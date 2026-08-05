@@ -804,16 +804,20 @@ pub(super) fn attach_entity_visuals(
                         .as_ref()
                         .and_then(|build| build.anchors.get(&rb.def.bone))
                         .map_or((entity, false), |&j| (j, true));
-                    // A streamed unit's body trails are always-on (wisp streamers, crystal
-                    // trails); the per-sequence visibility gate is the thrown weapon's InFlight
-                    // keying, which body models don't author — so the running gait is immaterial.
+                    // The `+0xc0` enable gate reads THIS instance's playing sequence, live —
+                    // a GameObject flips state under its own trails (a trap springs, a door
+                    // opens), so there is no spawn-time answer. Passing `None` here (the old
+                    // "body models don't author a gate" shortcut, true of creatures and false of
+                    // GameObjects) drew every trail a model authored in every state: the Frost
+                    // Trap's twelve trigger-only streamers became a permanent spinning column
+                    // over the placed trap (decision 1011).
                     crate::ribbons::spawn_ribbon(
                         &mut commands,
                         rb,
                         owner,
                         use_pivot,
                         placement.scale.max_element(),
-                        None,
+                        crate::ribbons::RibbonSeq::Host(entity),
                         // The unit's own render alpha gates its trail (0827).
                         Some(entity),
                     );

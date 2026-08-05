@@ -28,7 +28,7 @@
           not the gold a normal panel button wears, and grey when disabled.
         · **The labels** — GlobalStrings.lua (patch-2.MPQ), verbatim: VIDEOOPTIONS_MENU "Video
           Options", SOUNDOPTIONS_MENU "Sound Options", UIOPTIONS_MENU "Interface Options",
-          KEY_BINDINGS "Key Bindings", MACROS "Macros", LOGOUT "Logout", EXIT_GAME "Exit Game",
+          MACROS "Macros", LOGOUT "Logout", EXIT_GAME "Exit Game",
           RETURN_TO_GAME "Return to Game", MAIN_MENU "Main Menu". Declared as the real globals
           (they are addon-visible API, decision 0068) and read back into each button's label in its
           OnLoad — the ref's `text="LOGOUT"` attribute IS a global lookup, which this engine's
@@ -63,13 +63,12 @@
             Rewards / What's New / Ratings are structurally off in Era — store disabled, no
             account store, IsStandard() false, koKR only.)
           · The layout math those constants produce, precomputed here (this engine has no layout
-            frames): width 28+144+28 = 200; button tops 32/73/94/115/136/157/198/219/260; height
-            260+21+28 = 309. Anchored as a TOPLEFT chain so the gaps read in the XML.
-          · **Key Bindings is a carved seat (0997, 0985's seat-carving rule)**: the 1.15 menu
-            ceded the entry to its Settings panel, but THIS window family's shape source is
-            1.13/1.14 (KeyBindingsFrame.xml's provenance block), whose menu carries the button
-            and whose window reopens the menu on hide — so the rung returns, at the middle
-            section's head, wearing the 1.12 KEY_BINDINGS label like every sibling.
+            frames): width 28+144+28 = 200; button tops 32/73/94/115/136/177/198/239; height
+            239+21+28 = 288. Anchored as a TOPLEFT chain so the gaps read in the XML.
+          · No Key Bindings rung — the era menu's own shape: 1.15 ceded the entry to the
+            Settings panel, and since decision 1008 ours lives there too (the Options window's
+            Keybindings category, KeyBindingsPage.xml). 0997 had carved the 1.13/1.14 seat back
+            in for its standalone window; that seat left with the window.
           · The header — Classic/Dialog/DialogTemplates.xml l.11-43 (ClassicDialogHeaderTemplate):
             the same 256x64 UI-DialogBox-Header art, text = MAINMENU_BUTTON, swapped to
             GameFontNormalMed1 (13px) by MainMenuFrameMixin:OnLoad. Both header idioms (1.12's
@@ -90,7 +89,6 @@
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
         -- verbatim. `X = X or "..."` so a later real strings table wins, the MicroMenu.xml idiom.
         MAIN_MENU = MAIN_MENU or "Main Menu"
-        KEY_BINDINGS = KEY_BINDINGS or "Key Bindings"
         ADDONS = ADDONS or "AddOns"
         HUD_EDIT_MODE_MENU = HUD_EDIT_MODE_MENU or "Edit Mode"
         GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"
@@ -203,7 +201,7 @@
         <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
              28-bottom padding around nine 21-unit rungs with three 20-unit section gaps (the
              ninth rung is the 0997 Key Bindings seat). -->
-        <Size><AbsDimension x="200" y="309"/></Size>
+        <Size><AbsDimension x="200" y="288"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
@@ -255,29 +253,9 @@
             <!-- Key Bindings — live (decision 0997; the carved 1.13/1.14 seat, header SCOPE
                  note): the era menu entry's own body shape — hide the menu, show the window
                  (whose OnHide brings the menu back, both references' law). -->
-            <Button name="GameMenuButtonKeybindings" inherits="GameMenuButtonTemplate">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
-                </Anchors>
-                <Scripts>
-                    <OnLoad>self:SetText(KEY_BINDINGS)</OnLoad>
-                    <OnClick>
-                        PlaySound("igMainMenuOption")
-                        HideUIPanel(GameMenuFrame)
-                        ShowUIPanel(getglobal("KeyBindingFrame"))
-                    </OnClick>
-                </Scripts>
-            </Button>
-
-            <!-- The middle section's pending rest (header SCOPE note).
-                 AddOns:    the era addon-list dialog — nothing to list yet.
-                 Edit Mode: the era HUD editor — no edit mode exists.
-                 Support:   opens the external help site in era — no browser seam.
-                 Macros:    ref OnClick when live: PlaySound("igMainMenuOption");
-                            HideUIPanel(GameMenuFrame); ShowMacroFrame() -->
             <Button name="GameMenuButtonAddOns" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonKeybindings" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts><OnLoad>GameMenuButton_Pending(self, ADDONS)</OnLoad></Scripts>
             </Button>

@@ -1163,18 +1163,22 @@
         when it has none. That is not decoration — a warlock's imp has mana and a hunter's boar has
         focus, but a skeleton has neither, and the plain art draws a mana rail with nothing in it.
 
-        DEFERRED, each with its reason (all named in 0990):
-        - HAPPINESS. The ref's PetFrameHappiness icon needs `GetPetHappiness 0x4be900`, whose body
-          is NOT carved in wow-re (its address is known from the binding table, nothing more). Its
-          three thresholds, the damage percentage and the loyalty rate are exactly the kind of
-          derived numbers 0988 was written about: vmangos has a HAPPINESS_LEVEL_SIZE and taking it
-          would repeat that record's own mistake. So the icon is absent rather than guessed, and
-          comes back with the carve — together with `GetPetLoyalty 0x4be700`,
-          `GetPetTrainingPoints 0x4be790` and `GetPetExperience 0x4be840`, its uncarved siblings.
-        - The PET right-click menu. Its four entries (UnitPopup.xml's PET_PAPERDOLL / PET_RENAME /
-          PET_ABANDON / PET_DISMISS) each need a binding that is its own build — the pet paper doll
-          most of all. They stay suppressed there; the frame takes no right click rather than
-          opening a menu of four dead rows.
+        HAPPINESS is no longer deferred — decision 1005 built it, off the carve 0990 was waiting
+        for. `GetPetHappiness 0x4be900` returns a bucket the CLIENT has already computed from
+        PetPersonality.dbc's own three thresholds, so nothing here is derived from vmangos and
+        0988's warning was answered rather than dodged. Its three siblings (`GetPetLoyalty`,
+        `GetPetTrainingPoints`, `GetPetExperience`) landed with it.
+
+        STILL DEFERRED, each with its reason:
+        - The PET right-click menu. The reference opens it from PetFrame_OnClick's else arm
+          (`ToggleDropDownMenu(1, nil, PetFrameDropDown)` — PetFrame.lua:127-129), and its four
+          entries (UnitPopup.xml's PET_PAPERDOLL / PET_RENAME / PET_ABANDON / PET_DISMISS) each
+          need a binding that is its own build — the pet paper doll most of all. Two more are
+          needed just to decide what the menu SHOWS: `PetCanBeAbandoned` forks it, hiding
+          paperdoll/rename/abandon for a warlock pet and hiding dismiss for a hunter's, so the
+          same menu reads "Abandon" (permanent, behind the ABANDON_PET confirm) on a hunter pet
+          and "Dismiss" on a demon. They stay suppressed in UnitPopup.xml; the frame takes no
+          right click rather than opening a menu of dead rows.
         - PartyMemberBuffTooltip on hover (the ref's OnEnter panel): it belongs to the party
           frames' own deferred buff panel, not here.
     -->
@@ -1203,6 +1207,7 @@
             frame:RegisterEvent("UNIT_NAME_UPDATE")
             frame:RegisterEvent("PET_ATTACK_START")
             frame:RegisterEvent("PET_ATTACK_STOP")
+            frame:RegisterEvent("UNIT_HAPPINESS")
             frame:EnableMouse(true)
             BenillaPetFrame_Update(frame)
         end
@@ -1217,6 +1222,10 @@
                 return
             elseif event == "PET_ATTACK_STOP" then
                 BenillaPetFrameAttackMode:Hide()
+                return
+            elseif event == "UNIT_HAPPINESS" then
+                -- The ref's own last arm: repaint the icon alone, not the whole frame.
+                BenillaPetFrame_SetHappiness()
                 return
             elseif event == "UNIT_PET" then
                 if arg1 ~= "player" then return end
@@ -1255,6 +1264,44 @@
             end
 
             BenillaPetFrame_UpdateDebuffs()
+            BenillaPetFrame_SetHappiness()
+        end
+
+        -- ref PetFrame_SetHappiness (PetFrame.lua l.132-156), quoted (decision 1005).
+        --
+        -- `GetPetHappiness` hands back a PRE-BUCKETED 1/2/3 — the client does the thresholding
+        -- against PetPersonality.dbc, not this function — plus the two numbers that bucket
+        -- selects. Three things here are load-bearing and each is the reference's own:
+        --   * the hide test is `not happiness or not isHunterPet`, so a bucket of **0** (truthy in
+        --     Lua) leaves the icon SHOWING with whatever texcoords it had. Testing `happiness == 0`
+        --     or coercing 0 to nil would hide a frame the reference shows.
+        --   * the three texcoord cuts run 3/2/1 left-to-right across the strip — happy is at x=0.
+        --   * the loyalty line is chosen by the SIGN of loyaltyRate, which is why that return is
+        --     unscaled and allowed to be negative.
+        function BenillaPetFrame_SetHappiness()
+            local happiness, damagePercentage, loyaltyRate = GetPetHappiness()
+            local hasPetUI, isHunterPet = HasPetUI()
+            if not happiness or not isHunterPet then
+                BenillaPetFrameHappiness:Hide()
+                return
+            end
+            BenillaPetFrameHappiness:Show()
+            if happiness == 1 then
+                BenillaPetFrameHappinessTexture:SetTexCoord(0.375, 0.5625, 0, 0.359375)
+            elseif happiness == 2 then
+                BenillaPetFrameHappinessTexture:SetTexCoord(0.1875, 0.375, 0, 0.359375)
+            elseif happiness == 3 then
+                BenillaPetFrameHappinessTexture:SetTexCoord(0, 0.1875, 0, 0.359375)
+            end
+            BenillaPetFrameHappiness.tooltip = getglobal("PET_HAPPINESS" .. happiness)
+            BenillaPetFrameHappiness.tooltipDamage = format(PET_DAMAGE_PERCENTAGE, damagePercentage)
+            if loyaltyRate < 0 then
+                BenillaPetFrameHappiness.tooltipLoyalty = getglobal("LOSING_LOYALTY")
+            elseif loyaltyRate > 0 then
+                BenillaPetFrameHappiness.tooltipLoyalty = getglobal("GAINING_LOYALTY")
+            else
+                BenillaPetFrameHappiness.tooltipLoyalty = nil
+            end
         end
 
         -- The four debuff buttons (ref PetFrame.xml's $parentDebuff1..4 over RefreshBuffs). The pet
@@ -1411,6 +1458,40 @@
                         </FontString>
                     </Layer>
                 </Layers>
+            </Frame>
+            <!-- HAPPINESS (ref PetFrameHappiness, PetFrame.xml l.233-253; decision 1005). 24×23
+                 anchored LEFT to the frame's RIGHT at (-7,-4), so it sits just inside the plate's
+                 right edge. The file is a three-icon strip and the AUTHORED TexCoords are
+                 happiness 3's — the ref ships the happy face and re-cuts it at update. -->
+            <Frame name="$parentHappiness" enableMouse="true">
+                <Size><AbsDimension x="24" y="23"/></Size>
+                <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-7" y="-4"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentTexture" file="Interface\PetPaperDollFrame\UI-PetHappiness" setAllPoints="true">
+                            <Size><AbsDimension x="24" y="23"/></Size>
+                            <TexCoords left="0" right="0.1875" top="0" bottom="0.359375"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        if this.tooltip then
+                            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                            GameTooltip:SetText(this.tooltip)
+                            if this.tooltipDamage then
+                                GameTooltip:AddLine(this.tooltipDamage, "", 1, 1, 1)
+                            end
+                            if this.tooltipLoyalty then
+                                GameTooltip:AddLine(this.tooltipLoyalty, "", 1, 1, 1)
+                            end
+                            GameTooltip:Show()
+                        end
+                    </OnEnter>
+                    <OnLeave>
+                        GameTooltip:Hide()
+                    </OnLeave>
+                </Scripts>
             </Frame>
             <!-- The four debuffs, ref geometry: the first at (48,-42), then +2 px chained right. -->
             <Button name="$parentDebuff1" inherits="BenillaPetDebuffTemplate" id="1">

@@ -110,15 +110,23 @@ pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
     let Some(held) = model.cursor.take() else {
         return false;
     };
-    let (kind, action, texture) = match &held {
-        CursorPayload::Action(a) => (a.kind, a.action, a.texture.clone()),
-        CursorPayload::Item(i) => (ACTION_KIND_ITEM, i.item_id, i.texture.clone()),
-        CursorPayload::Spell(s) => (ACTION_KIND_SPELL, s.spell_id, s.texture.clone()),
+    let placeable = match &held {
+        CursorPayload::Action(a) => Some((a.kind, a.action, a.texture.clone())),
+        CursorPayload::Item(i) => Some((ACTION_KIND_ITEM, i.item_id, i.texture.clone())),
+        CursorPayload::Spell(s) => Some((ACTION_KIND_SPELL, s.spell_id, s.texture.clone())),
         // Mode 8 — the one non-item/non-spell payload the reference's `PlaceAction` accepts
         // (`action-item-slot.md` §5's payload table: pet actions and class abilities are refused,
         // macros are not). It packs the bare macro id under the MACRO tag, exactly as the SPELL
         // and ITEM arms pack theirs.
-        CursorPayload::Macro(m) => (ACTION_KIND_MACRO, m.index, m.texture.clone()),
+        CursorPayload::Macro(m) => Some((ACTION_KIND_MACRO, m.index, m.texture.clone())),
+        // Mode 4 — the other half of that same table's refusal (decision 1010). A pet action has
+        // no `CMSG_SET_ACTION_BUTTON` encoding at all, so there is nothing to pack: the payload
+        // goes straight back on the cursor, where the pet bar can still take it.
+        CursorPayload::PetAction(_) => None,
+    };
+    let Some((kind, action, texture)) = placeable else {
+        model.cursor = Some(held);
+        return false;
     };
     let displaced = model.actions.insert(
         id,

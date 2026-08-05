@@ -290,7 +290,10 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool 
             }
         }
         Some(
-            other @ (CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_)),
+            other @ (CursorPayload::Spell(_)
+            | CursorPayload::Action(_)
+            | CursorPayload::Macro(_)
+            | CursorPayload::PetAction(_)),
         ) => {
             model.cursor = Some(other);
             false

@@ -191,6 +191,7 @@ pub(super) fn spawn_ribbons_for(
     ribbons: &[benilla_assets::ModelRibbon],
     transform: Transform,
     joints: Option<&[Entity]>,
+    arm: Option<Entity>,
     fallback_owner: Option<Entity>,
 ) {
     for rb in ribbons {
@@ -201,16 +202,19 @@ pub(super) fn spawn_ribbons_for(
                 None => continue, // nothing to ride (an entity-less placement)
             },
         };
-        // Placed doodads carry only always-on trails (wisp streamers, banner ribbons) — no
-        // per-sequence visibility gate (that's the thrown weapon's InFlight keying), so the anim
-        // is immaterial here.
+        // The `+0xc0` enable gate reads the placement's live sequence, like its emitters one
+        // function up: an animated doodad re-rolls its variation every play window, so there is
+        // no arm-once answer. An unanimated placement has no clock and rests in `Stand`.
         crate::ribbons::spawn_ribbon(
             commands,
             rb,
             owner,
             use_pivot,
             transform.scale.max_element(),
-            None,
+            arm.map_or(
+                crate::ribbons::RibbonSeq::Fixed(0),
+                crate::ribbons::RibbonSeq::Host,
+            ),
             // No model-alpha source: a placed prop / effect instance is always drawn (0827).
             None,
         );

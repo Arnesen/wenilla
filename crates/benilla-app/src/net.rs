@@ -696,6 +696,14 @@ pub(crate) enum ClientCommand {
     },
     /// Call the pet off its target (`CMSG_PET_STOP_ATTACK`) — the Attack button's second press.
     PetStopAttack { pet_guid: u64 },
+    /// Cancel one of the **pet's** auras (`CMSG_PET_CANCEL_AURA`, decision 1007) — the pet bar's
+    /// press-again-to-cancel, and the pet-shaped twin of [`Self::CancelAura`].
+    ///
+    /// It is a separate opcode rather than `CancelAura` with a guid because the server needs to
+    /// know *whose* aura to drop, and `CMSG_CANCEL_AURA`'s body is a bare spell id. Like its
+    /// player twin: no answer packet — the removal arrives as a `UNIT_FIELD_AURA` delta on the
+    /// pet, which is also what puts the slot's icon back.
+    PetCancelAura { pet_guid: u64, spell_id: u32 },
     /// Start melee auto-attack on `guid` (`CMSG_ATTACKSWING`); echoed as `SMSG_ATTACKSTART`.
     AttackSwing { guid: u64 },
     /// Stop melee auto-attack (`CMSG_ATTACKSTOP`); echoed as `SMSG_ATTACKSTOP`, whose receive path

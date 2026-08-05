@@ -41,8 +41,10 @@ use super::creature::CreatureVoices;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
 
+/// The loaded terrain-chain catalog. `pub(crate)`: [`crate::footprints`] reads the same chain's
+/// `TerrainType.Flags` gate (`leaves_footprints`) — one load, two footfall consumers.
 #[derive(Resource)]
-struct Footsteps(FootstepCatalog);
+pub(crate) struct Footsteps(pub(crate) FootstepCatalog);
 
 fn load_footsteps(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
     let Some(assets) = assets else { return };

@@ -274,5 +274,72 @@
                 BenillaQuestWatchFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
             end
         end
+
+        -- ref UIParent.lua:1819-1878, transcribed 1:1 (decision 1008 — closes 0997's
+        -- "abbreviates through KEY_ABBR" residue with the REAL mechanism: it never was a
+        -- KEY_ABBR set; the whole abbreviation is this Lua). The action bar's HotKey corners
+        -- call it with returnAbbr=1: ONE modifier abbreviates (CTRL→c, SHIFT→s, ALT→a — so
+        -- SHIFT-2 reads "s-2", the director's ask), TWO OR MORE collapse the whole label to
+        -- "·" — the ref's own multi-modifier dot. The full form (tooltips, the Keybindings
+        -- page) keeps the canonical prefixes and reads the base key's KEY_* global.
+        -- Transcription notes: the ref's dead `gsub(tempName, "CAPSLOCK", "Caps")` line
+        -- (result discarded — gsub doesn't mutate) is dropped; its GetLocale() deDE
+        -- CTRL→STRG swap and IsMacClient() KEY_*_MAC lookup ride behind existence guards
+        -- (this VM defines neither yet, and the getglobal fallback covers the gap).
+        function GetBindingText(name, prefix, returnAbbr)
+            if ( not name ) then
+                return "";
+            end
+            local tempName = name;
+            local i = strfind(name, "-");
+            local dashIndex = nil;
+            local count = 0;
+            while ( i ) do
+                if ( not dashIndex ) then
+                    dashIndex = i;
+                else
+                    dashIndex = dashIndex + i;
+                end
+                count = count + 1;
+                tempName = strsub(tempName, i + 1);
+                i = strfind(tempName, "-");
+            end
+
+            local modKeys = '';
+            if ( not dashIndex ) then
+                dashIndex = 0;
+            else
+                modKeys = strsub(name, 1, dashIndex);
+                if ( GetLocale and GetLocale() == "deDE" ) then
+                    modKeys = gsub(modKeys, "CTRL", "STRG");
+                end
+            end
+
+            if ( returnAbbr ) then
+                if ( count > 1 ) then
+                    return "·";
+                else
+                    modKeys = gsub(modKeys, "CTRL", "c");
+                    modKeys = gsub(modKeys, "SHIFT", "s");
+                    modKeys = gsub(modKeys, "ALT", "a");
+                    modKeys = gsub(modKeys, "STRG", "st");
+                end
+            end
+
+            if ( not prefix ) then
+                prefix = "";
+            end
+            local localizedName = nil;
+            if ( IsMacClient and IsMacClient() ) then
+                localizedName = getglobal(prefix..tempName.."_MAC");
+            end
+            if ( not localizedName ) then
+                localizedName = getglobal(prefix..tempName);
+            end
+            if ( not localizedName ) then
+                localizedName = tempName;
+            end
+            return modKeys..localizedName;
+        end
     ]]></Script>
 </Ui>

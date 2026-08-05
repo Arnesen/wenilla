@@ -18,6 +18,7 @@ use super::{Model, ScriptValue};
 mod bar;
 mod doll;
 mod drag;
+mod pet;
 
 pub(crate) use bar::place_action;
 pub(crate) use drag::{arm_drag, maybe_start_drag, take_drag, DragGesture, DragRelease};
@@ -40,16 +41,17 @@ pub const EQUIPMENT_BAG: i64 = -100;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// What the cursor carries — the client's payload-mode global [0xb4d900] as a typed enum
-/// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell, **8 = macro**; our Action arm
-/// is the client's bar-slot pickup; the money/preview arms stay unbuilt). One transition seam for
-/// every surface, so sounds, CURSOR_UPDATE, and lock display can't drift apart per window
-/// (decision 0216).
+/// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell, **4 = pet action**, **8 =
+/// macro**; our Action arm is the client's bar-slot pickup; the money/preview arms stay unbuilt).
+/// One transition seam for every surface, so sounds, CURSOR_UPDATE, and lock display can't drift
+/// apart per window (decision 0216).
 #[derive(Clone, Debug, PartialEq)]
 pub enum CursorPayload {
     Item(CursorItem),
     Spell(CursorSpell),
     Action(CursorAction),
     Macro(CursorMacro),
+    PetAction(CursorPetAction),
 }
 
 /// The item currently held on the cursor (`PickupContainerItem`/`SplitContainerItem`/
@@ -111,6 +113,31 @@ pub struct CursorAction {
     pub texture: Option<String>,
 }
 
+/// A pet-bar payload ([`pet`]'s `PickupPetAction` produces it) — the client's cursor mode **4**,
+/// whose payload global `[0xb4e2f8]` is the picked slot's **packed word, copied verbatim** (its
+/// sole writer `0x494f0c` is a plain `mov edx,[edi]; mov [0xb4e2f8],edx`; decision 1010).
+///
+/// The word is the payload, and that is the whole design: the drop trampoline `0x4bce00` forwards
+/// this dword into the assign core without reading a field of it, so a slot's contents after any
+/// accepted drop is a word that already existed elsewhere in client state. Nothing is encoded at
+/// drop time and nothing here needs decoding.
+///
+/// This payload is **pet-bar-only**. `PlaceAction` refuses it (wow-re `action-item-slot.md`'s
+/// payload table: pet actions and class abilities are the refused modes, macros are not), and
+/// nothing else produces it — which is also why a pet bar can only ever be *rearranged*, never
+/// populated from the spellbook: its contents are the server's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorPetAction {
+    /// The 1-based pet bar slot it was picked from.
+    pub src_slot: u32,
+    /// The slot's packed word, verbatim.
+    pub packed: u32,
+    /// `Attributes & 0x40` for a spell word — carried because the assign core's one source filter
+    /// tests it at DROP time, not at pickup (`0x4bc9f8`).
+    pub passive: bool,
+    pub texture: Option<String>,
+}
+
 /// A macro payload ([`super::macros`]'s `PickupMacro` produces it) — the client's cursor mode
 /// **8**, whose payload global is the bare macro id (`[0xb4e2fc]`, wow-re `action-item-slot.md`'s
 /// payload table, where mode 8 is the ONE non-item/non-spell payload `PlaceAction` accepts).
@@ -141,13 +168,32 @@ pub(crate) fn queue_cursor_update(model: &mut Model) {
     model
         .pending_events
         .push(("CURSOR_UPDATE".to_string(), Vec::new()));
-    let now_held = model.cursor.is_some();
-    if now_held != model.cursor_grid_shown {
-        model.cursor_grid_shown = now_held;
-        let event = if now_held {
+    // The two grids are derived off DIFFERENT predicates, because the reference fires them from
+    // different places and the payload spaces do not overlap (decision 1010):
+    //
+    // - the ACTION bar's grid follows "is anything held that could land there" — every arm except
+    //   the pet one, which `PlaceAction` refuses outright;
+    // - the PET bar's grid follows the pet payload alone. The reference fires `PET_BAR_SHOWGRID`
+    //   from inside the pet-action pickup builder itself (`0x494f28`), not from a shared cursor
+    //   transition — so a spell on the cursor lights the action bar's empty slots and leaves the
+    //   pet bar alone, which is also the only honest answer: you cannot drop it there.
+    let pet_held = matches!(model.cursor, Some(CursorPayload::PetAction(_)));
+    let bar_held = model.cursor.is_some() && !pet_held;
+    if bar_held != model.cursor_grid_shown {
+        model.cursor_grid_shown = bar_held;
+        let event = if bar_held {
             "ACTIONBAR_SHOWGRID"
         } else {
             "ACTIONBAR_HIDEGRID"
+        };
+        model.pending_events.push((event.to_string(), Vec::new()));
+    }
+    if pet_held != model.pet_grid_shown {
+        model.pet_grid_shown = pet_held;
+        let event = if pet_held {
+            "PET_BAR_SHOWGRID"
+        } else {
+            "PET_BAR_HIDEGRID"
         };
         model.pending_events.push((event.to_string(), Vec::new()));
     }
@@ -194,7 +240,12 @@ pub(crate) fn clear_cursor(model: &mut Model) {
             queue_cursor_update(model);
             queue_lock_changed(model, item.bag, item.slot);
         }
-        Some(CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_)) => {
+        Some(
+            CursorPayload::Spell(_)
+            | CursorPayload::Action(_)
+            | CursorPayload::Macro(_)
+            | CursorPayload::PetAction(_),
+        ) => {
             queue_cursor_update(model);
         }
         None => {}
@@ -250,7 +301,12 @@ pub(crate) fn world_drop_click(model: &mut Model) -> bool {
             true
         }
         (
-            Some(CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_)),
+            Some(
+                CursorPayload::Spell(_)
+                | CursorPayload::Action(_)
+                | CursorPayload::Macro(_)
+                | CursorPayload::PetAction(_),
+            ),
             WorldPick::Terrain | WorldPick::Nothing,
         ) => {
             clear_cursor(model);
@@ -463,6 +519,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     Value::Nil,
                     Value::Nil,
                 )),
+                // The pet arm follows the Action arm's shape — kind word + the slot it came from.
+                // Nothing in the shipped 1.12 UI reads it (the pet bar's own drag never asks what
+                // it is carrying); it is here so the ONE payload space stays fully describable.
+                Some(CursorPayload::PetAction(p)) => Ok((
+                    Value::String(lua.create_string("petaction")?),
+                    Value::Integer(i64::from(p.src_slot)),
+                    Value::Nil,
+                    Value::Nil,
+                )),
                 None => Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil)),
             }
         })?,
@@ -509,6 +574,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     doll::install(lua)?;
     bar::install(lua)?;
+    pet::install(lua)?;
 
     Ok(())
 }

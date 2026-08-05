@@ -372,7 +372,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                         owner,
                         use_pivot,
                         placement.scale.max_element(),
-                        None,
+                        crate::ribbons::RibbonSeq::Host(entity),
                         // No model-alpha source: a placed prop / effect instance is always drawn (0827).
                         None,
                     )

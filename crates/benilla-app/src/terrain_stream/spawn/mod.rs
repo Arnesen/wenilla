@@ -224,6 +224,7 @@ pub(super) fn spawn_loaded_placements(
                         &m.ribbons,
                         p.transform,
                         host.as_ref().map(|h| h.joints.as_slice()),
+                        host.as_ref().and_then(|h| h.arm),
                         ents.first().copied(),
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
@@ -610,6 +611,7 @@ pub(super) fn spawn_loaded_placements(
                 &m.ribbons,
                 d.transform,
                 host.as_ref().map(|h| h.joints.as_slice()),
+                host.as_ref().and_then(|h| h.arm),
                 ents.first().copied(),
             );
             spawn_lights_for(&mut commands, &m.lights, d.transform, &mut ents);

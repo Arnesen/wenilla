@@ -29,7 +29,7 @@ use crate::Chain;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, u32_at};
+use crate::dbc::{parse, str_at, u32_at};
 
 /// The joined footstep tables, resolvable from `(footstep class, ground effect id)`.
 pub struct FootstepCatalog {
@@ -37,6 +37,9 @@ pub struct FootstepCatalog {
     effect_terrain: HashMap<u32, u32>,
     /// `TerrainType` id → its `SoundID` class (the lookup's `TerrainSoundID` axis).
     terrain_sound: HashMap<u32, u32>,
+    /// `TerrainType` id → its `Flags` word. In the shipped 5875 data bit 0 is set on exactly
+    /// Snow (3) and Sand (7) — the leaves-footprints surfaces (the reporter-visible pair).
+    terrain_flags: HashMap<u32, u32>,
     /// `(CreatureFootstepID, TerrainSoundID)` → `(dry kit, splash kit)`.
     lookup: HashMap<(u32, u32), (u32, u32)>,
 }
@@ -49,6 +52,17 @@ impl FootstepCatalog {
         let terrain = self.effect_terrain.get(&effect_id?).copied()?;
         let sound_class = self.terrain_sound.get(&terrain).copied()?;
         self.lookup.get(&(footstep_class, sound_class)).copied()
+    }
+
+    /// Does the ground under this effect layer take footprint decals? `TerrainType.Flags` bit 0
+    /// through the same effect→terrain chain the sounds ride (INTERIM reading, decision 1006:
+    /// bit 0 fits the shipped data — set on exactly Snow and Sand — pending the wow-re byte
+    /// verdict on the client's own gate). No/unknown effect layer = no prints.
+    pub fn leaves_footprints(&self, effect_id: Option<u32>) -> bool {
+        effect_id
+            .and_then(|e| self.effect_terrain.get(&e))
+            .and_then(|t| self.terrain_flags.get(t))
+            .is_some_and(|flags| flags & 1 != 0)
     }
 
     pub fn len(&self) -> usize {
@@ -95,9 +109,13 @@ pub fn load_footstep_catalog(chain: &mut Chain) -> Result<FootstepCatalog> {
         .context("reading TerrainType.dbc")?;
     let rs = parse(&bytes, n_u32_schema("TerrainType", 6, &[1]), "TerrainType")?;
     let mut terrain_sound = HashMap::with_capacity(rs.records().len());
+    let mut terrain_flags = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         if let (Some(id), Some(class)) = (u32_at(r, 0), u32_at(r, 4)) {
             terrain_sound.insert(id, class);
+        }
+        if let (Some(id), Some(flags)) = (u32_at(r, 0), u32_at(r, 5)) {
+            terrain_flags.insert(id, flags);
         }
     }
 
@@ -123,8 +141,31 @@ pub fn load_footstep_catalog(chain: &mut Chain) -> Result<FootstepCatalog> {
     Ok(FootstepCatalog {
         effect_terrain,
         terrain_sound,
+        terrain_flags,
         lookup,
     })
+}
+
+/// `FootprintTextures.dbc` — id → texture path (extensionless, e.g.
+/// `textures\Footsteps\BaseFootprint`), the table `CreatureModelData.FootprintTextureID`
+/// indexes. Shipped 5875 data: 6 rows (1 Base, 3 Cloven, 4 Bare, 5 Claw, 6 Hoof, 7 Paw), all
+/// 32×32 pure-black-RGB BLPs under a soft alpha — the print decal's ink.
+pub fn load_footprint_textures(chain: &mut Chain) -> Result<HashMap<u32, String>> {
+    let bytes = chain
+        .read_file("DBFilesClient\\FootprintTextures.dbc")
+        .context("reading FootprintTextures.dbc")?;
+    let rs = parse(
+        &bytes,
+        n_u32_schema("FootprintTextures", 2, &[1]),
+        "FootprintTextures",
+    )?;
+    let mut map = HashMap::with_capacity(rs.records().len());
+    for r in rs.records() {
+        if let (Some(id), Some(path)) = (u32_at(r, 0), str_at(&rs, r, 1)) {
+            map.insert(id, path);
+        }
+    }
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -188,5 +229,55 @@ mod tests {
         // No ground-effect layer = silence (the −1 sentinel, B5); unknown class too.
         assert_eq!(cat.resolve(7, None), None);
         assert_eq!(cat.resolve(9999, None), None);
+    }
+
+    /// The footprint gate on the real data: `TerrainType.Flags` bit 0 is set on exactly Snow (3)
+    /// and Sand (7) — an effect layer over either takes prints, every other terrain (and the
+    /// no-layer sentinel) doesn't. And `FootprintTextures.dbc` decodes its six shipped rows to
+    /// the `textures\Footsteps\*` ink paths.
+    #[test]
+    fn footprint_gate_and_textures_on_real_data() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_footstep_catalog(&mut chain).expect("load footstep catalog");
+        let printing: std::collections::BTreeSet<u32> = cat
+            .terrain_flags
+            .iter()
+            .filter(|(_, &f)| f & 1 != 0)
+            .map(|(&t, _)| t)
+            .collect();
+        assert_eq!(
+            printing,
+            [3, 7].into(),
+            "exactly Snow and Sand carry the flag"
+        );
+        let effect_on = |terrain: u32| {
+            cat.effect_terrain
+                .iter()
+                .find(|(_, &tt)| tt == terrain)
+                .map(|(&e, _)| e)
+        };
+        if let Some(e) = effect_on(3) {
+            assert!(cat.leaves_footprints(Some(e)), "snow effect layer prints");
+        }
+        if let Some(e) = effect_on(5) {
+            assert!(!cat.leaves_footprints(Some(e)), "grass doesn't");
+        }
+        assert!(!cat.leaves_footprints(None), "no layer, no prints");
+
+        let inks = load_footprint_textures(&mut chain).expect("load FootprintTextures.dbc");
+        assert_eq!(inks.len(), 6);
+        assert_eq!(
+            inks.get(&1).map(String::as_str),
+            Some(r"textures\Footsteps\BaseFootprint")
+        );
+        assert_eq!(
+            inks.get(&7).map(String::as_str),
+            Some(r"textures\Footsteps\PawFootprint")
+        );
     }
 }

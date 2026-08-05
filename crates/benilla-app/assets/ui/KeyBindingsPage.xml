@@ -1,0 +1,544 @@
+<Ui>
+    <!--
+        The KEY BINDINGS page (decision 1008, superseding 0997's standalone window) — the
+        Options window's Keybindings category, over the engine's binding table
+        (benilla_ui::script::keybind + crate::bindings — GetNumBindings/GetBinding/SetBinding/
+        GetBindingKey/GetBindingAction/LoadBindings/SaveBindings/GetCurrentBindingSet, the 1.12
+        Lua API verbatim). This file is the page MODULE: the templates and the whole script; the
+        page's static furniture (the rows, the checkbox row, the scroll seam, the search rows)
+        lives in OptionsFrame.xml as ordinary children of its Keybindings body, inheriting these
+        templates (manifest order puts this file first). Rows are the HONEST TREE: only commands
+        the engine really dispatches are registered, so only they (and only their non-empty
+        categories) appear.
+
+        PROVENANCE (0985 — the three-source split; OptionsFrame.xml carries the sibling block):
+        · STRUCTURE & BEHAVIOR — the era Settings panel's own Keybindings page (wow-ui-source-era
+          @ 1.15.9.68940: Blizzard_SettingsDefinitions_Frame/Keybindings.lua + Classic/
+          KeybindingsOverrides.lua + Blizzard_Settings_Shared/Blizzard_Keybindings.*): 1.15 put
+          keybindings INSIDE the Options window — the director's call this move executes — as
+          ONE list of EXPANDABLE per-category sections (SettingsKeybindingSectionMixin over
+          SettingsExpandableSectionMixin; 25-tall rows, sections COLLAPSED by default, categories
+          in first-appearance order, a bar's section existing only when the bar does — their
+          PROXY_SHOW_ACTIONBAR_N gate is our honest tree), the Character Specific Keybindings
+          checkbox as the page's first row (PROXY_CHARACTER_SPECIFIC_BINDINGS, confirm popup on
+          UNCHECK only), and per-binding search tags whose category REDIRECTS to this page
+          (Blizzard_SettingsPanel.lua l.578 `category.redirectCategory or category`) with the
+          matched rows LIVE in the results.
+        · CAPTURE & SET LAW — 1.12's own Blizzard_BindingUI (extracted from patch.MPQ, 0997),
+          KEPT over the era's listener where they differ (the game's fidelity truth is 1.12;
+          the window furniture is the era's): click a key capsule to arm; the next key or
+          mouse-3/4/5 press binds IMMEDIATELY (the host capture seam hands the canonical
+          ALT-CTRL-SHIFT chord to KeyBindings_OnHostKey); a stolen key names its victim in red
+          (KEY_UNBOUND_ERROR) only when the victim goes bare; left/right clicks select/deselect,
+          never bind; lone modifiers are ignored; the wheel binds click-commands but refuses
+          press+release ones (SetBinding returns nil → KEYBINDINGFRAME_MOUSEWHEEL_ERROR, old key
+          restored); ESC while armed BINDS Escape (1.12's OnKeyDown has no ESCAPE filter — the
+          era's ESC-cancels law is the one era behavior NOT taken, recorded in 1008; the Unbind
+          Key button is the clearing affordance). ESC with nothing armed never reaches any of
+          this: the ladder is the TOGGLEGAMEMENU binding, and the armed seam swallows the press.
+        · ART BYTES — the 1.12 MPQ chain only (0978/0985): the capsules wear 1.12's own
+          UIPanelButtonTemplate2 panel-button art (era silver VERIFIED ABSENT — 0997), selection
+          is 1.12's LockHighlight glow; section headers wear the 1.12 collapsible-list dress —
+          the QuestLog's own UI-PlusButton/UI-MinusButton square and gold label.
+
+        COMMIT LAW (1008, the page's one big behavior change from 0997): binds are LIVE-COMMIT.
+        The options window's whole grammar writes live (SetCVar on click, no Okay/Cancel pair),
+        and the era Settings panel commits keybinds as they land too — so every successful
+        bind/steal/unbind/reset saves the current set to disk at once
+        (SaveBindings(GetCurrentBindingSet())); 0997's Okay/Cancel/revert and the
+        CONFIRM_LOSE_BINDING_CHANGES popup die with the standalone window. The two destructive
+        gestures keep their confirms: Reset To Default (the page Defaults button) and leaving
+        the character-specific set (which permanently deletes it).
+
+        All strings are the 1.12 GlobalStrings globals (the VM executes the real file at boot)
+        through the `getglobal(...) or raw` fallback (the era's own `_G[x] or x` posture), so a
+        headless test without GlobalStrings still renders raw tokens.
+
+        SCOPE / divergences (noted, not bugs — the ledger is 1008):
+        - No Quick Keybind Mode row (era furniture over an overlay mechanism benilla lacks).
+        - 1.12's BLANK spacer-headers between multibar blocks are not modeled — both bottom
+          bars sit under the one MultiActionBar section.
+        - 1.12's "Key Bindings for <name>" title swap died with the standalone window: the page
+          title stays the category's, the checkbox is the character-set state (era's own shape).
+        - Search shows at most KEYBINDINGS_SEARCH_ROWS matched bindings (static row pool; the
+          era's results list scrolls, ours doesn't yet) — the group head jumps to the full page.
+    -->
+
+    <!-- One KEY CAPSULE (1.12 KeyBindingFrameBindingButtonTemplate: UIPanelButtonTemplate2 at
+         180x22 with the small-highlight font trio; its RegisterForClicks takes all five
+         buttons so middle/4/5 presses reach the capture law). The SELECTED state is 1.12's
+         LockHighlight — the ADD highlight held on. -->
+    <Button name="KeyBindingButtonTemplate" virtual="true">
+        <Size><AbsDimension x="180" y="22"/></Size>
+        <ButtonText name="$parentText"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+        <NormalFont inherits="GameFontHighlightSmall"/>
+        <HighlightFont inherits="GameFontHighlightSmall"/>
+        <DisabledFont inherits="GameFontDisableSmall"/>
+        <Scripts>
+            <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp", "Button4Up", "Button5Up")</OnLoad>
+            <OnClick>KeyBindingButton_OnClick(arg1)</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- One LIST ROW, dual-mode (the era list mixes section headers and binding rows in one
+         25-tall rhythm — SettingsKeybindingSectionInitializer:GetExtent's single bindingHeight).
+         BIND mode: command name 170 wide at LEFT, the two capsules at 175/355 (0997's seats,
+         kept). HEADER mode: the whole row is one toggle button wearing 1.12's own collapsible
+         dress — the QuestLogTitleButton's 16x16 UI-Plus/MinusButton square at LEFT and the gold
+         label (the era's Options_ListExpand arrows have no 1.12 counterpart). The paint
+         (KeyBindings_PaintBindRow / _PaintHeaderRow) shows one mode's furniture and hides the
+         other's. -->
+    <Frame name="KeyBindingRowTemplate" virtual="true">
+        <Size><AbsDimension x="560" y="25"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentDescription" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="170" y="24"/></Size>
+                    <Anchors><Anchor point="LEFT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentHeader" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT"/>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="$parentIcon">
+                            <Size><AbsDimension x="16" y="16"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <ButtonText name="$parentText" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="24" y="1"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="GameFontNormal"/>
+                <HighlightFont inherits="GameFontHighlight"/>
+                <Scripts>
+                    <OnClick>KeyBindings_ToggleSection(this.sectionIndex)</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="$parentKey1Button" inherits="KeyBindingButtonTemplate" id="1">
+                <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="175" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentKey2Button" inherits="KeyBindingButtonTemplate" id="2">
+                <Anchors><Anchor point="LEFT" relativeTo="$parentKey1Button" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <Script><![CDATA[
+        -- ── Strings ── the 1.12 GlobalStrings globals, each with the raw fallback (a headless
+        -- harness without GlobalStrings still works; the era's own `_G[x] or x` posture).
+        function KeyBindings_String(name, fallback)
+            local s = getglobal(name)
+            if s then return s end
+            return fallback
+        end
+
+        -- ── Key display ── the 1.12 GetBindingText law by hand: modifier prefixes stay the
+        -- canonical uppercase tokens, the base key reads its KEY_* global (Spacebar, Up Arrow,
+        -- Mouse Button 4...) else itself. "CTRL--" renders CTRL + the minus key. (The action
+        -- bar's ABBREVIATED labels ride the real GetBindingText transcription in UIParent.xml;
+        -- this page and the tooltips show the full form, both references' own split.)
+        function KeyBindings_KeyText(key)
+            if not key then
+                return NORMAL_FONT_COLOR_CODE .. KeyBindings_String("NOT_BOUND", "Not Bound") .. FONT_COLOR_CODE_CLOSE
+            end
+            local prefix = ""
+            local rest = key
+            while true do
+                local p = string.sub(rest, 1, 4)
+                if p == "ALT-" then
+                    prefix = prefix .. "ALT-"
+                    rest = string.sub(rest, 5)
+                elseif string.sub(rest, 1, 5) == "CTRL-" then
+                    prefix = prefix .. "CTRL-"
+                    rest = string.sub(rest, 6)
+                elseif string.sub(rest, 1, 6) == "SHIFT-" then
+                    prefix = prefix .. "SHIFT-"
+                    rest = string.sub(rest, 7)
+                else
+                    break
+                end
+            end
+            return prefix .. KeyBindings_String("KEY_" .. rest, rest)
+        end
+
+        -- ── Page state ── no root frame anymore: the page's state lives here. `sections` is the
+        -- era section model; `selected`/`keyID` the 1.12 selection; `searchPainted` the live
+        -- search-result rows (rowName → binding index), set by OptionsFrame.xml's search display
+        -- and repainted after a bind lands on one.
+        KeyBindingsPage = { sections = {}, items = {} }
+
+        KEYBINDINGS_ROW_BASE = "OptionsFrameContainerBodyKeybindingsRow"
+        KEYBINDINGS_DISPLAYED = 19
+        KEYBINDINGS_ROW_HEIGHT = 25
+        KEYBINDINGS_SEARCH_ROWS = 8
+
+        -- ── The section model (era CreateKeybindingInitializers, cut to the honest tree): walk
+        -- GetBinding(i), group runs of one category token; order = first appearance, which IS
+        -- 1.12's Bindings.xml order (the registry registers in it). Sections default COLLAPSED
+        -- (the era Classic overrides pass no `expanded`); a rebuild keeps each token's state.
+        function KeyBindings_BuildSections()
+            local page = KeyBindingsPage
+            local was = {}
+            for _, s in ipairs(page.sections) do
+                was[s.token] = s.expanded
+            end
+            page.sections = {}
+            local byToken = {}
+            for i = 1, GetNumBindings() do
+                local _, category = GetBinding(i)
+                local sec = byToken[category]
+                if not sec then
+                    sec = { token = category, indices = {}, expanded = was[category] }
+                    byToken[category] = sec
+                    table.insert(page.sections, sec)
+                end
+                table.insert(sec.indices, i)
+            end
+            KeyBindings_Flatten()
+        end
+
+        -- The flattened visible list (era EvaluateVisibility): every header, then the expanded
+        -- sections' rows. The faux scroll runs over this.
+        function KeyBindings_Flatten()
+            local page = KeyBindingsPage
+            page.items = {}
+            for n, sec in ipairs(page.sections) do
+                table.insert(page.items, { header = n })
+                if sec.expanded then
+                    for _, i in ipairs(sec.indices) do
+                        table.insert(page.items, { bind = i })
+                    end
+                end
+            end
+        end
+
+        -- The expand/collapse click (era OnExpandedChanged; the sound is the checkbox kit's,
+        -- the page's one click voice).
+        function KeyBindings_ToggleSection(n)
+            local sec = KeyBindingsPage.sections[n]
+            if not sec then return end
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            sec.expanded = not sec.expanded
+            KeyBindings_Flatten()
+            KeyBindingsPage_Update()
+        end
+
+        -- Expand/collapse by section index without the click voice — the capture fixture uses
+        -- it to open a section for the lens.
+        function KeyBindings_ExpandSection(n, on)
+            local sec = KeyBindingsPage.sections[n]
+            if not sec then return end
+            sec.expanded = on and true or false
+            KeyBindings_Flatten()
+        end
+
+        -- ── Painters ── one row, one mode. Shared by the list repaint and the search rows
+        -- (which are the SAME template painted bind-mode — the era reflows live rows into its
+        -- results, and these capsules run the full capture law in place).
+        function KeyBindings_PaintBindRow(name, index)
+            local command, _, key1, key2 = GetBinding(index)
+            local b1 = getglobal(name .. "Key1Button")
+            local b2 = getglobal(name .. "Key2Button")
+            b1.commandName = command
+            b2.commandName = command
+            b1:SetText(KeyBindings_KeyText(key1))
+            b2:SetText(KeyBindings_KeyText(key2))
+            if key1 then b1:SetAlpha(1) else b1:SetAlpha(0.8) end
+            if key2 then b2:SetAlpha(1) else b2:SetAlpha(0.8) end
+            local desc = getglobal(name .. "Description")
+            desc:SetText(KeyBindings_String("BINDING_NAME_" .. command, command))
+            desc:Show()
+            -- The 1.12 selection highlight: the pressed capsule holds its glow.
+            local page = KeyBindingsPage
+            if page.selected == command and page.keyID == 1 then
+                b1:LockHighlight()
+            else
+                b1:UnlockHighlight()
+            end
+            if page.selected == command and page.keyID == 2 then
+                b2:LockHighlight()
+            else
+                b2:UnlockHighlight()
+            end
+            b1:Show()
+            b2:Show()
+            getglobal(name .. "Header"):Hide()
+        end
+
+        function KeyBindings_PaintHeaderRow(name, n)
+            local sec = KeyBindingsPage.sections[n]
+            local header = getglobal(name .. "Header")
+            header.sectionIndex = n
+            header:SetText(KeyBindings_String(sec.token, sec.token))
+            local icon = getglobal(name .. "HeaderIcon")
+            if sec.expanded then
+                icon:SetTexture("Interface\\Buttons\\UI-MinusButton-Up")
+            else
+                icon:SetTexture("Interface\\Buttons\\UI-PlusButton-Up")
+            end
+            header:Show()
+            getglobal(name .. "Description"):Hide()
+            getglobal(name .. "Key1Button"):Hide()
+            getglobal(name .. "Key2Button"):Hide()
+        end
+
+        -- ── The list repaint (1.12 KeyBindingFrame_Update over the era section list). ──
+        function KeyBindingsPage_Update()
+            local page = KeyBindingsPage
+            local scroll = getglobal("OptionsFrameContainerBodyKeybindingsScrollFrame")
+            local offset = BenillaFauxScrollFrame_GetOffset(scroll)
+            for i = 1, KEYBINDINGS_DISPLAYED do
+                local name = KEYBINDINGS_ROW_BASE .. i
+                local row = getglobal(name)
+                local item = page.items[offset + i]
+                if item and item.header then
+                    KeyBindings_PaintHeaderRow(name, item.header)
+                    row:Show()
+                elseif item then
+                    KeyBindings_PaintBindRow(name, item.bind)
+                    row:Show()
+                else
+                    row:Hide()
+                end
+            end
+            BenillaFauxScrollFrame_Update(scroll, table.getn(page.items),
+                KEYBINDINGS_DISPLAYED, KEYBINDINGS_ROW_HEIGHT)
+            KeyBindings_UpdateUnbindKey()
+        end
+
+        -- The page entry (OptionsFrame_SelectCategory's Keybindings arm): rebuild the tree —
+        -- the table may have moved under us (a rebind, a set switch) — sync the checkbox to
+        -- the live set, park the scroll at the top, repaint.
+        function KeyBindingsPage_Refresh()
+            KeyBindings_BuildSections()
+            local box = getglobal("OptionsFrameContainerBodyKeybindingsCharacterRowCheck")
+            if GetCurrentBindingSet() == 2 then
+                box:SetChecked(1)
+            else
+                box:SetChecked(nil)
+            end
+            getglobal("OptionsFrameContainerBodyKeybindingsScrollFrameScrollBar"):SetValue(0)
+            KeyBindingsPage_Update()
+        end
+
+        function KeyBindings_Output(text)
+            getglobal("OptionsFrameContainerBodyKeybindingsOutput"):SetText(text)
+        end
+
+        -- ── Selection + the capture arm ── selecting a capsule arms the HOST's capture seam
+        -- (BenillaBindCapture): raw input is swallowed there and comes back canonical through
+        -- KeyBindings_OnHostKey. Deselecting (either way) disarms.
+        function KeyBindings_SetSelected(command, keyID)
+            KeyBindingsPage.selected = command
+            KeyBindingsPage.keyID = keyID
+            BenillaBindCapture(command ~= nil)
+        end
+
+        function KeyBindings_UpdateUnbindKey()
+            local unbind = getglobal("OptionsFrameContainerUnbind")
+            if KeyBindingsPage.selected then
+                unbind:Enable()
+            else
+                unbind:Disable()
+            end
+        end
+
+        -- Repaint whichever view currently shows binding rows: the page list, or the live
+        -- search-result rows (a bind landed from one must relabel it — and its victim, which
+        -- may sit on another visible row).
+        function KeyBindings_RepaintVisible()
+            if KeyBindingsPage.searchPainted then
+                for name, index in pairs(KeyBindingsPage.searchPainted) do
+                    KeyBindings_PaintBindRow(name, index)
+                end
+                KeyBindings_UpdateUnbindKey()
+            else
+                KeyBindingsPage_Update()
+            end
+        end
+
+        function KeyBindingButton_OnClick(button)
+            -- The 1.12 law: while something is selected, only LEFT/RIGHT on a capsule
+            -- re-select or deselect — a middle/4/5 press is a BIND, and the host's armed
+            -- capture seam (which runs after this click) takes it, so this handler must not
+            -- touch the selection for those buttons.
+            local page = KeyBindingsPage
+            if page.selected then
+                if button ~= "LeftButton" and button ~= "RightButton" then
+                    return
+                end
+                if page.selected == this.commandName and page.keyID == this:GetID() then
+                    KeyBindings_SetSelected(nil)
+                    KeyBindings_Output("")
+                else
+                    KeyBindings_SetSelected(this.commandName, this:GetID())
+                    KeyBindings_Output(string.format(
+                        KeyBindings_String("BIND_KEY_TO_COMMAND", "Press Key to Bind to Command -> %s"),
+                        KeyBindings_String("BINDING_NAME_" .. this.commandName, this.commandName)))
+                end
+            else
+                KeyBindings_SetSelected(this.commandName, this:GetID())
+                KeyBindings_Output(string.format(
+                    KeyBindings_String("BIND_KEY_TO_COMMAND", "Press Key to Bind to Command -> %s"),
+                    KeyBindings_String("BINDING_NAME_" .. this.commandName, this.commandName)))
+            end
+            KeyBindings_RepaintVisible()
+        end
+
+        -- The live-commit half of every mutation (1008's commit law — the header block): the
+        -- table already moved; persist the set it belongs to.
+        function KeyBindings_Commit()
+            SaveBindings(GetCurrentBindingSet())
+        end
+
+        -- The host's capture callback: `chord` is canonical (ALT-CTRL-SHIFT-TOKEN). The body is
+        -- 1.12's OnKeyDown selected-branch verbatim: steal message, clear the command's keys,
+        -- rebind in slot order so the pressed slot takes the new chord — then the live commit.
+        function KeyBindings_OnHostKey(chord)
+            local page = KeyBindingsPage
+            if not page.selected then
+                return
+            end
+            local selected = page.selected
+            local oldAction = GetBindingAction(chord)
+            if oldAction ~= "" and oldAction ~= selected then
+                local k1, k2 = GetBindingKey(oldAction)
+                if (not k1 or k1 == chord) and (not k2 or k2 == chord) then
+                    KeyBindings_Output(string.format(
+                        KeyBindings_String("KEY_UNBOUND_ERROR", "|cffff0000%s Function is Now Unbound!|r"),
+                        KeyBindings_String("BINDING_NAME_" .. oldAction, oldAction)))
+                else
+                    KeyBindings_Output(KeyBindings_String("KEY_BOUND", "Key Bound Successfully"))
+                end
+            else
+                KeyBindings_Output(KeyBindings_String("KEY_BOUND", "Key Bound Successfully"))
+            end
+            local key1, key2 = GetBindingKey(selected)
+            if key1 then SetBinding(key1) end
+            if key2 then SetBinding(key2) end
+            if page.keyID == 1 then
+                KeyBindings_SetOrRestore(chord, selected, key1)
+                if key2 then SetBinding(key2, selected) end
+            else
+                if key1 then SetBinding(key1, selected) end
+                KeyBindings_SetOrRestore(chord, selected, key2)
+            end
+            KeyBindings_Commit()
+            KeyBindings_SetSelected(nil)
+            KeyBindings_RepaintVisible()
+        end
+
+        -- 1.12 KeyBindingFrame_SetBinding: a refused bind (the wheel on a press+release
+        -- command) restores the slot's old key and says why.
+        function KeyBindings_SetOrRestore(key, command, oldKey)
+            if not SetBinding(key, command) then
+                if oldKey then SetBinding(oldKey, command) end
+                KeyBindings_Output(KeyBindings_String(
+                    "KEYBINDINGFRAME_MOUSEWHEEL_ERROR",
+                    "Can't bind mousewheel to actions with up and down states"))
+            end
+        end
+
+        -- The Unbind Key button (the Container header band, OptionsFrame.xml): 1.12's body —
+        -- the selected slot empties, the other slides into slot order — plus the live commit.
+        function KeyBindings_Unbind()
+            local page = KeyBindingsPage
+            local key1, key2 = GetBindingKey(page.selected)
+            if key1 then SetBinding(key1) end
+            if key2 then SetBinding(key2) end
+            if key1 and page.keyID == 1 then
+                if key2 then SetBinding(key2, page.selected) end
+            else
+                if key1 then SetBinding(key1, page.selected) end
+            end
+            KeyBindings_Commit()
+            KeyBindings_SetSelected(nil)
+            KeyBindings_Output("")
+            KeyBindings_RepaintVisible()
+        end
+
+        -- ── The character-specific set (1.12's three-set model under the era checkbox row) ──
+        -- CHECK: switch to the character set and save it at once — it starts as a copy of what
+        -- you had (LoadBindings(2) falls back to the account snapshot; SaveBindings(2) makes it
+        -- exist, which IS the checkbox's persisted truth). UNCHECK: destructive — the era
+        -- confirm-on-uncheck-only law; the box springs back until the popup decides. The accept
+        -- order is load-then-save: LoadBindings(1) puts the account set live FIRST, so
+        -- SaveBindings(1) persists it unchanged while dropping the character set (the confirmed
+        -- permanent delete — saving live-as-account here would smuggle the character binds in).
+        function KeyBindings_CharacterToggle(box)
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            if box:GetChecked() then
+                LoadBindings(2)
+                SaveBindings(2)
+                KeyBindings_SetSelected(nil)
+                KeyBindings_Output("")
+                KeyBindingsPage_Refresh()
+            else
+                box:SetChecked(1)
+                StaticPopup_Show("CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS")
+            end
+        end
+
+        StaticPopupDialogs["CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS"] = {
+            text = KeyBindings_String("CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS",
+                "Really switch to general key bindings?  All key bindings specific to this character will be permanantly deleted."),
+            button1 = KeyBindings_String("OKAY", "Okay"),
+            button2 = KeyBindings_String("CANCEL", "Cancel"),
+            OnAccept = function()
+                LoadBindings(1)
+                SaveBindings(1)
+                KeyBindings_SetSelected(nil)
+                KeyBindings_Output("")
+                KeyBindingsPage_Refresh()
+            end,
+        }
+        -- Reset To Default — the page's Defaults button (era: Defaults confirms; the string is
+        -- ours, 0997's note: the era's lives in its client binary, 1.12 has none). The reset
+        -- lands in the CURRENT set and commits live like every other mutation.
+        StaticPopupDialogs["CONFIRM_RESET_KEYBINDINGS"] = {
+            text = "Are you sure you want to reset all keybindings to their defaults?",
+            button1 = KeyBindings_String("OKAY", "Okay"),
+            button2 = KeyBindings_String("CANCEL", "Cancel"),
+            OnAccept = function()
+                PlaySound("igMainMenuOptionCheckBoxOn")
+                LoadBindings(0)
+                KeyBindings_Commit()
+                KeyBindings_SetSelected(nil)
+                KeyBindings_Output("")
+                KeyBindingsPage_Refresh()
+            end,
+        }
+
+        -- ── Search (the era redirect law) ── every binding's search tag is its display name
+        -- uppercased (era AddSearchTags(GetBindingName(action))); matches score by the shared
+        -- law (OptionsSearch_Score) and surface under the Keybindings group head, whose click
+        -- jumps to this page (era Blizzard_SettingsPanel.lua l.578: the fake category's results
+        -- carry `redirectCategory`). The matched rows are LIVE (era reflows real initializers);
+        -- OptionsFrame.xml paints them onto its static KeybindSearch row pool.
+        function KeyBindings_SearchMatches(words)
+            local out = {}
+            for i = 1, GetNumBindings() do
+                local command = GetBinding(i)
+                local tag = string.upper(KeyBindings_String("BINDING_NAME_" .. command, command))
+                local s = OptionsSearch_Score(tag, words)
+                if s then
+                    table.insert(out, { score = s, index = i })
+                end
+            end
+            return out
+        end
+    ]]></Script>
+</Ui>

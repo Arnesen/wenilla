@@ -398,7 +398,7 @@ pub(super) fn spawn_glue_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        crate::ffx_glow::FfxGlow::WORLD,
+        crate::ffx_glow::FfxGlow::BOOTH,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
         Projection::from(bevy::camera::PerspectiveProjection {

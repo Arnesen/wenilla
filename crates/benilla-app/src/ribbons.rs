@@ -1,13 +1,15 @@
 //! Faithful M2 **ribbon trails** — weapon enchant trails, wisp streamers, spell-missile trails.
 //!
 //! The 1.12 client simulates a ribbon as a ring of **edges**: each frame the emitter's bone-local
-//! origin is transformed by the live bone matrix into a node point, a new edge (a vertex pair at
-//! `±heightAbove/heightBelow` across the node) is committed at `edgesPerSecond`, old edges age out
-//! at `edgeLifetime`, gravity sags the stored verts, and the edge list renders as a triangle strip
-//! whose `u` texcoord slides with edge age (the texture's transparent tail fades the trail).
-//! Byte-exact spec: wow-5875-re `system/models/scratch/ribbon-emitter-spec.md` (their `9c862186`);
-//! the sim below transcribes it with the same simplifications as `particles` (distributions and
-//! frames mirrored, not the reference's exact float slots).
+//! origin is transformed by the live bone matrix into a node point, `floor(dt·edgesPerSecond +
+//! phase)` new edges (a vertex pair at `±heightAbove/heightBelow` across the node) are committed
+//! and backdated inside the frame, old edges age out at `edgeLifetime`, **gravity carries the
+//! stored verts along world +Z by `g·t²`** — up for the positive majority of the corpus — and the
+//! edge list renders as a triangle strip whose `u` texcoord slides with edge age (the texture's
+//! transparent tail fades the trail). Byte-exact spec: wow-5875-re
+//! `system/models/scratch/ribbon-emitter-spec.md`; the sim below transcribes it with the same
+//! simplifications as `particles` (distributions and frames mirrored, not the reference's exact
+//! float slots).
 //!
 //! Like particles, each trail writes its strip into the **shared effect-quad stream**
 //! ([`crate::particles::buffer::EffectQuads`], decision 0732 slice P1) — per segment, one quad
@@ -37,6 +39,24 @@ struct Edge {
     top: Vec3,
     bottom: Vec3,
     born: f32,
+    /// Seconds this edge has been alive, carried explicitly because the reference does
+    /// ([`simulate_ribbons`]'s gravity note): its per-edge age array at `emitter+0x0c` is the term
+    /// the gravity increment reads, and an edge born part-way through a frame starts at its
+    /// **backdated** age, not zero.
+    age: f32,
+}
+
+/// This frame's gravity displacement for one live edge, in world **+Z (up)** yards — the
+/// reference's exact per-frame term (`ribbonage 0x7b7e60`, `0x7b8007`..`0x7b800f`):
+/// `gravity · ((age + age) + dt) · dt`, applied identically to both of the edge's vertices, with
+/// `age` advanced by `dt` straight after.
+///
+/// `(2a + dt)·dt ≡ (a + dt)² − a²`, so stepping it across an edge's life telescopes exactly to
+/// `Δz = gravity · t²` — no ½, no factor of 2, and **upward** for a positive `gravity` (the block
+/// is two `fadd`s with no `fchs`, on world-space positions in a +Z-up frame). See
+/// [`simulate_ribbons`] for why both halves of that mattered on screen.
+fn gravity_step(gravity: f32, age: f32, dt: f32) -> f32 {
+    gravity * ((age + age) + dt) * dt
 }
 
 /// A live ribbon trail riding `owner`. Positions are world-space; the mesh entity's transform is
@@ -58,6 +78,8 @@ pub struct RibbonTrail {
     /// active flag before destroy, or hard-cuts at animation end, is the one OPEN half
     /// (CEffect-side, flagged in decision 0206).
     owner: Option<Entity>,
+    /// Which clock the `+0xc0` enable gate is sampled against, every frame ([`RibbonSeq`]).
+    seq: RibbonSeq,
     /// The MODEL INSTANCE whose [`crate::model_fade::ModelAlpha`] decides whether this trail is
     /// drawn at all (decision 0827). The reference's ribbon render leg reads the owning model's
     /// render alpha (`block+0x3c × Model+0x19c`) and **drops the draw** below a threshold (wow-re
@@ -100,14 +122,31 @@ impl RibbonTrail {
     }
 }
 
+/// What decides a trail's `+0xc0` **enable** gate — the reference's per-ribbon `block+0xbc` byte,
+/// which it re-reads every frame (wow-re `ribbon-emitter-spec.md` §6).
+#[derive(Clone, Copy)]
+pub enum RibbonSeq {
+    /// Re-read each frame from this entity's [`AnimationPlayer`] + [`ModelAnimations`] — the unit,
+    /// GameObject, doodad and effect-instance lanes, where the sequence **changes under the
+    /// trail**: a trap springs, a door opens, an effect model steps Stand → Hold → Decay.
+    Host(Entity),
+    /// A fixed `AnimationData.dbc` id for the instance's life — a worn item rests in `Stand`(0),
+    /// and nothing on it will ever play anything else.
+    Fixed(u16),
+}
+
 /// Spawn a ribbon-trail entity for one [`ModelRibbon`], riding `owner` (a host-bone joint for a
 /// skinned model — pass the joint and the def's baked pivot does the rebase — or the model/item
-/// root). `current_anim` is the `AnimationData.dbc` id the owner's model is running (a static held
-/// item rests in Stand; `None` = the model's first clip / no sequence), which the per-sequence
-/// visibility gate keys off. `owner_scale` is the owner placement's largest scale component — the
+/// root). `seq` names the clock the per-sequence enable gate is sampled against (see
+/// [`RibbonSeq`]). `owner_scale` is the owner placement's largest scale component — the
 /// model-local [`ModelRibbon::owner_reach`] takes it to reach world yards, which is what the
-/// draw-order rung is measured in. `None` if the trail has no resolved texture, degenerate
-/// emission, or is dark in that sequence.
+/// draw-order rung is measured in. `None` if the trail has no resolved texture or degenerate
+/// emission.
+///
+/// A gated trail still spawns: the gate is **live**, not a spawn-time decision, because the
+/// sequence that answers it changes while the instance lives. Refusing at spawn was correct only
+/// for the fixed-sequence lanes it was written for (a held item, a missile) and silently wrong for
+/// everything with a state machine — see [`simulate_ribbons`].
 #[allow(clippy::too_many_arguments)] // the spawn's full wiring, `alpha_src` included
 pub fn spawn_ribbon(
     commands: &mut Commands,
@@ -115,28 +154,12 @@ pub fn spawn_ribbon(
     owner: Entity,
     use_pivot: bool,
     owner_scale: f32,
-    current_anim: Option<u16>,
+    seq: RibbonSeq,
     alpha_src: Option<Entity>,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES also spawns no ribbons (one switch, whole family).
     if std::env::var_os("WOW_NO_PARTICLES").is_some() {
         return None;
-    }
-    // Per-sequence visibility (`+0xc0`): a keyed ribbon shows only in the sequences its author lit
-    // — the thrown weapon's trail is OFF in Stand (worn in hand) and Impact (landed), ON only in
-    // InFlight. A model with no gate (`None` — enchant trails, wisps) always shows. Owner and
-    // missile are separate fixed-sequence entities, so the spawn-time decision holds for the
-    // instance's life (the shipped keyed ribbons are constant within a sequence).
-    if let Some(vis) = &ribbon.def.visible_in_anim {
-        let anim = current_anim.unwrap_or(0); // a static held item rests in Stand (0)
-        let visible = vis
-            .get(&anim)
-            .or_else(|| vis.get(&0))
-            .copied()
-            .unwrap_or(true);
-        if !visible {
-            return None; // dark this sequence — no trail
-        }
     }
     let texture = ribbon.texture.clone()?;
     let def = ribbon.def.clone();
@@ -167,6 +190,7 @@ pub fn spawn_ribbon(
                     local_offset: wow_to_bevy(local),
                     def,
                     owner: Some(owner),
+                    seq,
                     alpha_src,
                     edges: VecDeque::new(),
                     accumulator: 0.0,
@@ -192,6 +216,8 @@ pub(crate) fn simulate_ribbons(
     // Owner reads (joints/roots — never trail entities): disjoint from the trail query's
     // `&mut GlobalTransform` below.
     transforms: Query<&GlobalTransform, Without<RibbonTrail>>,
+    // The `+0xc0` enable gate's clock: the sequence a [`RibbonSeq::Host`] instance is playing.
+    hosts: Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
     images: Res<Assets<Image>>,
     mut quads: ResMut<EffectQuads>,
     // The owning model's render alpha — the trail's draw gate (decision 0827), composed along the
@@ -220,6 +246,7 @@ pub(crate) fn simulate_ribbons(
             def,
             local_offset,
             owner,
+            seq,
             alpha_src,
             edges,
             accumulator,
@@ -259,31 +286,101 @@ pub(crate) fn simulate_ribbons(
             continue;
         }
 
-        // Expire old edges (front = oldest), sag the rest, commit new ones at cadence.
+        // The `+0xc0` **enable** gate, sampled LIVE against the sequence the host is playing.
+        // SETTLED at the bytes (wow-re `ribbon-emitter-spec.md` §7, closed — the dispatch this
+        // session): the per-ribbon runtime byte `block+0xbc` IS the sampled `visibilityTrack`
+        // value. Complete writer census — ctor `0x71b34c` = 0, loader default `0x70f80e` = 1,
+        // then per frame `values[k0]` at `0x7176ee` (step arm) and `0x717714` (non-step arm; a u8
+        // track is never blended, so both copy the same raw byte) inside `0x714260`. No
+        // equipment/attach/sheathe writer exists anywhere. `0x718960` only READS it.
+        //
+        // Decision 1011 wired this and was right about the mechanism; decision 1013 unwound it on
+        // the strength of §7's then-open INFERENCE and was wrong. What actually made the trap look
+        // wrong was gravity (see below) — the low rig sank instead of rising, so the tuft the
+        // reference shows above the crown vanished and only the gated-off high rig had ever been
+        // producing anything visible, as a downward column. Two faults, one screenshot.
+        //
+        // Clearing the byte KILLS THE WHOLE RIBBON'S DRAW — `0x7080c2` jumps to the collect loop's
+        // continue at `0x708263`, emitting no record at all. The earlier "committed edges keep
+        // fading" gloss is withdrawn by the same pass, so this gates the DRAW, not just the
+        // commit: a trail whose gate clears vanishes on the frame it clears.
+        let lit = def.visible.as_ref().is_none_or(|vis| match *seq {
+            RibbonSeq::Fixed(a) => vis.at(a, 0.0),
+            RibbonSeq::Host(h) => match hosts.get(h) {
+                // Sequences exist: the playing one answers, and `playing_seq` already degrades to
+                // the loader-idle clip. A slot with no clip row falls back to `Stand`(0).
+                Ok((player, anims)) => {
+                    let (anim, t) = crate::doodad_anim::playing_seq(player, anims)
+                        .and_then(|(slot, t)| {
+                            Some((anims.clips.iter().find(|c| c.seq_index == slot)?.anim_id, t))
+                        })
+                        .unwrap_or((0, 0.0));
+                    vis.at(anim, t)
+                }
+                // No clock on the host at all — the instance is still being built this frame. The
+                // reference never has this window (its loader seed arms a sequence the moment the
+                // M2 goes LIVE, `0x70ebd0`), so answering "enabled" here would invent a state and
+                // pop one frame of every gated trail. Hold dark until the host can answer.
+                Err(_) => false,
+            },
+        });
+        let head = lit.then_some(head).flatten();
+
+        // Expire old edges (front = oldest), move the rest under gravity, commit new ones at rate.
         while edges
             .front()
             .is_some_and(|e| now - e.born >= def.edge_lifetime)
         {
             edges.pop_front();
         }
-        if def.gravity != 0.0 {
-            let sag = 2.0 * def.gravity * dt;
-            for e in edges.iter_mut() {
-                e.top.y -= sag;
-                e.bottom.y -= sag;
-            }
+        // GRAVITY — byte-verified (`ribbonage 0x7b7e60`, the loop at `0x7b7fe7..0x7b807a`; wow-re
+        // `ribbon-emitter-spec.md` §4). Per frame, per live edge, into BOTH vertices' world z:
+        //
+        //     term = gravity · ((age + age) + dt) · dt   ;   age += dt
+        //
+        // `(2a + dt)·dt` is identically `(a + dt)² − a²`, and the age advance follows immediately,
+        // so the whole loop telescopes to a closed form — an edge sits at
+        //
+        //     z(t) = z_at_emit + gravity · t²        (t = seconds since commit, yards)
+        //
+        // with no ½ and no factor of 2. It is a **position** increment; the vertex is the only
+        // state besides the per-edge age, there is no velocity, and it is scaled by nothing (the
+        // interp factor the loop computes just above is never an operand here).
+        //
+        // And the sign is `fadd`, twice, with no `fchs` anywhere in the block: positions are world
+        // space, WoW's +Z is UP, so a **positive gravity makes the trail RISE**. The corpus agrees
+        // — of 590 ribbon records 86 are positive (totems 5.0, the cleanse family 0.5/1.0) and 16
+        // negative, including ±0.5 up/down PAIRS inside one model, which a single-signed reading
+        // cannot explain at all. Our old `pos.y -= 2·g·dt` was wrong twice over: constant velocity
+        // instead of `g·t²`, and falling instead of rising. On the Frost Trap that turned a
+        // 0.6–1.3 yd tuft rising off the crown into a 2–3 yd column smeared to the ground.
+        for e in edges.iter_mut() {
+            let term = gravity_step(def.gravity, e.age, dt);
+            e.top.y += term;
+            e.bottom.y += term;
+            e.age += dt;
         }
+        // EMISSION — `edgesPerSecond` is a true rate, not a per-frame cadence: the reference
+        // commits `n = floor(dt·eps + phase)` edges this frame, carries the fraction as the phase,
+        // and **backdates** each one inside the frame (wow-re §4.2). A one-edge-per-frame cap
+        // silently thins every trail below `eps` frames per second — the whole trail, at 30 fps
+        // with the Frost Trap's `eps` 30, is half the edges it should hold.
         if let Some((node, axis)) = head {
             *accumulator += def.edges_per_second * dt;
-            if *accumulator >= 1.0 {
-                *accumulator = accumulator.fract();
-                if edges.len() < MAX_EDGES {
-                    edges.push_back(Edge {
-                        top: node + axis * h_above,
-                        bottom: node - axis * h_below,
-                        born: now,
-                    });
-                }
+            let n = accumulator.floor().max(0.0);
+            *accumulator -= n;
+            // Sub-frame backdating: the n-th edge of this frame was emitted `k/n · dt` ago (the
+            // node itself only has this frame's position, so the sample point is shared — the
+            // backdate is what the age, and therefore the gravity rise, is measured from).
+            let n = (n as usize).min(MAX_EDGES.saturating_sub(edges.len()));
+            for k in 0..n {
+                let back = dt * (n - 1 - k) as f32 / n as f32;
+                edges.push_back(Edge {
+                    top: node + axis * h_above,
+                    bottom: node - axis * h_below,
+                    born: now - back,
+                    age: back,
+                });
             }
         }
 
@@ -293,6 +390,13 @@ pub(crate) fn simulate_ribbons(
         // strip yet, or a non-resident texture — pushes nothing and commits nothing: the old
         // "don't rewrite an already-empty mesh" guard is now the structure itself.
         if !images.contains(&*texture) {
+            continue;
+        }
+        // The gate again, on the DRAW: `0x7080c2` skips the whole record when the byte is 0, so a
+        // gated-off ribbon shows nothing — not a fading remainder. The sim above still ran (edges
+        // age and expire exactly as `ribbonage` ages them), which is what makes the trail resume
+        // mid-strip rather than from empty when the byte comes back.
+        if !lit {
             continue;
         }
         // An invisible MODEL has no streamer: the reference's ribbon render leg reads the owning
@@ -422,5 +526,63 @@ impl Plugin for RibbonPlugin {
                 .after(crate::billboard::billboard_joint_palette)
                 .after(crate::creature_anim::finalize_rig_worlds),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gravity_step;
+
+    /// The per-frame gravity term telescopes to the closed form the bytes imply: stepping
+    /// `gravity · ((2·age) + dt) · dt` and advancing `age` by `dt` leaves an edge exactly
+    /// `gravity · t²` from where it was emitted, **whatever the frame rate** — which is the
+    /// property that makes a trail look the same at 30 and 144 fps. Sign included: positive
+    /// gravity rises.
+    #[test]
+    fn gravity_telescopes_to_g_t_squared_at_any_frame_rate() {
+        for &g in &[0.5_f32, 1.0, 1.5, 2.0, 5.0, -1.0] {
+            for &dt in &[1.0 / 144.0_f32, 1.0 / 60.0, 1.0 / 30.0, 1.0 / 15.0] {
+                let steps = (1.0 / dt).round() as usize; // exactly one second of frames
+                let (mut z, mut age) = (0.0_f32, 0.0_f32);
+                for _ in 0..steps {
+                    z += gravity_step(g, age, dt);
+                    age += dt;
+                }
+                let t = steps as f32 * dt;
+                assert!(
+                    (z - g * t * t).abs() < 1e-4,
+                    "g {g} at dt {dt}: got {z}, want {}",
+                    g * t * t
+                );
+            }
+        }
+        // The sign is the half that was inverted: a positive gravity RISES.
+        assert!(gravity_step(2.0, 0.0, 0.016) > 0.0);
+        assert!(gravity_step(-1.0, 0.0, 0.016) < 0.0);
+    }
+
+    /// The Frost Trap's four low streamers, with their authored `gravity` and `edgeLifetime`:
+    /// each rises `g·L²` = 0.605 / 1.000 / 1.215 / 1.280 yd over an edge's life, from a node at
+    /// model z 0.129. That is the compact tuft standing off a crown whose own geometry stops at
+    /// z 0.637 — and it is what the old constant-velocity fall (1.1–3.2 yd DOWNWARD from the
+    /// twelve upper streamers at z 1.55) turned into a column reaching the ground.
+    #[test]
+    fn frost_trap_low_rig_rises_into_a_tuft_over_the_crown() {
+        for (g, life, want) in [
+            (0.5_f32, 1.1_f32, 0.605_f32),
+            (1.0, 1.0, 1.000),
+            (1.5, 0.9, 1.215),
+            (2.0, 0.8, 1.280),
+        ] {
+            let dt = 1.0 / 60.0;
+            let steps = (life / dt).round() as usize;
+            let (mut z, mut age) = (0.0_f32, 0.0_f32);
+            for _ in 0..steps {
+                z += gravity_step(g, age, dt);
+                age += dt;
+            }
+            assert!((z - want).abs() < 0.01, "g {g} life {life}: {z} vs {want}");
+            assert!(0.129 + z > 0.637, "clears the crown's own geometry");
+        }
     }
 }

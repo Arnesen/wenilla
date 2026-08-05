@@ -53,6 +53,7 @@ mod entities;
 mod entity_shade;
 mod exterior_cull;
 mod ffx_glow;
+mod footprints;
 mod glue;
 mod glue_strings;
 mod go_anim;
@@ -129,6 +130,7 @@ mod ui_net;
 mod ui_party;
 mod ui_pass;
 mod ui_pet;
+mod ui_pet_stats;
 mod ui_quest;
 mod ui_quest_log;
 mod ui_script;
@@ -170,6 +172,7 @@ use debug_panel::DebugPanelPlugin;
 use doodad_anim::DoodadAnimPlugin;
 use entities::EntitiesPlugin;
 use entity_shade::EntityShadePlugin;
+use footprints::FootprintsPlugin;
 use interact::InteractPlugin;
 use interior::InteriorPlugin;
 use lighting::LightingPlugin;
@@ -213,6 +216,7 @@ use ui_net::UiNetPlugin;
 use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
 use ui_pet::UiPetPlugin;
+use ui_pet_stats::UiPetStatsPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
 use ui_script::UiScriptPlugin;
@@ -565,6 +569,9 @@ pub fn run(build: BuildId) -> AppExit {
     // animation's box (the byte-verified law — wow-re unit-blob-shadow RE), on the same
     // surface-decal projector as the selection ring.
     .add_plugins(BlobShadowPlugin)
+    // Footprint decals (B212, decision 1006): the prints a walking unit leaves on snow/sand,
+    // spawn-once projections on the same decal projector, fading off the effect stream.
+    .add_plugins(FootprintsPlugin)
     // Doodad animation (decision 0130): placed M2s loop their first sequence + global sequences,
     // gated to drawn instances.
     .add_plugins(DoodadAnimPlugin)
@@ -708,6 +715,9 @@ pub fn run(build: BuildId) -> AppExit {
     // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
     // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
     .add_plugins(UiPetPlugin)
+    // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
+    // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.
+    .add_plugins(UiPetStatsPlugin)
     // The connection-telemetry feed: the averaged ping RTT behind `GetNetStats()`, which the main
     // bar's performance meter polls (decision 0658).
     .add_plugins(UiNetPlugin)

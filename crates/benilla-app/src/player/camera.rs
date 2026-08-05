@@ -373,7 +373,8 @@ pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl) {
 /// Seat the third-person camera: orient it, orbit it behind the avatar's torso with a collision
 /// sweep from the head to the ideal seat (snap-in instantly, ease back out), write the resulting
 /// transform, and compute the self-avatar zoom-in fade from the realized camera-to-pivot distance.
-/// A **keyboard** turn carries the camera rigidly by `turn_delta` — input turns only: a transport
+/// A **keyboard** turn (or the drunk veer, which rides `turn_delta` the same way — decision 1018)
+/// carries the camera rigidly — the character's own turns only: a transport
 /// deck turning under the rider is frame motion and is applied to `cam.yaw` at the ride block in
 /// [`super::control`], bypassing this function's look-session gate (routing it here was the
 /// right-drag drift bug — the gate ate the deck's share while a drag was held). A left-drag orbit

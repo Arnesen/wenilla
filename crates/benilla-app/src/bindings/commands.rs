@@ -4,8 +4,9 @@
 //!
 //! **Honest tree**: a command appears here only over a real engine action — the same law as the
 //! options rows (0954). The 1.12 commands with no benilla mechanism yet (pitch keys, walk toggle,
-//! action pages, camera views, screenshot, combat log, …) are absent, not stubbed; the window
-//! shows only what's here, and only non-empty categories (era law). Labels/headers are the 1.12
+//! action pages, the right multibars' MULTIACTIONBAR3/4, camera views, screenshot, combat log, …)
+//! are absent, not stubbed; the page shows only what's here, and only non-empty categories (era
+//! law). Labels/headers are the 1.12
 //! GlobalStrings (`BINDING_NAME_*`/`BINDING_HEADER_*`), defined in the window's XML.
 //!
 //! Three dispatch classes:
@@ -614,6 +615,253 @@ pub(crate) static SPECS: &[Spec] = &[
         CAMERA,
         Kind::Host,
         Some("MOUSEWHEELDOWN"),
+        None
+    ),
+    // ── MultiActionBar (BINDING_HEADER_MULTIACTIONBAR) ──────────────────────────────────
+    // The two bottom bars' buttons (MultiBars.xml renders exactly these; 1.12's right bars
+    // and their MULTIACTIONBAR3/4 commands stay out — honest tree). Ref bodies are the
+    // MultiActionButtonDown/Up runOnUp pair (Bindings.xml:799-966), transcribed in
+    // MultiBars.xml; shipped UNBOUND like the ref (no MULTIACTIONBAR* line in any of the
+    // install's bindings-cache.wtf files). 1.12 files bar 2 under a BLANK spacer-header;
+    // both bars sit under the one MULTIACTIONBAR header here (1008, recorded).
+    spec!(
+        "MULTIACTIONBAR1BUTTON1",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 1)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 1)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON2",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 2)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 2)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON3",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 3)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 3)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON4",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 4)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 4)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON5",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 5)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 5)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON6",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 6)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 6)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON7",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 7)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 7)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON8",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 8)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 8)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON9",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 9)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 9)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON10",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 10)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 10)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON11",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 11)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 11)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR1BUTTON12",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomLeft", 12)"#,
+            r#"BenillaMultiActionButtonUp("BottomLeft", 12)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON1",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 1)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 1)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON2",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 2)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 2)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON3",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 3)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 3)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON4",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 4)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 4)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON5",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 5)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 5)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON6",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 6)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 6)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON7",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 7)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 7)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON8",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 8)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 8)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON9",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 9)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 9)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON10",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 10)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 10)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON11",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 11)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 11)"#
+        ),
+        None,
+        None
+    ),
+    spec!(
+        "MULTIACTIONBAR2BUTTON12",
+        MULTIACTIONBAR,
+        Kind::EdgeUpDown(
+            r#"BenillaMultiActionButtonDown("BottomRight", 12)"#,
+            r#"BenillaMultiActionButtonUp("BottomRight", 12)"#
+        ),
+        None,
         None
     ),
     // ── Raid targeting (BINDING_HEADER_RAID_TARGET) ─────────────────────────────────────

@@ -71,8 +71,8 @@ pub(crate) struct KeybindState {
     /// Bumped by every live-table mutation and every seed — the app's re-derive-dispatch signal.
     generation: u64,
     requests: Vec<KeybindRequest>,
-    /// The Key Bindings window's capture arm (`BenillaBindCapture(armed)`): while set, the host
-    /// swallows raw input and calls the window back with the canonical chord string.
+    /// The Keybindings page's capture arm (`BenillaBindCapture(armed)`): while set, the host
+    /// swallows raw input and calls the page back with the canonical chord string.
     capture_armed: bool,
 }
 
@@ -279,8 +279,8 @@ impl super::UiScript {
         self.model_mut().keybinds.stored[1].is_some()
     }
 
-    /// The Key Bindings window's capture arm — while true, the host swallows raw input and
-    /// calls `KeyBindingFrame_OnHostKey("<chord>")` instead of dispatching it.
+    /// The Keybindings page's capture arm — while true, the host swallows raw input and
+    /// calls `KeyBindings_OnHostKey("<chord>")` instead of dispatching it.
     pub fn bind_capture_armed(&self) -> bool {
         self.model_mut().keybinds.capture_armed
     }

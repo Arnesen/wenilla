@@ -417,6 +417,25 @@ pub fn pet_stop_attack(pet_guid: u64) -> Vec<u8> {
     pet_guid.to_le_bytes().to_vec()
 }
 
+/// Body of `CMSG_PET_CANCEL_AURA` (opcode 619): `u64 petGuid` then `u32 spellId`.
+///
+/// Both ends agree independently. wow-re read the send off the client
+/// (`ui/scratch/pet-action-bar-api.md` §10.1, `0x4bd25f`–`0x4bd2ad`: `push 0x26b`, the guid pair,
+/// the id); vmangos reads the same two fields in the same order
+/// (`PetCancelAura::ReadFromWorldPacket`, `Server/Packets/Pet.cpp:27-31`).
+///
+/// The guid is what distinguishes it from the player's `CMSG_CANCEL_AURA` — which carries a bare
+/// spell id and so could only ever mean "mine". The handler re-checks that the guid is our pet or
+/// our charm and drops the packet otherwise, and answers a **dead** pet with
+/// `SendPetActionFeedback(FEEDBACK_PET_DEAD)` rather than silence (`HandlePetCancelAuraOpcode`,
+/// `Handlers/SpellHandler.cpp:407-432`) — the same feedback channel the bar's other refusals use.
+pub fn pet_cancel_aura(pet_guid: u64, spell_id: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&pet_guid.to_le_bytes());
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body
+}
+
 /// Body of `CMSG_PET_SET_ACTION` (opcode 372): `u64 petGuid` then one or two
 /// `(u32 position, u32 packedData)` pairs. The server distinguishes the forms **by body size
 /// alone** — 24 bytes ⇒ two entries, anything else ⇒ one (`PetSetAction::ReadFromWorldPacket`,
@@ -613,6 +632,18 @@ mod tests {
 
         // CMSG_PET_STOP_ATTACK: the lone guid.
         assert_eq!(pet_stop_attack(0x2A), 0x2Au64.to_le_bytes());
+
+        // CMSG_PET_CANCEL_AURA: guid then spell id, 12 bytes — the guid is the whole difference
+        // from the player's own CMSG_CANCEL_AURA, which is a bare u32.
+        assert_eq!(
+            pet_cancel_aura(0x2A, 2645),
+            [
+                0x2Au64.to_le_bytes().to_vec(),
+                2645u32.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(pet_cancel_aura(0x2A, 2645).len(), 12);
 
         // CMSG_PET_SET_ACTION: the server tells one entry from two BY BODY SIZE, so the one-entry
         // form is 16 bytes and the two-entry form is exactly 24.

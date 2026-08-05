@@ -345,6 +345,15 @@ impl ObjectFields {
     pub fn player_bytes_2(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_BYTES_2)
     }
+    /// `PLAYER_BYTES_3` **byte 1** — the inebriation byte (0..255) drunkenness renders from. The
+    /// server packs `gender | (drunk & 0xFFFE)` into the field's low u16 and decays it 256 per
+    /// 10 s (vmangos `Player::SetDrunkValue` / `HandleDrunkReduce`), so this byte is
+    /// `drunk_u16 >> 8` — the value the reference clamps to 100 and scales ×0.01 into its drunk
+    /// fraction (`[[unit+0xe68]+0x1d]`, wow-re `drunk_fraction_5e2a90`). `None` when never sent
+    /// on a bare delta; a create snapshot reads absent as `Some(0)` (sober).
+    pub fn player_drunk_byte(&self) -> Option<u8> {
+        self.get_u32(FIELD_PLAYER_BYTES_3).map(|v| (v >> 8) as u8)
+    }
     /// `PLAYER_FLAGS` (field 190) — the player state flags. `0` when absent (the descriptor's
     /// zero default — a create block skips zero fields).
     pub fn player_flags(&self) -> u32 {

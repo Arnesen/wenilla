@@ -398,6 +398,10 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     // (any height — the shape test is the renderer's own, the ceiling is lifted), the population
     // that decides where the decal lane's hover ceiling (`GROUND_HOVER_MAX`) can sit.
     let mut hovers: Vec<(f32, String)> = Vec::new();
+    // The TINT census: ground quads whose whole colour is a CONSTANT M2Color
+    // (`GroundQuad::tint`) — the population a decal consumer draws white unless it carries the
+    // vertex-colour bake across (the Flare's two washes on the neutral `GENERICGLOW*` radials).
+    let (mut tinted_total, mut tinted_models) = (0u32, 0u32);
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -411,6 +415,7 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         let (mut flat_count, mut quad_count, mut other_count) = (0u32, 0u32, 0u32);
         let mut blend_modes: Vec<String> = Vec::new();
         let mut model_hovers: Vec<f32> = Vec::new();
+        let mut tints: Vec<[f32; 3]> = Vec::new();
         for s in &subs {
             if s.positions.is_empty() {
                 continue;
@@ -432,8 +437,11 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             // The RENDERER's own detector, so this report is exactly what the ground-fx
             // decal lane will do with each batch — the instrument can't drift from the
             // mechanism it measures.
-            if s.ground_quad().is_some() {
+            if let Some(q) = s.ground_quad() {
                 quad_count += 1;
+                if q.tint != [1.0; 3] && !tints.contains(&q.tint) {
+                    tints.push(q.tint);
+                }
             } else {
                 other_count += 1;
             }
@@ -449,6 +457,8 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         } else {
             mixed += 1;
         }
+        tinted_total += tints.len() as u32;
+        tinted_models += u32::from(!tints.is_empty());
         blend_modes.sort();
         let hover_note = if model_hovers.is_empty() {
             String::new()
@@ -462,13 +472,28 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                     .join(" ")
             )
         };
+        let tint_note = if tints.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  TINT[{}]",
+                tints
+                    .iter()
+                    .map(|t| format!("{:.2},{:.2},{:.2}", t[0], t[1], t[2]))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
         println!(
-            "{total_batches:>3} batches  {flat_count:>3} flat ({quad_count:>2} quad-1bone, {other_count:>2} other-flat){hover_note}  blend[{}]  {name}",
+            "{total_batches:>3} batches  {flat_count:>3} flat ({quad_count:>2} quad-1bone, {other_count:>2} other-flat){hover_note}{tint_note}  blend[{}]  {name}",
             blend_modes.join(" ")
         );
     }
     eprintln!(
         "{scanned} models scanned, {hits} with flat batches ({all_flat} all-flat, {mixed} mixed); flat batches: {quad_total} QUAD-1BONE, {other_total} OTHER-FLAT"
+    );
+    eprintln!(
+        "static M2Color TINT on ground quads: {tinted_models} models carry {tinted_total} distinct non-white constants — the colour a decal lane loses unless it carries the vertex bake"
     );
     if !hovers.is_empty() {
         hovers.sort_by(|a, b| a.0.total_cmp(&b.0));

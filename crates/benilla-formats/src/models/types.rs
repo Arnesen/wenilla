@@ -417,6 +417,18 @@ pub struct GroundQuad {
     pub corners: [[f32; 3]; 4],
     /// The authored UV at each corner, parallel to [`Self::corners`].
     pub uvs: [[f32; 2]; 4],
+    /// The batch's **static M2Color tint** — the constant colour-track bake that rides
+    /// [`RenderSubmesh::vertex_colors`] on the mesh path — or white when the batch authors none.
+    ///
+    /// A decal consumer re-renders this quad from the corners and never touches its vertex buffer,
+    /// so without carrying the tint here the batch's whole colour is lost. That is load-bearing
+    /// exactly where `m2_batches` says it is: spell ground art is authored on the NEUTRAL
+    /// `GENERICGLOW*` radials, whose warmth lives entirely in this constant — `Flare_State_Base`'s
+    /// two 13.89-yd washes are white sheets tinted `(0.992, 0.467, 0.0)`, and an untinted additive
+    /// draw of them is a blown-white pool where the reference lays a dim orange one. A
+    /// *time-varying* track instead rides [`RenderSubmesh::rgb_anim`] and clears the vertex bake,
+    /// so this is white there and the two never double-apply.
+    pub tint: [f32; 3],
 }
 
 /// Vertices further than this from the quad's own plane disqualify a batch as ground-plane flat
@@ -614,6 +626,20 @@ impl RenderSubmesh {
             corners[slot] = *p;
             uvs[slot] = *uv;
         }
-        Some((GroundQuad { bone, corners, uvs }, hover))
+        // The batch's constant M2Color, straight off the vertex bake it would have drawn with
+        // (all four are the same colour — see [`GroundQuad::tint`]); white when it authors none.
+        let tint = self
+            .vertex_colors
+            .first()
+            .map_or([1.0; 3], |c| [c[0], c[1], c[2]]);
+        Some((
+            GroundQuad {
+                bone,
+                corners,
+                uvs,
+                tint,
+            },
+            hover,
+        ))
     }
 }

@@ -389,7 +389,11 @@
                     -- The raid roster (GetRaidRosterInfo) is a later arc — no raid menus open yet.
                     UnitPopupShown[index] = 0;
                 elseif ( value == "PET_PAPERDOLL" or value == "PET_RENAME" or value == "PET_ABANDON" or value == "PET_DISMISS" ) then
-                    -- The pet system is a later arc — the PET menu never opens (no "pet" token).
+                    -- The "pet" token exists now (0990), but none of these four rows does: each
+                    -- wants its own binding (paperdoll a whole panel), and `PetCanBeAbandoned`
+                    -- besides, which is what forks abandon-vs-dismiss. So the PET menu stays shut
+                    -- at its opener (UnitFrames.xml's pet frame takes no right click) and these
+                    -- stay suppressed here — the two halves of one deferral, not two.
                     UnitPopupShown[index] = 0;
                 elseif ( string.sub(value, 1, 12) == "RAID_TARGET_" ) then
                     if ( (inParty == 0) or ((isLeader == 0) and (isAssistant == 0)) ) then

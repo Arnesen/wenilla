@@ -12,22 +12,65 @@ use benilla_formats::Chain;
 
 use crate::model_key;
 
-/// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters.
+/// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters, with each
+/// model's `+0xc0` **enable-gate** census beside the count — the population instrument for
+/// "which trails are state-dependent, and where does the gate actually key".
+///
+/// A `GATED` line names the sequences a trail is dark in; `MID-SEQ` marks the models whose gate
+/// flips *inside* a band rather than only at its start, which a band-start-only reader cannot
+/// express (decision 1011 — `G_FrostTrap`'s streamers light 200 ms into the trigger and nowhere
+/// else, so a band-start read says "never" and an ungated consumer says "always").
 pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
     let names = super::m2_names(chain, None)?;
-    let (mut scanned, mut hits) = (0u32, 0u32);
+    let (mut scanned, mut hits, mut gated, mut mid_seq) = (0u32, 0u32, 0u32, 0u32);
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
         };
         scanned += 1;
         let n = benilla_formats::m2_ribbon_emitter_count(&bytes);
-        if n > 0 {
-            hits += 1;
-            println!("{n:>2}  {name}");
+        if n == 0 {
+            continue;
+        }
+        hits += 1;
+        let defs = benilla_formats::parse_m2_ribbon_emitters(&bytes).unwrap_or_default();
+        // Per ribbon: the sequences it can be dark in, and whether the gate keys mid-band.
+        let mut notes: Vec<String> = Vec::new();
+        let (mut any_gate, mut any_mid) = (false, false);
+        for (i, d) in defs.iter().enumerate() {
+            let Some(vis) = &d.visible else { continue };
+            any_gate = true;
+            let mut per: Vec<String> = vis
+                .per_anim()
+                .map(|(anim, keys)| {
+                    any_mid |= keys.len() > 1;
+                    let states: Vec<String> = keys
+                        .iter()
+                        .map(|&(t, on)| format!("{t:.3}s{}", if on { "+" } else { "-" }))
+                        .collect();
+                    format!("{anim}:{}", states.join(","))
+                })
+                .collect();
+            per.sort();
+            notes.push(format!("    r{i}  {}", per.join("  ")));
+        }
+        gated += u32::from(any_gate);
+        mid_seq += u32::from(any_mid);
+        let tag = match (any_gate, any_mid) {
+            (true, true) => "  [GATED MID-SEQ]",
+            (true, false) => "  [GATED]",
+            _ => "",
+        };
+        println!("{n:>2}  {name}{tag}");
+        for line in notes {
+            println!("{line}");
         }
     }
-    eprintln!("{scanned} models scanned, {hits} with ribbons");
+    eprintln!(
+        "{scanned} models scanned, {hits} with ribbons — {gated} carry an enable gate, \
+         {mid_seq} of those key it MID-SEQUENCE (a band-start-only read misses their whole \
+         ON window)"
+    );
     Ok(())
 }
 

@@ -19,9 +19,11 @@
         - No frame scale: the real bar is UIParent-scaled; we render 1:1. Geometry is otherwise exact.
         - Page up/down + the page number are ART ONLY (we have no bar paging — only the bonus-bar
           offset; ref-ActionBarFrame.xml l.159-217). The page number renders a static "1".
-        - HotKey renders the static binding labels — always non-empty, so the ref's RANGE_INDICATOR
-          dot path (shown only when a button has NO binding text, ActionButton_UpdateHotkeys) never
-          applies; the out-of-range read is the hotkey's red tint (the OnUpdate range timer below).
+        - HotKey renders the LIVE binding label, abbreviated the ref's own way since 1008
+          (GetBindingText(key, "KEY_", 1) — UIParent.xml carries the transcription; "s-2" for
+          SHIFT-2, "·" for a 2+-modifier chord). A slot with NO binding wears the ref's
+          RANGE_INDICATOR dot path instead (red dot only while out of range); a bound slot's
+          out-of-range read is the label's red tint (the OnUpdate range timer below).
         - The state/feedback layer (decision 0137 phase 4) is the ref ActionButton.lua transcribed:
           UpdateState (checked on IsCurrentAction/IsAutoRepeatAction), UpdateUsable (the 1/1/1 ·
           0.5/0.5/1 · 0.4/0.4/0.4 vertex-color trio), UpdateCooldown (CooldownFrame_SetTimer),
@@ -60,17 +62,31 @@
         -- CooldownFrame_SetTimer moved to Cooldown.xml (the ref's own file split) — the bag
         -- slots share it, so it loads before both consumers.
 
-        -- The key-binding label each main-bar button shows in its HotKey corner — LIVE off
-        -- GetBindingKey("ACTIONBUTTON"..i) since 0997 (the ref's own ActionButton_UpdateHotkeys
-        -- source), repainted on UPDATE_BINDINGS. Raw chord tokens for now (the ref abbreviates
-        -- through its KEY_ABBR set — 0997 residue); an unbound slot shows nothing, and so does
-        -- a harness with no registered bindings.
+        -- One button's HotKey corner — the ref's ActionButton_UpdateHotkeys law in FULL since
+        -- 1008 (closing 0997's raw-token residue): the ABBREVIATED binding text through the
+        -- real GetBindingText transcription (UIParent.xml — one modifier abbreviates, "s-2";
+        -- two or more collapse to the ref's "·"), and with NO binding the ref's no-binding
+        -- leg — an empty label the OnUpdate range timer fills with the RANGE_INDICATOR dot
+        -- while out of range (until 1008 that leg was multibar-only; now any unbound slot,
+        -- main bar included, wears it). A harness with no registered bindings paints nothing.
+        function BenillaActionButton_PaintHotkey(button)
+            local key = GetBindingKey(button.bindingCommand)
+            local text
+            if GetBindingText then
+                text = GetBindingText(key, "KEY_", 1)
+            else
+                -- lone-file harness (the shipped manifest always has UIParent.xml first):
+                -- the raw token, the MicroMenu.xml fallback idiom.
+                text = key or ""
+            end
+            button.noBindingLabel = (text == "")
+            button.hotkey:SetText(text)
+        end
+
+        -- Every button's label, repainted on UPDATE_BINDINGS (a rebind, a set switch, the seed).
         function BenillaActionBar_UpdateHotkeys()
             for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
-                local button = BENILLA_ACTION_BUTTONS[i]
-                if button.hotkeyIndex then
-                    button.hotkey:SetText(GetBindingKey("ACTIONBUTTON" .. button.hotkeyIndex) or "")
-                end
+                BenillaActionButton_PaintHotkey(BENILLA_ACTION_BUTTONS[i])
             end
         end
 
@@ -203,7 +219,7 @@
             GameTooltip:SetAction(BenillaActionButton_Action(button))
         end
 
-        function BenillaActionButton_OnLoad(button, index, base)
+        function BenillaActionButton_OnLoad(button, index, base, commandPrefix)
             button.index = index
             button.base = base
             button.icon = getglobal(button:GetName() .. "Icon")
@@ -216,17 +232,12 @@
             button.flashing = 0
             button.flashtime = 0
             button.rangeTimer = nil
-            if base then
-                -- Multibar buttons are unbound (ref Bindings.xml ships no default MULTIACTIONBAR*
-                -- keys): no label. Their hotkey corner instead carries the ref's
-                -- RANGE_INDICATOR dot (ActionButton_UpdateHotkeys' no-binding leg, net effect:
-                -- a red dot only while out of range), painted by the OnUpdate range timer.
-                button.hotkey:SetText("")
-            else
-                -- Main-bar buttons read their ACTIONBUTTON<i> binding live (0997).
-                button.hotkeyIndex = index
-                button.hotkey:SetText(GetBindingKey("ACTIONBUTTON" .. index) or "")
-            end
+            -- Every bar button carries its binding COMMAND (0997 main bar, 1008 multibars):
+            -- the caller names the command family (MultiBars.xml passes MULTIACTIONBAR1/2BUTTON
+            -- — the ref's own bar↔page mapping quoted there); nothing passed = the main bar's
+            -- ACTIONBUTTON. The label paints from it here and repaints on UPDATE_BINDINGS.
+            button.bindingCommand = (commandPrefix or "ACTIONBUTTON") .. index
+            BenillaActionButton_PaintHotkey(button)
             table.insert(BENILLA_ACTION_BUTTONS, button)
             -- BOTH mouse buttons, ref-verbatim (ActionButton_OnLoad, ActionButton.lua:108-109):
             -- an action button is a two-button button. The OnClick body reads no `arg1` — in the
@@ -353,9 +364,10 @@
             BenillaActionButton_UpdateState(button)
         end
 
-        -- Ref ActionButton_OnUpdate:384-428, minus the RANGE_INDICATOR dot (our hotkeys always
-        -- carry binding text — SCOPE note) and the tooltip refresh (no per-button tooltip yet):
-        -- the 0.4 s flash toggle, and the 0.2 s range recheck tinting the hotkey red/grey.
+        -- Ref ActionButton_OnUpdate:384-428, minus the tooltip refresh (no per-button tooltip
+        -- yet): the 0.4 s flash toggle, and the 0.2 s range recheck — a bound slot's label
+        -- tints red/grey, an unbound one wears the RANGE_INDICATOR dot (both legs the ref's,
+        -- unified in 1008 — the SCOPE note).
         function BenillaActionButton_OnUpdate(button, elapsed)
             if ( button.flashing == 1 ) then
                 button.flashtime = button.flashtime - elapsed
@@ -376,14 +388,16 @@
                 button.rangeTimer = button.rangeTimer - elapsed
                 if ( button.rangeTimer <= 0 ) then
                     if ( IsActionInRange(BenillaActionButton_Action(button)) == 0 ) then
-                        -- An unbound (multibar) button has no label to tint: paint the ref's
-                        -- RANGE_INDICATOR dot instead (net ref behavior — red dot iff out of range).
-                        if button.base then
+                        -- An UNBOUND button has no label to tint: paint the ref's
+                        -- RANGE_INDICATOR dot instead (net ref behavior — red dot iff out of
+                        -- range). Since 1008 the fork is the binding text itself (any bar's
+                        -- slot can be bound or bare now), not which bar owns the button.
+                        if button.noBindingLabel then
                             button.hotkey:SetText("●")
                         end
                         button.hotkey:SetVertexColor(1.0, 0.1, 0.1)
                     else
-                        if button.base then
+                        if button.noBindingLabel then
                             button.hotkey:SetText("")
                         end
                         button.hotkey:SetVertexColor(0.6, 0.6, 0.6)

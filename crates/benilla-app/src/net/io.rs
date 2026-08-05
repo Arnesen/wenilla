@@ -706,6 +706,9 @@ fn writer_loop(
                         w.pet_set_action(pet_guid, &entries)
                     }
                     ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
+                    ClientCommand::PetCancelAura { pet_guid, spell_id } => {
+                        w.pet_cancel_aura(pet_guid, spell_id)
+                    }
                     ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
                     ClientCommand::AttackStop => w.attack_stop(),
                     ClientCommand::SetSheathed { state } => w.set_sheathed(state),

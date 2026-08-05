@@ -639,7 +639,9 @@ fn spawn_slot(
             root,
             false,
             ctx.scale,
-            Some(0),
+            // A worn item rests in `Stand` and nothing on it plays anything else — the one lane
+            // where the enable gate genuinely has a fixed answer for the instance's life.
+            crate::ribbons::RibbonSeq::Fixed(0),
             // Its own model instance — chained to the wearer above — so an enchant streamer is
             // gone with the avatar in first person and absent until the body is shown (0827/0833).
             Some(root),

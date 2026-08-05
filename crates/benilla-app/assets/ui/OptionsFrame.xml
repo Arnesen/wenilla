@@ -116,9 +116,13 @@
           rows, reflowed — values, writes and dependencies all work mid-search. The two
           strings ("Search Results", "No results found.") are ours: the era's
           SETTINGS_SEARCH_* globals live in the client binary, not the dump.
-        - **No scroll bars**: the static category tree (9 rows, 2 headers) fits its 199px column
-          outright, and the deepest page (Audio, 7 rows) fits its area. MinimalScrollBar arrives
-          when a page outgrows the space.
+        - **No scroll bars on the CVar pages**: the static category tree (9 rows, 2 headers) fits
+          its 199px column outright, and the deepest CVar page (Audio, 7 rows) fits its area.
+          MinimalScrollBar arrives when one outgrows the space. The KEYBINDINGS page (decision
+          1008 — the 1.15 Settings panel's own Keybindings category, module + provenance in
+          KeyBindingsPage.xml) is the one page that can't fit and rides the shared faux-scroll
+          kit; its search results reflow live binding rows under a Keybindings group head whose
+          click jumps to the page (the era redirect law), capped at the static pool's size.
         - **Setting-page cuts (0957 Audio, 0959 Graphics)**: setting-row tooltips (the era
           OPTION_TOOLTIP_* hovers) are not wired; Defaults resets the VISIBLE page only (the
           era confirm dialog is not modeled); era rows with no 1.12 CVar +
@@ -264,11 +268,28 @@
                 local body = getglobal("OptionsFrameContainerBody" .. k)
                 if k == key then body:Show() else body:Hide() end
             end
-            if OPTIONS_PAGE_ROWS[key] then
-                OptionsPage_Refresh(key)
+            -- The Keybindings page (KeyBindingsPage.xml, decision 1008) body-swaps like the
+            -- CVar pages but runs its own machinery: entering rebuilds the section tree;
+            -- leaving disarms a straggling capture (the host seam must never outlive the page)
+            -- and clears its message line. Its Defaults is the confirmed Reset To Default (the
+            -- button's OnClick forks), and the Unbind Key button exists only here.
+            local kb = getglobal("OptionsFrameContainerBodyKeybindings")
+            if key == "Keybindings" then
+                kb:Show()
+                KeyBindingsPage_Refresh()
+                OptionsFrameContainerUnbind:Show()
                 OptionsFrameContainerDefaults:Enable()
             else
-                OptionsFrameContainerDefaults:Disable()
+                kb:Hide()
+                KeyBindings_SetSelected(nil)
+                KeyBindings_Output("")
+                OptionsFrameContainerUnbind:Hide()
+                if OPTIONS_PAGE_ROWS[key] then
+                    OptionsPage_Refresh(key)
+                    OptionsFrameContainerDefaults:Enable()
+                else
+                    OptionsFrameContainerDefaults:Disable()
+                end
             end
         end
 
@@ -329,6 +350,17 @@
                     end
                 end
             end
+            -- The keybinding entries join the same buckets (the era's searchable fake category
+            -- whose results REDIRECT to the Keybindings page — KeyBindingsPage.xml's search
+            -- note). Their rkey is the BINDING INDEX; the display fork below tells them apart
+            -- by the group key.
+            for _, m in ipairs(KeyBindings_SearchMatches(words)) do
+                if not buckets[m.score] then
+                    buckets[m.score] = {}
+                    table.insert(scores, m.score)
+                end
+                table.insert(buckets[m.score], { key = "Keybindings", rkey = m.index })
+            end
             table.sort(scores, function(a, b) return a > b end)
             local groups, order = {}, {}
             for _, s in ipairs(scores) do
@@ -387,6 +419,17 @@
                 end
                 getglobal("OptionsFrameContainerBodySearchHead" .. k):Hide()
             end
+            -- The Keybindings furniture leaves the stage with the rest: its body hides (the
+            -- search paints matched bindings on the shared pool below, not the page list), a
+            -- straggling capture disarms, and the pool starts blank.
+            getglobal("OptionsFrameContainerBodyKeybindings"):Hide()
+            getglobal("OptionsFrameContainerBodySearchHeadKeybindings"):Hide()
+            for i = 1, KEYBINDINGS_SEARCH_ROWS do
+                getglobal("OptionsFrameContainerBodyKeybindSearch" .. i):Hide()
+            end
+            KeyBindingsPage.searchPainted = nil
+            KeyBindings_SetSelected(nil)
+            OptionsFrameContainerUnbind:Hide()
             OptionsFrameContainerTitle:SetText("Search Results")
             OptionsFrameContainerDefaults:Hide()
 
@@ -402,25 +445,44 @@
                 OptionsSearch_Place(head, prev)
                 getglobal(head):Show()
                 prev = head
-                local placed = {}
-                for _, rkey in ipairs(groups[key]) do
-                    local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
-                    if row.parentRow and not placed[row.parentRow] then
-                        placed[row.parentRow] = 1
-                        local pname = "OptionsFrameContainerBody" .. key .. row.parentRow
-                        OptionsSearch_Place(pname, prev)
-                        getglobal(pname):Show()
-                        prev = pname
+                if key == "Keybindings" then
+                    -- Matched bindings painted LIVE onto the static pool (the era reflows its
+                    -- real rows the same way; the pool caps the count — the SCOPE note in
+                    -- KeyBindingsPage.xml — and the head above jumps to the full page).
+                    KeyBindingsPage.searchPainted = {}
+                    local shown = 0
+                    for _, index in ipairs(groups[key]) do
+                        if shown < KEYBINDINGS_SEARCH_ROWS then
+                            shown = shown + 1
+                            local name = "OptionsFrameContainerBodyKeybindSearch" .. shown
+                            KeyBindings_PaintBindRow(name, index)
+                            OptionsSearch_Place(name, prev)
+                            getglobal(name):Show()
+                            KeyBindingsPage.searchPainted[name] = index
+                            prev = name
+                        end
                     end
-                    if not placed[rkey] then
-                        placed[rkey] = 1
-                        local name = "OptionsFrameContainerBody" .. key .. rkey
-                        OptionsSearch_Place(name, prev)
-                        row:Show()
-                        prev = name
+                else
+                    local placed = {}
+                    for _, rkey in ipairs(groups[key]) do
+                        local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
+                        if row.parentRow and not placed[row.parentRow] then
+                            placed[row.parentRow] = 1
+                            local pname = "OptionsFrameContainerBody" .. key .. row.parentRow
+                            OptionsSearch_Place(pname, prev)
+                            getglobal(pname):Show()
+                            prev = pname
+                        end
+                        if not placed[rkey] then
+                            placed[rkey] = 1
+                            local name = "OptionsFrameContainerBody" .. key .. rkey
+                            OptionsSearch_Place(name, prev)
+                            row:Show()
+                            prev = name
+                        end
                     end
+                    OptionsPage_Refresh(key)
                 end
-                OptionsPage_Refresh(key)
             end
         end
 
@@ -432,6 +494,11 @@
                 OptionsPage_Layout(k)
                 getglobal("OptionsFrameContainerBodySearchHead" .. k):Hide()
             end
+            for i = 1, KEYBINDINGS_SEARCH_ROWS do
+                getglobal("OptionsFrameContainerBodyKeybindSearch" .. i):Hide()
+            end
+            getglobal("OptionsFrameContainerBodySearchHeadKeybindings"):Hide()
+            KeyBindingsPage.searchPainted = nil
             OptionsFrameContainerBodyNoResults:Hide()
             OptionsFrameContainerDefaults:Show()
             OptionsFrame_SelectCategory(OptionsFrame.selectedCategory or "Controls")
@@ -1346,13 +1413,37 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <!-- Live on any page with rows (OPTIONS_PAGE_ROWS);
-                         OptionsFrame_SelectCategory enables/disables it with the page swap. -->
+                    <!-- Live on any page with rows (OPTIONS_PAGE_ROWS) and on the Keybindings
+                         page, where it is 1.12's Reset To Default behind the era confirm
+                         (KeyBindingsPage.xml's popup); OptionsFrame_SelectCategory
+                         enables/disables it with the page swap. -->
                     <Button name="$parentDefaults" inherits="OptionsRedButtonTemplate" text="Defaults">
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-36" y="-16"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:Disable()</OnLoad>
-                            <OnClick>OptionsPage_Defaults(OptionsFrame.selectedCategory)</OnClick>
+                            <OnClick>
+                                if OptionsFrame.selectedCategory == "Keybindings" then
+                                    StaticPopup_Show("CONFIRM_RESET_KEYBINDINGS")
+                                else
+                                    OptionsPage_Defaults(OptionsFrame.selectedCategory)
+                                end
+                            </OnClick>
+                        </Scripts>
+                    </Button>
+                    <!-- Unbind Key (1.12's own button, reseated in the header band): exists only
+                         on the Keybindings page, live only while a capsule is selected
+                         (KeyBindings_UpdateUnbindKey drives the enable). -->
+                    <Button name="$parentUnbind" inherits="OptionsRedButtonTemplate" hidden="true">
+                        <Anchors><Anchor point="RIGHT" relativeTo="$parentDefaults" relativePoint="LEFT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts>
+                            <OnLoad>
+                                self:SetText(KeyBindings_String("UNBIND", "Unbind Key"))
+                                self:Disable()
+                            </OnLoad>
+                            <OnClick>
+                                PlaySound("igMainMenuOptionCheckBoxOn")
+                                KeyBindings_Unbind()
+                            </OnClick>
                         </Scripts>
                     </Button>
                     <!-- The page body: one child frame per category with rows, shown by
@@ -1590,6 +1681,229 @@
                                     </Frame>
                                 </Frames>
                             </Frame>
+                            <!-- The KEYBINDINGS page body (decision 1008 — the era Settings
+                                 panel's Keybindings category folded into this window; the module,
+                                 provenance and commit law: KeyBindingsPage.xml). First the
+                                 Character Specific row (the era page's first setting row, confirm
+                                 on uncheck only), then the section list — 19 dual-mode rows under
+                                 the shared faux-scroll kit, sections collapsed by default — and
+                                 the 1.12 window's message line (KEY_BOUND / the red steal / the
+                                 wheel refusal) at the foot. -->
+                            <!-- enableMouse: the page catches the wheel ITSELF on any point no
+                                 child claims (hit-testing only sees mouse-enabled frames —
+                                 pointer.rs; rows are plain Frames, so a spin over a row's name
+                                 would otherwise fall through to the window and die). -->
+                            <Frame name="$parentKeybindings" hidden="true" enableMouse="true">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                                <Layers>
+                                    <Layer level="OVERLAY">
+                                        <FontString name="$parentOutput" inherits="GameFontNormal">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="8"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                                <Frames>
+                                    <!-- Character Specific Key Bindings — the era checkbox-row
+                                         geometry (label left, the UI-CheckBox set at the
+                                         control column) over 1.12's set model; the click law
+                                         is KeyBindings_CharacterToggle. This bespoke row's
+                                         column sits at CENTER-40, not the shared CENTER-80:
+                                         1.12's string is longer than the era's and clipped at
+                                         the shared split ("…Key Bindin…" — the first capture);
+                                         no other control shares this page's column, so the
+                                         shift is free. -->
+                                    <Frame name="$parentCharacterRow" enableMouse="true">
+                                        <Size><AbsDimension y="26"/></Size>
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Layers>
+                                            <Layer level="OVERLAY">
+                                                <FontString name="$parentLabel" inherits="GameFontNormal" justifyH="LEFT">
+                                                    <Anchors>
+                                                        <Anchor point="LEFT"><Offset><AbsDimension x="37" y="0"/></Offset></Anchor>
+                                                        <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-45" y="0"/></Offset></Anchor>
+                                                    </Anchors>
+                                                </FontString>
+                                            </Layer>
+                                        </Layers>
+                                        <Frames>
+                                            <CheckButton name="$parentCheck">
+                                                <Size><AbsDimension x="30" y="29"/></Size>
+                                                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-40" y="0"/></Offset></Anchor></Anchors>
+                                                <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
+                                                <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
+                                                <CheckedTexture file="Interface\Buttons\UI-CheckBox-Check"/>
+                                                <DisabledCheckedTexture file="Interface\Buttons\UI-CheckBox-Check-Disabled"/>
+                                                <Scripts>
+                                                    <OnClick>KeyBindings_CharacterToggle(this)</OnClick>
+                                                    <OnEnter>
+                                                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                                        GameTooltip:SetText(KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDING_TOOLTIP",
+                                                            "Click this to toggle between general key bindings and key bindings specific to this character."), nil, nil, nil, nil, 1)
+                                                    </OnEnter>
+                                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                                </Scripts>
+                                            </CheckButton>
+                                        </Frames>
+                                        <Scripts>
+                                            <OnLoad>
+                                                getglobal(this:GetName() .. "Label"):SetText(
+                                                    KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDINGS", "Character Specific Key Bindings"))
+                                            </OnLoad>
+                                        </Scripts>
+                                    </Frame>
+                            <Frame name="$parentRow1" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
+                                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-32" y="-47"/></Offset></Anchor>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow2" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow1" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow1" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow3" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow2" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow2" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow4" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow3" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow3" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow5" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow4" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow4" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow6" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow5" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow5" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow7" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow6" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow6" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow8" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow7" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow7" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow9" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow8" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow8" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow10" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow9" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow9" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow11" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow10" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow10" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow12" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow11" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow11" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow13" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow12" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow12" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow14" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow13" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow13" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow15" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow14" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow14" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow16" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow15" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow15" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow17" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow16" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow16" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow18" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow17" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow17" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                            <Frame name="$parentRow19" inherits="KeyBindingRowTemplate">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT" relativeTo="$parentRow18" relativePoint="BOTTOMLEFT"/>
+                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow18" relativePoint="BOTTOMRIGHT"/>
+                                </Anchors>
+                            </Frame>
+                                    <!-- The faux scroll over the rows (the shared kit, 0997's own
+                                         seam). The kit's bar hangs 6px RIGHT of this frame's edge,
+                                         so the frame ends at the rows' own -32 and the 16-wide bar
+                                         rides the -26..-10 gutter inside the body (the TrainerFrame
+                                         seating). The wheel handler is NOT here: a spin over a row
+                                         bubbles up the PARENT chain (pointer.rs), and this frame is
+                                         the rows' sibling — it lives on the body below. -->
+                                    <Frame name="$parentScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
+                                            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts>
+                                            <OnLoad>
+                                                BenillaFauxScrollFrame_OnLoad(this)
+                                                this.updateFunc = KeyBindingsPage_Update
+                                            </OnLoad>
+                                        </Scripts>
+                                    </Frame>
+                                </Frames>
+                                <!-- The page's wheel: rows and the bar all bubble here (the
+                                     QuestLog/Trainer lesson — a handler on the sibling catcher
+                                     never sees a spin over a row). The guard is 1.12's law:
+                                     while a capsule is armed the wheel is a BIND (the host
+                                     seam swallows it) — never a scroll. -->
+                                <Scripts>
+                                    <OnMouseWheel>
+                                        if not KeyBindingsPage.selected then
+                                            BenillaFauxScrollFrame_OnMouseWheel(getglobal(this:GetName() .. "ScrollFrame"), arg1)
+                                        end
+                                    </OnMouseWheel>
+                                </Scripts>
+                            </Frame>
                             <!-- The search-results group headers — one per page WITH rows
                                  (the OPTIONS_PAGE_ROWS set; a page that gains rows gains its
                                  head here). Unanchored and hidden until a search chains them
@@ -1619,6 +1933,26 @@
                                     getglobal(self:GetName() .. "Label"):SetText("Nameplates")
                                 </OnLoad></Scripts>
                             </Button>
+                            <Button name="$parentSearchHeadKeybindings" inherits="OptionsSearchHeadTemplate">
+                                <Scripts><OnLoad>
+                                    self.categoryKey = "Keybindings"
+                                    getglobal(self:GetName() .. "Label"):SetText("Keybindings")
+                                </OnLoad></Scripts>
+                            </Button>
+                            <!-- The keybinding search-result pool (decision 1008): the era
+                                 reflows LIVE binding rows into its results; ours is this static
+                                 pool of the same template, painted and chained by the search
+                                 display (capped at KEYBINDINGS_SEARCH_ROWS — the SCOPE note in
+                                 KeyBindingsPage.xml). Unanchored until a search places them;
+                                 the capsules run the full capture law in place. -->
+                            <Frame name="$parentKeybindSearch1" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch2" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch3" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch4" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch5" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch6" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch7" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            <Frame name="$parentKeybindSearch8" inherits="KeyBindingRowTemplate" hidden="true"/>
                         </Frames>
                     </Frame>
                 </Frames>
@@ -1753,11 +2087,15 @@
                 OptionsFrame_SelectCategory(this.selectedCategory or "Controls")
             </OnShow>
             <!-- Hiding discards pending edits (the era wipes its modified table on hide; its
-                 close-time confirm dialog is cut — SCOPE note) and ends a live search (the
-                 era Flush's ClearSearchBox, SettingsPanel.lua l.187-193). -->
+                 close-time confirm dialog is cut — SCOPE note), ends a live search (the
+                 era Flush's ClearSearchBox, SettingsPanel.lua l.187-193), and disarms a
+                 straggling bind capture — the host seam swallowing all input with no window
+                 on screen would be a lockout (KeyBindingsPage.xml, decision 1008). -->
             <OnHide>
                 OptionsFrameSearchBox:SetText("")
                 OptionsPage_DiscardPending()
+                KeyBindings_SetSelected(nil)
+                KeyBindings_Output("")
             </OnHide>
         </Scripts>
     </Frame>

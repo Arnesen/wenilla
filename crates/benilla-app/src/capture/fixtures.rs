@@ -977,12 +977,18 @@ pub(super) fn seed_ui_fixture(
             let Some(mut script) = script else {
                 return;
             };
-            // The Key Bindings window (0997), the page fixtures' posture: the real command
-            // registry first (hermetic capture — the plugin's PostStartup seed isn't raced,
-            // the register_cvars precedent), then the live open path. Movement is the default
-            // category; the rows read the registry's byte-real 1.12 defaults.
+            // The Keybindings page (1008 — the Options window's category), the page fixtures'
+            // posture: the real command registry first (hermetic capture — the plugin's
+            // PostStartup seed isn't raced, the register_cvars precedent), then the live open
+            // path; CVars registered too so the sibling category rows behave. Movement is
+            // expanded so the lens sees both a header row and the byte-real default capsules.
+            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
             script.register_bindings(&crate::bindings::registry_commands());
-            if let Err(e) = script.run("ShowUIPanel(KeyBindingFrame)") {
+            if let Err(e) = script.run(
+                "ShowUIPanel(OptionsFrame); \
+                 OptionsFrameCategoryListRowKeybindings:Click(); \
+                 KeyBindings_ExpandSection(1, true); KeyBindingsPage_Update()",
+            ) {
                 warn!("capture: ui-keybindings seed failed: {e}");
             }
         }

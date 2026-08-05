@@ -109,7 +109,7 @@ pub(super) fn object_create(
         // Where and how big, the moment it streams in — the readout that answers "is this prop in
         // the wrong place, or the wrong size, or just drawn wrong" without a guess (decision 0637:
         // the duel flag read as huge and mislocated, and nothing in the client could say which).
-        // `RUST_LOG=benilla::net::apply::objects=debug`.
+        // `RUST_LOG=benilla_app::net::apply::objects=debug`.
         debug!(
             "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
              pos [{:.2}, {:.2}, {:.2}] scale {scale}",

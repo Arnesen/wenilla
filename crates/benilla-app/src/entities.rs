@@ -213,6 +213,12 @@ impl Creatures {
         self.catalog.collision_height(display_id)
     }
 
+    /// A display's footprint-decal parameters (yards, pre-scale) — `None` = this model leaves no
+    /// prints. See [`benilla_formats::CreatureCatalog::footprint`].
+    pub(crate) fn footprint(&self, display_id: u32) -> Option<benilla_formats::FootprintParams> {
+        self.catalog.footprint(display_id)
+    }
+
     /// A display's **base render alpha** (`CreatureDisplayInfo.CreatureModelAlpha / 255`) — the
     /// `baseAlpha` factor of the per-unit alpha product the aura CharProc nodes multiply into
     /// (`crate::aura_visual`). `None` for an unknown display.
@@ -717,6 +723,29 @@ fn setup_entities(
         }
         // No LockType data ⇒ lock-bearing GOs fall back to the Interact gear cursor — degraded, not broken.
         Err(e) => warn!("lock-type catalog unavailable, GO cursors fall back to Interact: {e:#}"),
+    }
+    match (
+        benilla_formats::load_pet_personalities(&mut chain),
+        benilla_formats::load_pet_loyalty_names(&mut chain),
+    ) {
+        (Ok(personalities), Ok(loyalty)) => {
+            info!(
+                "pet stat tables: {} personalities, {} loyalty levels",
+                personalities.len(),
+                loyalty.len()
+            );
+            commands.insert_resource(crate::ui_pet_stats::PetStatTables {
+                personalities,
+                loyalty,
+            });
+        }
+        // No pet tables ⇒ happiness answers its own gate-failure nil (so the icon hides) and the
+        // loyalty line is blank; the rest of the paper doll — XP, training points — reads straight
+        // off the descriptor and is unaffected. Degraded, not wrong.
+        (p, l) => warn!(
+            "pet stat tables unavailable, happiness/loyalty stay blank: {:#}",
+            p.err().or(l.err()).expect("at least one of the two failed")
+        ),
     }
     match CharacterGeosets::load(&mut chain) {
         Ok(geosets) => commands.insert_resource(Characters(geosets)),

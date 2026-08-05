@@ -70,6 +70,11 @@ pub(crate) struct GroundFxDecal {
     /// sampled into the vertex tint at push time (was: a per-instance material clone mutated
     /// per frame through `FxTintAnims`).
     rgb_anim: Option<(std::sync::Arc<benilla_formats::RgbAnim>, f32)>,
+    /// The part's **static** M2Color tint ([`GroundQuad::tint`]) — the constant colour the mesh
+    /// path draws through its vertex-colour bake, which this lane has no vertex buffer to carry.
+    /// White for a batch that authors none, and white whenever [`Self::rgb_anim`] is `Some` (the
+    /// bake clears one when it emits the other), so the two multiply without ever double-applying.
+    tint: [f32; 3],
     /// The cached projection (world-space effect triangles, white × the vertical-fade alpha).
     cache: Vec<EffectVertex>,
     /// The posed corners the cache was projected from (NaN-seeded: the first pass always
@@ -119,6 +124,7 @@ pub(crate) fn spawn_ground_fx_decal(
             blend,
             fog,
             rgb_anim,
+            tint: quad.tint,
             cache: Vec::new(),
             cached_corners: [Vec3::splat(f32::NAN); 4],
             cached_surfaces: 0,
@@ -225,12 +231,16 @@ pub(crate) fn update_ground_fx_decals(
         if decal.cache.is_empty() {
             continue;
         }
-        // This frame's tint: the part's M2Color RGB loop (instance clock) × the MatAnim alpha
-        // loop — exactly what the material clone + MeshTag carried on the old path.
-        let tint = decal
+        // This frame's tint: the part's M2Color colour — its STATIC constant (the vertex-colour
+        // bake this lane has no vertex buffer to carry) × its RGB loop where it varies (instance
+        // clock) — and the MatAnim alpha loop. Exactly what the vertex colours + material clone +
+        // MeshTag carried on the mesh path. Only one of the two colour terms is ever non-white
+        // (the bake emits one or the other), so the product is the authored colour, not a square.
+        let loop_tint = decal
             .rgb_anim
             .as_ref()
             .map_or([1.0, 1.0, 1.0], |(anim, origin)| anim.sample(now - origin));
+        let tint: [f32; 3] = std::array::from_fn(|i| decal.tint[i] * loop_tint[i]);
         let alpha = mat_anim.map_or(1.0, |m| m.current);
         let start = quads.begin();
         quads.verts.extend(decal.cache.iter().map(|v| EffectVertex {

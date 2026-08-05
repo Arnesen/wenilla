@@ -116,8 +116,25 @@ struct ModelRow {
     scale: f32,
     /// `BloodID` — see [`CreatureModel::blood`]. Reads signed: `−1` marks a bloodless model.
     blood: i32,
+    /// `FootprintTextureID` (field 6) — the `FootprintTextures.dbc` key. Reads signed: `−1`
+    /// (133 of 430 shipped rows) marks a model that leaves no prints.
+    footprint_texture: i32,
+    /// `FootprintTextureLength`/`Width` (fields 7/8), authored in **inches** — the client caches
+    /// them ×(1/36) into yards (byte-verified at `0x607a00`, wow-re mount-composition.md).
+    footprint_length: f32,
+    footprint_width: f32,
     /// `collisionHeight` (field 15), raw model units — see [`CreatureCatalog::collision_height`].
     collision_height: f32,
+}
+
+/// A display's footprint-decal parameters (see [`CreatureCatalog::footprint`]): the
+/// `FootprintTextures.dbc` key + the print rectangle in **yards** (length along the facing,
+/// width across), pre-scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FootprintParams {
+    pub texture_id: u32,
+    pub length: f32,
+    pub width: f32,
 }
 
 /// Display/model tables loaded from the DBCs, resolving `displayId` → [`CreatureModel`].
@@ -168,6 +185,24 @@ impl CreatureCatalog {
     pub fn collision_height(&self, display_id: u32) -> Option<f32> {
         let row = self.display.get(&display_id)?;
         Some(self.models.get(&row.model_id)?.collision_height)
+    }
+
+    /// A display's **footprint decal** parameters — `CreatureModelData` fields 6..=8 through the
+    /// display→model chain, sizes converted to **yards** (the client's own ×(1/36) inches→yards
+    /// cache, byte-verified at `0x607a00` for the mounted getter `0x607920`). `None` when either
+    /// lookup misses, the model authors `FootprintTextureID = −1` (no prints — 133 of 430 shipped
+    /// rows), or the print rectangle is degenerate (40 rows carry an id over a 0×0 size). World
+    /// yards = these × the unit's render scale — the caller multiplies, like `collision_height`.
+    pub fn footprint(&self, display_id: u32) -> Option<FootprintParams> {
+        let row = self.display.get(&display_id)?;
+        let model = self.models.get(&row.model_id)?;
+        let texture_id = u32::try_from(model.footprint_texture).ok()?;
+        let (length, width) = (model.footprint_length / 36.0, model.footprint_width / 36.0);
+        (length > 0.0 && width > 0.0).then_some(FootprintParams {
+            texture_id,
+            length,
+            width,
+        })
     }
 
     /// Resolve an NPC display id to its model, or `None` if either DBC lookup misses.
@@ -301,6 +336,10 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         scale: f32_at(r, 4).unwrap_or(1.0),
                         // BloodID (field 5) reads signed: −1 marks a bloodless model in the real data.
                         blood: u32_at(r, 5).map_or(0, |v| v as i32),
+                        // FootprintTextureID reads signed too: −1 = no prints (see ModelRow docs).
+                        footprint_texture: u32_at(r, 6).map_or(-1, |v| v as i32),
+                        footprint_length: f32_at(r, 7).unwrap_or(0.0),
+                        footprint_width: f32_at(r, 8).unwrap_or(0.0),
                         collision_height: f32_at(r, 15).unwrap_or(0.0),
                     },
                 );
@@ -392,6 +431,49 @@ mod tests {
     /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
     fn vanilla_data_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
+    }
+
+    /// The footprint accessor on the **real** build-5875 DBCs: a display wearing the HumanMale
+    /// body resolves the Base boot print (`FootprintTextures` id 1) at the authored 12×10 inches
+    /// → 1/3 × 5/18 yards (the client's ×1/36 cache conversion, byte-verified at `0x607a00`);
+    /// a display whose model authors `FootprintTextureID = −1` resolves `None`. Guards the
+    /// schema columns (a shifted field would misread every print) and the inches→yards space.
+    #[test]
+    fn footprints_resolve_on_real_data() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+        let human = cat
+            .display
+            .iter()
+            .find(|(_, r)| {
+                cat.models.get(&r.model_id).is_some_and(|m| {
+                    m.path
+                        .eq_ignore_ascii_case(r"Character\Human\Male\HumanMale.mdx")
+                })
+            })
+            .map(|(&d, _)| d)
+            .expect("some display wears the HumanMale body");
+        let p = cat.footprint(human).expect("HumanMale leaves prints");
+        assert_eq!(p.texture_id, 1, "the Base boot print");
+        assert!((p.length - 12.0 / 36.0).abs() < 1e-6, "length {}", p.length);
+        assert!((p.width - 10.0 / 36.0).abs() < 1e-6, "width {}", p.width);
+        // A −1 model (133 shipped rows) yields no print params through any display over it.
+        let printless = cat
+            .display
+            .iter()
+            .find(|(_, r)| {
+                cat.models
+                    .get(&r.model_id)
+                    .is_some_and(|m| m.footprint_texture == -1)
+            })
+            .map(|(&d, _)| d)
+            .expect("some display over a printless model");
+        assert_eq!(cat.footprint(printless), None);
     }
 
     /// End-to-end on the **real** build-5875 DBCs: the `ExtendedDisplayInfoID` chain resolves

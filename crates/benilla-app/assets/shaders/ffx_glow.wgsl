@@ -6,7 +6,8 @@
 //   out    = lerp(screen, blur, z) + w · blur²                          (FFXGlow.bls, exact)
 //
 // `w` is the per-zone LightParams glow weight (authored data — ≈0.647 in Elwynn), `z` is the haze
-// mix (0 in the standard glow pass). The reference runs this in GAMMA bytes, and since 0161 the
+// mix — the drunk/underwater screen-toward-blur cross-fade (0 sober and dry; wow-re
+// drunk-blur-z.md, decision 1009 §A). The reference runs this in GAMMA bytes, and since 0161 the
 // whole frame composites in gamma too — but in a FLOAT buffer, which unlike the reference's byte
 // buffer does not saturate at 1.0 per draw. Every read of the scene RT below therefore clamps to
 // 1.0 first (the byte semantics restored at the read), does the byte math, and decodes once — the
@@ -96,17 +97,25 @@ fn fs_combine(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // hard-white after the min() below — the screen term must saturate BEFORE the glow add.
     let sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let bg = max(textureSample(blur_tex, in_samp, in.uv).rgb, vec3<f32>(0.0));
-    let glowed = sg + glow.x * bg * bg;
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear
     // booths hold 1 everywhere — only the transparent-clear create booth reads it, to composite
     // its baked model straight over the UI page.
     if glow.y > 0.0 {
+        // The FFXDeath pack has no z lane (its COLOR rgb is the constant tint) — the ghost
+        // combine reads the un-hazed screen.
+        let glowed = sg + glow.x * bg * bg;
         let luma = clamp(dot(glowed, vec3<f32>(0.299, 0.587, 0.144)), 0.0, 1.0);
         let p = clamp(4.0 * luma * (1.0 - luma), 0.0, 1.0);
         let ghost_tint = vec3<f32>(83.0, 147.0, 168.0) / 255.0; // 0x5393A8
         let outg = min(vec3<f32>(luma) + ghost_tint * p, vec3<f32>(1.0));
         return vec4<f32>(srgb_to_linear(outg), scene.a);
     }
-    let outg = min(glowed, vec3<f32>(1.0));
+    // The z lane — the drunk/underwater haze: cross-fade the screen toward the ¼-res blur
+    // BEFORE the glow add (`out = lerp(screen, blur, z) + w·blur²`, the shipped FFXGlow.bls;
+    // wow-re drunk-blur-z.md). z = max(drunkFraction, 84/255 while the eye is submerged) — 0 in
+    // the ordinary sober pass, 1 = fully blurred at 100 inebriation. The blur term clamps like
+    // the screen term: it stands for the same byte RT.
+    let hazed = mix(sg, min(bg, vec3<f32>(1.0)), glow.z);
+    let outg = min(hazed + glow.x * bg * bg, vec3<f32>(1.0));
     return vec4<f32>(srgb_to_linear(outg), scene.a);
 }

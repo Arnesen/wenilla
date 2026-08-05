@@ -51,6 +51,22 @@ pub struct PetActionView {
     /// `(start_ms on the GetTime clock, duration_ms, enabled)` — [`super::action::ActionState`]'s
     /// exact shape; `None` = no cooldown.
     pub cooldown: Option<(i64, u32, bool)>,
+    /// **The slot's packed word, verbatim** — the one place this seam's "the engine holds no pet
+    /// knowledge" rule bends, and deliberately (decision 1010).
+    ///
+    /// The drag ([`super::cursor::pet`]) is word arithmetic in the reference and cannot be
+    /// anything else: `0x4bc9a0` compares occupants under `& 0x3FFFFFFF`, tests a candidate's low
+    /// 16 bits, and **writes the source word through unchanged** — `0x4bce00` forwards the cursor's
+    /// payload dword without reading a field of it, and the payload itself is only ever a verbatim
+    /// copy of a word that already existed in a slot. There is no drop-time encoding to model, so
+    /// re-deriving a word from `(kind, action, bits)` at the engine boundary would be inventing one.
+    ///
+    /// `0` is the empty slot, which is also the reference's own test (the zero dword).
+    pub packed: u32,
+    /// `Attributes & 0x40` (`SPELL_ATTR_PASSIVE`) for a spell slot — the drop core's one source
+    /// filter (`0x4bc9f8`–`0x4bca2e`: a type-1 source whose `SpellRec+0x18 & 0x40` is set is
+    /// refused, silently). False for a token and for an empty slot.
+    pub passive: bool,
 }
 
 /// [`PetActionView`] as stored: the cooldown converted to the `GetTime` clock at push time (the
@@ -60,6 +76,39 @@ pub(crate) struct StoredPetAction {
     pub(crate) view: PetActionView,
     /// `(start_s, duration_s, enabled)` in `GetTime` seconds; `None` = no cooldown.
     pub(crate) cooldown: Option<(f64, f64, bool)>,
+}
+
+/// The hunter-pet stat block behind `GetPetHappiness`/`GetPetLoyalty`/`GetPetTrainingPoints`/
+/// `GetPetExperience` and `HasPetUI`'s second return (decision 1005; wow-re §11b).
+///
+/// **All four bindings share one gate** — `0x6116e0(pet)`, "is this a hunter's pet" — which is why
+/// they share one pushed struct: a warlock's imp resolves perfectly well and still answers nothing,
+/// because happiness, loyalty and training points are hunter machinery.
+///
+/// **Their failure conventions differ, and the difference is the API.** `GetPetLoyalty` fails to
+/// **nil**; the two pairs fail to **`(0, 0)` — numbers, not nil**; `GetPetHappiness` fails to
+/// **`(nil, 100.0, 0.0)`**, nil in the first slot and numbers in the other two. `PetFrame.lua`
+/// hides the happiness icon on `not happiness` alone, so collapsing any of these into a uniform
+/// nil-everything would hide the frame in cases the reference shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PetStats {
+    /// `HasPetUI`'s second return — the hunter-pet discriminator. False makes every field below
+    /// answer its own failure convention regardless of what is in it.
+    pub hunter_pet: bool,
+    /// `GetPetHappiness`'s first return: the **pre-bucketed** `0..=3`. `None` is the gate
+    /// failure's nil; `Some(0)` is a real answer and must stay distinguishable from it.
+    pub happiness: Option<u32>,
+    /// Return 2 — the damage percentage, already scaled by the client's own `100.0f`.
+    pub damage_percentage: f32,
+    /// Return 3 — the loyalty rate, unscaled and possibly negative.
+    pub loyalty_rate: f32,
+    /// `GetPetLoyalty`'s single return — the `PetLoyalty.dbc` name, verbatim including the shipped
+    /// `"(Loyalty Level N) "` prefix. `None` = nil (level 0, or off the table).
+    pub loyalty: Option<String>,
+    /// `GetPetTrainingPoints` → `(totalPoints, spent)`, high word first.
+    pub training_points: (u16, u16),
+    /// `GetPetExperience` → `(currXP, nextXP)`.
+    pub experience: (u32, u32),
 }
 
 /// The pet bar's pushed state: the slots plus the two bar-wide bits the reference exposes
@@ -72,6 +121,21 @@ pub(crate) struct PetBarState {
     /// `GetPetActionsUsable()` — false desaturates every icon on the bar at once.
     pub(crate) actions_usable: bool,
     pub(crate) slots: Vec<StoredPetAction>,
+    /// `HasPetUI`'s FIRST return — "there is a pet with a UI at all", which the reference derives
+    /// from the pet resolving plus its `UNIT_FIELD_PETNUMBER` being nonzero (`0x4be697`). Separate
+    /// from `has_bar`: the action bar's gate is the cached guid alone, with no pet-number test.
+    pub(crate) has_ui: bool,
+    pub(crate) stats: PetStats,
+    /// May the bar be **rearranged** — `PickupPetAction`'s own gate, and nobody else's
+    /// (`0x4be1c1`: `[[pet+0x110]+0xA3] & 1 == 0`, i.e. `UNIT_FLAG_POSSESSED` clear).
+    ///
+    /// A third bar-wide bit rather than a fold into `actions_usable`, because the reference is
+    /// deliberate about keeping them apart: possession is expressly **not** among the flags that
+    /// grey the bar (a possessed unit is exactly the case where the buttons must still work), and
+    /// the crowd-control flags that do grey it do **not** block a drag. Two gates, two questions.
+    ///
+    /// It sits before the cursor fork, so it blocks the DROP as well as the pick-up.
+    pub(crate) pickup_allowed: bool,
 }
 
 impl super::UiScript {
@@ -81,12 +145,14 @@ impl super::UiScript {
         &mut self,
         has_bar: bool,
         actions_usable: bool,
+        pickup_allowed: bool,
         slots: Vec<PetActionView>,
     ) {
         let mut model = self.model_mut();
         model.pet_bar = PetBarState {
             has_bar,
             actions_usable,
+            pickup_allowed,
             slots: slots
                 .into_iter()
                 .map(|view| {
@@ -102,7 +168,20 @@ impl super::UiScript {
                     StoredPetAction { view, cooldown }
                 })
                 .collect(),
+            // The stat block rides its own setter: `SMSG_PET_SPELLS` replaces the bar wholesale,
+            // but happiness moves every few seconds off a plain descriptor field, so tying the two
+            // together would make the bar's diff-and-fire churn on a number no button draws.
+            has_ui: model.pet_bar.has_ui,
+            stats: std::mem::take(&mut model.pet_bar.stats),
         };
+    }
+
+    /// Push the hunter-pet stat block ([`PetStats`]) — the four paper-doll bindings plus
+    /// `HasPetUI`. Separate from [`Self::set_pet_actions`] because it changes on a different clock.
+    pub fn set_pet_stats(&mut self, has_ui: bool, stats: PetStats) {
+        let bar = &mut self.model_mut().pet_bar;
+        bar.has_ui = has_ui;
+        bar.stats = stats;
     }
 
     /// Drain the 1-based slot indices `CastPetAction` queued since the last call. What each index
@@ -120,6 +199,16 @@ impl super::UiScript {
     /// Drain the `PetStopAttack()` calls queued (a count — the verb carries no argument).
     pub fn take_pet_stop_attacks(&mut self) -> u32 {
         std::mem::replace(&mut self.model_mut().pet_stop_attacks, 0)
+    }
+
+    /// Drain the pet bar writes the drag queued (decision 1010) — **one `Vec` per
+    /// `CMSG_PET_SET_ACTION`**, each of one or two `(0-based position, packed word)` pairs.
+    ///
+    /// Already-applied on the engine's side: the app's job is to mirror each pair into its own
+    /// authoritative ten words and put the batch on the wire whole. Flattening the batches would
+    /// break the server's body-size fork between the one- and two-entry forms.
+    pub fn take_pet_set_actions(&mut self) -> Vec<Vec<(u32, u32)>> {
+        std::mem::take(&mut self.model_mut().pet_set_actions)
     }
 }
 
@@ -241,6 +330,89 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // HasPetUI() → hasUI, isHunterPet — ALWAYS exactly two returns (`EAX=2` on every path of
+    // `0x4be670`), with `(nil, nil)` when there is no pet with a UI. The second return is the
+    // gate every stat binding below shares.
+    g.set(
+        "HasPetUI",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let bar = &model.pet_bar;
+            Ok((flag(bar.has_ui), flag(bar.has_ui && bar.stats.hunter_pet)))
+        })?,
+    )?;
+
+    // GetPetHappiness() → happiness, damagePercentage, loyaltyRate.
+    //
+    // The client thresholds; Lua does not. Return 1 is a PRE-BUCKETED 0..3 read off
+    // PetPersonality.dbc's three columns, and `0` is a real bucket that answers the NUMBER 0 —
+    // `PetFrame.lua` hides the icon on `not happiness`, and a 0 leaves it showing with whatever
+    // texcoords it had. Only the gate failure is nil, and even then returns 2 and 3 are the
+    // numbers (100.0, 0.0), never nil.
+    g.set(
+        "GetPetHappiness",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let s = &model.pet_bar.stats;
+            let happiness = match s.happiness.filter(|_| s.hunter_pet) {
+                Some(b) => Value::Integer(i64::from(b)),
+                None => Value::Nil,
+            };
+            let (dmg, rate) = if happiness == Value::Nil {
+                (100.0, 0.0)
+            } else {
+                (s.damage_percentage, s.loyalty_rate)
+            };
+            Ok(MultiValue::from_vec(vec![
+                happiness,
+                Value::Number(f64::from(dmg)),
+                Value::Number(f64::from(rate)),
+            ]))
+        })?,
+    )?;
+
+    // GetPetLoyalty() → the localized level name, or NIL. The one stat binding whose failure is
+    // nil rather than a number — level 0 (no loyalty yet) included.
+    g.set(
+        "GetPetLoyalty",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let s = &model.pet_bar.stats;
+            Ok(match s.loyalty.as_deref().filter(|_| s.hunter_pet) {
+                Some(name) => Value::String(lua.create_string(name)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
+    // GetPetTrainingPoints() → totalPoints, spent — the two halves of one packed dword, HIGH word
+    // first. Numbers on every path: a gate failure is (0, 0), not nil.
+    g.set(
+        "GetPetTrainingPoints",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let s = &model.pet_bar.stats;
+            let (total, spent) = if s.hunter_pet {
+                s.training_points
+            } else {
+                (0, 0)
+            };
+            Ok((f64::from(total), f64::from(spent)))
+        })?,
+    )?;
+
+    // GetPetExperience() → currXP, nextXP. Numbers on every path, like the pair above; the client
+    // converts both `fild qword` off a zero-extended dword, so neither can arrive negative.
+    g.set(
+        "GetPetExperience",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let s = &model.pet_bar.stats;
+            let (cur, next) = if s.hunter_pet { s.experience } else { (0, 0) };
+            Ok((f64::from(cur), f64::from(next)))
+        })?,
+    )?;
+
     // PetStopAttack() — queue the call-off. No argument: the wire carries only the pet's guid.
     g.set(
         "PetStopAttack",
@@ -256,7 +428,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::PetActionView;
+    use super::{PetActionView, PetStats};
     use crate::script::UiScript;
 
     /// A hunter's bar, cut down to the three slot classes that matter: the Attack command (a
@@ -291,7 +463,7 @@ mod tests {
         assert!(s.eval::<bool>("return PetHasActionBar() == nil").unwrap());
         assert!(s.eval::<bool>("return GetPetActionInfo(1) == nil").unwrap());
 
-        s.set_pet_actions(true, true, slots());
+        s.set_pet_actions(true, true, true, slots());
         assert_eq!(s.eval::<i64>("return PetHasActionBar()").unwrap(), 1);
         assert_eq!(s.eval::<i64>("return GetPetActionsUsable()").unwrap(), 1);
 
@@ -349,7 +521,7 @@ mod tests {
     fn cooldown_triple_stamps_to_the_vm_clock_and_goes_cold() {
         let mut s = UiScript::new().unwrap();
         s.tick(10.0); // GetTime == 10
-        s.set_pet_actions(true, true, slots());
+        s.set_pet_actions(true, true, true, slots());
 
         assert_eq!(
             s.eval::<(f64, f64, i32)>("return GetPetActionCooldown(1)")
@@ -378,7 +550,7 @@ mod tests {
     #[test]
     fn intents_queue_and_the_meaningless_ones_are_dropped() {
         let mut s = UiScript::new().unwrap();
-        s.set_pet_actions(true, true, slots());
+        s.set_pet_actions(true, true, true, slots());
 
         s.run("CastPetAction(1) CastPetAction(3) CastPetAction(9)")
             .unwrap();
@@ -410,7 +582,7 @@ mod tests {
     #[test]
     fn attack_active_is_a_per_slot_boolean() {
         let mut s = UiScript::new().unwrap();
-        s.set_pet_actions(true, true, slots());
+        s.set_pet_actions(true, true, true, slots());
         assert!(s.eval::<bool>("return IsPetAttackActive(1)").unwrap());
         assert!(!s.eval::<bool>("return IsPetAttackActive(2)").unwrap());
         assert!(s
@@ -423,10 +595,129 @@ mod tests {
     #[test]
     fn a_disabled_bar_is_still_a_bar() {
         let mut s = UiScript::new().unwrap();
-        s.set_pet_actions(true, false, slots());
+        s.set_pet_actions(true, false, true, slots());
         assert_eq!(s.eval::<i64>("return PetHasActionBar()").unwrap(), 1);
         assert!(s
             .eval::<bool>("return GetPetActionsUsable() == nil")
+            .unwrap());
+    }
+
+    fn hunter_stats() -> PetStats {
+        PetStats {
+            hunter_pet: true,
+            happiness: Some(3),
+            damage_percentage: 125.0,
+            loyalty_rate: 20.0,
+            loyalty: Some("(Loyalty Level 6) Best Friend".into()),
+            training_points: (170, 130),
+            experience: (4200, 8000),
+        }
+    }
+
+    /// The four stat bindings on a hunter's pet — arities and values, including the pair ORDER
+    /// (`total` before `spent`, `curr` before `next`), which is the half a swap makes invisible.
+    #[test]
+    fn a_hunters_pet_answers_every_stat_binding() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_stats(true, hunter_stats());
+
+        assert!(s
+            .eval::<bool>(
+                "local h, dmg, rate = GetPetHappiness() \
+                 return h == 3 and dmg == 125 and rate == 20"
+            )
+            .unwrap());
+        assert_eq!(
+            s.eval::<String>("return GetPetLoyalty()").unwrap(),
+            "(Loyalty Level 6) Best Friend",
+            "the shipped prefix is pushed verbatim — the client does no stripping"
+        );
+        assert!(s
+            .eval::<bool>("local t, sp = GetPetTrainingPoints() return t == 170 and sp == 130")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("local c, n = GetPetExperience() return c == 4200 and n == 8000")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("local ui, hunter = HasPetUI() return ui == 1 and hunter == 1")
+            .unwrap());
+    }
+
+    /// **The failure conventions are three different shapes and the API is those shapes.** A
+    /// warlock's imp has a pet UI and is not a hunter pet: loyalty goes nil, both pairs go to
+    /// `(0, 0)` as NUMBERS, and happiness goes `(nil, 100, 0)` — nil in the first slot only.
+    ///
+    /// Flattening any of these to nil-everything breaks a different consumer: `PetFrame.lua` hides
+    /// its happiness icon on `not happiness`, but `PetPaperDollFrame` does arithmetic on the pairs
+    /// and would error on a nil.
+    #[test]
+    fn a_non_hunter_pet_fails_three_different_ways() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_stats(
+            true,
+            PetStats {
+                hunter_pet: false,
+                ..hunter_stats()
+            },
+        );
+
+        assert!(
+            s.eval::<bool>(
+                "local h, dmg, rate = GetPetHappiness() \
+                 return h == nil and dmg == 100 and rate == 0"
+            )
+            .unwrap(),
+            "happiness is nil but its two numbers are still numbers"
+        );
+        assert!(s.eval::<bool>("return GetPetLoyalty() == nil").unwrap());
+        assert!(s
+            .eval::<bool>("local t, sp = GetPetTrainingPoints() return t == 0 and sp == 0")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("local c, n = GetPetExperience() return c == 0 and n == 0")
+            .unwrap());
+        // HasPetUI still reports the UI — it is the SECOND return that discriminates.
+        assert!(s
+            .eval::<bool>("local ui, hunter = HasPetUI() return ui == 1 and hunter == nil")
+            .unwrap());
+    }
+
+    /// **Bucket 0 is a number, not nil**, and this is the trap the RE calls out by name: the
+    /// shipped `PetFrame.lua` branches on 1/2/3 and hides only on `not happiness`, so a 0 must
+    /// leave the icon up. Collapsing it into the failure path hides a frame the reference shows.
+    #[test]
+    fn happiness_bucket_zero_is_not_the_failure_case() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_stats(
+            true,
+            PetStats {
+                happiness: Some(0),
+                damage_percentage: 100.0,
+                loyalty_rate: 0.0,
+                ..hunter_stats()
+            },
+        );
+        assert!(s
+            .eval::<bool>("local h = GetPetHappiness() return h == 0 and h ~= nil")
+            .unwrap());
+        assert!(
+            s.eval::<bool>("return not GetPetHappiness() == false")
+                .unwrap(),
+            "0 is truthy in Lua, so the reference's `not happiness` hide-test does NOT fire"
+        );
+    }
+
+    /// With no pet at all every binding takes its failure path and `HasPetUI` answers `(nil, nil)`
+    /// — two returns on every path, never zero.
+    #[test]
+    fn no_pet_still_answers_two_values_from_has_pet_ui() {
+        let s = UiScript::new().unwrap();
+        assert!(s
+            .eval::<bool>("local ui, hunter = HasPetUI() return ui == nil and hunter == nil")
+            .unwrap());
+        assert!(s.eval::<bool>("return GetPetLoyalty() == nil").unwrap());
+        assert!(s
+            .eval::<bool>("local h, dmg = GetPetHappiness() return h == nil and dmg == 100")
             .unwrap());
     }
 }

@@ -42,18 +42,37 @@ use crate::player::WorldCamera;
 pub struct FfxGlow {
     /// Per-view multiplier on the zone glow weight. See [`Self::WORLD`] / [`Self::UI_PANE`].
     pub gain_scale: f32,
+    /// Per-view multiplier on the haze mix `z` ([`FfxHazeMix`] — the drunk/underwater
+    /// screen-toward-blur cross-fade). `1.0` only on the true world view: the haze is a
+    /// *player-state* effect on the viewed scene, and a booth bake that stands in for a UI pane
+    /// must never inherit it (the reference paints UI model widgets after the FFX pass).
+    pub haze_scale: f32,
 }
 
 impl FfxGlow {
-    /// The reference's own full-screen glow, at the zone's authored weight — the world camera, and
-    /// every booth bake that wants world parity.
-    pub const WORLD: Self = Self { gain_scale: 1.0 };
+    /// The reference's own full-screen glow, at the zone's authored weight — the world camera:
+    /// zone glow AND the player-state haze (drunk / camera-eye-submerged blur).
+    pub const WORLD: Self = Self {
+        gain_scale: 1.0,
+        haze_scale: 1.0,
+    };
+    /// A portrait/booth bake at world parity for *lighting and glow* (decision 0638) — but never
+    /// the haze: a bake stands in for a UI model widget, which the reference composites after
+    /// the WorldFrame's FFX pass, so a drunk player's unit frame stays sharp while the world
+    /// swims.
+    pub const BOOTH: Self = Self {
+        gain_scale: 1.0,
+        haze_scale: 0.0,
+    };
     /// **Decode only, no glow** — for a bake that stands in for a 1.12 *UI model widget*. The
     /// reference applies its FFX pass inside the WorldFrame's own paint (`0x48350e` → the apply
     /// hook `0x6cd890`, wow-re `ffxeffects.md`); every UI frame paints afterwards, at its own
     /// strata, so a `<PlayerModel>` pane is composited over an already-glowed world and never
     /// glows itself. (The give-away in-game: the reference's chat text and buttons don't bloom.)
-    pub const UI_PANE: Self = Self { gain_scale: 0.0 };
+    pub const UI_PANE: Self = Self {
+        gain_scale: 0.0,
+        haze_scale: 0.0,
+    };
 }
 
 impl Default for FfxGlow {
@@ -73,6 +92,45 @@ pub struct FfxGlowGain(pub f32);
 /// Driven by [`crate::death`] off `PLAYER_FLAGS_GHOST`; uploaded as the combine uniform's `y`.
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct FfxDeathFade(pub f32);
+
+/// The haze mix `z` — the combine's screen-toward-blur cross-fade
+/// (`out = lerp(screen, blur, z) + w·blur²`, the shipped FFXGlow.bls). The reference's glow
+/// render packs it per frame from the **active player's** state (`0x6cb134`/`0x6cb599`, wow-re
+/// `ffxeffects/scratch/drunk-blur-z.md`, decision 1009 §A):
+/// `z = max(min(drunkByte,100)/100, submerged ? 84/255 : 0)` — fully blurred at 100 inebriation,
+/// and a fixed ≈0.329 floor whenever the **camera eye** is in any liquid (the vanilla underwater
+/// blur; `0x672470`'s eye-liquid probe, `0xf` = dry). Synced by [`sync_haze`]; uploaded as the
+/// combine uniform's `z`, scaled per view by [`FfxGlow::haze_scale`].
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct FfxHazeMix(pub f32);
+
+/// The underwater haze floor: 84/255 (the reference's byte 84 in the COLOR z lane whenever the
+/// eye-liquid probe reads non-dry — applied regardless of sobriety).
+const HAZE_SUBMERGED_FLOOR: f32 = 84.0 / 255.0;
+
+/// Sync [`FfxHazeMix`] from the two player-state inputs the reference's glow render reads each
+/// frame: our own drunk byte (`PLAYER_BYTES_3` byte 1 → `min(b,100)/100`) and the camera-eye
+/// submersion claim. Off-world both read empty → 0 (the glue screens never haze).
+fn sync_haze(
+    self_player: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
+    underwater: Option<Res<crate::liquid::Underwater>>,
+    mut haze: ResMut<FfxHazeMix>,
+) {
+    let drunk = self_player
+        .single()
+        .ok()
+        .and_then(|s| s.0.player_drunk_byte())
+        .map_or(0.0, |b| f32::from(b.min(100)) / 100.0);
+    let submerged = if underwater.is_some_and(|u| u.0 != benilla_formats::Submersion::Dry) {
+        HAZE_SUBMERGED_FLOOR
+    } else {
+        0.0
+    };
+    let target = drunk.max(submerged);
+    if haze.0 != target {
+        haze.0 = target;
+    }
+}
 
 /// Sync the gain from the live zone lighting (the same source `sync_bloom` used). Off-world there
 /// is no `Light.dbc` zone — the reference runs its `LightParams` **default 0.5** (wow-re
@@ -288,6 +346,9 @@ impl ViewNode for FfxGlowNode {
         // model pane, where the combine runs only for its gamma decode ([`FfxGlow::UI_PANE`]).
         let gain = world.resource::<FfxGlowGain>().0 * glow.gain_scale;
         let death = world.resource::<FfxDeathFade>().0;
+        // The haze mix, world-view only ([`FfxGlow::haze_scale`]): a booth bake never inherits
+        // the drunk/underwater screen blur.
+        let haze = world.resource::<FfxHazeMix>().0 * glow.haze_scale;
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
@@ -299,7 +360,7 @@ impl ViewNode for FfxGlowNode {
         let render_device = render_context.render_device().clone();
         let gain_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("ffx_glow_gain"),
-            contents: bytemuck::cast_slice(&[gain, death, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&[gain, death, haze, 0.0]),
             usage: BufferUsages::UNIFORM,
         });
         let post = view_target.post_process_write();
@@ -391,12 +452,14 @@ impl Plugin for FfxGlowPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FfxGlowGain(0.647)) // overwritten by sync_gain from zone data
             .init_resource::<FfxDeathFade>()
+            .init_resource::<FfxHazeMix>()
             .add_plugins((
                 ExtractComponentPlugin::<FfxGlow>::default(),
                 ExtractResourcePlugin::<FfxGlowGain>::default(),
                 ExtractResourcePlugin::<FfxDeathFade>::default(),
+                ExtractResourcePlugin::<FfxHazeMix>::default(),
             ))
-            .add_systems(Update, (sync_gain, ensure_ffx_glow));
+            .add_systems(Update, (sync_gain, sync_haze, ensure_ffx_glow));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

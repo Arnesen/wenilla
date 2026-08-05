@@ -135,6 +135,20 @@ pub(crate) fn scenario_active() -> bool {
 ///   WOW_FX_DIST=12 WOW_CAPTURE_OUT=/tmp/vw.png cargo run -q -p benilla
 /// ```
 ///
+/// **`WOW_FX_GO=<GameObjectDisplayInfo id>` swaps the subject onto the GAMEOBJECT path** — the
+/// third lane, and the one a placed trap/door/chest actually takes: the wire component set a
+/// streamed GO gets, so `crate::go_anim`'s §243 state machine — not the effect pool — chooses the
+/// sequence. `WOW_FX_GO_STATE` (`GAMEOBJECT_STATE`, default 1 READY) and `WOW_FX_GO_TYPE`
+/// (`GAMEOBJECT_TYPE_ID`, default 6 TRAP) select the substate; `benilla-extract goanimscan`
+/// *predicts* what that resolves to, and this *shows* it. The lane matters because an absent
+/// `GAMEOBJECT_STATE` reads as the wire default `0` = ACTIVE, which on a model with no `Opened`
+/// sequence lands somewhere else entirely:
+///
+/// ```text
+/// WOW_DATA=<Data> WOW_CAPTURE=fxview WOW_FX_GO=3073 WOW_FX_GO_STATE=1 WOW_FX_AGE=4 \
+///   WOW_FX_DIST=3 WOW_CAPTURE_OUT=/tmp/go.png cargo run -q -p benilla
+/// ```
+///
 /// Knobs: `WOW_FX_MODEL` (required, internal path), `WOW_FX_AGE` (seconds after attach, default
 /// 1.0), `WOW_FX_AZ`/`WOW_FX_EL` (camera orbit degrees, default 0/10), `WOW_FX_DIST` (yards,
 /// default 5), `WOW_FX_FLY` (yd/s along the model's facing — a missile only trails in motion;
@@ -157,6 +171,17 @@ pub(crate) struct FxViewRequest {
     /// knob is the A/B that says whether a defect belongs to the model or to the unit path.
     /// `WOW_FX_MODEL` is then optional (the display id names the model).
     pub(crate) display: Option<u32>,
+    /// `WOW_FX_GO=<GameObjectDisplayInfo id>` — spawn the subject as a real **GameObject**, so
+    /// [`crate::go_anim`]'s state machine picks the sequence instead of the effect pool's
+    /// "play clip 0". A placed trap renders through this lane and nothing else, so it is the only
+    /// honest A/B for "does the trap look right".
+    pub(crate) go: Option<u32>,
+    /// `WOW_FX_GO_STATE` — the `GAMEOBJECT_STATE` the fixture's descriptor carries (default 1 =
+    /// READY, what vmangos spawns a trap in). Set it to 0 to see what an omitted field renders as.
+    pub(crate) go_state: u32,
+    /// `WOW_FX_GO_TYPE` — the `GAMEOBJECT_TYPE_ID` (default 6 = TRAP). Decides whether
+    /// [`crate::go_anim::go_animates`] puts the instance on the machine at all.
+    pub(crate) go_type: u32,
     /// `WOW_FX_SCALE` — the unit lane's `NetEntity::scale` (the wire scale a creature carries).
     pub(crate) scale: f32,
     pub(crate) age: f32,
@@ -404,13 +429,17 @@ impl Plugin for CapturePlugin {
             let display: Option<u32> = std::env::var("WOW_FX_DISPLAY")
                 .ok()
                 .and_then(|v| v.trim().parse().ok());
-            let model_path = match (std::env::var("WOW_FX_MODEL"), display) {
+            let go: Option<u32> = std::env::var("WOW_FX_GO")
+                .ok()
+                .and_then(|v| v.trim().parse().ok());
+            let model_path = match (std::env::var("WOW_FX_MODEL"), display.or(go)) {
                 (Ok(p), _) => p,
-                (Err(_), Some(_)) => String::new(), // the unit lane names its model by display id
+                (Err(_), Some(_)) => String::new(), // the id lanes name their model by display id
                 (Err(_), None) => {
                     eprintln!(
-                        "WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path> or \
-                         WOW_FX_DISPLAY=<CreatureDisplayInfo id>"
+                        "WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path>, \
+                         WOW_FX_DISPLAY=<CreatureDisplayInfo id> or \
+                         WOW_FX_GO=<GameObjectDisplayInfo id>"
                     );
                     std::process::exit(2);
                 }
@@ -424,6 +453,9 @@ impl Plugin for CapturePlugin {
             app.insert_resource(FxViewRequest {
                 model_path,
                 display,
+                go,
+                go_state: knob("WOW_FX_GO_STATE", 1.0) as u32,
+                go_type: knob("WOW_FX_GO_TYPE", 6.0) as u32,
                 scale: knob("WOW_FX_SCALE", 1.0),
                 age: knob("WOW_FX_AGE", 1.0),
                 az_deg: knob("WOW_FX_AZ", 0.0),

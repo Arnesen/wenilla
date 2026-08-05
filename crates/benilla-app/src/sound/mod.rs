@@ -17,7 +17,7 @@ mod anim_events;
 mod combat;
 mod creature;
 mod emote;
-mod footsteps;
+pub(crate) mod footsteps;
 mod gameobject;
 mod glue;
 mod greeting;

@@ -78,6 +78,10 @@ pub(super) const FALLBACK_SPAN: f32 = 1.0;
 /// like the wire's, in a serverless capture where nothing else claims one.
 const FXVIEW_UNIT_GUID: u64 = (0xF130u64 << 48) | 0xFC0FEE;
 
+/// The `fxview` GameObject lane's synthetic guid (`WOW_FX_GO`) — the wire's `0xF110` high word,
+/// which is what `crate::net` reads a GO's identity out of.
+const FXVIEW_GO_GUID: u64 = (0xF110u64 << 48) | 0xFC0FEE;
+
 /// How long a self-terminating instance may wait unspawned (model/skeleton never loading — the
 /// cube-fallback caster) before it is dropped instead of pending forever.
 const PENDING_TIMEOUT: f32 = 10.0;
@@ -223,6 +227,43 @@ pub(crate) fn drive_fx_view(
                 ))
                 .id();
         }
+        // `WOW_FX_GO`: the GAMEOBJECT lane. A placed trap/door/chest reaches the screen through
+        // `crate::go_anim`'s §243 state machine, never through the effect pool, so this is the
+        // only lane that reproduces one. The descriptor carries the three fields the machine
+        // reads — display, TYPE_ID (the `go_animates` gate) and STATE (the substate) — and
+        // nothing else, so an unset knob renders exactly what an omitted wire field renders.
+        // Always seated on the terrain: a GO stands on the ground.
+        if let Some(display) = req.go {
+            if let Some(hit) = spatial.cast_ray(
+                pos,
+                Dir3::NEG_Y,
+                500.0,
+                true,
+                &crate::collision::player_query_filter(),
+            ) {
+                pos.y -= hit.distance;
+            }
+            pos.y += req.up;
+            return commands
+                .spawn((
+                    crate::net::Guid(FXVIEW_GO_GUID),
+                    crate::net::NetEntity {
+                        kind: benilla_protocol::EntityKind::GameObject,
+                        display_id: Some(display),
+                        scale: req.scale,
+                    },
+                    crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
+                        &[
+                            (14, req.go_state), // GAMEOBJECT_STATE
+                            (21, req.go_type),  // GAMEOBJECT_TYPE_ID
+                        ],
+                    )),
+                    Transform::from_translation(pos)
+                        .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
+                    Visibility::default(),
+                ))
+                .id();
+        }
         // `WOW_FX_GROUND=1`: seat the fixture ON the terrain — a ground-anchored effect's flat
         // quads render as projected surface decals and need ground inside their vertical slab.
         // The scene settled before arming, so the streamed tile's collider is there to hit.
@@ -262,8 +303,8 @@ pub(crate) fn drive_fx_view(
     // instance dies at exactly one pass of sequence 0 and its emitters DRAIN — the fixture
     // mirrors it so a capture past the span shows the truth. `WOW_FX_HOLD=1` previews a
     // persistent hold instead (reaped by its spell edge in game, so no clock here).
-    // The one-pass reap is an effect-instance rule; a unit stands there.
-    if !req.hold && !state.expired && req.display.is_none() {
+    // The one-pass reap is an effect-instance rule; a unit — or a placed GameObject — stands there.
+    if !req.hold && !state.expired && req.display.is_none() && req.go.is_none() {
         if let Some(at) = state.attached_at {
             let span = fx
                 .models
@@ -277,10 +318,10 @@ pub(crate) fn drive_fx_view(
         }
     }
     if state.attached_at.is_none() {
-        // The unit lane has no attach step — the unit pipeline builds the model on its own. Its
-        // "age" is therefore seconds since the unit appeared, which is what the animation phase is
-        // measured in.
-        if req.display.is_some() {
+        // The unit and GameObject lanes have no attach step — the entity pipeline builds the model
+        // on its own. Their "age" is therefore seconds since the entity appeared, which is what the
+        // animation phase is measured in.
+        if req.display.is_some() || req.go.is_some() {
             state.attached_at = Some(time.elapsed_secs());
             return;
         }
@@ -619,9 +660,6 @@ pub(super) fn attach_effect_visuals(
             },
         );
     }
-    // The same pick, as an `AnimationData` id — the ribbons' per-sequence visibility keys off it,
-    // so the thrown weapon's trail shows in flight and never in the worn hand.
-    let played_anim = played.map(|c| c.anim_id);
     for rb in &dm.ribbons {
         let (owner, use_pivot) = joints
             .get(rb.def.bone as usize)
@@ -635,7 +673,10 @@ pub(super) fn attach_effect_visuals(
             // `Transform::IDENTITY` placement a few lines up, so both of a model's effect
             // families land on the same draw-order rung, which is the property that matters.
             1.0,
-            played_anim,
+            // The instance's own root carries the clip: an effect model that steps
+            // Stand -> Hold -> Decay re-answers the gate at each step, instead of freezing the
+            // birth clip's answer for the whole life.
+            crate::ribbons::RibbonSeq::Host(root),
             // This instance's own model alpha, chained to its host (0827/0833): a standalone
             // instance has none above it and draws exactly as before.
             Some(root),

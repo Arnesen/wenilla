@@ -618,13 +618,13 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
         // show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
         // `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
         "MacroFrame.xml",
-        // The Key Bindings window (decision 0997): the era-shaped standalone KeyBindingFrame
-        // over the engine's binding table (benilla_ui::script::keybind + crate::bindings — the
-        // 1.12 GetBinding/SetBinding Lua API). Needs Fonts, UiPanels (panel manager + popup
-        // engine + the ESC ladder rung that reverts it), ScrollTemplates (the faux kit), and
-        // GameTooltip (the character-specific checkbox's hover); before GameMenuFrame, whose
-        // Key Bindings button reaches it by name at click time.
-        "KeyBindingsFrame.xml",
+        // The Keybindings page MODULE (decision 1008, superseding 0997's standalone window):
+        // the templates + script of the Options window's Keybindings category, over the
+        // engine's binding table (benilla_ui::script::keybind + crate::bindings — the 1.12
+        // GetBinding/SetBinding Lua API). Needs UiPanels (popup engine) and GameTooltip (the
+        // character-specific checkbox's hover); MUST load before OptionsFrame.xml, whose
+        // Keybindings body inherits these templates and calls this script at OnLoad.
+        "KeyBindingsPage.xml",
         // The options window (the 0985 provenance split: 0950's era structure, 0978's
         // 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
         // cuts — bare fully-live sliders, no corner X; 0992's dropdown rows + the Nameplates

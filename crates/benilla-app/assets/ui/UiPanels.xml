@@ -101,10 +101,8 @@
         -- the client. (The ref's l.17-18 register SoundOptionsFrame/UIOptionsFrame the same way;
         -- those panels are this one window's category rows now, so the rows have no frames.)
         UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
-        -- The Key Bindings window (decision 0997, KeyBindingsFrame.xml) — the ref's own
-        -- registration verbatim (`UIPanelWindows["KeyBindingFrame"] = { area = "center",
-        -- pushable = 0, whileDead = 1 }`, 1.12 Blizzard_BindingUI.lua l.8).
-        UIPanelWindows["KeyBindingFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- (0997's KeyBindingFrame row is gone — decision 1008 folded key bindings into the
+        -- options window above, the 1.15 layout's own placement; KeyBindingsPage.xml.)
         -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)
         -- and the first **full** row. It was a plain toplevel until now, showing itself with a bare
         -- `WorldMapFrame:Show()` and so bypassing this manager entirely: with the game menu up it
@@ -554,22 +552,15 @@
             if StaticPopup_EscapePressed() then
                 return
             end
-            -- The Key Bindings window (decision 0997): ESC with nothing armed is the Cancel
-            -- gesture — revert to the saved set and close (both references' own law; while a
-            -- capsule IS armed the host's capture seam swallowed the press before this chain
-            -- ever saw it, and ESC became a bind — 1.12's law). Its OnHide reopens the menu.
-            -- Looked up like the rest (headless tests load this file without the window).
-            local keybinds = getglobal("KeyBindingFrame")
-            if keybinds and keybinds:IsVisible() then
-                KeyBindingFrame_Cancel()
-                return
-            end
             -- The options window next (l.1483-1484, live since decision 0950 — this rung sat
             -- unfilled while GameMenuFrame.xml's disabled buttons were the gap). The ref
             -- cancel-clicks (`OptionsFrameCancel:Click()`); ours hides: benilla applies changes
             -- live, there is no pending-change model for a Cancel to roll back, so putting the
-            -- window away IS the whole gesture. Looked up like the menu above (a headless panel
-            -- test loads this file without OptionsFrame.xml behind it).
+            -- window away IS the whole gesture — and since 1008 that covers the Keybindings
+            -- page too (live-commit; its OnHide hook disarms a straggling bind capture, and
+            -- while a capsule IS armed the host's capture seam swallows ESC before this chain
+            -- ever exists — the press becomes a BIND, 1.12's law). Looked up like the menu
+            -- above (a headless panel test loads this file without OptionsFrame.xml behind it).
             local options = getglobal("OptionsFrame")
             if options and options:IsVisible() then
                 HideUIPanel(options)

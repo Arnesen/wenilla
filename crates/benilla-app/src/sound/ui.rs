@@ -207,8 +207,12 @@ fn play_item_gesture_sounds(
         }
         // Everything that is not a live item shares the generic grab/drop kit — the reference's
         // own `0x494f60`/`0x494f80` grab path for a macro (mode 8) reaches the same
-        // `INTERFACESOUND_CURSOR*` pair the spell and bar-action modes do.
-        CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_) => {
+        // `INTERFACESOUND_CURSOR*` pair the spell and bar-action modes do, and the pet-action
+        // builder `0x494e20` names `INTERFACESOUND_CURSORGRABOBJECT` outright (wow-re §10.3).
+        CursorPayload::Spell(_)
+        | CursorPayload::Action(_)
+        | CursorPayload::Macro(_)
+        | CursorPayload::PetAction(_) => {
             let kit_id = match gesture {
                 CursorGesture::Gain => INTERFACESOUND_CURSORGRABOBJECT,
                 CursorGesture::Loss => INTERFACESOUND_CURSORDROPOBJECT,

@@ -625,7 +625,7 @@ pub(crate) fn spawn_warm_booth(
                 ..default()
             },
             RenderTarget::Image(image.into()),
-            crate::ffx_glow::FfxGlow::WORLD,
+            crate::ffx_glow::FfxGlow::BOOTH,
             Projection::custom(framing::WowPortraitProjection {
                 fov: framing::BODY_FOV,
                 near: 0.02,
@@ -714,7 +714,7 @@ fn setup_booths(
             // booth needs the same final node — the FFXGlow combine owns the frame's ONE decode.
             // This also keeps the bake at exact world parity (same glow, same transform chain);
             // without it the portrait reads one encode too bright.
-            crate::ffx_glow::FfxGlow::WORLD,
+            crate::ffx_glow::FfxGlow::BOOTH,
             Projection::from(PerspectiveProjection {
                 fov: PORTRAIT_FOV,
                 near: 0.02,

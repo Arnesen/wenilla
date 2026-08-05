@@ -114,8 +114,8 @@ pub use char_stats::{
 pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
 pub use craft::{CraftReagent, CraftRecipe, CraftState};
 pub use cursor::{
-    CursorAction, CursorItem, CursorMacro, CursorPayload, CursorSpell, EnchantConfirm, WorldPick,
-    EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
+    EnchantConfirm, WorldPick, EQUIPMENT_BAG,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use duel::DuelRequest;
@@ -131,7 +131,7 @@ pub use mail::{MailInboxRow, MailSendRequest, MailState};
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
 pub use party::{PartyMemberInfo, PartyRequest, PartyState};
-pub use pet::PetActionView;
+pub use pet::{PetActionView, PetStats};
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
 pub use session::SessionRequest;

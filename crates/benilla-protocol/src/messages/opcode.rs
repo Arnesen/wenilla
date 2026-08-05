@@ -251,6 +251,10 @@ pub const CMSG_PET_SET_ACTION: u16 = 0x0174; // 372
 pub const CMSG_PET_SPELL_AUTOCAST: u16 = 0x02F3; // 755
 /// Call the pet off — the Attack button's second press.
 pub const CMSG_PET_STOP_ATTACK: u16 = 0x02EA; // 746
+/// Take an aura off the **pet** — a pet bar spell click on a spell already running on it. The
+/// player's own `CMSG_CANCEL_AURA` cannot serve: its body is a bare spell id with no room to name
+/// whose aura to drop.
+pub const CMSG_PET_CANCEL_AURA: u16 = 0x026B; // 619
 
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in
 /// [`super::gameobject::gameobject_query`] — the ask-once GO template lookup, identical shape to

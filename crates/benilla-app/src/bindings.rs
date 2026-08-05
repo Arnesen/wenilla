@@ -19,10 +19,11 @@
 //! - [`Kind::Host`] lands in [`BindingsState::fired`] for engine consumers (chat open, TAB
 //!   targeting, nameplates, autorun, camera zoom, …).
 //!
-//! While the Key Bindings window has a capsule selected it arms the **capture seam**
-//! (`BenillaBindCapture`): raw input is swallowed here, canonicalized
-//! (`ALT-CTRL-SHIFT-<TOKEN>`), and handed back to the window's own capture handler — the 1.12
-//! law (lone modifiers ignored, left/right clicks stay UI clicks, ESC binds like any key).
+//! While the Keybindings page (the Options window's category since 1008) has a capsule
+//! selected it arms the **capture seam** (`BenillaBindCapture`): raw input is swallowed here,
+//! canonicalized (`ALT-CTRL-SHIFT-<TOKEN>`), and handed back to the page's own capture handler
+//! — the 1.12 law (lone modifiers ignored, left/right clicks stay UI clicks, ESC binds like
+//! any key).
 //!
 //! Persistence: `benilla/bindings/account.txt` + `<Realm>-<Char>.txt` ([`store`], through
 //! [`crate::local_state`]); the character file's existence is the character-set state, deleted
@@ -312,8 +313,8 @@ fn latch_and_dispatch(
         }
     };
 
-    // ── The capture seam ── the Key Bindings window has a capsule selected: swallow raw input,
-    // canonicalize, hand the chord string to the window's Lua (1.12's OnKeyDown law: lone
+    // ── The capture seam ── the Keybindings page has a capsule selected: swallow raw input,
+    // canonicalize, hand the chord string to the page's Lua (1.12's OnKeyDown law: lone
     // modifiers and unknown keys ignored; Super is not a 1.12 modifier — a Super press is
     // ignored outright; left/right stay UI clicks; the wheel is a chord like any other).
     if armed {
@@ -344,7 +345,7 @@ fn latch_and_dispatch(
         if let Some(chord_str) = captured {
             run_lua(
                 &mut script,
-                &format!("KeyBindingFrame_OnHostKey(\"{chord_str}\")"),
+                &format!("KeyBindings_OnHostKey(\"{chord_str}\")"),
                 "capture",
             );
         }

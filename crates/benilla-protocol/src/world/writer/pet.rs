@@ -1,11 +1,16 @@
 //! The pet bar's `WorldWriter` sends — mirroring [`crate::messages::pet`] (decisions 0982, 0988).
 //!
-//! Three verbs, and the thing to know about them is that **the server answers none of them**.
-//! Every one is an intent the client has already applied to its own state before sending
+//! Four verbs, and the thing to know about them is that **no reply packet answers any of them**.
+//! The first three are intents the client has already applied to its own state before sending
 //! (wow-re §10.1/§10.2: the reaction, command and autocast paths all write `[0xb71468]` or the
 //! slot word and fire `PET_BAR_UPDATE` *before* the packet leaves). The bar's contents change only
 //! when a fresh `SMSG_PET_SPELLS` arrives — a summon, a swap, a learned spell — never as a reply
 //! to one of these.
+//!
+//! [`WorldWriter::pet_cancel_aura`] is the exception worth naming: it too gets no reply, but it is
+//! the one verb the client does *not* pre-apply, because what it changes is the pet's own
+//! descriptor. The aura leaves in a `UNIT_FIELD_AURA` delta, and the slot's icon follows from
+//! that — so the round trip is visible, just not as an answer.
 //!
 //! Every one carries the pet's guid: the server re-checks ownership on each
 //! (`PetHandler.cpp`'s `GetCharmerOrOwnerGuid` gate) and silently drops anything naming a unit we
@@ -35,6 +40,20 @@ impl WorldWriter {
         self.send(
             opcode::CMSG_PET_STOP_ATTACK,
             &messages::pet_stop_attack(pet_guid),
+        )
+    }
+
+    /// Cancel one of the **pet's** auras (`CMSG_PET_CANCEL_AURA`, layout in
+    /// [`messages::pet_cancel_aura`]) — a pet bar spell click that lands on a spell already running
+    /// on the pet (wow-re §10.1, `0x4bd25f`; the predicate is `0x4bcea0`).
+    ///
+    /// The click that sends this sends **nothing else**: the reference returns straight after,
+    /// so the ordinary `CMSG_PET_ACTION` never leaves. That "and return" is the whole behaviour —
+    /// clicking a lit pet buff takes it off rather than re-casting it.
+    pub fn pet_cancel_aura(&mut self, pet_guid: u64, spell_id: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_PET_CANCEL_AURA,
+            &messages::pet_cancel_aura(pet_guid, spell_id),
         )
     }
 

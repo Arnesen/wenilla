@@ -47,6 +47,11 @@ fn declare_token_strings(s: &UiScript) {
     .unwrap();
 }
 
+/// The words the drag moves — `ACT_COMMAND`/Attack and `ACT_ENABLED`/Claw as the server packs
+/// them. Carried on the views because the drag is word arithmetic (decision 1010).
+const ATTACK_WORD: u32 = 0x0700_0002;
+const CLAW_WORD: u32 = 0xC100_0BC2;
+
 /// A hunter's bar as the server actually sends it: Attack (a lit command token), an empty spell
 /// slot, Claw (a spell with autocast running), and Defensive (a lit reaction token).
 fn hunter_slots() -> Vec<PetActionView> {
@@ -57,6 +62,7 @@ fn hunter_slots() -> Vec<PetActionView> {
         is_token: true,
         active: true,
         attack_active: true,
+        packed: ATTACK_WORD,
         ..Default::default()
     };
     slots[3] = PetActionView {
@@ -66,6 +72,7 @@ fn hunter_slots() -> Vec<PetActionView> {
         spell_id: Some(3010),
         autocast_allowed: true,
         autocast_enabled: true,
+        packed: CLAW_WORD,
         ..Default::default()
     };
     slots[8] = PetActionView {
@@ -73,6 +80,7 @@ fn hunter_slots() -> Vec<PetActionView> {
         texture: Some("PET_DEFENSIVE_TEXTURE".into()),
         is_token: true,
         active: true,
+        packed: 0x0600_0001,
         ..Default::default()
     };
     slots
@@ -121,7 +129,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
 
     // A pet appears. The tick is what runs the bar's OnUpdate, i.e. the sparkle trail — it is an
     // animation, so it exists from the first frame after the repaint, not from the repaint.
-    s.set_pet_actions(true, true, hunter_slots());
+    s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.tick(0.05);
@@ -194,7 +202,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     );
 
     // The pet goes: the bar hides again, sparkles and all.
-    s.set_pet_actions(false, true, Vec::new());
+    s.set_pet_actions(false, true, true, Vec::new());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     s.tick(0.05);
     s.resolve();
@@ -213,7 +221,7 @@ fn clicks_route_through_the_attack_toggle_fork() {
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
     declare_token_strings(&s);
-    s.set_pet_actions(true, true, hunter_slots());
+    s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     s.resolve();
 
@@ -236,7 +244,7 @@ fn clicks_route_through_the_attack_toggle_fork() {
     let mut slots = hunter_slots();
     slots[0].active = false;
     slots[0].attack_active = false;
-    s.set_pet_actions(true, true, slots);
+    s.set_pet_actions(true, true, true, slots);
     s.fire_event("PET_BAR_UPDATE", vec![]);
     s.resolve();
     click(&mut s, 87.0, 71.0, "LeftButton");
@@ -265,7 +273,7 @@ fn a_disabled_bar_greys_rather_than_hides() {
     load_pet_bar(&s);
     declare_token_strings(&s);
 
-    s.set_pet_actions(true, false, hunter_slots());
+    s.set_pet_actions(true, false, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     s.resolve();
     let quads = s.extract();
@@ -315,7 +323,7 @@ fn pet_bar_row(with_multibar: bool) -> (usize, f32) {
     load_xml(&s, "PetActionBar.xml");
     declare_token_strings(&s);
 
-    s.set_pet_actions(true, true, hunter_slots());
+    s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.tick(0.05);
@@ -358,5 +366,94 @@ fn the_pet_bar_rises_and_sheds_its_shelf_over_the_bottom_left_bar() {
     assert!(
         (risen.abs() - 43.0).abs() < 0.5,
         "the bar must rise by the ref's 43 px (moved {risen})"
+    );
+}
+
+/// **The drag, through the shipped XML** (decision 1010). One verb serves both ends — the button's
+/// `OnDragStart` and its `OnReceiveDrag` both call `PickupPetAction` — so what makes this a move
+/// rather than two pick-ups is the binding's own fork on whether the cursor is already carrying.
+///
+/// Also locks the grid: while a pet action rides the cursor every slot shows, including the empty
+/// ones, so there is somewhere visible to drop it. That is the whole reason `PET_BAR_SHOWGRID`
+/// exists, and the reason an unnamed button's `Hide()` is conditional.
+#[test]
+fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+
+    // Slot 5 is empty, so its button is hidden — until the grid comes up.
+    assert!(!s
+        .eval::<bool>("return BenillaPetActionButton5:IsShown()")
+        .unwrap());
+
+    s.run("BenillaPetActionButton_OnDragStart(BenillaPetActionButton4)")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_pet_set_actions(),
+        vec![vec![(3, CLAW_WORD & 0xFFFF_0000)]],
+        "the pickup blanks the slot it came from and tells the server"
+    );
+    s.tick(0.01);
+    s.resolve();
+    assert_eq!(
+        s.eval::<i64>("return BenillaPetActionBarFrame.showgrid")
+            .unwrap(),
+        1
+    );
+    assert!(
+        s.eval::<bool>("return BenillaPetActionButton5:IsShown()")
+            .unwrap(),
+        "the grid reveals the empty slots to drop onto"
+    );
+
+    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_pet_set_actions(),
+        vec![vec![(4, CLAW_WORD)]],
+        "and the drop writes the word verbatim into slot 5 (0-based 4)"
+    );
+    s.tick(0.01);
+    assert_eq!(
+        s.eval::<i64>("return BenillaPetActionBarFrame.showgrid")
+            .unwrap(),
+        0,
+        "the grid goes down with the payload"
+    );
+    assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+}
+
+/// A shift-click is the same pick-up, whichever mouse button carried it — the reference's own fork
+/// puts shift above the left/right split, so it never toggles autocast by accident.
+#[test]
+fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+
+    s.run(
+        "IsShiftKeyDown = function() return 1 end \
+         BenillaPetActionButton_OnClick(BenillaPetActionButton4, 'RightButton')",
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.take_pet_actions().is_empty() && s.take_pet_autocast_toggles().is_empty(),
+        "shift outranks both click arms — no cast, no autocast flip"
+    );
+    assert_eq!(
+        s.take_pet_set_actions(),
+        vec![vec![(3, CLAW_WORD & 0xFFFF_0000)]]
     );
 }

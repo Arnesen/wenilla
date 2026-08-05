@@ -171,6 +171,30 @@ impl ObjectFields {
     pub fn unit_stand_state(&self) -> u8 {
         (self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) & 0xff) as u8
     }
+    /// `UNIT_FIELD_BYTES_1` byte 1 — a hunter pet's **loyalty level**, `1..=8`, and `0` for a unit
+    /// that has none (VERIFIED vmangos `UNIT_BYTES_1_OFFSET_PET_LOYALTY = 1`; byte-verified
+    /// client-side as `[unit+0x110]+0x211`, the byte `GetPetLoyalty 0x4be700` indexes
+    /// `PetLoyalty.dbc` with). `0` is the binding's **nil**, not level 1.
+    pub fn unit_loyalty_level(&self) -> u8 {
+        ((self.get_u32(FIELD_UNIT_BYTES_1).unwrap_or(0) >> 8) & 0xff) as u8
+    }
+    /// `UNIT_FIELD_PETEXPERIENCE` / `UNIT_FIELD_PETNEXTLEVELEXP` — `GetPetExperience`'s
+    /// `(currXP, nextXP)`, in that order. Absent fields read `0`, which is the binding's own
+    /// gate-failure value: this pair is numbers on every path, never nil.
+    pub fn unit_pet_experience(&self) -> (u32, u32) {
+        (
+            self.get_u32(FIELD_UNIT_PETEXPERIENCE).unwrap_or(0),
+            self.get_u32(FIELD_UNIT_PETNEXTLEVELEXP).unwrap_or(0),
+        )
+    }
+    /// `UNIT_TRAINING_POINTS` split as the client splits it — `(total, spent)`, **high word
+    /// first**. The order is the load-bearing half: both are small numbers of the same magnitude,
+    /// so swapping them yields a pet that looks like it has spent everything or nothing, with no
+    /// error anywhere.
+    pub fn unit_training_points(&self) -> (u16, u16) {
+        let packed = self.get_u32(FIELD_UNIT_TRAINING_POINTS).unwrap_or(0);
+        ((packed >> 16) as u16, (packed & 0xffff) as u16)
+    }
     /// `UNIT_FIELD_BYTES_1` byte 3's `UNIT_VIS_FLAGS_CREEP (0x2)` — the sneaking visual, set by
     /// `SPELL_AURA_MOD_STEALTH` (vmangos `SpellAuras.cpp:3610`,
     /// `UNIT_BYTES_1_OFFSET_VIS_FLAG = 3`). The usable walk's only-stealthed leg tests exactly

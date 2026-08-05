@@ -172,6 +172,8 @@ fn escape_closes_the_options_window_before_opening_the_menu() {
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the Keybindings page's faux-scroll kit (1008)
+    load_xml(&s, "KeyBindingsPage.xml");
     load_xml(&s, "OptionsFrame.xml");
     load_xml(&s, "GameMenuFrame.xml");
 

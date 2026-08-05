@@ -31,6 +31,7 @@ use crate::ui_script::PointerOverUi;
 
 mod arc;
 pub(crate) mod camera;
+mod drunk;
 mod follow;
 
 mod gait;
@@ -448,6 +449,22 @@ fn control(
             store.map(|s| s.0.unit_flags() & UNIT_FLAG_STUNNED != 0)
         })
         .unwrap_or(false);
+    // Drunkenness (B210): this frame's wobble angle, computed once — the facing veer and the
+    // swim-pitch porpoise below both read it. Zero while sober (`wobble` early-outs on a 0.0
+    // fraction), and zero while stunned — the reference's wobble sits behind the same
+    // input-allowed chain as the turn emitters (`0x60aa47` → `0x5145b0`).
+    let drunk_wobble = {
+        let f = self_player
+            .single()
+            .ok()
+            .and_then(|(.., store, _, _, _, _)| store.and_then(|s| s.0.player_drunk_byte()))
+            .map_or(0.0, drunk::fraction);
+        if stunned {
+            0.0
+        } else {
+            drunk::wobble(time.elapsed().as_millis() as u32, f)
+        }
+    };
     run_look_session(
         &buttons,
         mouse_motion,
@@ -699,6 +716,9 @@ fn control(
         // animation a stunned character was still playing was the turn-in-place shuffle, which
         // `gait` derives from real yaw change.
         let turning = !mouselook && !stunned && (turn_left || turn_right);
+        // The net translate state — the reference's `flags & 0xf` (its four move bits), read off
+        // the *net* axes, not the keys: W+S streams no direction bit and doesn't translate.
+        let translating = fwd_axis != 0 || side_axis != 0;
         // This frame's keyboard-turn rotation — `seat_camera` carries the camera by it rigidly
         // (char and camera turn as one on the reference; director's call, closing 0050's open
         // "camera follow on turn" feel item).
@@ -711,12 +731,24 @@ fn control(
             if turn_right {
                 turn -= 1.0;
             }
-            // 0.75× while also translating — the verified `flags & 0x200f` case, so it reads the
-            // *net* axis, not the keys: W+S streams no direction bit and turns at the full rate.
-            let translating = fwd_axis != 0 || side_axis != 0;
+            // 0.75× while also translating — the verified `flags & 0x200f` case.
             let rate = TURN_RATE * if translating { TURN_RATE_MOVING } else { 1.0 };
             turn_delta = turn * rate * dt;
             player.face_yaw += turn_delta;
+        }
+        // The drunk veer (B210): while moving, the facing increments by the wobble angle every
+        // frame (`0x60aa70–0x60aab7`: `facing + wobble`, 2π-wrapped, committed via the normal
+        // facing pipeline `0x60de30` — so it streams on the wire like any turn). The slow sign
+        // oscillation of the pulse is what makes the walk meander. Skipped while a keyboard turn
+        // is held — the reference's `flags & 0x30` guard (`0x60aa5a`) — so deliberate turning
+        // stays crisp; both yaw conventions increase turning left, so the add maps sign-for-sign.
+        // The veer joins `turn_delta` so `seat_camera` carries the camera with it exactly like a
+        // keyboard turn (char and camera turn as one) — the reference's camera follows the drunk
+        // meander too (director's ref observation, decision 1018); without the carry the character
+        // staggers out from under a fixed camera.
+        if drunk_wobble != 0.0 && translating && !turning {
+            player.face_yaw += drunk_wobble;
+            turn_delta = drunk_wobble;
         }
         let face_rot = Quat::from_rotation_y(player.face_yaw);
         let move_fwd = flat(face_rot * Vec3::NEG_Z);
@@ -1011,6 +1043,17 @@ fn control(
                 player.swim_pitch = cam
                     .pitch
                     .clamp(-MOUSELOOK_PITCH_CLAMP, MOUSELOOK_PITCH_CLAMP);
+            }
+            // The drunk porpoise (B210): while swimming and moving, the pitch increments by the
+            // wobble ×4.0 every frame (`0x60aabc–0x60ab0a`: flag `0x200000` → `pitch +
+            // wobble·[0x80306c]`, clamped, committed via the pitch pipeline `0x60de70`). Same
+            // wobble as the facing veer above, so the nose and the heading meander together.
+            // The clamp is the callee `0x60aba0`'s FIXED ±π/2 bounds (`0x808acc`/`0x80c5e4`),
+            // NOT the mouselook set's ±89° — the reference carries both (decision 1009 §C4).
+            if drunk_wobble != 0.0 && translating {
+                player.swim_pitch = (player.swim_pitch
+                    + drunk_wobble * drunk::SWIM_PITCH_WOBBLE_SCALE)
+                    .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
             }
             swim_pitch = player.swim_pitch;
             // The travel basis (`0x7c5880`, the client's swim velocity direction): the FORWARD axis
@@ -1373,9 +1416,10 @@ fn control(
         // framing pivot — see `seat_camera`'s doc for why. Computed here (not in `camera`) because it
         // depends on the avatar's own capsule constants, which are a movement concern.
         let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
-        // `turn_delta` is the KEYBOARD turn only — the deck's yaw delta was already applied to
-        // `cam.yaw` at the ride block (frame motion carries the camera unconditionally; only
-        // input turns respect `seat_camera`'s look-session gate).
+        // `turn_delta` is the character's own turn this frame (keyboard turn, or the drunk veer)
+        // — the deck's yaw delta was already applied to `cam.yaw` at the ride block (frame motion
+        // carries the camera unconditionally; only input turns respect `seat_camera`'s
+        // look-session gate).
         seat_camera(
             dt,
             turn_delta,

@@ -34,8 +34,16 @@
           change, so the ref's PET_BAR_UPDATE / PET_BAR_UPDATE_COOLDOWN / UNIT_PET / the
           UNIT_FLAGS+UNIT_AURA pair it filters for arg1=="pet" collapse into one — the same
           collapse StanceBar.xml makes, for the same reason.
-        - No PET_BAR_SHOWGRID/HIDEGRID. That pair exists for the drag-an-empty-slot state; the
-          bar's own drag is not built yet, so the grid has nothing to reveal.
+        - The drag is ONE verb. PickupPetAction serves shift-click, OnDragStart and OnReceiveDrag
+          alike (decision 1010) — that is the reference's own shape, not a collapse of ours: the
+          binding itself forks on whether the cursor is already carrying a pet payload, so there is
+          no "place" counterpart the way PlaceAction answers PickupAction on the main bar. Nothing
+          else can produce that payload, which is why the pet bar can be rearranged and never
+          populated: its contents are the server's.
+        - PET_BAR_SHOWGRID/HIDEGRID are live, and are the PET payload's alone. The engine derives
+          them off the same cursor transition that drives ACTIONBAR_SHOWGRID/HIDEGRID but on a
+          disjoint predicate, so a held spell lights the action bar's empty slots and a held pet
+          action lights this bar's — never both, because neither payload can land on the other bar.
         - The autocast sparkle is TEXTURES, not the ref's <Model>. benilla has no Model widget
           (the Cooldown and the bag ItemAnim took the same posture): model the mechanism, let our
           own renderer draw it. The numbers below are the shipped model's own — see BENILLA_PET_
@@ -186,6 +194,13 @@
             -- not boilerplate: it is the whole autocast toggle, and without it a right click is
             -- simply never delivered.
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            -- The drag trio (decision 1010). Both buttons drag, ref-verbatim
+            -- (PetActionButton_OnLoad l.234) — and unlike the action bar's, ALL THREE gestures here
+            -- reach the same verb: the reference's OnClick-under-shift, OnDragStart and
+            -- OnReceiveDrag all call PickupPetAction, which forks on whether the cursor is already
+            -- carrying. LOCK_ACTIONBAR stays the vanilla default (unlocked), so — as on ActionBar
+            -- — the ref's cvar guard is not reproduced and the drag is always live.
+            button:RegisterForDrag("LeftButton", "RightButton")
             button.index = index
             button.icon = getglobal(button:GetName() .. "Icon")
             button.cooldown = getglobal(button:GetName() .. "Cooldown")
@@ -199,13 +214,32 @@
         -- the pet is already on the attack, in which case it calls off; right = flip autocast.
         function BenillaPetActionButton_OnClick(button, mouseButton)
             button:SetChecked(0)
-            if mouseButton == "RightButton" then
+            -- Shift outranks the button fork entirely (ref l.253-255): a shift-click on the pet bar
+            -- is a pick-up whichever mouse button it came from, and it never toggles autocast.
+            if IsShiftKeyDown() then
+                PickupPetAction(button.index)
+                BenillaPetActionBar_Update()
+            elseif mouseButton == "RightButton" then
                 TogglePetAutocast(button.index)
             elseif IsPetAttackActive(button.index) then
                 PetStopAttack()
             else
                 CastPetAction(button.index)
             end
+        end
+
+        -- Both drag ends are the SAME verb (ref l.269-283, byte-verified at `0x4be180`): with an
+        -- empty cursor it picks the slot up, with a pet payload already held it drops onto this
+        -- slot. There is no separate "place" binding on this bar, which is also why a spell or an
+        -- item can never land here — nothing but a pet slot produces the payload it accepts.
+        function BenillaPetActionButton_OnDragStart(button)
+            PickupPetAction(button.index)
+            BenillaPetActionBar_Update()
+        end
+
+        function BenillaPetActionButton_OnReceiveDrag(button)
+            PickupPetAction(button.index)
+            BenillaPetActionBar_Update()
         end
 
         -- Ref PetActionButton_OnEnter. A token slot has no spell to look up, so its tooltip is
@@ -256,7 +290,14 @@
                 if autoCastAllowed then button.autocastable:Show() else button.autocastable:Hide() end
                 button.autocasting = autoCastEnabled
 
-                if name then button:Show() else button:Hide() end
+                -- An unnamed slot hides — UNLESS the drop grid is up, which is the whole point of
+                -- the grid: while a pet action rides the cursor every slot shows, so you can see
+                -- where it may land (ref PetActionBar_Update l.122-128 + PetActionBar_ShowGrid).
+                if name or (BenillaPetActionBarFrame.showgrid or 0) > 0 then
+                    button:Show()
+                else
+                    button:Hide()
+                end
 
                 if texture then
                     SetDesaturation(button.icon, not usable and 1 or nil)
@@ -275,6 +316,13 @@
         function BenillaPetActionBar_OnLoad(frame)
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("PET_BAR_UPDATE")
+            -- The drop grid (decision 1010). A counter rather than a flag, ref-verbatim
+            -- (PetActionBar_ShowGrid/_HideGrid): our engine derives the pair off one payload edge
+            -- so they strictly alternate, but the counter is what the reference keeps and it costs
+            -- nothing to keep it too.
+            frame:RegisterEvent("PET_BAR_SHOWGRID")
+            frame:RegisterEvent("PET_BAR_HIDEGRID")
+            frame.showgrid = 0
             frame.clock = 0
             BenillaPetActionBar_OnEvent(frame)
         end
@@ -283,7 +331,12 @@
         -- bottom-stack pass (UIParent.xml, decision 0272) — the pet term of that stack is what
         -- lifts the cast bar and the chat frame clear of it, which is the ref's own
         -- PetActionBarFrame.xml:205-210.
-        function BenillaPetActionBar_OnEvent(frame)
+        function BenillaPetActionBar_OnEvent(frame, eventName)
+            if eventName == "PET_BAR_SHOWGRID" then
+                frame.showgrid = frame.showgrid + 1
+            elseif eventName == "PET_BAR_HIDEGRID" and frame.showgrid > 0 then
+                frame.showgrid = frame.showgrid - 1
+            end
             if PetHasActionBar() then
                 BenillaPetActionBar_Update()
                 frame:Show()
@@ -347,6 +400,8 @@
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>
             <OnClick>BenillaPetActionButton_OnClick(self, arg1)</OnClick>
+            <OnDragStart>BenillaPetActionButton_OnDragStart(self)</OnDragStart>
+            <OnReceiveDrag>BenillaPetActionButton_OnReceiveDrag(self)</OnReceiveDrag>
             <OnEnter>BenillaPetActionButton_OnEnter(self)</OnEnter>
             <OnLeave>BenillaPetActionButton_OnLeave(self)</OnLeave>
         </Scripts>
@@ -426,7 +481,7 @@
         </Frames>
         <Scripts>
             <OnLoad>BenillaPetActionBar_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaPetActionBar_OnEvent(self)</OnEvent>
+            <OnEvent>BenillaPetActionBar_OnEvent(self, event)</OnEvent>
             <OnUpdate>BenillaPetActionBar_OnUpdate(self, arg1)</OnUpdate>
             <OnShow>UIParent_ManageFramePositions()</OnShow>
             <OnHide>UIParent_ManageFramePositions()</OnHide>

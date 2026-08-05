@@ -22,12 +22,33 @@
 //! one-shot spell effects key them: `HolySmite_Low_Chest.m2` flares its slash ribbons' height
 //! `0 → 0.167 → 0` over 267 ms and fades their alpha `1 → 0`, so the old value[0] bake read a
 //! permanent zero height and Smite's impact slash never drew (the 0141 lesson, surfaced).
-//! `texSlot` stays value[0]-baked (constant in the shipped corpus). The `visibility` gate track
-//! (`+0xc0`) IS parsed — **per sequence** ([`RibbonEmitterDef::visible_in_anim`]): the thrown
-//! weapon keys its flight trail OFF in Stand (worn in the hand) and Impact (landed), ON only in
-//! InFlight (flying), so the spawn site lights it on the missile and never in the hand. This is
-//! the multi-sequence gating that was a named seam — the thrown weapon is its driving model. Ramp
-//! within a sequence isn't modeled (no shipped ribbon keys it): the band-start value stands.
+//! `texSlot` stays value[0]-baked (constant in the shipped corpus).
+//!
+//! The **visibility** gate track (`+0xc0`) parses as [`RibbonVisibility`]: the keys of every
+//! sequence, band-local, sampled **step** (a `u8` track is never blended, so both of the
+//! reference's sampler arms copy the same raw `values[k0]`). It is the source of the enable byte
+//! `block+0xbc` — ctor `0x71b34c` = 0, loader default `0x70f80e` = 1, then written every frame
+//! from the sampled value at `0x7176ee` / `0x717714` inside `0x714260`; `0x718960` only reads it,
+//! and no equipment/attach/sheathe writer exists anywhere in the binary. Clearing it **kills the
+//! whole ribbon's draw** (`0x7080c2` → the collect loop's continue at `0x708263`). wow-re
+//! `ribbon-emitter-spec.md` §6/§7, settled by the dispatch behind decision 1017: §7 previously
+//! left the writer OPEN and *guessed* the equip/attach route, and decision 1013 unwound the whole
+//! mechanism on the strength of that guess.
+//!
+//! The thrown weapon keys its flight trail OFF in Stand (worn in the hand) and Impact (landed),
+//! ON only in InFlight. Keeping the keys — rather than the old band-start bool per sequence — is
+//! not tidiness: shipped ribbons **do** key the gate mid-sequence. `G_FrostTrap.m2` lights its
+//! low rig 534 ms into Spawn (`867` inside the `333..1067` band) and its twelve upper streamers
+//! 200 ms into `Custom0` (`4200` inside `4000..5400`) — so a placed trap shows the low rig alone
+//! and the upper twelve fire only when it springs.
+//!
+//! **NOT transcribed**, both narrow, both recorded so the next reader knows they are open: the
+//! reference gates re-sampling on `timestamps.count > Model+0x8c`, which is 0 on an instance's
+//! first frame and 1 after — so a **single-key** track samples once and then latches, where we
+//! re-answer every frame (same result for a constant track, which is that whole population). And
+//! its key window is `interpolationRanges[rangeIdx]` with `rangeIdx` the **emitter's own bone's**
+//! active slot, not the model's, `lo >= hi` returning `lo` unsearched; we window by the playing
+//! sequence's band, which agrees wherever the ribbon's bone plays what the model plays.
 
 use std::io::Cursor;
 
@@ -108,31 +129,56 @@ pub struct RibbonEmitterDef {
     pub tile_rows: u16,
     pub tile_cols: u16,
     pub tex_slot: u16,
-    /// Per-sequence **visibility** from the `+0xc0` gate track (`M2Track<u8>`): `anim_id → whether
-    /// the trail shows during that sequence`, sampled at the sequence's band start. `None` = no
-    /// gate — keyless, global-seq-clocked, or ON in every sequence (the always-on majority: enchant
-    /// trails, wisps). `Some(map)` = the trail is dark in some sequence: the thrown weapon keys it
-    /// OFF in Stand (worn in hand) and Impact (landed), ON only in InFlight — so the spawn site
-    /// gates on the sequence its owner runs ([`crate::RibbonEmitterDef`]). The shipped keyed ribbons
-    /// are constant-per-sequence; ramping mid-sequence isn't modeled (no shipped ribbon does it).
-    pub visible_in_anim: Option<std::collections::HashMap<u16, bool>>,
+    /// The `+0xc0` **enable** track, per sequence and keyed within it (see the module doc).
+    /// `None` = no gate — keyless, global-seq-clocked, or ON everywhere (the always-on majority:
+    /// enchant trails, wisps). `Some(v)` = the trail goes dark somewhere, and the consumer must
+    /// sample [`RibbonVisibility::at`] against the sequence its host is playing, every frame.
+    pub visible: Option<RibbonVisibility>,
 }
 
-/// Per-sequence visibility from a ribbon's `+0xc0` gate track (`M2Track<u8>`, sequence-timeline).
-/// Returns `anim_id → whether the trail shows during that sequence`, sampled nearest-previous at
-/// each sequence's absolute band start (the shipped keyed ribbons are constant-per-sequence, so
-/// the band-start value stands for the whole sequence). `None` when there is nothing to gate:
+/// A ribbon's `+0xc0` enable track, resolved per sequence: for each `AnimationData.dbc` id the
+/// model authors, the gate's step keys inside that sequence's band, rebased to **band-local
+/// seconds**. Entry 0 of each list is the value the band opens on (the nearest-previous key at
+/// the band start), so a sample never has to look outside the sequence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RibbonVisibility {
+    by_anim: std::collections::HashMap<u16, Vec<(f32, bool)>>,
+}
+
+impl RibbonVisibility {
+    /// Whether the trail emits during `anim` at `t` seconds into the clip. Step
+    /// (nearest-previous) — the track's own `interp == 0`, which is what every shipped gate
+    /// carries. A sequence this model doesn't author falls back to `Stand`(0)'s answer, then to
+    /// the reference's load default: **enabled** (`0x70f80e` writes `block+0xbc = 1`).
+    pub fn at(&self, anim: u16, t: f32) -> bool {
+        let Some(keys) = self.by_anim.get(&anim).or_else(|| self.by_anim.get(&0)) else {
+            return true;
+        };
+        keys.iter()
+            .take_while(|&&(kt, _)| kt <= t)
+            .last()
+            .or(keys.first())
+            .is_some_and(|&(_, on)| on)
+    }
+
+    /// Every `(anim id, keys)` pair, for instruments that census the gate.
+    pub fn per_anim(&self) -> impl Iterator<Item = (u16, &[(f32, bool)])> {
+        self.by_anim.iter().map(|(&a, k)| (a, k.as_slice()))
+    }
+}
+
+/// Parse a ribbon's `+0xc0` gate track (`M2Track<u8>`, sequence-timeline) into a
+/// [`RibbonVisibility`]: per `anim_id`, the keys that fall inside that sequence's band, rebased to
+/// band-local seconds, preceded by the nearest-previous value at the band start. `None` when there
+/// is nothing to gate:
 ///
-/// - a keyless / out-of-range track (the always-on loader default), or
+/// - a keyless / out-of-range track (the reference's enabled-at-load default), or
 /// - a **global-sequence** clock (`gseq != 0xffff`) — a free-running loop, not per-sequence, or
-/// - a track that resolves ON in *every* sequence (a keyed-but-always-on author).
+/// - a track that resolves ON at every key of every sequence (a keyed-but-always-on author).
 ///
 /// Sequences: MD20 count @ `0x1c`, offset @ `0x20`, stride `0x44` — `anim_id` @ +0, band `[start,
 /// end]` @ +4/+8 (the same walk as [`crate::value_track::seq0_band`], one sequence wider).
-fn visibility_by_anim(
-    bytes: &[u8],
-    vis_track: usize,
-) -> Option<std::collections::HashMap<u16, bool>> {
+fn visibility_by_anim(bytes: &[u8], vis_track: usize) -> Option<RibbonVisibility> {
     if vis_track + 0x1c > bytes.len() {
         return None;
     }
@@ -154,7 +200,8 @@ fn visibility_by_anim(
 
     let nseq = le_u32(bytes, 0x1c) as usize;
     let oseq = le_u32(bytes, 0x20) as usize;
-    let mut map = std::collections::HashMap::new();
+    let mut by_anim: std::collections::HashMap<u16, Vec<(f32, bool)>> =
+        std::collections::HashMap::new();
     let mut any_off = false;
     for i in 0..nseq {
         let s = oseq + i * 0x44;
@@ -162,22 +209,29 @@ fn visibility_by_anim(
             break;
         }
         let anim = le_u16(bytes, s);
-        let start = le_u32(bytes, s + 4);
-        // Nearest-previous at the band start (M2 step interpolation); before the first key, the
-        // first key's value; keyless-safe default ON.
-        let mut on = keys.first().map(|&(_, v)| v).unwrap_or(true);
-        for &(t, v) in &keys {
-            if t <= start {
-                on = v;
-            } else {
-                break;
+        let (start, end) = (le_u32(bytes, s + 4), le_u32(bytes, s + 8));
+        // The band opens on the nearest-previous key (M2 step interpolation); before the first
+        // key, the first key's value; keyless-safe default ON.
+        let opening = keys
+            .iter()
+            .take_while(|&&(t, _)| t <= start)
+            .last()
+            .or(keys.first())
+            .is_some_and(|&(_, v)| v);
+        let mut band: Vec<(f32, bool)> = vec![(0.0, opening)];
+        // …then every key strictly inside the band, band-local. `G_FrostTrap`'s streamers live
+        // entirely here — their whole ON window opens 200 ms into the trigger sequence.
+        for &(t, v) in keys.iter().filter(|&&(t, _)| t > start && t <= end) {
+            let local = (t - start) as f32 / 1000.0;
+            if band.last().is_some_and(|&(_, prev)| prev != v) {
+                band.push((local, v));
             }
         }
-        any_off |= !on;
-        map.entry(anim).or_insert(on); // variations share an id — the head sequence wins
+        any_off |= band.iter().any(|&(_, v)| !v);
+        by_anim.entry(anim).or_insert(band); // variations share an id — the head sequence wins
     }
     // Nothing dark anywhere ⇒ effectively always-on: no gate to carry.
-    any_off.then_some(map)
+    any_off.then_some(RibbonVisibility { by_anim })
 }
 
 /// Parse an M2's ribbon emitters (see the module doc). Empty when the model has none or isn't a
@@ -262,7 +316,7 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
             tile_rows: le_u16(bytes, e + 0xa0).max(1),
             tile_cols: le_u16(bytes, e + 0xa2).max(1),
             tex_slot: track_first(bytes, e + 0xa4, 2, 0, le_u16),
-            visible_in_anim: visibility_by_anim(bytes, e + 0xc0),
+            visible: visibility_by_anim(bytes, e + 0xc0),
         });
     }
     Ok(out)
@@ -275,6 +329,35 @@ mod tests {
     /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
     fn vanilla_data_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
+    }
+
+    /// [`RibbonVisibility::at`]'s sampling law, on a hand-built gate: STEP (nearest-previous, the
+    /// track's own `interp == 0`), the band-opening entry answers before the first in-band key,
+    /// and a sequence the model doesn't author falls back to `Stand`(0) and then to the
+    /// reference's enabled-at-load default.
+    #[test]
+    fn visibility_samples_step_and_falls_back_to_stand() {
+        let vis = RibbonVisibility {
+            by_anim: [
+                (0u16, vec![(0.0, false)]),
+                (153u16, vec![(0.0, false), (0.2, true), (1.4, false)]),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        // Step within the band: dark, lit, dark — and lit right ON the key, not after it.
+        assert!(!vis.at(153, 0.0));
+        assert!(!vis.at(153, 0.199));
+        assert!(vis.at(153, 0.2), "step: the key's value takes effect AT it");
+        assert!(vis.at(153, 1.399));
+        assert!(!vis.at(153, 1.4));
+        // A sequence this gate doesn't list borrows Stand(0)'s answer…
+        assert!(!vis.at(147, 0.0), "unlisted sequence borrows Stand");
+        // …and with no Stand either, the load default stands: enabled.
+        let no_stand = RibbonVisibility {
+            by_anim: [(153u16, vec![(0.0, false)])].into_iter().collect(),
+        };
+        assert!(no_stand.at(147, 0.0), "no answer at all ⇒ the load default");
     }
 
     /// The real `HolySmite_Low_Chest.m2` (Smite's impact): its yellow slash IS its two ribbon
@@ -313,7 +396,7 @@ mod tests {
             // ON wherever it plays (its alpha, above, does the fade). So it must carry NO gate,
             // or the spawn site would wrongly darken it against a Stand default.
             assert_eq!(
-                r.visible_in_anim, None,
+                r.visible, None,
                 "an always-on slash carries no visibility gate"
             );
         }
@@ -337,11 +420,55 @@ mod tests {
         let defs = parse_m2_ribbon_emitters(&bytes).expect("parse ribbons");
         assert_eq!(defs.len(), 1, "the dagger authors one trail ribbon");
         let vis = defs[0]
-            .visible_in_anim
+            .visible
             .as_ref()
             .expect("the thrown dagger's trail IS visibility-gated");
-        assert_eq!(vis.get(&0), Some(&false), "Stand (worn in hand): dark");
-        assert_eq!(vis.get(&144), Some(&true), "InFlight (flying): lit");
-        assert_eq!(vis.get(&191), Some(&false), "Impact (landed): dark");
+        assert!(!vis.at(0, 0.0), "Stand (worn in hand): dark");
+        assert!(vis.at(144, 0.0), "InFlight (flying): lit");
+        assert!(!vis.at(191, 0.0), "Impact (landed): dark");
+    }
+
+    /// The placed **Frost Trap** — the model that proved the gate is keyed *inside* a sequence,
+    /// not constant across it (decisions 1011/1017). Its sixteen ribbons split in two: four low
+    /// ones on bones 45–48 at model z 0.129 that light 534 ms into Spawn and stay lit through
+    /// Closed — the tuft a placed trap shows, riding up off the crown on the verified `+g·t²` —
+    /// and twelve upper ones on bones 33–44 at z ≈ 1.55 that are dark in **every** rest state and
+    /// light only 200 ms into `Custom0`, when the trap springs.
+    ///
+    /// A band-start-only read answers "dark" for `Custom0` too, so the upper rig would never fire;
+    /// an ungated consumer draws all sixteen for ever, which is half of the tall column the
+    /// director reported (the other half was gravity's sign — see `benilla::ribbons`).
+    #[test]
+    fn real_frost_trap_upper_streamers_light_only_inside_the_trigger() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("World\\Goober\\G_FrostTrap.m2")
+            .expect("read G_FrostTrap.m2");
+        let defs = parse_m2_ribbon_emitters(&bytes).expect("parse ribbons");
+        assert_eq!(defs.len(), 16, "the frost trap authors sixteen trails");
+
+        // Ribbons 0..4: the low swirl at the trap's base. Dark as Spawn opens, lit 534 ms in
+        // (key 867 inside the 333..1067 band), and lit for all of Closed — what a placed trap shows.
+        for r in &defs[0..4] {
+            let v = r.visible.as_ref().expect("the low swirl IS gated");
+            assert!(!v.at(145, 0.0), "Spawn opens dark");
+            assert!(v.at(145, 0.6), "…and lights 534 ms in");
+            assert!(v.at(147, 0.0), "Closed: lit — the placed trap's swirl");
+        }
+        // Ribbons 4..16: the upper streamers. Dark in every rest state; lit only 200 ms into the
+        // trigger (key 4200 inside the 4000..5400 band) — the column, and only when sprung.
+        for r in &defs[4..16] {
+            let v = r.visible.as_ref().expect("the upper streamers ARE gated");
+            assert!(!v.at(147, 0.0), "Closed: dark — no column on a placed trap");
+            assert!(!v.at(148, 0.0), "Open: dark");
+            assert!(!v.at(153, 0.0), "the trigger OPENS dark");
+            assert!(v.at(153, 0.5), "…and lights 200 ms in");
+            assert!(!v.at(153, 1.45), "…then goes dark again at the band end");
+        }
     }
 }

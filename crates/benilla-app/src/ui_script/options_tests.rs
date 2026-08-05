@@ -40,6 +40,8 @@ fn harness_on(mut s: UiScript) -> UiScript {
         "UiPanels.xml",
         "GameTooltip.xml",
         "UIDropDownMenu.xml",
+        "ScrollTemplates.xml", // the Keybindings page's faux-scroll kit
+        "KeyBindingsPage.xml", // the Keybindings body's templates + script (1008)
         "OptionsFrame.xml",
         "GameMenuFrame.xml",
     ] {

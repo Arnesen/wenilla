@@ -45,13 +45,12 @@ fn harness() -> UiScript {
     harness_with(&[])
 }
 
-/// The nine buttons, top to bottom — the ERA ladder (the director's call on the 0951 review;
-/// GameMenuFrame.xml's header SCOPE note quotes the era source) plus the 0997 Key Bindings
-/// seat carved at the middle section's head (the 1.13/1.14 menu's own entry — the window's
-/// shape source — returning under 0985's seat-carving rule).
-const LADDER: [&str; 9] = [
+/// The eight buttons, top to bottom — the ERA ladder, its own shape again (the director's call
+/// on the 0951 review; GameMenuFrame.xml's header SCOPE note quotes the era source). 0997's
+/// carved Key Bindings seat left with its standalone window — decision 1008 folded key
+/// bindings into the Options window, where the era menu always pointed.
+const LADDER: [&str; 8] = [
     "GameMenuButtonOptions",
-    "GameMenuButtonKeybindings",
     "GameMenuButtonAddOns",
     "GameMenuButtonEditMode",
     "GameMenuButtonSupport",
@@ -62,10 +61,10 @@ const LADDER: [&str; 9] = [
 ];
 
 /// The ladder geometry — the era layout engine's own numbers (MainMenuFrameTemplates: padding
-/// 32/28/28/28, spacing 0, AddSection gap 20) with the 0997 Key Bindings rung: 200×309, each
-/// button 144×21 at x=28, tops at 32/73/94/115/136/157/198/219/260 — three sections split by
-/// the 20-unit gaps after Options, after Macros, and before Return to Game. First thing to
-/// break if the era shape is ever "tidied".
+/// 32/28/28/28, spacing 0, AddSection gap 20): 200×288, each button 144×21 at x=28, tops at
+/// 32/73/94/115/136/177/198/239 — three sections split by the 20-unit gaps after Options,
+/// after Macros, and before Return to Game. First thing to break if the era shape is ever
+/// "tidied".
 #[test]
 fn the_menu_has_the_era_frame_and_button_ladder() {
     let mut s = harness();
@@ -75,11 +74,11 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    assert_eq!((w, h), (200.0, 309.0), "the era frame size");
+    assert_eq!((w, h), (200.0, 288.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
-    const TOPS: [f64; 9] = [32.0, 73.0, 94.0, 115.0, 136.0, 157.0, 198.0, 219.0, 260.0];
+    const TOPS: [f64; 8] = [32.0, 73.0, 94.0, 115.0, 136.0, 177.0, 198.0, 239.0];
     for (name, down) in LADDER.iter().zip(TOPS) {
         let (bw, bh, btop, bleft) = s
             .eval::<(f64, f64, f64, f64)>(&format!(
@@ -724,7 +723,13 @@ fn backpack() -> ContainerState {
 /// real load order; the bare-menu harness elsewhere exercises the `or 1` guard implicitly.
 #[test]
 fn the_menu_rides_the_shared_era_window_scale() {
-    let mut s = harness_with(&["GameTooltip.xml", "UIDropDownMenu.xml", "OptionsFrame.xml"]);
+    let mut s = harness_with(&[
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "KeyBindingsPage.xml",
+        "OptionsFrame.xml",
+    ]);
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());

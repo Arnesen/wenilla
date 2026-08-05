@@ -310,6 +310,136 @@ fn left_clicking_the_pet_frame_targets_it() {
     assert!(s.take_target_requests().is_empty());
 }
 
+/// The GlobalStrings the happiness tooltip resolves by key. Loaded from the MPQ in production; the
+/// test declares the ones it reads, the pet-bar tests' convention. (That the real keys exist in the
+/// shipped file is asserted separately, by name, in `ui_pet_stats`.)
+fn declare_happiness_strings(s: &UiScript) {
+    s.run(
+        "PET_HAPPINESS1 = 'Unhappy' PET_HAPPINESS2 = 'Content' PET_HAPPINESS3 = 'Happy' \
+         PET_DAMAGE_PERCENTAGE = 'Damage: %d%%' \
+         LOSING_LOYALTY = 'Losing Loyalty' GAINING_LOYALTY = 'Gaining Loyalty'",
+    )
+    .unwrap();
+}
+
+fn stats(
+    hunter: bool,
+    happiness: Option<u32>,
+    damage: f32,
+    rate: f32,
+) -> benilla_ui::script::PetStats {
+    benilla_ui::script::PetStats {
+        hunter_pet: hunter,
+        happiness,
+        damage_percentage: damage,
+        loyalty_rate: rate,
+        loyalty: Some("(Loyalty Level 6) Best Friend".into()),
+        training_points: (170, 130),
+        experience: (4200, 8000),
+    }
+}
+
+/// The happiness icon end to end through the real XML (decision 1005): shown for a hunter pet,
+/// re-cut per bucket, hidden for anything that is not one.
+///
+/// The tooltip key is the assertion rather than the texcoords because it is what proves **which
+/// branch ran** — `PET_HAPPINESS2` can only come from the `happiness == 2` arm.
+#[test]
+fn the_happiness_icon_shows_per_bucket_and_hides_for_a_non_hunter_pet() {
+    let mut s = load_pet_frame();
+    declare_happiness_strings(&s);
+    s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
+
+    for (bucket, tip, rate, loyalty_line) in [
+        (3u32, "Happy", 20.0f32, Some("Gaining Loyalty")),
+        (2, "Content", 0.0, None),
+        (1, "Unhappy", -10.0, Some("Losing Loyalty")),
+    ] {
+        s.set_pet_stats(true, stats(true, Some(bucket), 125.0, rate));
+        s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
+        assert!(
+            s.eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+                .unwrap(),
+            "bucket {bucket} must show the icon"
+        );
+        assert_eq!(
+            s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+                .unwrap(),
+            tip,
+            "bucket {bucket} took the wrong texcoord branch"
+        );
+        // The loyalty line is chosen by the SIGN of the rate — and is absent at exactly zero.
+        let line = s
+            .eval::<Option<String>>("return BenillaPetFrameHappiness.tooltipLoyalty")
+            .unwrap();
+        assert_eq!(
+            line.as_deref(),
+            loyalty_line,
+            "bucket {bucket} loyalty line"
+        );
+    }
+
+    // A warlock's imp: `HasPetUI`'s second return is nil, so the icon hides however happy the
+    // first return looks.
+    s.set_pet_stats(true, stats(false, Some(3), 125.0, 20.0));
+    s.fire_event("UNIT_HAPPINESS", vec![]);
+    assert!(!s
+        .eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+        .unwrap());
+}
+
+/// **Bucket 0 keeps the icon up.** The reference hides on `not happiness`, and `0` is truthy in
+/// Lua — so a client that folded bucket 0 into nil would hide a frame the reference shows. This is
+/// the trap wow-re calls out by name, tested where it would actually bite: in the frame.
+#[test]
+fn happiness_bucket_zero_keeps_the_icon_showing() {
+    let mut s = load_pet_frame();
+    declare_happiness_strings(&s);
+    s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
+
+    s.set_pet_stats(true, stats(true, Some(0), 100.0, 0.0));
+    s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
+    assert!(
+        s.eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+            .unwrap(),
+        "bucket 0 is a number, not the hide case"
+    );
+
+    // …whereas a genuine nil — the gate failure — does hide it.
+    s.set_pet_stats(true, stats(true, None, 100.0, 0.0));
+    s.fire_event("UNIT_HAPPINESS", vec![]);
+    assert!(!s
+        .eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+        .unwrap());
+}
+
+/// `UNIT_HAPPINESS` repaints the icon **alone** — the reference's own arm returns before the
+/// frame-wide update, so a happiness tick must not be a full repaint.
+#[test]
+fn unit_happiness_repaints_only_the_icon() {
+    let mut s = load_pet_frame();
+    declare_happiness_strings(&s);
+    s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 2)));
+    s.set_pet_stats(true, stats(true, Some(1), 75.0, -10.0));
+    s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
+    assert_eq!(
+        s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+            .unwrap(),
+        "Unhappy"
+    );
+
+    // Feed it up a bucket and fire ONLY the happiness event.
+    s.set_pet_stats(true, stats(true, Some(3), 125.0, 20.0));
+    s.fire_event("UNIT_HAPPINESS", vec![]);
+    assert_eq!(
+        s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+            .unwrap(),
+        "Happy",
+        "UNIT_HAPPINESS must re-cut the icon on its own"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The layering law (decision 0884), the pet frame's copy of the player/target/party tests: the
 /// frame art must draw OVER the bar fills, which only the frame LEVEL can hold — the draw layer is
 /// bucket-wide. A "simplification" back to declaration order puts the bars on top as pasted slabs.

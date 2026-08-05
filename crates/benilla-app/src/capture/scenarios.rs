@@ -940,7 +940,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::OptionsWorldDetail),
     },
-    // The Key Bindings window on its Movement page (0997). Run with
+    // The options window's Keybindings page, Movement expanded (1008). Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-keybindings`.
     Scenario {
         name: "ui-keybindings",

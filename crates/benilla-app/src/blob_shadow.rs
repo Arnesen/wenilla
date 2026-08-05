@@ -216,7 +216,8 @@ fn update_shadows(
     // until a wow-re shadow-consumer trace pins it.
     mount_anims: Query<(&NetEntity, &ModelAnimations), With<crate::entities::mount::MountBody>>,
     mut shadows: Query<(&BlobShadow, &mut ShadowKey, &mut ShadowVerts)>,
-    // Once-a-second census at debug level (`RUST_LOG=benilla::blob_shadow=debug`): how many
+    // Once-a-second census at debug level (`RUST_LOG=benilla_app::blob_shadow=debug` — the lib
+    // target is `benilla_app`; a `benilla::` filter silently matches nothing): how many
     // shadows exist and why the hidden ones hid — the first question of any "no shadow under X"
     // report, answerable from a log instead of a debugger.
     mut census_at: Local<f32>,

@@ -104,3 +104,47 @@ fn character_model_detects_no_ground_quads() {
         "no body batch reads as a ground quad"
     );
 }
+
+/// The quad's **static M2Color tint** ([`benilla_formats::GroundQuad::tint`]) — the constant the
+/// mesh path draws through its vertex-colour bake, which a decal consumer has no vertex buffer to
+/// carry. The Flare's ground wash is the case that named it: two 13.89-yd quads on the NEUTRAL
+/// `GENERICGLOW*` radials, whose entire colour is the constant `(0.992, 0.467, 0.0)` — drawn
+/// untinted, an additive pool of them blows white instead of laying down dim orange. Battle
+/// Shout's crescents are the other side of the same gate: their colour VARIES (white→red over the
+/// clip), so it rides `rgb_anim`, the vertex bake is cleared, and this must read white — that is
+/// what keeps the two from double-applying.
+#[test]
+fn ground_quads_carry_their_static_m2color_tint() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = open_chain(&data).expect("open chain");
+
+    let bytes = chain
+        .read_file("SPELLS\\Flare_State_Base.m2")
+        .expect("Flare state-base model");
+    let subs = parse_m2_render_submeshes(&bytes, "", &[]).expect("submeshes");
+    let quads: Vec<_> = subs.iter().filter_map(|s| s.ground_quad()).collect();
+    assert_eq!(quads.len(), 2, "both washes are ground quads");
+    for q in &quads {
+        assert!((q.tint[0] - 0.992).abs() < 1e-3, "warm red: {:?}", q.tint);
+        assert!((q.tint[1] - 0.467).abs() < 1e-3, "warm green: {:?}", q.tint);
+        assert!(q.tint[2] < 1e-3, "no blue at all: {:?}", q.tint);
+        // 13.89 yd across — the wash the tint has to colour.
+        let span = q.corners[3][0] - q.corners[0][0];
+        assert!((span - 13.89).abs() < 0.02, "wash span {span}");
+    }
+
+    // The animated twin: colour varies, so it rides `rgb_anim` and the vertex bake is cleared.
+    let bytes = chain
+        .read_file("Spells\\BattleShout_Cast_Base.m2")
+        .expect("Battle Shout cast-base model");
+    let subs = parse_m2_render_submeshes(&bytes, "", &[]).expect("submeshes");
+    for sub in &subs {
+        let q = sub.ground_quad().expect("crescent");
+        assert!(sub.rgb_anim.is_some(), "the crescent's colour is a loop");
+        assert_eq!(q.tint, [1.0; 3], "…so the static tint stays white");
+    }
+}

@@ -306,6 +306,12 @@ pub(crate) struct Model {
     pub(crate) pet_autocast_toggles: Vec<u32>,
     /// `PetStopAttack()` calls queued — a count, since the verb takes no argument.
     pub(crate) pet_stop_attacks: u32,
+    /// Pet bar writes queued by the drag ([`cursor::pet`], decision 1010) — **one entry per
+    /// `CMSG_PET_SET_ACTION`**, each holding the one or two `(0-based position, packed word)` pairs
+    /// that send names. The nesting is the point: the server tells the one-pair form from the
+    /// two-pair form **by body size**, so a relocation and its write must travel together and must
+    /// not be flattened into a stream of singles.
+    pub(crate) pet_set_actions: Vec<Vec<(u32, u32)>>,
 
     /// The per-bag container snapshot (keyed by live-API bag id, 0 = backpack) the app pushes,
     /// and the `UseContainerItem` intents it drains — the container seam ([`container`]).
@@ -332,7 +338,16 @@ pub(crate) struct Model {
     /// arm, any surface (bags/doll/actions alike — the reference's own "any placeable payload
     /// shows the bar's drop grid"). A Some→Some transition (the action hop) updates nothing here,
     /// so no spurious HIDE+SHOW churns out of one gesture.
+    ///
+    /// The **pet** payload arm is excluded (decision 1010): `PlaceAction` refuses it, so lighting
+    /// the action bar's empty slots for a payload that cannot land there would be an invitation to
+    /// a no-op. It drives [`Self::pet_grid_shown`] instead.
     pub(crate) cursor_grid_shown: bool,
+    /// The same mirror for the PET bar's grid — `PET_BAR_SHOWGRID`/`PET_BAR_HIDEGRID`, which the
+    /// reference fires from inside the pet-action pickup builder itself (`0x494f28`) rather than
+    /// from a shared cursor transition. So the two grids are disjoint: a spell lights the action
+    /// bar's, a pet action lights the pet bar's, and neither lights both.
+    pub(crate) pet_grid_shown: bool,
     /// The app's world pick under the cursor — the reference's click-time pick state
     /// (`[this+0x350]`: nothing / terrain / object), fed once per frame
     /// ([`super::UiScript::set_world_pick`]; stays `Nothing` in tests/captures). Routes
@@ -792,12 +807,14 @@ impl Model {
             pet_actions_pressed: Vec::new(),
             pet_autocast_toggles: Vec::new(),
             pet_stop_attacks: 0,
+            pet_set_actions: Vec::new(),
             containers: HashMap::new(),
             container_uses: Vec::new(),
             container_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
             cursor_grid_shown: false,
+            pet_grid_shown: false,
             world_pick: cursor::WorldPick::default(),
             container_moves: Vec::new(),
             container_repairs: Vec::new(),
