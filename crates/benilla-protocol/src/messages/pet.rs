@@ -436,6 +436,28 @@ pub fn pet_cancel_aura(pet_guid: u64, spell_id: u32) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_PET_SPELL_AUTOCAST` (opcode 755): `u64 petGuid`, `u32 spellId`, `u8 state` —
+/// **thirteen** bytes, and the trailing field is a byte (decision 1032).
+///
+/// Both ends agree independently. The client builds it at `0x4bcd5f`–`0x4bcdb2`: `push 0x2f3`, the
+/// guid pair through the u64 writer `0x418370`, the spell id through the u32 writer `0x418190`,
+/// then `(word >> 30) & 0xFFFFFF01` through **`0x418070`**, the *byte* writer — which is also why
+/// that mask ends in `01`. vmangos reads `guid, spellId, state` in that order with `state` a
+/// `uint8` (`PetSpellAutocast::ReadFromWorldPacket`, `Server/Packets/Pet.cpp:44-49`).
+///
+/// **This is the pet SPELLBOOK's autocast verb, not the pet bar's.** The bar's right click sends
+/// [`pet_set_action`], whose body names a slot *position*; the book has no positions, so this one
+/// names the spell. The server's handler is correspondingly different — it re-derives which slots
+/// to update itself (`HandlePetSpellAutocastOpcode`, `PetHandler.cpp:451-478`), gating on
+/// `pet->HasSpell(spellId) && Spells::IsAutocastable(spellId)`. No reply packet.
+pub fn pet_spell_autocast(pet_guid: u64, spell_id: u32, enabled: bool) -> Vec<u8> {
+    let mut body = Vec::with_capacity(13);
+    body.extend_from_slice(&pet_guid.to_le_bytes());
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body.push(u8::from(enabled));
+    body
+}
+
 /// Body of `CMSG_PET_SET_ACTION` (opcode 372): `u64 petGuid` then one or two
 /// `(u32 position, u32 packedData)` pairs. The server distinguishes the forms **by body size
 /// alone** — 24 bytes ⇒ two entries, anything else ⇒ one (`PetSetAction::ReadFromWorldPacket`,

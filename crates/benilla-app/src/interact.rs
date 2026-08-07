@@ -15,7 +15,7 @@
 //!   misses).
 //! - the **inspector surface** ([`inspect_ui`]) — a standalone, key-toggleable overlay (**the dev
 //!   chord + `I`**): a weak "armed" pill plus a small identity card that follows the cursor over any
-//!   picked object. It's its own surface, *not* a section of the backtick debug panel, so
+//!   picked object. It's its own surface, *not* a section of the dev-chord debug panel, so
 //!   identifying a thing costs one chord and no panel.
 //! - the **cast journal** ([`journal`]) — the *temporal* half of the same instrument: a spell is an
 //!   event, gone before a cursor could reach it, so every cast edge is recorded as it flows past and

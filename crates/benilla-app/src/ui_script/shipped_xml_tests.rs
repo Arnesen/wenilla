@@ -85,6 +85,93 @@ fn loading_the_shipped_ui_queues_no_sounds() {
     );
 }
 
+/// **Every texture path the shipped UI names RESOLVES in the real archives** — the tripwire for a
+/// mis-typed `file=`, which the renderer reports by drawing a plain WHITE QUAD and nothing else.
+///
+/// A sprite that fails to resolve is `None` all the way to `ui_pass`, where a texture-less quad
+/// samples the shared 1×1 white image (that fallback is what makes flat-shaded quads batch, so it
+/// cannot itself be made loud). The bug it hid (1046): six `file=` attributes in
+/// `SpellBookFrame.xml` were written with **doubled** separators — `Interface\\SpellBook\\…`, the
+/// Lua escaping, in an XML attribute where a backslash is already literal. `normalize_path` only
+/// folds case and slashes, so the doubled key missed the archive hash and the pet book shipped with
+/// a white slab over its autocast ring and another under its tab row. Every gate was green.
+///
+/// The shape half runs everywhere; the resolve half needs client data and skips without it (a
+/// hand-kept list of real file names would rot into agreeing with itself — the `text=` sweep's
+/// argument below). Resolution goes through the renderer's own `sprite_key`, not a copy of it.
+#[test]
+fn every_shipped_texture_path_resolves_in_the_client_archives() {
+    use benilla_ui::framexml::{Element, TopLevel};
+
+    // `file=` on a texture element is an ARCHIVE path; `<Script file=>`/`<Include file=>` name our
+    // own source files and are top-level items, not elements, so walking elements can't see them.
+    fn walk(el: &Element, file: &str, out: &mut Vec<(String, String, String)>) {
+        for (key, value) in el.attrs() {
+            let archive_path = ["file", "bgfile", "edgefile"]
+                .contains(&key.to_ascii_lowercase().as_str())
+                && !value.is_empty();
+            if archive_path {
+                out.push((file.to_string(), el.tag.clone(), value.clone()));
+            }
+        }
+        for child in &el.children {
+            walk(child, file, out);
+        }
+    }
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut refs = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "xml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        let doc = benilla_ui::framexml::parse(&text).expect("parses");
+        for item in &doc.items {
+            match item {
+                TopLevel::Font(el) | TopLevel::Template(el) | TopLevel::Instance(el) => {
+                    walk(el, &file, &mut refs);
+                }
+                TopLevel::Include(_) | TopLevel::Script(_) => {}
+            }
+        }
+    }
+    // Never let the sweep pass by matching nothing — the shipped UI names hundreds of textures.
+    assert!(refs.len() >= 200, "only {} texture paths swept", refs.len());
+
+    // The shape half: a doubled separator is the Lua escaping written into XML, and it resolves to
+    // nothing. Checked without the client so a data-less machine still catches this exact class.
+    for (file, tag, path) in &refs {
+        assert!(
+            !path.contains("\\\\"),
+            "{file}: <{tag} file=\"{path}\"> has DOUBLED separators — XML attributes are not Lua \
+             strings, so the backslashes stay doubled, the archive lookup misses, and the widget \
+             draws as a white quad"
+        );
+    }
+
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!(
+            "skipping the resolve half: no client data at {}",
+            data.display()
+        );
+        return;
+    }
+    let chain = benilla_formats::open_chain(&data).expect("open chain");
+    let missing: Vec<String> = refs
+        .iter()
+        .filter(|(_, _, path)| !chain.contains(&crate::assets::sprite_key(path)))
+        .map(|(file, tag, path)| format!("{file}: <{tag} file=\"{path}\">"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "texture paths that resolve to nothing (each draws as a white quad): {missing:#?}"
+    );
+}
+
 /// **Every `text=` in the shipped UI is answerable against the REAL `GlobalStrings.lua`** — the
 /// tripwire for the defect that put "CREATE_MACROS" across the macro window's title bar (0991).
 ///
@@ -247,4 +334,76 @@ fn every_texture_frame_outranks_its_status_bars() {
         "only {checked} texture-frame/bar pairs checked — the name sweep found nothing"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The boot phase is inert.** `Fonts.xml` — the only file loaded at `Startup` since 1051 — is a
+/// pure registry: it materializes no frames, so nothing of the in-game UI can draw, tick or ring
+/// before a character is in the world. (1033's tack was a load-time handler firing on the login
+/// screen; this is the structural half of that fix.)
+#[test]
+fn the_boot_phase_materializes_no_frames() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml");
+    let text = std::fs::read_to_string(&dir).expect("Fonts.xml");
+    let doc = benilla_ui::framexml::parse(&text).expect("parses");
+    let provider = |_: &str| -> Option<String> { None };
+    let report = benilla_ui::loader::load(&s, &doc, &provider);
+    assert_eq!(
+        report.frames, 0,
+        "the boot-phase load materialized {} frame(s) — the login screen is meant to carry none",
+        report.frames
+    );
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+}
+
+/// **The font registry alone covers the WHOLE glyph-atlas bake plan** — the property that makes
+/// 1051's split safe, asserted rather than reasoned.
+///
+/// Our native glue screens share the one atlas, and that atlas bakes **once**, on the first
+/// `Update`, from `script.font_objects()` (`ui_text/atlas.rs` — the face size-list extension *and*
+/// the outlined-cell census). So the registry must be complete at boot even though the other 55
+/// manifest files now load at world entry. It is: three font objects live outside `Fonts.xml`
+/// (`GameFontNormalMed1` 13, `OptionsFontHighlightMedium` 14, `OptionsFontHighlightHuge` 20), all
+/// un-outlined, all at heights `Fonts.xml` already declares.
+///
+/// If this fails, someone added a font object to a non-`Fonts.xml` file with a new height or an
+/// outline. In-game text would silently lose that variant for the whole session — the bake has
+/// already happened by the time the file loads. Either move it into `Fonts.xml` or make the atlas
+/// rebakeable.
+#[test]
+fn the_font_registry_alone_covers_the_whole_bake_plan() {
+    let plan = |whole: bool| -> std::collections::BTreeSet<(String, String, String)> {
+        let mut s = benilla_ui::script::UiScript::new().unwrap();
+        s.set_screen_size(1024.0, 768.0);
+        if whole {
+            let _ = super::load_default_ui(&s);
+        } else {
+            let _ = super::load_font_registry(&s);
+        }
+        s.font_objects()
+            .iter()
+            .map(|f| {
+                (
+                    f.font.clone().unwrap_or_default().to_ascii_lowercase(),
+                    format!("{:?}", f.height),
+                    format!("{:?}", f.outline),
+                )
+            })
+            .collect()
+    };
+    let whole = plan(true);
+    let registry_only = plan(false);
+    let missing: Vec<_> = whole.difference(&registry_only).collect();
+    assert!(
+        missing.is_empty(),
+        "these (font, height, outline) combinations exist in the full manifest but NOT in the \
+         boot-time font registry, so the atlas would never bake them: {missing:#?}"
+    );
+    // Never let this pass by finding nothing on both sides.
+    assert!(
+        registry_only.len() >= 19,
+        "only {} combinations swept — the registry sweep broke",
+        registry_only.len()
+    );
 }

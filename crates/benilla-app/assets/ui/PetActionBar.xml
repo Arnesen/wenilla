@@ -44,6 +44,15 @@
           them off the same cursor transition that drives ACTIONBAR_SHOWGRID/HIDEGRID but on a
           disjoint predicate, so a held spell lights the action bar's empty slots and a held pet
           action lights this bar's — never both, because neither payload can land on the other bar.
+        - NO HotKey corner, and none is missing (1052). The ref's button inherits
+          ActionButtonTemplate's $parentHotKey and repaints it on UPDATE_BINDINGS — but
+          PetActionButton_SetHotkeys (l.311-319) writes the label only when
+          `bindingSuffix == this:GetID()`, a STRING against a NUMBER, which Lua never equates. So
+          the real 1.12 pet bar renders an empty hotkey on every slot, always, and the reporter's
+          own reference shot for B218 shows exactly that: CTRL-1..CTRL-5 bound in the window, no
+          glyph on any pet button. An empty corner is the faithful render; a filled one would be
+          the divergence. (Our own action bar's corners are real — ActionBar.xml — because the
+          ref's ActionButton_UpdateHotkeys has no such bug.)
         - The autocast sparkle is TEXTURES, not the ref's <Model>. benilla has no Model widget
           (the Cooldown and the bag ItemAnim took the same posture): model the mechanism, let our
           own renderer draw it. The numbers below are the shipped model's own — see BENILLA_PET_
@@ -225,6 +234,31 @@
                 PetStopAttack()
             else
                 CastPetAction(button.index)
+            end
+        end
+
+        -- The KEYBIND pair (decision 1052) — ref PetActionButtonDown/Up l.218-231, which is where
+        -- the BONUSACTIONBUTTONn bindings land: their bodies call BonusActionButtonDown/Up, and
+        -- those are one-liners onto these (BonusActionBarFrame.lua:106-112). The ref's own
+        -- runOnUp shape: DOWN only shows the pushed art, UP fires.
+        --
+        -- Note what the key path does NOT do — it is a bare CastPetAction, with none of the click
+        -- path's forks: no shift pick-up, no right-button autocast, and no IsPetAttackActive
+        -- call-off. That is the reference's split, not a simplification of ours: the fork lives in
+        -- PetActionButton_OnClick, which a key press never reaches. So CTRL-1 on a pet already
+        -- attacking re-issues Attack where a left click would call it off.
+        function BenillaPetActionButtonDown(id)
+            local button = getglobal("BenillaPetActionButton" .. id)
+            if ( button:GetButtonState() == "NORMAL" ) then
+                button:SetButtonState("PUSHED")
+            end
+        end
+
+        function BenillaPetActionButtonUp(id)
+            local button = getglobal("BenillaPetActionButton" .. id)
+            if ( button:GetButtonState() == "PUSHED" ) then
+                button:SetButtonState("NORMAL")
+                CastPetAction(id)
             end
         end
 

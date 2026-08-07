@@ -266,6 +266,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
             passive: false,
             current: false,
             cooldown: None,
+            ..Default::default()
         }],
     });
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();

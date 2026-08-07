@@ -71,7 +71,7 @@ use bevy::prelude::*;
 use benilla_protocol::guid;
 
 use crate::names::NameCache;
-use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{Guid, GuidIndex, ObjectStore, SelfPlayer};
 
 use super::{scan, Selection};
 
@@ -567,7 +567,7 @@ pub(super) fn follow_requests(
 #[allow(clippy::type_complexity)] // one bundled system param — the app's convention for big query sets
 pub(crate) struct SelectCommit<'w, 's> {
     selection: ResMut<'w, Selection>,
-    net: Res<'w, NetCommands>,
+    seam: crate::creature_anim::AttackSeam<'w, 's>,
     me: Query<
         'w,
         's,
@@ -588,7 +588,7 @@ impl SelectCommit<'_, '_> {
         let me = self.me.single().ok();
         // The new-target classification `scan::commit` expects from its callers (it does not
         // re-derive one) — the same `can_attack` the cursor and the TAB scan pass.
-        let attackable = scan::can_attack(
+        let attackable = super::relations::can_attack(
             self.stores.get(entity).ok(),
             self.factions.as_deref(),
             &self.reputations,
@@ -596,7 +596,7 @@ impl SelectCommit<'_, '_> {
         );
         scan::commit(
             &mut self.selection,
-            &self.net,
+            &mut self.seam,
             entity,
             guid,
             me.is_some_and(|(_, _, engaged)| engaged),

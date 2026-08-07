@@ -70,4 +70,24 @@ impl WorldWriter {
             &messages::pet_set_action(pet_guid, entries),
         )
     }
+
+    /// Flip one pet **spellbook** entry's autocast (`CMSG_PET_SPELL_AUTOCAST`, layout in
+    /// [`messages::pet_spell_autocast`]) — `ToggleSpellAutocast`'s send (decision 1032).
+    ///
+    /// The fifth verb, and the one easy to mistake for the fourth: the pet BAR's autocast right
+    /// click is [`WorldWriter::pet_set_action`] with one entry (a slot and its word), while this
+    /// names a **spell id**, because the book it comes from has no slots. Same bit, same
+    /// server-side effect; different opcode, different body, different handler. Like the rest of
+    /// this file: no reply.
+    pub fn pet_spell_autocast(
+        &mut self,
+        pet_guid: u64,
+        spell_id: u32,
+        enabled: bool,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_PET_SPELL_AUTOCAST,
+            &messages::pet_spell_autocast(pet_guid, spell_id, enabled),
+        )
+    }
 }

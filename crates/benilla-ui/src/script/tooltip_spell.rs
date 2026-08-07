@@ -306,15 +306,31 @@ fn set_spell_by_id(
 
 /// Register the spell/aura content channels into the GameTooltip kind method table.
 pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // GameTooltip:SetSpell(bookId, bookType) — the spellbook hover: the 1-based flat book slot
-    // resolves through the spellbook state to a spell id (the era signature; bookType is always
-    // the player book here — pets are a later arc).
+    // GameTooltip:SetSpell(bookId, bookType) — the spellbook hover: the 1-based book slot resolves
+    // through the named book's state to a spell id.
+    //
+    // **`bookType` decides which book**, exactly like every `bookType`-taking global
+    // (`super::spellbook::book_slot`). Byte-verified in `SetSpell 0x532d10`, which is its own
+    // implementation of the same fork rather than a caller of the shared parser: arg2 → number,
+    // `- 1`, bounded `[0, 0x400)` (`0x532dd4`-`0x532df4`); arg3 → string, compared against the
+    // literal `"pet"` at `0x846960` (`0x532e13`); match takes `[4*i + 0xb6f098]` — the PET book —
+    // and sets `isPet = 1` (`0x532e1c`), everything else takes `[4*i + 0xb700f0]` (`0x532e2a`).
+    // That `isPet` then rides into `0x6e2ea0` as the cooldown BANK (`0x532e50`), the same bank
+    // split 1031 built.
+    //
+    // Before the fork, a pet-book hover indexed the PLAYER's slot list, so hovering the imp's first
+    // spell showed the player's first spell — "Attack", crit line and all (decision 1050).
     m.set(
         "SetSpell",
-        lua.create_function(|lua, (this, book_id, _book_type): (Table, usize, Value)| {
+        lua.create_function(|lua, (this, book_id, book_type): (Table, u32, Value)| {
+            // The reference requires a STRING third argument and bails otherwise (`0x532dc0`'s
+            // `lua_isstring(3)` → `je` out); a non-string is therefore not "the player's book".
+            let Some(book_type) = book_type.as_string().and_then(|s| s.to_str().ok()) else {
+                return Ok(());
+            };
             let (spell_id, name) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
-                match model.spellbook.slots.get(book_id.saturating_sub(1)) {
+                match super::spellbook::book_slot(&model, book_id, &book_type) {
                     Some(s) => (s.spell_id, Some(s.name.clone())),
                     None => return Ok(()),
                 }

@@ -85,7 +85,10 @@ pub(crate) fn land_here(
         return;
     }
     if !player.detached {
-        info!("land: not free-flying — press F, fly somewhere, then land");
+        info!(
+            "land: not free-flying — press {chord}+F, fly somewhere, then land",
+            chord = crate::debug_panel::DEV_CHORD
+        );
         return;
     }
     let Ok(cam) = camera.single() else {

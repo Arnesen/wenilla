@@ -63,6 +63,68 @@ fn spellbook_hover_renders_the_verified_shape() {
     assert!(s.take_errors().is_empty());
 }
 
+/// **`bookType` decides which book the hover reads** — the fork `SetSpell 0x532d10` makes at
+/// `0x532e1c`/`0x532e2a` (`[4*i + 0xb6f098]` for the pet, `[4*i + 0xb700f0]` otherwise).
+///
+/// The defect (1050): the binding took the argument and dropped it, so a pet-book hover indexed the
+/// PLAYER's slot list — the imp's first spell showed the player's first spell, "Attack" and its
+/// crit line, on the director's screen. Both books are populated here with a *different* spell at
+/// the same slot id, which is the only arrangement that can tell the two apart.
+#[test]
+fn a_pet_book_hover_reads_the_pets_book_not_the_players() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(133, fireball());
+    s.set_spell_tooltip(
+        3110,
+        SpellTooltipView {
+            name: "Firebolt".into(),
+            description: "Hurls a fiery ball.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_spellbook(SpellBookState {
+        tabs: Vec::new(),
+        slots: vec![SpellSlotView {
+            spell_id: 133,
+            name: "Fireball".into(),
+            ..Default::default()
+        }],
+    });
+    s.set_pet_book(PetBookState {
+        token: Some("DEMON".into()),
+        slots: vec![SpellSlotView {
+            spell_id: 3110,
+            name: "Firebolt".into(),
+            ..Default::default()
+        }],
+    });
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetSpell(1, "pet")
+        assert(TTTextLeft1:GetText() == "Firebolt", "pet slot 1, got " .. TTTextLeft1:GetText())
+        -- The same slot id in the other book is the OTHER spell.
+        tt:SetSpell(1, "spell")
+        assert(TTTextLeft1:GetText() == "Fireball", "player slot 1, got " .. TTTextLeft1:GetText())
+        -- The compare is case-insensitive against "pet" ALONE (0x532e13's SStrCmpI), so every
+        -- other string is the player's book — including a mis-cased one being the pet's.
+        tt:SetSpell(1, "PeT")
+        assert(TTTextLeft1:GetText() == "Firebolt", "case-insensitive pet")
+        tt:SetSpell(1, "book")
+        assert(TTTextLeft1:GetText() == "Fireball", "any other string is the player's book")
+        -- A non-string third argument is not "the player's book": the reference bails outright
+        -- (0x532dc0's isstring test), leaving whatever was shown.
+        tt:SetSpell(1, 7)
+        assert(TTTextLeft1:GetText() == "Fireball", "a non-string arg shows nothing new")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}
+
 /// The tracking icon's hover (SetTrackingSpell): a GOLD name over the white (aura-variant)
 /// description — the shape the director's reference A/B pinned (2026-07-20), distinct from
 /// SetPlayerBuff's white name. No cost/casttime lines, no duration-remaining line.

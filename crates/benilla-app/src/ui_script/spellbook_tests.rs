@@ -52,6 +52,7 @@ fn book() -> SpellBookState {
                 passive: false,
                 current: false,
                 cooldown: None,
+                ..Default::default()
             },
             SpellSlotView {
                 spell_id: 2136,
@@ -61,6 +62,7 @@ fn book() -> SpellBookState {
                 passive: false,
                 current: false,
                 cooldown: None,
+                ..Default::default()
             },
             SpellSlotView {
                 spell_id: 168,
@@ -70,14 +72,33 @@ fn book() -> SpellBookState {
                 passive: false,
                 current: false,
                 cooldown: None,
+                ..Default::default()
             },
         ],
     }
 }
 
+/// The centre of a laid-out frame, for a real mouse click through the hit-test — the file's own
+/// idiom, lifted out of `shipped_spellbook_drives_end_to_end` so the pet test shares it.
+fn center(s: &UiScript, name: &str) -> (f32, f32) {
+    let l: f32 = s.eval(&format!("return {name}:GetLeft()")).unwrap();
+    let r: f32 = s.eval(&format!("return {name}:GetRight()")).unwrap();
+    let t: f32 = s.eval(&format!("return {name}:GetTop()")).unwrap();
+    let b: f32 = s.eval(&format!("return {name}:GetBottom()")).unwrap();
+    ((l + r) * 0.5, (t + b) * 0.5)
+}
+
+/// One full press/release of `button` on the named frame.
+fn click(s: &mut UiScript, name: &str, button: &str) {
+    s.resolve();
+    let (x, y) = center(s, name);
+    s.mouse_button(x, y, button, true);
+    s.mouse_button(x, y, button, false);
+}
+
 /// The loader itself: every file the window depends on parses and materializes with no errors —
 /// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown child)
-/// + 8 skill-line tabs = 36 frames.
+/// + 8 skill-line tabs + the 3 Spell/Pet toggle tabs.
 #[test]
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
@@ -96,9 +117,9 @@ fn shipped_spellbook_loads_clean() {
         report.errors
     );
     assert_eq!(
-        report.frames, 36,
+        report.frames, 39,
         "window + close + prev/next + 12 spell buttons (each with a Cooldown child) + 8 \
-         skill-line tabs"
+         skill-line tabs + the 3 Spell/Pet toggle tabs (decision 1032)"
     );
 }
 
@@ -157,13 +178,6 @@ fn shipped_spellbook_drives_end_to_end() {
         "book id 7 is past the 2-spell Fire tab — disabled"
     );
 
-    let center = |s: &UiScript, name: &str| -> (f32, f32) {
-        let l: f32 = s.eval(&format!("return {name}:GetLeft()")).unwrap();
-        let r: f32 = s.eval(&format!("return {name}:GetRight()")).unwrap();
-        let t: f32 = s.eval(&format!("return {name}:GetTop()")).unwrap();
-        let b: f32 = s.eval(&format!("return {name}:GetBottom()")).unwrap();
-        ((l + r) * 0.5, (t + b) * 0.5)
-    };
     s.resolve();
     let (x1, y1) = center(&s, "BenillaSpellButton1");
 
@@ -346,4 +360,203 @@ fn set_checked_uses_blizzard_bool_coercion() {
             .unwrap();
         assert_eq!(got, want, "SetChecked({arg})");
     }
+}
+
+/// A hunter's pet book: Growl (autocast ON, on cooldown), Claw (autocast OFF), Avoidance (a
+/// passive — not autocastable). Three spells so the tab row raises and the page has content.
+fn pet_book() -> benilla_ui::script::PetBookState {
+    benilla_ui::script::PetBookState {
+        token: Some("PET".into()),
+        slots: vec![
+            SpellSlotView {
+                spell_id: 2649,
+                name: "Growl".into(),
+                rank: Some("Rank 1".into()),
+                texture: Some("Interface\\Icons\\Ability_Physical_Taunt".into()),
+                cooldown: Some((9400, 5000, true)),
+                autocast: Some((true, true)),
+                packed: 0xC100_0000 | 2649,
+                ..Default::default()
+            },
+            SpellSlotView {
+                spell_id: 16827,
+                name: "Claw".into(),
+                rank: Some("Rank 1".into()),
+                texture: Some("Interface\\Icons\\Ability_Druid_Rake".into()),
+                autocast: Some((true, false)),
+                packed: 0x8100_0000 | 16827,
+                ..Default::default()
+            },
+            SpellSlotView {
+                spell_id: 3025,
+                name: "Avoidance".into(),
+                texture: Some("Interface\\Icons\\Spell_Nature_SpiritArmor".into()),
+                passive: true,
+                autocast: Some((false, false)),
+                packed: 0x0100_0000 | 3025,
+                ..Default::default()
+            },
+        ],
+    }
+}
+
+/// **The pet tab, end to end through the shipped XML** (decision 1032): the toggle row appears
+/// only once there are pet spells, clicking the pet tab switches the book, the page renders the
+/// pet's own spells with their autocast overlay, the skill-line strip goes away, the title becomes
+/// the class token's label, and a right-click flips autocast instead of casting.
+#[test]
+fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "SpellBookFrame.xml");
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.set_spellbook(book());
+
+    // ── No pet: no toggle row, and the pet book cannot be opened at all (ref l.11-14) ──────────
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
+    assert!(
+        !s.eval::<bool>("return BenillaSpellBookFrameTabButton1:IsVisible()")
+            .unwrap(),
+        "with no pet spells the ref hides the whole toggle row"
+    );
+    s.run("ToggleSpellBook(BOOKTYPE_PET)").unwrap();
+    assert!(
+        s.eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_SPELL")
+            .unwrap(),
+        "asking for a pet book you have not got does nothing — not even close the window"
+    );
+    assert!(s
+        .eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
+        .unwrap());
+
+    // ── A pet arrives: the row appears on the next repaint ────────────────────────────────────
+    s.set_pet_book(pet_book());
+    s.fire_event("SPELLS_CHANGED", vec![]);
+    assert!(s.errors().is_empty(), "repaint errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BenillaSpellBookFrameTabButton1:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return BenillaSpellBookFrameTabButton2:GetText()")
+            .unwrap(),
+        "Pet",
+        "the label is PET_TYPE_<token>, not the token"
+    );
+
+    // ── Click the pet tab ─────────────────────────────────────────────────────────────────────
+    click(&mut s, "BenillaSpellBookFrameTabButton2", "LeftButton");
+    assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_PET")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return BenillaSpellBookTitleText:GetText()")
+            .unwrap(),
+        "Pet",
+        "the window title becomes the pet's, not SPELLBOOK"
+    );
+    assert!(
+        !s.eval::<bool>("return BenillaSpellBookSkillLineTab1:IsVisible()")
+            .unwrap(),
+        "the pet book has no skill lines — the whole strip hides (ref l.124)"
+    );
+
+    // The page: book ids are the button ids themselves on this book, so button 1 is Growl and
+    // button 3 (id="2") is Claw — the same column-major id map the spell book uses.
+    assert_eq!(
+        s.eval::<String>("return BenillaSpellButton1SpellName:GetText()")
+            .unwrap(),
+        "Growl"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaSpellButton3SpellName:GetText()")
+            .unwrap(),
+        "Claw"
+    );
+    // The autocast overlay follows GetSpellAutocast's FIRST return (can it), not the second.
+    assert!(s
+        .eval::<bool>("return BenillaSpellButton1AutoCastable:IsVisible()")
+        .unwrap());
+    assert!(
+        !s.eval::<bool>("return BenillaSpellButton5AutoCastable:IsVisible()")
+            .unwrap(),
+        "a passive is not autocastable"
+    );
+    // …and the sparkle follows the SECOND (is it on).
+    assert!(s
+        .eval::<bool>("return BenillaSpellButton1.autocasting == 1")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return BenillaSpellButton3.autocasting == nil")
+        .unwrap());
+
+    // ── The clicks ────────────────────────────────────────────────────────────────────────────
+    // Left: a pet cast, on the pet queue and NOT the player's.
+    click(&mut s, "BenillaSpellButton1", "LeftButton");
+    assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
+    assert_eq!(s.take_pet_spell_casts(), vec![2649]);
+    assert!(s.take_spell_casts().is_empty());
+    assert!(s.take_pet_spell_autocasts().is_empty());
+
+    // Right: autocast, never a cast (ref l.284-285).
+    click(&mut s, "BenillaSpellButton3", "RightButton");
+    assert!(
+        s.errors().is_empty(),
+        "right-click errors: {:?}",
+        s.errors()
+    );
+    assert_eq!(s.take_pet_spell_autocasts(), vec![16827]);
+    assert!(
+        s.take_pet_spell_casts().is_empty(),
+        "a right-click on the pet page must not also cast"
+    );
+
+    // ── The two reference QUIRKS, asserted on purpose (decisions 1030/1032) ───────────────────
+    // The pet page ignores its page number: `SpellBook_GetSpellID`'s pet arm is a bare `return id`.
+    assert_eq!(
+        s.eval::<i64>("return BenillaSpellBook_GetSpellID(1)")
+            .unwrap(),
+        1
+    );
+    s.run(r#"SPELLBOOK_PAGENUMBERS["pet"] = 2"#).unwrap();
+    assert_eq!(
+        s.eval::<i64>("return BenillaSpellBook_GetSpellID(1)")
+            .unwrap(),
+        1,
+        "DO NOT FIX: the ref's pet arm has no page term (decision 1032)"
+    );
+    // …and the Next arrow writes the SPELL book's counter, leaving the pet page where it was.
+    s.run(r#"SPELLBOOK_PAGENUMBERS["pet"] = 1"#).unwrap();
+    click(&mut s, "BenillaSpellBookNextPageButton", "LeftButton");
+    assert!(s.errors().is_empty(), "page errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>(r#"return SPELLBOOK_PAGENUMBERS["pet"]"#)
+            .unwrap(),
+        1,
+        "DO NOT FIX: the ref writes SPELLBOOK_PAGENUMBERS[selectedSkillLine] on both books"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaSpellButton1SpellName:GetText()")
+            .unwrap(),
+        "Growl",
+        "so the page does not turn"
+    );
+
+    // ── The pet leaves: the window closes and reverts (ref l.147-151) ─────────────────────────
+    s.set_pet_book(benilla_ui::script::PetBookState::default());
+    s.fire_event("SPELLS_CHANGED", vec![]);
+    assert!(s.errors().is_empty(), "teardown errors: {:?}", s.errors());
+    assert!(
+        !s.eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
+            .unwrap(),
+        "a pet book with no pet closes rather than showing an empty page"
+    );
+    assert!(s
+        .eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_SPELL")
+        .unwrap());
 }

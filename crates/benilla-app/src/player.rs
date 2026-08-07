@@ -12,7 +12,8 @@
 //! distance (clamped to the vanilla `cameraDistanceMax` range; the camera *glides* to the new
 //! distance). A left-drag orbit offset *persists* — the vanilla `cameraSmoothStyle` auto-follow that
 //! swung the camera back behind the character while moving is deliberately removed (director's call).
-//! `F` toggles free-fly; the **dev chord + `G`** lands the avatar where the camera is ([`land`]).
+//! The **dev chord + `F`** toggles free-fly (1043); the **dev chord + `G`** lands the avatar where
+//! the camera is ([`land`]).
 //!
 //! Movement is a thin kinematic capsule controller over avian's `MoveAndSlide` (decision 0009).
 
@@ -260,7 +261,8 @@ fn mirror_self_collision_height(
 
 /// Camera + avatar controller. Free-flies until the server reports our position; then takes
 /// third-person control (WASD walks the avatar; right-drag turns it, left-drag orbits the camera,
-/// wheel zooms) and streams our movement to the server as the confirmed mover. `F` toggles free-fly.
+/// wheel zooms) and streams our movement to the server as the confirmed mover. The dev chord + `F`
+/// toggles free-fly (decision 1043).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn control(
     time: Res<Time>,
@@ -307,8 +309,8 @@ fn control(
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
         // The binding dispatch (decision 0997): every rebindable input below reads command
-        // state from here — raw `keys` remain only for the dev instruments (F free-fly, the
-        // Ctrl boost) and the look-session mouse.
+        // state from here — raw `keys` remain only for the dev chord's free-fly toggle
+        // (decision 1043) and the look-session mouse.
         Res<crate::bindings::BindingsState>,
     ),
     mut commands: Commands,
@@ -396,27 +398,14 @@ fn control(
     let binds = &speed_capsule.7;
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
-    // "no keys held" — so WASD/F/Ctrl/Z don't also drive the avatar while typing (a `.tele` command).
-    // Mouse still works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives.
+    // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
+    // works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives; the free-fly
+    // chord below is deliberately outside it, like every dev chord ([`debug_panel::dev_chord`]).
     let typing = ui_capture.0;
-    let keys_pressed = |k: KeyCode| !typing && keys.pressed(k);
-    let keys_just_pressed = |k: KeyCode| !typing && keys.just_pressed(k);
     // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the
     // typing gate and 0585's exact-modifier law when it latched, so this module carries neither
-    // anymore. What stays on raw keys: the F free-fly toggle and the Ctrl boost (dev
-    // instruments, not 1.12 bindings — F still wants the bare-binding rule locally so CTRL-F
-    // and friends stay distinct) and the mouse look session.
-    let modified = keys.any_pressed([
-        KeyCode::ShiftLeft,
-        KeyCode::ShiftRight,
-        KeyCode::ControlLeft,
-        KeyCode::ControlRight,
-        KeyCode::AltLeft,
-        KeyCode::AltRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]);
-    let bare_binding = |k: KeyCode| keys_just_pressed(k) && !modified;
+    // anymore. Nothing here reads a bare key any more (decision 1043) — the free-fly toggle is on
+    // the dev chord, and the Ctrl run boost is gone.
 
     // Both mouse buttons held together = vanilla's "both-button run": the avatar runs forward while
     // the character steers with the mouse (turns like a right-drag), regardless of which button went
@@ -513,7 +502,11 @@ fn control(
         - binds.amount(crate::bindings::cmd::CAMERA_ZOOM_OUT);
     apply_zoom_scroll(zoom, dt, &mut rig);
 
-    if bare_binding(KeyCode::KeyF) {
+    // Free-fly is a dev instrument, so it sits on the dev chord, not a bare `F` (decision 1043).
+    // A bare `F` is a key the reference lets a player bind — our own store test binds it to JUMP —
+    // and a dev doesn't get to squat on the game's namespace (0585, the same rule that moved the
+    // perf HUD off bare `P`). Ungated on `typing` like every chord: it can't be mistaken for text.
+    if crate::debug_panel::dev_chord(&keys, KeyCode::KeyF) {
         player.detached = !player.detached;
     }
 
@@ -889,11 +882,6 @@ fn control(
                 }
             }
         }
-        let boost = if keys_pressed(KeyCode::ControlLeft) {
-            2.5
-        } else {
-            1.0
-        };
         // Backpedaling is slower: the backward move-flag selects the backward speed, dominating
         // strafe (binary-VERIFIED — see RUN_BACK_RATIO). Net-backward = the S key held without a
         // forward override (W or both-button run). The backward arm is a **min**, not a plain
@@ -912,12 +900,11 @@ fn control(
             Some(s) if !move_speed.env_override => (s.run, s.run_back),
             _ => (move_speed.value, move_speed.value * RUN_BACK_RATIO),
         };
-        let speed = boost
-            * if net_backward {
-                run_back_speed.min(run_speed)
-            } else {
-                run_speed
-            };
+        let speed = if net_backward {
+            run_back_speed.min(run_speed)
+        } else {
+            run_speed
+        };
         let mut want_jump = binds.fired(crate::bindings::cmd::JUMP) && !player.modes.rooted;
 
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,

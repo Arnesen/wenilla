@@ -108,22 +108,25 @@ pub(super) fn attack_target_binding(
     }
     match targeting.selection.guid {
         Some(guid) => {
-            debug!("bindings: ATTACKTARGET swing at {guid:#x}");
-            if let Ok((e, _)) = ladder.self_player.single() {
-                ladder.sheath.write(crate::creature_anim::SheathRequest {
-                    entity: e,
-                    state: 1,
-                    ceremony: false,
-                });
-            }
-            let self_e = ladder.self_player.single().ok().map(|(e, _)| e);
-            crate::creature_anim::cancel_auto_repeat_local(
-                self_e,
+            let Ok((e, engaged)) = ladder.self_player.single() else {
+                return;
+            };
+            debug!(
+                "bindings: ATTACKTARGET {} at {guid:#x}",
+                if engaged { "toggled off" } else { "swing" }
+            );
+            // The same `0x6131a0` this binding's doc says it shares with the action button — so
+            // it takes the same seam, toggle and all, instead of a second copy that drifts.
+            crate::creature_anim::toggle_attack_local(
+                e,
+                guid,
+                engaged,
+                &mut ladder.queued_melee,
                 &mut ladder.auto_repeat,
+                &mut ladder.sheath,
                 &mut ladder.ecs,
                 &ladder.commands,
             );
-            let _ = ladder.commands.0.send(ClientCommand::AttackSwing { guid });
         }
         None => {
             debug!("bindings: ATTACKTARGET with no target — acquiring nearest");
@@ -168,29 +171,34 @@ pub(super) fn drain_action_uses(
                 }
                 match selection.guid {
                     Some(guid) => {
-                        debug!("ui_action: attack swing at {guid:#x}");
-                        // Auto-draw: initiating melee requests melee sheath state through the
-                        // anim layer's ONE setter (decision 0080) — a SNAP, no ceremony, no
-                        // sound: the attack path passes `(newState=1, bInstant=1, bFireEvent=1)`
-                        // at `0x5ecd80` (wow-re `sheath-policy.md`). The setter's idempotency
-                        // is the client's own "no-op if already melee".
-                        if let Ok((e, _)) = ladder.self_player.single() {
-                            ladder.sheath.write(crate::creature_anim::SheathRequest {
-                                entity: e,
-                                state: 1,
-                                ceremony: false,
-                            });
-                        }
-                        // Melee attack-start cancels a running auto-repeat UNCONDITIONALLY —
-                        // the client's `0x5ecd8c` (wow-re `nocked-ammo-cancel.md` §Q-B-5).
-                        let self_e = ladder.self_player.single().ok().map(|(e, _)| e);
-                        crate::creature_anim::cancel_auto_repeat_local(
-                            self_e,
+                        // **The Attack button is a TOGGLE** — `0x6131a0`, which the base Attack
+                        // pseudo-spell reaches through `TryCast`'s effect-0x4e short-circuit
+                        // (`0x6e4c7a`), forks on `0x60ecb0`: already attacking →
+                        // `0x6131d9 call 0x5ecac0` **StopAttack**, else `0x6131ee call 0x5ecb70`
+                        // **StartAttack** (wow-re `melee-autorepeat-exclusion.md` §5f).
+                        //
+                        // Both halves were wrong here. There was no toggle-off at all, and the
+                        // press cancelled a running auto-repeat *unconditionally* — but only the
+                        // START arm reaches `0x5ecd8c`, so in the reference toggling melee OFF
+                        // leaves Auto Shot running. The seams carry the sheath snap and the cancel
+                        // now, so neither is spelled out twice.
+                        let Ok((e, engaged)) = ladder.self_player.single() else {
+                            continue;
+                        };
+                        debug!(
+                            "ui_action: attack {} at {guid:#x}",
+                            if engaged { "toggled off" } else { "swing" }
+                        );
+                        crate::creature_anim::toggle_attack_local(
+                            e,
+                            guid,
+                            engaged,
+                            &mut ladder.queued_melee,
                             &mut ladder.auto_repeat,
+                            &mut ladder.sheath,
                             &mut ladder.ecs,
                             &ladder.commands,
                         );
-                        let _ = ladder.commands.0.send(ClientCommand::AttackSwing { guid });
                     }
                     // No target: the client's attack resolver runs the nearest-enemy core and
                     // swings at the winner (`0x612df0` @ `6130b5`) — `target::scan` answers.

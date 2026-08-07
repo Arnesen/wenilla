@@ -46,7 +46,7 @@ use bevy::prelude::*;
 use crate::assets::{LockRecover, WorldAssets};
 use crate::collision::GroundDecalSurface;
 use crate::decal::{project_decal, DecalFrame};
-use crate::net::{NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::net::{NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
 
 use super::click::clear;
@@ -276,7 +276,7 @@ pub(super) fn update_ring(
     // `.respawn`ed creature reuses its spawn guid, so change-armed state goes stale and misses the
     // second kill (the bug this replaces).
     mut last_vitals: Local<Option<(u64, bool)>>,
-    net_commands: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     // Net entities are roots, so their `Transform` is already world-space + current this frame
     // (net motion ran in `WorldStage::Net`), avoiding the 1-frame lag a `GlobalTransform` read
     // would add. Tupled into one param (the 16-param ceiling): `.0` the target's own components;
@@ -375,7 +375,7 @@ pub(super) fn update_ring(
                         .is_some_and(|g| *last_vitals == Some((g, false)));
                 *last_vitals = selection.guid.map(|g| (g, is_dead));
                 if died {
-                    clear(&mut selection, &net_commands, !engaged.is_empty());
+                    clear(&mut selection, &mut seam, !engaged.is_empty());
                     *last_vitals = None;
                     state.shown = false;
                     state.verts.clear();
@@ -416,7 +416,7 @@ pub(super) fn update_ring(
             // selection-death-clear RE; this is also what drops a selected corpse at respawn, when
             // the server destroys it ahead of the fresh create).
             Err(_) => {
-                clear(&mut selection, &net_commands, !engaged.is_empty());
+                clear(&mut selection, &mut seam, !engaged.is_empty());
                 *last_vitals = None;
                 *logged_guid = None;
                 true

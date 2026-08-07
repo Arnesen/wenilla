@@ -2,7 +2,7 @@
 //!
 //! The panel is a rounded, translucent **window floated off the top-right corner** (a gap from the
 //! edges, like the perf pill) — it overlays the 3D view, which renders full-screen underneath and is
-//! never letterboxed. Fixed width (no resize handle). Press the backtick key (`` ` ``) to show/hide it.
+//! never letterboxed. Fixed width (no resize handle). [`DEV_CHORD`]+`D` shows/hides it (1043, 1048).
 //! Its look (translucent dark backing + crisp text) is shared with the perf pill and the inspector card
 //! via [`OVERLAY_FILL`] / [`overlay_text`], so the dev overlays read as one family.
 //!
@@ -234,9 +234,10 @@ impl Plugin for DebugPanelPlugin {
         .add_systems(
             Update,
             (
-                // After the UI keyboard feed so a backtick typed into a focused EditBox never
-                // toggles the panel.
-                toggle_panel.after(crate::ui_script::UiInput),
+                // No ordering against the UI keyboard feed any more: the toggle is a dev chord
+                // (1043), which no focused EditBox can consume and which needs no capture gate —
+                // the same reason `perf`'s and `sound`'s toggles never needed one.
+                toggle_panel,
                 apply_model_visibility
                     .after(crate::wmo_portal::WmoPvsSet)
                     .in_set(ModelVisSet),
@@ -267,14 +268,14 @@ fn spawn_egui_camera(mut commands: Commands) {
     ));
 }
 
-fn toggle_panel(
-    keys: Res<ButtonInput<KeyCode>>,
-    ui_capture: Res<crate::ui_script::UiKeyboardCapture>,
-    mut debug: ResMut<DebugState>,
-) {
-    // Don't toggle while the chat input is open or a focused EditBox owns the keyboard — a backtick
-    // keypress there belongs in the text.
-    if !ui_capture.0 && keys.just_pressed(KeyCode::Backquote) {
+fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugState>) {
+    // The dev chord + `D` (decision 1048). It was a *bare* backtick until 1043 — backtick reads as
+    // "not a game key", but it is one ([`crate::bindings::chord`] gives it the token `` ` ``, so the
+    // reference's binding UI can bind it like any other), which made a bare toggle here exactly the
+    // squat 0585 moved the perf HUD off `P` for. 1043 put it on the chord; `` ` `` is a bad key to
+    // hold a chord on, so it became a letter like the rest of the fleet. The chat-bar/EditBox gate
+    // the bare key needed is gone either way: a chord can't be mistaken for typed text.
+    if dev_chord(&keys, KeyCode::KeyD) {
         debug.open = !debug.open;
     }
 }
@@ -284,7 +285,8 @@ fn toggle_panel(
 /// what [`dev_chord`] actually listens for.
 pub(crate) const DEV_CHORD: &str = "Ctrl+Shift";
 
-/// Did the **dev-overlay chord** — [`DEV_CHORD`]+*key* — just fire? (decisions 0585, 0867, 0870.)
+/// Did the **dev-overlay chord** — [`DEV_CHORD`]+*key* — just fire? (decisions 0585, 0867, 0870,
+/// 1043 — which moved the last two dev keys onto it, so the whole fleet is here now.)
 ///
 /// The dev instruments used to sit on bare letters, which is a namespace we don't own: every letter is
 /// a *game* binding in the reference client, so `P` both opened the spellbook and toggled the perf HUD
@@ -674,7 +676,7 @@ fn debug_panel_ui(
             ui.separator();
             ui.label(
                 egui::RichText::new(format!(
-                    "`  panel   ·   {DEV_CHORD}:  P perf · I inspect · M mute"
+                    "{DEV_CHORD}:  D panel · P perf · I inspect · M mute · F free-fly"
                 ))
                     .small()
                     .color(OVERLAY_TEXT_DIM),

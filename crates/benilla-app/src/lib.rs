@@ -16,9 +16,11 @@
 //! sits at the login screen, which is what the real one does. The scene harness (`$WOW_CAPTURE`)
 //! boots straight in-world and is unaffected.
 //!
-//! Controls: WASD walks the avatar (Ctrl sprints); right-drag turns it, left-drag orbits the camera
-//! (both hide/freeze the cursor while held), scroll wheel zooms; `F` toggles free-fly (then WASD flies
-//! the camera with Space up / C down, Ctrl boost).
+//! Controls: WASD walks the avatar; right-drag turns it, left-drag orbits the camera (both
+//! hide/freeze the cursor while held), scroll wheel zooms. Those are all **bindings** now (0997) —
+//! rebindable, and nothing in the client squats on a bare key beside them (1043). The dev chord
+//! (`Ctrl`+`Shift`) + `F` toggles free-fly, then WASD flies the camera with Space up / C down and
+//! `Ctrl` boosts — a boost that exists only inside free-fly, itself behind the chord.
 
 mod area;
 mod area_trigger;
@@ -130,6 +132,7 @@ mod ui_net;
 mod ui_party;
 mod ui_pass;
 mod ui_pet;
+mod ui_pet_book;
 mod ui_pet_stats;
 mod ui_quest;
 mod ui_quest_log;
@@ -216,6 +219,7 @@ use ui_net::UiNetPlugin;
 use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
 use ui_pet::UiPetPlugin;
+use ui_pet_book::UiPetBookPlugin;
 use ui_pet_stats::UiPetStatsPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
@@ -715,6 +719,7 @@ pub fn run(build: BuildId) -> AppExit {
     // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
     // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
     .add_plugins(UiPetPlugin)
+    .add_plugins(UiPetBookPlugin)
     // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
     // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.
     .add_plugins(UiPetStatsPlugin)

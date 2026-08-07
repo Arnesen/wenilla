@@ -25,7 +25,7 @@ use bevy::prelude::*;
 use crate::creature_anim::Engaged;
 use crate::net::{ObjectStore, Reputations, SelfPlayer};
 
-use super::scan::can_attack;
+use super::relations::can_attack;
 use super::{Factions, Selection};
 
 /// This frame's flash verdict + the global pulse clock. Recomputed every frame by

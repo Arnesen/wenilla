@@ -414,6 +414,24 @@ impl SpellDisplay {
         self.attributes & (ATTR_DO_NOT_DISPLAY | ATTR_IS_TRADESKILL) == 0 && self.cast_ui == 0
     }
 
+    /// Whether this spell appears in the **pet's** book — a *different* add-gate from
+    /// [`Self::in_spellbook`]'s, and deliberately narrower (decision 1032). `0x4b2f90`, the pet
+    /// book's whole append routine, tests the record's existence and then exactly one bit:
+    ///
+    /// ```text
+    /// 0x4b2fa8  mov dl, byte ptr [rec + 0x18]     ; Attributes, byte 0
+    /// 0x4b2fab  test dl, dl
+    /// 0x4b2fad  js  <drop>                        ; the SIGN of the byte = 0x80 = DO_NOT_DISPLAY
+    /// 0x4b2fb4  [0xb6f098 + 4*count++] = spellId
+    /// ```
+    ///
+    /// No `IS_TRADESKILL` leg and no `castUI` leg — the player book's other two gates simply are
+    /// not there. Reusing `in_spellbook` here would be a guess that happens to agree on every
+    /// vmangos pet list today and would diverge the moment one didn't.
+    pub fn in_pet_book(&self) -> bool {
+        self.attributes & ATTR_DO_NOT_DISPLAY == 0
+    }
+
     /// The **melee auto-attack** — `Effect[0] == SPELL_EFFECT_ATTACK (78)`, the client's own
     /// effect-type trigger for the equipped-weapon icon substitution (decision 0231; wow-re
     /// `attack-icon-substitution.md`, resolvers `0x4b3f8a`/`0x4e59de`). In 1.12 the only spell

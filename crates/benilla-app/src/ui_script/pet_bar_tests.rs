@@ -510,3 +510,71 @@ fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
         vec![vec![(3, CLAW_WORD & 0xFFFF_0000)]]
     );
 }
+
+/// **The keybind pair** (decision 1052) — what a bound `BONUSACTIONBUTTONn` runs. The ref's
+/// binding body calls `BonusActionButtonDown/Up`, one-liners onto `PetActionButtonDown/Up`
+/// (l.218-231), so the whole lane is these two functions: press shows the pushed art, release
+/// fires the slot.
+///
+/// The load-bearing half is what the key path does NOT do: it is a bare `CastPetAction`, with none
+/// of `PetActionButton_OnClick`'s forks. Pinned below on the Attack token with the pet ALREADY
+/// attacking — a left click there calls the attack off (the test above), while the key re-issues
+/// it. That asymmetry is the reference's, and the only thing that could hide a regression into it
+/// is a test that never presses a key on an active slot.
+#[test]
+fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+
+    let state = |s: &UiScript| {
+        s.eval::<String>("return BenillaPetActionButton1:GetButtonState()")
+            .unwrap()
+    };
+
+    // Down shows the pushed art and fires nothing (the ref's runOnUp shape).
+    s.run("BenillaPetActionButtonDown(1)").unwrap();
+    assert_eq!(state(&s), "PUSHED");
+    assert!(
+        s.take_pet_actions().is_empty(),
+        "the press is visual only — the ref fires on the release"
+    );
+
+    // Up releases the art and casts — slot 1 is Attack and the pet is already attacking, so a
+    // LEFT CLICK here would call it off instead. The key has no such fork.
+    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    assert_eq!(state(&s), "NORMAL");
+    assert_eq!(s.take_pet_actions(), vec![1]);
+    assert_eq!(
+        s.take_pet_stop_attacks(),
+        0,
+        "IsPetAttackActive lives in OnClick, which a key press never reaches"
+    );
+
+    // The state guard is the whole re-entrancy story: an up with nothing pushed does nothing
+    // (a focus-stolen release, a stuck-latch sweep), and a second down does not re-fire.
+    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    assert!(
+        s.take_pet_actions().is_empty(),
+        "an unmatched release fires nothing"
+    );
+    s.run("BenillaPetActionButtonDown(1) BenillaPetActionButtonDown(1)")
+        .unwrap();
+    assert_eq!(state(&s), "PUSHED");
+    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    assert_eq!(s.take_pet_actions(), vec![1], "one press, one cast");
+
+    // An EMPTY slot is inert through the same path (CastPetAction's own guard): slot 2 of the
+    // hunter bar carries no name, and its button is hidden.
+    s.run("BenillaPetActionButtonDown(2) BenillaPetActionButtonUp(2)")
+        .unwrap();
+    assert!(
+        s.take_pet_actions().is_empty(),
+        "an unnamed slot queues nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

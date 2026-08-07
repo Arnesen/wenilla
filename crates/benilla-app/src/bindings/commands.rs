@@ -85,15 +85,15 @@ pub(crate) mod cmd {
     pub(crate) const OPEN_CHAT: Cmd = Cmd(12);
     pub(crate) const OPEN_CHAT_SLASH: Cmd = Cmd(13);
     pub(crate) const REPLY: Cmd = Cmd(17);
-    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = Cmd(40);
-    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = Cmd(41);
-    pub(crate) const NAMEPLATES: Cmd = Cmd(52);
-    pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(53);
-    pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(54);
-    pub(crate) const ATTACK_TARGET: Cmd = Cmd(55);
-    pub(crate) const TOGGLE_UI: Cmd = Cmd(76);
-    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(77);
-    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(78);
+    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = Cmd(50);
+    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = Cmd(51);
+    pub(crate) const NAMEPLATES: Cmd = Cmd(62);
+    pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(63);
+    pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(64);
+    pub(crate) const ATTACK_TARGET: Cmd = Cmd(65);
+    pub(crate) const TOGGLE_UI: Cmd = Cmd(86);
+    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(87);
+    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(88);
 }
 
 /// The registry, 1.12 `Bindings.xml` order. Sub-tables (action buttons, shapeshift, raid
@@ -332,6 +332,114 @@ pub(crate) static SPECS: &[Spec] = &[
             r#"local b = getglobal("BenillaShapeshiftButton10"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F10"),
+        None
+    ),
+    // The PET bar's row — 1.12 calls it BONUSACTIONBUTTON and files it under this same ACTIONBAR
+    // header (Bindings.xml:321-390 carries no `header` attribute, so it inherits l.121's), which
+    // is why "Secondary Action Button 1-10" reads under Action Bar in the reference's own window.
+    // The ref's body is BonusActionButtonDown/Up(id), and those two are one-liners onto
+    // PetActionButtonDown/Up (BonusActionBarFrame.lua:106-112) — the PET bar's buttons, not the
+    // bonus bar's. benilla has no bonus bar at all, so the pet bar is the whole lane, exactly as
+    // the reference wires it. Defaults are byte-real and unanimous: CTRL-1..CTRL-0 in all three
+    // of the install's `bindings-cache.wtf` files (unlike TOGGLEUI's rebind, 0870).
+    spec!(
+        "BONUSACTIONBUTTON1",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(1)",
+            "BenillaPetActionButtonUp(1)"
+        ),
+        Some("CTRL-1"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON2",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(2)",
+            "BenillaPetActionButtonUp(2)"
+        ),
+        Some("CTRL-2"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON3",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(3)",
+            "BenillaPetActionButtonUp(3)"
+        ),
+        Some("CTRL-3"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON4",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(4)",
+            "BenillaPetActionButtonUp(4)"
+        ),
+        Some("CTRL-4"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON5",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(5)",
+            "BenillaPetActionButtonUp(5)"
+        ),
+        Some("CTRL-5"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON6",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(6)",
+            "BenillaPetActionButtonUp(6)"
+        ),
+        Some("CTRL-6"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON7",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(7)",
+            "BenillaPetActionButtonUp(7)"
+        ),
+        Some("CTRL-7"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON8",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(8)",
+            "BenillaPetActionButtonUp(8)"
+        ),
+        Some("CTRL-8"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON9",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(9)",
+            "BenillaPetActionButtonUp(9)"
+        ),
+        Some("CTRL-9"),
+        None
+    ),
+    spec!(
+        "BONUSACTIONBUTTON10",
+        ACTIONBAR,
+        Kind::EdgeUpDown(
+            "BenillaPetActionButtonDown(10)",
+            "BenillaPetActionButtonUp(10)"
+        ),
+        Some("CTRL-0"),
         None
     ),
     // ── Targeting (BINDING_HEADER_TARGETING) ────────────────────────────────────────────
@@ -984,6 +1092,23 @@ mod tests {
                     "{}: default '{d}' does not parse",
                     s.name
                 );
+            }
+        }
+    }
+
+    /// No two commands ship the SAME default chord. One key, one command is the binding table's
+    /// own law (the steal pass in [`super::store::resolve`] enforces it at load), so a duplicate
+    /// here would ship a table that eats itself: registration order would decide the winner and
+    /// the loser would come up silently unbound. Cheap tripwire for the one mistake a new block
+    /// of rows can make — 1052's CTRL-1..CTRL-0 went in with nothing to catch a collision.
+    #[test]
+    fn no_two_commands_ship_the_same_default_chord() {
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for s in SPECS {
+            for d in [s.d1, s.d2].into_iter().flatten() {
+                if let Some(prev) = seen.insert(d, s.name) {
+                    panic!("default '{d}' is on both {prev} and {}", s.name);
+                }
             }
         }
     }

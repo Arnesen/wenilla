@@ -175,8 +175,13 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         // Added because the harness could not reach the leg that broke decision 0793: the director's
         // first real run was a boosted free-fly, whose camera crosses the art radius in ~5 s, and
         // reproducing it needed a held `Ctrl` + `W` behind an `F`.
+        //
+        // The toggle is the dev chord + `F` since decision 1043 (it was a bare `F`), so a probe that
+        // wants free-fly holds `Ctrl` and `Shift` across the `F` tap — hence `Shift` here. `Ctrl`
+        // stays held afterwards for the ×5 boost, which is unchanged.
         "F" => KeyCode::KeyF,
         "Ctrl" => KeyCode::ControlLeft,
+        "Shift" => KeyCode::ShiftLeft,
         _ => return None,
     })
 }

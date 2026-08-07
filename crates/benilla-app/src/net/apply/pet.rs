@@ -83,6 +83,27 @@ pub(super) fn pet_spells(spells: PetSpells, catalog: Option<&Spells>, bar: &mut 
             .collect::<Vec<_>>()
             .join(" ")
     );
+    // The spell LIST, spelled out the same way and for the same reason (decision 1032). It is a
+    // different question from the bar's — "why is the pet book shorter than the packet said" — and
+    // the answer is always one of three things this line names: the id resolves to no `Spell.dbc`
+    // record, it carries `DO_NOT_DISPLAY` (the book's whole add-gate, `0x4b2f90`), or it is in.
+    // vmangos sends the pet's runtime passives here alongside its real spells, so the gap between
+    // the two counts is usually large and entirely correct.
+    debug!(
+        "net: pet spellbook — {}",
+        spells
+            .spells
+            .iter()
+            .map(|e| {
+                match catalog.and_then(|c| c.catalog.get(e.action())) {
+                    Some(d) if d.in_pet_book() => format!("{} ({})", d.name, e.action()),
+                    Some(d) => format!("{} ({}) DO_NOT_DISPLAY", d.name, e.action()),
+                    None => format!("{} NOT IN CATALOG", e.action()),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    );
     let now = Instant::now();
     bar.cooldowns = crate::cooldowns::Cooldowns::default();
     for cd in &spells.cooldowns {

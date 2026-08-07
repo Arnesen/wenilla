@@ -310,6 +310,10 @@ fn build_book(
                 // after the build (they need the live form/cooldown state, not the catalog).
                 current: false,
                 cooldown: None,
+                // Player-book slots: `GetSpellAutocast` answers (nil, nil) for this book by the
+                // reference's own short-circuit, and there is no packed word behind a known spell.
+                autocast: None,
+                packed: 0,
             });
         }
         tabs.push(SpellTabView {
@@ -331,9 +335,19 @@ fn build_book(
 /// modeled — module doc.)
 fn spell_sort_key(catalog: &SpellCatalog, spell_id: u32) -> (String, u32, String) {
     let d = catalog.get(spell_id);
-    let name = d.map(|d| d.name.clone()).unwrap_or_default();
-    let rank_str = d.and_then(|d| d.rank.clone()).unwrap_or_default();
-    (name, leading_number(&rank_str), rank_str)
+    spell_sort_key_of(
+        d.map(|d| d.name.as_str()).unwrap_or_default(),
+        d.and_then(|d| d.rank.as_deref()),
+    )
+}
+
+/// [`spell_sort_key`] over an already-resolved `(name, rank)` — the **pet** book's entry point
+/// (`crate::ui_pet_book`). The reference sorts both arrays with the same comparator `0x4b30c0`
+/// (`0x4b2fd0` calls it for `0xb700f0` and `0xb6f098` alike), so the two books share this and not
+/// a copy of it.
+pub(crate) fn spell_sort_key_of(name: &str, rank: Option<&str>) -> (String, u32, String) {
+    let rank_str = rank.unwrap_or_default().to_string();
+    (name.to_string(), leading_number(&rank_str), rank_str)
 }
 
 /// The first run of ASCII digits in `s` as a number, or `0` when there is none — the client's own

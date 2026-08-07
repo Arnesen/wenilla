@@ -359,7 +359,8 @@ pub(crate) fn incapacitated_flags(flags: u32, rooted: bool, stunned: bool) -> u3
 }
 
 /// Our controllable avatar. Until `active`, the camera free-flies; once the server reports our
-/// position we take control (third-person) and drive movement. Toggle free-fly with `F`.
+/// position we take control (third-person) and drive movement. Toggle free-fly with the dev
+/// chord + `F` (decision 1043).
 /// `active`/`pos`/`detached` are `pub(crate)` so terrain streaming can center the loaded block on the
 /// avatar in third-person and on the free-flying camera while detached.
 #[derive(Resource, Default)]

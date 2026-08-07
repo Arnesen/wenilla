@@ -91,6 +91,20 @@ pub(crate) fn normalize_path(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
 }
 
+/// The archive key a UI **sprite** reference resolves to: [`normalize_path`] plus the FrameXML
+/// extensionless→`.blp` rule (`Interface\Buttons\UI-Quickslot2` → `interface\buttons\ui-quickslot2.blp`;
+/// a path that already carries an extension passes through). One function because every sprite
+/// entry point needs it — the five decoders below and, deliberately, the shipped-XML sweep that
+/// asserts each `file=` in our own UI actually resolves (`ui_script::shipped_xml_tests`): a sweep
+/// re-implementing this rule could agree with itself while disagreeing with the renderer.
+pub(crate) fn sprite_key(path: &str) -> String {
+    let mut key = normalize_path(path);
+    if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
+        key.push_str(".blp");
+    }
+    key
+}
+
 /// Mutate an asset only when `differs` says its current state doesn't already match.
 ///
 /// `Assets::get_mut` alone marks the asset Modified — a uniform re-upload and (on the Metal
@@ -181,10 +195,7 @@ impl WorldAssets {
         // FrameXML/DBC texture references are canonically EXTENSIONLESS
         // (`Interface\Buttons\UI-Quickslot2`) — the real client appends `.blp` at resolve. Paths
         // that already carry an extension (`textures\moon.blp`) pass through unchanged.
-        let mut key = normalize_path(path);
-        if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-            key.push_str(".blp");
-        }
+        let key = sprite_key(path);
         // Cached (hits AND misses): the UI extractor asks per quad per frame — uncached, every
         // frame re-decoded every BLP into a fresh `Image` (unbounded asset growth) and the fresh
         // handles defeated the quad-list dirty check.
@@ -203,10 +214,7 @@ impl WorldAssets {
     /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub(crate) fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        let mut key = normalize_path(path);
-        if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-            key.push_str(".blp");
-        }
+        let key = sprite_key(path);
         read_texture_rgba(&mut self.chain.lock_recover(), &key).ok()
     }
 
@@ -220,10 +228,7 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let mut key = normalize_path(path);
-        if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-            key.push_str(".blp");
-        }
+        let key = sprite_key(path);
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
@@ -243,10 +248,7 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let mut key = normalize_path(path);
-        if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-            key.push_str(".blp");
-        }
+        let key = sprite_key(path);
         if let Some(cached) = self.portraits.get(&key) {
             return cached.clone();
         }
@@ -265,10 +267,7 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let mut key = normalize_path(path);
-        if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-            key.push_str(".blp");
-        }
+        let key = sprite_key(path);
         if let Some(cached) = self.masks.get(&key) {
             return cached.clone();
         }

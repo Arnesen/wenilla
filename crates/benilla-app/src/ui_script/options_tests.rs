@@ -1159,3 +1159,240 @@ fn defaults_resets_the_controls_page_to_registered_defaults() {
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// Drive the window a few frames so the frame-late fits (the scroll body, the tab widths)
+/// converge: rects resolve after Lua runs, so OptionsScroll_Fit answers one frame behind.
+fn settle(s: &mut UiScript) {
+    for _ in 0..4 {
+        s.resolve();
+        s.tick(0.016);
+    }
+    s.resolve();
+}
+
+/// B217: a search that matches across categories chains five group heads and every matched row
+/// into one column — ~150 units past the page area, which before the page scrolled drew straight
+/// out through the dialog border onto the world. Now the body is the scroll child: it grows to the
+/// content, the bar and its trough appear, and everything past the fold is CLIPPED to the page
+/// rect until scrolled to.
+#[test]
+fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    settle(&mut s);
+
+    // Control first: a settled page fits, so there is no scroll and no bar at all — and the body
+    // sits exactly on the page rect, the seat every page's XML anchors were authored against.
+    assert_eq!(
+        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+            .unwrap(),
+        0.0,
+        "the Controls page fits its area"
+    );
+    for f in [
+        "OptionsFrameContainerScrollBar",
+        "OptionsFrameContainerScrollBarTrough",
+    ] {
+        assert!(
+            !s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
+            "{f} stays away while the page fits"
+        );
+    }
+    let page_h: f32 = s
+        .eval("return OptionsFrameContainerScroll:GetHeight()")
+        .unwrap();
+    assert!(
+        (s.eval::<f32>("return OptionsFrameContainerBody:GetHeight()")
+            .unwrap()
+            - page_h)
+            .abs()
+            < 0.5,
+        "the body is the page rect when nothing overflows"
+    );
+
+    // Now the broad search: every category surfaces, and the column outruns the page.
+    s.run("OptionsFrameSearchBox:SetText(\"e\")").unwrap();
+    settle(&mut s);
+    let range: f32 = s
+        .eval("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+        .unwrap();
+    assert!(
+        range > 100.0,
+        "the results outrun the page, so there is something to scroll (range {range})"
+    );
+    for f in [
+        "OptionsFrameContainerScrollBar",
+        "OptionsFrameContainerScrollBarTrough",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
+            "{f} appears with the overflow"
+        );
+    }
+
+    // THE SYMPTOM: nothing under the page draws past its bottom edge any more. Every quad the
+    // page's own content emits carries the page rect as its clip (the engine's ScrollFrame
+    // mechanism), so the deepest DRAWN pixel is the page's own bottom — while the content's own
+    // rects still reach far below it, which is exactly the spill that used to be on screen.
+    let quads = s.extract();
+    let clip = quads
+        .iter()
+        .find_map(|q| q.clip)
+        .expect("the page clips its content");
+    assert!(
+        quads.iter().all(|q| q.clip.is_none_or(|c| c == clip)),
+        "one clip in play: the page area"
+    );
+    let deepest_rect = quads
+        .iter()
+        .filter(|q| q.clip.is_some())
+        .filter_map(|q| q.rect)
+        .map(|r| r.bottom)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        deepest_rect < clip.bottom - 100.0,
+        "there is a real fold to make: the results reach {deepest_rect} against a page bottom of {}",
+        clip.bottom
+    );
+    let deepest_drawn = quads
+        .iter()
+        .filter_map(|q| Some((q.rect?, q.clip?)))
+        .map(|(r, c)| r.bottom.max(c.bottom))
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        deepest_drawn >= clip.bottom - 0.01,
+        "…and it is folded AT the page bottom, not spilling ({deepest_drawn} vs {})",
+        clip.bottom
+    );
+
+    // The last result is reachable: scrolling to the end brings it inside the page rect. (Widget
+    // coordinates here, not the extract's screen px — the window carries ERA_WINDOW_SCALE.)
+    let sf_bottom: f32 = s
+        .eval("return OptionsFrameContainerScroll:GetBottom()")
+        .unwrap();
+    let tail = |s: &UiScript| -> f32 { s.eval("return OptionsScroll_ContentBottom()").unwrap() };
+    assert!(
+        tail(&s) < sf_bottom,
+        "the tail starts below the fold ({} vs {sf_bottom})",
+        tail(&s)
+    );
+    s.run(&format!("OptionsFrameContainerScrollBar:SetValue({range})"))
+        .unwrap();
+    settle(&mut s);
+    assert!(
+        tail(&s) >= sf_bottom - 0.5,
+        "scrolling to the end brings the tail into the page ({} vs {sf_bottom})",
+        tail(&s)
+    );
+
+    // Clearing the search puts the page — and the bar with its trough — back.
+    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    settle(&mut s);
+    assert_eq!(
+        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+            .unwrap(),
+        0.0
+    );
+    for f in [
+        "OptionsFrameContainerScrollBar",
+        "OptionsFrameContainerScrollBarTrough",
+    ] {
+        assert!(
+            !s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
+            "{f} goes away with the results"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The bar's TROUGH — the recessed channel it rides in, the "background and border" a bare
+/// arrows-and-knob bar was missing. It is the shared kit's template on 1.12's own
+/// UI-Character-ScrollBar channel art over the ref's black backing, and it seats ITSELF on its bar
+/// at the ref's hang: 31 wide against the bar's 16, 8 units left, and — the part B224 caught —
+/// overhanging the bar by 21 above and 20 below, which is what drops each arrow button into the
+/// 16-tall SOCKET the art carries for it. (The Keybindings page's own bar wears the same one —
+/// keybindings_tests, where the harness has a real binding registry to overflow the list with.)
+#[test]
+fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameSearchBox:SetText(\"e\")").unwrap();
+    settle(&mut s);
+
+    let bar = "OptionsFrameContainerScrollBar";
+    let trough = "OptionsFrameContainerScrollBarTrough";
+    let g = |f: &str, m: &str| s.eval::<f32>(&format!("return {f}:{m}()")).unwrap();
+    assert!(
+        (g(trough, "GetWidth") - 31.0).abs() < 0.01,
+        "the trough is the 31-wide channel"
+    );
+    assert!(
+        (g(bar, "GetWidth") - 16.0).abs() < 0.01,
+        "against a 16-wide bar"
+    );
+    assert!(
+        (g(bar, "GetLeft") - g(trough, "GetLeft") - 8.0).abs() < 0.01,
+        "the trough hangs the ref's 8 units left of the bar, so the bar rides it centred"
+    );
+    // THE SOCKET LAW (BenillaScrollTrough_Seat): the trough overhangs the bar by 21/20 — not the
+    // arrow-to-arrow 16/16 that B224 reported, which sat both arrows 4 units OUT of their sockets,
+    // riding the caps with bare socket showing beside them. Ref: ReputationFrame's trough at the
+    // scroll frame's +5/-4 against a UIPanelScrollBarTemplate bar at -16/+16.
+    assert!(
+        (g(trough, "GetTop") - g(bar, "GetTop") - 21.0).abs() < 0.01,
+        "trough top 21 above the bar"
+    );
+    assert!(
+        (g(bar, "GetBottom") - g(trough, "GetBottom") - 20.0).abs() < 0.01,
+        "trough bottom 20 below the bar"
+    );
+    // Read the same law off the ARROWS, which is what the eye actually judges: 5 units of top cap
+    // above the up arrow, 4 of bottom cap below the down arrow, and the 16-tall sockets between.
+    let up = format!("{bar}ScrollUpButton");
+    let down = format!("{bar}ScrollDownButton");
+    assert!((g(&up, "GetHeight") - 16.0).abs() < 0.01, "16-tall arrows");
+    assert!((g(&down, "GetHeight") - 16.0).abs() < 0.01);
+    assert!(
+        (g(trough, "GetTop") - g(&up, "GetTop") - 5.0).abs() < 0.01,
+        "the cap shows 5 above the up arrow"
+    );
+    assert!(
+        (g(&down, "GetBottom") - g(trough, "GetBottom") - 4.0).abs() < 0.01,
+        "and 4 below the down arrow"
+    );
+    // …and on THIS page the whole channel lands on the page rect: the scroll frame is the page
+    // area, so the bar takes the 21/20 inset rather than the trough poking out through the header
+    // divider above and the container's bottom below.
+    let sf = "OptionsFrameContainerScroll";
+    assert!((g(trough, "GetTop") - g(sf, "GetTop")).abs() < 0.01);
+    assert!((g(trough, "GetBottom") - g(sf, "GetBottom")).abs() < 0.01);
+
+    // The art: three channel slices from the one 1.12 file — top cap, stretched run, bottom cap —
+    // each spanning the channel's full width, stacked with no gap and no overlap.
+    let mut slices: Vec<_> = s
+        .extract()
+        .into_iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture { path: Some(p), .. } if p.contains("UI-Character-ScrollBar") => {
+                q.rect
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(slices.len(), 3, "top cap, stretched run, bottom cap");
+    slices.sort_by(|a, b| b.top.total_cmp(&a.top));
+    assert!(
+        slices
+            .windows(2)
+            .all(|w| (w[0].bottom - w[1].top).abs() < 0.01),
+        "the three stack flush into one channel: {slices:?}"
+    );
+    let width = slices[0].right - slices[0].left;
+    assert!(
+        slices
+            .iter()
+            .all(|r| (r.right - r.left - width).abs() < 0.01),
+        "…all at the channel's own width: {slices:?}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

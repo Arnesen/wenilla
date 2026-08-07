@@ -53,40 +53,10 @@ use bevy::prelude::*;
 use crate::assets::{LockRecover, WorldAssets};
 use crate::creature_anim::{Engaged, SwingMessage};
 use crate::names::NameCache;
-use crate::net::{
-    ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer,
-};
+use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
 
+use super::relations::can_attack;
 use super::{ring_reaction, Factions, Selection};
-
-/// The five `UNIT_FIELD_FLAGS` disqualifiers `CanAttack 0x606980` tests (bit positions
-/// byte-verified; names vmangos-corroborated): NON_ATTACKABLE(1), NOT_ATTACKABLE_1(7),
-/// NON_ATTACKABLE_2(16), TAXI_FLIGHT(20), NOT_SELECTABLE(25).
-pub(super) const FLAG_DISQUALIFIERS: u32 = (1 << 1) | (1 << 7) | (1 << 16) | (1 << 20) | (1 << 25);
-
-/// `CanAttack 0x606980` — the shared attackability predicate (the combat flash's gate and the
-/// scan's filter 3): the flag disqualifiers clear AND an attackable reaction. A unit without a
-/// store passes the flag leg (nothing known to disqualify). The duel/PVP legs are deferred with
-/// duels/PvP.
-///
-/// The reaction leg is **≤ neutral (rank ≤ 3)** — attackable means *not friendly*. First
-/// director-observed (0170), then **byte-confirmed** by the `0x606980` re-pin: the function has
-/// three reaction legs selected by `UNIT_FLAG_PVP_ATTACKABLE` (bit 3) on both parties, and the
-/// player-vs-creature case is Leg B — `UnitReaction(player→target) < 4` (`cmp eax,4; setl`),
-/// single direction, friendly-only blocked. The old "≤ 1 hostile" gloss was Leg A (both parties
-/// UN-flagged: NPC-vs-NPC, bidirectional), never the player's check. Leg C (both flagged: the
-/// PvP/duel/group machinery) is deferred with PvP.
-pub(crate) fn can_attack(
-    store: Option<&ObjectStore>,
-    factions: Option<&Factions>,
-    reputations: &Reputations,
-    self_store: Option<&ObjectStore>,
-) -> bool {
-    if store.is_some_and(|s| s.0.unit_flags() & FLAG_DISQUALIFIERS != 0) {
-        return false;
-    }
-    ring_reaction(factions, reputations, store, self_store) <= 3
-}
 
 // == The Classic-priority dials ==
 // Each names the Classic Era cvar it stands in for. The VALUES are tuned, not pinned — the
@@ -498,7 +468,7 @@ pub(super) struct CommitOutcome {
 /// the swing and does NOT re-point (the tail's self exception).
 pub(super) fn commit(
     selection: &mut Selection,
-    net: &NetCommands,
+    seam: &mut crate::creature_anim::AttackSeam,
     entity: Entity,
     guid: u64,
     engaged: bool,
@@ -513,12 +483,19 @@ pub(super) fn commit(
     selection.guid = Some(guid);
     let stop_and_repoint = engaged && had_old;
     if stop_and_repoint {
-        let _ = net.0.send(ClientCommand::AttackStop);
+        // `0x493a08 call 0x5ecac0` — the real StopAttack, so the switch also cancels a queued
+        // on-next-swing strike (the seam's `0x6e6f30` tail). Before this routed through the seam
+        // it was a bare `CMSG_ATTACKSTOP` and a queued Heroic Strike survived the switch.
+        seam.stop(engaged);
     }
-    let _ = net.0.send(ClientCommand::SetSelection { guid });
+    let _ = seam.net.0.send(ClientCommand::SetSelection { guid });
     let swung = stop_and_repoint && new_attackable && self_guid != Some(guid);
     if swung {
-        let _ = net.0.send(ClientCommand::AttackSwing { guid });
+        // `0x4938c8 call 0x5ecb70` with a stop in flight (`[+0xc54]`, set by the call above), so
+        // the swing goes out despite the still-set lock. Its tail cancels a running auto-repeat —
+        // wow-re `melee-autorepeat-exclusion.md` §6 REFUTES `nocked-ammo-cancel.md`'s
+        // direct-callers-only census, which had this chain never reaching `0x6ea080`.
+        seam.start(guid, engaged, true);
     }
     CommitOutcome {
         changed: true,
@@ -537,7 +514,7 @@ pub(super) fn tab_target(
     scan: EnemyScan,
     mut history: ResMut<TabHistory>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
 ) {
     let reverse = binds.fired(crate::bindings::cmd::TARGET_PREVIOUS_ENEMY);
@@ -605,7 +582,7 @@ pub(super) fn tab_target(
     }
     let out = commit(
         &mut selection,
-        &net,
+        &mut seam,
         entity,
         guid,
         !engaged.is_empty(),
@@ -650,7 +627,7 @@ pub(super) fn tab_target(
 fn acquire_nearest_enemy(
     scan: &EnemyScan,
     selection: &mut Selection,
-    net: &NetCommands,
+    seam: &mut crate::creature_anim::AttackSeam,
     errors: &mut crate::ui_action::UiErrorKeys,
 ) -> Option<(Entity, u64)> {
     let cands = scan.build();
@@ -666,7 +643,7 @@ fn acquire_nearest_enemy(
     // `engaged = false`: the switch law only fires when we were already swinging at the OLD
     // selection, and every path that reaches here had no selection or a non-hostile one — neither
     // is a thing you can be engaged with.
-    commit(selection, net, c.entity, c.guid, false, None, false);
+    commit(selection, seam, c.entity, c.guid, false, None, false);
     Some((c.entity, c.guid))
 }
 
@@ -703,14 +680,14 @@ fn acquire_nearest_enemy(
 pub(crate) fn attack_order_target(
     scan: &EnemyScan,
     selection: &mut Selection,
-    net: &NetCommands,
+    seam: &mut crate::creature_anim::AttackSeam,
     errors: &mut crate::ui_action::UiErrorKeys,
 ) -> Option<u64> {
     // `0x61306b` + `0x6130a3`: the selection is the candidate, and it survives only if the actor is
     // hostile to it. Otherwise `0x6130b5` acquires.
     let guid = match keeps_held_target(selection.guid, |g| scan.reaction_hostile(g)) {
         Some(kept) => kept,
-        None => acquire_nearest_enemy(scan, selection, net, errors)?.1,
+        None => acquire_nearest_enemy(scan, selection, seam, errors)?.1,
     };
     // `0x613167`'s final gate on whatever we ended up with. `0x61312e`'s legs are the ACTOR's and
     // are Phase A's, already run by the caller; these two are the target's.
@@ -777,11 +754,9 @@ pub(super) fn acquire_and_attack(
     mut requests: MessageReader<AttackNearestRequest>,
     scan: EnemyScan,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
-    self_player: Query<Entity, With<SelfPlayer>>,
+    mut seam: crate::creature_anim::AttackSeam,
     self_store: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
     mut ui_error_keys: ResMut<crate::ui_action::UiErrorKeys>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
 ) {
     if requests.read().last().is_none() {
         return;
@@ -809,20 +784,16 @@ pub(super) fn acquire_and_attack(
     // `0x6130b5` and `0x6130d9`, shared with the pet bar's ATTACK arm — see
     // [`acquire_nearest_enemy`]. The selection is empty (checked above), which is exactly the
     // `candidate == 0` leg of [`attack_order_target`]; the follow-through below is what differs.
-    let Some((_, guid)) = acquire_nearest_enemy(&scan, &mut selection, &net, &mut ui_error_keys)
+    let Some((_, guid)) =
+        acquire_nearest_enemy(&scan, &mut selection, &mut seam, &mut ui_error_keys)
     else {
         return;
     };
     debug!("attack acquire: best candidate {guid:#x} → select + swing");
-    // The attack start (`0x6131a0` continuation): auto-draw (snap, decision 0080) + the swing.
-    if let Ok(e) = self_player.single() {
-        sheath.write(crate::creature_anim::SheathRequest {
-            entity: e,
-            state: 1,
-            ceremony: false,
-        });
-    }
-    let _ = net.0.send(ClientCommand::AttackSwing { guid });
+    // `0x6131a0`'s continuation — StartAttack through the one seam, so the acquire path gets the
+    // auto-draw AND the auto-repeat cancel its hand-rolled copy used to miss. The selection was
+    // empty on entry, so we cannot have been engaged: no stop is in flight.
+    seam.start(guid, false, false);
 }
 
 /// Auto-acquire the attacker (behavior 2): the ATTACKERSTATEUPDATE victim handler's
@@ -833,7 +804,7 @@ pub(super) fn auto_acquire_attacker(
     self_player: Query<Entity, With<SelfPlayer>>,
     guids: Query<&Guid>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
 ) {
     for s in swings.read() {
         if selection.target.is_some() {
@@ -853,126 +824,138 @@ pub(super) fn auto_acquire_attacker(
             guid.0
         );
         // Selection is empty here (checked above): no engaged-switch law, selection only.
-        commit(&mut selection, &net, s.attacker, guid.0, false, None, false);
+        commit(
+            &mut selection,
+            &mut seam,
+            s.attacker,
+            guid.0,
+            false,
+            None,
+            false,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::NetCommands;
 
     /// The `SetSelection` wire law, byte-read from `0x493540` (the director's "TAB while
     /// auto-attacking kills the attack" bug): an engaged SWITCH is **stop → select → re-swing**
     /// — the attack follows the new target — while a plain select sends only the selection, a
     /// self-target stops without re-pointing, and an unattackable new target (Attack `0x5ecb70`'s
     /// validation) switches and stops but never swings.
+    ///
+    /// Driven through a World because `commit` now runs the two real seams
+    /// ([`crate::creature_anim::AttackSeam`]) rather than emitting bare packets — which is what
+    /// the second half of this test pins: the switch's stop un-queues an on-next-swing strike
+    /// (`0x493a08 call 0x5ecac0` → `0x6e6f30`) and its re-swing cancels a running auto-repeat
+    /// (`0x4938c8 call 0x5ecb70` → `0x5ecd8c`). Both were missing while this path hand-rolled
+    /// its own packets.
     #[test]
     fn commit_follows_the_stop_select_reswing_law() {
+        use bevy::ecs::system::RunSystemOnce;
+
         let (tx, rx) = crossbeam_channel::unbounded();
-        let net = NetCommands(tx);
-        let mut selection = Selection::default();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+        world.init_resource::<crate::ui_action::AutoRepeatActive>();
+        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<Selection>();
+        world.spawn(SelfPlayer);
+
         let drain = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
             rx.try_iter()
                 .map(|c| match c {
                     ClientCommand::SetSelection { .. } => "select",
                     ClientCommand::AttackStop => "stop",
                     ClientCommand::AttackSwing { .. } => "swing",
+                    ClientCommand::CancelCast { .. } => "cancel-cast",
+                    ClientCommand::CancelAutoRepeat => "cancel-repeat",
                     _ => "other",
                 })
                 .collect::<Vec<_>>()
         };
+        // One `commit` through a one-shot system, returning its outcome.
+        fn go(
+            world: &mut World,
+            guid: u64,
+            engaged: bool,
+            self_guid: Option<u64>,
+            attackable: bool,
+        ) -> CommitOutcome {
+            world
+                .run_system_once(
+                    move |mut selection: ResMut<Selection>,
+                          mut seam: crate::creature_anim::AttackSeam| {
+                        commit(
+                            &mut selection,
+                            &mut seam,
+                            Entity::PLACEHOLDER,
+                            guid,
+                            engaged,
+                            self_guid,
+                            attackable,
+                        )
+                    },
+                )
+                .expect("commit runs as a one-shot system")
+        }
 
         // Not engaged: first select and a switch are selection-only; a same-guid re-commit dedups.
-        assert!(
-            commit(
-                &mut selection,
-                &net,
-                Entity::PLACEHOLDER,
-                0xA,
-                false,
-                Some(1),
-                true
-            )
-            .changed
-        );
-        assert!(
-            commit(
-                &mut selection,
-                &net,
-                Entity::PLACEHOLDER,
-                0xB,
-                false,
-                Some(1),
-                true
-            )
-            .changed
-        );
-        assert!(
-            !commit(
-                &mut selection,
-                &net,
-                Entity::PLACEHOLDER,
-                0xB,
-                false,
-                Some(1),
-                true
-            )
-            .changed
-        );
+        assert!(go(&mut world, 0xA, false, Some(1), true).changed);
+        assert!(go(&mut world, 0xB, false, Some(1), true).changed);
+        assert!(!go(&mut world, 0xB, false, Some(1), true).changed);
         assert_eq!(drain(&rx), ["select", "select"]);
 
         // Engaged switch onto an attackable unit: the byte order stop → select → swing.
-        let out = commit(
-            &mut selection,
-            &net,
-            Entity::PLACEHOLDER,
-            0xC,
-            true,
-            Some(1),
-            true,
-        );
+        let out = go(&mut world, 0xC, true, Some(1), true);
         assert!(out.changed && out.swung);
         assert_eq!(drain(&rx), ["stop", "select", "swing"]);
 
         // Engaged switch onto MYSELF (TargetUnit("player") mid-combat): stop, no re-point.
-        let out = commit(
-            &mut selection,
-            &net,
-            Entity::PLACEHOLDER,
-            0x1,
-            true,
-            Some(1),
-            true,
-        );
+        let out = go(&mut world, 0x1, true, Some(1), true);
         assert!(out.changed && !out.swung);
         assert_eq!(drain(&rx), ["stop", "select"]);
 
         // Engaged switch onto an unattackable unit (vendor/corpse): stop, no swing at it.
-        let out = commit(
-            &mut selection,
-            &net,
-            Entity::PLACEHOLDER,
-            0xD,
-            true,
-            Some(1),
-            false,
-        );
+        let out = go(&mut world, 0xD, true, Some(1), false);
         assert!(out.changed && !out.swung);
         assert_eq!(drain(&rx), ["stop", "select"]);
 
         // Engaged FIRST select (no old target): the [ebp-1] latch is off — selection only.
-        let mut fresh = Selection::default();
-        let out = commit(
-            &mut fresh,
-            &net,
-            Entity::PLACEHOLDER,
-            0xE,
-            true,
-            Some(1),
-            true,
-        );
+        *world.resource_mut::<Selection>() = Selection::default();
+        let out = go(&mut world, 0xE, true, Some(1), true);
         assert!(out.changed && !out.swung);
         assert_eq!(drain(&rx), ["select"]);
+
+        // **The two edges the seam brought.** A queued strike and a running auto-repeat, then an
+        // engaged switch onto an attackable unit: the stop un-queues the strike, the re-swing
+        // kills the repeat.
+        world
+            .resource_mut::<crate::ui_cast::QueuedMeleeSpell>()
+            .arm(78);
+        world.resource_mut::<crate::ui_action::AutoRepeatActive>().0 = Some(75);
+        let out = go(&mut world, 0xF, true, Some(1), true);
+        assert!(out.changed && out.swung);
+        assert_eq!(
+            drain(&rx),
+            ["stop", "cancel-cast", "select", "swing", "cancel-repeat"]
+        );
+        assert_eq!(
+            world
+                .resource::<crate::ui_cast::QueuedMeleeSpell>()
+                .current(),
+            None,
+            "the switch un-queued Heroic Strike"
+        );
+        assert_eq!(
+            world.resource::<crate::ui_action::AutoRepeatActive>().0,
+            None,
+            "and the re-swing killed Auto Shot"
+        );
     }
 
     fn cand(guid: u64, score: f32, on_screen: bool) -> Candidate {

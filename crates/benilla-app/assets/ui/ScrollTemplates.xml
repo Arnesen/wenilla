@@ -1,7 +1,10 @@
 <Ui>
     <!--
-        benilla's reusable scroll kits — TWO of them, sharing one scrollbar and one pair of arrow
-        helpers. The **faux-scroll** kit (this header) re-binds a fixed set of rows to a moving data
+        benilla's reusable scroll kits — TWO of them, sharing one scrollbar, one pair of arrow
+        helpers and one optional TROUGH (`BenillaScrollTroughTemplate`, at the foot: the recessed
+        channel a bar rides in — 1.12 authors that art per window, so an owner declares one beside
+        its bar and the kit shows and hides the two together).
+        The **faux-scroll** kit (this header) re-binds a fixed set of rows to a moving data
         offset; the **real-scroll** kit (second half of the script block) pans and CLIPS a
         variable-height child through the engine's `<ScrollFrame>` (decision 0112) — the one a gossip
         menu of wrapped options needs, since its content height isn't known until it is laid out.
@@ -95,6 +98,60 @@
             scrollBar:SetValue(offset * scrollBar:GetValueStep())
         end
 
+        -- Seat a trough ON ITS BAR. THE SOCKETS, and why this is not a free choice: the channel art
+        -- is not a plain tube — each end carries a 16-tall SOCKET that the arrow button drops into,
+        -- bounded by the frame's outer cap and an inner crossbar. Measured texel-exact off
+        -- UI-Character-ScrollBar (64x256):
+        --   top piece    (left column) : rows 0-3 CAP · rows 4-19 SOCKET · rows 20-21 crossbar
+        --   bottom piece (right column): rows 85-86 crossbar · rows 87-102 SOCKET · rows 104-106 CAP
+        -- Both pieces draw 1:1 anchored to their own end of the trough, and the arrow buttons sit 16
+        -- outside the slider's ends — so a socket lands on its arrow only when the trough OVERHANGS
+        -- the bar by 21 above and 20 below (4 rows of cap at the top against 3+1 at the bottom; that
+        -- 1 is the whole asymmetry). Those are the ref's own numbers, reached from the other side:
+        -- ReputationFrame hangs its trough at the scroll frame's TOPRIGHT (-2,+5) / BOTTOMRIGHT
+        -- (-2,-4) against a bar seated (6,-16)/(6,+16) — 21, 20, and the 8-left hang
+        -- (ref-ReputationFrame.xml l.573-599 against ref-UIPanelTemplates.xml l.166-181). Miss it by
+        -- even 4 and the arrows ride OUT of their sockets onto the caps with a sliver of bare socket
+        -- showing beside them, which is exactly what B224 reported.
+        --
+        -- Seated HERE, off the bar, rather than restated in each owner's XML: it is one law, and an
+        -- owner made to re-derive it in offsets is an owner that can get it wrong — which is how
+        -- B224 happened. So a trough carries NO anchors of its own; declare it before the bar (so it
+        -- draws beneath) and name it `<barname>Trough`, and that is the whole contract. Lazy,
+        -- because the bar is declared after the trough and does not exist at the trough's OnLoad.
+        function BenillaScrollTrough_Seat(trough, scrollBar)
+            if trough.seated then return end
+            trough.seated = true
+            trough:ClearAllPoints()
+            trough:SetPoint("TOPLEFT", scrollBar, "TOPLEFT", -8, 21)
+            trough:SetPoint("BOTTOMRIGHT", scrollBar, "BOTTOMRIGHT", 7, -20)
+        end
+
+        -- Show/hide a bar TOGETHER WITH ITS TROUGH — the recessed channel it rides in, if the
+        -- owner authored one beside it (a `<barname>Trough` frame on BenillaScrollTroughTemplate
+        -- below). Every path that shows or hides a bar goes through here, so a window that fits
+        -- shows neither and one that overflows shows both — and so a trough is seated on its bar
+        -- before it can ever be visible, whichever way the first call goes.
+        --
+        -- Why the trough is OPT-IN rather than part of the bar template: 1.12 authors trough art
+        -- PER WINDOW, never in the shared scroll kit — `UIPanelScrollBarTemplate` carries only the
+        -- two arrow buttons and the knob, and the ref's FrameXML then hangs loose trough textures
+        -- beside 29 individual bars, in two different skins (UI-Character-ScrollBar for the
+        -- dialog/paperdoll family, UI-ClassTrainer-ScrollBar for the trainer family). The era's own
+        -- MinimalScrollBar went the other way and made its Track part of the bar; this pair keeps
+        -- the era's COUPLING (track lives and dies with the bar) on 1.12's per-window SKIN.
+        function BenillaScrollBar_SetShown(scrollBar, shown)
+            local trough = getglobal(scrollBar:GetName() .. "Trough")
+            if trough then BenillaScrollTrough_Seat(trough, scrollBar) end
+            if shown then
+                scrollBar:Show()
+                if trough then trough:Show() end
+            else
+                scrollBar:Hide()
+                if trough then trough:Hide() end
+            end
+        end
+
         -- Reconcile the bar to a freshly-sized list (ref FauxScrollFrame_Update): clamp the offset into
         -- range, set the pixel range + step, seat the thumb at the current offset, and show the bar only
         -- when the list overflows the visible rows. Called by the owner's list-repaint each pass.
@@ -110,11 +167,7 @@
             scrollBar:SetValue(frame.offset * itemHeight)
             BenillaScrollBar_UpdateArrows(scrollBar)
 
-            if numItems > numToDisplay then
-                scrollBar:Show()
-            else
-                scrollBar:Hide()
-            end
+            BenillaScrollBar_SetShown(scrollBar, numItems > numToDisplay)
         end
 
         -- A wheel spin over the list → one row (WoW convention: +1 up, −1 down). Called from the
@@ -160,7 +213,7 @@
             bar:SetMinMaxValues(0, range)
             bar:SetValue(sf:GetVerticalScroll())
             BenillaScrollBar_UpdateArrows(bar)
-            if range > 0 then bar:Show() else bar:Hide() end
+            BenillaScrollBar_SetShown(bar, range > 0)
         end
 
         -- Pan by `delta` px; the engine clamps to [0, range].
@@ -250,6 +303,84 @@
             <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
         </ThumbTexture>
     </Slider>
+
+    <!--
+        The scroll bar's TROUGH — the recessed channel the bar rides in: the "background and
+        border" a bare arrows+knob bar is missing. An owner declares one of these BESIDE its bar,
+        named `<barname>Trough` and WITH NO ANCHORS — it seats itself on the bar the first time
+        BenillaScrollBar_SetShown touches it (BenillaScrollTrough_Seat above, where the socket law
+        and the ref citations live). Declare it BEFORE the bar so it draws beneath.
+
+        THE ART, and why it is sliced this way. `Interface\PaperDollInfoFrame\UI-Character-ScrollBar`
+        is a 64x256 sheet holding TWO 31-wide channel pieces, measured texel-exact from the file —
+        rails at x 2-5 and 25-30 with a 19-wide interior between them, and each piece bearing a
+        16-tall SOCKET for its arrow button:
+          · LEFT column (u 0 .. 31/64): rows 0-3 the solid TOP cap, 4-19 the up-arrow socket,
+            20-21 the crossbar that closes it, then plain channel from row 22 to the bottom edge.
+          · RIGHT column (u 33/64 .. 1): plain channel, then rows 85-86 the crossbar, 87-102 the
+            down-arrow socket, 104-106 the solid BOTTOM cap (nothing below 107).
+        The ref composes a trough from exactly two quads — the whole left column plus the right
+        column's bottom 108 rows — which reaches 362 units and no further, and only works because
+        its scroll frames are short enough for the two to OVERLAP. Ours must span a 563-tall page,
+        so the same art is cut as a THREE-SLICE instead: the two socket ends at their natural
+        heights and a plain-channel slice stretched between them. The middle is constant down its
+        whole length, so stretching it is exact — there is no seam to find.
+
+        The black `Fill` is the ref's own trough backing, not an invention: ItemTextFrame draws a
+        0.8-alpha black quad behind its channel art for exactly this (ref-ItemTextFrame.xml's
+        `Middle`). It sits in BACKGROUND and the channel art in BORDER — two layers, because within
+        ONE layer the client re-sorts overlapping quads by texture handle and their order is not
+        ours to depend on (order.rs). The bar's own furniture stays clear above both: button state
+        textures are ARTWORK, the knob is OVERLAY.
+    -->
+    <Frame name="BenillaScrollTroughTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="31"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The channel interior: x 6..24 of the 31-wide piece, i.e. inset 6 from each edge. -->
+                <Texture name="$parentFill">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0" g="0" b="0" a="0.8"/>
+                </Texture>
+            </Layer>
+            <Layer level="BORDER">
+                <!-- Cap + up-arrow socket + crossbar: left column, rows 0..22 (v 0 .. 23/256). -->
+                <Texture name="$parentTop" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size><AbsDimension y="23"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"/>
+                        <Anchor point="TOPRIGHT"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.484375" top="0" bottom="0.08984375"/>
+                </Texture>
+                <!-- Crossbar + down-arrow socket + cap: right column, rows 82..107
+                     (v 82/256 .. 108/256) — the mirror of the top's 23, cut to put row 107 on the
+                     trough's bottom edge exactly as ReputationFrame's own 108/0.421875 does, which
+                     is what lands the socket on the arrow (BenillaScrollTrough_Seat's law). -->
+                <Texture name="$parentBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size><AbsDimension y="26"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"/>
+                        <Anchor point="BOTTOMRIGHT"/>
+                    </Anchors>
+                    <TexCoords left="0.515625" right="1.0" top="0.3203125" bottom="0.421875"/>
+                </Texture>
+                <!-- The stretched run between them: left column rows 30..70, plain rails only.
+                     Declared LAST because it anchors to the two above by name, and an anchor whose
+                     target is declared later falls back to the parent (ItemTextFrame's own note). -->
+                <Texture name="$parentMiddle" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentTop" relativePoint="BOTTOMLEFT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentBottom" relativePoint="TOPRIGHT"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.484375" top="0.1171875" bottom="0.2734375"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Frame>
 
     <!--
         The faux-scroll container: a plain `<Frame>` carrying the offset state + a right-hand scroll bar

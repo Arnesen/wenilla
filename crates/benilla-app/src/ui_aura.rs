@@ -49,8 +49,10 @@ use benilla_protocol::messages::{UnitAuraSlot, AURA_FLAG_CANCELABLE, UNIT_AURA_P
 use benilla_ui::script::{AuraState, ScriptValue, TrackingState, UiScript};
 
 use crate::char_select::ClientState;
-use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
-use crate::target::Selection;
+use crate::net::{
+    ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer,
+};
+use crate::target::{can_assist, Factions, Selection};
 use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -298,10 +300,21 @@ fn projection_of(list: &[AuraState]) -> Vec<AuraProjection> {
 /// only thing any of them can show is what `UNIT_FIELD_AURA` holds. Filtering here rather than in
 /// the Lua binding keeps `UnitBuff(token, i)` returning the i-th *shown* aura, matching the
 /// reference's own indices.
-fn other_unit_auras(store: &ObjectStore, catalog: Option<&SpellCatalog>) -> Vec<AuraState> {
+///
+/// `buffs_visible` is the **unit-level** gate (decision 1035): `UnitBuff 0x519500` decides, once
+/// per unit and *before* it walks a single slot, whether this unit's positive half is enumerable at
+/// all — see [`buffs_visible_on`]. False drops the helpful half entirely, which is exactly what the
+/// reference does (a single nil for every index), so `UnitBuff(token, i)` goes nil while
+/// `UnitDebuff(token, i)` is untouched: `UnitDebuff 0x5198f0` has no such gate.
+fn other_unit_auras(
+    store: &ObjectStore,
+    catalog: Option<&SpellCatalog>,
+    buffs_visible: bool,
+) -> Vec<AuraState> {
     store
         .0
         .unit_auras()
+        .filter(|a| buffs_visible || a.slot >= UNIT_AURA_POSITIVE_SLOTS)
         .filter(|a| shown_in_aura_ui(catalog, a.spell_id))
         .map(|a| {
             let display = catalog.and_then(|cat| cat.get(a.spell_id));
@@ -325,6 +338,50 @@ fn other_unit_auras(store: &ObjectStore, catalog: Option<&SpellCatalog>) -> Vec<
         .collect()
 }
 
+/// **`UnitBuff 0x519500`'s unit-level gate** — may this unit's *buffs* be enumerated at all?
+/// (Decision 1035; byte-derived in wow-re `ui/scratch/aura-display-pipeline.md` §9b.)
+///
+/// This sits **before** the per-slot walk and outranks it: when it fails, `UnitBuff` pushes a
+/// single nil for **every** index without examining one slot, so the unit shows *no buffs*
+/// whatever its aura array holds. `UnitDebuff 0x5198f0` has no counterpart — debuffs are always
+/// enumerable, which is why a hostile mob shows its debuffs and nothing else.
+///
+/// ```text
+/// (unit.UNIT_FIELD_FLAGS & UNIT_FLAG_AURAS_VISIBLE)        // 0x08000000
+///   || (CanAssist(activePlayer, unit) && activePlayer.UNIT_FIELD_CHARMEDBY == 0)
+/// ```
+///
+/// The first clause is **Detect Magic** (spell 2855 → `SPELL_AURA_AURAS_VISIBLE`, vmangos
+/// `UnitDefines.h:518` *"Detect Magic. Added by SPELL_AURA_AURAS_VISIBLE"*). That spell exists
+/// precisely *because* the second clause denies a hostile unit's buffs — which is the independent
+/// gameplay corroboration that this gate is real and not an artifact of one screenshot.
+///
+/// **It is also why GM mode changes the answer**, and why the same mob read two ways for a while:
+/// vmangos ORs the bit into the outgoing `UNIT_FIELD_FLAGS` *for GameMasters only* (`Object.cpp`
+/// 765-766, *"Gamemasters should be always able to select units and view auras"*). So the server
+/// already tailors this per viewer and we need know nothing about GM state — reading the flag off
+/// the descriptor as received is both simpler and exactly right in both regimes.
+fn buffs_visible_on(
+    store: &ObjectStore,
+    self_store: Option<&ObjectStore>,
+    factions: Option<&Factions>,
+    reputations: &Reputations,
+    owner_store: impl FnOnce(u64) -> Option<ObjectStore>,
+) -> bool {
+    if store.0.unit_flags() & UNIT_FLAG_AURAS_VISIBLE != 0 {
+        return true;
+    }
+    // `activePlayer.UNIT_FIELD_CHARMEDBY == 0` — while something else is driving you, you assist
+    // nobody (`0x5195f1`-`0x5195f7`).
+    if self_store.is_some_and(|s| s.0.unit_charmed_by().is_some()) {
+        return false;
+    }
+    can_assist(Some(store), factions, reputations, self_store, owner_store)
+}
+
+/// `UNIT_FLAG_AURAS_VISIBLE` — see [`buffs_visible_on`].
+const UNIT_FLAG_AURAS_VISIBLE: u32 = 0x0800_0000;
+
 /// The reference's aura display filter (decisions 0268 + 0417): an aura is shown iff its spell is
 /// *not* flagged never-display (`SPELL_ATTR_DO_NOT_DISPLAY` / `SPELL_ATTR_EX_NO_AURA_ICON`, via
 /// `SpellDisplay::hidden_from_aura_bar`) **and** is not a tracking spell
@@ -335,7 +392,16 @@ fn other_unit_auras(store: &ObjectStore, catalog: Option<&SpellCatalog>) -> Vec<
 /// display — the player's own bar and any other unit's rows alike (the director watched the
 /// reference hide a target's Battle Stance; 0417 corrects 0268's player-only scope note and
 /// wow-re §9). A spell the catalog can't resolve stays visible — fail-open, like every other
-/// catalog miss in the feed (and like the reference's own no-SpellRec path, which inserts).
+/// catalog miss in the feed.
+///
+/// **That fail-open is ours, not the reference's, on this path** — the parenthetical that used to
+/// justify it here ("like the reference's own no-SpellRec path, which inserts") was true of the
+/// *player cache* (§3) and is FALSE of the non-player walk: `UnitBuff`/`UnitDebuff` **skip** a slot
+/// whose id has no `Spell.dbc` row (`id > [0xc0d78c]` or a null row; wow-re §9c, decision 1035).
+/// Kept as fail-open deliberately: every id on the wire is a real spell, so the two behaviours are
+/// indistinguishable in practice, and failing *closed* would let a catalog load hiccup silently
+/// blank every aura on every frame. A knowing divergence, recorded — not a comment asserting
+/// something untrue.
 fn shown_in_aura_ui(catalog: Option<&SpellCatalog>, spell_id: u32) -> bool {
     catalog
         .and_then(|c| c.get(spell_id))
@@ -374,6 +440,11 @@ fn feed_auras(
     // The pet half (decision 0990): the bar owns the pet's identity, the index resolves it.
     pet: Res<crate::ui_pet::PetBar>,
     index: Res<GuidIndex>,
+    // The `UnitBuff` unit-level gate's inputs ([`buffs_visible_on`]) — the same reaction resolve
+    // the selection ring and the name plates run, so one law answers "is this unit friendly to me"
+    // everywhere.
+    factions: Option<Res<Factions>>,
+    reputations: Res<Reputations>,
     // Read-only over the stamps: the feed joins them, the net apply path writes them, and only the
     // session end drops them (decision 0900). Nothing the feed sees may invalidate one.
     durations: Res<AuraDurations>,
@@ -530,7 +601,25 @@ fn feed_auras(
             if guid == self_guid.0 {
                 return Some(list.clone());
             }
-            Some(other_unit_auras(stores.get(e).ok()?, catalog))
+            // NOT named `store` — that is the SELF player's, bound above and needed here as the
+            // gate's second argument.
+            let target_store = stores.get(e).ok()?;
+            // The gate is resolved per unit, once, exactly where the reference resolves it —
+            // before any slot is read (decision 1035).
+            let buffs = buffs_visible_on(
+                target_store,
+                Some(store),
+                factions.as_deref(),
+                &reputations,
+                |owner| {
+                    index
+                        .0
+                        .get(&owner)
+                        .and_then(|&e| stores.get(e).ok())
+                        .cloned()
+                },
+            );
+            Some(other_unit_auras(target_store, catalog, buffs))
         });
 
     // The pet's list — the pet frame's four debuff buttons (decision 0990). Same other-unit law as
@@ -543,7 +632,13 @@ fn feed_auras(
         .then(|| index.0.get(&pet_guid))
         .flatten()
         .and_then(|&e| stores.get(e).ok())
-        .map(|store| other_unit_auras(store, catalog));
+        // **The pet keeps the ungated read, deliberately** (decision 1035). A pet is
+        // PLAYER_CONTROLLED, which sends `CanAssist` down an arm (`0x60673e`-`0x60679f`, keyed on
+        // an `[obj+0xe68]` record) wow-re did NOT name — so the gate is not known here, and
+        // guessing it is the one mistake that could blank a working pet frame. `true` is the
+        // status quo; the pet frame draws only debuffs today anyway (0990), so nothing observable
+        // rides on it until that arm is derived.
+        .map(|store| other_unit_auras(store, catalog, true));
 
     let target_cur = selection
         .guid
@@ -685,6 +780,10 @@ mod tests {
             // the `"pet"` token stays cleared and the feed's pet leg is inert.
             .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<GuidIndex>()
+            // The `UnitBuff` gate's reaction inputs (decision 1035). `Factions` is an
+            // `Option<Res<..>>` (it needs the DBC catalog), but `Reputations` is not — the feed
+            // reads it unconditionally, so a bare app must carry it or the system fails validation.
+            .init_resource::<Reputations>()
             .insert_resource(NetCommands(tx))
             .add_plugins(UiAuraPlugin);
         app
@@ -969,6 +1068,110 @@ mod tests {
         assert!(
             (expiry - 1199.95).abs() < 1e-9,
             "expiry rebased onto the script clock, got {expiry}"
+        );
+    }
+    // == Decision 1035 — `UnitBuff 0x519500`'s unit-level gate ==
+    //
+    // The B216 case: a stealthed Ridge Stalker carries TWO auras that both resolve to
+    // `Ability_Stealth` — 5916 "Shadowstalker Stealth" in a POSITIVE slot (creature_addon) and
+    // 22766 "Sneak" in a NEGATIVE slot (EventAI; vmangos files it harmful because its
+    // MOD_DECREASE_SPEED effect is negative). We drew both. The reference draws only the debuff,
+    // because `UnitBuff` never enumerates a hostile creature's positive half at all.
+
+    /// `UNIT_FIELD_FLAGS` index — the fixture writes it directly (`from_pairs` is the public
+    /// fixture constructor; live code only ever decodes the wire).
+    const F_FLAGS: u16 = 46;
+    /// `UNIT_FIELD_CHARMEDBY`'s low dword — a guid pair, so the high half is the next index.
+    const F_CHARMEDBY: u16 = 10;
+
+    /// The B216 mob's two slots: 5916 helpful, 22766 harmful.
+    fn ridge_stalker_slots(flags: u32) -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (F_FLAGS, flags),
+            (47, 5916),            // UNIT_FIELD_AURA slot 0 — the positive half
+            (47 + 32, 22766),      // slot 32 — the negative half
+            (95, 0x0000_0008),     // AURAFLAGS slot 0 nibble 0x8 (eff0)
+            (95 + 4, 0x0000_0008), // slot 32 nibble 0x8
+        ]))
+    }
+
+    /// **The gate's consequence, both ways.** With buffs denied, `other_unit_auras` returns the
+    /// harmful half ONLY — which is what makes `UnitBuff("target", i)` nil for every i while
+    /// `UnitDebuff` is untouched, exactly as the reference behaves (a single nil for every buff
+    /// index, no slot examined). With buffs allowed, both come back.
+    #[test]
+    fn the_unit_gate_drops_the_whole_helpful_half_and_never_the_harmful_one() {
+        let store = ridge_stalker_slots(0);
+
+        let denied = other_unit_auras(&store, None, false);
+        assert_eq!(
+            denied.iter().map(|a| a.spell_id).collect::<Vec<_>>(),
+            [22766],
+            "a hostile creature shows its debuffs and NOT its buffs — the B216 divergence"
+        );
+        assert!(denied.iter().all(|a| !a.helpful));
+
+        let allowed = other_unit_auras(&store, None, true);
+        assert_eq!(
+            allowed.iter().map(|a| a.spell_id).collect::<Vec<_>>(),
+            [5916, 22766],
+            "with the gate open both halves enumerate, ascending slot"
+        );
+    }
+
+    /// **Detect Magic / GM mode short-circuits the gate.** `UNIT_FLAG_AURAS_VISIBLE` is clause
+    /// one, tested before any reaction work — and it is why the same mob reads two ways: vmangos
+    /// ORs the bit in for GameMasters only (`Object.cpp:765-766`), so a GM sees the buffs and an
+    /// ordinary player does not. Nothing here consults GM state; the flag arrives on the wire.
+    #[test]
+    fn detect_magic_or_gm_mode_opens_the_gate_on_the_flag_alone() {
+        let reputations = Reputations::default();
+        // No factions catalog → `ring_reaction` falls through to NEUTRAL (3), which FAILS the
+        // `>= 4` bar. So the flag is the only thing that can open the gate in this fixture.
+        let hostile = ridge_stalker_slots(0);
+        assert!(
+            !buffs_visible_on(&hostile, None, None, &reputations, |_| None),
+            "neutral reaction, not player-controlled, no PvP flag → no buffs"
+        );
+
+        let detected = ridge_stalker_slots(UNIT_FLAG_AURAS_VISIBLE);
+        assert!(
+            buffs_visible_on(&detected, None, None, &reputations, |_| None),
+            "UNIT_FLAG_AURAS_VISIBLE alone opens it, whatever the reaction says"
+        );
+    }
+
+    /// **`NOT_SELECTABLE` and the charm clause.** Both are outside the reaction ladder: the first
+    /// is `CanAssist`'s own first test, the second is `UnitBuff`'s `activePlayer.CHARMEDBY == 0`
+    /// (`0x5195f1`-`0x5195f7`) — while something else drives you, you assist nobody.
+    #[test]
+    fn not_selectable_and_being_charmed_each_close_the_gate_on_their_own() {
+        let reputations = Reputations::default();
+
+        // AURAS_VISIBLE would open it — but it is clause one and NOT_SELECTABLE lives inside
+        // CanAssist, so the flag still wins. Pin that ordering, it is the reference's.
+        let both = ridge_stalker_slots(UNIT_FLAG_AURAS_VISIBLE | (1 << 25));
+        assert!(
+            buffs_visible_on(&both, None, None, &reputations, |_| None),
+            "AURAS_VISIBLE is tested FIRST and short-circuits CanAssist entirely"
+        );
+
+        // Player-controlled + friendly would otherwise pass the permissive arm; being charmed
+        // ourselves closes it before CanAssist runs at all.
+        let friendly_pc = ridge_stalker_slots(0x8);
+        let charmed_self = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (F_CHARMEDBY, 0x1234),
+            (F_CHARMEDBY + 1, 0),
+        ]));
+        assert!(
+            !buffs_visible_on(
+                &friendly_pc,
+                Some(&charmed_self),
+                None,
+                &reputations,
+                |_| None
+            ),
+            "activePlayer.CHARMEDBY != 0 → no buffs on anyone"
         );
     }
 }

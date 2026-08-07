@@ -56,7 +56,7 @@ pub(super) fn select_on_click(
     hovered: Res<Hovered>,
     cursor: Res<WorldCursor>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     self_q: Query<(&Guid, Has<Engaged>), With<SelfPlayer>>,
     payload_held: Res<crate::ui_script::CursorPayloadHeld>,
     occlusion: Res<PickOcclusion>,
@@ -95,7 +95,7 @@ pub(super) fn select_on_click(
             // neutral, hover-refreshed every frame) IS Attack `0x5ecb70`'s new-target validation.
             scan::commit(
                 &mut selection,
-                &net,
+                &mut seam,
                 entity,
                 guid,
                 engaged,
@@ -113,7 +113,7 @@ pub(super) fn select_on_click(
         // at 0 = an empty-world click keeps the target (1.12's own inverted checkbox).
         _ => {
             if click_cfg.deselect_on_click && (!payload_held.0 || occlusion.distance.is_finite()) {
-                clear(&mut selection, &net, engaged);
+                clear(&mut selection, &mut seam, engaged);
             }
         }
     }
@@ -149,9 +149,8 @@ pub(super) fn act_on_right_click(
     hovered_object: Res<HoveredObject>,
     cursor: Res<WorldCursor>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     self_player: Query<(Entity, &Guid, Has<Engaged>), With<SelfPlayer>>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
     mut emote: MessageWriter<crate::creature_anim::EmoteAnim>,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
     // The GameObject lock-routing inputs (decisions 0239 / 0545 / 0752) as one [`GoLockInputs`]
@@ -227,13 +226,13 @@ pub(super) fn act_on_right_click(
                     &player_actions.spells,
                     go,
                     me_store,
-                    &net,
+                    &seam.net,
                 ) {
                     GoAction::Use if cursor.unable => {}
                     GoAction::OpenLock(_) | GoAction::OpenByKey { .. } if cursor.unable => {}
                     GoAction::Use => {
                         debug!("right-click gameobject use: {guid:#x}");
-                        let _ = net.0.send(ClientCommand::GameObjUse { guid });
+                        let _ = seam.net.0.send(ClientCommand::GameObjUse { guid });
                     }
                     GoAction::OpenLock(spell_id) => {
                         // The opener cast funnels through the ref's TryCast like any other cast
@@ -254,7 +253,7 @@ pub(super) fn act_on_right_click(
                             return;
                         }
                         debug!("right-click gameobject open-lock: cast {spell_id} at {guid:#x}");
-                        let _ = net.0.send(ClientCommand::CastSpellGameObject {
+                        let _ = seam.net.0.send(ClientCommand::CastSpellGameObject {
                             spell_id,
                             go_guid: guid,
                         });
@@ -277,7 +276,7 @@ pub(super) fn act_on_right_click(
                         // *spell* as well as its block ordinal, and the binder has no GameObject
                         // arm (`CastCommit::Item::on_object` is the seam that awaits it). Stated
                         // gap, decision 0914.
-                        let _ = net.0.send(ClientCommand::UseItem {
+                        let _ = seam.net.0.send(ClientCommand::UseItem {
                             bag_index,
                             slot,
                             spell_index,
@@ -315,7 +314,7 @@ pub(super) fn act_on_right_click(
     // it never swings at them.
     let outcome = scan::commit(
         &mut selection,
-        &net,
+        &mut seam,
         entity,
         guid,
         me.is_some_and(|(_, _, e)| e),
@@ -335,23 +334,14 @@ pub(super) fn act_on_right_click(
             // refused — selection stands, no swing
         } else {
             debug!("right-click attack: {guid:#x}");
-            // Auto-draw through the anim layer's ONE setter (decision 0080) — a SNAP, no
-            // ceremony, no sound: the attack path passes `(newState=1, bInstant=1,
-            // bFireEvent=1)` at `0x5ecd80` (wow-re `sheath-policy.md`). The setter's
-            // idempotency is the client's own "no-op if already melee".
-            if let Some((e, _, _)) = me {
-                sheath.write(crate::creature_anim::SheathRequest {
-                    entity: e,
-                    state: 1,
-                    ceremony: false,
-                });
-            }
-            // The commit's engaged-switch law may already have re-pointed the swing at this
-            // guid (the ref's `0x5ecb70` skips a second send while the attack lock is set) —
-            // only the fresh attack-start still owes its ATTACKSWING.
-            if !outcome.swung {
-                let _ = net.0.send(ClientCommand::AttackSwing { guid });
-            }
+            // The right-click's own StartAttack, through the one seam (auto-draw + the swing +
+            // the auto-repeat cancel — `0x5ecb70`'s whole body). The commit above may already
+            // have re-pointed the swing at this guid, in which case the ref's `0x5eccda` is the
+            // thing that suppresses a second send, so pass it the real lock state and let the
+            // seam decide: `swung` means the re-swing already went out and the lock is ours, so
+            // no stop is in flight any more.
+            let engaged = me.is_some_and(|(_, _, e)| e);
+            seam.start(guid, engaged || outcome.swung, false);
         }
     } else if loot {
         // A dead unit carrying UNIT_DYNFLAG_LOOTABLE (the Pickup loot cursor, decision 0084): open
@@ -360,7 +350,7 @@ pub(super) fn act_on_right_click(
         // No EmoteTalk: looting is not an NPC interaction, the corpse plays no talk.
         if !cursor.unable {
             debug!("right-click loot: {guid:#x}");
-            let _ = net.0.send(ClientCommand::Loot { guid });
+            let _ = seam.net.0.send(ClientCommand::Loot { guid });
             // The kneel is client-predicted AT THE SEND: the real client's `CMSG_LOOT` sender
             // (`0x5df253`) sets the loot-target latch `[player+0x1d28]` and plays Loot 50 before
             // any server response (decision 0515). Arm the latch the anim driver's loot leg
@@ -377,7 +367,7 @@ pub(super) fn act_on_right_click(
         if !cursor.unable {
             if let Some(spell_id) = learned.skinning {
                 debug!("right-click skin: {guid:#x} (spell {spell_id})");
-                let _ = net.0.send(ClientCommand::CastSpell {
+                let _ = seam.net.0.send(ClientCommand::CastSpell {
                     spell_id,
                     target: Some(guid),
                 });
@@ -395,7 +385,7 @@ pub(super) fn act_on_right_click(
             .unwrap_or(0);
         if let Some(cmd) = interact_command(cursor.kind, guid, npc_flags) {
             debug!("right-click interact: {guid:#x} ({:?})", cursor.kind);
-            let _ = net.0.send(cmd);
+            let _ = seam.net.0.send(cmd);
             // Play EmoteTalk on our avatar — the reconcile stows a drawn weapon, persistently
             // (decisions 0080/0081; no sheath wiring here).
             if let Some((e, _, _)) = me {
@@ -674,14 +664,14 @@ fn interact_command(
 pub(super) fn clear_target_requests(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     if script.take_target_clear() {
-        clear(&mut selection, &net, !engaged.is_empty());
+        clear(&mut selection, &mut seam, !engaged.is_empty());
     }
 }
 
@@ -698,7 +688,7 @@ pub(super) fn clear_target_requests(
 pub(super) fn target_unit_requests(
     script: Option<NonSendMut<UiScript>>,
     mut selection: ResMut<Selection>,
-    net: Res<NetCommands>,
+    mut seam: crate::creature_anim::AttackSeam,
     self_q: Query<(Entity, &Guid, Has<Engaged>), With<SelfPlayer>>,
     group: Res<crate::ui_party::GroupState>,
     index: Res<crate::net::GuidIndex>,
@@ -739,7 +729,7 @@ pub(super) fn target_unit_requests(
             // switch fired from here can only ever STOP the swing — never re-point it.
             scan::commit(
                 &mut selection,
-                &net,
+                &mut seam,
                 entity,
                 guid,
                 engaged,
@@ -755,13 +745,18 @@ pub(super) fn target_unit_requests(
 /// one is running (`engaged`, our server-echoed [`Engaged`]): `CMSG_ATTACKSTOP` — the ref stops
 /// swinging and drops the attack stance on Esc/click-off/target-death alike (the stance itself falls
 /// when the `SMSG_ATTACKSTOP` echo removes [`Engaged`]). Weapons *stay drawn* — combat never stows.
-pub(super) fn clear(selection: &mut Selection, net: &NetCommands, engaged: bool) {
+pub(super) fn clear(
+    selection: &mut Selection,
+    seam: &mut crate::creature_anim::AttackSeam,
+    engaged: bool,
+) {
     if selection.target.take().is_some() {
         selection.guid = None;
-        let _ = net.0.send(ClientCommand::SetSelection { guid: 0 });
-        if engaged {
-            let _ = net.0.send(ClientCommand::AttackStop);
-        }
+        let _ = seam.net.0.send(ClientCommand::SetSelection { guid: 0 });
+        // `SetSelection 0x493540`'s own `0x493a08 call 0x5ecac0` — the real StopAttack, so
+        // losing the target also un-queues a pending on-next-swing strike. It was a bare
+        // `CMSG_ATTACKSTOP` before the seam existed.
+        seam.stop(engaged);
     }
 }
 

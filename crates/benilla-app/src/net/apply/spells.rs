@@ -309,12 +309,15 @@ pub(super) fn spell_go(
     queued_melee: &mut QueuedMeleeSpell,
     text: &mut MessageWriter<crate::combat_text::CombatTextSpawn>,
     go_lid: &mut MessageWriter<crate::go_anim::GoLidOpen>,
-    // The cooldown store + what its start laws read (grouped: one arm-body concern).
+    // The cooldown store + what its start laws read (grouped: one arm-body concern). The last
+    // member is the PET's store — the reference inserts into two banks from this one handler
+    // ([`pet_go_cooldown`]).
     cooldown_ctx: (
         &mut Cooldowns,
         Option<&Spells>,
         &mut crate::items::Items,
         &crate::net::NetCommands,
+        &mut crate::ui_pet::PetBar,
     ),
     seq: u64,
 ) {
@@ -331,6 +334,9 @@ pub(super) fn spell_go(
     if let Some(go_guid) = go_target {
         go_lid.write(crate::go_anim::GoLidOpen { go_guid, spell_id });
     }
+    let (cooldowns, spells, items, net_commands, pet_bar) = cooldown_ctx;
+    let now = Instant::now();
+    let display = spells.and_then(|s| s.catalog.get(spell_id));
     // Our own launch completes the cast bar (a shown bar fills green and fades; auto-repeat
     // shots — GO with no bar showing — no-op in the reference Lua) and opens the in-flight guard
     // (spell-id-keyed, so a triggered proc's GO mid-cast doesn't unblock the running cast early).
@@ -366,9 +372,6 @@ pub(super) fn spell_go(
         // normal source — this insert is how a Charge sweep appears on vmangos, which sends no
         // cooldown packet for a plain cast. A pre-launch failure never reaches here, so nothing
         // needs reverting.
-        let (cooldowns, spells, items, net_commands) = cooldown_ctx;
-        let now = Instant::now();
-        let display = spells.and_then(|s| s.catalog.get(spell_id));
         // The ranged-shot pad (the category scaler `0x6e2b60`, byte-verified — wow-re
         // `ranged-cooldown-sweep.md`, decision 0378): a ranged-slot cast folds our live
         // `UNIT_FIELD_RANGEDATTACKTIME` (haste-scaled, server-written) into the category
@@ -413,6 +416,28 @@ pub(super) fn spell_go(
                     ),
                 );
             }
+        }
+    }
+    // **The PET leg of the same insert** (decision 1031) — a second, independent `if` in the very
+    // same handler, not an else of the one above.
+    if let Some(d) = display.filter(|_| pet_go_cooldown(caster, self_guid, index, stores)) {
+        // No ranged pad here: `0x6e2b60` is called on the self leg only (`0x6e845d`), and there is
+        // nothing on a pet to read a `UNIT_FIELD_RANGEDATTACKTIME` from that the client uses.
+        pet_bar.cooldowns.start_spell(spell_id, d, 0, now);
+        // `0x6e85fc` + `0x6e8601`: SPELL_UPDATE_COOLDOWN and PET_BAR_UPDATE_COOLDOWN. benilla
+        // collapses both into the pet bar's one repaint event, which the feed fires off its own
+        // diff — and the diff moves, because the slot's cooldown triple just changed. The signal
+        // bump is belt-and-braces for the case where the same spell re-arms to an identical
+        // triple (a zero-length re-cast), which the diff would otherwise swallow.
+        pet_bar.bar_signals = pet_bar.bar_signals.wrapping_add(1);
+        if crate::dbg_trace::enabled() {
+            crate::dbg_trace::line(
+                "cd",
+                &format!(
+                    "arm spell={spell_id} rec={}ms cat={}:{}ms (GO pet-insert)",
+                    d.recovery_ms, d.category, d.category_recovery_ms
+                ),
+            );
         }
     }
     // The miss list's floating words (0137 phase 2, the `0x6e7a70` handler): one outcome word
@@ -600,6 +625,53 @@ pub(super) fn cancel_auto_repeat(
     // not dormant: the doc block above has the send site and the target-death path to it.
     let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
     crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
+}
+
+/// **Does this `SMSG_SPELL_GO` arm the PET's cooldown bank?** (decision 1031; `0x6e857a`-`0x6e85ad`.)
+///
+/// The reference's GO handler makes two independent cooldown inserts, into two banks
+/// (`0x6e2ea0`'s `bankHead = 0xcecaec + 24*bank`): the self leg above writes bank 0 at
+/// `0x6e8493 mov ecx, 0xcecaec`, and this one writes **bank 1** at `0x6e85f2 mov ecx, 0xcecb04` —
+/// the same bank `SMSG_PET_SPELLS`' cooldown tail seeds (`0x4bdaa8 push 1`) and the same bank
+/// `GetPetActionCooldown` and `GetSpellCooldown(id, "pet")` read. One packet can arm both.
+///
+/// The gate is **ownership of the caster**, read off the caster's own descriptor and nothing else
+/// — not the pet-bar guid, not `UNIT_FIELD_PETNUMBER`:
+///
+/// ```text
+/// 0x6e858b  edi = fields[0x14] ; edx = fields[0x10]     ; CHARMEDBY as a 64-bit pair
+/// 0x6e8594  or edx, edi ; jne -> edi = &fields[0x10]
+/// 0x6e859a  else            edi = &fields[0x18]         ; SUMMONEDBY
+/// 0x6e859d  call 0x468550                               ; the active player's guid
+/// 0x6e85a2  if (*edi, *(edi+4)) != that guid -> skip
+/// ```
+///
+/// i.e. `charmedBy` when set, else **`summonedBy`** — `OwnerFallback::SummonedBy`, the pair the
+/// `PET_ATTACK_*` callback uses, and **not** `0x5ee5a0`'s `createdBy` fallback. Picking the wrong
+/// one would arm the bank for totems and miss real pets: exactly the silent failure that enum
+/// exists to prevent.
+///
+/// **Why this leg matters at all on vmangos**: the server sends *no* cooldown packet for a pet's
+/// own cast. `Creature::AddCooldown` (`Objects/Creature.cpp:3259-3282`) stores the cooldown and
+/// returns; its one `SendSpellCooldown` call sits in the `else` branch, reached only by a
+/// **charmed non-pet** casting an instant under mind control. So without this insert a hunter's
+/// Growl or a warlock imp's Firebolt shows no sweep at all until the next `SMSG_PET_SPELLS`
+/// reseeds the bank — and that is a summon, a swap or a learned spell, never a cast.
+fn pet_go_cooldown(
+    caster: u64,
+    self_guid: &SelfGuid,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
+) -> bool {
+    let Some(me) = self_guid.0 else {
+        return false;
+    };
+    index
+        .0
+        .get(&caster)
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_owner(benilla_protocol::OwnerFallback::SummonedBy))
+        == Some(me)
 }
 
 /// `SMSG_SPELL_COOLDOWN` (`0x6e9460`) — server-pushed cooldowns (school lockouts, and the pet's
@@ -821,6 +893,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
         // The self player mid-cast on Fireball (133): the bar is up, `Casting{133}` marks it.
@@ -861,6 +934,7 @@ mod tests {
                           mut text: MessageWriter<CombatTextSpawn>,
                           mut go_lid: MessageWriter<GoLidOpen>,
                           mut cooldowns: ResMut<Cooldowns>,
+                          mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                           mut items: ResMut<crate::items::Items>| {
                         let net_commands = crate::net::NetCommands(tx.clone());
                         spell_go(
@@ -886,7 +960,13 @@ mod tests {
                             &mut queued_melee,
                             &mut text,
                             &mut go_lid,
-                            (&mut cooldowns, None, &mut items, &net_commands),
+                            (
+                                &mut cooldowns,
+                                None,
+                                &mut items,
+                                &net_commands,
+                                &mut pet_bar,
+                            ),
                             1,
                         );
                     },
@@ -910,6 +990,166 @@ mod tests {
             "the in-flight cast's own GO finishes the bar"
         );
         assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
+    }
+
+    /// **The GO handler's PET leg** (decision 1031): a spell going off on a unit WE own arms the
+    /// pet's own cooldown bank, and nothing else does — vmangos sends no cooldown packet for a
+    /// pet's cast, so without this the pet bar's sweep never runs in play.
+    ///
+    /// Three things are pinned, and each is a way the leg could be subtly wrong:
+    /// - the insert lands in the **pet's** store, not the player's (two banks, `0xcecaec` /
+    ///   `0xcecb04`);
+    /// - the owner read falls back to **SUMMONEDBY**, not CREATEDBY (`0x6e859a`) — a totem, which
+    ///   carries only CREATEDBY, must not arm it;
+    /// - a stranger's cast arms neither.
+    #[test]
+    fn a_pets_own_go_arms_the_pet_bank_and_only_the_pet_bank() {
+        use crate::combat_text::CombatTextSpawn;
+        use crate::creature_anim::Casting;
+        use crate::go_anim::GoLidOpen;
+        use crate::net::{Guid, SelfPlayer};
+        use bevy::ecs::system::RunSystemOnce;
+
+        /// `UNIT_FIELD_CHARMEDBY` / `SUMMONEDBY` / `CREATEDBY` — 64-bit, so each takes two dwords.
+        const CHARMEDBY: u16 = 10;
+        const SUMMONEDBY: u16 = 12;
+        const CREATEDBY: u16 = 14;
+
+        const GROWL: u32 = 2649;
+        let growl = || benilla_formats::SpellDisplay {
+            name: "Growl".into(),
+            recovery_ms: 5000,
+            ..Default::default()
+        };
+        let make_spells = || crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [(GROWL, growl())].into_iter().collect(),
+            ),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+
+        // A world with us (guid 10), our pet (20, SUMMONEDBY us), a totem (30, CREATEDBY us only)
+        // and a stranger's pet (40, SUMMONEDBY somebody else).
+        let owned = |field: u16, owner: u64| {
+            ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+                (field, owner as u32),
+                (field + 1, (owner >> 32) as u32),
+            ]))
+        };
+        let fire = |caster: u64, store: ObjectStore| {
+            let mut app = App::new();
+            app.add_message::<CastEvent>()
+                .add_message::<SpellGoTargets>()
+                .add_message::<CombatTextSpawn>()
+                .add_message::<GoLidOpen>()
+                .init_resource::<GuidIndex>()
+                .init_resource::<SelfGuid>()
+                .init_resource::<CastBarFeed>()
+                .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
+                .init_resource::<Cooldowns>()
+                .init_resource::<crate::ui_pet::PetBar>()
+                .init_resource::<crate::items::Items>();
+            let self_e = app
+                .world_mut()
+                .spawn((Guid(10), SelfPlayer, ObjectStore::default()))
+                .id();
+            let caster_e = app.world_mut().spawn((Guid(caster), store)).id();
+            {
+                let mut index = app.world_mut().resource_mut::<GuidIndex>();
+                index.0.insert(10, self_e);
+                index.0.insert(caster, caster_e);
+            }
+            app.world_mut().resource_mut::<SelfGuid>().0 = Some(10);
+
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let spells = make_spells();
+            app.world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          index: Res<GuidIndex>,
+                          casting: Query<&Casting>,
+                          mut cast_events: MessageWriter<CastEvent>,
+                          mut go_targets: MessageWriter<SpellGoTargets>,
+                          self_guid: Res<SelfGuid>,
+                          stores: Query<&mut ObjectStore>,
+                          mut cast_bar: ResMut<CastBarFeed>,
+                          mut pending: ResMut<PendingCast>,
+                          mut queued_melee: ResMut<QueuedMeleeSpell>,
+                          mut text: MessageWriter<CombatTextSpawn>,
+                          mut go_lid: MessageWriter<GoLidOpen>,
+                          mut cooldowns: ResMut<Cooldowns>,
+                          mut pet_bar: ResMut<crate::ui_pet::PetBar>,
+                          mut items: ResMut<crate::items::Items>| {
+                        let net_commands = crate::net::NetCommands(tx.clone());
+                        spell_go(
+                            caster,
+                            GROWL,
+                            0,
+                            vec![],
+                            vec![],
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(caster),
+                            &mut commands,
+                            &index,
+                            &casting,
+                            &mut cast_events,
+                            &mut go_targets,
+                            &self_guid,
+                            &stores,
+                            &mut cast_bar,
+                            &mut pending,
+                            &mut queued_melee,
+                            &mut text,
+                            &mut go_lid,
+                            (
+                                &mut cooldowns,
+                                Some(&spells),
+                                &mut items,
+                                &net_commands,
+                                &mut pet_bar,
+                            ),
+                            1,
+                        );
+                    },
+                )
+                .unwrap();
+            let now = Instant::now();
+            let armed = |c: &Cooldowns| c.info(GROWL, 0, Some(&growl()), now).remaining_ms > 0;
+            let world = app.world();
+            (
+                armed(world.resource::<Cooldowns>()),
+                armed(&world.resource::<crate::ui_pet::PetBar>().cooldowns),
+                world.resource::<crate::ui_pet::PetBar>().bar_signals,
+            )
+        };
+
+        // Our pet: the PET bank only, and a forced repaint with it.
+        let (player, pet, signals) = fire(20, owned(SUMMONEDBY, 10));
+        assert!(pet, "our pet's GO arms the pet bank");
+        assert!(!player, "…and never the player's");
+        assert_eq!(signals, 1, "PET_BAR_UPDATE_COOLDOWN's repaint");
+
+        // A charm reads CHARMEDBY first — the same leg, the other field.
+        let (_, charmed, _) = fire(20, owned(CHARMEDBY, 10));
+        assert!(charmed, "a charmed unit's GO arms it too");
+
+        // A TOTEM carries CREATEDBY and no SUMMONEDBY. `0x5ee5a0` would accept it; this leg's own
+        // fallback (`0x6e859a`) does not, and reading the wrong one is invisible until a shaman
+        // drops a totem and the pet bar sweeps.
+        let (_, totem, _) = fire(30, owned(CREATEDBY, 10));
+        assert!(!totem, "CREATEDBY alone is not this leg's owner test");
+
+        // Somebody else's pet: neither bank.
+        let (p2, pet2, _) = fire(40, owned(SUMMONEDBY, 99));
+        assert!(!p2 && !pet2, "a stranger's pet arms nothing");
     }
 
     /// **Both** producers of the caster's chain-hop array (decision 0955): `SMSG_SPELL_GO`'s own
@@ -936,6 +1176,7 @@ mod tests {
             .init_resource::<PendingCast>()
             .init_resource::<QueuedMeleeSpell>()
             .init_resource::<Cooldowns>()
+            .init_resource::<crate::ui_pet::PetBar>()
             .init_resource::<crate::items::Items>();
 
         // A caster and two streamed victims; guid 40 is never streamed to us.
@@ -977,6 +1218,7 @@ mod tests {
                       mut text: MessageWriter<CombatTextSpawn>,
                       mut go_lid: MessageWriter<GoLidOpen>,
                       mut cooldowns: ResMut<Cooldowns>,
+                      mut pet_bar: ResMut<crate::ui_pet::PetBar>,
                       mut items: ResMut<crate::items::Items>| {
                     let net_commands = crate::net::NetCommands(tx.clone());
                     spell_go(
@@ -1002,7 +1244,13 @@ mod tests {
                         &mut queued_melee,
                         &mut text,
                         &mut go_lid,
-                        (&mut cooldowns, None, &mut items, &net_commands),
+                        (
+                            &mut cooldowns,
+                            None,
+                            &mut items,
+                            &net_commands,
+                            &mut pet_bar,
+                        ),
                         1,
                     );
                 },

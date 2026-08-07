@@ -116,13 +116,21 @@
           rows, reflowed — values, writes and dependencies all work mid-search. The two
           strings ("Search Results", "No results found.") are ours: the era's
           SETTINGS_SEARCH_* globals live in the client binary, not the dump.
-        - **No scroll bars on the CVar pages**: the static category tree (9 rows, 2 headers) fits
-          its 199px column outright, and the deepest CVar page (Audio, 7 rows) fits its area.
-          MinimalScrollBar arrives when one outgrows the space. The KEYBINDINGS page (decision
-          1008 — the 1.15 Settings panel's own Keybindings category, module + provenance in
-          KeyBindingsPage.xml) is the one page that can't fit and rides the shared faux-scroll
-          kit; its search results reflow live binding rows under a Keybindings group head whose
-          click jumps to the page (the era redirect law), capped at the static pool's size.
+        - **The PAGE AREA scrolls; the category tree does not.** The static tree (9 rows, 2
+          headers) fits its 199px column outright, and every CVar page fits its area, so nothing
+          on a settled page has a bar. The page area is a real ScrollFrame all the same (B217 —
+          the era's SettingsList is a ScrollBox with a MinimalScrollBar, and results and pages
+          ride the same one): a SEARCH chains group heads and matched rows from every category
+          into one column, which for a broad query outran the page and drew out through the
+          window onto the world. The body is the scroll child, sized to the visible rect until
+          the content outgrows it (OptionsScroll_Fit). The KEYBINDINGS page (decision 1008 — the
+          1.15 Settings panel's own Keybindings category, module + provenance in
+          KeyBindingsPage.xml) keeps its OWN faux-scroll list inside that body — it fills the
+          body exactly, so the outer scroll's range on it is 0 and the two bars are never live
+          together; its search results reflow live binding rows under a Keybindings group head
+          whose click jumps to the page (the era redirect law), capped at the static pool's size.
+          Both bars wear the shared kit's trough (the recessed channel — 1.12 authors that art
+          per window, so it is opt-in there and declared beside each bar here).
         - **Setting-page cuts (0957 Audio, 0959 Graphics)**: setting-row tooltips (the era
           OPTION_TOOLTIP_* hovers) are not wired; Defaults resets the VISIBLE page only (the
           era confirm dialog is not modeled); era rows with no 1.12 CVar +
@@ -375,6 +383,67 @@
             return order, groups
         end
 
+        -- ── The page scroll (B217) ──────────────────────────────────────────────────────────
+        -- The body is the scroll child (the ScrollFrame above it), so what these two do is
+        -- decide how TALL it is: the content's own extent, or the visible page rect, whichever
+        -- is larger. Below the rect nothing changes at all — range 0, no bar, every page seated
+        -- exactly where its XML puts it — and above it the overflow becomes a scroll instead of
+        -- a spill.
+        --
+        -- The measured set is every element that takes a seat in the ONE layout law's chain:
+        -- each page's rows, the search group heads, and the keybinding result pool. All of them
+        -- hang off the body's TOP, so their extent is independent of the height being computed —
+        -- which is what makes this converge. Nothing anchored to the body's BOTTOM may join them
+        -- (the Keybindings page's output line is the live example): growing the body would move
+        -- it down, which would grow the body. IsVisible, not IsShown: a hidden page's rows keep
+        -- their own shown flag, and only what the player can actually see may set the height.
+        function OptionsScroll_ContentBottom()
+            local bottom = nil
+            local function take(name)
+                local f = getglobal(name)
+                if f and f:IsVisible() then
+                    local b = f:GetBottom()
+                    if b and (not bottom or b < bottom) then bottom = b end
+                end
+            end
+            for _, key in ipairs(OPTIONS_CATEGORY_KEYS) do
+                if OPTIONS_PAGE_ROWS[key] then
+                    take("OptionsFrameContainerBodySearchHead" .. key)
+                    for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
+                        take("OptionsFrameContainerBody" .. key .. rkey)
+                    end
+                end
+            end
+            take("OptionsFrameContainerBodySearchHeadKeybindings")
+            for i = 1, KEYBINDINGS_SEARCH_ROWS do
+                take("OptionsFrameContainerBodyKeybindSearch" .. i)
+            end
+            return bottom
+        end
+
+        -- Size the body to that, from the scroll frame's OnUpdate. Frame-late by nature (rects
+        -- resolve after Lua runs, so a reflow answers a frame later — the OptionsTab_FitWidth
+        -- idiom), and write-gated: SetWidth/SetHeight invalidate layout, so an every-frame write
+        -- would fight the resolver. UpdateScrollChildRect re-drives the bar through
+        -- OnScrollRangeChanged, which is what shows and hides it (and its trough).
+        function OptionsScroll_Fit()
+            local sf = OptionsFrameContainerScroll
+            local body = OptionsFrameContainerBody
+            local fw, fh = sf:GetWidth(), sf:GetHeight()
+            if not fw or fw <= 0 or not fh or fh <= 0 then return end
+            if math.abs(body:GetWidth() - fw) >= 0.5 then body:SetWidth(fw) end
+            local h = fh
+            local top, bottom = body:GetTop(), OptionsScroll_ContentBottom()
+            if top and bottom then
+                local content = (top - bottom) + BENILLA_SCROLL_PAD
+                if content > h then h = content end
+            end
+            if math.abs(body:GetHeight() - h) >= 0.5 then
+                body:SetHeight(h)
+                sf:UpdateScrollChildRect()
+            end
+        end
+
         -- THE one layout law (era SettingsList: verticalPad 10, padLeft 25/padRight 0 →
         -- first element at (10,-12) off the body, spacing 9 → chain at (0,-9)). The rows'
         -- authored XML anchors state exactly this chain as the initial layout; search
@@ -412,6 +481,8 @@
         -- search holds the page (l.684-688), and an empty result shows the no-results line
         -- (l.680-682).
         function OptionsSearch_Display(text)
+            -- A new result set starts at the top (the era's own ScrollBox reset on a search).
+            OptionsFrameContainerScroll:SetVerticalScroll(0)
             for k in pairs(OPTIONS_PAGE_ROWS) do
                 getglobal("OptionsFrameContainerBody" .. k):Show()
                 for _, rkey in ipairs(OPTIONS_PAGE_ROWS[k]) do
@@ -490,6 +561,7 @@
         -- selection re-applied — SelectCategory re-shows the one body, retitles, and brings
         -- Defaults back (the era's no-text arm, l.655-658).
         function OptionsSearch_Restore()
+            OptionsFrameContainerScroll:SetVerticalScroll(0)
             for k in pairs(OPTIONS_PAGE_ROWS) do
                 OptionsPage_Layout(k)
                 getglobal("OptionsFrameContainerBodySearchHead" .. k):Hide()
@@ -1446,515 +1518,600 @@
                             </OnClick>
                         </Scripts>
                     </Button>
-                    <!-- The page body: one child frame per category with rows, shown by
-                         OptionsFrame_SelectCategory (Audio 0957, Graphics 0959). -->
-                    <Frame name="$parentBody">
+                    <!-- ── The page area SCROLLS (the real-scroll kit, decision 0112) ────────────
+                         The body below IS this frame's scroll child, so every page, row, search
+                         head and keybinding capsule under it pans and CLIPS to the visible page
+                         rect instead of drawing past the window. 0950's header said "MinimalScrollBar
+                         arrives when one outgrows the space"; the SEARCH is what outgrew it first —
+                         a query that matches across categories chains five group heads and every
+                         matched row into one column, which for a broad query runs ~150 units past
+                         the body's own bottom and out through the dialog border onto the world
+                         (B217). The era's answer is the same one: its SettingsList is a ScrollBox
+                         with a MinimalScrollBar (Blizzard_SettingsList.xml l.48-58), and results and
+                         pages ride the same one.
+
+                         The body is sized by OptionsScroll_Fit each frame: normally EXACTLY this
+                         frame's rect — range 0, no bar, every page seated where it has always been,
+                         including the Keybindings page that fills the body and runs its own faux
+                         list inside it — and grown to the measured content only when a layout
+                         outruns it. So nothing about the fitting pages moves; the scroll appears
+                         only where the overflow is.
+
+                         enableMouse so a wheel spin over blank page area lands here rather than
+                         falling through to the window (hit-testing only sees mouse-enabled frames);
+                         a spin over the Keybindings page still hits ITS handler first, which is the
+                         nearer ancestor, so the inner list keeps the wheel where it owns it. -->
+                    <ScrollFrame name="$parentScroll" enableMouse="true">
                         <Anchors>
                             <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-50"/></Offset></Anchor>
                             <Anchor point="BOTTOMRIGHT"/>
                         </Anchors>
-                        <Layers>
-                            <Layer level="OVERLAY">
-                                <!-- The empty-search line (era SETTINGS_SEARCH_NOTHING_FOUND
-                                     on the SettingsListSectionHeaderTemplate seat:
-                                     GameFontHighlightLarge, the header's (7,-16) inside the
-                                     first 45-tall slot -> (17,-28) off the body with the
-                                     layout pads). Shown only by a no-match search. -->
-                                <FontString name="$parentNoResults" inherits="GameFontHighlightLarge" justifyH="LEFT" hidden="true" text="No results found.">
-                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="17" y="-28"/></Offset></Anchor></Anchors>
-                                </FontString>
-                            </Layer>
-                        </Layers>
+                        <Scripts>
+                            <!-- The loader fires OnLoad bottom-up, so the body already exists. -->
+                            <OnLoad>self:SetScrollChild(OptionsFrameContainerBody)</OnLoad>
+                            <OnUpdate>OptionsScroll_Fit()</OnUpdate>
+                            <OnMouseWheel>BenillaScroll_OnMouseWheel(this, arg1)</OnMouseWheel>
+                            <OnVerticalScroll>BenillaScroll_SyncBar(this)</OnVerticalScroll>
+                            <OnScrollRangeChanged>BenillaScroll_SyncBar(this)</OnScrollRangeChanged>
+                        </Scripts>
                         <Frames>
-                            <!-- The Controls page (0961): the gameplay checkboxes with benilla
-                                 knobs behind them, in the era Controls page's own row order
-                                 (Controls.lua @1.15.9: Sticky Targeting #1, Auto Loot #6,
-                                 Invert Mouse #12 — its Mouse section header is cut while one
-                                 row survives under it). Sticky Targeting is value-INVERTED in
-                                 BOTH references (1.12 UIOptionsFrame checks it on
-                                 deselectOnClick=="0"; era wraps the CVar in NegateBoolean);
-                                 labels are 1.12 GlobalStrings where the row exists there
-                                 (GAMEFIELD_DESELECT_TEXT, INVERT_MOUSE), era's for Auto Loot
-                                 (no 1.12 row exists). -->
-                            <Frame name="$parentControls" hidden="true">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT"/>
-                                    <Anchor point="BOTTOMRIGHT"/>
-                                </Anchors>
-                                <Frames>
-                                    <Frame name="$parentRowStickyTarget" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "deselectOnClick", "Sticky Targeting")
-                                            self.invert = 1
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowAutoLoot" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "autoLootDefault", "Auto Loot")</OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowInvertMouse" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse")</OnLoad></Scripts>
-                                    </Frame>
-                                </Frames>
+                            <!-- The bar's trough (the shared kit's). No anchors: it seats itself on
+                                 the bar named by dropping this frame's "Trough" suffix, at the ref's
+                                 own hang — the socket law is one law and lives in
+                                 BenillaScrollTrough_Seat, not restated here. That puts it in the
+                                 SAME gutter the Keybindings page's own bar uses — the two are never
+                                 live together (this one's range is 0 on that page, since the page
+                                 fills the body), so the gutter holds exactly one bar at a time.
+                                 Declared before the body and the bar so it is beneath both by
+                                 link-stamp as well as by layer. -->
+                            <Frame name="$parentBarTrough" inherits="BenillaScrollTroughTemplate"/>
+                            <!-- The page body: one child frame per category with rows, shown by
+                                 OptionsFrame_SelectCategory (Audio 0957, Graphics 0959). Named in
+                                 full rather than `$parent…`: it keeps the name every page, row and
+                                 search seat is derived from, across the scroll frame that now sits
+                                 between it and the container. Its SIZE is authored here because a
+                                 scroll child's anchors are the engine's (SetScrollChild pins it
+                                 TOPLEFT, offset by the scroll — layout.rs) and only its own width
+                                 and height are read; these are the container's own 665 x (613-50),
+                                 the seat it held before, and OptionsScroll_Fit keeps them true
+                                 against the live rect from there on. -->
+                            <Frame name="OptionsFrameContainerBody">
+                                <Size><AbsDimension x="665" y="563"/></Size>
+                            <Layers>
+                                <Layer level="OVERLAY">
+                                    <!-- The empty-search line (era SETTINGS_SEARCH_NOTHING_FOUND
+                                         on the SettingsListSectionHeaderTemplate seat:
+                                         GameFontHighlightLarge, the header's (7,-16) inside the
+                                         first 45-tall slot -> (17,-28) off the body with the
+                                         layout pads). Shown only by a no-match search. -->
+                                    <FontString name="$parentNoResults" inherits="GameFontHighlightLarge" justifyH="LEFT" hidden="true" text="No results found.">
+                                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="17" y="-28"/></Offset></Anchor></Anchors>
+                                    </FontString>
+                                </Layer>
+                            </Layers>
+                            <Frames>
+                                <!-- The Controls page (0961): the gameplay checkboxes with benilla
+                                     knobs behind them, in the era Controls page's own row order
+                                     (Controls.lua @1.15.9: Sticky Targeting #1, Auto Loot #6,
+                                     Invert Mouse #12 — its Mouse section header is cut while one
+                                     row survives under it). Sticky Targeting is value-INVERTED in
+                                     BOTH references (1.12 UIOptionsFrame checks it on
+                                     deselectOnClick=="0"; era wraps the CVar in NegateBoolean);
+                                     labels are 1.12 GlobalStrings where the row exists there
+                                     (GAMEFIELD_DESELECT_TEXT, INVERT_MOUSE), era's for Auto Loot
+                                     (no 1.12 row exists). -->
+                                <Frame name="$parentControls" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowStickyTarget" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "deselectOnClick", "Sticky Targeting")
+                                                self.invert = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAutoLoot" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "autoLootDefault", "Auto Loot")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowInvertMouse" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse")</OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The Audio page. Row seats transcribe the era settings list
+                                     (Blizzard_SettingsList.lua l.43-47 + .xml: scroll box hung
+                                     -15/-20 off the header block with padLeft 25 / padRight 0 and
+                                     verticalPad 10 → first row at (10,-12); spacing 9 → 35 pitch).
+                                     Row ORDER is the era Audio page's grammar (volume block first,
+                                     then the enables) over the 1.12 row set: the three category
+                                     volumes ride as CHILDREN of Master Volume exactly like era's,
+                                     in the 1.12 panel's own slider order (Sound, Music, Ambience —
+                                     SoundOptionsFrame.lua's index order). -->
+                                <Frame name="$parentAudio" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowEnableAll" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMaster" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterVolume", "Master Volume")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowSound" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMaster" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMaster" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "SoundVolume", "Sound Volume", 1)
+                                                -- era parentInitializer (search pulls Master in
+                                                -- above a matched child, SettingsPanel.lua l.665)
+                                                self.parentRow = "RowMaster"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMusic" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowSound" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowSound" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "MusicVolume", "Music Volume", 1)
+                                                self.parentRow = "RowMaster"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAmbience" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "AmbienceVolume", "Ambience Volume", 1)
+                                                self.parentRow = "RowMaster"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowEnableMusic" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowEnableAmbience" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")
+                                                self.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The Graphics page (0959; farclip row retired 0961 — the
+                                     director's call, standing: the farclip CVar/knob/env/
+                                     debug-panel plumbing all stay, only the row is off the page).
+                                     UI Scale is the 1.12 OptionsFrameSliders table verbatim
+                                     (OptionsFrame.lua l.25): uiscale 0.64..1.0 step 0.01 (UI_SCALE
+                                     "UI Scale", percent readout — era's own
+                                     FormatPercentageRounded on its uiscale row). 1.12's useUiScale
+                                     gate has no benilla knob (our scale always applies; off ≡ 1.0)
+                                     so the checkbox doesn't ship. Environment Detail (0992) is the
+                                     same table's WorldDetail row (l.26: 0..2 step 1, label
+                                     ENVIRONMENT_DETAIL) over the clutter-density knob, worn as the
+                                     dropdown row — the shape call is the template's comment. -->
+                                <Frame name="$parentGraphics" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowUiScale" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "uiScale", "UI Scale")
+                                                OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
+                                                -- era registers its uiscale row CommitFlag.Apply
+                                                -- (Graphics.lua l.684): the one row whose live
+                                                -- write would rescale the very slider mid-drag —
+                                                -- it stages and commits through the Apply button.
+                                                self.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowWorldDetail" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail")
+                                                -- The stop names are the era preset ladder's (its
+                                                -- quality dropdowns say Low/Medium/High); 1.12's
+                                                -- slider had no stop labels to quote.
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Low", value = "0" },
+                                                    { text = "Medium", value = "1" },
+                                                    { text = "High", value = "2" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The Nameplates page (0992 — the page 0952 promised when the
+                                     category row joined): the three 1.12 UnitName* checkboxes over
+                                     the overhead-name gates (nameplates.rs NameConfig), rows in
+                                     the 1.12 Interface Options' own index order (21/30/67), labels
+                                     its GlobalStrings verbatim (SHOW_PLAYER_NAMES/SHOW_NPC_NAMES/
+                                     SHOW_OWN_NAME). -->
+                                <Frame name="$parentNameplates" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowPlayerNames" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNamePlayer", "Player Names")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNpcNames" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameNPC", "NPC Names")</OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowOwnName" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameOwn", "Show Own Name")</OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The KEYBINDINGS page body (decision 1008 — the era Settings
+                                     panel's Keybindings category folded into this window; the module,
+                                     provenance and commit law: KeyBindingsPage.xml). First the
+                                     Character Specific row (the era page's first setting row, confirm
+                                     on uncheck only), then the section list — 19 dual-mode rows under
+                                     the shared faux-scroll kit, sections collapsed by default — and
+                                     the 1.12 window's message line (KEY_BOUND / the red steal / the
+                                     wheel refusal) at the foot. -->
+                                <!-- enableMouse: the page catches the wheel ITSELF on any point no
+                                     child claims (hit-testing only sees mouse-enabled frames —
+                                     pointer.rs; rows are plain Frames, so a spin over a row's name
+                                     would otherwise fall through to the window and die). -->
+                                <Frame name="$parentKeybindings" hidden="true" enableMouse="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Layers>
+                                        <Layer level="OVERLAY">
+                                            <FontString name="$parentOutput" inherits="GameFontNormal">
+                                                <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="8"/></Offset></Anchor></Anchors>
+                                            </FontString>
+                                        </Layer>
+                                    </Layers>
+                                    <Frames>
+                                        <!-- Character Specific Key Bindings — the era checkbox-row
+                                             geometry (label left, the UI-CheckBox set at the
+                                             control column) over 1.12's set model; the click law
+                                             is KeyBindings_CharacterToggle. This bespoke row's
+                                             column sits at CENTER-40, not the shared CENTER-80:
+                                             1.12's string is longer than the era's and clipped at
+                                             the shared split ("…Key Bindin…" — the first capture);
+                                             no other control shares this page's column, so the
+                                             shift is free. -->
+                                        <Frame name="$parentCharacterRow" enableMouse="true">
+                                            <Size><AbsDimension y="26"/></Size>
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Layers>
+                                                <Layer level="OVERLAY">
+                                                    <FontString name="$parentLabel" inherits="GameFontNormal" justifyH="LEFT">
+                                                        <Anchors>
+                                                            <Anchor point="LEFT"><Offset><AbsDimension x="37" y="0"/></Offset></Anchor>
+                                                            <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-45" y="0"/></Offset></Anchor>
+                                                        </Anchors>
+                                                    </FontString>
+                                                </Layer>
+                                            </Layers>
+                                            <Frames>
+                                                <CheckButton name="$parentCheck">
+                                                    <Size><AbsDimension x="30" y="29"/></Size>
+                                                    <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-40" y="0"/></Offset></Anchor></Anchors>
+                                                    <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
+                                                    <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
+                                                    <CheckedTexture file="Interface\Buttons\UI-CheckBox-Check"/>
+                                                    <DisabledCheckedTexture file="Interface\Buttons\UI-CheckBox-Check-Disabled"/>
+                                                    <Scripts>
+                                                        <OnClick>KeyBindings_CharacterToggle(this)</OnClick>
+                                                        <OnEnter>
+                                                            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                                            GameTooltip:SetText(KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDING_TOOLTIP",
+                                                                "Click this to toggle between general key bindings and key bindings specific to this character."), nil, nil, nil, nil, 1)
+                                                        </OnEnter>
+                                                        <OnLeave>GameTooltip:Hide()</OnLeave>
+                                                    </Scripts>
+                                                </CheckButton>
+                                            </Frames>
+                                            <Scripts>
+                                                <OnLoad>
+                                                    getglobal(this:GetName() .. "Label"):SetText(
+                                                        KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDINGS", "Character Specific Key Bindings"))
+                                                </OnLoad>
+                                            </Scripts>
+                                        </Frame>
+                                <Frame name="$parentRow1" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
+                                        <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-32" y="-47"/></Offset></Anchor>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow2" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow1" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow1" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow3" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow2" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow2" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow4" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow3" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow3" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow5" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow4" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow4" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow6" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow5" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow5" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow7" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow6" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow6" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow8" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow7" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow7" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow9" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow8" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow8" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow10" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow9" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow9" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow11" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow10" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow10" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow12" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow11" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow11" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow13" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow12" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow12" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow14" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow13" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow13" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow15" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow14" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow14" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow16" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow15" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow15" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow17" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow16" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow16" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow18" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow17" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow17" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                <Frame name="$parentRow19" inherits="KeyBindingRowTemplate">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentRow18" relativePoint="BOTTOMLEFT"/>
+                                        <Anchor point="TOPRIGHT" relativeTo="$parentRow18" relativePoint="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                </Frame>
+                                        <!-- That bar's TROUGH — the recessed channel it rides in (the
+                                             shared kit's template; 1.12 authors this art per window,
+                                             never in the bar template). Named off the bar, which is
+                                             how BenillaScrollBar_SetShown finds it, and carrying no
+                                             anchors of its own: it seats itself on that bar at the
+                                             ref's hang (BenillaScrollTrough_Seat), which is what
+                                             lands the channel's arrow sockets on the arrows. Sits
+                                             here, BEFORE the faux frame, so it draws beneath it. -->
+                                        <Frame name="$parentScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
+                                        <!-- The faux scroll over the rows (the shared kit, 0997's own
+                                             seam). The kit's bar hangs 6px RIGHT of this frame's edge,
+                                             so the frame ends at the rows' own -32 and the 16-wide bar
+                                             rides the -26..-10 gutter inside the body (the TrainerFrame
+                                             seating). The wheel handler is NOT here: a spin over a row
+                                             bubbles up the PARENT chain (pointer.rs), and this frame is
+                                             the rows' sibling — it lives on the body below. -->
+                                        <Frame name="$parentScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
+                                                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts>
+                                                <OnLoad>
+                                                    BenillaFauxScrollFrame_OnLoad(this)
+                                                    this.updateFunc = KeyBindingsPage_Update
+                                                </OnLoad>
+                                            </Scripts>
+                                        </Frame>
+                                    </Frames>
+                                    <!-- The page's wheel: rows and the bar all bubble here (the
+                                         QuestLog/Trainer lesson — a handler on the sibling catcher
+                                         never sees a spin over a row). The guard is 1.12's law:
+                                         while a capsule is armed the wheel is a BIND (the host
+                                         seam swallows it) — never a scroll. -->
+                                    <Scripts>
+                                        <OnMouseWheel>
+                                            if not KeyBindingsPage.selected then
+                                                BenillaFauxScrollFrame_OnMouseWheel(getglobal(this:GetName() .. "ScrollFrame"), arg1)
+                                            end
+                                        </OnMouseWheel>
+                                    </Scripts>
+                                </Frame>
+                                <!-- The search-results group headers — one per page WITH rows
+                                     (the OPTIONS_PAGE_ROWS set; a page that gains rows gains its
+                                     head here). Unanchored and hidden until a search chains them
+                                     in; the label is the category's pageTitle, the era
+                                     GetQualifiedName. -->
+                                <Button name="$parentSearchHeadControls" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Controls"
+                                        getglobal(self:GetName() .. "Label"):SetText("Controls")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadAudio" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Audio"
+                                        getglobal(self:GetName() .. "Label"):SetText("Audio")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadGraphics" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Graphics"
+                                        getglobal(self:GetName() .. "Label"):SetText("Graphics")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadNameplates" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Nameplates"
+                                        getglobal(self:GetName() .. "Label"):SetText("Nameplates")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadKeybindings" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Keybindings"
+                                        getglobal(self:GetName() .. "Label"):SetText("Keybindings")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <!-- The keybinding search-result pool (decision 1008): the era
+                                     reflows LIVE binding rows into its results; ours is this static
+                                     pool of the same template, painted and chained by the search
+                                     display (capped at KEYBINDINGS_SEARCH_ROWS — the SCOPE note in
+                                     KeyBindingsPage.xml). Unanchored until a search places them;
+                                     the capsules run the full capture law in place. -->
+                                <Frame name="$parentKeybindSearch1" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch2" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch3" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch4" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch5" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch6" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch7" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Frame name="$parentKeybindSearch8" inherits="KeyBindingRowTemplate" hidden="true"/>
+                            </Frames>
                             </Frame>
-                            <!-- The Audio page. Row seats transcribe the era settings list
-                                 (Blizzard_SettingsList.lua l.43-47 + .xml: scroll box hung
-                                 -15/-20 off the header block with padLeft 25 / padRight 0 and
-                                 verticalPad 10 → first row at (10,-12); spacing 9 → 35 pitch).
-                                 Row ORDER is the era Audio page's grammar (volume block first,
-                                 then the enables) over the 1.12 row set: the three category
-                                 volumes ride as CHILDREN of Master Volume exactly like era's,
-                                 in the 1.12 panel's own slider order (Sound, Music, Ambience —
-                                 SoundOptionsFrame.lua's index order). -->
-                            <Frame name="$parentAudio" hidden="true">
+                            <!-- The bar: the shared Slider (drag + arrows, decision 0250) on the
+                                 real-scroll handler, hidden until the content overflows. Seated
+                                 INSIDE the frame's right edge rather than 6 units outside it (the
+                                 UIPanelScrollFrameTemplate shape the faux kit uses): outside would
+                                 put it past the page box, and the -20 right inset the rows already
+                                 carry leaves the -26..-10 gutter free — the very gutter the
+                                 Keybindings list's bar rides.
+
+                                 Inset 21/20 vertically, not the ref's 16/16, because HERE the
+                                 scroll frame IS the page rect: the trough seats itself 21 above and
+                                 20 below the bar (BenillaScrollTrough_Seat), so these are the
+                                 offsets that put the whole channel — caps and all — exactly on the
+                                 page rect instead of poking 5 units up through the header divider
+                                 and 4 down past the container. The bar↔trough relationship is the
+                                 ref's either way; this only chooses which of the two is flush. -->
+                            <Slider name="$parentBar" inherits="BenillaScrollBarTemplate" hidden="true">
                                 <Anchors>
-                                    <Anchor point="TOPLEFT"/>
-                                    <Anchor point="BOTTOMRIGHT"/>
+                                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-10" y="-21"/></Offset></Anchor>
+                                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-10" y="20"/></Offset></Anchor>
                                 </Anchors>
-                                <Frames>
-                                    <Frame name="$parentRowEnableAll" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")
-                                            self.soundQuirk = 1
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowMaster" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterVolume", "Master Volume")</OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowSound" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowMaster" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowMaster" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "SoundVolume", "Sound Volume", 1)
-                                            -- era parentInitializer (search pulls Master in
-                                            -- above a matched child, SettingsPanel.lua l.665)
-                                            self.parentRow = "RowMaster"
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowMusic" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowSound" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowSound" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "MusicVolume", "Music Volume", 1)
-                                            self.parentRow = "RowMaster"
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowAmbience" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "AmbienceVolume", "Ambience Volume", 1)
-                                            self.parentRow = "RowMaster"
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowEnableMusic" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")
-                                            self.soundQuirk = 1
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowEnableAmbience" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")
-                                            self.soundQuirk = 1
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                </Frames>
-                            </Frame>
-                            <!-- The Graphics page (0959; farclip row retired 0961 — the
-                                 director's call, standing: the farclip CVar/knob/env/
-                                 debug-panel plumbing all stay, only the row is off the page).
-                                 UI Scale is the 1.12 OptionsFrameSliders table verbatim
-                                 (OptionsFrame.lua l.25): uiscale 0.64..1.0 step 0.01 (UI_SCALE
-                                 "UI Scale", percent readout — era's own
-                                 FormatPercentageRounded on its uiscale row). 1.12's useUiScale
-                                 gate has no benilla knob (our scale always applies; off ≡ 1.0)
-                                 so the checkbox doesn't ship. Environment Detail (0992) is the
-                                 same table's WorldDetail row (l.26: 0..2 step 1, label
-                                 ENVIRONMENT_DETAIL) over the clutter-density knob, worn as the
-                                 dropdown row — the shape call is the template's comment. -->
-                            <Frame name="$parentGraphics" hidden="true">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT"/>
-                                    <Anchor point="BOTTOMRIGHT"/>
-                                </Anchors>
-                                <Frames>
-                                    <Frame name="$parentRowUiScale" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "uiScale", "UI Scale")
-                                            OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
-                                            -- era registers its uiscale row CommitFlag.Apply
-                                            -- (Graphics.lua l.684): the one row whose live
-                                            -- write would rescale the very slider mid-drag —
-                                            -- it stages and commits through the Apply button.
-                                            self.deferred = 1
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowWorldDetail" inherits="OptionsDropdownRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail")
-                                            -- The stop names are the era preset ladder's (its
-                                            -- quality dropdowns say Low/Medium/High); 1.12's
-                                            -- slider had no stop labels to quote.
-                                            OptionsDropdownRow_Setup(self, {
-                                                { text = "Low", value = "0" },
-                                                { text = "Medium", value = "1" },
-                                                { text = "High", value = "2" },
-                                            })
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                </Frames>
-                            </Frame>
-                            <!-- The Nameplates page (0992 — the page 0952 promised when the
-                                 category row joined): the three 1.12 UnitName* checkboxes over
-                                 the overhead-name gates (nameplates.rs NameConfig), rows in
-                                 the 1.12 Interface Options' own index order (21/30/67), labels
-                                 its GlobalStrings verbatim (SHOW_PLAYER_NAMES/SHOW_NPC_NAMES/
-                                 SHOW_OWN_NAME). -->
-                            <Frame name="$parentNameplates" hidden="true">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT"/>
-                                    <Anchor point="BOTTOMRIGHT"/>
-                                </Anchors>
-                                <Frames>
-                                    <Frame name="$parentRowPlayerNames" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNamePlayer", "Player Names")</OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowNpcNames" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameNPC", "NPC Names")</OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowOwnName" inherits="OptionsCheckboxRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameOwn", "Show Own Name")</OnLoad></Scripts>
-                                    </Frame>
-                                </Frames>
-                            </Frame>
-                            <!-- The KEYBINDINGS page body (decision 1008 — the era Settings
-                                 panel's Keybindings category folded into this window; the module,
-                                 provenance and commit law: KeyBindingsPage.xml). First the
-                                 Character Specific row (the era page's first setting row, confirm
-                                 on uncheck only), then the section list — 19 dual-mode rows under
-                                 the shared faux-scroll kit, sections collapsed by default — and
-                                 the 1.12 window's message line (KEY_BOUND / the red steal / the
-                                 wheel refusal) at the foot. -->
-                            <!-- enableMouse: the page catches the wheel ITSELF on any point no
-                                 child claims (hit-testing only sees mouse-enabled frames —
-                                 pointer.rs; rows are plain Frames, so a spin over a row's name
-                                 would otherwise fall through to the window and die). -->
-                            <Frame name="$parentKeybindings" hidden="true" enableMouse="true">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT"/>
-                                    <Anchor point="BOTTOMRIGHT"/>
-                                </Anchors>
-                                <Layers>
-                                    <Layer level="OVERLAY">
-                                        <FontString name="$parentOutput" inherits="GameFontNormal">
-                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="8"/></Offset></Anchor></Anchors>
-                                        </FontString>
-                                    </Layer>
-                                </Layers>
-                                <Frames>
-                                    <!-- Character Specific Key Bindings — the era checkbox-row
-                                         geometry (label left, the UI-CheckBox set at the
-                                         control column) over 1.12's set model; the click law
-                                         is KeyBindings_CharacterToggle. This bespoke row's
-                                         column sits at CENTER-40, not the shared CENTER-80:
-                                         1.12's string is longer than the era's and clipped at
-                                         the shared split ("…Key Bindin…" — the first capture);
-                                         no other control shares this page's column, so the
-                                         shift is free. -->
-                                    <Frame name="$parentCharacterRow" enableMouse="true">
-                                        <Size><AbsDimension y="26"/></Size>
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Layers>
-                                            <Layer level="OVERLAY">
-                                                <FontString name="$parentLabel" inherits="GameFontNormal" justifyH="LEFT">
-                                                    <Anchors>
-                                                        <Anchor point="LEFT"><Offset><AbsDimension x="37" y="0"/></Offset></Anchor>
-                                                        <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-45" y="0"/></Offset></Anchor>
-                                                    </Anchors>
-                                                </FontString>
-                                            </Layer>
-                                        </Layers>
-                                        <Frames>
-                                            <CheckButton name="$parentCheck">
-                                                <Size><AbsDimension x="30" y="29"/></Size>
-                                                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-40" y="0"/></Offset></Anchor></Anchors>
-                                                <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
-                                                <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
-                                                <CheckedTexture file="Interface\Buttons\UI-CheckBox-Check"/>
-                                                <DisabledCheckedTexture file="Interface\Buttons\UI-CheckBox-Check-Disabled"/>
-                                                <Scripts>
-                                                    <OnClick>KeyBindings_CharacterToggle(this)</OnClick>
-                                                    <OnEnter>
-                                                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-                                                        GameTooltip:SetText(KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDING_TOOLTIP",
-                                                            "Click this to toggle between general key bindings and key bindings specific to this character."), nil, nil, nil, nil, 1)
-                                                    </OnEnter>
-                                                    <OnLeave>GameTooltip:Hide()</OnLeave>
-                                                </Scripts>
-                                            </CheckButton>
-                                        </Frames>
-                                        <Scripts>
-                                            <OnLoad>
-                                                getglobal(this:GetName() .. "Label"):SetText(
-                                                    KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDINGS", "Character Specific Key Bindings"))
-                                            </OnLoad>
-                                        </Scripts>
-                                    </Frame>
-                            <Frame name="$parentRow1" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
-                                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-32" y="-47"/></Offset></Anchor>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow2" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow1" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow1" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow3" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow2" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow2" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow4" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow3" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow3" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow5" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow4" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow4" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow6" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow5" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow5" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow7" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow6" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow6" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow8" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow7" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow7" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow9" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow8" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow8" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow10" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow9" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow9" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow11" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow10" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow10" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow12" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow11" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow11" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow13" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow12" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow12" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow14" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow13" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow13" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow15" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow14" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow14" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow16" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow15" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow15" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow17" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow16" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow16" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow18" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow17" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow17" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                            <Frame name="$parentRow19" inherits="KeyBindingRowTemplate">
-                                <Anchors>
-                                    <Anchor point="TOPLEFT" relativeTo="$parentRow18" relativePoint="BOTTOMLEFT"/>
-                                    <Anchor point="TOPRIGHT" relativeTo="$parentRow18" relativePoint="BOTTOMRIGHT"/>
-                                </Anchors>
-                            </Frame>
-                                    <!-- The faux scroll over the rows (the shared kit, 0997's own
-                                         seam). The kit's bar hangs 6px RIGHT of this frame's edge,
-                                         so the frame ends at the rows' own -32 and the 16-wide bar
-                                         rides the -26..-10 gutter inside the body (the TrainerFrame
-                                         seating). The wheel handler is NOT here: a spin over a row
-                                         bubbles up the PARENT chain (pointer.rs), and this frame is
-                                         the rows' sibling — it lives on the body below. -->
-                                    <Frame name="$parentScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
-                                            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts>
-                                            <OnLoad>
-                                                BenillaFauxScrollFrame_OnLoad(this)
-                                                this.updateFunc = KeyBindingsPage_Update
-                                            </OnLoad>
-                                        </Scripts>
-                                    </Frame>
-                                </Frames>
-                                <!-- The page's wheel: rows and the bar all bubble here (the
-                                     QuestLog/Trainer lesson — a handler on the sibling catcher
-                                     never sees a spin over a row). The guard is 1.12's law:
-                                     while a capsule is armed the wheel is a BIND (the host
-                                     seam swallows it) — never a scroll. -->
-                                <Scripts>
-                                    <OnMouseWheel>
-                                        if not KeyBindingsPage.selected then
-                                            BenillaFauxScrollFrame_OnMouseWheel(getglobal(this:GetName() .. "ScrollFrame"), arg1)
-                                        end
-                                    </OnMouseWheel>
-                                </Scripts>
-                            </Frame>
-                            <!-- The search-results group headers — one per page WITH rows
-                                 (the OPTIONS_PAGE_ROWS set; a page that gains rows gains its
-                                 head here). Unanchored and hidden until a search chains them
-                                 in; the label is the category's pageTitle, the era
-                                 GetQualifiedName. -->
-                            <Button name="$parentSearchHeadControls" inherits="OptionsSearchHeadTemplate">
-                                <Scripts><OnLoad>
-                                    self.categoryKey = "Controls"
-                                    getglobal(self:GetName() .. "Label"):SetText("Controls")
-                                </OnLoad></Scripts>
-                            </Button>
-                            <Button name="$parentSearchHeadAudio" inherits="OptionsSearchHeadTemplate">
-                                <Scripts><OnLoad>
-                                    self.categoryKey = "Audio"
-                                    getglobal(self:GetName() .. "Label"):SetText("Audio")
-                                </OnLoad></Scripts>
-                            </Button>
-                            <Button name="$parentSearchHeadGraphics" inherits="OptionsSearchHeadTemplate">
-                                <Scripts><OnLoad>
-                                    self.categoryKey = "Graphics"
-                                    getglobal(self:GetName() .. "Label"):SetText("Graphics")
-                                </OnLoad></Scripts>
-                            </Button>
-                            <Button name="$parentSearchHeadNameplates" inherits="OptionsSearchHeadTemplate">
-                                <Scripts><OnLoad>
-                                    self.categoryKey = "Nameplates"
-                                    getglobal(self:GetName() .. "Label"):SetText("Nameplates")
-                                </OnLoad></Scripts>
-                            </Button>
-                            <Button name="$parentSearchHeadKeybindings" inherits="OptionsSearchHeadTemplate">
-                                <Scripts><OnLoad>
-                                    self.categoryKey = "Keybindings"
-                                    getglobal(self:GetName() .. "Label"):SetText("Keybindings")
-                                </OnLoad></Scripts>
-                            </Button>
-                            <!-- The keybinding search-result pool (decision 1008): the era
-                                 reflows LIVE binding rows into its results; ours is this static
-                                 pool of the same template, painted and chained by the search
-                                 display (capped at KEYBINDINGS_SEARCH_ROWS — the SCOPE note in
-                                 KeyBindingsPage.xml). Unanchored until a search places them;
-                                 the capsules run the full capture law in place. -->
-                            <Frame name="$parentKeybindSearch1" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch2" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch3" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch4" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch5" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch6" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch7" inherits="KeyBindingRowTemplate" hidden="true"/>
-                            <Frame name="$parentKeybindSearch8" inherits="KeyBindingRowTemplate" hidden="true"/>
+                                <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(self, arg1)</OnValueChanged></Scripts>
+                            </Slider>
                         </Frames>
-                    </Frame>
+                    </ScrollFrame>
                 </Frames>
             </Frame>
 

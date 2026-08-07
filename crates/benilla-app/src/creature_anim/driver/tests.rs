@@ -100,16 +100,58 @@ fn catalog() -> AnimData {
     ]))
 }
 
+/// What a bare `app.update()` advances the harness clock by — small and nonzero, which is the
+/// regime every assertion in this file was written against (a real frame used to land here by
+/// accident). Zero is NOT equivalent: a frame with no delta never ticks a transition at all, so
+/// clips the tests expect to find mid-fade are never started.
+const FRAME_STEP: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// The delta [`step_clock`] will use for the next frame, when a test asked for more than
+/// [`FRAME_STEP`]. It has to travel as a resource rather than a plain pre-`update()` call on
+/// `Time`, because `Time::advance_by` *sets* the frame's delta rather than accumulating it — so a
+/// value written before `update()` is simply overwritten by the in-frame step.
+#[derive(Resource, Default)]
+struct NextStep(Option<std::time::Duration>);
+
+/// The harness's whole clock, in place of `TimePlugin`'s real one (see [`app`]): one frame of
+/// [`FRAME_STEP`], or of whatever [`advance`] asked for.
+fn step_clock(mut time: ResMut<Time>, mut next: ResMut<NextStep>) {
+    time.advance_by(next.0.take().unwrap_or(FRAME_STEP));
+}
+
+/// Run one frame whose delta is exactly `ms` — the only way time moves further than
+/// [`FRAME_STEP`] (see [`app`]). Replaces `thread::sleep` + `update()`: the same intent, but the
+/// delta is the number written here rather than however long the machine happened to take.
+fn advance(app: &mut App, ms: u64) {
+    app.world_mut().resource_mut::<NextStep>().0 = Some(std::time::Duration::from_millis(ms));
+    app.update();
+}
+
 fn app() -> App {
     let mut app = App::new();
     // Asset + animation plugins so tests with REAL clip assets (the watchdog test) get Bevy's
     // `advance_animations` ticking completions; units without a graph handle are skipped by it,
     // so the asset-less tenants are unaffected.
+    //
+    // **`TimePlugin` is deliberately disabled, and the clock is ours** ([`step_clock`]). With it,
+    // `Time`'s delta is the REAL gap between two `app.update()` calls, and this file is full of
+    // assertions that a fade or clip is still mid-flight. A stalled frame — parallel `cargo test`
+    // on a loaded machine, a debugger, a cold page — then runs the whole fade out in one delta and
+    // the clip is gone from the player, which is a coin flip rather than a test: it red-lit main's
+    // gates on 2026-08-06 in `the_swim_relatch_holds_the_kick_but_a_ground_cut_freezes_it`, and
+    // injecting a 400 ms stall before that test's ground cut reproduces the failure exactly. The
+    // tests that DO need time to pass used to buy it with `thread::sleep`, which is the same coin
+    // flip pointed the other way; they now say how far the clock moves, through [`advance`].
+    //
+    // The step is small-but-nonzero rather than zero on purpose — see [`FRAME_STEP`].
     app.add_plugins((
-        MinimalPlugins,
+        MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
         AssetPlugin::default(),
         bevy::animation::AnimationPlugin,
     ));
+    app.init_resource::<Time>();
+    app.init_resource::<NextStep>();
+    app.add_systems(bevy::app::First, step_clock);
     app.add_message::<SwingMessage>()
         .add_message::<crate::creature_anim::SwingImpact>()
         .add_message::<crate::creature_anim::DefenseAnim>()
@@ -1232,8 +1274,7 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..60 {
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        app.update();
+        advance(&mut app, 25);
         let tr = app
             .world()
             .entity(unit)
@@ -1684,8 +1725,7 @@ fn a_finished_masked_cast_fades_out_instead_of_snapping() {
     // Step in small frames until the clip completes (a big frame would run the whole 150 ms fade
     // out in one go — right behaviour, useless assertion).
     for _ in 0..60 {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        app.update();
+        advance(&mut app, 20);
         if app
             .world()
             .entity(unit)
@@ -1719,8 +1759,7 @@ fn a_finished_masked_cast_fades_out_instead_of_snapping() {
         assert!(active.weight() > 0.0, "still blended in as λ decays");
     }
     // Past the 150 ms window: the slot self-releases, exactly like the kernel's `+0xd0 = -1`.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    app.update();
+    advance(&mut app, 200);
     let e = app.world().entity(unit);
     assert!(
         e.get::<AnimDriver>().unwrap().overlay_fade.is_none(),
@@ -2079,8 +2118,7 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
     let mut seen = vec![[1u8, 1]];
     let mut settled = false;
     for _ in 0..60 {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        app.update();
+        advance(&mut app, 20);
         match visual(&app) {
             Some(v) if seen.last() != Some(&v) => seen.push(v),
             None => {

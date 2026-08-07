@@ -612,21 +612,18 @@ fn send_spell_cast(
                 // above means an auto-repeat can't be running while we swing in the first place.
                 if !engaged {
                     debug!("ui_action: cast {spell_id} initiates auto-attack at {guid:#x}");
-                    sheath.write(crate::creature_anim::SheathRequest {
-                        entity: e,
-                        state: 1,
-                        ceremony: false,
-                    });
-                    // `0x5ecb70`'s tail `0x5ecd78`–`0x5ecd95`: the melee sheath snap
-                    // (`0x611cf0(1,1,1)`) then the local auto-repeat cancel (`0x6ea080` at
-                    // `0x5ecd8c`) — you can't start swinging and keep auto-shooting.
-                    crate::creature_anim::cancel_auto_repeat_local(
-                        Some(e),
+                    // No stop is ever in flight on this route: the gate above IS the ref's
+                    // `6e51d2`, so we only get here with the lock clear.
+                    crate::creature_anim::start_attack_local(
+                        e,
+                        guid,
+                        engaged,
+                        false,
                         auto_repeat,
+                        sheath,
                         ecs,
                         commands,
                     );
-                    let _ = commands.0.send(ClientCommand::AttackSwing { guid });
                 }
             }
         }
@@ -881,13 +878,15 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == RAPTOR_STRIKE)
         );
-        assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::CancelAutoRepeat)),
-            "the attack-start tail's `0x6ea080`"
-        );
+        // The reference's order, which the hand-rolled copy this seam replaced had backwards:
+        // the swing send is `0x5eccfd`, the auto-repeat cancel is `0x5ecd8c` in the tail below it.
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::AttackSwing { guid }) if guid == MOB),
-            "and then the swing itself"
+            "the swing goes out first"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CancelAutoRepeat)),
+            "then the attack-start tail's `0x6ea080`"
         );
         assert_eq!(
             world.resource::<AutoRepeatActive>().0,

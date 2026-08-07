@@ -671,6 +671,40 @@ mod tests {
         assert!(!state(&app).fired(cmd::TOGGLE_SHEATH));
     }
 
+    /// **The pet lane routes on the CTRL digits, and the number row is untouched** (B218,
+    /// decision 1052). The two share their base keys, so the only thing keeping them apart is
+    /// the exact-modifier law — worth pinning on the pair that actually collides rather than
+    /// trusting the law in the abstract. CTRL-0 is slot **10**, the 1.12 cache's own wrap.
+    #[test]
+    fn the_pet_lane_dispatches_on_the_ctrl_digits() {
+        let by_name =
+            |n: &str| Cmd(SPECS.iter().position(|s| s.name == n).expect("registered") as u16);
+        let mut app = harness();
+        press_key(&mut app, KeyCode::ControlLeft);
+        press_key(&mut app, KeyCode::Digit1);
+        app.update();
+        assert!(state(&app).pressed(by_name("BONUSACTIONBUTTON1")));
+        assert!(
+            !state(&app).pressed(by_name("ACTIONBUTTON1")),
+            "the modifier decides: CTRL-1 is not the number row's"
+        );
+        // The runOnUp half: the latch drops on the BASE key's release (which is what runs
+        // BenillaPetActionButtonUp → CastPetAction in the app's VM), Ctrl still held.
+        release_key(&mut app, KeyCode::Digit1);
+        app.update();
+        assert!(!state(&app).pressed(by_name("BONUSACTIONBUTTON1")));
+        // CTRL-0 → slot 10.
+        press_key(&mut app, KeyCode::Digit0);
+        app.update();
+        assert!(state(&app).pressed(by_name("BONUSACTIONBUTTON10")));
+        // Bare 1 is still the action bar's, with no pet command in sight.
+        let mut app = harness();
+        press_key(&mut app, KeyCode::Digit1);
+        app.update();
+        assert!(state(&app).pressed(by_name("ACTIONBUTTON1")));
+        assert!(!state(&app).pressed(by_name("BONUSACTIONBUTTON1")));
+    }
+
     #[test]
     fn the_typing_gate_blocks_new_input_and_clears_held_latches_once() {
         let mut app = harness();

@@ -139,7 +139,9 @@ pub use shapeshift::ShapeshiftFormView;
 pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::SoundRequest;
-pub use spellbook::{resolve_spell_by_name, SpellBookState, SpellSlotView, SpellTabView};
+pub use spellbook::{
+    resolve_spell_by_name, PetBookState, SpellBookState, SpellSlotView, SpellTabView,
+};
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;

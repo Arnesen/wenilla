@@ -486,6 +486,23 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
         .eval::<bool>(&format!("return {SF}ScrollBar:IsVisible()"))
         .unwrap());
     s.resolve();
+    // The page area's OWN scroll (B217) stays out of it: this page fills the body exactly, so the
+    // outer range is 0 and its bar never joins this one in the gutter the two share.
+    for _ in 0..4 {
+        s.tick(0.016);
+        s.resolve();
+    }
+    assert_eq!(
+        s.eval::<f32>("return OptionsFrameContainerScroll:GetVerticalScrollRange()")
+            .unwrap(),
+        0.0,
+        "the page scroll has nothing to scroll here — the list's own bar owns the gutter"
+    );
+    assert!(
+        !s.eval::<bool>("return OptionsFrameContainerScrollBar:IsVisible()")
+            .unwrap(),
+        "…so only one bar is on screen"
+    );
     let body_right = s
         .eval::<f64>("return OptionsFrameContainerBodyKeybindings:GetRight()")
         .unwrap();
@@ -504,6 +521,49 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
         bar_right <= body_right - 8.0,
         "bar inset from the body edge ({bar_right} vs body {body_right})"
     );
+    // …wearing its TROUGH: the recessed channel (the shared kit's, shown and hidden with the bar),
+    // which seats ITSELF on the bar — 31 wide against the bar's 16, hung 8 units left, and
+    // overhanging it 21/20 so each arrow drops into the 16-tall socket the art carries (B224; the
+    // law and its ref citation are in BenillaScrollTrough_Seat). Asserted off the ARROWS here,
+    // which is the half the eye judges: 5 units of cap above the up arrow, 4 below the down arrow.
+    const TROUGH: &str = "OptionsFrameContainerBodyKeybindingsScrollFrameScrollBarTrough";
+    let bar = format!("{SF}ScrollBar");
+    let g = |f: &str, m: &str| s.eval::<f64>(&format!("return {f}:{m}()")).unwrap();
+    assert!(
+        s.eval::<bool>(&format!("return {TROUGH}:IsVisible()"))
+            .unwrap(),
+        "the trough shows with the bar"
+    );
+    assert!((g(TROUGH, "GetWidth") - 31.0).abs() < 0.01);
+    assert!((bar_left - g(TROUGH, "GetLeft") - 8.0).abs() < 0.01);
+    assert!((g(TROUGH, "GetTop") - g(&bar, "GetTop") - 21.0).abs() < 0.01);
+    assert!((g(&bar, "GetBottom") - g(TROUGH, "GetBottom") - 20.0).abs() < 0.01);
+    assert!(
+        (g(TROUGH, "GetTop") - g(&format!("{bar}ScrollUpButton"), "GetTop") - 5.0).abs() < 0.01
+    );
+    assert!(
+        (g(&format!("{bar}ScrollDownButton"), "GetBottom") - g(TROUGH, "GetBottom") - 4.0).abs()
+            < 0.01
+    );
+    // A list that FITS shows neither.
+    let set_all = |s: &UiScript, open: bool| {
+        s.run(&format!(
+            "for i = 1, table.getn(KeyBindingsPage.sections) do KeyBindings_ExpandSection(i, {}) end
+             KeyBindingsPage_Update()",
+            if open { "true" } else { "nil" }
+        ))
+        .unwrap();
+    };
+    set_all(&s, false);
+    for f in [format!("{SF}ScrollBar"), TROUGH.to_string()] {
+        assert!(
+            !s.eval::<bool>(&format!("return {f}:IsVisible()")).unwrap(),
+            "{f} goes away when the list fits"
+        );
+    }
+    set_all(&s, true);
+    s.resolve();
+
     // A spin over a row NAME — the dead zone when the handler lived on the sibling.
     let quads = s.extract();
     let (wx, wy) = quads
@@ -562,4 +622,69 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     );
     s.run("KeyBindings_SetSelected(nil)").unwrap();
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The pet lane reaches the page** (B218 / decision 1052). 1008 registered the two multibars
+/// and stopped; 1.12's `BONUSACTIONBUTTON1-10` — "Secondary Action Button" in its own window —
+/// never joined, so the pet bar was the one visible bar with no way to bind it.
+///
+/// Pinned on both sides of the seam, because the report is about the *page*: the registry carries
+/// the ten rows under the ACTION BAR header with their byte-real `CTRL-1..CTRL-0` defaults (1.12
+/// files them under l.121's header, having none of their own), and the page's own search — the
+/// path a player actually finds a binding by — paints the row live with that key on its capsule.
+#[test]
+fn the_pet_lane_is_registered_under_the_action_bar_header() {
+    let mut s = harness();
+    on_page(&mut s);
+
+    // Registry side: the whole lane, in Bindings.xml order right after the shapeshift block,
+    // sharing the action bar's category token.
+    let category = |s: &mut UiScript, name: &str| {
+        s.eval::<String>(&format!(
+            r#"for i = 1, GetNumBindings() do
+                   local n, c = GetBinding(i)
+                   if n == "{name}" then return c end
+               end"#
+        ))
+        .unwrap()
+    };
+    for i in 1..=10 {
+        let name = format!("BONUSACTIONBUTTON{i}");
+        assert_eq!(
+            category(&mut s, &name),
+            "BINDING_HEADER_ACTIONBAR",
+            "{name} files under the action bar, as 1.12 does"
+        );
+        let key = s
+            .eval::<String>(&format!(r#"return GetBindingKey("{name}")"#))
+            .unwrap();
+        assert_eq!(key, format!("CTRL-{}", i % 10), "{name}'s 1.12 default");
+    }
+    // …and it is a runOnUp pair like the action bar's own rows, which is what makes the wheel
+    // refusal apply to it (SetBinding answers nil rather than binding MOUSEWHEELUP).
+    assert!(
+        s.eval::<Option<u32>>(r#"return SetBinding("MOUSEWHEELUP", "BONUSACTIONBUTTON1")"#)
+            .unwrap()
+            .is_none(),
+        "press+release commands refuse the wheel"
+    );
+
+    // Page side: search finds it and paints a live row with the capsule filled.
+    s.run(r#"OptionsFrameSearchBox:SetText("bonusactionbutton1")"#)
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodySearchHeadKeybindings:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Description:GetText()")
+            .unwrap(),
+        "BONUSACTIONBUTTON1",
+        "the raw-token fallback — the app's GlobalStrings read 'Secondary Action Button 1'"
+    );
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyKeybindSearch1Key1ButtonText:GetText()")
+            .unwrap(),
+        "CTRL-1"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

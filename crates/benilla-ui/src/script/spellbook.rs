@@ -25,14 +25,22 @@
 //! running sum of every earlier tab's `num_spells` (tab 1's is `0`, so its first spell's book id
 //! is `1`, matching the ref's own "first tab's first spell is id 1").
 //!
-//! ## Pet book (named deferral)
+//! ## The pet book (decision 1032 — live; 0216 §8's deferral is retired)
 //!
-//! `BOOKTYPE_PET` is anticipated (decision 0216 §8: "pet book deferred, no pets streamed yet")
-//! but answers empty everywhere: `GetNumSpellTabs`/`GetSpellTabInfo` don't even take a `bookType`
-//! (matching the ref's own signature — they always read whatever `SpellBookFrame.bookType`
-//! selected, and this engine only ever HOLDS the spell book, so there is no separate pet-book
-//! state to switch between), and every `bookType`-taking binding treats `"pet"` as an instant
-//! empty/no-op via [`slot_index`]'s own gate.
+//! `BOOKTYPE_PET` selects a **second slot list** ([`PetBookState`]), fed from `SMSG_PET_SPELLS`'
+//! own spell tail. Every `bookType`-taking binding is a two-way fork ([`book_slot`]) exactly as the
+//! reference's are — `isPet ? [0xb6f098 + 4*i] : [0xb700f0 + 4*i]`, written out once per binding —
+//! and the three pet-only bindings (`HasPetSpells`, `GetSpellAutocast`, `ToggleSpellAutocast`) live
+//! here with them.
+//!
+//! Two asymmetries are the API and not tidiable away:
+//!
+//! - `GetNumSpellTabs`/`GetSpellTabInfo` take **no** `bookType` and only ever answer the player's
+//!   skill lines. That is the reference's own signature: the pet book has no tabs, and
+//!   `SpellBookFrame_Update` hides the whole skill-line strip while it is up.
+//! - `PickupSpell` and `CastSpell` produce a **different kind of thing** on the pet side — a pet
+//!   action word on the cursor (`0x494e20`, cursor modes 1-7) and a `CMSG_PET_ACTION` on the wire
+//!   (`0x4b34ce`) — rather than a spell payload and a player cast. See each binding.
 //!
 //! `BOOKTYPE_SPELL`/`BOOKTYPE_PET` are installed as plain Lua globals here rather than left to the
 //! transcribed XML's own `<Script>` block (the ref's actual home for them, `SpellBookFrame.lua:
@@ -47,6 +55,11 @@ use super::Model;
 
 const BOOKTYPE_SPELL: &str = "spell";
 const BOOKTYPE_PET: &str = "pet";
+
+/// `HasPetSpells`' second return when the app has not resolved a token — the reference's own
+/// literal at `0x846a40`, pushed by `0x4b44a6` whenever the player object fails to resolve. Never
+/// nil: FrameXML concatenates it (`"PET_TYPE_"..token`), which would error on one.
+const PET_TOKEN_FALLBACK: &str = "PET";
 
 /// One skill-line tab (`GetSpellTabInfo`'s own Era tuple shape). `offset` is the tab's 0-based
 /// START index into [`SpellBookState::slots`] (module docs' book-id seam) — pushed by the app,
@@ -87,6 +100,39 @@ pub struct SpellSlotView {
     /// `(start, duration, enable)`. `None` = cold. Frame-stable per arm (the absolute start), so
     /// a running cooldown never churns the book diff.
     pub cooldown: Option<(i64, u32, bool)>,
+    /// `GetSpellAutocast`'s `(allowed, enabled)` pair — **pet-book only**, and `None` is not
+    /// "neither": it is the reference's own player-book answer, `(nil, nil)`, because `0x4b4180`
+    /// short-circuits on the book flag (`0x4b41cb`/`0x4b41d6`) before it looks a spell up at all.
+    /// Read off the pet's **raw** word (`0x4bd160` → bits 31/30), never off the filtered book.
+    pub autocast: Option<(bool, bool)>,
+    /// The pet slot's packed word **verbatim** — what `PickupSpell(id, "pet")` puts on the cursor.
+    /// `0x4b3260`'s pet arm hands `0x494e20` a *pointer* to this very word, so the payload is the
+    /// server's own dword, type byte and autocast bits included, not a synthesized one. `0` for a
+    /// player-book slot, which has no word.
+    pub packed: u32,
+}
+
+/// The **pet's** book — the reference's second flat array (`0xb6f098`, count `0xb71174`), which is
+/// a genuinely different object from the player's rather than a variant of it:
+///
+/// - **no tabs.** `GetNumSpellTabs`/`GetSpellTabInfo` take no `bookType` and only ever answer the
+///   player's skill lines; `SpellBookFrame_Update` hides every skill-line tab while the pet book is
+///   up (`SpellBookFrame.lua:124`), and `SpellBook_GetSpellID` returns the button's own 1..12 id
+///   with no tab offset at all (`l.460-462`).
+/// - **a different add-gate.** `0x4b2f90` admits a spell iff it resolves in `Spell.dbc` **and**
+///   `Attributes & 0x80` (DO_NOT_DISPLAY) is clear — `0x4b2fa8 mov dl,[rec+0x18]; test dl,dl; js`.
+///   That is *one* of the three tests the player book's own gate makes: no `IS_TRADESKILL` leg and
+///   no `castUI == 0` leg. Reusing the player book's gate here would be the same class of mistake
+///   as reusing its tab routing.
+/// - **the same order.** `0x4b2fd0(ecx = 0, edx = 1)` sorts it with `0x4b30c0`, the player book's
+///   own comparator (name, then parsed rank), and tail-jumps `SPELLS_CHANGED`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PetBookState {
+    /// `HasPetSpells`'s second return: `ChrClasses.dbc` field 4 for the player's class — `"PET"`
+    /// or `"DEMON"` (`benilla_formats::PetNameTokens`). A **key**, not display text: FrameXML does
+    /// `getglobal("PET_TYPE_"..token)`. `None` only while there is no book at all.
+    pub token: Option<String>,
+    pub slots: Vec<SpellSlotView>,
 }
 
 /// The player's known-spell book: tabs (skill lines) + the flat slot list every tab indexes into
@@ -104,6 +150,30 @@ impl super::UiScript {
     /// `set_action`/`set_container`; never auto-fired here).
     pub fn set_spellbook(&mut self, state: SpellBookState) {
         self.model_mut().spellbook = state;
+    }
+
+    /// Push the pet's book ([`PetBookState`]), replacing whatever was there. A bare setter for the
+    /// same reason as its sibling: the reference fires `SPELLS_CHANGED` for **both** books off the
+    /// one re-sort (`0x4b2fd0` → `SignalEvent(0x104)`), and whose diff moved is the app's to know.
+    pub fn set_pet_book(&mut self, state: PetBookState) {
+        self.model_mut().pet_book = state;
+    }
+
+    /// Drain the pet spell ids `CastSpell(id, "pet")` queued. Separate from
+    /// [`Self::take_spell_casts`] because the wire verb is different in kind: the dispatcher's pet
+    /// arm sends **`CMSG_PET_ACTION`** with a synthesized type-1 word (`0x4b34ce`), not a player
+    /// cast, so folding them into one queue would lose which end of the leash the cast came from.
+    pub fn take_pet_spell_casts(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().pet_spell_casts)
+    }
+
+    /// Drain the pet spell ids `ToggleSpellAutocast` queued — the pet **book**'s autocast verb,
+    /// which is a different opcode from the pet **bar**'s ([`super::pet::UiScript::…`]'s
+    /// `take_pet_autocast_toggles` → `CMSG_PET_SET_ACTION`): this one is
+    /// `CMSG_PET_SPELL_AUTOCAST 0x2F3` and names a spell id rather than a bar slot
+    /// (`0x4b4291` → `0x4bccb0`).
+    pub fn take_pet_spell_autocasts(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.model_mut().pet_spell_autocasts)
     }
 
     /// Read the book back — for the ONE app-side consumer that must resolve a spell name by the
@@ -150,14 +220,40 @@ impl super::UiScript {
     }
 }
 
-/// The book-id → 0-based [`SpellBookState::slots`] index seam (module docs): `None` for a
-/// `bookType` other than `"spell"` (the pet deferral) or an id of `0` (the ref's ids start at 1,
-/// so `id - 1` would otherwise underflow).
-fn slot_index(id: u32, book_type: &str) -> Option<usize> {
-    if book_type != BOOKTYPE_SPELL {
-        return None;
-    }
+/// Which book a `bookType` argument names — the reference's own one-line test, and it is a
+/// **case-insensitive compare against `"pet"` alone** (`0x4b3f27` → `SStrCmpI(arg2, "pet")`), so
+/// every other string, `"spell"` included, is the player's book. Reproduced rather than tightened:
+/// the shared parser also *requires* a string second argument (`0x4b3ee8 lua_isstring(2)`), which
+/// is why these bindings take `String` and not `Option<String>`.
+fn is_pet_book(book_type: &str) -> bool {
+    book_type.eq_ignore_ascii_case(BOOKTYPE_PET)
+}
+
+/// The book-id → 0-based slot-list index seam (module docs). `None` for an id of `0` (the ref's
+/// ids start at 1, so `id - 1` would otherwise underflow) — the reference's own `arg1 - 1` with its
+/// `[0, 0x400)` bound, which our slot lists enforce by being shorter than that anyway.
+fn slot_index(id: u32) -> Option<usize> {
     usize::try_from(id.checked_sub(1)?).ok()
+}
+
+/// The one lookup every `bookType`-taking binding shares: pick the book, then the slot. This is
+/// literally the reference's shape — `isPet ? [0xb6f098 + 4*i] : [0xb700f0 + 4*i]`, one fork
+/// repeated verbatim inside each binding (`0x4b3f5d`, `0x4b40e6`, `0x4b3735`, `0x4b3339`, …).
+///
+/// Shared with the tooltip channel (`super::tooltip_spell`'s `SetSpell`), which is a `GameTooltip`
+/// method rather than a global but repeats the identical fork at `0x532e1c`/`0x532e2a` — and which
+/// read the player's book for a pet hover until 1050, because it took the argument and dropped it.
+pub(super) fn book_slot<'a>(
+    model: &'a Model,
+    id: u32,
+    book_type: &str,
+) -> Option<&'a SpellSlotView> {
+    let slots = if is_pet_book(book_type) {
+        &model.pet_book.slots
+    } else {
+        &model.spellbook.slots
+    };
+    slots.get(slot_index(id)?)
 }
 
 /// Resolve a spell **by name** against the player's book — the law behind `CastSpellByName` and,
@@ -246,17 +342,40 @@ fn pickup_spell(model: &mut Model, id: u32, book_type: &str) -> bool {
     if model.cursor.is_some() {
         return false;
     }
-    let Some(slot) = slot_index(id, book_type).and_then(|i| model.spellbook.slots.get(i)) else {
+    let Some(slot) = book_slot(model, id, book_type) else {
         return false;
     };
-    let payload = CursorSpell {
-        book_slot: id,
-        book_type: book_type.to_string(),
-        spell_id: slot.spell_id,
-        texture: slot.texture.clone(),
-        passive: slot.passive,
+    // **The pet book's payload is a different KIND**, not a Spell payload with a flag on it: the
+    // pet arm of `0x4b3260` calls `0x494e20` with a pointer to the pet's raw word (cursor modes
+    // 1-7), while the player arm calls `0x494d20` with a spell id (mode 9). That is why a pet
+    // spell can be dropped onto the pet bar and a player spell cannot — the bar's drop accepts
+    // exactly one payload kind, and the book is the *second* place that kind is produced.
+    let payload = if is_pet_book(book_type) {
+        // `0x494e20`'s own jump table refuses type 0 and type >= 8, so a word that could not sit
+        // on the bar cannot ride the cursor either (`cursor::pet::payload_word`, same rule).
+        let packed = slot.packed;
+        if !(1..=7).contains(&((packed >> 24) & 0x3F)) {
+            return false;
+        }
+        CursorPayload::PetAction(super::cursor::CursorPetAction {
+            // No source slot: this word came out of the BOOK, not off the bar, so there is
+            // nothing to blank behind it and nothing to swap back to. The reference is the same
+            // shape — its cursor holds a pointer into the raw spell array, not into the bar.
+            src_slot: 0,
+            packed,
+            passive: slot.passive,
+            texture: slot.texture.clone(),
+        })
+    } else {
+        CursorPayload::Spell(CursorSpell {
+            book_slot: id,
+            book_type: book_type.to_string(),
+            spell_id: slot.spell_id,
+            texture: slot.texture.clone(),
+            passive: slot.passive,
+        })
     };
-    model.cursor = Some(CursorPayload::Spell(payload));
+    model.cursor = Some(payload);
     queue_cursor_update(model);
     true
 }
@@ -267,6 +386,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     g.set("BOOKTYPE_SPELL", BOOKTYPE_SPELL)?;
     g.set("BOOKTYPE_PET", BOOKTYPE_PET)?;
+
+    /// The 1/nil boolean every Era binding in this file answers with.
+    fn flag(b: bool) -> Value {
+        if b {
+            Value::Integer(1)
+        } else {
+            Value::Nil
+        }
+    }
 
     g.set(
         "GetNumSpellTabs",
@@ -304,8 +432,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellName",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(slot) = slot_index(id, &book_type).and_then(|i| model.spellbook.slots.get(i))
-            else {
+            let Some(slot) = book_slot(&model, id, &book_type) else {
                 return Ok(MultiValue::from_vec(vec![Value::Nil]));
             };
             let rank = match &slot.rank {
@@ -323,9 +450,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetSpellTexture",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let tex = slot_index(id, &book_type)
-                .and_then(|i| model.spellbook.slots.get(i))
-                .and_then(|s| s.texture.clone());
+            let tex = book_slot(&model, id, &book_type).and_then(|s| s.texture.clone());
             match tex {
                 Some(t) => Ok(Value::String(lua.create_string(&t)?)),
                 None => Ok(Value::Nil),
@@ -341,9 +466,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsCurrentCast",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let current = slot_index(id, &book_type)
-                .and_then(|i| model.spellbook.slots.get(i))
-                .is_some_and(|s| s.current);
+            let current = book_slot(&model, id, &book_type).is_some_and(|s| s.current);
             // The ref's binding convention: 1 or nil, never false.
             match current {
                 true => Ok(Value::Integer(1)),
@@ -362,9 +485,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let cooldown = slot_index(id, &book_type)
-                .and_then(|i| model.spellbook.slots.get(i))
-                .and_then(|s| s.cooldown);
+            let cooldown = book_slot(&model, id, &book_type).and_then(|s| s.cooldown);
             Ok(match cooldown {
                 Some((start_ms, duration_ms, enabled)) => {
                     let (start, duration) =
@@ -384,26 +505,101 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsSpellPassive",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(slot_index(id, &book_type)
-                .and_then(|i| model.spellbook.slots.get(i))
-                .is_some_and(|s| s.passive))
+            Ok(book_slot(&model, id, &book_type).is_some_and(|s| s.passive))
         })?,
     )?;
 
     // CastSpell(id, bookType) — the plain click (ref SpellButton_OnClick's `else` branch): queues
     // the resolved spell id UNLESS the slot is passive (module doc: a passive is permanent player
     // state, never something the player casts) or bookType/id resolve to nothing.
+    //
+    // **The pet arm is a different verb, not a flag.** `0x4b3300`'s tail forks on the book byte
+    // one instruction before the send (`0x4b34c8 cmp ecx, 0; je` → the player's own cast
+    // `0x6e5a90`), and the pet side builds `CMSG_PET_ACTION 0x175` by hand:
+    // `{ u64 [0xb714a0], u32 (spellId & 0xFFFF) | 0x01000000, u64 target }` (`0x4b34ce`-`0x4b3524`)
+    // — a **synthesized type-1 word**, which is why the pet book can cast a spell that is not on
+    // the bar at all. The target is the passed one, falling back to the current selection
+    // (`0x4b34af`-`0x4b34bb`), exactly as `CastPetAction` does; the app supplies it at the drain.
     g.set(
         "CastSpell",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if let Some(slot) =
-                slot_index(id, &book_type).and_then(|i| model.spellbook.slots.get(i))
-            {
+            if let Some(slot) = book_slot(&model, id, &book_type) {
                 if !slot.passive {
                     let spell_id = slot.spell_id;
-                    model.spell_casts.push(spell_id);
+                    if is_pet_book(&book_type) {
+                        model.pet_spell_casts.push(spell_id);
+                    } else {
+                        model.spell_casts.push(spell_id);
+                    }
                 }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // HasPetSpells() → numPetSpells, petToken — no arguments, and **always exactly two returns**
+    // (`0x4b4410`, `EAX = 2` on every path). Zero spells answers `(nil, nil)` (`0x4b4420`), which
+    // is the gate `ToggleSpellBook` and `SpellBookFrame_Update` both read: no pet book, no tab row.
+    //
+    // Return 1 is the **count as a number**, not a boolean — `SpellBook_GetCurrentPage` divides by
+    // it (`ceil(numPetSpells/12)`), so answering 1/nil would silently pin the pet book to one page.
+    g.set(
+        "HasPetSpells",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let n = model.pet_book.slots.len();
+            if n == 0 {
+                return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]));
+            }
+            let token = match &model.pet_book.token {
+                Some(t) => Value::String(lua.create_string(t)?),
+                // The reference's own unresolved-player arm pushes the literal "PET"
+                // (`0x4b44a6`), never nil — a nil here would make `"PET_TYPE_"..token` error.
+                None => Value::String(lua.create_string(PET_TOKEN_FALLBACK)?),
+            };
+            Ok(MultiValue::from_vec(vec![Value::Integer(n as i64), token]))
+        })?,
+    )?;
+
+    // GetSpellAutocast(id, bookType) → autoCastAllowed, autoCastEnabled (1/nil each) — the
+    // AutoCastable overlay and the sparkle model on a pet book button.
+    //
+    // **Pet-only, and it fails to (nil, nil) rather than (nil) for the player book**: `0x4b4180`
+    // tests the book flag twice (`0x4b41cb`, `0x4b41d6`) and falls into the same two nil pushes the
+    // no-record path uses, so the arity is 2 on every path including a bad index.
+    g.set(
+        "GetSpellAutocast",
+        lua.create_function(move |lua, (id, book_type): (u32, String)| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let (allowed, enabled) = book_slot(&model, id, &book_type)
+                .filter(|_| is_pet_book(&book_type))
+                .and_then(|s| s.autocast)
+                .unwrap_or((false, false));
+            Ok((flag(allowed), flag(enabled)))
+        })?,
+    )?;
+
+    // ToggleSpellAutocast(id, bookType) — the pet book's right click (ref `SpellButton_OnClick`'s
+    // `arg1 ~= "LeftButton"` fork). **A different binding and a different opcode from the pet
+    // BAR's `TogglePetAutocast`**: `0x4b4240` indexes the pet spellbook and calls `0x4bccb0`, which
+    // sends `CMSG_PET_SPELL_AUTOCAST 0x2F3` naming a **spell id**, where the bar's verb sends
+    // `CMSG_PET_SET_ACTION` naming a slot. Confusing them is a wire bug that looks like a UI one.
+    //
+    // The gate here is the same one `0x4bccb0` applies before it sends: the word must be
+    // autocast-ALLOWED (`0x4bccf5 test cl,1`). Everything else the sender does — flipping bit 30
+    // in place and mirroring it onto every bar slot carrying the same action — is state the app
+    // owns, so it happens at the drain.
+    g.set(
+        "ToggleSpellAutocast",
+        lua.create_function(|lua, (id, book_type): (u32, String)| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let spell_id = book_slot(&model, id, &book_type)
+                .filter(|_| is_pet_book(&book_type))
+                .filter(|s| s.autocast.is_some_and(|(allowed, _)| allowed))
+                .map(|s| s.spell_id);
+            if let Some(spell_id) = spell_id {
+                model.pet_spell_autocasts.push(spell_id);
             }
             Ok(())
         })?,
@@ -501,7 +697,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SpellBookState, SpellSlotView, SpellTabView};
+    use super::{PetBookState, SpellBookState, SpellSlotView, SpellTabView};
     use crate::script::cursor::{CursorAction, CursorPayload};
     use crate::script::UiScript;
 
@@ -532,6 +728,7 @@ mod tests {
                     passive: false,
                     current: false,
                     cooldown: None,
+                    ..Default::default()
                 },
                 SpellSlotView {
                     spell_id: 2136,
@@ -541,6 +738,7 @@ mod tests {
                     passive: true, // artificial: exercises the refusal gate
                     current: false,
                     cooldown: None,
+                    ..Default::default()
                 },
                 SpellSlotView {
                     spell_id: 168,
@@ -550,6 +748,7 @@ mod tests {
                     passive: false,
                     current: false,
                     cooldown: None,
+                    ..Default::default()
                 },
             ],
         }
@@ -779,8 +978,11 @@ mod tests {
             .unwrap());
     }
 
+    /// **With no pet book fed, every pet arm answers nothing** — the old deferral's behaviour,
+    /// which is also the reference's whenever `[0xb71174] == 0`. Kept as its own case so the
+    /// pet-book tests below can never pass by the player book leaking into them.
     #[test]
-    fn pet_book_answers_empty_everywhere() {
+    fn an_absent_pet_book_answers_empty_everywhere() {
         let mut s = UiScript::new().unwrap();
         s.set_spellbook(book());
 
@@ -793,13 +995,266 @@ mod tests {
         assert!(!s
             .eval::<bool>(r#"return IsSpellPassive(1, BOOKTYPE_PET)"#)
             .unwrap());
+        assert!(s
+            .eval::<bool>(r#"local n, t = HasPetSpells() return n == nil and t == nil"#)
+            .unwrap());
 
         s.run(r#"CastSpell(1, BOOKTYPE_PET)"#).unwrap();
         assert!(s.take_spell_casts().is_empty(), "pet cast is a no-op");
+        assert!(s.take_pet_spell_casts().is_empty());
 
         assert!(!s
             .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_PET)"#)
             .unwrap());
         assert!(s.cursor_payload().is_none(), "pet pickup is a no-op");
+    }
+
+    /// A hunter's pet book: Growl (autocastable, ON, on cooldown), Claw (autocastable, OFF) and
+    /// Avoidance (a passive — no autocast, `ACT_PASSIVE 0x01`).
+    fn pet_book() -> PetBookState {
+        PetBookState {
+            token: Some("PET".into()),
+            slots: vec![
+                SpellSlotView {
+                    spell_id: 2649,
+                    name: "Growl".into(),
+                    rank: Some("Rank 1".into()),
+                    texture: Some("Interface\\Icons\\Ability_Physical_Taunt".into()),
+                    cooldown: Some((9400, 5000, true)),
+                    autocast: Some((true, true)),
+                    packed: 0xC100_0000 | 2649,
+                    ..Default::default()
+                },
+                SpellSlotView {
+                    spell_id: 16827,
+                    name: "Claw".into(),
+                    rank: Some("Rank 1".into()),
+                    texture: Some("Interface\\Icons\\Ability_Druid_Rake".into()),
+                    autocast: Some((true, false)),
+                    packed: 0x8100_0000 | 16827,
+                    ..Default::default()
+                },
+                SpellSlotView {
+                    spell_id: 3025,
+                    name: "Avoidance".into(),
+                    texture: Some("Interface\\Icons\\Spell_Nature_SpiritArmor".into()),
+                    passive: true,
+                    autocast: Some((false, false)),
+                    packed: 0x0100_0000 | 3025,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    /// `HasPetSpells` is **the count and a token**, always two returns, and the count is a NUMBER
+    /// — `SpellBook_GetCurrentPage` divides by it, so a 1/nil boolean would pin the page count.
+    #[test]
+    fn has_pet_spells_answers_a_count_and_a_class_token() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_book(pet_book());
+        assert!(s
+            .eval::<bool>(r#"local n, t = HasPetSpells() return n == 3 and t == "PET""#)
+            .unwrap());
+
+        // A warlock's book carries the other token, which is the whole of what makes the tab read
+        // "Demon" — FrameXML does `getglobal("PET_TYPE_"..token)`.
+        let mut demon = pet_book();
+        demon.token = Some("DEMON".into());
+        s.set_pet_book(demon);
+        assert_eq!(
+            s.eval::<String>("local _, t = HasPetSpells() return t")
+                .unwrap(),
+            "DEMON"
+        );
+
+        // No token resolved (no ChrClasses.dbc) still answers a STRING, never nil — a nil would
+        // make the reference's own concatenation error.
+        let mut untokened = pet_book();
+        untokened.token = None;
+        s.set_pet_book(untokened);
+        assert_eq!(
+            s.eval::<String>("local _, t = HasPetSpells() return t")
+                .unwrap(),
+            "PET"
+        );
+    }
+
+    /// The two books are separate lists reached by the SAME id — the reference's `isPet ? petArray
+    /// : playerArray` fork. Book id 1 means Fireball in one and Growl in the other.
+    #[test]
+    fn one_id_reads_two_different_books() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        assert_eq!(
+            s.eval::<String>(r#"return GetSpellName(1, BOOKTYPE_SPELL)"#)
+                .unwrap(),
+            "Fireball"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetSpellName(1, BOOKTYPE_PET)"#)
+                .unwrap(),
+            "Growl"
+        );
+        // The book type is a case-insensitive compare against "pet" ALONE (`0x4b3f27`), so every
+        // other string is the player's book — including a typo'd one.
+        assert_eq!(
+            s.eval::<String>(r#"return GetSpellName(1, "PeT")"#)
+                .unwrap(),
+            "Growl"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetSpellName(1, "spel")"#)
+                .unwrap(),
+            "Fireball"
+        );
+        // Past the pet book's end: one nil, the out-of-range shape.
+        assert!(s
+            .eval::<bool>(r#"return GetSpellName(4, BOOKTYPE_PET) == nil"#)
+            .unwrap());
+    }
+
+    /// `GetSpellAutocast` is **pet-only and always two returns**: the player book short-circuits
+    /// to `(nil, nil)` before it looks anything up (`0x4b41cb`/`0x4b41d6`), and so does an
+    /// out-of-range pet index.
+    #[test]
+    fn autocast_is_a_pet_only_pair() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        assert!(s
+            .eval::<bool>(
+                r#"local a, e = GetSpellAutocast(1, BOOKTYPE_PET) return a == 1 and e == 1"#
+            )
+            .unwrap());
+        assert!(s
+            .eval::<bool>(
+                r#"local a, e = GetSpellAutocast(2, BOOKTYPE_PET) return a == 1 and e == nil"#
+            )
+            .unwrap());
+        assert!(
+            s.eval::<bool>(
+                r#"local a, e = GetSpellAutocast(3, BOOKTYPE_PET) return a == nil and e == nil"#
+            )
+            .unwrap(),
+            "a passive is not autocastable"
+        );
+        assert!(
+            s.eval::<bool>(
+                r#"local a, e = GetSpellAutocast(1, BOOKTYPE_SPELL) return a == nil and e == nil"#
+            )
+            .unwrap(),
+            "the PLAYER book never answers a pair"
+        );
+        assert!(
+            s.eval::<bool>(
+                r#"local a, e = GetSpellAutocast(9, BOOKTYPE_PET) return a == nil and e == nil"#
+            )
+            .unwrap(),
+            "still two returns out of range"
+        );
+    }
+
+    /// `ToggleSpellAutocast` queues only what `0x4bccb0` would actually send: a pet-book slot whose
+    /// word is autocast-ALLOWED. A passive, a player-book id and an out-of-range id all queue
+    /// nothing — and none of them may leak into the player's cast queue.
+    #[test]
+    fn only_an_autocastable_pet_slot_queues_a_toggle() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        s.run(
+            r#"ToggleSpellAutocast(1, BOOKTYPE_PET)
+               ToggleSpellAutocast(3, BOOKTYPE_PET)
+               ToggleSpellAutocast(9, BOOKTYPE_PET)
+               ToggleSpellAutocast(1, BOOKTYPE_SPELL)"#,
+        )
+        .unwrap();
+        assert_eq!(s.take_pet_spell_autocasts(), vec![2649]);
+        assert!(s.take_pet_spell_autocasts().is_empty(), "drain empties");
+        assert!(s.take_spell_casts().is_empty());
+    }
+
+    /// A pet cast is a **different queue** from a player cast, because it is a different opcode at
+    /// the far end (`CMSG_PET_ACTION`, not a player cast). A passive still refuses on both.
+    #[test]
+    fn a_pet_cast_queues_apart_from_a_player_cast() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        s.run(
+            r#"CastSpell(1, BOOKTYPE_PET)
+               CastSpell(3, BOOKTYPE_PET)
+               CastSpell(1, BOOKTYPE_SPELL)"#,
+        )
+        .unwrap();
+        assert_eq!(s.take_pet_spell_casts(), vec![2649], "the passive refused");
+        assert_eq!(s.take_spell_casts(), vec![133]);
+        assert!(s.take_pet_spell_casts().is_empty(), "drain empties");
+    }
+
+    /// A pet-book pickup puts a **pet action word** on the cursor, not a spell payload — which is
+    /// exactly what makes it droppable on the pet bar (`cursor::pet`'s payload). The word is the
+    /// server's own, autocast bits and all.
+    #[test]
+    fn a_pet_book_pickup_carries_the_packed_word() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        assert!(s
+            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_PET)"#)
+            .unwrap());
+        let Some(CursorPayload::PetAction(p)) = s.cursor_payload() else {
+            panic!(
+                "expected a pet action payload, got {:?}",
+                s.cursor_payload()
+            );
+        };
+        assert_eq!(p.packed, 0xC100_0000 | 2649);
+        assert_eq!(p.src_slot, 0, "it came out of the book, not off the bar");
+
+        // The player book still produces a SPELL payload — the two are not interchangeable.
+        s.run("ClearCursor()").unwrap();
+        assert!(s
+            .eval::<bool>(r#"return PickupSpell(1, BOOKTYPE_SPELL)"#)
+            .unwrap());
+        assert!(matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))));
+    }
+
+    /// `GetSpellCooldown(id, "pet")` reads the PET's slot — the reference reaches bank 1 with the
+    /// same `0x6e2ea0(edx = isPet)` `GetPetActionCooldown` uses, so a spell on the bar and the same
+    /// spell in the book must never disagree. The elapsed-goes-cold rule is the player book's.
+    #[test]
+    fn the_pet_books_cooldown_is_the_pets_own() {
+        let mut s = UiScript::new().unwrap();
+        s.tick(10.0); // GetTime == 10
+        s.set_spellbook(book());
+        s.set_pet_book(pet_book());
+
+        let (start, duration, enable) = s
+            .eval::<(f64, f64, i32)>(r#"return GetSpellCooldown(1, BOOKTYPE_PET)"#)
+            .unwrap();
+        assert!((start - 9.4).abs() < 1e-9, "start {start}");
+        assert!((duration - 5.0).abs() < 1e-9);
+        assert_eq!(enable, 1);
+        // The player book's slot 1 has none — proof the fork reached the right list.
+        assert_eq!(
+            s.eval::<(f64, f64, i32)>(r#"return GetSpellCooldown(1, BOOKTYPE_SPELL)"#)
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
+
+        s.tick(5.0); // now == 15 > 9.4 + 5.0
+        assert_eq!(
+            s.eval::<(f64, f64, i32)>(r#"return GetSpellCooldown(1, BOOKTYPE_PET)"#)
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
     }
 }

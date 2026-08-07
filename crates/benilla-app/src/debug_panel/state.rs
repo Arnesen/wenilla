@@ -11,7 +11,7 @@ use bevy::prelude::*;
 /// (`open: false`), each section its own `Default` (so this derives cleanly).
 #[derive(Resource, Default)]
 pub struct DebugState {
-    /// Panel visible? Hidden by default; toggled with the backtick key.
+    /// Panel visible? Hidden by default; toggled with the dev chord + `D` (decisions 1043, 1048).
     pub open: bool,
     pub models: ModelDebug,
     pub lighting: LightingDebug,

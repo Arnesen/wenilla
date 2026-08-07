@@ -704,6 +704,19 @@ pub(crate) enum ClientCommand {
     /// player twin: no answer packet — the removal arrives as a `UNIT_FIELD_AURA` delta on the
     /// pet, which is also what puts the slot's icon back.
     PetCancelAura { pet_guid: u64, spell_id: u32 },
+    /// Flip one pet **spellbook** entry's autocast (`CMSG_PET_SPELL_AUTOCAST` 0x2F3, decision
+    /// 1032) — `ToggleSpellAutocast`'s send, and **not** the pet bar's autocast verb.
+    ///
+    /// The bar's right click is [`Self::PetSetAction`]: it rewrites a *slot's word*, so its body
+    /// names a position. This one names a **spell id**, because the book has no positions —
+    /// `0x4b4240` looks the id up in `0xb6f098` and hands `0x4bccb0` the id, never an index. Both
+    /// end up flipping the same bit on the same word; only one of them can say which word by slot.
+    /// No reply packet either way.
+    PetSpellAutocast {
+        pet_guid: u64,
+        spell_id: u32,
+        enabled: bool,
+    },
     /// Start melee auto-attack on `guid` (`CMSG_ATTACKSWING`); echoed as `SMSG_ATTACKSTART`.
     AttackSwing { guid: u64 },
     /// Stop melee auto-attack (`CMSG_ATTACKSTOP`); echoed as `SMSG_ATTACKSTOP`, whose receive path

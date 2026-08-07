@@ -709,6 +709,11 @@ fn writer_loop(
                     ClientCommand::PetCancelAura { pet_guid, spell_id } => {
                         w.pet_cancel_aura(pet_guid, spell_id)
                     }
+                    ClientCommand::PetSpellAutocast {
+                        pet_guid,
+                        spell_id,
+                        enabled,
+                    } => w.pet_spell_autocast(pet_guid, spell_id, enabled),
                     ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
                     ClientCommand::AttackStop => w.attack_stop(),
                     ClientCommand::SetSheathed { state } => w.set_sheathed(state),

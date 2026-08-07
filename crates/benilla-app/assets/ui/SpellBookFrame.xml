@@ -31,23 +31,18 @@
         `MAX_SKILLLINE_TABS`/`SPELLBOOK_PAGENUMBERS` stay here — genuine per-window UI state, the
         ref's own home for them.
 
+        THE PET BOOK IS LIVE (decision 1032) — the second tab, its 12-slot page, the autocast
+        overlay + sparkle, the right-click autocast toggle, and the cast/pickup pair, all over
+        `crate::ui_pet_book`'s feed of `SMSG_PET_SPELLS`' own spell list. Two reference QUIRKS are
+        reproduced on purpose here and each carries a do-not-fix note at its site (the standing
+        rule from decision 1030): the pet page **ignores its page number**, and its page arrows
+        write the *spell* book's page counter. See `BenillaSpellBook_GetSpellID` and the two
+        page-turn handlers.
+
         Named deferrals/OMITs (each re-cited at its own site below):
-          - The PET spellbook: no pets stream yet (decision 0216's own scope note). The ref's
-            Spell/Pet toggle tab row (`SpellBookFrameTabButton1/2/3`, `HasPetSpells()`-gated) is
-            dropped OUTRIGHT — this window only ever shows the one book that exists, the 0138
-            merchant-tab precedent ("tabs arrive with their pages"). `LEARNED_SPELL_IN_TAB`'s tab
-            flash (`SpellBookTabFlashFrame`, `CheckButtonGlow`) is dropped with it — no such event
-            exists yet (no "just learned a spell" signal split out of the general `SPELLS_CHANGED`
-            diff).
-          - Pet autocast (`GetSpellAutocast`/`ToggleSpellAutocast`/`UI-AutoCastableOverlay`/the
-            `AutoCast` model): pet-only, no pet book. Right-click pet-autocast toggle
-            (`SpellButton_OnClick`'s `arg1 ~= "LeftButton"` branch) is out of scope this slice
-            per the same brief — every click routes straight to cast/pickup. (Cooldowns —
-            originally deferred here alongside autocast for want of a feed — are LIVE:
-            `GetSpellCooldown` + the native Cooldown child + `SPELL_UPDATE_COOLDOWN`, ref
-            `SpellButton_UpdateButton` l.359-365; the app feed stamps each slot's triple from
-            the one cooldown store, `benilla::ui_spellbook`. CharacterFrame's item cooldowns
-            remain that file's own named gap.)
+          - `LEARNED_SPELL_IN_TAB`'s tab flash (`SpellBookTabFlashFrame`, `CheckButtonGlow`): no
+            such event exists yet (no "just learned a spell" signal split out of the general
+            `SPELLS_CHANGED` diff). The ref returns early on it for the pet book anyway.
           - The CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE legs of the checked ring: the ring
             itself is LIVE (`BenillaSpellButton_UpdateSelection`/`IsCurrentCast` over the
             app-resolved slot verdict — the shapeshift arm makes Ghost Wolf's/a druid form's
@@ -57,12 +52,11 @@
           - The MacroFrame branch (`SpellButton_OnClick`'s shift-click "already in a macro editor"
             fork): no macro window exists — shift-click always falls to the ref's own "else"
             (`PickupSpell`), exactly what the ref itself does whenever no MacroFrame is visible.
-          - `GameTooltip:SetSpell(id, bookType)` (the full spell-effect/cost/range tooltip): no
-            such content channel exists (the item-stats precedent's own gap — no spell-stat feed).
-            `BenillaSpellButton_OnEnter` shows a plain name + rank two-liner instead
-            (`GetSpellName`'s own two return values) — the `this.updateTooltip`/`OnUpdate`
-            re-poll loop is dropped with it (nothing about a static name/rank line changes
-            per-frame the way a live cooldown would).
+          - The `this.updateTooltip`/`OnUpdate` re-poll loop around the hover: `GameTooltip:SetSpell`
+            itself is LIVE (the engine channel, decision 0276's line law; it reads whichever book
+            `bookType` names — 1050), but its per-frame re-poll is dropped, since nothing in the
+            rendered lines changes per-frame the way a live cooldown would. The ref's own
+            `if ( GameTooltip:SetSpell(…) )` return value exists only to arm that loop.
           - `maxLines="3"` on `$parentSpellName` (word-wrap line cap): no such FontString
             attribute is modeled (grepped `benilla-ui/src/loader/widgets.rs`) — the name just
             wraps unbounded inside its box width, a harmless cosmetic gap on the rare long name.
@@ -84,6 +78,11 @@
         -- `X = X or "..."` idiom matches CastingBar.xml/CharacterFrame.xml's own convention) ────
         SPELLBOOK = SPELLBOOK or "Spellbook"      -- :3820
         PAGE_NUMBER = PAGE_NUMBER or "Page %d"    -- :2981
+        -- The pet tab's label AND the window title while the pet book is up. Keyed, not chosen:
+        -- HasPetSpells()'s second return is ChrClasses.dbc field 4 ("PET"/"DEMON") and the ref
+        -- concatenates it (`getglobal("PET_TYPE_"..token)`, ref SpellBookFrame.lua:173).
+        PET_TYPE_PET = PET_TYPE_PET or "Pet"          -- :3058
+        PET_TYPE_DEMON = PET_TYPE_DEMON or "Demon"    -- :3057
 
         -- ── This window's own constants (ref SpellBookFrame.lua:1-7, Benilla-prefixed where the
         -- ref's own name would collide with the engine's BOOKTYPE_SPELL/BOOKTYPE_PET globals —
@@ -94,15 +93,17 @@
 
         -- ── The window: toggle (ref ToggleSpellBook, l.9-50) ─────────────────────────────────────
         -- Kept BARE (not Benilla-prefixed) — the addon-facing entry point, matching this
-        -- codebase's own ToggleCharacter/ToggleQuestLog precedent. The ref's `HasPetSpells()`
-        -- short-circuit (blocking a toggle INTO an empty pet book) is dropped outright — this
-        -- file's header comment, the pet book is never fed so `bookType` is always
-        -- BOOKTYPE_SPELL in practice. The ref's own DUPLICATED prev/next enable/disable (once
-        -- inside the `currentPage > maxPages` clamp branch, once again unconditionally right
-        -- after — both produce the identical end state) collapses to the ONE
-        -- BenillaSpellBook_UpdatePageArrows() call already shared by every other page-turn site
-        -- below — a redundant-code cleanup, not a behavior change.
+        -- codebase's own ToggleCharacter/ToggleQuestLog precedent. The ref's own DUPLICATED
+        -- prev/next enable/disable (once inside the `currentPage > maxPages` clamp branch, once
+        -- again unconditionally right after — both produce the identical end state) collapses to
+        -- the ONE BenillaSpellBook_UpdatePageArrows() call already shared by every other
+        -- page-turn site below — a redundant-code cleanup, not a behavior change.
         function ToggleSpellBook(bookType)
+            -- ref l.11-14: asking for a pet book you haven't got does NOTHING — not even close a
+            -- spellbook that is already open. The TOGGLEPETBOOK key binding is the live caller.
+            if bookType == BOOKTYPE_PET and not HasPetSpells() then
+                return
+            end
             local isVisible = BenillaSpellBookFrame:IsVisible()
             HideUIPanel(BenillaSpellBookFrame)
             if (not isVisible or (BenillaSpellBookFrame.bookType ~= bookType)) then
@@ -132,6 +133,7 @@
             for i = 1, MAX_SKILLLINE_TABS do
                 SPELLBOOK_PAGENUMBERS[i] = 1
             end
+            SPELLBOOK_PAGENUMBERS["pet"] = 1   -- ref l.66; read by GetCurrentPage, written by nothing
             BenillaSpellBookSkillLineTab_OnClick(1)
         end
 
@@ -152,18 +154,20 @@
             BenillaSpellBookFrame_Update(1)
         end
 
-        -- ref SpellBookFrame_Update (l.107-164): the Spell/Pet toggle-tab hide loop and the
-        -- HasPetSpells()/petTitle branch are DROPPED outright (header comment — no pet book, no
-        -- toggle row exists at all this slice).
+        -- ref SpellBookFrame_Update (l.107-164), whole. Three things happen here and they are
+        -- easy to conflate: the skill-line strip is gated on the book TYPE (the pet book has no
+        -- tabs at all — GetSpellTabInfo never sees it), the Spell/Pet toggle row is gated on
+        -- HasPetSpells(), and the title + open sound fork on which book is up.
         function BenillaSpellBookFrame_Update(showing)
             if showing then
                 BenillaSpellBookSkillLineTab_OnClick(BenillaSpellBookFrame.selectedSkillLine)
                 BenillaUpdateSpells()
             end
+            local isPet = BenillaSpellBookFrame.bookType == BOOKTYPE_PET
             local numSkillLineTabs = GetNumSpellTabs()
             for i = 1, MAX_SKILLLINE_TABS do
                 local skillLineTab = getglobal("BenillaSpellBookSkillLineTab" .. i)
-                if i <= numSkillLineTabs then
+                if i <= numSkillLineTabs and not isPet then
                     local name, texture = GetSpellTabInfo(i)
                     skillLineTab:SetNormalTexture(texture)
                     skillLineTab.tooltip = name
@@ -173,9 +177,74 @@
                     skillLineTab:Hide()
                 end
             end
-            BenillaSpellBookTitleText:SetText(SPELLBOOK)
-            if showing then
-                PlaySound("igSpellBookOpen")
+
+            -- ref l.108-111 + l.141-151: hide the row first, then raise exactly the tabs that
+            -- exist. Tab 3 never appears in 1.12 (no third book) and is hidden by the template's
+            -- own `hidden="true"`; it is kept so the anchor chain reads like the ref's.
+            BenillaSpellBookFrameTabButton1:Hide()
+            BenillaSpellBookFrameTabButton2:Hide()
+            local hasPetSpells, petToken = HasPetSpells()
+            BenillaSpellBookFrame.petTitle = nil
+            if hasPetSpells then
+                BenillaSpellBookFrame_SetTabType(BenillaSpellBookFrameTabButton1, BOOKTYPE_SPELL)
+                BenillaSpellBookFrame_SetTabType(BenillaSpellBookFrameTabButton2, BOOKTYPE_PET, petToken)
+            elseif isPet then
+                -- The pet died/was dismissed while its book was open: the ref closes the window
+                -- and reverts, rather than showing an empty pet page (l.147-151).
+                HideUIPanel(BenillaSpellBookFrame)
+                BenillaSpellBookFrame.bookType = BOOKTYPE_SPELL
+                isPet = false
+            end
+
+            if not isPet then
+                BenillaSpellBookTitleText:SetText(SPELLBOOK)
+                if showing then PlaySound("igSpellBookOpen") end
+            else
+                BenillaSpellBookTitleText:SetText(BenillaSpellBookFrame.petTitle)
+                -- ref l.161: the pet book opens on the ABILITY kit, not the spellbook one. Both
+                -- ship in the real SoundEntries.dbc.
+                if showing then PlaySound("igAbilityOpen") end
+            end
+        end
+
+        -- ref SpellBookFrame_SetTabType (l.166-183). `binding` is what the tab's tooltip appends
+        -- the bound key to (MicroButtonTooltipText); `petTitle` is set here as a side effect,
+        -- exactly as the ref does, because this is the only place the token is in hand.
+        function BenillaSpellBookFrame_SetTabType(tabButton, bookType, token)
+            if bookType == BOOKTYPE_SPELL then
+                tabButton.bookType = BOOKTYPE_SPELL
+                tabButton:SetText(SPELLBOOK)
+                tabButton.binding = "TOGGLESPELLBOOK"
+            else
+                tabButton.bookType = BOOKTYPE_PET
+                local label = getglobal("PET_TYPE_" .. (token or "PET")) or PET_TYPE_PET
+                tabButton:SetText(label)
+                tabButton.binding = "TOGGLEPETBOOK"
+                BenillaSpellBookFrame.petTitle = label
+            end
+            -- The tab for the book you are ON is disabled, which is also what draws it as the
+            -- selected (Tab1-Selected) plate — the ref uses <DisabledTexture> for the "current"
+            -- look rather than a checked state.
+            if BenillaSpellBookFrame.bookType == bookType then
+                tabButton:Disable()
+            else
+                tabButton:Enable()
+            end
+            tabButton:Show()
+        end
+
+        -- The shared sparkle clock — PetActionBar.xml's own pattern, one OnUpdate for the twelve
+        -- buttons rather than twelve: the emitters are one model and every autocasting button
+        -- plays the same loop in step, which is what the ref's per-button Models do too. Only runs
+        -- while the window is shown, so it costs nothing the rest of the time.
+        function BenillaSpellBookFrame_OnUpdate(frame, elapsed)
+            if not BenillaPetAutocast_Update then return end
+            frame.clock = (frame.clock or 0) + elapsed
+            if frame.clock > BENILLA_PET_AUTOCAST_PERIOD then
+                frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
+            end
+            for i = 1, SPELLS_PER_PAGE do
+                BenillaPetAutocast_Update(getglobal("BenillaSpellButton" .. i), frame.clock)
             end
         end
 
@@ -184,7 +253,11 @@
         -- on). UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml).
         function BenillaSpellBookFrame_OnHide()
             if UpdateMicroButtons then UpdateMicroButtons() end
-            PlaySound("igSpellBookClose")
+            if BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                PlaySound("igAbilityClose")   -- ref l.191
+            else
+                PlaySound("igSpellBookClose")
+            end
         end
 
         -- UpdateSpells(): the ref's OWN global (`SpellBookFrame.lua:26/116/411/426/450` — never
@@ -198,16 +271,25 @@
         end
 
         -- ── The spell button (ref SpellButton_*, l.206-404) ──────────────────────────────────────
-        -- CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE/PET_BAR_UPDATE are OMITTED (header comment:
-        -- no craft/trade-skill window arm, no pet bar); SPELLS_CHANGED and SPELL_UPDATE_COOLDOWN
-        -- drive the full refresh (the ref's own shared branch, l.221) and
-        -- CURRENT_SPELL_CAST_CHANGED the checked ring (ref SpellButton_OnEvent's own split).
+        -- CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE are OMITTED (header comment: no craft or
+        -- trade-skill window arm); SPELLS_CHANGED and SPELL_UPDATE_COOLDOWN drive the full refresh
+        -- (the ref's own shared branch, l.221) and CURRENT_SPELL_CAST_CHANGED the checked ring.
+        -- PET_BAR_UPDATE is LIVE (ref l.214 + l.227-231) and it is the pet page's whole repaint
+        -- wire: the pet book's cooldowns, autocast bits and active ring all move without the BOOK
+        -- changing, so SPELLS_CHANGED alone would leave a stale page.
         function BenillaSpellButton_OnLoad(button)
             button:RegisterEvent("SPELLS_CHANGED")
             button:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
             button:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+            button:RegisterEvent("PET_BAR_UPDATE")
             button:RegisterForDrag("LeftButton")
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            button.autocastable = getglobal(button:GetName() .. "AutoCastable")
+            -- The ref's `$parentAutoCast` is a <Model> playing UI-AutoCastButton.mdx; we have no
+            -- Model widget, so the pet bar's byte-derived sparkle emitter stands in for it
+            -- (decision 0982 — PetActionBar.xml owns the numbers and both surfaces share them).
+            -- Guarded because several engine test harnesses load this file without the pet bar.
+            if BenillaPetAutocast_Create then BenillaPetAutocast_Create(button) end
             BenillaSpellButton_UpdateButton(button)
         end
 
@@ -216,6 +298,10 @@
                 BenillaSpellButton_UpdateButton(button)
             elseif event == "CURRENT_SPELL_CAST_CHANGED" then
                 BenillaSpellButton_UpdateSelection(button)
+            elseif event == "PET_BAR_UPDATE" then
+                if BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                    BenillaSpellButton_UpdateButton(button)
+                end
             end
         end
 
@@ -250,11 +336,17 @@
         -- `id > MAX_SPELLS` guard is dropped too: GetSpellName/CastSpell/PickupSpell already
         -- answer nil/no-op for any id past the book's real length, so the extra guard checks
         -- nothing a MAX_SPELLS constant would add here.
-        function BenillaSpellButton_OnClick(button, drag)
+        function BenillaSpellButton_OnClick(button, drag, mouseButton)
             local id = BenillaSpellBook_GetSpellID(button:GetID())
             button:SetChecked("false")
             if drag then
                 PickupSpell(id, BenillaSpellBookFrame.bookType)
+            elseif not IsShiftKeyDown() and mouseButton and mouseButton ~= "LeftButton"
+                   and BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                -- ref l.284-285: on the PET page a non-left click flips autocast instead of
+                -- casting. Shift still outranks it — the ref tests shift first, so a shift
+                -- right-click on a pet spell picks it up.
+                ToggleSpellAutocast(id, BenillaSpellBookFrame.bookType)
             elseif IsShiftKeyDown() then
                 -- ref SpellButton_OnClick l.271-283 (LIVE since decision 0983): with the macro
                 -- editor open a shift-click APPENDS `/cast <name>[(<rank>)]` to the body instead of
@@ -294,6 +386,7 @@
             if not BenillaSpellBookFrame.selectedSkillLine then
                 BenillaSpellBookFrame.selectedSkillLine = 1
             end
+            local isPet = BenillaSpellBookFrame.bookType == BOOKTYPE_PET
             local temp, tabTexture, offset, numSpells = GetSpellTabInfo(BenillaSpellBookFrame.selectedSkillLine)
             offset = offset or 0
             numSpells = numSpells or 0
@@ -304,12 +397,19 @@
             local spellString = getglobal(name .. "SpellName")
             local subSpellString = getglobal(name .. "SubSpellName")
             local cooldown = getglobal(name .. "Cooldown")
-            if id > (offset + numSpells) then
+            local autocastable = getglobal(name .. "AutoCastable")
+            -- ref l.328: the out-of-tab DISABLE is `(bookType ~= BOOKTYPE_PET) and ...` — the pet
+            -- page has no tab to be out of, so a pet button past the end of the book falls to the
+            -- no-texture branch below and stays ENABLED. Faithful, and harmless: an enabled button
+            -- with no spell behind it clicks into GetSpellName's nil and does nothing.
+            if (not isPet) and id > (offset + numSpells) then
                 button:Disable()
                 iconTexture:Hide()
                 spellString:Hide()
                 subSpellString:Hide()
                 cooldown:Hide()
+                autocastable:Hide()
+                button.autocasting = nil
                 button:SetChecked(0)
                 getglobal(name .. "NormalTexture"):SetVertexColor(1.0, 1.0, 1.0)
                 return
@@ -324,6 +424,8 @@
                 spellString:Hide()
                 subSpellString:Hide()
                 cooldown:Hide()
+                autocastable:Hide()
+                button.autocasting = nil
                 highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
                 button:SetChecked(0)
                 normalTexture:SetVertexColor(1.0, 1.0, 1.0)
@@ -339,6 +441,12 @@
             else
                 iconTexture:SetVertexColor(0.4, 0.4, 0.4)
             end
+            -- ref l.367-377: the autocast pair. `GetSpellAutocast` answers (nil, nil) for the
+            -- player book by the engine's own short-circuit, so this needs no isPet guard — the
+            -- overlay and the sparkle simply never come on outside the pet page.
+            local autoCastAllowed, autoCastEnabled = GetSpellAutocast(id, BenillaSpellBookFrame.bookType)
+            if autoCastAllowed then autocastable:Show() else autocastable:Hide() end
+            button.autocasting = autoCastEnabled
             local spellName, subSpellName = GetSpellName(id, BenillaSpellBookFrame.bookType)
             local isPassive = IsSpellPassive(id, BenillaSpellBookFrame.bookType)
             if isPassive then
@@ -365,13 +473,24 @@
         end
 
         -- ── Page turn (ref PrevPageButton_OnClick/NextPageButton_OnClick, l.406-434) ─────────────
-        -- Always the spell-book page-turn kit (no pet book to branch on, header comment).
+        --
+        -- DO NOT "FIX" THE KEY (decision 1032, the standing rule from 1030). The reference writes
+        -- `SPELLBOOK_PAGENUMBERS[selectedSkillLine]` on BOTH books, while `SpellBook_GetCurrentPage`
+        -- reads `SPELLBOOK_PAGENUMBERS["pet"]` for the pet one — a key nothing writes. So on the
+        -- pet page the arrows turn nothing, the page text says a number the page does not honour,
+        -- and the *spell* book's page counter moves behind your back. All three are the reference's
+        -- and all three are reproduced; `BenillaSpellBook_GetSpellID`'s note is the other half.
         function BenillaSpellBookPrevPageButton_OnClick()
             local pageNum = BenillaSpellBook_GetCurrentPage() - 1
             SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] = pageNum
             BenillaSpellBook_UpdatePageArrows()
             BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, pageNum))
             BenillaUpdateSpells()
+            -- ref l.414-417: the pet page re-asserts its own title, because the spell book's page
+            -- text handler is shared and the title is not.
+            if BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                BenillaSpellBookTitleText:SetText(BenillaSpellBookFrame.petTitle)
+            end
             PlaySound("igAbiliityPageTurn")
         end
 
@@ -381,6 +500,9 @@
             BenillaSpellBook_UpdatePageArrows()
             BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, pageNum))
             BenillaUpdateSpells()
+            if BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                BenillaSpellBookTitleText:SetText(BenillaSpellBookFrame.petTitle)
+            end
             PlaySound("igAbiliityPageTurn")
         end
 
@@ -403,11 +525,18 @@
             end
         end
 
-        -- ref SpellBook_GetSpellID (l.459-465): the pet-book `return id` branch is DROPPED
-        -- outright (header comment — bookType is always BOOKTYPE_SPELL, dead code for this
-        -- window). This is the book-id the engine's own byte-verified seam expects verbatim
-        -- (`benilla-ui/src/script/spellbook.rs`'s own module doc).
+        -- ref SpellBook_GetSpellID (l.459-465). This is the book id the engine's own byte-verified
+        -- seam expects verbatim (`benilla-ui/src/script/spellbook.rs`'s module doc).
+        --
+        -- DO NOT "FIX" THE PET ARM (decision 1032, the standing rule from 1030). The reference's
+        -- pet branch is a bare `return id` — no tab offset, and **no page term** — so the pet page
+        -- always shows book entries 1..12 no matter what page number the window is displaying. A
+        -- well-trained hunter pet can know more than twelve spells, so this is visible, and it is
+        -- still the reference's behaviour. Its sibling quirk is in the two page-turn handlers.
         function BenillaSpellBook_GetSpellID(id)
+            if BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                return id
+            end
             return id + (BenillaSpellBookFrame.selectedSkillLineOffset or 0)
                 + (SPELLS_PER_PAGE * ((SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] or 1) - 1))
         end
@@ -427,11 +556,21 @@
             end
         end
 
-        -- ref SpellBook_GetCurrentPage (l.481-493): the pet-book branch is DROPPED outright
-        -- (header comment). `maxPages` is clamped to at least 1 (a defensive addition this file's
-        -- own — an empty/not-yet-fed book must still show ONE (empty) page rather than disabling
-        -- both page buttons into a currentPage=1 > maxPages=0 dead state).
+        -- ref SpellBook_GetCurrentPage (l.481-493), both branches. `maxPages` is clamped to at
+        -- least 1 (a defensive addition this file's own — an empty/not-yet-fed book must still
+        -- show ONE (empty) page rather than disabling both page buttons into a currentPage=1 >
+        -- maxPages=0 dead state).
+        --
+        -- The pet branch reads `SPELLBOOK_PAGENUMBERS["pet"]`, which is the counter NOTHING ever
+        -- writes — see the page-turn handlers. So it is always 1, and with it `maxPages > 1` the
+        -- Next arrow stays enabled forever on a big pet book. Reference behaviour; see the
+        -- do-not-fix note on `BenillaSpellBook_GetSpellID`.
         function BenillaSpellBook_GetCurrentPage()
+            local numPetSpells = HasPetSpells()
+            if numPetSpells and BenillaSpellBookFrame.bookType == BOOKTYPE_PET then
+                return SPELLBOOK_PAGENUMBERS["pet"] or 1,
+                       max(ceil(numPetSpells / SPELLS_PER_PAGE), 1)
+            end
             local currentPage = SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] or 1
             local temp, texture, offset, numSpells = GetSpellTabInfo(BenillaSpellBookFrame.selectedSkillLine)
             local maxPages = max(ceil((numSpells or 0) / SPELLS_PER_PAGE), 1)
@@ -494,6 +633,16 @@
                     </Anchors>
                 </Texture>
             </Layer>
+            <Layer level="OVERLAY">
+                <!-- ref SpellButtonTemplate's $parentAutoCastable: the static ring that says a pet
+                     spell CAN autocast, 58x58 over a 37x37 button. Its animated sibling (the
+                     $parentAutoCast <Model>) has no widget here — PetActionBar.xml's byte-derived
+                     sparkle emitter stands in, created in OnLoad. -->
+                <Texture name="$parentAutoCastable" file="Interface\Buttons\UI-AutoCastableOverlay" hidden="true">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
             <Layer level="BORDER">
                 <Texture name="$parentIconTexture" setAllPoints="true" hidden="true"/>
                 <!-- maxLines="3" unmodeled (this file's header comment) — wraps unbounded instead. -->
@@ -524,7 +673,7 @@
         <Scripts>
             <OnLoad>BenillaSpellButton_OnLoad(self)</OnLoad>
             <OnEvent>BenillaSpellButton_OnEvent(self)</OnEvent>
-            <OnClick>BenillaSpellButton_OnClick(self)</OnClick>
+            <OnClick>BenillaSpellButton_OnClick(self, nil, arg1)</OnClick>
             <OnShow>BenillaSpellButton_UpdateButton(self)</OnShow>
             <!-- The reference routes both drag entries to the plain click path with drag=1
                  (SpellButtonTemplate l.169-174) — the bag/doll/action slots' own precedent. -->
@@ -541,6 +690,41 @@
         <HighlightTexture name="$parentHighlight" file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
     </CheckButton>
+
+    <!--
+        The Spell/Pet toggle tab (ref SpellBookFrameTabButtonTemplate, l.40-71): a 128x64 plate
+        that hangs off the window's bottom-left, drawn UNSELECTED normally and swapping to the
+        selected plate through its <DisabledTexture> — the ref uses Disable() for "this is the
+        book you are on", not a checked state, which is why this is a plain Button and not a
+        CheckButton. Hidden by default; SpellBookFrame_Update raises exactly the ones that exist.
+    -->
+    <Button name="BenillaSpellBookFrameTabButtonTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="128" y="64"/></Size>
+        <HitRectInsets><AbsInset left="15" right="14" top="13" bottom="15"/></HitRectInsets>
+        <Scripts>
+            <OnClick>ToggleSpellBook(self.bookType)</OnClick>
+            <OnEnter>
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                -- ref l.53: the label plus its bound key. MicroButtonTooltipText is MicroMenu.xml's
+                -- (loaded before this file); nil-guarded like every other cross-file call here.
+                if MicroButtonTooltipText then
+                    GameTooltip:SetText(MicroButtonTooltipText(self:GetText(), self.binding), 1.0, 1.0, 1.0)
+                else
+                    GameTooltip:SetText(self:GetText(), 1.0, 1.0, 1.0)
+                end
+                GameTooltip:Show()
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+        <ButtonText>
+            <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormalSmall"/>
+        <HighlightFont inherits="GameFontHighlightSmall"/>
+        <DisabledFont inherits="GameFontHighlightSmall"/>
+        <NormalTexture file="Interface\SpellBook\UI-SpellBook-Tab-Unselected"/>
+        <HighlightTexture file="Interface\SpellBook\UI-SpellbookPanel-Tab-Highlight" alphaMode="ADD"/>
+    </Button>
 
     <Frame name="BenillaSpellBookFrame" hidden="true">
         <!-- The real 384x512 window (ref l.202-205). No <Anchors> — ShowUIPanel/SetLeftFrame
@@ -604,6 +788,31 @@
                 <Scripts>
                     <OnClick>HideUIPanel(BenillaSpellBookFrame)</OnClick>
                 </Scripts>
+            </Button>
+
+            <!-- ref l.288-317. Tab 3 exists in the ref's own XML and is never raised in 1.12
+                 (there is no third book); kept so the anchor chain reads like the ref's. -->
+            <Button name="BenillaSpellBookFrameTabButton1" inherits="BenillaSpellBookFrameTabButtonTemplate">
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="79" y="61"/></Offset></Anchor>
+                </Anchors>
+                <DisabledTexture file="Interface\SpellBook\UI-SpellBook-Tab1-Selected"/>
+            </Button>
+            <Button name="BenillaSpellBookFrameTabButton2" inherits="BenillaSpellBookFrameTabButtonTemplate">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="BenillaSpellBookFrameTabButton1" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="-20" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <DisabledTexture file="Interface\SpellBook\UI-SpellBook-Tab1-Selected"/>
+            </Button>
+            <Button name="BenillaSpellBookFrameTabButton3" inherits="BenillaSpellBookFrameTabButtonTemplate">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="BenillaSpellBookFrameTabButton2" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="-20" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <DisabledTexture file="Interface\SpellBook\UI-SpellBook-Tab3-Selected"/>
             </Button>
 
             <Button name="BenillaSpellBookPrevPageButton">
@@ -719,6 +928,7 @@
             <OnEvent>BenillaSpellBookFrame_OnEvent(self)</OnEvent>
             <OnShow>BenillaSpellBookFrame_OnShow()</OnShow>
             <OnHide>BenillaSpellBookFrame_OnHide()</OnHide>
+            <OnUpdate>BenillaSpellBookFrame_OnUpdate(self, arg1)</OnUpdate>
         </Scripts>
     </Frame>
 </Ui>

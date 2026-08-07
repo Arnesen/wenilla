@@ -1038,6 +1038,7 @@ pub(super) fn apply_net_updates(
                     ui_actions.11.as_deref(),
                     &mut items,
                     &net_commands,
+                    &mut pet_bar,
                 ),
                 play_seq.next(),
             ),

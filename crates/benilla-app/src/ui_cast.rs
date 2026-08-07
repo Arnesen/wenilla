@@ -188,15 +188,13 @@ impl PendingCast {
 /// **an auto-repeat press** (`0x6e5976`), target change/death, mount, interact — never movement.
 /// That chain is [`crate::creature_anim::stop_attack_local`], and the auto-repeat arm inside
 /// [`crate::ui_action::cast_send`]'s commit runs it whole: starting Auto Shot un-queues the
-/// strike, which is what darkens its checked ring. **The two target-side StopAttack senders do
-/// not route through it yet** — `target::scan`'s `commit` (the engaged-switch law) and
-/// `target::click`'s `clear` still emit a bare `CMSG_ATTACKSTOP`, so a target switch or a
-/// click-off leaves the queue standing where the reference cancels it. The same two sites owe a
-/// second edge the 2026-08-06 §5 pinned: a mid-melee target switch reaches `Attack 0x5ecb70`
-/// (`SetSelection 0x493540` @ `0x4938c8`, gated on `0x60ecb0` already true) and therefore runs
-/// its `0x5ecd8c` **auto-repeat cancel** — refuting `nocked-ammo-cancel.md`'s direct-callers-only
-/// census. Threading the seam through those eight callers is the named follow-up; the wire still
-/// resolves the queue either way.
+/// strike, which is what darkens its checked ring. Every attack edge reaches that seam since
+/// 1044 — the Attack toggle, a target switch, a click-off, the ring's death teardown.
+///
+/// **Escape is the other route, and it is not that chain at all** (1049). In the reference a
+/// queued strike simply *is* the inflight spell, so `Script::SpellStopCasting 0x6e6e80`'s plain
+/// `IsCasting 0x6e3d30` branch cancels it like any cast — no melee-specific code anywhere in it.
+/// [`Inflight`] is where our two slots are re-joined for that reader.
 #[derive(Resource, Default)]
 pub(crate) struct QueuedMeleeSpell(Option<u32>);
 
@@ -219,6 +217,57 @@ impl QueuedMeleeSpell {
             self.0 = None;
         }
     }
+}
+
+/// What the reference's single inflight spell id (`0xceca88`) holds — as our **two** slots see it.
+///
+/// The client has one slot, with one save beneath it for the nesting. An ordinary cast and a
+/// queued on-next-swing strike both live in `0xceca88`, which is exactly why `IsCasting 0x6e3d30`
+/// — a bare `ceca88 != 0` — answers true for either, and why `AbortCast 0x6e4940` cancels
+/// whichever is there without ever asking which kind it was. [`PendingCast`] and
+/// [`QueuedMeleeSpell`] split that one slot in two (its doc says why), which leaves every reader
+/// of *"what is in flight"* to re-join them — and the one reader that forgot was the Esc ladder,
+/// which is the bug decision 1049 fixes. So the join gets a name, once, here.
+///
+/// **The order is the reference's nesting, not a preference.** An ordinary cast started over a
+/// queued strike is allowed through `TryCast`'s already-casting refusal precisely because the
+/// inflight rec has `Attributes & 0x404` (`0x6e4d97`/`0x6e4dbe`), and it *pushes*
+/// (`PushPopNestedCast 0x6e4ad0` @ `0x6e5026`): the cast becomes `0xceca88`, the strike the save
+/// in `0xcecaa8`. `AbortCast` cancels the cast and pops the strike back up — so the cast dies on
+/// the first Esc and the strike on the second. Reading `PendingCast` first reproduces that
+/// without our needing the push/pop pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Inflight {
+    /// An ordinary cast — ours to send-guard, to paint a bar for, and to reap.
+    Cast(u32),
+    /// A queued on-next-swing strike waiting for the swing. No bar ever opened for it and it
+    /// holds no [`Casting`], so cancelling it is the wire message and the slot, nothing else.
+    Strike(u32),
+}
+
+impl Inflight {
+    /// The spell id in the slot — what a cancel names on the wire, either way.
+    pub(crate) fn spell_id(self) -> u32 {
+        match self {
+            Self::Cast(id) | Self::Strike(id) => id,
+        }
+    }
+}
+
+/// Resolve the reference's inflight slot from our two — see [`Inflight`] for the order and the
+/// why. `started` is the self [`Casting`] spell id, which covers a cast that never armed the send
+/// guard (an item use) exactly as the ref's one id covers it.
+pub(crate) fn inflight(
+    pending: &PendingCast,
+    queued_melee: &QueuedMeleeSpell,
+    started: Option<u32>,
+    now: Instant,
+) -> Option<Inflight> {
+    pending
+        .current(now)
+        .or(started)
+        .map(Inflight::Cast)
+        .or_else(|| queued_melee.current().map(Inflight::Strike))
 }
 
 /// Slack past the server-named channel end, so a lost/late `MSG_CHANNEL_UPDATE(0)` can't pin the
@@ -335,6 +384,7 @@ fn local_self_cancel(
     script: Option<NonSendMut<UiScript>>,
     mut moved: ResMut<LocalMoveStart>,
     mut pending: ResMut<PendingCast>,
+    mut queued_melee: ResMut<QueuedMeleeSpell>,
     channel: Res<ActiveChannel>,
     mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
     mut feed: ResMut<CastBarFeed>,
@@ -378,12 +428,16 @@ fn local_self_cancel(
             .and_then(|s| s.catalog.get(spell_id))
             .is_none_or(pick)
     };
-    // The cast half. The inflight id is the ref's `0xceca88` union: our own send guard
-    // (pre-START, armed by the spell-cast send path only) OR the started self cast (`Casting`,
-    // set at `SMSG_SPELL_START` for ANY cast — an item use's cast, which never arms the guard,
-    // is still move/Esc-cancelable this way, exactly as the ref's one inflight id covers it).
+    // The cast half — the ref's ONE inflight slot ([`Inflight`]), which is an ordinary cast or a
+    // queued on-next-swing strike. `AbortCast` doesn't distinguish, so neither does the send or
+    // the movement gate; only the local teardown differs, because only a cast ever had a bar.
     let started = self_e.and_then(|e| casting.get(e).ok()).map(|c| c.spell_id);
-    if let Some(spell_id) = pending.current(now).or(started) {
+    if let Some(slot) = inflight(&pending, &queued_melee, started, now) {
+        let spell_id = slot.spell_id();
+        // Esc bypasses the flags gate; movement consults the slot's own `InterruptFlags`, which
+        // is what spares a queued strike (Heroic Strike 78, Cleave 845, Raptor Strike 2973 all
+        // ship `InterruptFlags = 0x0` — verified against Spell.dbc, vs Fireball's `0xf`). So
+        // charging in with a strike queued keeps it queued, and only Esc takes it.
         if esc
             || flags_open(
                 |d| d.interrupt_flags & SPELL_INTERRUPT_MOVEMENT != 0,
@@ -392,29 +446,46 @@ fn local_self_cancel(
         {
             if *crate::net::CAST_TRACE {
                 info!(
-                    "cast-trace: LOCAL self-cancel — spell {spell_id} ({}), CMSG_CANCEL_CAST",
+                    "cast-trace: LOCAL self-cancel — {slot:?} ({}), CMSG_CANCEL_CAST",
                     if esc { "esc" } else { "moved" }
                 );
             }
             let _ = net.0.send(ClientCommand::CancelCast { spell_id });
-            pending.clear_if(spell_id);
-            // The ref's two-step at RTT→0: STOP arms the bar's flash overlay, the echo's
-            // INTERRUPTED repaints it red and starts the hold — so after the hold the flash
-            // BURSTS white over the red bar, then the fade runs. One edge alone misses the
-            // burst (which the enemy-interrupt path — no prior STOP — correctly lacks).
-            feed.0.push(CastBarEdge::Stop);
-            feed.0.push(CastBarEdge::Interrupted);
-            // The reap — `spell_failed_other`'s self arm, run early so the echo finds it done.
-            if let Some(e) = self_e {
-                if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
-                    ecs.entity(e).remove::<Casting>();
+            match slot {
+                Inflight::Cast(_) => {
+                    pending.clear_if(spell_id);
+                    // The ref's two-step at RTT→0: STOP arms the bar's flash overlay, the echo's
+                    // INTERRUPTED repaints it red and starts the hold — so after the hold the
+                    // flash BURSTS white over the red bar, then the fade runs. One edge alone
+                    // misses the burst (which the enemy-interrupt path — no prior STOP —
+                    // correctly lacks).
+                    feed.0.push(CastBarEdge::Stop);
+                    feed.0.push(CastBarEdge::Interrupted);
+                    // The reap — `spell_failed_other`'s self arm, run early so the echo finds it
+                    // done.
+                    if let Some(e) = self_e {
+                        if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
+                            ecs.entity(e).remove::<Casting>();
+                        }
+                        cast_events.write(CastEvent {
+                            entity: e,
+                            spell_id,
+                            kind: CastEventKind::Fail,
+                            seq: play_seq.next(),
+                        });
+                    }
                 }
-                cast_events.write(CastEvent {
-                    entity: e,
-                    spell_id,
-                    kind: CastEventKind::Fail,
-                    seq: play_seq.next(),
-                });
+                Inflight::Strike(_) => {
+                    // Clearing the slot IS the un-toggle: the checked ring reads it
+                    // (`ui_action::state`), so the button darkens this frame instead of waiting
+                    // for vmangos's FAILED_OTHER + CAST_RESULT echo (which then finds the slot
+                    // already open and is idempotent). `AbortCast` fires its `0x152`
+                    // SPELLCAST_STOP here too — inert on a bar that never opened
+                    // (`CastingBar.xml` guards every arm on `IsShown`), so it is fired for
+                    // fidelity, not effect. No red INTERRUPTED: there is nothing to repaint.
+                    queued_melee.clear_if(spell_id);
+                    feed.0.push(CastBarEdge::Stop);
+                }
             }
         }
     }
@@ -443,16 +514,22 @@ fn local_self_cancel(
 /// argless STOP / FAILED / INTERRUPTED / CHANNEL_STOP. A channel update of `0` fires
 /// CHANNEL_STOP — the server ends both the natural finish and the interrupt that way.
 ///
-/// Also pushes the frame's stoppable mirror (running auto-repeat OR cast in flight — NOT a
-/// channel, which `SpellStopCasting()` answers nil for: wow-re `esc-stopcasting.md`) into the
+/// Also pushes the frame's stoppable mirror (running auto-repeat OR the [`Inflight`] slot — NOT
+/// a channel, which `SpellStopCasting()` answers nil for: wow-re `esc-stopcasting.md`) into the
 /// VM **after** [`local_self_cancel`] resolved, so the ESC chain's `SpellStopCasting()` reads
 /// post-cancel truth when `UiInput` runs later this frame.
+///
+/// The mirror is what decides whether the press is EATEN, and that is half of decision 1049: a
+/// queued strike makes `IsCasting` true in the reference, so `SpellStopCasting()` returns `1` and
+/// `ToggleGameMenu`'s ladder never reaches `ClearTarget()` (`UIParent.lua` l.1489 vs l.1492).
+/// Reading only the ordinary-cast half here is what dropped the target on the first Esc.
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn feed_cast_bar(
     script: Option<NonSendMut<UiScript>>,
     mut feed: ResMut<CastBarFeed>,
     spells: Option<Res<Spells>>,
     pending: Res<PendingCast>,
+    queued_melee: Res<QueuedMeleeSpell>,
     auto_repeat: Res<crate::ui_action::AutoRepeatActive>,
     self_guid: Res<SelfGuid>,
     index: Res<GuidIndex>,
@@ -462,14 +539,18 @@ fn feed_cast_bar(
         return;
     };
     let now = Instant::now();
-    // The same pending ∪ started union as the cancel's (an item use's cast must answer
-    // `SpellStopCasting()` truthily too), plus the auto-repeat key (`0xceac30`) it reads first.
+    // The same slot the cancel resolves, so the mirror and the drain can never disagree about
+    // whether a press had something to spend itself on — plus the auto-repeat key (`0xceac30`)
+    // the ref reads first.
     let started = self_guid
         .0
         .as_ref()
         .and_then(|g| index.0.get(g))
-        .is_some_and(|&e| casting.get(e).is_ok());
-    script.set_casting(auto_repeat.0.is_some() || pending.current(now).is_some() || started);
+        .and_then(|&e| casting.get(e).ok())
+        .map(|c| c.spell_id);
+    script.set_casting(
+        auto_repeat.0.is_some() || inflight(&pending, &queued_melee, started, now).is_some(),
+    );
     let name = |id: u32| -> String {
         spells
             .as_ref()
@@ -660,6 +741,7 @@ mod tests {
         use std::collections::HashMap;
 
         const ARCANE_MISSILES: u32 = 5143;
+        const HEROIC_STRIKE: u32 = 78;
 
         fn harness(
             displays: HashMap<u32, SpellDisplay>,
@@ -669,6 +751,7 @@ mod tests {
             app.add_message::<CastEvent>()
                 .init_resource::<CastBarFeed>()
                 .init_resource::<PendingCast>()
+                .init_resource::<QueuedMeleeSpell>()
                 .init_resource::<ActiveChannel>()
                 .init_resource::<crate::ui_action::AutoRepeatActive>()
                 .init_resource::<LocalMoveStart>()
@@ -965,6 +1048,148 @@ mod tests {
                 ),
                 "the second press reaches the cast half"
             );
+        }
+
+        /// **The director's report, decision 1049: Esc with Heroic Strike queued un-toggles the
+        /// STRIKE and keeps the target.** In the reference a queued on-next-swing spell simply
+        /// *is* the inflight spell (`0xceca88`), so `SpellStopCasting 0x6e6e80` takes its plain
+        /// `IsCasting 0x6e3d30` branch — `AbortCast` → `CMSG_CANCEL_CAST` — and returns `1`,
+        /// which EATS the press so `ToggleGameMenu`'s ladder never reaches `ClearTarget()`. We
+        /// split that one slot in two and the Esc reader saw only the cast half, so the binding
+        /// answered nil: the strike stayed lit *and* the target dropped, both from one cause.
+        #[test]
+        fn esc_unqueues_a_strike_and_eats_the_press() {
+            let (mut app, rx) = harness(HashMap::from([(
+                HEROIC_STRIKE,
+                SpellDisplay {
+                    attributes: 0x5_0014, // the shipped row: on-next-swing (`& 0x404`)
+                    interrupt_flags: 0,   // …and no movement bit, also shipped
+                    ..Default::default()
+                },
+            )]));
+            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.world_mut()
+                .resource_mut::<QueuedMeleeSpell>()
+                .arm(HEROIC_STRIKE);
+
+            app.world_mut().run_system_once(feed_cast_bar).unwrap();
+            assert_eq!(
+                app.world()
+                    .non_send_resource::<UiScript>()
+                    .eval::<Option<i64>>("return SpellStopCasting()")
+                    .unwrap(),
+                Some(1),
+                "the queued strike makes IsCasting true, so the binding EATS the press — which \
+                 is what spares the target three rungs further down the ladder"
+            );
+            app.world_mut().run_system_once(local_self_cancel).unwrap();
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(crate::net::ClientCommand::CancelCast {
+                        spell_id: HEROIC_STRIKE
+                    })
+                ),
+                "AbortCast names the queued strike on the wire, exactly as it would a cast"
+            );
+            assert_eq!(
+                app.world().resource::<QueuedMeleeSpell>().current(),
+                None,
+                "the slot opens locally — the checked ring darkens this frame, not one RTT later"
+            );
+            assert!(
+                matches!(
+                    app.world().resource::<CastBarFeed>().0[..],
+                    [CastBarEdge::Stop]
+                ),
+                "the ref's `0x152` STOP and nothing else: no red INTERRUPTED for a spell that \
+                 never opened a bar"
+            );
+        }
+
+        /// …but MOVEMENT does not take it. The movement path consults the inflight spell's own
+        /// `InterruptFlags`, and Heroic Strike 78 / Cleave 845 / Raptor Strike 2973 all ship
+        /// `InterruptFlags = 0x0` (read off the shipped `Spell.dbc`; Fireball is `0xf`). So
+        /// charging in with a strike queued keeps it queued — Esc is the only local taker.
+        #[test]
+        fn a_move_edge_leaves_a_queued_strike_queued() {
+            let (mut app, rx) = harness(HashMap::from([(
+                HEROIC_STRIKE,
+                SpellDisplay {
+                    interrupt_flags: 0,
+                    ..Default::default()
+                },
+            )]));
+            app.world_mut()
+                .resource_mut::<QueuedMeleeSpell>()
+                .arm(HEROIC_STRIKE);
+
+            run(&mut app, true);
+
+            assert!(rx.try_recv().is_err(), "running at the mob cancels nothing");
+            assert_eq!(
+                app.world().resource::<QueuedMeleeSpell>().current(),
+                Some(HEROIC_STRIKE)
+            );
+        }
+
+        /// The nesting order (`Inflight`'s doc): an ordinary cast started over a queued strike
+        /// pushes it down (`PushPopNestedCast 0x6e4ad0`), so `0xceca88` holds the CAST. One Esc
+        /// takes the cast; `AbortCast`'s pop restores the strike, and the next Esc takes that.
+        /// One press, one thing — the ladder's law all the way down.
+        #[test]
+        fn esc_takes_the_cast_first_and_the_strike_on_the_next_press() {
+            let (mut app, rx) = harness(HashMap::new());
+            app.insert_non_send_resource(UiScript::new().unwrap());
+            app.world_mut()
+                .resource_mut::<QueuedMeleeSpell>()
+                .arm(HEROIC_STRIKE);
+            app.world_mut()
+                .resource_mut::<PendingCast>()
+                .arm(FIREBALL, Instant::now());
+            mark_casting(&mut app, FIREBALL);
+
+            app.world_mut().run_system_once(feed_cast_bar).unwrap();
+            assert_eq!(
+                app.world()
+                    .non_send_resource::<UiScript>()
+                    .eval::<Option<i64>>("return SpellStopCasting()")
+                    .unwrap(),
+                Some(1)
+            );
+            app.world_mut().run_system_once(local_self_cancel).unwrap();
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(crate::net::ClientCommand::CancelCast { spell_id: FIREBALL })
+                ),
+                "the nested cast is what sits in the inflight slot — it dies first"
+            );
+            assert!(rx.try_recv().is_err());
+            assert_eq!(
+                app.world().resource::<QueuedMeleeSpell>().current(),
+                Some(HEROIC_STRIKE),
+                "the strike is the SAVE underneath, untouched by the first press"
+            );
+
+            // Press 2 — the pop put the strike back in the slot.
+            app.world_mut().run_system_once(feed_cast_bar).unwrap();
+            assert_eq!(
+                app.world()
+                    .non_send_resource::<UiScript>()
+                    .eval::<Option<i64>>("return SpellStopCasting()")
+                    .unwrap(),
+                Some(1),
+                "still stoppable — so this press is eaten too, and the target still survives"
+            );
+            app.world_mut().run_system_once(local_self_cancel).unwrap();
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(crate::net::ClientCommand::CancelCast {
+                    spell_id: HEROIC_STRIKE
+                })
+            ));
+            assert_eq!(app.world().resource::<QueuedMeleeSpell>().current(), None);
         }
 
         /// The channel half is the SEND and nothing else — the verified asymmetry (0445): the

@@ -48,15 +48,32 @@ fn with_scroll<T>(
 /// `GetVerticalScrollRange()`'s live computation: `max(0, child_height − frame_height)` from the
 /// **resolved** rects — `0.0` when either is unresolved or there is no child. Never cached: the
 /// scroll offset always clamps against the current layout, not a stale snapshot.
+///
+/// In **LOCAL units**, each height divided by its own frame's effective scale — i.e. exactly
+/// `child:GetHeight() - self:GetHeight()`, the widget contract this method states. The resolved
+/// rects are screen px, and the scroll offset is NOT: `SetVerticalScroll` becomes the scroll
+/// child's anchor y-offset, which the solver multiplies by that child's scale (`resolve`'s
+/// override; `anchor_resolve_y`). Reporting a screen-px range against a local-unit offset makes
+/// every SCALED ScrollFrame under-scroll by exactly its scale — the bar's max is the range, so it
+/// stops short of the end and the tail of the content is unreachable. Invisible at scale 1.0,
+/// which is every 1.12-native window; the era-scaled options window (ERA_WINDOW_SCALE 0.78) is the
+/// first real-scroll customer that isn't, and it lost 22% of its travel.
 fn scroll_range(model: &Model, h: FrameHandle) -> f32 {
     let child = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Scroll(s)) => s.child,
         _ => None,
     };
     let Some(child) = child else { return 0.0 };
-    let frame_h = model.resolved.get(&h).map(|r| r.height());
-    let child_h = model.resolved.get(&child).map(|r| r.height());
-    match (frame_h, child_h) {
+    let local_height = |h: FrameHandle| {
+        let scale = model
+            .arena
+            .frame(h)
+            .map(|f| f.effective_scale)
+            .filter(|s| s.abs() >= 1e-6)
+            .unwrap_or(1.0);
+        model.resolved.get(&h).map(|r| r.height() / scale)
+    };
+    match (local_height(h), local_height(child)) {
         (Some(fh), Some(ch)) => (ch - fh).max(0.0),
         _ => 0.0,
     }

@@ -184,6 +184,56 @@ fn vertical_scroll_range_is_live_and_zero_when_unresolved_or_childless_or_shorte
     );
 }
 
+/// The range is in LOCAL units, not screen px — `child:GetHeight() - self:GetHeight()`, the
+/// contract the method states. It has to be: `SetVerticalScroll` becomes the child's anchor
+/// y-offset, which the solver multiplies by the child's scale, so a screen-px range against a
+/// local-unit offset makes a SCALED frame stop short of its own end and strand the tail of its
+/// content. (Found on the era-scaled options window's page scroll, which lost 22% of its travel.)
+#[test]
+fn vertical_scroll_range_is_local_units_on_a_scaled_frame() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local frame = CreateFrame("ScrollFrame", "SF")
+        frame:SetPoint("TOPLEFT", 0, -100)
+        frame:SetSize(300, 200)
+        frame:SetScale(0.5)
+        local child = CreateFrame("Frame", "Child", frame)
+        child:SetSize(300, 600)
+        frame:SetScrollChild(child)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return SF:GetVerticalScrollRange()").unwrap(),
+        400.0,
+        "600 - 200 in the frame's own units, NOT (600 - 200) * 0.5"
+    );
+    assert_eq!(
+        s.eval::<f32>("return Child:GetHeight() - SF:GetHeight()")
+            .unwrap(),
+        400.0,
+        "…which is exactly what the widget contract says it is"
+    );
+    // And the clamp agrees, so scrolling to the range really reaches the end: the child's bottom
+    // lands on the frame's.
+    s.run("SF:SetVerticalScroll(400)").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f32>("return SF:GetVerticalScroll()").unwrap(),
+        400.0,
+        "the full range is reachable, not clamped away"
+    );
+    assert_eq!(
+        s.eval::<f32>("return Child:GetBottom() - SF:GetBottom()")
+            .unwrap(),
+        0.0,
+        "at the end, the child's bottom sits on the frame's"
+    );
+}
+
 #[test]
 fn vertical_scroll_fires_clamped_and_update_rect_fires_range_changed() {
     let mut s = script();

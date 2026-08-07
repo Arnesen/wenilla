@@ -681,6 +681,7 @@ fn drain_pet_actions(
     spells: Option<Res<Spells>>,
     mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
     scan: crate::target::EnemyScan,
+    mut seam: crate::creature_anim::AttackSeam,
 ) {
     let Some(mut script) = script else {
         return;
@@ -747,7 +748,7 @@ fn drain_pet_actions(
                 || match crate::target::attack_order_target(
                     &scan,
                     &mut selection,
-                    &commands,
+                    &mut seam,
                     &mut ui_errors,
                 ) {
                     Some(guid) => {

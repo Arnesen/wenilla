@@ -241,6 +241,11 @@ pub(crate) struct Model {
     /// `GetSpellTabInfo`/`GetSpellName`/… bindings read ([`spellbook`]). Durable player state like
     /// `actions` above, never `Option` — "no known spells yet" is simply empty vectors.
     pub(crate) spellbook: spellbook::SpellBookState,
+    /// The **pet's** book (decision 1032) — a second flat slot list, no tabs, with its own
+    /// add-gate and its own class token ([`spellbook::PetBookState`]). Held apart from
+    /// [`Self::spellbook`] because the reference holds two arrays too (`0xb700f0` / `0xb6f098`)
+    /// and every `bookType`-taking binding is a fork between them, never a filter over one.
+    pub(crate) pet_book: spellbook::PetBookState,
     /// The player's **macros** (decision 0983) — the one game-state table this crate owns
     /// outright, because 1.12 macros have no server side at all ([`macros`]'s module docs). The
     /// app seeds it from `benilla/macros/…` and reads it back to persist.
@@ -258,6 +263,12 @@ pub(crate) struct Model {
     /// Spell ids `CastSpell` queued since the app's last [`super::UiScript::take_spell_casts`]
     /// drain.
     pub(crate) spell_casts: Vec<u32>,
+    /// Pet spell ids `CastSpell(id, "pet")` queued — a separate list because the wire verb is a
+    /// separate opcode (`CMSG_PET_ACTION` with a synthesized type-1 word, `0x4b34ce`).
+    pub(crate) pet_spell_casts: Vec<u32>,
+    /// Pet spell ids `ToggleSpellAutocast` queued — `CMSG_PET_SPELL_AUTOCAST 0x2F3`, which names a
+    /// spell rather than the pet bar's slot ([`Self::pet_autocast_toggles`] is the bar's).
+    pub(crate) pet_spell_autocasts: Vec<u32>,
     /// Whether the app's own cast lifecycle holds something `SpellStopCasting()` can stop — a
     /// running auto-repeat or an in-flight cast; a channel is NOT stoppable there (wow-re
     /// `esc-stopcasting.md`; pushed each frame by the app's cast feed,
@@ -790,11 +801,14 @@ impl Model {
             action_sets: Vec::new(),
             ui_errors: Vec::new(),
             spellbook: spellbook::SpellBookState::default(),
+            pet_book: spellbook::PetBookState::default(),
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,
             macro_icons: Vec::new(),
             spell_casts: Vec::new(),
+            pet_spell_casts: Vec::new(),
+            pet_spell_autocasts: Vec::new(),
             casting: false,
             spell_stop: false,
             spell_targeting: false,
