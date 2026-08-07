@@ -24,8 +24,8 @@ fn shipped_action_bar_drives_end_to_end() {
         );
         if file == "ActionBar.xml" {
             assert_eq!(
-                report.frames, 31,
-                "bar + XP StatusBar + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button"
+                report.frames, 33,
+                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button"
             );
         }
     }
@@ -821,79 +821,6 @@ fn state_events_leave_empty_wells_untinted() {
         oom_icon,
         Some([0.5, 0.5, 1.0, 1.0]),
         "the occupied button still tints OOM blue"
-    );
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-}
-
-/// The XP bar's hover (ref-MainMenuBar.xml l.136-147): the strip takes the mouse, and the plate is
-/// the ref's two-line `GameTooltip_AddNewbieTip` — "XP Bar" over the wrapped explanation.
-///
-/// `enableMouse` is the load-bearing half and the easy thing to lose: without it the strip is
-/// transparent and the hover silently never fires, which no tooltip assertion alone would catch.
-#[test]
-fn the_xp_bar_takes_the_mouse_and_explains_itself() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    for file in [
-        "Fonts.xml",
-        "UIParent.xml",
-        "GameTooltip.xml",
-        "Cooldown.xml",
-        "ActionBar.xml",
-    ] {
-        let text = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/ui")
-                .join(file),
-        )
-        .unwrap();
-        let doc = benilla_ui::framexml::parse(&text).unwrap();
-        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
-        assert!(
-            report.errors.is_empty(),
-            "{file}: loader errors: {:?}",
-            report.errors
-        );
-    }
-    s.resolve();
-
-    // Mid-height of the strip (the bar's top 13 px), a quarter of the way along — NOT its
-    // horizontal center, where the page arrows straddle the strip's lower edge and rightly take
-    // the mouse ahead of it.
-    let (x, y) = s
-        .eval::<(f64, f64)>(
-            "return BenillaExpBar:GetLeft() + BenillaExpBar:GetWidth() / 4, \
-                    (BenillaExpBar:GetBottom() + BenillaExpBar:GetTop()) / 2",
-        )
-        .unwrap();
-    assert_eq!(
-        s.hit_test_name(x as f32, y as f32).as_deref(),
-        Some("BenillaExpBar"),
-        "the XP strip must be mouse-enabled or the hover never fires"
-    );
-
-    s.run("BenillaExpBar_OnEnter(BenillaExpBar)").unwrap();
-    assert_eq!(
-        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
-            .unwrap(),
-        "XP Bar"
-    );
-    assert_eq!(
-        s.eval::<String>("return GameTooltipTextLeft2:GetText()")
-            .unwrap(),
-        s.eval::<String>("return NEWBIE_TOOLTIP_XPBAR").unwrap(),
-        "line 2 is the ref's NEWBIE_TOOLTIP_XPBAR, verbatim"
-    );
-    assert_eq!(
-        s.eval::<i64>("return GameTooltip.default").unwrap(),
-        1,
-        "the default-corner anchor"
-    );
-
-    s.run("BenillaExpBar_OnLeave()").unwrap();
-    assert!(
-        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
-        "leaving hides the plate"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -14,10 +14,12 @@
     PLAYER_AURAS_CHANGED + GetTrackingTexture() (the aura rebuild's tracking-global law, `ui_aura`).
 
     OUT (no wire / later arc slices, per 0203): meeting stone and battlefield buttons;
-    the ping model + MINIMAP_PING; the day/night indicator; the rotate-minimap CVar. The
+    the ping model + MINIMAP_PING; the rotate-minimap CVar. The day/night indicator now lives in
+    its own GameTime.xml (the reference's own file split), loaded right after this file. The
     reference's minimapPlayerModel/.mdx arrow renders app-side from its .blp for now (0203 flags
-    the simplification). The reference's <HitRectInsets> on the cluster is dropped (the loader
-    doesn't model it; only enlarges the mouse-blocking hull).
+    the simplification). The reference's <HitRectInsets> on the cluster is dropped (it only
+    enlarges the mouse-blocking hull; the loader models the tag now, so restore it if it ever
+    matters).
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[

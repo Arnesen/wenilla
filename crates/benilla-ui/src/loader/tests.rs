@@ -847,6 +847,47 @@ mod loader_tests {
         );
         assert!(s.hit_test(14.0, 20.0).is_some(), "the art band still hits");
     }
+
+    /// **The `<Scripts>` walker auto-enables the mouse kind when it attaches a mouse handler**
+    /// (`0x769ef0` → `0x76af00(2,-1)` per handler name; wow-re `ui/scratch/scripts-auto-enable.md`,
+    /// §5 cross-checked) — the reference's GameTimeFrame declares `<OnEnter>`/`<OnLeave>` and no
+    /// `enableMouse`, yet its tooltip hovers in the real client. The kind-2 name set is exactly
+    /// {OnEnter, OnLeave, OnMouseDown, OnMouseUp, OnDragStart}: `OnDragStop`/`OnReceiveDrag` are
+    /// NOT in it, and the law is XML-load-time only — the Lua SetScript binding (`0x7748d0`)
+    /// never auto-enables (verified negative there).
+    #[test]
+    fn scripts_block_mouse_handlers_auto_enable_mouse() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Hoverable">
+                    <Scripts><OnEnter>-- hover</OnEnter></Scripts>
+                </Frame>
+                <Frame name="DropTarget">
+                    <Scripts><OnDragStop>-- outside the kind-2 set</OnDragStop></Scripts>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert!(
+            s.eval::<bool>("return Hoverable:IsMouseEnabled()").unwrap(),
+            "an XML mouse handler arms EnableMouse like the attribute would"
+        );
+        assert!(
+            !s.eval::<bool>("return DropTarget:IsMouseEnabled()")
+                .unwrap(),
+            "OnDragStop is outside the kind-2 name set"
+        );
+        // Runtime SetScript never auto-enables — the law is the XML walker's, not SetScript's.
+        s.run("rt = CreateFrame('Frame', 'Rt'); rt:SetScript('OnEnter', function() end)")
+            .unwrap();
+        assert!(
+            !s.eval::<bool>("return Rt:IsMouseEnabled()").unwrap(),
+            "a runtime-created frame still needs an explicit EnableMouse"
+        );
+    }
+
     /// **`text=` is a GLOBAL-STRING LOOKUP, not a literal** (wow-re rf28 l.36/l.115 →
     /// `FrameScript_GetText 0x703bf0`). Every arm of [`Loader::resolve_text`] in one document:
     /// a `<Button text=>`, a `<ButtonText text=>` and a `<FontString text=>` all resolve through

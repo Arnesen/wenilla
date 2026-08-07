@@ -30,6 +30,17 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_UNIT_RANGED_ATTACK_POWER_MULTIPLIER, OBJECT_END + 0xA4);
     assert_eq!(FIELD_UNIT_MINRANGEDDAMAGE, OBJECT_END + 0xA5);
     assert_eq!(FIELD_UNIT_MAXRANGEDDAMAGE, OBJECT_END + 0xA6);
+    // The rested-XP pool sits exactly one below the tested COINAGE anchor, and exactly one past
+    // the explored-zones bitset's 64 slots (decision 1082).
+    assert_eq!(FIELD_PLAYER_REST_STATE_EXPERIENCE, UNIT_END + 0x3DB);
+    assert_eq!(
+        FIELD_PLAYER_REST_STATE_EXPERIENCE + 1,
+        FIELD_PLAYER_FIELD_COINAGE
+    );
+    assert_eq!(
+        FIELD_PLAYER_EXPLORED_ZONES_1 + PLAYER_EXPLORED_ZONES_SLOTS,
+        FIELD_PLAYER_REST_STATE_EXPERIENCE
+    );
     // PLAYER stat block: POSSTAT0 sits one past the tested COINAGE, and the run through
     // AMMO_ID lands three shy of the tested BUYBACK_PRICE_1 (BYTES 1222, SELF_RES 1224,
     // PVP_MEDALS 1225 between).
@@ -388,7 +399,7 @@ fn a_stale_spell_id_with_a_cleared_flags_nibble_is_not_a_live_aura() {
 #[test]
 fn created_store_reads_absent_fields_as_zero_a_delta_as_none() {
     // A broken item's create: MAXDURABILITY present (40), DURABILITY omitted (it is 0).
-    let create = ObjectFields::from_pairs(&[(3, 2264), (47, 40)]).into_created();
+    let create = ObjectFields::from_pairs(&[(3, 2264), (47, 40)]).into_created(ObjectType::Item);
     assert_eq!(create.item_durability(), Some(0), "created absent = 0");
     assert_eq!(create.item_max_durability(), Some(40));
 
@@ -401,12 +412,54 @@ fn created_store_reads_absent_fields_as_zero_a_delta_as_none() {
     assert_eq!(create.corpse_owner(), None);
 }
 
+/// …and "absent = 0" stops at the end of the object's OWN descriptor (decision 1081). A creature
+/// has no PLAYER block to be absent from, so a PLAYER-block read off one is `None` — a question it
+/// cannot answer — not a confident `0`.
+///
+/// The live bug: `unit_combat_stats` reads `PLAYER_FIELD_MOD_DAMAGE_DONE_PCT` for any unit and
+/// defaults an absent answer to the divide-safe `1.0`. With a created pet answering `Some(0.0)`,
+/// the default never fired and the ref's `damage / percent` produced the pet sheet's
+/// `inf - inf` / `nan` tooltip and its red damage line (director, 2026-08-07).
+#[test]
+fn a_creature_has_no_player_block_to_be_absent_from() {
+    // PLAYER_FIELD_MOD_DAMAGE_DONE_PCT[0] = UNIT_END(188) + 0x403 — past a UNIT's descriptor end.
+    const MOD_DAMAGE_DONE_PCT: u16 = 1215;
+    // UNIT_FIELD_BASEATTACKTIME — well inside it.
+    const BASEATTACKTIME: u16 = 126;
+
+    let pet = ObjectFields::from_pairs(&[(2, 0x09), (150, 33)]).into_created(ObjectType::Unit);
+    assert_eq!(
+        pet.player_mod_damage_done_pct(0),
+        None,
+        "a creature cannot answer a PLAYER-block field"
+    );
+    assert_eq!(
+        pet.unit_base_attack_time(0),
+        Some(0),
+        "…while a field it DOES have still reads the create's zero"
+    );
+    assert_eq!(pet.unit_stat(0), Some(33), "and a present field is itself");
+
+    // The same index on a real player: inside the descriptor, so absent is the honest 0 the
+    // client's own zero-initialized buffer holds.
+    let player = ObjectFields::from_pairs(&[(2, 0x19), (BASEATTACKTIME, 1800)])
+        .into_created(ObjectType::Player);
+    assert_eq!(player.player_mod_damage_done_pct(0), Some(0.0));
+    assert_eq!(player.unit_base_attack_time(0), Some(1800));
+
+    // A bare delta answers nothing either way — it never claimed to be complete.
+    let delta = ObjectFields::from_pairs(&[(MOD_DAMAGE_DONE_PCT, 1.0f32.to_bits())]);
+    assert_eq!(delta.player_mod_damage_done_pct(0), Some(1.0));
+    assert_eq!(delta.unit_base_attack_time(0), None);
+}
+
 /// Merging keeps the semantics straight: a delta overlays a created store without unsetting the
 /// created mark, and a re-CREATE *replaces* the store — stale non-zero values for fields the
 /// fresh snapshot omits (they dropped to zero out of view) must die with it.
 #[test]
 fn merge_overlays_deltas_and_replaces_on_recreate() {
-    let mut store = ObjectFields::from_pairs(&[(3, 2264), (46, 40), (47, 40)]).into_created();
+    let mut store =
+        ObjectFields::from_pairs(&[(3, 2264), (46, 40), (47, 40)]).into_created(ObjectType::Item);
 
     // A durability-damage delta overlays; the store stays a complete (created) descriptor.
     store.merge(ObjectFields::from_pairs(&[(46, 30)]));
@@ -418,7 +471,7 @@ fn merge_overlays_deltas_and_replaces_on_recreate() {
     );
 
     // Re-create after the item broke out of view: the fresh snapshot omits DURABILITY (0).
-    store.merge(ObjectFields::from_pairs(&[(3, 2264), (47, 40)]).into_created());
+    store.merge(ObjectFields::from_pairs(&[(3, 2264), (47, 40)]).into_created(ObjectType::Item));
     assert_eq!(
         store.item_durability(),
         Some(0),
@@ -445,7 +498,7 @@ fn dynamicobject_fields_read_the_live_blizzard_capture() {
         (12, 668.83f32.to_bits()),     // POS_Y
         (13, 97.81f32.to_bits()),      // POS_Z
     ])
-    .into_created();
+    .into_created(ObjectType::DynamicObject);
     assert_eq!(f.dynamicobject_caster(), Some(26));
     assert_eq!(f.dynamicobject_bytes(), Some(1));
     assert_eq!(f.dynamicobject_spell_id(), Some(10));

@@ -157,6 +157,15 @@ function GetZonePVPInfo()
     return t, f, __benilla_pvp_arena
 end
 
+-- ── GetGameTime: the server's in-game clock (hour, minute) — the reference reads the
+-- SMSG_LOGIN_SETTIMESPEED-seeded clock the client advances by its timescale. The app pushes the
+-- host globals when the game minute ticks (`crate::minimap::feed_game_time` — same shape as the
+-- zone-text family); minute resolution is the API's own (the binding returns no seconds).
+-- 0:00 until the first time packet lands.
+__benilla_game_hour = 0
+__benilla_game_minute = 0
+function GetGameTime() return __benilla_game_hour, __benilla_game_minute end
+
 -- ── wipe / tostringall ─────────────────────────────────────────────────────────────────────────
 function wipe(t)
     for k in pairs(t) do t[k] = nil end

@@ -540,6 +540,66 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // The rest-state trio (decision 1082) — player-level globals over the app's rest feed
+    // ([`UiScript::set_rest_state`]), the MainMenuBar exhaustion tick's and the player frame's
+    // whole wire. INTERIM pending the dispatched wow-re verdict on `GetRestState 0x48d350` /
+    // `GetXPExhaustion 0x48d3f0` / `IsResting 0x516ea0`; each claim below is flagged at its site.
+    //
+    // GetRestState() → (stateID, stateName, multiplier). The id IS the wire byte
+    // (`PLAYER_BYTES_2` byte 3): 1 = Rested (earn 200% of base kill XP), 2 = Normal (100%) — the
+    // only two the live server ever writes (vmangos `SetRestBonus`; the beta tired/exhausted
+    // tiers 3..5 survive as dead FrameXML branches). 0-before-feed reads as Normal. The names are
+    // the live client's own returns (INTERIM: enUS spellings, source string table unverified);
+    // the multiplier is what `EXHAUST_TOOLTIP1` renders ×100 ("200% of normal experience").
+    g.set(
+        "GetRestState",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.rest_state == 1 {
+                (1i64, "Rested", 2.0f64)
+            } else {
+                (2i64, "Normal", 1.0f64)
+            })
+        })?,
+    )?;
+    // GetXPExhaustion() → the rested span in BAR-XP units, or nil once the pool is dry — the tick
+    // parks at `currXP + this` and the fill bar spans up to it (`ExhaustionTick_Update`). ×2 of
+    // the wire pool: the server drains `PLAYER_REST_STATE_EXPERIENCE` 1:1 against BASE kill XP
+    // while granting +100% (vmangos `GetXPRestBonus`), so the bar advances two for every one the
+    // pool loses (INTERIM: the ×2-in-client and the nil-when-zero shape are the dispatch's C1).
+    g.set(
+        "GetXPExhaustion",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.rest_pool == 0 {
+                Value::Nil
+            } else {
+                Value::Integer(i64::from(model.rest_pool) * 2)
+            })
+        })?,
+    )?;
+    // IsResting() → 1/nil: inside a rest area (inn/city) right now — `PLAYER_FLAGS_RESTING
+    // (0x20)`. The player frame's flashing zzz reads exactly this.
+    g.set(
+        "IsResting",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.resting {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+    // GetTimeToWellRested() → nil, always: nothing on the 1.12 wire carries a time-to-full
+    // estimate, and `ExhaustionToolTipText` nil-guards the call (its EXHAUST_TOOLTIP4 line simply
+    // never renders). INTERIM: the dispatch's Q5 — if the binary computes one client-side, this
+    // grows the real formula.
+    g.set(
+        "GetTimeToWellRested",
+        lua.create_function(|_, ()| Ok(Value::Nil))?,
+    )?;
+
     // TargetUnit(unit) — select a unit by token (the reference's `TargetUnit` Lua shim → SetSelection;
     // the caller here is `PlayerFrame_OnClick`'s left-click branch → `TargetUnit("player")`, and the
     // TARGETSELF binding). Queues the raw token; the app resolves it to a streamed entity and commits

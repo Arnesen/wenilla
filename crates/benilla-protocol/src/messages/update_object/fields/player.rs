@@ -349,9 +349,25 @@ impl ObjectFields {
         self.get_u32(FIELD_PLAYER_BYTES)
     }
     /// `PLAYER_BYTES_2` — byte 0 = facialHair, byte 1 = unk, byte 2 = bankBagSlots (see
-    /// [`Self::player_bank_bag_slots_purchased`]), byte 3 = restState (unread here).
+    /// [`Self::player_bank_bag_slots_purchased`]), byte 3 = restState (see
+    /// [`Self::player_rest_state`]).
     pub fn player_bytes_2(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_BYTES_2)
+    }
+    /// `PLAYER_BYTES_2` **byte 3** — the rest state the client's `GetRestState()` maps to its
+    /// (id, name, multiplier) triple: `1` = rested, `2` = normal (vmangos `REST_STATE_*`,
+    /// `Player.h:673`). The server writes it with hysteresis off the rest pool — rested when the
+    /// pool exceeds 10, normal when it falls to ≤1 (`SetRestBonus`) — so the byte, not the pool,
+    /// is the state authority. `None` when never sent; a fresh descriptor reads absent as normal.
+    pub fn player_rest_state(&self) -> Option<u8> {
+        self.player_bytes_2().map(|b| (b >> 24) as u8)
+    }
+    /// `PLAYER_REST_STATE_EXPERIENCE` (field 1175) — the rested-XP pool, in **base kill-XP
+    /// units**: the server drains it 1:1 against a kill's base XP while granting +100%
+    /// (vmangos `GetXPRestBonus`), so the doubled-XP span the exhaustion tick marks is 2× this
+    /// value. `None` before the field streams (PRIVATE — self only).
+    pub fn player_rest_state_experience(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_REST_STATE_EXPERIENCE)
     }
     /// `PLAYER_BYTES_3` **byte 1** — the inebriation byte (0..255) drunkenness renders from. The
     /// server packs `gender | (drunk & 0xFFFE)` into the field's low u16 and decays it 256 per
@@ -374,6 +390,13 @@ impl ObjectFields {
     /// UnitIsDead/UnitIsGhost/UnitIsDeadOrGhost trio).
     pub fn player_is_ghost(&self) -> bool {
         self.player_flags() & 0x10 != 0
+    }
+    /// Whether the player is inside a rest area (inn/city) — `PLAYER_FLAGS_RESTING (0x20)`
+    /// (vmangos `Player.h:320`), set/cleared by the area-trigger/zone rest checks
+    /// (`SetRestType`). The real client's `IsResting()` and the player frame's flashing zzz
+    /// state icon read exactly this bit.
+    pub fn player_is_resting(&self) -> bool {
+        self.player_flags() & 0x20 != 0
     }
     /// `PLAYER_DUEL_ARBITER` (field 188, GUID) — the duel-flag GameObject of the duel this player
     /// is in, `0` when they are in none. Set on both duellists by `Spell::EffectDuel`, cleared by

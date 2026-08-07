@@ -276,6 +276,19 @@ impl super::UiScript {
         model.player_next_level_xp = next_level_xp;
     }
 
+    /// Push the player's rest snapshot — the `PLAYER_BYTES_2` byte 3 rest state, the
+    /// `PLAYER_REST_STATE_EXPERIENCE` pool (raw wire value, base kill-XP units) and the
+    /// `PLAYER_FLAGS_RESTING` bit — taken together so the `GetRestState`/`GetXPExhaustion`/
+    /// `IsResting` trio can never read a half-updated rest picture. Player-level fields, same
+    /// shape as [`Self::set_money`]; the app calls this each frame any of the three moves
+    /// (decision 1082).
+    pub fn set_rest_state(&mut self, state: u8, pool: u32, resting: bool) {
+        let mut model = self.model_mut();
+        model.rest_state = state;
+        model.rest_pool = pool;
+        model.resting = resting;
+    }
+
     /// Push the player's banked combo points (`PLAYER_FIELD_BYTES` byte 1) and the unit they sit
     /// on (`PLAYER_FIELD_COMBO_TARGET`) — the pair `Player::SetComboPoints` writes together, taken
     /// together so they can never be read half-updated. Player-level PRIVATE fields, same shape as

@@ -98,7 +98,7 @@ fn feed_pet_doll(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_protocol::ObjectFields;
+    use benilla_protocol::messages::{ObjectFields, ObjectType};
 
     use crate::net::ObjectStore;
 
@@ -114,22 +114,32 @@ mod tests {
 
     /// A boar's descriptor: the UNIT half a creature really streams, and nothing else — no PLAYER
     /// block at all, which is the whole point of the fixture.
+    ///
+    /// **CREATED, and that is the load-bearing half** (decision 1081). A live pet arrives as a
+    /// create block, and a create is a *complete* snapshot — absent means 0, not unknown. Built
+    /// bare (the fixture default), this boar answered `None` for every PLAYER field and the
+    /// defaults below looked right while the live client's read `0`; the pet sheet's damage
+    /// tooltip came out `inf - inf` / `nan` under a green test. Take `.into_created` off and the
+    /// `damage_percent` assertion is the one that fails.
     fn boar() -> ObjectStore {
-        ObjectStore(ObjectFields::from_pairs(&[
-            (STAT0, 63),     // strength
-            (STAT0 + 1, 45), // agility
-            (STAT0 + 2, 68), // stamina
-            (STAT0 + 3, 32), // intellect
-            (STAT0 + 4, 42), // spirit
-            (RESISTANCES0, 1810),
-            (RESISTANCES0 + 2, 15), // fire
-            (BASEATTACKTIME, 2000),
-            (MINDAMAGE, 30.5f32.to_bits()),
-            (MAXDAMAGE, 44.5f32.to_bits()),
-            (ATTACK_POWER, 178),
-            // The MODS field is a packed signed pair: pos in the low word, neg in the high.
-            (ATTACK_POWER_MODS, (((-4i16) as u16 as u32) << 16) | 12),
-        ]))
+        ObjectStore(
+            ObjectFields::from_pairs(&[
+                (STAT0, 63),     // strength
+                (STAT0 + 1, 45), // agility
+                (STAT0 + 2, 68), // stamina
+                (STAT0 + 3, 32), // intellect
+                (STAT0 + 4, 42), // spirit
+                (RESISTANCES0, 1810),
+                (RESISTANCES0 + 2, 15), // fire
+                (BASEATTACKTIME, 2000),
+                (MINDAMAGE, 30.5f32.to_bits()),
+                (MAXDAMAGE, 44.5f32.to_bits()),
+                (ATTACK_POWER, 178),
+                // The MODS field is a packed signed pair: pos in the low word, neg in the high.
+                (ATTACK_POWER_MODS, (((-4i16) as u16 as u32) << 16) | 12),
+            ])
+            .into_created(ObjectType::Unit),
+        )
     }
 
     /// The descriptor-only core over a real creature's field set: the UNIT values come through,

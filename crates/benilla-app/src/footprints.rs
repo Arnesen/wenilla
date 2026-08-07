@@ -50,7 +50,7 @@ use benilla_assets::AdtTile;
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::blob_shadow::SHADOW_RASTER_BIAS;
 use crate::collision::GroundDecalSurface;
-use crate::creature_anim::{is_footstep, move_flags, AnimSoundEvent, MovementState};
+use crate::creature_anim::{footfall_side, move_flags, AnimSoundEvent, MovementState};
 use crate::decal::{project_decal, DecalFrame};
 use crate::entities::{BoneAttach, Creatures};
 use crate::net::{NetEntity, ObjectStore, SelfPlayer};
@@ -152,13 +152,6 @@ fn load_ink(
     }
 }
 
-/// The foot side a per-foot tag names (`$FL0` → `L`) — `$FSD` (sound-only, byte-verified) and
-/// non-footstep tags are `None`. **Right** prints get the mirrored texture: the shipped art is
-/// the left foot (the `0x5fc07f` `side==0` mirror, corrected from 1006's guess in 1012).
-fn foot_side(ident: &[u8; 4]) -> Option<u8> {
-    (is_footstep(ident) && ident != b"$FSD").then_some(ident[2])
-}
-
 /// The spawner's ROOT-unit reads (see [`spawn_footprints`]'s `roots` param).
 type RootState = (
     Has<SelfPlayer>,
@@ -199,7 +192,10 @@ fn spawn_footprints(
     };
     let now = time.elapsed_secs();
     for ev in events.read() {
-        let Some(side) = foot_side(&ev.ident) else {
+        // The VISUAL footfall channel: the per-foot side tags only (`$FSD` is the sound handler's,
+        // decision 1080). **Right** prints get the mirrored texture — the shipped art is the left
+        // foot (the `0x5fc07f` `side==0` mirror, corrected from 1006's guess in 1012).
+        let Some(side) = footfall_side(&ev.ident) else {
             continue;
         };
         let Ok((net, transform, attach)) = units.get(ev.entity) else {
@@ -389,19 +385,6 @@ fn push_footprints(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Per-foot tags carry their side letter; `$FSD` (sound-only, byte-verified) and
-    /// non-footstep tags spawn nothing.
-    #[test]
-    fn foot_side_reads_the_side_letter() {
-        assert_eq!(foot_side(b"$FL0"), Some(b'L'));
-        assert_eq!(foot_side(b"$FR0"), Some(b'R'));
-        assert_eq!(foot_side(b"$RL2"), Some(b'L'));
-        assert_eq!(foot_side(b"$BR0"), Some(b'R'));
-        assert_eq!(foot_side(b"$FSD"), None);
-        assert_eq!(foot_side(b"$SND"), None);
-        assert_eq!(foot_side(b"$CSL"), None);
-    }
 
     /// The byte-verified ramp: no fade-in — 127/255 from age 0, held while `255·t ≥ 127`
     /// (through age = 6·(1 − 127/255) ≈ 3.012 s), then the raw `⌊255·t⌋/255` line to zero at

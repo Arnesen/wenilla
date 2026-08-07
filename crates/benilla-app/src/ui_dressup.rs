@@ -96,16 +96,23 @@ fn held_lanes(equipment: &mut [CharEnumItem; 19], room: &DressUpRoom) {
         *mine = Some(item);
     }
 
-    // Back into the enum array, each item at the slot its own inventory type names — so a bow that
-    // won the off lane still renders through the ranged arm (`placement`'s HandLeft), which is what
-    // the widget installs it as.
+    // Back into the enum array's held triple — where the index is **which held law `held_wants`
+    // asks**, not "the slot this item's inventory type names": 15/16 are the melee-drawn main/off
+    // attach points, and 17 is the ranged-drawn arm, which carries the bow-left / gun-right split
+    // itself. So a lane writes back at its own lane, and a ranged item writes back at 17 whichever
+    // lane it won.
+    //
+    // Routing this through [`equip_slot`] instead is what collapsed a dual-wielded pair into one
+    // weapon (decision 1079): an off-hand one-hander is `INVTYPE_WEAPON` 13 just like a main-hand
+    // one, and that table — which answers "where is this item WORN", the right question everywhere
+    // else — maps 13 to the main hand, so the off hand overwrote the main.
     for slot in HELD_SLOTS {
         equipment[slot] = CharEnumItem::default();
     }
-    for item in [main, off].into_iter().flatten() {
-        if let Some(slot) = equip_slot(item.inventory_type) {
-            equipment[slot] = item;
-        }
+    for (lane, item) in [(15usize, main), (16, off)] {
+        let Some(item) = item else { continue };
+        let ranged = matches!(item.inventory_type, 15 | 25 | 26);
+        equipment[if ranged { 17 } else { lane }] = item;
     }
 }
 
@@ -560,5 +567,49 @@ mod tests {
             "the two-hander is evicted"
         );
         assert_eq!(look.equipment[16].display_id, 5600);
+    }
+
+    /// The director's report (2026-08-07): *"there is an issue now where the preview is only
+    /// showing 1 wep, while I was just previewing some boots"* — decision 1079, a regression from
+    /// 1076's write-back.
+    ///
+    /// A dual-wielded pair is two items of the **same** inventory type: an off-hand one-hander is
+    /// `INVTYPE_WEAPON` 13 exactly like the main-hand one, and [`equip_slot`] answers "where is
+    /// this WORN", which for 13 is the main hand. Both lanes therefore landed on slot 15 and the
+    /// off hand overwrote the main. Nothing about it needed a held try-on — the boots are in the
+    /// test because that is what the director was previewing, and the pair has to survive an
+    /// unrelated substitution untouched.
+    ///
+    /// Every off-lane inventory type is looped rather than only 13, so what is pinned is "a lane
+    /// keeps its own item" and not "13 got a special case".
+    #[test]
+    fn a_dual_wielded_pair_keeps_both_hands() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(1500, Some(worn("Main Sword", 5500, 13))); // INVTYPE_WEAPON
+        items.insert_template(2000, Some(worn("Shiny Boots", 7000, 8))); // FEET — the try-on
+
+        for (entry, display, inv, what) in [
+            (1600u32, 5600u32, 13u32, "a second one-hander"),
+            (1601, 5601, 22, "an off-hand-only weapon"),
+            (1602, 5602, 23, "a held-in-off-hand"),
+            (1603, 5603, 14, "a shield"),
+        ] {
+            items.insert_template(entry, Some(worn("Off Hand", display, inv)));
+            let store = player(&[(15, 1500), (16, entry)]);
+
+            let mut room = DressUpRoom::default();
+            room.apply(DressUpIntent::Dress);
+            room.apply(DressUpIntent::TryOn(2000));
+            room.resolve_pending(&mut items, &cmds);
+
+            let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+            assert_eq!(look.equipment[7].display_id, 7000, "the boots went on");
+            assert_eq!(
+                (look.equipment[15].display_id, look.equipment[16].display_id),
+                (5500, display),
+                "the main hand keeps its sword beside {what}"
+            );
+        }
     }
 }

@@ -22,16 +22,36 @@ pub(crate) struct AnimSoundEvent {
     pub(crate) data: u32,
 }
 
-/// Is this tag a **footstep plant**? The per-foot keys (`$FL/$FR/$RL/$RR/$SL/$SR/$BL/$BR`) plus the
-/// dispatch tag `$FSD` (the client's `HandleFootfallAnimEvent`; a sequence fires one style or the
-/// other). Each match = one foot meeting the ground — the shared trigger for footfall-driven
-/// effects: the wading splash **sound** ([`crate::sound::footsteps`]) and the water-surface
-/// **ripple** ([`crate::water_fx`]) both gate on it, reading the same [`AnimSoundEvent`] stream.
-pub(crate) fn is_footstep(ident: &[u8; 4]) -> bool {
+/// A footfall is **two independent channels**, and a tag belongs to exactly one of them — the
+/// client's event dispatcher `0x5ffbd0` routes them to two different handlers (wow-re
+/// `footprint-decals.md` §1, §5 4-agent round, byte-arbitrated):
+///
+/// - **`$FSD` → `0x623390`: the footstep SOUND**, and nothing else — it never reaches the decal
+///   path ([`is_footstep_sound`]).
+/// - **the per-foot side tags → `0x5fbf70`: the VISUAL footfall** — the footprint decal and the
+///   spray/splash particle, and no sound at all ([`footfall_side`]).
+///
+/// So a gait that authors both fires **one** sound per `$FSD` key, not one per key of either
+/// family: HumanMale's Walk keys `$FR0 · $FSD · $FL0 · $FSD` over 1 s and the real client plays
+/// **two** steps there, while its turn-in-place ShuffleLeft/Right key only `$SL0 $SR0` at
+/// `t = 0.000` and are **silent** (decision 1080).
+///
+/// The **sound** channel: the dispatch tag `$FSD` alone.
+pub(crate) fn is_footstep_sound(ident: &[u8; 4]) -> bool {
+    ident == b"$FSD"
+}
+
+/// The **visual** channel: the foot side a per-foot plant tag names (`$FL0` → `L`), or `None` for
+/// every other tag — the trigger for footfall-driven *visuals* ([`crate::footprints`]). The ten
+/// families the dispatcher tables, each with its `0/1/2/3` variants: `$FL/$FR` (front),
+/// `$RL/$RR` (rear), `$SL/$SR` (shuffle), `$BL/$BR` (backwards), `$WL/$WR` — call sites
+/// `0x5ffe32` (`push 1`, LEFT) and `0x5ffc82` (`push 0`, RIGHT).
+pub(crate) fn footfall_side(ident: &[u8; 4]) -> Option<u8> {
     matches!(
         &ident[..3],
-        b"$FL" | b"$FR" | b"$RL" | b"$RR" | b"$SL" | b"$SR" | b"$BL" | b"$BR"
-    ) || ident == b"$FSD"
+        b"$FL" | b"$FR" | b"$RL" | b"$RR" | b"$SL" | b"$SR" | b"$BL" | b"$BR" | b"$WL" | b"$WR"
+    )
+    .then_some(ident[2])
 }
 
 /// How far (seconds) into a just-switched clip the playhead may be for [`fire_anim_events`] to
@@ -155,5 +175,41 @@ pub(crate) fn scan_events(
     } else {
         fire(prev, clip.duration + 1.0);
         fire(-1.0, cur);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two channels are disjoint (decision 1080): `$FSD` is the whole sound channel, the
+    /// per-foot side tags the whole visual one. HumanMale's Walk keys one of each family per
+    /// footfall — routing both to sound is exactly the doubled step rate.
+    #[test]
+    fn the_sound_channel_is_fsd_alone() {
+        assert!(is_footstep_sound(b"$FSD"));
+        for t in [
+            b"$FL0", b"$FR0", b"$RL2", b"$SL0", b"$SR0", b"$BR0", b"$WL1",
+        ] {
+            assert!(!is_footstep_sound(t), "{} is the visual channel", lossy(t));
+            assert!(footfall_side(t).is_some(), "{} names a side", lossy(t));
+        }
+        assert_eq!(footfall_side(b"$FSD"), None);
+    }
+
+    /// The side letter a per-foot tag names; every other tag is `None`.
+    #[test]
+    fn footfall_side_reads_the_side_letter() {
+        assert_eq!(footfall_side(b"$FL0"), Some(b'L'));
+        assert_eq!(footfall_side(b"$FR0"), Some(b'R'));
+        assert_eq!(footfall_side(b"$RL2"), Some(b'L'));
+        assert_eq!(footfall_side(b"$BR0"), Some(b'R'));
+        assert_eq!(footfall_side(b"$WR3"), Some(b'R'));
+        assert_eq!(footfall_side(b"$SND"), None);
+        assert_eq!(footfall_side(b"$CSL"), None);
+    }
+
+    fn lossy(t: &[u8; 4]) -> String {
+        String::from_utf8_lossy(t).into_owned()
     }
 }

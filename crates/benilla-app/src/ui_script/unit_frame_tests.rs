@@ -1284,3 +1284,108 @@ fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
         .unwrap();
     assert!(up, "the feign ends and the frame reads live again");
 }
+
+/// The resting status flash (decision 1082, ref `PlayerFrame_UpdateStatus` + `_OnUpdate`): while
+/// resting the player frame wears the gold status ring, the zzz state icon and its glow, all
+/// pulsing on a 0.5 s alpha wave; auto-attack (PLAYER_ENTER_COMBAT) swaps them for the red
+/// ring/swords/disc — resting still wins when both hold — and leaving both states clears the lot.
+#[test]
+fn the_player_frame_flashes_zzz_while_resting() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Prober".into()),
+            health: 100,
+            max_health: 100,
+            level: 12,
+            power_type: 0,
+            power: 80,
+            max_power: 80,
+            dead: false,
+            reaction: 0,
+            ..UnitState::default()
+        }),
+    );
+
+    // Into the inn: the resting flag lands and PLAYER_UPDATE_RESTING repaints.
+    s.set_rest_state(1, 500, true);
+    s.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+    let resting: bool = s
+        .eval(
+            r#"
+            local tf = "BenillaPlayerFrameTextureFrame"
+            return getglobal(tf .. "StatusTexture"):IsShown()
+               and getglobal(tf .. "RestIcon"):IsShown()
+               and not getglobal(tf .. "AttackIcon"):IsShown()
+               and BenillaPlayerFrameStatusGlow:IsShown()
+               and BenillaPlayerFrameStatusGlowRestGlow:IsShown()
+               and not BenillaPlayerFrameStatusGlowAttackGlow:IsShown()
+               and not getglobal(tf .. "AttackBackground"):IsShown()
+        "#,
+        )
+        .unwrap();
+    assert!(
+        resting,
+        "resting shows the gold ring + zzz + glow, nothing red"
+    );
+
+    // The pulse: two OnUpdate ticks move the ring's alpha (the 0.5 s triangle wave).
+    let a0: f64 = s
+        .eval("return BenillaPlayerFrameTextureFrameStatusTexture:GetAlpha()")
+        .unwrap();
+    s.run("BenillaPlayerFrame_OnUpdate(BenillaPlayerFrame, 0.25)")
+        .unwrap();
+    let a1: f64 = s
+        .eval("return BenillaPlayerFrameTextureFrameStatusTexture:GetAlpha()")
+        .unwrap();
+    assert!(
+        (a0 - a1).abs() > 0.1,
+        "the flash moves the status alpha ({a0} → {a1})"
+    );
+
+    // Swinging while resting: resting still wins (the ref's branch order).
+    s.fire_event("PLAYER_ENTER_COMBAT", vec![]);
+    assert!(
+        s.eval::<bool>("return BenillaPlayerFrameTextureFrameRestIcon:IsShown()")
+            .unwrap(),
+        "resting outranks auto-attack"
+    );
+
+    // Out of the inn mid-swing: the red attack set takes over.
+    s.set_rest_state(2, 0, false);
+    s.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+    let attacking: bool = s
+        .eval(
+            r#"
+            local tf = "BenillaPlayerFrameTextureFrame"
+            return getglobal(tf .. "StatusTexture"):IsShown()
+               and getglobal(tf .. "AttackIcon"):IsShown()
+               and not getglobal(tf .. "RestIcon"):IsShown()
+               and BenillaPlayerFrameStatusGlowAttackGlow:IsShown()
+               and getglobal(tf .. "AttackBackground"):IsShown()
+        "#,
+        )
+        .unwrap();
+    assert!(attacking, "auto-attack shows the red ring + swords + disc");
+
+    // Swords down: everything clears.
+    s.fire_event("PLAYER_LEAVE_COMBAT", vec![]);
+    let clear: bool = s
+        .eval(
+            r#"
+            local tf = "BenillaPlayerFrameTextureFrame"
+            return not getglobal(tf .. "StatusTexture"):IsShown()
+               and not getglobal(tf .. "RestIcon"):IsShown()
+               and not getglobal(tf .. "AttackIcon"):IsShown()
+               and not BenillaPlayerFrameStatusGlow:IsShown()
+               and not getglobal(tf .. "AttackBackground"):IsShown()
+        "#,
+        )
+        .unwrap();
+    assert!(clear, "neither state → no status dressing at all");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

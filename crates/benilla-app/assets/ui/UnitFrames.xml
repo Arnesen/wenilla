@@ -195,6 +195,29 @@
                 frame.feedbackText = getglobal(tf .. "HitIndicator")
                 frame.feedbackFontHeight = 30
                 frame:RegisterEvent("UNIT_COMBAT")
+                -- The status flash (ref PlayerFrame_OnLoad, decision 1082): the resting zzz /
+                -- auto-attack swords under the portrait, the gold/red ring, and the pulse
+                -- counters. Handles cached like pvpIcon above; their presence is what gates
+                -- BenillaPlayerFrame_UpdateStatus in the shared Update.
+                frame.statusTexture = getglobal(tf .. "StatusTexture")
+                frame.attackBackground = getglobal(tf .. "AttackBackground")
+                frame.restIcon = getglobal(tf .. "RestIcon")
+                frame.attackIcon = getglobal(tf .. "AttackIcon")
+                frame.statusGlow = getglobal(name .. "StatusGlow")
+                frame.restGlow = getglobal(name .. "StatusGlowRestGlow")
+                frame.attackGlow = getglobal(name .. "StatusGlowAttackGlow")
+                frame.statusCounter = 0
+                frame.statusSign = -1
+                frame.attackBackground:SetVertexColor(0.8, 0.1, 0.1)
+                frame.attackBackground:SetAlpha(0.4)
+                -- Its four wires (ref PlayerFrame_OnLoad's registrations): auto-attack toggling
+                -- (ENTER/LEAVE_COMBAT), the aggro list (REGEN_DISABLED/ENABLED), and the rest
+                -- flag (UPDATE_RESTING); PLAYER_ENTERING_WORLD is registered above for all units.
+                frame:RegisterEvent("PLAYER_ENTER_COMBAT")
+                frame:RegisterEvent("PLAYER_LEAVE_COMBAT")
+                frame:RegisterEvent("PLAYER_REGEN_DISABLED")
+                frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+                frame:RegisterEvent("PLAYER_UPDATE_RESTING")
             end
             -- A plain Frame isn't mouse-enabled by construction (only Button/EditBox are); enable it so
             -- the hover tooltip fires (the real client's unit frames take the mouse to target/tooltip).
@@ -281,6 +304,22 @@
             if event == "UNIT_COMBAT" then
                 CombatFeedback_OnCombatEvent(frame, arg2, arg3, arg4, arg5)
                 return
+            end
+            -- The status flash's state arms (ref PlayerFrame_OnEvent l.100-115, decision 1082):
+            -- inCombat = auto-attack active, onHateList = on something's aggro list; a world
+            -- entry resets both (the ref's own PLAYER_ENTERING_WORLD arm). The repaint itself
+            -- rides the shared Update below — this file's posture (the PvP sound note).
+            if event == "PLAYER_ENTERING_WORLD" then
+                frame.inCombat = nil
+                frame.onHateList = nil
+            elseif event == "PLAYER_ENTER_COMBAT" then
+                frame.inCombat = 1
+            elseif event == "PLAYER_LEAVE_COMBAT" then
+                frame.inCombat = nil
+            elseif event == "PLAYER_REGEN_DISABLED" then
+                frame.onHateList = 1
+            elseif event == "PLAYER_REGEN_ENABLED" then
+                frame.onHateList = nil
             end
             BenillaUnitFrame_Update(frame)
             -- The player's flag-change sound (decision 0646 §2/§4). The reference plays
@@ -570,6 +609,11 @@
             -- The PvP flag icon, on both frames (decision 0646 §4).
             BenillaUnitFrame_UpdatePvP(frame)
 
+            -- The status flash, player frame only (handle-gated like pvpIcon; decision 1082).
+            if frame.statusTexture then
+                BenillaPlayerFrame_UpdateStatus(frame)
+            end
+
             -- The aura rows (target only) — the ref's TargetFrame_Update →
             -- TargetDebuffButton_Update: repainted on PLAYER_TARGET_CHANGED and UNIT_AURA alike.
             if unit == "target" then
@@ -688,6 +732,69 @@
             else
                 GameTooltip:SetUnitBuff("target", button:GetID())
             end
+        end
+
+        -- The status flash's paint (ref PlayerFrame_UpdateStatus, transcribed onto frame-param
+        -- style; decision 1082). Priority is the ref's: RESTING wins over combat — sitting in an
+        -- inn mid-auto-attack shows the zzz — then the auto-attack state (gold ring/zzz vs red
+        -- ring/swords/red disc), then bare swords for on-someone's-aggro-list, then nothing.
+        function BenillaPlayerFrame_UpdateStatus(frame)
+            if IsResting() then
+                frame.statusTexture:SetVertexColor(1.0, 0.88, 0.25, 1.0)
+                frame.statusTexture:Show()
+                frame.restIcon:Show()
+                frame.attackIcon:Hide()
+                frame.restGlow:Show()
+                frame.attackGlow:Hide()
+                frame.statusGlow:Show()
+                frame.attackBackground:Hide()
+            elseif frame.inCombat then
+                frame.statusTexture:SetVertexColor(1.0, 0.0, 0.0, 1.0)
+                frame.statusTexture:Show()
+                frame.attackIcon:Show()
+                frame.restIcon:Hide()
+                frame.attackGlow:Show()
+                frame.restGlow:Hide()
+                frame.statusGlow:Show()
+                frame.attackBackground:Show()
+            elseif frame.onHateList then
+                frame.attackIcon:Show()
+                frame.restIcon:Hide()
+                frame.statusGlow:Hide()
+                frame.attackBackground:Hide()
+            else
+                frame.statusTexture:Hide()
+                frame.restIcon:Hide()
+                frame.attackIcon:Hide()
+                frame.statusGlow:Hide()
+                frame.attackBackground:Hide()
+            end
+        end
+
+        -- ref PlayerFrame_OnUpdate: the status pulse — a 0.5 s triangle wave between alpha
+        -- 55/255 and 255/255 on the ADD-blend status ring and the icon glow, run only while the
+        -- ring is visible (resting or auto-attacking); the hit-indicator fade rides the same
+        -- tick, exactly as before.
+        function BenillaPlayerFrame_OnUpdate(frame, elapsed)
+            if frame.statusTexture:IsVisible() then
+                local counter = frame.statusCounter + elapsed
+                local sign = frame.statusSign
+                if counter > 0.5 then
+                    sign = -sign
+                    frame.statusSign = sign
+                end
+                counter = mod(counter, 0.5)
+                frame.statusCounter = counter
+                local alpha
+                if sign == 1 then
+                    alpha = (55 + counter * 400) / 255
+                else
+                    alpha = (255 - counter * 400) / 255
+                end
+                frame.statusTexture:SetAlpha(alpha)
+                frame.statusGlow:SetAlpha(alpha)
+            end
+            CombatFeedback_OnUpdate(frame)
         end
 
         -- Left-click the player frame to target yourself (ref PlayerFrame_OnClick, the LeftButton
@@ -851,6 +958,25 @@
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="18" y="-20"/></Offset></Anchor>
                             </Anchors>
                         </Texture>
+                        <!-- The status ring (ref PlayerStatusTexture, ref-PlayerFrame.xml l.99-111):
+                             the ADD-blend glow ring around the whole frame, tinted gold while
+                             resting / red while auto-attacking, pulsed by the OnUpdate flash
+                             (decision 1082). 190×66 TOPLEFT (35,-8), the ring art's own recess. -->
+                        <Texture name="$parentStatusTexture" file="Interface\CharacterFrame\UI-Player-Status" alphaMode="ADD" hidden="true">
+                            <Size><AbsDimension x="190" y="66"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="35" y="-8"/></Offset></Anchor>
+                            </Anchors>
+                            <TexCoords left="0" right="0.74609375" top="0" bottom="0.53125"/>
+                        </Texture>
+                        <!-- ref PlayerAttackBackground (l.112-123): the dark red disc behind the
+                             attack state icon; OnLoad tints it (0.8,0.1,0.1) at alpha 0.4. -->
+                        <Texture name="$parentAttackBackground" file="Interface\TargetingFrame\UI-TargetingFrame-AttackBackground" hidden="true">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="37" y="-50"/></Offset></Anchor>
+                            </Anchors>
+                        </Texture>
                     </Layer>
                     <Layer level="OVERLAY">
                         <!-- Name 100×10 CENTER (50,19) (ref l.58-69). -->
@@ -875,6 +1001,50 @@
                                 <Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="73" y="-42"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
+                        <!-- The state icon pair under the portrait (ref PlayerRestIcon /
+                             PlayerAttackIcon, ref-PlayerFrame.xml l.171-201): the two halves of
+                             UI-StateIcon — zzz left, crossed swords right (decision 1082). -->
+                        <Texture name="$parentRestIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
+                            <Size><AbsDimension x="31" y="33"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="37" y="-49"/></Offset></Anchor>
+                            </Anchors>
+                            <TexCoords left="0" right="0.5" top="0" bottom="0.421875"/>
+                        </Texture>
+                        <Texture name="$parentAttackIcon" file="Interface\CharacterFrame\UI-StateIcon" hidden="true">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="$parentRestIcon"><Offset><AbsDimension x="1" y="1"/></Offset></Anchor>
+                            </Anchors>
+                            <TexCoords left="0.5" right="1.0" top="0" bottom="0.5"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <!-- The state icon's own ADD-blend glow (ref PlayerStatusGlow, ref-PlayerFrame.xml
+                 l.216-248): a sibling FRAME over the icon so the whole thing can pulse as one
+                 SetAlpha group with the status ring (the OnUpdate flash, decision 1082). -->
+            <Frame name="$parentStatusGlow" hidden="true">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="$parentTextureFrameRestIcon"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentRestGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                            </Anchors>
+                            <TexCoords left="0" right="0.5" top="0.5" bottom="1.0"/>
+                        </Texture>
+                        <Texture name="$parentAttackGlow" file="Interface\CharacterFrame\UI-StateIcon" alphaMode="ADD">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.5" right="1.0" top="0.5" bottom="1.0"/>
+                        </Texture>
                     </Layer>
                 </Layers>
             </Frame>
@@ -882,7 +1052,7 @@
         <Scripts>
             <OnLoad><![CDATA[BenillaUnitFrame_OnLoad(this, "player")]]></OnLoad>
             <OnEvent><![CDATA[BenillaUnitFrame_OnEvent(this)]]></OnEvent>
-            <OnUpdate><![CDATA[CombatFeedback_OnUpdate(this)]]></OnUpdate>
+            <OnUpdate><![CDATA[BenillaPlayerFrame_OnUpdate(this, arg1)]]></OnUpdate>
             <OnEnter><![CDATA[BenillaUnitFrame_OnEnter(this)]]></OnEnter>
             <OnLeave><![CDATA[BenillaUnitFrame_OnLeave(this)]]></OnLeave>
             <OnClick><![CDATA[BenillaPlayerFrame_OnClick(arg1)]]></OnClick>

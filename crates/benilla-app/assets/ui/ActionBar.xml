@@ -10,8 +10,11 @@
         Structure mirrors the real hierarchy so the draw order falls out of the frame tree:
           BenillaActionBar (1024x53, BOTTOM of screen)
             ├─ BenillaExpBar        (StatusBar, TOP)      — drawn first ⇒ lowest
-            └─ BenillaActionBarArtFrame (fills the bar)   — dwarf strips + end caps over the XP bar
-                 └─ 12 buttons + page up/down             — child frames ⇒ over the art
+            │    ├─ BenillaExhaustionLevelFillBar (BORDER) — the pale rested wash up to the tick
+            │    └─ BenillaExpBarOverlayFrame (DIALOG)     — the hover "curr / max" numerals
+            ├─ BenillaActionBarArtFrame (fills the bar)   — dwarf strips + end caps over the XP bar
+            │    └─ 12 buttons + page up/down             — child frames ⇒ over the art
+            └─ BenillaExhaustionTick (DIALOG)             — the rested-boundary marker on the strip
         (The real client gets the same order via RaiseFrameLevel(MainMenuBarArtFrame); our loader's
         later-sibling-is-higher + child-over-parent rules reproduce it without the explicit raise.)
 
@@ -594,37 +597,192 @@
         function BenillaExpBar_OnLoad(bar)
             bar:RegisterEvent("PLAYER_ENTERING_WORLD")
             bar:RegisterEvent("PLAYER_XP_UPDATE")
+            -- The numerals seam (ref-MainMenuBar.xml l.117-120: TextStatusBar_Initialize() +
+            -- textLockable in the bar's own OnLoad; TextStatusBar.xml). textLockable is what lets
+            -- the statusBarText cvar pin the numerals on permanently.
+            if TextStatusBar_Initialize then -- engine tests load file subsets
+                TextStatusBar_Initialize()
+                bar.textLockable = 1
+            end
             BenillaExpBar_Update(bar)
         end
 
+        -- ref-MainMenuBar.xml l.121-126: repaint, then hand arg1/arg2 to the CVAR_UPDATE watcher.
         function BenillaExpBar_OnEvent(bar)
             BenillaExpBar_Update(bar)
+            if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end
         end
 
         -- The XP bar's hover (ref-MainMenuBar.xml l.136-147, MainMenuExpBar's own OnEnter/OnLeave).
-        -- ref GlobalStrings.lua l.5461 / l.2789 (enUS), in the `X = X or` FALLBACK form: the app
-        -- runs the real localized GlobalStrings.lua off the patch chain BEFORE this file
-        -- (ui_script/mod.rs load_global_strings), so the installed locale wins and these copies
-        -- only fill in for the test harnesses, which load no patch chain. CombatText.xml's shape.
+        -- ref GlobalStrings.lua l.5461 / l.2789 / l.1929-1932 (enUS), in the `X = X or` FALLBACK
+        -- form: the app runs the real localized GlobalStrings.lua off the patch chain BEFORE this
+        -- file (ui_script/mod.rs load_global_strings), so the installed locale wins and these
+        -- copies only fill in for the test harnesses, which load no patch chain.
+        -- CombatText.xml's shape.
         XPBAR_LABEL = XPBAR_LABEL or "XP Bar"
         NEWBIE_TOOLTIP_XPBAR = NEWBIE_TOOLTIP_XPBAR or "The amount of experience (XP) you have earned. The color of the XP bar indicates your rest state: light blue for Rested, and purple for Normal. Rested players earn twice the experience they would normally gain from slaying a monster. Characters become less rested when they kill monsters, and more rested by spending time at or logging out at an inn or city."
+        EXHAUST_TOOLTIP1 = EXHAUST_TOOLTIP1 or "|cffffd200%s|r\n|cffffffff%d%% of normal experience\ngained from monsters.|r"
+        EXHAUST_TOOLTIP2 = EXHAUST_TOOLTIP2 or "\n|cffff0000You should rest at an Inn.|r"
+        EXHAUST_TOOLTIP4 = EXHAUST_TOOLTIP4 or "\n\n|cffffd200Resting|r\n|cffffffffYou must rest for %d additional\nminutes to become|r |cffffd200Fully Rested|r|cffffffff.|r"
 
-        -- The ref's OnEnter does three more things, all of them machinery we don't have yet, and
-        -- each one its own slice rather than a gap in this one:
-        --   TextStatusBar_UpdateTextString() + ShowTextStatusBarText(this) — the "1234/5678" numerals
-        --     that appear ON the bar while hovered. No TextStatusBar text layer exists here at all.
-        --   ExhaustionTick.timer = 1 and GameTooltip.canAddRestStateLine = 1 — the rest-state line
-        --     ("You should rest at an Inn", EXHAUST_TOOLTIP1-4) the exhaustion tick appends. There is
-        --     no rest-state feed, so there is nothing to append.
-        -- The trailing 1 is the ref's noNormalText: with detailed tips OFF this hover shows NOTHING
-        -- rather than a bare "XP Bar". Transcribed, though 1.12's default (0661) never takes it.
+        -- The ref OnEnter's full body (ref-MainMenuBar.xml l.136-141), now that its machinery
+        -- exists (decision 1082): the on-bar numerals (TextStatusBar.xml), the 1 s armed timer
+        -- that appends the rest-state line to the held-open tooltip, and canAddRestStateLine —
+        -- the handshake BenillaExhaustionToolTipText's newbie-tips branch reads. The trailing 1
+        -- is the ref's noNormalText: with detailed tips OFF this hover shows NOTHING rather than
+        -- a bare "XP Bar". Transcribed, though 1.12's default (0661) never takes it.
         function BenillaExpBar_OnEnter(bar)
-            if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
+            if TextStatusBar_UpdateTextString then -- engine tests load file subsets
+                TextStatusBar_UpdateTextString(bar)
+                ShowTextStatusBarText(bar)
+            end
+            BenillaExhaustionTick.timer = 1
+            if not GameTooltip_AddNewbieTip then return end
             GameTooltip_AddNewbieTip(bar, XPBAR_LABEL, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_XPBAR, 1)
+            GameTooltip.canAddRestStateLine = 1
         end
 
-        function BenillaExpBar_OnLeave()
+        function BenillaExpBar_OnLeave(bar)
+            if HideTextStatusBarText then HideTextStatusBarText(bar) end
             if GameTooltip then GameTooltip:Hide() end
+            BenillaExhaustionTick.timer = nil
+        end
+
+        -- ── The exhaustion tick (ref-MainMenuBar.lua ExhaustionTick_*) ────────────────────────
+        -- The round marker riding the XP bar at the point where rested XP runs out, plus the
+        -- pale fill between the bar's value and that point. Two transcription cuts, named:
+        -- the ref's MainMenuBarMaxLevelBar / ReputationWatchBar guards reference max-level bar
+        -- art and the faction watch bar, neither built — each is its own slice, and until then
+        -- the guards' frames can't be shown, so the cuts are unreachable-code cuts, not behavior
+        -- cuts. (A level-60 body simply keeps its inert XP bar for now.)
+        function BenillaExhaustionTick_OnLoad(tick)
+            tick:RegisterEvent("PLAYER_ENTERING_WORLD")
+            tick:RegisterEvent("PLAYER_XP_UPDATE")
+            tick:RegisterEvent("UPDATE_EXHAUSTION")
+            tick:RegisterEvent("PLAYER_LEVEL_UP")
+            tick:RegisterEvent("PLAYER_UPDATE_RESTING")
+        end
+
+        function BenillaExhaustionTick_Update(tick)
+            if event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_XP_UPDATE"
+                or event == "UPDATE_EXHAUSTION" or event == "PLAYER_LEVEL_UP" then
+                local playerCurrXP = UnitXP("player")
+                local playerMaxXP = UnitXPMax("player")
+                local exhaustionThreshold = GetXPExhaustion()
+                local exhaustionStateID = GetRestState()
+                -- The ref's beta-eras leftover: the tired/exhausted tiers (id >= 3) park the tick
+                -- at the bar's RIGHT end. The live server never produces them (GetRestState's
+                -- binding note) — kept because the ref keeps it.
+                if exhaustionStateID >= 3 then
+                    tick:SetPoint("CENTER", "BenillaExpBar", "RIGHT", 0, 0)
+                end
+                if not exhaustionThreshold then
+                    tick:Hide()
+                    BenillaExhaustionLevelFillBar:Hide()
+                else
+                    local exhaustionTickSet = max(((playerCurrXP + exhaustionThreshold)
+                        / playerMaxXP) * BenillaExpBar:GetWidth(), 0)
+                    tick:ClearAllPoints()
+                    if exhaustionTickSet > BenillaExpBar:GetWidth() then
+                        tick:Hide()
+                        BenillaExhaustionLevelFillBar:Hide()
+                    else
+                        tick:Show()
+                        tick:SetPoint("CENTER", "BenillaExpBar", "LEFT", exhaustionTickSet, 0)
+                        BenillaExhaustionLevelFillBar:Show()
+                        BenillaExhaustionLevelFillBar:SetPoint("TOPRIGHT", "BenillaExpBar",
+                            "TOPLEFT", exhaustionTickSet, 0)
+                    end
+                end
+            end
+            -- The rest-state paint (only these two events repaint it, the ref's own split):
+            -- rested = light blue bar + pale blue fill-to-tick, normal = the purple default.
+            if event == "PLAYER_ENTERING_WORLD" or event == "UPDATE_EXHAUSTION" then
+                local exhaustionStateID = GetRestState()
+                if exhaustionStateID == 1 then
+                    BenillaExpBar:SetStatusBarColor(0.0, 0.39, 0.88, 1.0)
+                    BenillaExhaustionLevelFillBar:SetVertexColor(0.0, 0.39, 0.88, 0.15)
+                    BenillaExhaustionTickHighlight:SetVertexColor(0.0, 0.39, 0.88)
+                elseif exhaustionStateID == 2 then
+                    BenillaExpBar:SetStatusBarColor(0.58, 0.0, 0.55, 1.0)
+                    BenillaExhaustionLevelFillBar:SetVertexColor(0.58, 0.0, 0.55, 0.15)
+                    BenillaExhaustionTickHighlight:SetVertexColor(0.58, 0.0, 0.55)
+                end
+            end
+        end
+
+        -- The tick's tooltip (ref-MainMenuBar.lua ExhaustionToolTipText, the live branches only —
+        -- its own dead commented-out code is not carried). Two callers, two postures: hovering
+        -- the TICK anchors the plate beside it (flipped to whichever side has room); the armed
+        -- 1 s timer from the BAR hover instead APPENDS the line to the already-open newbie tip,
+        -- gated on canAddRestStateLine. EXHAUST_TOOLTIP4 (time to fully rested) needs
+        -- GetTimeToWellRested, which is nil on this wire — the line simply never renders,
+        -- faithfully (the binding's note).
+        function BenillaExhaustionToolTipText()
+            if SHOW_NEWBIE_TIPS ~= "1" then
+                local x, y = BenillaExhaustionTick:GetCenter()
+                if BenillaExhaustionTick:IsVisible() then
+                    if x >= (GetScreenWidth() / 2) then
+                        GameTooltip:SetOwner(BenillaExhaustionTick, "ANCHOR_LEFT")
+                    else
+                        GameTooltip:SetOwner(BenillaExhaustionTick, "ANCHOR_RIGHT")
+                    end
+                else
+                    GameTooltip_SetDefaultAnchor(GameTooltip, UIParent)
+                end
+            end
+            local exhaustionStateID, exhaustionStateName, exhaustionStateMultiplier = GetRestState()
+            local exhaustionThreshold = GetXPExhaustion()
+            exhaustionStateMultiplier = exhaustionStateMultiplier * 100
+            local exhaustionCountdown = nil
+            if GetTimeToWellRested() then
+                exhaustionCountdown = GetTimeToWellRested() / 60
+            end
+            local tooltipText = format(EXHAUST_TOOLTIP1, exhaustionStateName,
+                exhaustionStateMultiplier)
+            local append = nil
+            if IsResting() then
+                if exhaustionThreshold and exhaustionCountdown then
+                    append = format(EXHAUST_TOOLTIP4, exhaustionCountdown)
+                end
+            elseif exhaustionStateID == 4 or exhaustionStateID == 5 then
+                append = EXHAUST_TOOLTIP2
+            end
+            if append then
+                tooltipText = tooltipText .. append
+            end
+            if SHOW_NEWBIE_TIPS ~= "1" then
+                GameTooltip:SetText(tooltipText)
+            else
+                if GameTooltip.canAddRestStateLine then
+                    GameTooltip:AddLine("\n" .. tooltipText)
+                    GameTooltip:Show()
+                    GameTooltip.canAddRestStateLine = nil
+                end
+            end
+        end
+
+        -- Driven from the XP BAR's OnUpdate (the ref wires it there, not on the tick — the timer
+        -- only ever counts while the mouse is on the bar, which is what arms it).
+        function BenillaExhaustionTick_OnUpdate(elapsed)
+            if BenillaExhaustionTick.timer then
+                if BenillaExhaustionTick.timer < 0 then
+                    BenillaExhaustionToolTipText()
+                    BenillaExhaustionTick.timer = nil
+                else
+                    BenillaExhaustionTick.timer = BenillaExhaustionTick.timer - elapsed
+                end
+            end
+        end
+
+        -- ref-MainMenuBar.xml l.104-110 (the overlay child's OnLoad): the numerals wiring lives
+        -- in the OVERLAY frame's own OnLoad because there its FontString is guaranteed
+        -- materialized; the bar's lockShow starts at the not-hovered refcount.
+        function BenillaExpBarOverlay_OnLoad()
+            if SetTextStatusBarText then -- engine tests load file subsets
+                BenillaExpBar.lockShow = 0
+                SetTextStatusBarText(BenillaExpBar, BenillaExpBarText)
+            end
         end
 
         -- ── The performance ("ping") meter ────────────────────────────────────────────────────
@@ -793,6 +951,19 @@
                             <Color r="0.0" g="0.0" b="0.0" a="0.5"/>
                         </Texture>
                     </Layer>
+                    <Layer level="BORDER">
+                        <!-- The rested fill (ref-MainMenuBar.xml l.20-33 ExhaustionLevelFillBar):
+                             the pale wash from the bar's LEFT edge to the exhaustion tick. 0-wide
+                             until BenillaExhaustionTick_Update stretches its TOPRIGHT to the tick
+                             and tints it (SetVertexColor a=0.15 over this authored white). -->
+                        <Texture name="BenillaExhaustionLevelFillBar">
+                            <Size><AbsDimension x="0" y="13"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="BenillaExpBar"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                            </Anchors>
+                            <Color r="1.0" g="1.0" b="1.0" a="1.0"/>
+                        </Texture>
+                    </Layer>
                     <Layer level="OVERLAY">
                         <Texture name="BenillaXPBarTexture0" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
                             <Size><AbsDimension x="256" y="10"/></Size>
@@ -816,15 +987,67 @@
                         </Texture>
                     </Layer>
                 </Layers>
+                <Frames>
+                    <!-- The numerals overlay (ref-MainMenuBar.xml l.96-113 MainMenuBarOverlayFrame):
+                         a DIALOG-strata child so the "1234 / 5678" text draws over the dwarf-notch
+                         art and the buttons; its own OnLoad wires the FontString to the bar
+                         (BenillaExpBarOverlay_OnLoad's note). -->
+                    <Frame name="BenillaExpBarOverlayFrame" frameStrata="DIALOG">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="BenillaActionBar" relativePoint="TOPLEFT"/>
+                            <Anchor point="BOTTOMRIGHT" relativeTo="BenillaActionBar" relativePoint="BOTTOMRIGHT"/>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString name="BenillaExpBarText" inherits="TextStatusBarText">
+                                    <Anchors>
+                                        <Anchor point="CENTER" relativeTo="BenillaExpBar"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor>
+                                    </Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>BenillaExpBarOverlay_OnLoad()</OnLoad>
+                        </Scripts>
+                    </Frame>
+                </Frames>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.58" g="0.0" b="0.55"/>
                 <Scripts>
                     <OnLoad>BenillaExpBar_OnLoad(self)</OnLoad>
                     <OnEvent>BenillaExpBar_OnEvent(self)</OnEvent>
                     <OnEnter>BenillaExpBar_OnEnter(self)</OnEnter>
-                    <OnLeave>BenillaExpBar_OnLeave()</OnLeave>
+                    <OnLeave>BenillaExpBar_OnLeave(self)</OnLeave>
+                    <OnUpdate>BenillaExhaustionTick_OnUpdate(arg1)</OnUpdate>
+                    <OnValueChanged>
+                        if this:IsShown() and TextStatusBar_OnValueChanged then
+                            TextStatusBar_OnValueChanged()
+                        end
+                    </OnValueChanged>
                 </Scripts>
             </StatusBar>
+
+            <!--
+                The exhaustion tick (ref-MainMenuBar.xml l.415-442): a 32×32 button riding the XP
+                bar at the rested boundary, DIALOG strata so it draws over the bar art. Normal =
+                the brass marker, Highlight = the ADD glow BenillaExhaustionTick_Update tints to
+                the rest state. Starts at the bar's CENTER exactly like the ref (its own first
+                Update re-seats or hides it before anything is seen).
+            -->
+            <Button name="BenillaExhaustionTick" frameStrata="DIALOG">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativeTo="BenillaExpBar"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>BenillaExhaustionTick_OnLoad(self)</OnLoad>
+                    <OnEvent>BenillaExhaustionTick_Update(self)</OnEvent>
+                    <OnEnter>BenillaExhaustionToolTipText()</OnEnter>
+                    <OnLeave>if GameTooltip then GameTooltip:Hide() end</OnLeave>
+                </Scripts>
+                <NormalTexture name="BenillaExhaustionTickNormal" file="Interface\MainMenuBar\UI-ExhaustionTickNormal"/>
+                <HighlightTexture name="BenillaExhaustionTickHighlight" file="Interface\MainMenuBar\UI-ExhaustionTickHighlight" alphaMode="ADD"/>
+            </Button>
 
             <!--
                 The art frame: fills the bar (ref-MainMenuBar.xml l.225-229). Carries the 4 dwarf

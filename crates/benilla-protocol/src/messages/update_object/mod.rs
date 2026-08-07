@@ -62,8 +62,10 @@ impl Object {
                 let movement = MovementBlock::read(r)?;
                 // A create's mask is the COMPLETE descriptor — the server omits zero-valued
                 // fields (vmangos `_SetCreateBits`), so absent must read 0, not unknown
-                // (`ObjectFields`'s created semantics).
-                let mask = ObjectFields::read(r)?.into_created();
+                // (`ObjectFields`'s created semantics). The TYPE rides along because "absent = 0"
+                // holds only inside this object's OWN descriptor: a creature has no PLAYER block
+                // to be absent from (decision 1081).
+                let mask = ObjectFields::read(r)?.into_created(object_type);
                 Object::Create {
                     guid,
                     object_type,

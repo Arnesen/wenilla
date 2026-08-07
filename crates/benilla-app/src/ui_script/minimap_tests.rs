@@ -125,3 +125,108 @@ fn tracking_frame_follows_get_tracking_texture_across_player_auras_changed() {
     s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
     assert!(!vis(&s), "no tracking texture hides the frame again");
 }
+
+/// A session with the minimap cluster + the time-of-day indicator (`GameTime.xml`) loaded, the
+/// game clock parked at `hour:minute` — the shape `crate::minimap::feed_game_time` pushes.
+fn game_time_session(hour: u32, minute: u32) -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run("function GetMinimapZoneText() return '' end")
+        .unwrap();
+    s.run("function PlaySound() end").unwrap();
+    // Byte-exact 1.12 GlobalStrings (l.4251-4253) — the engine-only session loads no
+    // GlobalStrings off a chain.
+    s.run("TIME_TWELVEHOURAM = \"%d:%02d AM\"; TIME_TWELVEHOURPM = \"%d:%02d PM\"; TIME_TWENTYFOURHOURS = \"%d:%02d\"")
+        .unwrap();
+    s.run(&format!(
+        "__benilla_game_hour = {hour}; __benilla_game_minute = {minute}"
+    ))
+    .unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MinimapCluster.xml");
+    load_xml(&s, "GameTime.xml");
+    s
+}
+
+/// `GameTimeTexture`'s current 4-edge texcoord window.
+fn tod_window(s: &UiScript) -> (f64, f64, f64, f64) {
+    s.eval::<(f64, f64, f64, f64)>("return GameTimeTexture:GetTexCoord()")
+        .unwrap()
+}
+
+/// The verbatim `GameTimeFrame_Update` law: the 50-px window over the 128×64 UI-TOD-Indicator
+/// sits on the LEFT half (the sun) through the game day and slides +0.5 to the RIGHT half (the
+/// moon) outside it — night is before 5:30 AM or from 9:00 PM, boundaries included exactly as
+/// the ref compares (`< DAWN or >= DUSK`).
+#[test]
+fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
+    let mut s = game_time_session(10, 30);
+    // OnLoad seeded `timeOfDay = 0` and 10:30 ≠ 0, so the very first update already seated the
+    // window — no OnUpdate tick needed for the initial state.
+    let day = (0.0, 50.0 / 128.0, 0.0, 50.0 / 64.0);
+    assert_eq!(tod_window(&s), day, "mid-morning shows the sun half");
+
+    // 21:00 exactly is night (`>= DUSK`): the OnUpdate re-read slides the window +0.5.
+    s.run("__benilla_game_hour = 21; __benilla_game_minute = 0")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        tod_window(&s),
+        (0.5, 0.5 + 50.0 / 128.0, 0.0, 50.0 / 64.0),
+        "9:00 PM sharp is the moon half"
+    );
+
+    // 5:29 is still night; 5:30 exactly is day (`< DAWN`).
+    s.run("__benilla_game_hour = 5; __benilla_game_minute = 29")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(tod_window(&s).0, 0.5, "5:29 AM is still the moon");
+    s.run("__benilla_game_minute = 30").unwrap();
+    s.tick(0.016);
+    assert_eq!(tod_window(&s), day, "5:30 AM sharp flips to the sun");
+}
+
+/// Hovering the indicator through the REAL pointer path (hit-test → OnEnter) shows the game-time
+/// tooltip, live-updates it while owned (the `IsOwned` refresh branch), and hides it on leave.
+/// This also pins the two loader-side pieces the transcription leans on: the `<Scripts>` walker's
+/// mouse auto-enable (the frame declares no enableMouse, like the reference — without the law the
+/// hit-test never captures) and the `<HitRectInsets>` hull.
+#[test]
+fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
+    let mut s = game_time_session(21, 7);
+    s.resolve();
+
+    // Hover the middle of the frame's hit rect: the resolved rect inset by (l=6, r=0, t=5, b=10).
+    let (l, r, t, b) = (
+        s.eval::<f32>("return GameTimeFrame:GetLeft()").unwrap(),
+        s.eval::<f32>("return GameTimeFrame:GetRight()").unwrap(),
+        s.eval::<f32>("return GameTimeFrame:GetTop()").unwrap(),
+        s.eval::<f32>("return GameTimeFrame:GetBottom()").unwrap(),
+    );
+    let (x, y) = ((l + 6.0 + r) * 0.5, (b + 10.0 + t - 5.0) * 0.5);
+    s.mouse_move(x, y);
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "OnEnter owns the tooltip (the Scripts-walker auto-enable capturing at {x},{y})"
+    );
+    // TwentyFourHourTime = 1 (enGB LocalizeFrames, the transcription header): 21:07, not 9:07 PM.
+    let text = |s: &UiScript| {
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap()
+    };
+    assert_eq!(text(&s), "21:07");
+
+    // The minute ticks while hovered: GameTimeFrame_Update's IsOwned branch refreshes in place.
+    s.run("__benilla_game_minute = 8").unwrap();
+    s.tick(0.016);
+    assert_eq!(text(&s), "21:08", "the owned tooltip follows the clock");
+
+    // Leave: a point past the left inset — outside the hit hull but still inside the raw 50×50
+    // rect — must ALSO leave; the insets are part of the reference geometry.
+    s.mouse_move(l + 2.0, y);
+    assert!(
+        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the 6-px left inset band is not hoverable"
+    );
+}

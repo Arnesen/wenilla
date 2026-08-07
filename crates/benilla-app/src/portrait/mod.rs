@@ -849,10 +849,16 @@ fn setup_booths(
             booth_view_shape(),
             Camera {
                 order: -100 + (SLOTS.len() + i) as isize,
-                // A near-black backdrop like the portraits (the pipeline is proven opaque; the pane
-                // reads as a recessed dark panel, close to the ref's model-frame background). A
-                // transparent float-over-the-frame-art backdrop is a director's-call follow-up.
-                clear_color: ClearColorConfig::Custom(Color::srgb(0.055, 0.045, 0.04)),
+                // **TRANSPARENT** — a `<PlayerModel>` widget has no backdrop of its own (decision
+                // 1083). The reference's three model frames declare nothing but the widget; what
+                // fills the pane behind the figure is the PAGE's own art, the same
+                // `UI-Character-CharacterTab-*` / `UI-Character-General-*` plates our transcription
+                // already draws, and the model composites over them. Baking an opaque backdrop into
+                // the target painted those plates out — the director's report is exactly that: "our
+                // paperdoll is pure black bg instead of having what the ref has, slightly off black
+                // and textured" (2026-08-07). The glue booth has composited this way since 0807;
+                // the combine passes scene alpha through untouched.
+                clear_color: ClearColorConfig::Custom(Color::NONE),
                 ..default()
             },
             RenderTarget::Image(image.clone().into()),

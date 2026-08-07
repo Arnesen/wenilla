@@ -44,6 +44,11 @@ const UI_MANIFEST: &[&str] = &[
     // (GameTooltip_OnLoad) AND the dropdown kit + UnitPopup — its FriendsDropDown inherits
     // UIDropDownMenuTemplate and opens a UnitPopup FRIEND menu.
     "ItemRef.xml",
+    // The shared status-bar numerals machinery (decision 1082): TextStatusBar_* + the opt-in
+    // template — before its customers (the XP bar in ActionBar.xml today; the unit-frame
+    // health/mana numerals are the ref's other users, when that slice lands). The ref's own TOC
+    // loads TextStatusBar right before its unit frames, same seat as here.
+    "TextStatusBar.xml",
     "UnitFrames.xml",
     // The combo-point dots (decision 0869) — anchored to BenillaTargetFrame, so after
     // UnitFrames.xml; its fade chain needs UiPanels.xml's UIFrameFade above.
@@ -99,6 +104,10 @@ const UI_MANIFEST: &[&str] = &[
     // <Minimap> widget hole (`crate::minimap` fills it). After GameTooltip (its zone-text
     // hover uses the shared tooltip).
     "MinimapCluster.xml",
+    // The minimap's time-of-day indicator (GameTimeFrame): the reference's own file split — its
+    // TOC loads GameTime.xml right after Minimap.xml. After MinimapCluster (its parent) and
+    // GameTooltip (the hover tooltip); driven by the app's game clock (`minimap::feed_game_time`).
+    "GameTime.xml",
     // The zone-entry splash (decision 0287): ZoneTextFrame/SubZoneTextFrame + the inlined
     // FadingFrame kit, driven by the ZONE_CHANGED family `crate::area` fires. Needs only
     // Fonts (ZoneTextFont/SubZoneTextFont) + UIParent; kept by the minimap cluster — the

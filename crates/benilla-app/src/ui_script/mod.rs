@@ -625,6 +625,9 @@ mod unit_popup_tests;
 mod action_bar_tests;
 
 #[cfg(test)]
+mod exp_bar_tests;
+
+#[cfg(test)]
 mod multibar_stance_tests;
 
 #[cfg(test)]

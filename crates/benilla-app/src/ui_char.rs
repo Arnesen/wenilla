@@ -321,6 +321,18 @@ fn skill_pair(store: &ObjectStore, skill_id: u32) -> (u32, i32) {
 /// a creature has no PLAYER block, so they read absent and fall to their defaults, which is the
 /// right pet answer (no buff decomposition, `damage_percent` the divide-safe 1.0) rather than a
 /// second unit-only copy of the same twenty lines.
+///
+/// **That premise is load-bearing, and it was false until decision 1081.** A created store used to
+/// answer `Some(0)` for *any* absent index, PLAYER block or not, so on a live pet every default
+/// here was dead code — `damage_percent` came through as `0` and the ref's `damage / percent` made
+/// the pet sheet read `inf - inf` / `nan`. The protocol layer now bounds "absent = 0" to the
+/// object's own descriptor, which is what makes this shared core honest for a creature.
+/// A swing time in ms, with `0` (and absent) read as "no swing time yet" → the vanilla 2000. Never
+/// zero, because it is the reference's `damage / speed` divisor.
+fn base_swing(streamed: Option<u32>) -> u32 {
+    streamed.filter(|&ms| ms != 0).unwrap_or(2000)
+}
+
 pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
     let f = &store.0;
     let round = |v: Option<f32>| v.unwrap_or(0.0).round() as i32;
@@ -360,16 +372,19 @@ pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
         physical_bonus_neg: f.player_mod_damage_done_neg(0).unwrap_or(0),
         damage_percent: f.player_mod_damage_done_pct(0).unwrap_or(1.0),
         // 2000 ms is the vanilla base swing when the field hasn't streamed — keeps the ref's
-        // damage/speed division finite on the first frames.
-        main_attack_time_ms: f.unit_base_attack_time(0).unwrap_or(2000),
-        offhand_attack_time_ms: f.unit_base_attack_time(1).unwrap_or(2000),
+        // damage/speed division finite on the first frames. **`0` counts as unstreamed**, not as a
+        // swing time: on a created store an absent in-block field reads `Some(0)` (the descriptor's
+        // zero), so a plain `unwrap_or` would never fire and `damage / speed` would go to infinity
+        // (the shape of the bug decision 1081 is about, one field over).
+        main_attack_time_ms: base_swing(f.unit_base_attack_time(0)),
+        offhand_attack_time_ms: base_swing(f.unit_base_attack_time(1)),
         attack_power: f.unit_attack_power().unwrap_or(0),
         attack_power_pos: i32::from(ap_pos),
         attack_power_neg: i32::from(ap_neg),
         ranged_attack_power: f.unit_ranged_attack_power().unwrap_or(0),
         ranged_attack_power_pos: i32::from(rap_pos),
         ranged_attack_power_neg: i32::from(rap_neg),
-        ranged_attack_time_ms: f.unit_ranged_attack_time().unwrap_or(2000),
+        ranged_attack_time_ms: base_swing(f.unit_ranged_attack_time()),
         ranged_min_damage: f.unit_min_ranged_damage().unwrap_or(0.0),
         ranged_max_damage: f.unit_max_ranged_damage().unwrap_or(0.0),
         // The equipment- and skill-derived half is the PLAYER feed's ([`combat_stats`]); a unit

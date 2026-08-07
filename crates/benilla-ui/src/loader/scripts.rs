@@ -32,6 +32,27 @@ impl Loader<'_> {
                     );
                     continue;
                 }
+                // The real `<Scripts>` walker auto-enables the matching input kind after each
+                // successful SetScript (`0x769ef0` → `0x76af00(kind,-1)` per handler name; wow-re
+                // `ui/scratch/scripts-auto-enable.md`, §5 cross-checked): the five MOUSE-kind
+                // handlers arm the same enable as the XML `enableMouse` attribute — `OnDragStart`
+                // is in the set, `OnDragStop`/`OnReceiveDrag` are NOT. This is XML-load-time
+                // ONLY: the Lua SetScript binding (`0x7748d0`) never auto-enables, so the law
+                // lives here and not in SetScript itself (a runtime-created frame still needs an
+                // explicit `EnableMouse(true)`, like the real client). The keyboard kinds
+                // (`OnChar` = kind 0, `OnKeyDown`/`OnKeyUp` = kind 1) and the wheel kind
+                // (`OnMouseWheel` = kind 3) have separate indexes in the real client that this
+                // engine doesn't model yet — un-modeled beside the SetScript keyboard gap above.
+                const MOUSE_KIND: [&str; 5] = [
+                    "OnEnter",
+                    "OnLeave",
+                    "OnMouseDown",
+                    "OnMouseUp",
+                    "OnDragStart",
+                ];
+                if MOUSE_KIND.iter().any(|k| name.eq_ignore_ascii_case(k)) {
+                    self.call(wrapper, "EnableMouse", true, dbg);
+                }
                 if name.eq_ignore_ascii_case("OnLoad") {
                     onload = Some(func);
                 }

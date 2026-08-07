@@ -97,6 +97,10 @@ struct UnitFeedState {
     /// The last `(PLAYER_XP, PLAYER_NEXT_LEVEL_XP)` pair pushed, for the `PLAYER_XP_UPDATE` trigger —
     /// the XP bar's feed is a player-global (like coinage), not a per-unit-token field.
     last_xp: Option<(u32, u32)>,
+    /// The last `(restState, restPool, resting)` triple pushed, for the `UPDATE_EXHAUSTION` and
+    /// `PLAYER_UPDATE_RESTING` triggers — player-globals like the XP pair (decision 1082). Pushed
+    /// as one snapshot so `GetRestState`/`GetXPExhaustion`/`IsResting` never read it half-updated.
+    last_rest: Option<(u8, u32, bool)>,
     /// The last `(count, banked-target guid)` pair pushed, for the `PLAYER_COMBO_POINTS` trigger —
     /// player-globals (`PLAYER_FIELD_BYTES` byte 1 + `PLAYER_FIELD_COMBO_TARGET`), not per-unit-
     /// token fields. Diffed as a pair because the server writes them as one (decision 0875).
@@ -738,6 +742,31 @@ fn feed_units(
             feed.last_xp = Some((xp, next));
             script.set_player_xp(xp, next);
             script.fire_event("PLAYER_XP_UPDATE", vec![]);
+        }
+    }
+
+    // The rest feed (decision 1082): the `PLAYER_BYTES_2` rest-state byte, the
+    // `PLAYER_REST_STATE_EXPERIENCE` pool and the `PLAYER_FLAGS_RESTING` bit, pushed as one
+    // snapshot. Two watches, the reference's own grain: `UPDATE_EXHAUSTION` on a state-or-pool
+    // change (the exhaustion tick and the bar's rested/normal color both register it),
+    // `PLAYER_UPDATE_RESTING` on the flag toggling (the player frame's zzz). Absent fields read
+    // 0 / not-resting — a fresh descriptor's zero default, which `GetRestState` renders as Normal.
+    if let Some((store, _)) = self_q.iter().next() {
+        let rest = (
+            store.0.player_rest_state().unwrap_or(0),
+            store.0.player_rest_state_experience().unwrap_or(0),
+            store.0.player_is_resting(),
+        );
+        if feed.last_rest != Some(rest) {
+            let prev = feed.last_rest;
+            feed.last_rest = Some(rest);
+            script.set_rest_state(rest.0, rest.1, rest.2);
+            if prev.map(|p| (p.0, p.1)) != Some((rest.0, rest.1)) {
+                script.fire_event("UPDATE_EXHAUSTION", vec![]);
+            }
+            if prev.map(|p| p.2) != Some(rest.2) {
+                script.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+            }
         }
     }
 

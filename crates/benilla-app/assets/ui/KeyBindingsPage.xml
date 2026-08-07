@@ -37,9 +37,12 @@
           Key button is the clearing affordance). ESC with nothing armed never reaches any of
           this: the ladder is the TOGGLEGAMEMENU binding, and the armed seam swallows the press.
         · ART BYTES — the 1.12 MPQ chain only (0978/0985): the capsules wear 1.12's own
-          UIPanelButtonTemplate2 panel-button art (era silver VERIFIED ABSENT — 0997), selection
-          is 1.12's LockHighlight glow; section headers wear the 1.12 collapsible-list dress —
-          the QuestLog's own UI-PlusButton/UI-MinusButton square and gold label.
+          UIPanelButtonTemplate2 panel-button art (the Classic client's silver stretch set —
+          UI-Silver-Button-Up/-Down/-Highlight/-Select, a 9-slice — is VERIFIED ABSENT from
+          the 1.12 chain: 0997, re-pinned and reverted-to-red in 1088 after 1085's gray-dress
+          detour), selection is 1.12's LockHighlight glow; section headers wear the 1.12
+          collapsible-list dress — the QuestLog's own UI-PlusButton/UI-MinusButton square
+          and gold label.
 
         COMMIT LAW (1008, the page's one big behavior change from 0997): binds are LIVE-COMMIT.
         The options window's whole grammar writes live (SetCVar on click, no Okay/Cancel pair),

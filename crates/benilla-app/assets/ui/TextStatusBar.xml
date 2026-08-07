@@ -1,0 +1,150 @@
+<!--
+    The shared status-bar numerals machinery (ref-TextStatusBar.lua + ref-TextStatusBar.xml,
+    transcribed whole — decision 1082). A bar opts in by calling TextStatusBar_Initialize() in its
+    OnLoad (setting `textLockable`), wiring a FontString via SetTextStatusBarText(bar, text), and
+    routing its OnEnter/OnLeave/OnValueChanged through the Show/Hide/Update functions here. The
+    text is "value / max", shown while hovered (a lockShow refcount) or always when the
+    `statusBarText` cvar is "1" ("Status Text" in the options; our GetCVar returns nil for a cvar
+    the engine doesn't carry, which reads as OFF — the 1.12 default).
+
+    First (and so far only) customer: the XP bar (ActionBar.xml). The unit-frame health/mana
+    numerals are the ref's other users of this file — UnitFrames.xml omits them deliberately (its
+    own header note) — so this is the seam they inherit when their slice lands.
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        function TextStatusBar_Initialize()
+            this:RegisterEvent("CVAR_UPDATE")
+            this.lockShow = 0
+        end
+
+        function SetTextStatusBarText(bar, text)
+            if not bar or not text then
+                return
+            end
+            bar.TextString = text
+        end
+
+        function TextStatusBar_OnEvent(cvar, value)
+            if event == "CVAR_UPDATE" and cvar == "STATUS_BAR_TEXT" then
+                if this.TextString then
+                    if value == "1" and this.textLockable then
+                        this.TextString:Show()
+                    elseif this.lockShow == 0 then
+                        this.TextString:Hide()
+                    end
+                end
+            end
+        end
+
+        function TextStatusBar_UpdateTextString(textStatusBar)
+            if not textStatusBar then
+                textStatusBar = this
+            end
+            local string = textStatusBar.TextString
+            if string then
+                local value = textStatusBar:GetValue()
+                local valueMin, valueMax = textStatusBar:GetMinMaxValues()
+                if valueMax > 0 then
+                    textStatusBar:Show()
+                    if value == 0 and textStatusBar.zeroText then
+                        string:SetText(textStatusBar.zeroText)
+                        textStatusBar.isZero = 1
+                        string:Show()
+                    else
+                        textStatusBar.isZero = nil
+                        if textStatusBar.prefix then
+                            string:SetText(textStatusBar.prefix .. " " .. value .. " / " .. valueMax)
+                        else
+                            string:SetText(value .. " / " .. valueMax)
+                        end
+                        if GetCVar("statusBarText") == "1" and textStatusBar.textLockable then
+                            string:Show()
+                        elseif textStatusBar.lockShow > 0 then
+                            string:Show()
+                        else
+                            string:Hide()
+                        end
+                    end
+                else
+                    textStatusBar:Hide()
+                end
+            end
+        end
+
+        function TextStatusBar_OnValueChanged()
+            TextStatusBar_UpdateTextString()
+        end
+
+        function SetTextStatusBarTextPrefix(bar, prefix)
+            if bar and bar.TextString then
+                bar.prefix = prefix
+            end
+        end
+
+        function SetTextStatusBarTextZeroText(bar, zeroText)
+            if bar and bar.TextString then
+                bar.zeroText = zeroText
+            end
+        end
+
+        function ShowTextStatusBarText(bar)
+            if bar and bar.TextString then
+                if not bar.lockShow then
+                    bar.lockShow = 0
+                end
+                bar.TextString:Show()
+                bar.lockShow = bar.lockShow + 1
+            end
+        end
+
+        function HideTextStatusBarText(bar)
+            if bar and bar.TextString then
+                if not bar.lockShow then
+                    bar.lockShow = 0
+                end
+                if bar.lockShow > 0 then
+                    bar.lockShow = bar.lockShow - 1
+                end
+                -- The ref reads `this.isZero` here — a leak of the handler's own frame into a
+                -- helper that otherwise takes `bar`. Equivalent at every call site (each caller
+                -- passes its handler's own frame), so it is written as `bar` — which also keeps
+                -- the function callable outside a handler, where `this` is nil.
+                if bar.lockShow > 0 or bar.isZero == 1 then
+                    bar.TextString:Show()
+                elseif GetCVar("statusBarText") == "1" and bar.textLockable then
+                    bar.TextString:Show()
+                else
+                    bar.TextString:Hide()
+                end
+            end
+        end
+    ]]></Script>
+
+    <!--
+        The opt-in template (ref-TextStatusBar.xml): every script routed through the functions
+        above. One transcription cut, named: the ref OnEnter's TargetFrame arm (re-anchor the unit
+        tooltip under the target frame's bars) references a TextStatusBar-inheriting TargetFrame
+        bar we don't build yet — it is dead until that slice, so it is left out rather than
+        shipped unreachable. A frame that overrides all five scripts (the XP bar does) takes only
+        the StatusBar widget type from inheriting this.
+    -->
+    <StatusBar name="TextStatusBar" virtual="true">
+        <Scripts>
+            <OnLoad>TextStatusBar_Initialize()</OnLoad>
+            <OnEvent>TextStatusBar_OnEvent(arg1, arg2)</OnEvent>
+            <OnEnter>
+                TextStatusBar_UpdateTextString()
+                ShowTextStatusBarText(this)
+                if this.tooltipTitle and GameTooltip_AddNewbieTip then
+                    GameTooltip_AddNewbieTip(this, this.tooltipTitle, 1.0, 1.0, 1.0, this.tooltipText, 1)
+                end
+            </OnEnter>
+            <OnLeave>
+                HideTextStatusBarText(this)
+                if GameTooltip then GameTooltip:Hide() end
+            </OnLeave>
+            <OnValueChanged>TextStatusBar_OnValueChanged()</OnValueChanged>
+        </Scripts>
+    </StatusBar>
+</Ui>

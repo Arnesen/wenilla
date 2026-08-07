@@ -699,6 +699,18 @@ pub(crate) struct Model {
     pub(crate) combo_points: u8,
     pub(crate) combo_target: u64,
 
+    /// The player's rest snapshot, pushed together each frame any part moves
+    /// ([`UiScript::set_rest_state`]) — player-globals like `money`. `rest_state` is the raw
+    /// `PLAYER_BYTES_2` byte 3 (1 = rested, 2 = normal — the server writes it with hysteresis
+    /// off the pool; `0` until the feed lands, read as normal), `rest_pool` the raw
+    /// `PLAYER_REST_STATE_EXPERIENCE` value in **base kill-XP units**, `resting` the
+    /// `PLAYER_FLAGS_RESTING (0x20)` bit (inside an inn/city). `GetRestState`/`GetXPExhaustion`/
+    /// `IsResting` read these; the ×2 display scaling of the pool lives in the `GetXPExhaustion`
+    /// binding, where the real client applies it (decision 1082).
+    pub(crate) rest_state: u8,
+    pub(crate) rest_pool: u32,
+    pub(crate) resting: bool,
+
     /// The paper doll's combat-stats snapshot (`None` until the app's feed lands), the
     /// equipment/ammo slot views, and the model pane's persistent bake yaw — the character-window
     /// seam ([`char_stats`], decision 0208 §3).
@@ -993,6 +1005,9 @@ impl Model {
             player_next_level_xp: 0,
             combo_points: 0,
             combo_target: 0,
+            rest_state: 0,
+            rest_pool: 0,
+            resting: false,
             player_combat_stats: None,
             pet_combat_stats: None,
             inventory_slots: Default::default(),
