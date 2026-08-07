@@ -414,3 +414,64 @@ fn the_macro_expanded_chat_types_are_the_reference_wire_gate() {
         );
     }
 }
+
+/// **Addon chat is ordinary chat with a sentinel language** (decision 1029, B215). 1.12.1 has no
+/// addon opcode and no addon `ChatMsg` type: a hunter addon's version ping reaches the client as a
+/// `CHAT_MSG_PARTY` like any other, and only `language == LANG_ADDON` (`0xFFFFFFFF`) separates it
+/// from someone talking. Miss that field and it renders — which is exactly what printed
+/// `[Party] [Soreen]: Quiver VERSION:3.1.4` in a mixed-client party.
+///
+/// The bytes below are the shape `addon_chat_probe` observed coming back off the **live** vmangos
+/// on both lanes it tested (`cargo run -p benilla-protocol --example addon_chat_probe`): the
+/// reported PARTY lane and the CHANNEL lane. Note what the payload is — `prefix`, a TAB, then the
+/// addon's own encoding — and that the server passes it through untouched (addon chat skips
+/// `SanitizeChatMessage` entirely, vmangos `Handlers/ChatHandler.cpp:49`).
+#[test]
+fn addon_chat_is_an_ordinary_type_with_the_sentinel_language() {
+    // PARTY (the reported case): the two-guid shape, language 0xFFFFFFFF, "Quiver\tVERSION:3.1.4".
+    let body = hx("01ffffffff21000000000000002100000000000000150000005175697665720956455253494f4e3a332e312e340000");
+    match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
+        ServerPacket::MessageChat(m) => {
+            assert_eq!(
+                m.chat_type,
+                messages::CHAT_MSG_PARTY,
+                "no addon-only type byte"
+            );
+            assert_eq!(m.language, messages::LANGUAGE_ADDON);
+            assert_eq!(m.text, "Quiver\tVERSION:3.1.4");
+            assert!(m.is_addon());
+        }
+        _ => panic!("expected MessageChat"),
+    }
+    // The control, same lane, same shape: speech must not be caught by a language-keyed gate. The
+    // live server hands party speech back as LANG_UNIVERSAL (0) — `HandleChatMessageOpcode`
+    // rewrites the tongue for GMs and for two-side-enabled lanes, and the one language it never
+    // rewrites is LANG_ADDON (the whole normalisation block sits in that `if`'s `else`).
+    let body = hx("01000000002100000000000000210000000000000013000000706172747920636f6e74726f6c206c696e650000");
+    match messages::parse_server(messages::opcode::SMSG_MESSAGECHAT, &body).unwrap() {
+        ServerPacket::MessageChat(m) => {
+            assert_eq!(m.chat_type, messages::CHAT_MSG_PARTY);
+            assert_eq!(m.text, "party control line");
+            assert!(!m.is_addon(), "speech must survive the addon gate");
+        }
+        _ => panic!("expected MessageChat"),
+    }
+    // Every tongue a character can actually speak is speech, sentinel or not — the gate is an
+    // equality test against 0xFFFFFFFF, never a range or a "not a known language" test.
+    for lang in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 33] {
+        let m = messages::ChatMessage {
+            chat_type: messages::CHAT_MSG_PARTY,
+            language: lang,
+            sender_guid: 0x21,
+            target_guid: 0x21,
+            sender_name: None,
+            channel: None,
+            text: "hello".into(),
+            chat_tag: 0,
+        };
+        assert!(
+            !m.is_addon(),
+            "language {lang} is a tongue, not the sentinel"
+        );
+    }
+}

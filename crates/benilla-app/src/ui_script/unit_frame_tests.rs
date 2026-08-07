@@ -1197,3 +1197,90 @@ fn the_party_art_paints_over_the_bars() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **What a feigning hunter looks like on the frames** (decision 1022) — the end of the chain the
+/// snapshot starts: `UNIT_DYNFLAG_DEAD` zeroes `UnitHealth`/`UnitMana` while the maxima stay real
+/// (`UnitHealth 0x5174d0` gates, `UnitHealthMax 0x5175b0` does not), so both bars run **empty over
+/// a full-size track** rather than collapsing to a 0/0 nothing, and the target frame's DEAD text
+/// lights on the same `UnitHealth(unit) <= 0` test a corpse trips.
+#[test]
+fn a_feigning_target_paints_empty_bars_and_the_dead_text() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    let hunter = |health: u32, power: u32, dead: bool| {
+        Some(UnitState {
+            exists: true,
+            name: Some("Nazriel".into()),
+            health,
+            max_health: 1500,
+            level: 60,
+            power_type: 0,
+            power,
+            max_power: 900,
+            dead,
+            reaction: 2, // hostile — the frame we would be watching him through
+            ..UnitState::default()
+        })
+    };
+
+    s.set_unit("target", hunter(1200, 300, false));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    let alive: bool = s
+        .eval(
+            r#"
+            local hb, pb = BenillaTargetFrameHealthBar, BenillaTargetFramePowerBar
+            return hb:GetValue() == 1200 and pb:GetValue() == 300
+               and BenillaTargetFrameTextureFrameDeadText:GetText() == ""
+        "#,
+        )
+        .unwrap();
+    assert!(alive, "the control: a live hunter reads live");
+
+    // He feigns. Only the flag moved on the wire — the snapshot turns it into these three.
+    s.set_unit("target", hunter(0, 0, true));
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("target".into())]);
+    let (hp, hmax, mana, mmax): (f64, f64, f64, f64) = (
+        s.eval("return BenillaTargetFrameHealthBar:GetValue()")
+            .unwrap(),
+        s.eval("local _, m = BenillaTargetFrameHealthBar:GetMinMaxValues() return m")
+            .unwrap(),
+        s.eval("return BenillaTargetFramePowerBar:GetValue()")
+            .unwrap(),
+        s.eval("local _, m = BenillaTargetFramePowerBar:GetMinMaxValues() return m")
+            .unwrap(),
+    );
+    assert_eq!((hp, hmax), (0.0, 1500.0), "empty health bar, real track");
+    assert_eq!((mana, mmax), (0.0, 900.0), "empty mana bar, real track");
+    assert!(
+        s.eval::<bool>("return BenillaTargetFramePowerBar:IsVisible()")
+            .unwrap(),
+        "the mana bar empties, it does not disappear — UnitManaMax 0x5177e0 is ungated"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaTargetFrameTextureFrameDeadText:GetText()")
+            .unwrap(),
+        "DEAD",
+        "TargetFrame_CheckDead's UnitHealth(unit) <= 0 test, tripped by the flag"
+    );
+    assert!(
+        s.eval::<bool>(r#"return UnitIsDead("target")"#).unwrap(),
+        "UnitIsDead 0x517ac0's dynflag leg reaches the API too"
+    );
+
+    // He stands back up: the flag clears, and nothing about the body needed restoring.
+    s.set_unit("target", hunter(1200, 300, false));
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("target".into())]);
+    let up: bool = s
+        .eval(
+            r#"
+            return BenillaTargetFrameHealthBar:GetValue() == 1200
+               and BenillaTargetFramePowerBar:GetValue() == 300
+               and BenillaTargetFrameTextureFrameDeadText:GetText() == ""
+               and not UnitIsDead("target")
+        "#,
+        )
+        .unwrap();
+    assert!(up, "the feign ends and the frame reads live again");
+}

@@ -27,6 +27,15 @@
     <Script><![CDATA[
         NUM_SHAPESHIFT_SLOTS = 10
 
+        -- RIGHT-CLICK IS DEAD HERE, and deliberately (decision 1030 reverting 1027). The ref's
+        -- ShapeshiftButtonTemplate registers NOTHING: it inherits ActionButtonTemplate and then
+        -- overrides <OnLoad> with a body that only scales the cooldown, so the
+        -- `RegisterForClicks("LeftButtonUp","RightButtonUp")` that ActionButton_OnLoad gives every
+        -- other action-style button (ref ActionButton.lua:109) is lost and the default
+        -- {LeftButtonUp} stands. A right-press therefore neither flashes the pushed art
+        -- (0x77924b gates that on the same mask) nor casts. It reads like a Blizzard oversight
+        -- and it is the only bar that behaves this way — reproduced anyway, because the director
+        -- checked it against the reference and called faithful.
         function BenillaShapeshiftButton_OnLoad(button, index)
             button.index = index
             button.icon = getglobal(button:GetName() .. "Icon")
@@ -38,7 +47,9 @@
         -- BonusActionBarFrame.xml l.31-38), so the checked ring never follows the click — only
         -- the isActive repaint. That is what keeps a warrior's ACTIVE stance lit through the
         -- click's silent wire no-op (stances never cancel — the 0x4b4963 guard), and a druid
-        -- form/Stealth lit until the server actually confirms the shift-out.
+        -- form/Stealth lit until the server actually confirms the shift-out. The revert is
+        -- unconditional, which is why no click here can leave a lit form dark — unlike the pet
+        -- bar's flat SetChecked(0), which needs a repaint to be correct.
         function BenillaShapeshiftButton_OnClick(button)
             if button:GetChecked() then
                 button:SetChecked(nil)

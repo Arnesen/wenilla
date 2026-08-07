@@ -68,7 +68,11 @@ fn death_vocals(
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
-        let dead = store.0.unit_is_dead();
+        // Reads-dead, not really-dead (decision 1022): the reference's `UNIT_DYNAMIC_FLAGS` watcher
+        // fires `0x623a40(4)` — the death vocal state — on the `UNIT_DYNFLAG_DEAD` set edge
+        // (`0x600543`), the very same call its real death handler makes (`0x6251b0`). So a feign
+        // drops the body with its death cry, exactly like a kill.
+        let dead = store.0.unit_reads_dead();
         let was = known_dead.insert(entity, dead);
         let fresh_death = was == Some(false) && dead;
         if !fresh_death {
@@ -211,8 +215,11 @@ fn creature_body_loops(
             .and_then(|d| voices.0.for_display(d))
             .map(|v| v.loop_sound)
             .unwrap_or(0);
-        let alive =
-            store.0.unit_health().unwrap_or(0) > 0 && store.0.unit_dynamic_flags() & 0x20 == 0;
+        // `0x623800`'s own gate verbatim (`0x623817` health, `0x62381e` the flag): RAW health ≤ 0
+        // — absent = 0, deliberately not `unit_is_dead`'s max-health guard, which would leave a
+        // unit whose snapshot has not landed humming — or `UNIT_DYNFLAG_DEAD` set, the feign-death
+        // bit the reference re-evaluates this very gate on (`0x60053c`, decision 1022).
+        let alive = store.0.unit_health().unwrap_or(0) > 0 && !store.0.unit_reads_dead();
         let desired = if alive { kit } else { 0 };
         // Stop a superseded loop first: death, or a mount transition that changed the row.
         if let Some(&prev) = armed.get(&entity) {

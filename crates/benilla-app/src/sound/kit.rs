@@ -236,6 +236,19 @@ pub(super) fn play_kit_ext(
         }
         None => (None, mixer.play_2d(data)?),
     };
+    // Every actual play, named. The one question the sound subsystem could not answer about itself
+    // was "what just made that noise?" — a report of an unexpected sound had no trace to read, only
+    // a guess at which trigger fired. `RUST_LOG=benilla_app::sound=debug` now answers it.
+    debug!(
+        "sound: play kit {id} ({}) {} {}",
+        kits.catalog.get(id).map_or("?", |k| k.name.as_str()),
+        match category {
+            SoundCategory::Sfx => "sfx",
+            SoundCategory::Music => "music",
+            SoundCategory::Ambience => "ambience",
+        },
+        if pos.is_some() { "3d" } else { "2d" },
+    );
     out.channels.push(ActiveChannel {
         kit: id,
         source,
@@ -295,7 +308,7 @@ pub(super) fn set_source_kit_gain(out: &mut SoundOutput, source: Entity, kit_id:
 pub(super) fn stop_source_kit(out: &mut SoundOutput, source: Entity, kit_id: u32) {
     out.channels.retain_mut(|c| {
         if c.source == Some(source) && c.kit == kit_id {
-            c.handle.stop(mixer::snap());
+            c.handle.stop(mixer::declick());
             false
         } else {
             true
@@ -308,7 +321,7 @@ pub(super) fn stop_source_kit(out: &mut SoundOutput, source: Entity, kit_id: u32
 pub(super) fn stop_source(out: &mut SoundOutput, source: Entity) {
     out.channels.retain_mut(|c| {
         if c.source == Some(source) {
-            c.handle.stop(mixer::snap());
+            c.handle.stop(mixer::declick());
             false
         } else {
             true
@@ -493,14 +506,14 @@ pub(super) fn pump_channels(
             // 2D: only the category slider can move under a live channel.
             ch.handle.set_volume(
                 mixer::amp_to_db(config.category_amp(ch.category) * ch.v * ch.gain),
-                mixer::snap(),
+                mixer::glide(),
             );
             return true;
         };
         let d_sq = math::dist_sq(listener, p);
         if ch.cutoff > 0.0 && !math::audible(d_sq, ch.cutoff) {
             // Beyond cutoff: the client virtualizes; our one-shots just stop (module docs).
-            ch.handle.stop(mixer::snap());
+            ch.handle.stop(mixer::declick());
             return false;
         }
         let amp = config.category_amp(ch.category)
@@ -508,7 +521,10 @@ pub(super) fn pump_channels(
             * ch.gain
             * math::fmod_rolloff(d_sq, ch.min_dist)
             * near_field(d_sq, ch.cutoff);
-        ch.handle.set_volume(mixer::amp_to_db(amp), mixer::snap());
+        // Glides, not snaps (decision 1026): this is the per-frame gain feed, and a step here is a
+        // click. It is also the one that scales — every live channel steps together when a frame
+        // hitches, which is what a "crack fest" under OBS actually was.
+        ch.handle.set_volume(mixer::amp_to_db(amp), mixer::glide());
         true
     });
 }
@@ -573,7 +589,7 @@ pub(super) fn apply_kit_debug(
 fn stop_all_channels(mut out: NonSendMut<SoundOutput>) {
     let n = out.channels.len();
     for ch in &mut out.channels {
-        ch.handle.stop(mixer::snap());
+        ch.handle.stop(mixer::declick());
     }
     out.channels.clear();
     if n > 0 {

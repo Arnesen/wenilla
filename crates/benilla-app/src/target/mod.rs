@@ -62,8 +62,10 @@ pub(crate) use lock::GO_FLAG_LOCKED;
 // nameplate colour gate (`crate::nameplates`), the flash's only two consumers (byte-verified).
 pub(crate) use flash::CombatFlash;
 // The action layer's "attack pressed with no target" request — the nearest-enemy auto-acquire
-// (`scan`) answers it with the same core TAB uses.
-pub(crate) use scan::{can_attack, AttackNearestRequest};
+// (`scan`) answers it with the same core TAB uses. `attack_order_target` + `EnemyScan` are that
+// same core called *synchronously*, by the pet bar's ATTACK arm: the pet's order has to leave in
+// the frame it was pressed carrying the acquired guid, so it cannot go round through a request.
+pub(crate) use scan::{attack_order_target, can_attack, AttackNearestRequest, EnemyScan};
 // The chat layer's by-name selection asks (`/target`, `/assist` — decision 0886), answered by the
 // shared resolver the reference parameterises per caller.
 pub(crate) use by_name::{AssistRequest, TargetByNameRequest};

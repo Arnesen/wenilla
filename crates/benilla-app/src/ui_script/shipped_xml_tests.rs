@@ -54,6 +54,37 @@ fn the_whole_shipped_manifest_loads_without_errors() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Loading the UI makes no sound.** Materializing the shipped manifest is bookkeeping — nothing
+/// has opened, so nothing may be heard (decision 1033).
+///
+/// The defect this pins: a dropdown's `OnLoad` calls `UIDropDownMenu_Initialize`, which —
+/// faithfully, ref `UIDropDownMenu.lua` l.49-52 — *calls the init function immediately*. For the
+/// unit popups that init function reaches `UnitPopup_ShowMenu`, whose last line is
+/// `PlaySound("igMainMenuOpen")`. The ref never gets there at load: `UnitPopup_HideButtons` leaves
+/// nothing but CANCEL shown for a unit that does not exist, tripping the "only one item, don't show
+/// the menu" early-out. Ours was missing that hide for FOLLOW and INSPECT (ref l.304-307/316-319),
+/// so all four party dropdowns rang on startup — four copies of the menu-open tack stacked in one
+/// frame, on the login screen.
+///
+/// Deliberately asserted over the WHOLE manifest rather than the popup: any future window that
+/// plays a sound from a load-time handler is the same bug, and this is where it gets caught. Sound
+/// is on by default now (decision 1026), so a load-time sound is something the director hears on
+/// every single launch.
+#[test]
+fn loading_the_shipped_ui_queues_no_sounds() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    assert_eq!(
+        s.take_sounds(),
+        vec![],
+        "loading the UI played a sound — a load-time handler is ringing; see \
+         UnitPopup_HideButtons / UIDropDownMenu_Initialize (decision 1033)"
+    );
+}
+
 /// **Every `text=` in the shipped UI is answerable against the REAL `GlobalStrings.lua`** — the
 /// tripwire for the defect that put "CREATE_MACROS" across the macro window's title bar (0991).
 ///

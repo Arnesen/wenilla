@@ -129,6 +129,28 @@ pub struct ChatMessage {
     pub chat_tag: u8,
 }
 
+impl ChatMessage {
+    /// Is this line addon traffic rather than speech? (`language == LANG_ADDON`, decision 1029.)
+    ///
+    /// The `language` field is the **whole** discriminator: 1.12.1 has no addon opcode and no addon
+    /// `ChatMsg` type, so an addon broadcast is an ordinary `SMSG_MESSAGECHAT` on whichever lane it
+    /// was sent over — `CHAT_MSG_PARTY` for a hunter addon's version ping, `CHAT_MSG_CHANNEL` for a
+    /// hidden-channel protocol — and only the sentinel language tells it apart. The chat frame must
+    /// drop it; rendering it is what printed `[Party] [Soreen]: Quiver VERSION:3.1.4` (B215).
+    ///
+    /// The `text` of such a line is an addon payload, not a sentence: `prefix`, a TAB, then the
+    /// addon's own encoding. It is deliberately **not** split here — nothing consumes it until
+    /// benilla runs third-party addons, and the split rule belongs with the `CHAT_MSG_ADDON` fire
+    /// that would need it. When that lands, the rule is byte-verified and slightly
+    /// counter-intuitive (wow-re `system/ui/scratch/addon-chat-law.md`): the copy **starts** in the
+    /// prefix buffer and the **first** tab switches it to the message buffer, so text with no tab
+    /// at all yields `prefix = <the whole text>`, `message = ""` — not the reverse — and the event
+    /// still fires. Later tabs are literal payload bytes.
+    pub fn is_addon(&self) -> bool {
+        self.language == super::LANGUAGE_ADDON
+    }
+}
+
 /// Read the length-prefixed string shape (`u32 len` including NUL + bytes).
 fn read_len_string(r: &mut &[u8]) -> io::Result<String> {
     let len = read_u32_le(r)? as usize;

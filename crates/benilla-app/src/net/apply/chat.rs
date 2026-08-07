@@ -29,6 +29,49 @@ pub(super) fn chat(
     net_commands: &NetCommands,
     server_said: &mut MessageWriter<ServerSaidMessage>,
 ) {
+    // The ADDON gate (decision 1029, B215): a line whose `language` is `LANG_ADDON` is not speech
+    // at all — it is one addon talking to another over the party/raid/guild/channel lane, because
+    // 1.12.1 has no addon opcode and no addon `ChatMsg` type. The real client never renders it; it
+    // fires `CHAT_MSG_ADDON` instead. Rendering it printed a partied real-client player's
+    // `[Party] [Soreen]: Quiver VERSION:3.1.4` version ping as ordinary party chat, and a
+    // mixed-client party makes that constant background noise.
+    //
+    // VERIFIED in `WoW.exe` (5875) — wow-re `system/ui/scratch/addon-chat-law.md`: the test is
+    // `0x49a89b`/`0x49a89e cmp edi,-0x1`, in the DISPLAY function `0x49a870`, and every branch of
+    // the addon arm `[0x49a8a7, 0x49a96d)` jumps below the normal render path at `0x49a970` — the
+    // chat frame is unreachable for such a line by construction. The **language field is the whole
+    // discriminator**: the type byte takes no part in the comparison, and the wire parser
+    // `0x49d560` never inspects language at all.
+    //
+    // **Ignore beats addon**, so that check comes first even though it costs a duplicated call:
+    // the reference drops an ignored sender's line at `0x49d72d`, *upstream* of the language test,
+    // so an ignored player's addon traffic fires nothing at all. Unobservable while both paths
+    // merely drop, but it is the precedence that has to already be right the day there is
+    // something to fire. (`CMSG_CHAT_IGNORED` is not owed here — the server refuses `LANG_ADDON`
+    // on WHISPER, the only type that answers on the wire.)
+    //
+    // **One divergence, named:** the reference suppresses *after* name resolution — an uncached
+    // sender parks the line in `__AUPENDINGCHAT__` (`0x49d7ba`) behind `CMSG_NAME_QUERY`, and
+    // `CHAT_MSG_ADDON` fires late from the callback `0x49ccc0`. We drop here instead, ahead of the
+    // name query [`ChatLog::push_wire`] would queue. Invisible today (nothing listens for
+    // `CHAT_MSG_ADDON` — benilla runs FrameXML, not third-party addons) and it saves a name query
+    // per addon sender; when an addon runtime lands, the *fire* must move downstream of the
+    // resolve so its `sender` arg is a name rather than a guid — the drop can stay here.
+    //
+    // The payload rides `debug!` and its own `addon` trace tag rather than vanishing, so
+    // mixed-client traffic stays diagnosable: invisible in chat, never invisible to us.
+    if m.is_addon() {
+        if !social.is_ignored(m.sender_guid) {
+            debug!(
+                "net: addon chat [{:#04x}] from {:#x}: {:?} (suppressed — not a chat line)",
+                m.chat_type, m.sender_guid, m.text
+            );
+            if crate::dbg_trace::enabled() {
+                crate::dbg_trace::line("addon", &format!("[{:#04x}] {:?}", m.chat_type, m.text));
+            }
+        }
+        return;
+    }
     if m.chat_type == 0x0A {
         info!("net: server says — {}", m.text);
         // …and as a message, for the senders that must know whether their command landed. Server
@@ -129,5 +172,85 @@ pub(super) fn played_time(total: u32, level: u32, chat_log: &mut ChatLog) {
             ChatEventKind::System,
             format!("{label}: {d} days, {h} hours, {m} minutes, {sec} seconds"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+    use benilla_protocol::messages::{CHAT_MSG_PARTY, LANGUAGE_ADDON};
+
+    fn a_party_line(language: u32, text: &str) -> ChatMessage {
+        ChatMessage {
+            chat_type: CHAT_MSG_PARTY,
+            language,
+            sender_guid: 0x21,
+            target_guid: 0x21,
+            sender_name: None,
+            channel: None,
+            text: text.to_string(),
+            chat_tag: 0,
+        }
+    }
+
+    /// Run one inbound line through the real arm body and report whether it reached the chat log.
+    fn reaches_the_chat_window(m: ChatMessage) -> bool {
+        let mut world = World::new();
+        world.init_resource::<Messages<ServerSaidMessage>>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(NetCommands(tx));
+        world.insert_resource(SocialState::default());
+        world.insert_resource(ChatLog::default());
+        world
+            .run_system_once(
+                move |mut chat_log: ResMut<ChatLog>,
+                      social: Res<SocialState>,
+                      net_commands: Res<NetCommands>,
+                      mut server_said: MessageWriter<ServerSaidMessage>| {
+                    chat(
+                        m.clone(),
+                        &mut chat_log,
+                        &social,
+                        &net_commands,
+                        &mut server_said,
+                    );
+                },
+            )
+            .unwrap();
+        world.resource::<ChatLog>().pending_len() > 0
+    }
+
+    /// B215 / decision 1029: an addon broadcast never reaches the chat window. It arrives as an
+    /// ordinary `CHAT_MSG_PARTY` — the lane a mixed-client party's hunter addon talks over — so the
+    /// `language` sentinel is the only thing standing between it and a rendered `[Party]` line.
+    #[test]
+    fn addon_chat_never_reaches_the_chat_window() {
+        assert!(
+            !reaches_the_chat_window(a_party_line(LANGUAGE_ADDON, "Quiver\tVERSION:3.1.4")),
+            "an addon broadcast must be dropped before the chat log"
+        );
+        // A payload with no tab is still addon traffic — the gate reads the language field, never
+        // the shape of the text.
+        assert!(!reaches_the_chat_window(a_party_line(
+            LANGUAGE_ADDON,
+            "nopayloadseparator"
+        )));
+        // An empty addon payload likewise: nothing about the text can un-addon a line.
+        assert!(!reaches_the_chat_window(a_party_line(LANGUAGE_ADDON, "")));
+    }
+
+    /// The control the gate must not swallow: real speech on the same lane, in every tongue a
+    /// character can speak. A gate that keyed on "unknown language" instead of the sentinel would
+    /// silently eat Demonic and Gutterspeak.
+    #[test]
+    fn speech_on_the_addon_lane_still_renders() {
+        for language in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 33] {
+            assert!(
+                reaches_the_chat_window(a_party_line(language, "party control line")),
+                "language {language} is a tongue — the line must render"
+            );
+        }
     }
 }

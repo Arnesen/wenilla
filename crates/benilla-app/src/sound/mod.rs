@@ -59,9 +59,13 @@ pub(crate) struct SoundConfig {
     pub enabled: bool,
     /// Quick mute — toggled by the dev chord + `M` (its plane is per-OS: decisions 0585, 0867).
     /// Zeroes the **main track only**: selection and channel life go on untouched, so unmute is
-    /// instant
-    /// (unlike `enabled`, which stops sounds from being picked at all). Starts `true`: the client
-    /// boots silent until deliberately unmuted.
+    /// instant (unlike `enabled`, which stops sounds from being picked at all).
+    ///
+    /// Starts **`false`** — a run you launch has sound, like the real client (decision 1026). It
+    /// used to boot muted so that automated runs stayed quiet, but that made the human's every
+    /// session start with a chord press to hear anything. The quiet belongs on the automated side
+    /// instead: `$WOW_NOSOUND` (agents) and `$WOW_CAPTURE` (the visual harness) open no device at
+    /// all — see [`SoundPlugin`].
     pub muted: bool,
     /// Master volume, linear `[0,1]` (the whole mix, applied on the main track).
     pub master: f32,
@@ -99,7 +103,7 @@ impl Default for SoundConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            muted: true,
+            muted: false,
             master: 1.0,
             sfx: 1.0,
             music: 0.4,
@@ -162,8 +166,21 @@ pub(crate) struct SoundPlugin;
 
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
-        let mixer = if std::env::var_os("WOW_NOSOUND").is_some() {
-            info!("$WOW_NOSOUND set — audio disabled");
+        // Who gets sound: a run a human launched, and only that. The default posture is audible
+        // (decision 1026 — `SoundConfig::muted` starts false), so the silence has to be opt-in by
+        // the *automated* callers, both of which are unattended by construction:
+        //   $WOW_NOSOUND — an agent opening the client to check something (the dispatch recipe in
+        //                  `method.md` sets it; nobody is listening, and a background window that
+        //                  starts playing zone music is pure noise in a shared room).
+        //   $WOW_CAPTURE — the visual harness. A screenshot has no audio track; opening a device
+        //                  per capture is cost and racket for nothing.
+        // Both open no device at all rather than muting one, so an unattended run cannot grab the
+        // audio hardware or hold it against the session the director is actually listening to.
+        let silent = ["WOW_NOSOUND", "WOW_CAPTURE"]
+            .into_iter()
+            .find(|v| std::env::var_os(v).is_some());
+        let mixer = if let Some(var) = silent {
+            info!("${var} set — audio disabled");
             None
         } else {
             match Mixer::new() {
@@ -188,6 +205,7 @@ impl Plugin for SoundPlugin {
                 update_audio_listener.in_set(WorldStage::Stream),
                 toggle_mute,
                 apply_master_volume.after(toggle_mute),
+                poll_mix_health,
             ),
         );
         kit::plugin(app);
@@ -272,5 +290,51 @@ fn apply_master_volume(
     *last = Some(cur);
     if let Some(mixer) = out.mixer.as_mut() {
         mixer.set_master(if cur.0 { cur.1 } else { 0.0 });
+    }
+}
+
+/// How long a window of missed deadlines is summarised into one line. Long enough that a sustained
+/// problem reports steadily instead of flooding, short enough to still correlate with what the
+/// director was doing when they heard it.
+const MIX_HEALTH_REPORT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drain the backend's mix-health queues and report deadline misses (decision 1026).
+///
+/// This is the instrument the crackle investigation had to be run without: kira measures every
+/// callback's `elapsed / allotted` and we were throwing it away, so an underrun — the one failure
+/// that is *definitionally* audible — left no trace anywhere but the director's ear. The queues
+/// are bounded ring buffers, so polling every frame is also what keeps them meaningful.
+///
+/// A miss is not a maybe: `load >= 1.0` means the mix did not finish before the driver needed it,
+/// and the driver played whatever was in the buffer. If this line is quiet during a crackle, the
+/// crackle is *not* an underrun and the next suspect is upstream (a stepped parameter, a starved
+/// stream decoder) — which is exactly the disambiguation we could not make before.
+fn poll_mix_health(
+    mut out: NonSendMut<SoundOutput>,
+    time: Res<Time>,
+    mut since_report: Local<std::time::Duration>,
+    mut last_overruns: Local<u64>,
+) {
+    let Some(mixer) = out.mixer.as_mut() else {
+        return;
+    };
+    let health = mixer.poll_health();
+    *since_report += time.delta();
+    if *since_report < MIX_HEALTH_REPORT {
+        return;
+    }
+    *since_report = std::time::Duration::ZERO;
+    let peak = mixer.take_health_peak();
+    let new_overruns = health.overruns - *last_overruns;
+    *last_overruns = health.overruns;
+    if new_overruns > 0 {
+        warn!(
+            "audio: {new_overruns} missed mix deadline(s) in the last {}s (peak load {:.0}% of \
+             budget) — this is what a crackle sounds like",
+            MIX_HEALTH_REPORT.as_secs(),
+            peak * 100.0,
+        );
+    } else {
+        debug!("audio: mix load peak {:.0}% of budget", peak * 100.0);
     }
 }

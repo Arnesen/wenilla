@@ -104,8 +104,10 @@ impl UiScript {
                         owner_frame.map(|f| &f.kind_state)
                     {
                         let hovered = owner.is_some() && model.mouseover == owner;
-                        let held = owner.is_some()
-                            && model.mouse_down_on.get("LeftButton").copied() == owner;
+                        // ANY registered mouse button holds a button down, not only the left one
+                        // (`0x77924b`, see `button::wants_press_visual`) — which is what makes a
+                        // right-click on a bar or spellbook slot flash its pushed art.
+                        let held = owner.is_some_and(|o| super::button::press_held(&model, o));
                         if !bs.region_visible(rh, hovered, held) {
                             continue;
                         }

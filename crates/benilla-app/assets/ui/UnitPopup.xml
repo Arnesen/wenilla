@@ -322,6 +322,22 @@
                     if ( canCoop == 0 ) then
                         UnitPopupShown[index] = 0;
                     end
+                elseif ( value == "FOLLOW" ) then
+                    -- Ref UnitPopup.lua l.304-307, verbatim: you cannot follow a unit you cannot
+                    -- cooperate with.
+                    if ( canCoop == 0 ) then
+                        UnitPopupShown[index] = 0;
+                    end
+                elseif ( value == "INSPECT" ) then
+                    -- Ref UnitPopup.lua l.316-319, verbatim. These two arms were MISSING
+                    -- (decision 1033): without them FOLLOW and INSPECT stayed shown for *every*
+                    -- unit — including one that does not exist — so PARTY's count never fell to
+                    -- zero, `UnitPopup_ShowMenu`'s "nothing but CANCEL, don't show the menu"
+                    -- early-out never fired at load, and each party dropdown's OnLoad-time
+                    -- initialize ran on to its closing `PlaySound("igMainMenuOpen")`.
+                    if ( canCoop == 0 ) then
+                        UnitPopupShown[index] = 0;
+                    end
                 elseif ( value == "INVITE" ) then
                     if ( dropdownMenu.unit ) then
                         if ( canCoop == 0 ) then

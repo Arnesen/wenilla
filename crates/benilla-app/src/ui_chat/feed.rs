@@ -170,6 +170,13 @@ impl ChatLog {
     pub(crate) fn clear_session(&mut self) {
         self.pending.clear();
     }
+
+    /// How many items are queued — the gates upstream of this log ([`crate::net::apply`]'s addon
+    /// and ignore gates) are "the line never got here at all", so their tests read this.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
 }
 
 /// The ding's chat lines — the reference PLAYER_LEVEL_UP handler transcribed

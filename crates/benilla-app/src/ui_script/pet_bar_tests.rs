@@ -263,6 +263,59 @@ fn clicks_route_through_the_attack_toggle_fork() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **A click takes the ring off; the repaint puts it back** — the contract decision 1021's signal
+/// count depends on, pinned here so it cannot quietly rot.
+///
+/// `PetActionButton_OnClick`'s first line is `this:SetChecked(0)` and it runs for every click, so
+/// the ring always comes off. What puts it back is `PET_BAR_UPDATE` — and the repaint that answers
+/// it must re-derive `SetChecked` from `isActive` per slot, **not** diff the views, or a press that
+/// changed no state would have no way home.
+///
+/// The reference signals that repaint from the state writes (`0x4bc940`/`0x4bc960`) and **not**
+/// from a `TogglePetAutocast` it refuses (`0x4bcbf7` — a token is not autocastable, i.e. every
+/// right-click on Follow, Stay or a reaction). So on a right-click the ring genuinely stays off
+/// until something else repaints the bar. That is the reference's own quirk, checked there by the
+/// director; decision 1027 diverged from it and 1030 put it back.
+#[test]
+fn a_click_drops_the_ring_and_the_repaint_restores_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+
+    let checked = |s: &UiScript| {
+        s.eval::<bool>("return BenillaPetActionButton1:GetChecked()")
+            .unwrap()
+    };
+
+    // Button 1 (Attack, lit) spans x[72,102] y[56,86] ⇒ centre (87,71). Both mouse buttons take
+    // the ring off — the CheckButton toggles itself, then `SetChecked(0)` lands it at 0 either way.
+    for button in ["RightButton", "LeftButton"] {
+        s.set_pet_actions(true, true, true, hunter_slots());
+        s.fire_event("PET_BAR_UPDATE", vec![]);
+        s.resolve();
+        assert!(checked(&s), "{button}: the Attack token starts lit");
+
+        s.mouse_button(87.0, 71.0, button, true);
+        s.mouse_button(87.0, 71.0, button, false);
+        assert!(
+            !checked(&s),
+            "{button}: the ref's own SetChecked(0), reproduced"
+        );
+
+        // A repaint carrying the very SAME views restores it — the property the signal count buys.
+        s.fire_event("PET_BAR_UPDATE", vec![]);
+        assert!(
+            checked(&s),
+            "{button}: an unchanged repaint must re-light, not diff to a no-op"
+        );
+    }
+    let _ = s.take_pet_actions();
+    let _ = s.take_pet_stop_attacks();
+    let _ = s.take_pet_autocast_toggles();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// A DISABLED bar still draws — every icon desaturated, nothing hidden. That pair
 /// (`PetHasActionBar` true, `GetPetActionsUsable` false) is what a feared or mind-controlled pet
 /// looks like, and collapsing it to "hide the bar" would lose the state entirely.

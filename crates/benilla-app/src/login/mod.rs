@@ -64,6 +64,7 @@ impl Plugin for LoginPlugin {
                     (
                         screen::materialize_screen,
                         login_input,
+                        tick_login_caret,
                         screen::refresh_boxes,
                         screen::refresh_checkbox,
                         drive_dialog,
@@ -387,6 +388,9 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     };
     form.account.set_text(&saved);
     form.password.set_text("");
+    // `SetFocus` starts the caret solid — the screen never opens mid-blink-off (`set_text` alone
+    // wouldn't do it: it no-ops when the saved name is already in the box).
+    form.focused().reset_blink();
     preview.scene = Some(GlueScene::MainMenu);
     preview.look = None;
     preview.yaw = 0.0;
@@ -428,8 +432,16 @@ fn login_input(
             continue;
         }
         match action {
-            LoginAction::FocusAccount => form.focus = Field::Account,
-            LoginAction::FocusPassword => form.focus = Field::Password,
+            // A click takes the focus the same way TAB does — including the solid caret the fresh
+            // focus starts on, so the box you just clicked never answers with a blank half-period.
+            LoginAction::FocusAccount => {
+                form.focus = Field::Account;
+                form.focused().reset_blink();
+            }
+            LoginAction::FocusPassword => {
+                form.focus = Field::Password;
+                form.focused().reset_blink();
+            }
             LoginAction::Login => do_login = true,
             LoginAction::Quit => do_quit = true,
             LoginAction::ToggleSave => {
@@ -516,6 +528,21 @@ fn login_input(
         sounds.write(GlueSound("gsTitleQuit"));
         commands.insert_resource(QuitArm(Some(time.elapsed_secs() + QUIT_GRACE_SECS)));
     }
+}
+
+/// The caret's clock. Exactly one box owns the keyboard, so the focused one is the one that blinks
+/// — on the shared law's 0.5 s period, so the login caret keeps time with the create-name box, the
+/// delete dialog and the chat box (decision 0704). It keeps blinking under an open dialog: a dialog
+/// eats the keys, not the clock.
+///
+/// Its own system, not a line inside [`login_input`]: a blink is a clock, not input, and as a
+/// system it can be run on its own in a test — which is the only thing that can catch this tick
+/// going missing again. It went missing once already, and nothing but an eye noticed: the box's
+/// `caret_shown` simply never left its `true` default, so the login caret was the one glue caret
+/// that sat solid.
+fn tick_login_caret(mut form: ResMut<LoginForm>, time: Res<Time>) {
+    let dt = time.delta_secs();
+    textinput::tick_caret(form.focused(), true, dt);
 }
 
 /// Editing the account box away from the saved name clears the save + unchecks (the ref's
@@ -793,5 +820,36 @@ mod tests {
         save_account_to(&base, "");
         assert_eq!(load_saved_account_from(&base), "");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The clock system toggles the FOCUSED box on the shared 0.5 s period and leaves the other
+    /// one alone. It guards the system's behaviour, not its registration (that is the one
+    /// `tick_login_caret` line in [`LoginPlugin`], and a login screen with no clock is
+    /// indistinguishable from one whose caret is in its ON half forever — `caret_shown` defaults
+    /// to `true`, which is exactly how this went unnoticed).
+    #[test]
+    fn the_focused_box_caret_blinks() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<LoginForm>()
+            .add_systems(Update, tick_login_caret);
+
+        let past_the_period = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(600));
+            app.update();
+            app.world().resource::<LoginForm>().account.caret_shown
+        };
+
+        // Account has the focus by default; one period each way is on → off → on.
+        assert!(!past_the_period(&mut app), "the first period turns it off");
+        assert!(past_the_period(&mut app), "the second turns it back on");
+        // The box that doesn't own the keyboard never accumulates, so switching focus to it lands
+        // on a solid caret rather than wherever its own clock would have drifted to.
+        assert_eq!(
+            app.world().resource::<LoginForm>().password.blink_accum,
+            0.0
+        );
     }
 }

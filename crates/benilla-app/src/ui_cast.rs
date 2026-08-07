@@ -185,9 +185,18 @@ impl PendingCast {
 /// (`6e4d43`: debug-log, `xor al,al`, no CMSG, no error): 1.12 has no re-press-to-unqueue. The
 /// real un-queue is the StopAttack chain (`0x5ecac0` → `CancelQueuedCast 0x6e6f30`, sending
 /// `CMSG_ATTACKSTOP` + `CMSG_CANCEL_CAST`), reached by /stopattack, the Attack-button toggle,
-/// target change/death, mount, interact — never movement. benilla doesn't run that chain yet
-/// (we have no attack-toggle-off or stop-attack-on-target-change law) — a named follow-up; the
-/// wire still resolves the queue either way.
+/// **an auto-repeat press** (`0x6e5976`), target change/death, mount, interact — never movement.
+/// That chain is [`crate::creature_anim::stop_attack_local`], and the auto-repeat arm inside
+/// [`crate::ui_action::cast_send`]'s commit runs it whole: starting Auto Shot un-queues the
+/// strike, which is what darkens its checked ring. **The two target-side StopAttack senders do
+/// not route through it yet** — `target::scan`'s `commit` (the engaged-switch law) and
+/// `target::click`'s `clear` still emit a bare `CMSG_ATTACKSTOP`, so a target switch or a
+/// click-off leaves the queue standing where the reference cancels it. The same two sites owe a
+/// second edge the 2026-08-06 §5 pinned: a mid-melee target switch reaches `Attack 0x5ecb70`
+/// (`SetSelection 0x493540` @ `0x4938c8`, gated on `0x60ecb0` already true) and therefore runs
+/// its `0x5ecd8c` **auto-repeat cancel** — refuting `nocked-ammo-cancel.md`'s direct-callers-only
+/// census. Threading the seam through those eight callers is the named follow-up; the wire still
+/// resolves the queue either way.
 #[derive(Resource, Default)]
 pub(crate) struct QueuedMeleeSpell(Option<u32>);
 

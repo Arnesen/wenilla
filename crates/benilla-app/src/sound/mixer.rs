@@ -17,6 +17,8 @@
 
 use anyhow::{Context, Result};
 use bevy::prelude::*;
+use cpal::traits::{DeviceTrait, HostTrait};
+use kira::backend::cpal::CpalBackendSettings;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::listener::ListenerHandle;
 use kira::sound::streaming::StreamingSoundData;
@@ -26,20 +28,65 @@ use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Mix, Tw
 
 pub(crate) use benilla_formats::SoundProvider;
 
-// Types crossing the seam (consumers hold handles to stop/steer a playing channel; dropping
-// a *sound* handle does not stop the sound, dropping a spatial *track* handle unloads its track).
+// Types crossing the seam (consumers hold handles to stop/steer a playing channel; dropping a
+// *sound* handle does not stop the sound, and dropping a spatial *track* handle marks its track
+// for removal — which lands once the track's sounds finish, see `play_3d`'s
+// `persist_until_sounds_finish`, so a fade-then-drop still gets to fade).
 pub(crate) use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 pub(crate) use kira::sound::streaming::StreamingSoundHandle;
 pub(crate) use kira::track::SpatialTrackHandle;
 
-/// An immediate (zero-duration) parameter change — the per-frame sync tween. kira requires a tween
-/// on every setter; the WoW-side ramps (volume rates, crossfades) are our own math updated per
-/// frame, so the backend must not add smoothing of its own on top.
+/// An immediate (zero-duration) parameter change. kira requires a tween on every setter; the
+/// WoW-side ramps (volume rates, crossfades) are our own math updated per frame, so the backend
+/// must not add smoothing of its own on top. Use this for a change that is genuinely a *step* —
+/// a reverb preset switch (verified instant, `benilla-pins.md` A2), an initial value. For the
+/// **per-frame volume feed** use [`glide`]: a step there is an audible click, not fidelity.
 pub(crate) fn snap() -> Tween {
     Tween {
         duration: std::time::Duration::ZERO,
         ..Default::default()
     }
+}
+
+/// The per-frame **volume** feed's reconstruction ramp (decision 1026).
+///
+/// kira applies a track's volume as **one constant gain per internal chunk** — it updates the
+/// parameter once per `internal_buffer_size` (128 frames ≈ 2.9 ms) block and multiplies the whole
+/// block by it (`track/sub.rs::process`, `backend/renderer.rs`'s `chunks_mut`). Spatial *position*
+/// is interpolated across the chunk (`time_in_chunk`); volume is not. So a [`snap`] on the
+/// per-frame gain feed is a hard step in the waveform — a click whose loudness scales with the
+/// size of the jump.
+///
+/// At a steady 60 fps the per-frame jumps are small and the clicks stay under the noise floor,
+/// which is why this was invisible for so long. The moment frame pacing goes unstable — a
+/// background build, an OBS encode, a macOS Space switch (decision 0609's world) — the jumps get
+/// big and every live channel steps at once: the reported "crack fest". The frame rate was never
+/// supposed to be audible.
+///
+/// So the feed glides instead of stepping: each frame starts a fresh linear ramp toward the value
+/// we just computed. This is **not** backend smoothing layered on WoW's ramps — it is
+/// reconstruction of a signal we only sample at frame rate. WoW's owned envelope math upstream is
+/// untouched; a ramp shorter than one frame at 60 fps cannot smear a multi-second crossfade, and
+/// on a long frame it simply completes early and holds.
+pub(crate) fn glide() -> Tween {
+    Tween {
+        duration: std::time::Duration::from_millis(GLIDE_MS),
+        ..Default::default()
+    }
+}
+
+/// [`glide`]'s ramp, and the de-click fade on a force-stop. Just under one 60 fps frame (16.7 ms):
+/// long enough to bridge kira's 2.9 ms gain blocks, short enough that a stop still reads as
+/// immediate and a live parameter never audibly lags its source.
+const GLIDE_MS: u64 = 15;
+
+/// The de-click fade for a **force-stop** — a `stop()` that cuts a channel which may still be at
+/// full amplitude (a tracked loop reaped on despawn, the leave-world blanket stop). Ending a
+/// non-zero waveform at an arbitrary sample is a step to zero: the same click [`glide`] fixes on
+/// the gain feed. One `GLIDE_MS` ramp removes it without moving the stop in time. The fade
+/// survives dropping the handle — `stop_fade_ramps_after_handle_drop` pins exactly that.
+pub(crate) fn declick() -> Tween {
+    glide()
 }
 
 /// A linear fade over `ms` — kira's default easing, matching the client's constant per-tick volume
@@ -72,6 +119,8 @@ pub(crate) fn amp_to_db(amp: f32) -> Decibels {
 pub(crate) struct Mixer {
     manager: AudioManager<DefaultBackend>,
     listener: ListenerHandle,
+    /// Rolling mix-health counters — the crackle instrument ([`Mixer::poll_health`]).
+    health: MixHealth,
     /// The zone-reverb send track (wet-only Freeverb). Every 3D world track routes into it at
     /// build; this handle's volume is the zone wet level (SILENCE = reverb off).
     reverb_send: SendTrackHandle,
@@ -83,7 +132,10 @@ impl Mixer {
     /// Open the default audio device. Fails cleanly when there is none (headless/CI) — the caller
     /// runs silent with `None` (mirrors the client's `-nosound` gate).
     pub(crate) fn new() -> Result<Self> {
-        let settings = AudioManagerSettings::<DefaultBackend>::default();
+        let settings = AudioManagerSettings::<DefaultBackend> {
+            backend_settings: backend_settings(),
+            ..Default::default()
+        };
         let mut manager = AudioManager::<DefaultBackend>::new(settings)
             .map_err(|e| anyhow::anyhow!("audio device init: {e}"))?;
         // The zone-reverb send: wet-only (the dry path stays on the source tracks), silent until
@@ -118,6 +170,7 @@ impl Mixer {
         Ok(Self {
             manager,
             listener,
+            health: MixHealth::default(),
             reverb_send,
             reverb,
         })
@@ -170,9 +223,13 @@ impl Mixer {
         );
     }
 
-    /// Master volume as linear amplitude (the whole mix — every track routes to main).
+    /// Master volume as linear amplitude (the whole mix — every track routes to main). Fed every
+    /// frame, so it [`glide`]s: a step on the *main* track clicks the entire mix at once, and this
+    /// is the knob a slider drag and the mute toggle both move.
     pub(crate) fn set_master(&mut self, amp: f32) {
-        self.manager.main_track().set_volume(amp_to_db(amp), snap());
+        self.manager
+            .main_track()
+            .set_volume(amp_to_db(amp), glide());
     }
 
     /// Play a decoded (short SFX) sound on the main track — the 2D/UI path.
@@ -204,6 +261,16 @@ impl Mixer {
                 // volume, so per-zone reverb is one knob, not a per-track update.
                 SpatialTrackBuilder::new()
                     .attenuation_function(None)
+                    // Outlive the handle by exactly as long as the sound needs (decision 1026).
+                    // kira defaults this to `false` (`track/sub/spatial_builder.rs`), which makes
+                    // `should_be_removed()` fire the instant the handle drops — so a channel that
+                    // is stopped-with-a-fade and then dropped in the same breath (every reaper
+                    // here: cutoff cull, despawn, leave-world) loses its track mid-ramp and gets
+                    // cut anyway. `declick()` would have been a no-op on all 3D audio. With this
+                    // set, the drop only *marks* the track and kira keeps it until its sounds
+                    // finish. Cannot leak: every path that drops a channel stops its sound first,
+                    // and a stopped sound finishes.
+                    .persist_until_sounds_finish(true)
                     .with_send(&self.reverb_send, Decibels(0.0)),
             )
             .map_err(|e| anyhow::anyhow!("spatial track alloc: {e}"))?;
@@ -223,6 +290,98 @@ impl Mixer {
         self.manager
             .play(data)
             .map_err(|e| anyhow::anyhow!("play stream: {e}"))
+    }
+}
+
+/// The device buffer we ask for, in frames — the underrun margin (decision 1026).
+///
+/// kira's cpal backend takes `device.default_output_config().config()` when handed no config of
+/// its own, and that carries `BufferSize::Default` — whatever CoreAudio happens to hand us. On
+/// macOS the buffer size is a *shared, per-device* property, so another app (an OBS capture, a
+/// conferencing tool) can drag it down under us and we would never know. Naming it puts a floor
+/// under the callback's deadline instead of inheriting someone else's.
+///
+/// 1024 frames is ~21 ms at 48 kHz. Latency that size is inaudible for WoW — nothing here is
+/// rhythm-critical, the shortest UI click is an order of magnitude longer — and it buys ~4× the
+/// deadline of a 256-frame buffer for the mix to finish in.
+const TARGET_BUFFER_FRAMES: u32 = 1024;
+
+/// Build the cpal backend settings: kira's default device, our explicit buffer size.
+///
+/// `device` stays `None` on purpose — that keeps kira's own default-device selection *and* its
+/// disconnect/restart handling (`custom_device = false`). We override only the config. Every
+/// failure path falls back to kira's defaults, so a machine we can't probe still opens the device
+/// exactly as before; [`Mixer::new`]'s caller already tolerates no-device.
+fn backend_settings() -> CpalBackendSettings {
+    let fallback = CpalBackendSettings::default();
+    let Some(device) = cpal::default_host().default_output_device() else {
+        return fallback;
+    };
+    let Ok(supported) = device.default_output_config() else {
+        return fallback;
+    };
+    // Clamp into what the device will actually accept; `Unknown` means cpal can't tell us the
+    // range, and asking for a size outside it fails the stream build — so leave those alone.
+    let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size() else {
+        info!("audio: device reports no buffer-size range — leaving it to the driver");
+        return fallback;
+    };
+    let frames = TARGET_BUFFER_FRAMES.clamp(*min, *max);
+    let mut config = supported.config();
+    config.buffer_size = cpal::BufferSize::Fixed(frames);
+    info!(
+        "audio: {} Hz, {} ch, buffer {frames} frames (~{:.1} ms)",
+        config.sample_rate,
+        config.channels,
+        f64::from(frames) / f64::from(config.sample_rate) * 1000.0,
+    );
+    CpalBackendSettings {
+        config: Some(config),
+        ..fallback
+    }
+}
+
+/// The mix-health counters — what a crackle actually *is*, in numbers (decision 1026).
+///
+/// Before this, a crackle was invisible to us: the only report was the director's ear, and we
+/// could not tell a missed callback deadline from a stepped parameter from a starved decoder.
+/// kira hands us the measurement and we were not reading it.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct MixHealth {
+    /// The most recent callback load: elapsed / allotted, where allotted is `frames / sample_rate`
+    /// (kira's `pop_cpu_usage`). **`>= 1.0` means the mix missed its deadline** — that is an
+    /// underrun, and an underrun is audible as a crack.
+    pub(crate) load: f32,
+    /// Worst load seen since the last [`Mixer::take_health_peak`].
+    pub(crate) peak_load: f32,
+    /// Callbacks at/over the deadline, since launch.
+    pub(crate) overruns: u64,
+    /// cpal stream errors kira handled, since launch (device loss, `BufferUnderrun`).
+    pub(crate) stream_errors: u64,
+}
+
+impl Mixer {
+    /// Drain the backend's health queues. Cheap and non-blocking (two ring-buffer pops per
+    /// frame); the queues are bounded, so *not* draining them is what loses information.
+    pub(crate) fn poll_health(&mut self) -> MixHealth {
+        let backend = self.manager.backend_mut();
+        while let Some(load) = backend.pop_cpu_usage() {
+            self.health.load = load;
+            self.health.peak_load = self.health.peak_load.max(load);
+            if load >= 1.0 {
+                self.health.overruns += 1;
+            }
+        }
+        while let Some(err) = backend.pop_error() {
+            self.health.stream_errors += 1;
+            warn!("audio: stream error — {err}");
+        }
+        self.health
+    }
+
+    /// Read and reset the peak — so a report covers the window since the last one, not all time.
+    pub(crate) fn take_health_peak(&mut self) -> f32 {
+        std::mem::take(&mut self.health.peak_load)
     }
 }
 

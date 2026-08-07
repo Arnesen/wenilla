@@ -87,6 +87,70 @@ fn button_state_textures_switch_with_interaction() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// **A right-click lights a button up too** — the director's report, and `0x77924b`'s law.
+///
+/// `CButton::OnMouseDown` gates the PushedTexture on `[this+0x330] & (m | m << 8)`: the button
+/// registered for that mouse button in **either** variant. Not on the click firing, not on the
+/// handler doing anything — which is why right-clicking an action, spellbook or pet slot flashes,
+/// while right-clicking a default `LeftButtonUp` button does not.
+#[test]
+fn any_registered_mouse_button_shows_the_pushed_texture() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local function slot(name, x)
+            local b = CreateFrame("Button", name)
+            b:SetPoint("BOTTOMLEFT", x, 0); b:SetSize(100, 100)
+            b:SetNormalTexture("Interface\\" .. name .. "N.blp")
+            b:SetPushedTexture("Interface\\" .. name .. "P.blp")
+            return b
+        end
+        -- A bar slot: both buttons registered, exactly as ActionButton/PetActionButton do.
+        slot("Bar", 0):RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        -- A plain button: the default set, {LeftButtonUp}.
+        slot("Plain", 200)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let shows = |s: &UiScript, path: &str| {
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == path))
+    };
+
+    // The bar slot lights under EITHER button.
+    for button in ["LeftButton", "RightButton"] {
+        s.mouse_move(50.0, 50.0);
+        s.mouse_button(50.0, 50.0, button, true);
+        assert!(
+            shows(&s, "Interface\\BarP.blp") && !shows(&s, "Interface\\BarN.blp"),
+            "{button} down must show the pushed art"
+        );
+        assert_eq!(
+            s.eval::<String>("return Bar:GetButtonState()").unwrap(),
+            "PUSHED",
+            "and the state variable the engine writes is one variable ({button})"
+        );
+        s.mouse_button(50.0, 50.0, button, false);
+        assert!(shows(&s, "Interface\\BarN.blp"), "the release restores it");
+    }
+
+    // The plain button lights under the left only — `0x77924b` is a real gate, not a formality.
+    s.mouse_move(250.0, 50.0);
+    s.mouse_button(250.0, 50.0, "RightButton", true);
+    assert!(
+        shows(&s, "Interface\\PlainN.blp") && !shows(&s, "Interface\\PlainP.blp"),
+        "an unregistered button must not light"
+    );
+    s.mouse_button(250.0, 50.0, "RightButton", false);
+    s.mouse_button(250.0, 50.0, "LeftButton", true);
+    assert!(shows(&s, "Interface\\PlainP.blp"));
+    s.mouse_button(250.0, 50.0, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// `SetButtonState`/`GetButtonState` (`0x780270`/`0x780180`) — the scripted press state the ref's
 /// `ActionButtonDown/Up` keybind pair drives: PUSHED shows the pushed texture with no mouse
 /// involved, NORMAL restores, unknown states error, and a disabled button answers DISABLED.

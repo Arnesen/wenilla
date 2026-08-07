@@ -459,3 +459,121 @@ fn dynamicobject_fields_read_the_live_blizzard_capture() {
         None
     );
 }
+
+/// **Feign death is one bit, and the client reads it everywhere it reads health** (decision 1022).
+/// `UNIT_DYNFLAG_DEAD` leaves `UNIT_FIELD_HEALTH` alone — vmangos `Unit::SetFeignDeath` only sets
+/// the flag — so every predicate that keys on the raw field must stay FALSE while every one that
+/// keys on how the unit *reads* must flip. The byte law being transcribed: `UnitHealth 0x5174d0`
+/// and `UnitMana 0x517670` answer 0 under the flag, their `*Max` siblings (`0x5175b0`/`0x5177e0`)
+/// have no such gate, and `0x605f90` is the shared reads-dead triple.
+#[test]
+fn feign_death_reads_dead_without_touching_the_raw_health_field() {
+    const MANA: u8 = 0;
+    let unit = |pairs: &[(u16, u32)]| ObjectFields::from_pairs(pairs);
+    let alive = unit(&[
+        (FIELD_UNIT_HEALTH, 1200),
+        (FIELD_UNIT_MAXHEALTH, 1500),
+        (FIELD_UNIT_POWER1, 300),
+        (FIELD_UNIT_MAXPOWER1, 900),
+    ]);
+    let feigning = unit(&[
+        (FIELD_UNIT_HEALTH, 1200),
+        (FIELD_UNIT_MAXHEALTH, 1500),
+        (FIELD_UNIT_POWER1, 300),
+        (FIELD_UNIT_MAXPOWER1, 900),
+        (FIELD_UNIT_DYNAMIC_FLAGS, 0x20),
+    ]);
+    let corpse = unit(&[(FIELD_UNIT_HEALTH, 0), (FIELD_UNIT_MAXHEALTH, 1500)]);
+
+    // The raw field predicate is untouched by the flag — the death arc, loot and the corpse never
+    // fire for a feign.
+    assert!(!alive.unit_is_dead());
+    assert!(!feigning.unit_is_dead(), "feign leaves HEALTH alone");
+    assert!(corpse.unit_is_dead());
+    assert_eq!(feigning.unit_health(), Some(1200), "the raw field survives");
+
+    // …and the reads-dead predicate flips for both, plus the stand-state leg.
+    assert!(!alive.unit_reads_dead());
+    assert!(feigning.unit_reads_dead(), "0x605f9d — the dynflag leg");
+    assert!(corpse.unit_reads_dead());
+    assert!(
+        unit(&[
+            (FIELD_UNIT_HEALTH, 1200),
+            (FIELD_UNIT_MAXHEALTH, 1500),
+            (FIELD_UNIT_BYTES_1, 7),
+        ])
+        .unit_reads_dead(),
+        "0x605faa — stand state 7 (inert against vmangos, kept as the reference has it)"
+    );
+
+    // The UI getters: current goes to zero, the maxima do not — that is what makes the bar render
+    // 0/max (empty) instead of vanishing.
+    assert_eq!(alive.unit_shown_health(), Some(1200));
+    assert_eq!(feigning.unit_shown_health(), Some(0));
+    assert_eq!(feigning.unit_max_health(), Some(1500));
+    assert_eq!(alive.unit_shown_power(MANA), Some(300));
+    assert_eq!(feigning.unit_shown_power(MANA), Some(0));
+    assert_eq!(feigning.unit_max_power(MANA), Some(900));
+    // Out-of-range power slots stay nil under the flag, exactly as the ungated reader has them.
+    assert_eq!(feigning.unit_shown_power(5), None);
+    // An empty store is not a feigning one: no flag, no zeroing, and no invented health.
+    assert!(!ObjectFields::default().unit_reads_dead());
+    assert_eq!(ObjectFields::default().unit_shown_health(), None);
+}
+
+/// **The raw→display power divide** (decision 1034, wow-re `feign-death-dyndead.md` §3): the
+/// reference's `UnitMana`/`UnitManaMax` divide by `0x6e7130`'s table at `0x86f978` —
+/// `{1, 10, 1, 1, 1000}`. vmangos ships rage max **1000** and pet happiness max **1050000**
+/// (`GetCreatePowers`), which through that divide are the 100 and 1050 a real client shows. The
+/// RAW accessors must stay raw: the pet happiness bucket thresholds compare on the wire scale.
+#[test]
+fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
+    const RAGE: u8 = 1;
+    const HAPPINESS: u8 = 4;
+    const MANA: u8 = 0;
+    let warrior = ObjectFields::from_pairs(&[
+        (FIELD_UNIT_POWER1 + u16::from(RAGE), 350),
+        (FIELD_UNIT_MAXPOWER1 + u16::from(RAGE), 1000),
+    ]);
+    assert_eq!(
+        warrior.unit_power(RAGE),
+        Some(350),
+        "the wire value, untouched"
+    );
+    assert_eq!(warrior.unit_shown_power(RAGE), Some(35));
+    assert_eq!(warrior.unit_shown_max_power(RAGE), Some(100), "not 1000");
+
+    let pet = ObjectFields::from_pairs(&[
+        (FIELD_UNIT_POWER1 + u16::from(HAPPINESS), 1_020_000),
+        (FIELD_UNIT_MAXPOWER1 + u16::from(HAPPINESS), 1_050_000),
+    ]);
+    assert_eq!(
+        pet.unit_power(HAPPINESS),
+        Some(1_020_000),
+        "raw — the happiness bucket thresholds are on this scale"
+    );
+    assert_eq!(pet.unit_shown_power(HAPPINESS), Some(1020));
+    assert_eq!(pet.unit_shown_max_power(HAPPINESS), Some(1050));
+
+    // Mana/focus/energy divide by 1 — the shown and raw readers agree.
+    let caster = ObjectFields::from_pairs(&[
+        (FIELD_UNIT_POWER1 + u16::from(MANA), 4200),
+        (FIELD_UNIT_MAXPOWER1 + u16::from(MANA), 8000),
+    ]);
+    assert_eq!(caster.unit_shown_power(MANA), caster.unit_power(MANA));
+    assert_eq!(
+        caster.unit_shown_max_power(MANA),
+        caster.unit_max_power(MANA)
+    );
+    // Absent stays nil rather than becoming a divided zero.
+    assert_eq!(caster.unit_shown_power(RAGE), None);
+    assert_eq!(caster.unit_shown_max_power(RAGE), None);
+    // The dead gate still wins over the divide, and only for the current value.
+    let feigning_warrior = ObjectFields::from_pairs(&[
+        (FIELD_UNIT_POWER1 + u16::from(RAGE), 350),
+        (FIELD_UNIT_MAXPOWER1 + u16::from(RAGE), 1000),
+        (FIELD_UNIT_DYNAMIC_FLAGS, 0x20),
+    ]);
+    assert_eq!(feigning_warrior.unit_shown_power(RAGE), Some(0));
+    assert_eq!(feigning_warrior.unit_shown_max_power(RAGE), Some(100));
+}

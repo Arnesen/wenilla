@@ -527,7 +527,7 @@ fn send_spell_cast(
         }
     }
     if let Some(d) = def {
-        if let Ok((e, _)) = self_player.single() {
+        if let Ok((e, engaged)) = self_player.single() {
             if d.ranged_attack() {
                 sheath.write(crate::creature_anim::SheathRequest {
                     entity: e,
@@ -540,6 +540,17 @@ fn send_spell_cast(
                 // The live autorepeat key (`0xceac30 = SpellRec+0x00` at `0x6e5947`) — what the
                 // button's flash/checked state reads until CANCEL_AUTO_REPEAT clears it.
                 auto_repeat.0 = Some(spell_id);
+                // The commit's own **StopAttack** (`0x6e5976`, guarded by nothing but "the caster
+                // is the active player" — the inlined guid compare at `0x6e5957`–`0x6e5972` that
+                // `0x5ecac0` then re-does): starting an auto-repeat ends the melee auto-attack and
+                // takes the queued on-next-swing strike down with it. This is the end at which
+                // the client's melee ⟷ auto-repeat exclusion is actually enforced (decision
+                // 1029): the attack-start tail below cancels a repeat only on a press that
+                // *starts* the swing, so this call is what keeps "swinging and auto-shooting at
+                // once" unreachable — and it is why the reference un-checks both the Attack
+                // button and a queued Raptor Strike the instant Auto Shot starts. The arm above
+                // runs first, so the repeat we just started is never the thing this cancels.
+                crate::creature_anim::stop_attack_local(engaged, queued_melee, commands);
             }
         }
     }
@@ -588,6 +599,17 @@ fn send_spell_cast(
     if let (Some(d), Some(guid)) = (def, target) {
         if d.initiates_auto_attack() {
             if let Ok((e, engaged)) = self_player.single() {
+                // **`!engaged` is the TAIL's own gate, not StartAttack's** — the distinction cost
+                // decision 1028 a wrong half. `Attack 0x5ecb70`'s already-attacking test at
+                // `0x5eccda` really does skip only the `CMSG_ATTACKSWING` send, jumping *into*
+                // the tail at `0x5ecd78` whose `0x5ecd8c` cancels the auto-repeat — but a cast
+                // press never reaches that jump. TryCast's tail gates the CALL: `6e51cb call
+                // 0x60ecb0; 6e51d2 jne` skips `0x6131a0` outright when an attack is already
+                // running (wow-re `combat-feel-law.md` §A1, and `melee-autorepeat-exclusion.md`
+                // §0a, which states the consequence outright: a strike pressed while already
+                // engaged does nothing to a running auto-repeat). So the whole block is gated,
+                // and the exclusion holds from the other end instead — the commit's StopAttack
+                // above means an auto-repeat can't be running while we swing in the first place.
                 if !engaged {
                     debug!("ui_action: cast {spell_id} initiates auto-attack at {guid:#x}");
                     sheath.write(crate::creature_anim::SheathRequest {
@@ -595,9 +617,9 @@ fn send_spell_cast(
                         state: 1,
                         ceremony: false,
                     });
-                    // Melee attack-start cancels a running auto-repeat UNCONDITIONALLY — the
-                    // client's `0x5ecd8c` tail right after its melee snap (wow-re
-                    // `nocked-ammo-cancel.md` §Q-B-5): you can't melee and auto-shoot at once.
+                    // `0x5ecb70`'s tail `0x5ecd78`–`0x5ecd95`: the melee sheath snap
+                    // (`0x611cf0(1,1,1)`) then the local auto-repeat cancel (`0x6ea080` at
+                    // `0x5ecd8c`) — you can't start swinging and keep auto-shooting.
                     crate::creature_anim::cancel_auto_repeat_local(
                         Some(e),
                         auto_repeat,
@@ -681,6 +703,197 @@ mod tests {
                 ladder.send(spell_id, &ctx(), commit);
             })
             .expect("the ladder runs as a one-shot system");
+    }
+
+    // ── The melee ⟷ auto-repeat exclusion (the 5875 image, read 2026-08-06) ──────────────────
+    //
+    // Two client-local calls make Auto Shot and a queued Raptor Strike mutually exclusive, and
+    // benilla had neither shape right: the commit's auto-repeat arm calls **StopAttack**
+    // (`0x6e5976` → `0x5ecac0` → `CancelQueuedCast 0x6e6f30`), and the melee attack-start's tail
+    // (`0x5ecd78`–`0x5ecd95`) cancels the running repeat **whether or not** the
+    // already-attacking test at `0x5eccda` skipped the swing send. The tests below pin both, and
+    // the two orders they compose into.
+
+    const AUTO_SHOT: u32 = 75;
+    const RAPTOR_STRIKE: u32 = 2973;
+    const MOB: u64 = 0x0000_0000_0000_00f1;
+
+    /// The two combat-initiation classes exactly as the real 5875 rows classify them (the data
+    /// itself is pinned by `benilla_formats`' `real_spell_catalog_classifies_combat_initiation`):
+    /// Auto Shot is `AttributesEx2 & 0x20` auto-repeat over `Attributes & 0x2` ranged, Raptor
+    /// Strike is `Attributes & 0x404` on-next-swing. `Targets & 0x2` is the generic UNIT bind —
+    /// the one candidate leg that needs no relation data ([`cast_target::clear_satisfied_bits`]),
+    /// so the selection binds here without a faction table standing in for the world.
+    fn combat_catalog() -> Spells {
+        use std::collections::HashMap;
+        let auto_shot = benilla_formats::SpellDisplay {
+            targets: 0x2,
+            attributes: 0x2,
+            attributes_ex2: 0x20,
+            ..Default::default()
+        };
+        let raptor_strike = benilla_formats::SpellDisplay {
+            targets: 0x2,
+            attributes: 0x404,
+            ..Default::default()
+        };
+        Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([
+                (AUTO_SHOT, auto_shot),
+                (RAPTOR_STRIKE, raptor_strike),
+            ])),
+            ..Spells::empty_for_tests()
+        }
+    }
+
+    /// [`world`] plus the catalog and the self player the commit tail needs — `engaged` is our
+    /// server-echoed mirror of the ref's attack lock `[+0xc48]`.
+    fn combat_world(engaged: bool) -> (World, Receiver<ClientCommand>) {
+        let (mut world, rx) = world();
+        world.insert_resource(combat_catalog());
+        let mut me = world.spawn(SelfPlayer);
+        if engaged {
+            me.insert(crate::creature_anim::Engaged);
+        }
+        (world, rx)
+    }
+
+    fn send_at(world: &mut World, spell_id: u32, target: u64) {
+        world
+            .run_system_once(move |mut ladder: CastLadder| {
+                let ctx = cast_target::CastContext {
+                    selection_guid: Some(target),
+                    ..ctx()
+                };
+                ladder.send(spell_id, &ctx, CastCommit::Spell);
+            })
+            .expect("the ladder runs as a one-shot system");
+    }
+
+    /// **The commit's StopAttack** (`0x6e5976`): starting an auto-repeat ends the melee swing and
+    /// takes the queued on-next-swing strike with it — `CMSG_ATTACKSTOP` from `0x624370`, then the
+    /// tail jump into `CancelQueuedCast 0x6e6f30`, whose `Attributes & 0x404` leg hands the queued
+    /// id to `CancelCast 0x6e4940(dl=1)` and its `CMSG_CANCEL_CAST`. Both buttons cannot be lit at
+    /// once; benilla used to leave the strike's ring on because this call did not exist here.
+    #[test]
+    fn an_auto_repeat_press_stops_the_attack_and_takes_the_queued_strike_with_it() {
+        let (mut world, rx) = combat_world(true);
+        world
+            .resource_mut::<crate::ui_cast::QueuedMeleeSpell>()
+            .arm(RAPTOR_STRIKE);
+
+        send_at(&mut world, AUTO_SHOT, MOB);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::AttackStop)),
+            "the auto-repeat arm calls StopAttack before the cast leaves"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CancelCast { spell_id }) if spell_id == RAPTOR_STRIKE),
+            "the StopAttack tail cancels the queued strike by id"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
+            "and then the shot itself commits"
+        );
+        assert_eq!(
+            world
+                .resource::<crate::ui_cast::QueuedMeleeSpell>()
+                .current(),
+            None,
+            "the queue is empty — the strike's checked ring goes dark"
+        );
+    }
+
+    /// `0x5ecac0`'s early-out (`!IsAttacking && [+0xc50] == 0`): with no swing running there is
+    /// nothing to stop and nothing is sent — a queued strike, which cannot exist without a swing
+    /// to fire it, survives untouched.
+    #[test]
+    fn an_auto_repeat_press_with_no_swing_running_stops_nothing() {
+        let (mut world, rx) = combat_world(false);
+        world
+            .resource_mut::<crate::ui_cast::QueuedMeleeSpell>()
+            .arm(RAPTOR_STRIKE);
+
+        send_at(&mut world, AUTO_SHOT, MOB);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == AUTO_SHOT),
+            "the shot, and only the shot"
+        );
+        assert!(rx.try_recv().is_err(), "no ATTACKSTOP, no CANCEL_CAST");
+        assert_eq!(
+            world
+                .resource::<crate::ui_cast::QueuedMeleeSpell>()
+                .current(),
+            Some(RAPTOR_STRIKE)
+        );
+    }
+
+    /// **The other direction, and the correction decision 1028 needed** (wow-re §5,
+    /// `melee-autorepeat-exclusion.md` §0a + `combat-feel-law.md` §A1). `Attack 0x5ecb70`'s tail
+    /// really does cancel the auto-repeat on a path that skipped the swing send — but a cast press
+    /// never reaches it while engaged: TryCast's tail gates the CALL, `6e51cb call 0x60ecb0;
+    /// 6e51d2 jne`, so `0x6131a0` is not invoked at all. A strike pressed mid-swing therefore does
+    /// nothing to a running auto-repeat, and 1028's un-gated tail was wrong to make it.
+    ///
+    /// The state this pins is unreachable in ordinary play *because* of the sibling test above —
+    /// starting Auto Shot stops the swing — which is the point: the exclusion is enforced at one
+    /// end, not both.
+    #[test]
+    fn a_strike_pressed_while_already_swinging_reaches_no_attack_start_at_all() {
+        let (mut world, rx) = combat_world(true);
+        world.resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
+
+        send_at(&mut world, RAPTOR_STRIKE, MOB);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == RAPTOR_STRIKE)
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no ATTACKSWING and no CANCEL_AUTO_REPEAT — `6e51d2 jne` skipped the whole attack-start"
+        );
+        assert_eq!(
+            world.resource::<AutoRepeatActive>().0,
+            Some(AUTO_SHOT),
+            "the repeat survives: the reference cancels it via the attack it STARTS, and it started none"
+        );
+        assert_eq!(
+            world
+                .resource::<crate::ui_cast::QueuedMeleeSpell>()
+                .current(),
+            Some(RAPTOR_STRIKE),
+            "the strike still queues — only the attack-start was skipped"
+        );
+    }
+
+    /// The same press from the state that *is* reachable: not yet swinging. Here the tail fires,
+    /// `0x6131a0` → `0x5ecb70` runs, and its `0x5ecd8c` kills the repeat on the way to the swing —
+    /// the transitive route all three §5 workers missed by censusing StartAttack's direct callers.
+    #[test]
+    fn a_strike_pressed_before_the_swing_starts_kills_the_auto_repeat() {
+        let (mut world, rx) = combat_world(false);
+        world.resource_mut::<AutoRepeatActive>().0 = Some(AUTO_SHOT);
+
+        send_at(&mut world, RAPTOR_STRIKE, MOB);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { spell_id, .. }) if spell_id == RAPTOR_STRIKE)
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CancelAutoRepeat)),
+            "the attack-start tail's `0x6ea080`"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::AttackSwing { guid }) if guid == MOB),
+            "and then the swing itself"
+        );
+        assert_eq!(
+            world.resource::<AutoRepeatActive>().0,
+            None,
+            "Auto Shot's ring goes dark"
+        );
     }
 
     /// **B200's regression test, at the ladder** (decisions 0908/0914): an item use is a cast

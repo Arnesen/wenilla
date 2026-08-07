@@ -361,15 +361,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetButtonState",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
-            // The LIVE mouse-held press counts too (hovered + LeftButton down on this frame —
-            // the same predicate the extract pass renders the PushedTexture by), closing the
-            // documented INTERIM where a mouse-held button answered "NORMAL": the chat scroll
+            // The LIVE mouse-held press counts too (hovered + a registered button down on this
+            // frame — the same predicate the extract pass renders the PushedTexture by), closing
+            // the documented INTERIM where a mouse-held button answered "NORMAL": the chat scroll
             // buttons' hold-repeat (ref MessageFrameScrollButton_OnUpdate) polls exactly this
-            // mid-press (decision 0288 P3).
+            // mid-press (decision 0288 P3). It reads the same in the reference for the same
+            // reason — `0x7792ad` writes ONE state variable and `0x780180` reads it back, so a
+            // right-held button answers "PUSHED" as surely as a left-held one.
             let held = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.mouseover == Some(h)
-                    && model.mouse_down_on.get("LeftButton").copied() == Some(h)
+                model.mouseover == Some(h) && press_held(&model, h)
             };
             with_button(lua, &this, move |bs| {
                 if !bs.enabled {
@@ -454,6 +455,51 @@ pub(super) fn wants_click(model: &Model, h: FrameHandle, name: &str) -> bool {
             .any(|s| s.eq_ignore_ascii_case(name)),
         _ => name.ends_with("Up"),
     }
+}
+
+/// Whether frame `h` is registered for `button` (`"LeftButton"`, `"RightButton"`, …) in **either**
+/// variant — the press-visual gate, which is a strictly weaker test than [`wants_click`]'s.
+///
+/// `CButton::OnMouseDown 0x779210` runs the two as separate tests in one pass, and the difference
+/// between them is the whole of this:
+///
+/// ```text
+/// 0x779238  eax = event.buttonMask
+/// 0x779243  ecx = eax << 8 | eax
+/// 0x77924b  test [this+0x330], ecx   ; registered EITHER WAY -> keep going, else nothing at all
+/// 0x779256  hit-test the point       ; else nothing
+/// 0x77926b  test event.buttonMask, [this+0x330]  ; the DOWN bits alone -> fire OnClick
+/// 0x7792ad  push 2 ; SetState(PUSHED)            ; unconditional past the gates above
+/// ```
+///
+/// So `[this+0x330]` is one dword holding the `"…ButtonDown"` registrations in byte 0 and the
+/// `"…ButtonUp"` registrations in byte 1, and the mask `m | m << 8` asks "this button, either
+/// variant". **The pushed art is not conditional on the click firing, or on the handler doing
+/// anything** — it is conditional only on the button being registered for that mouse button at
+/// all, which is why a right-click on an action, spellbook or pet slot lights up even when the
+/// right-click does nothing (they all register `RightButtonUp`), and why a right-click on a plain
+/// `LeftButtonUp` button does not.
+pub(super) fn wants_press_visual(model: &Model, h: FrameHandle, button: &str) -> bool {
+    match model.arena.frame(h).map(|f| &f.kind_state) {
+        Some(KindState::Button(bs)) => bs.registered_clicks.iter().any(|s| {
+            s.strip_suffix("Up")
+                .or_else(|| s.strip_suffix("Down"))
+                .is_some_and(|b| b.eq_ignore_ascii_case(button))
+        }),
+        _ => false,
+    }
+}
+
+/// Is a press currently holding this button down — the `held` half of the PushedTexture rule.
+///
+/// Any captured mouse button counts, gated by [`wants_press_visual`]. Callers pair it with
+/// `hovered`, which is `0x779256`'s hit test at press time plus `0x7793f0`'s restore-to-NORMAL
+/// when the pointer leaves mid-press.
+pub(super) fn press_held(model: &Model, h: FrameHandle) -> bool {
+    model
+        .mouse_down_on
+        .iter()
+        .any(|(button, &pressed)| pressed == h && wants_press_visual(model, h, button))
 }
 
 /// The click behavior shared by the input path and `Click()`: gated on `enabled`; a CheckButton

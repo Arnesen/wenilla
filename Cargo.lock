@@ -596,6 +596,7 @@ dependencies = [
  "bevy_egui",
  "bytemuck",
  "cosmic-text",
+ "cpal 0.17.1",
  "crossbeam-channel",
  "fontdb",
  "half",

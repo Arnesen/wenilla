@@ -4,6 +4,38 @@
 
 use super::*;
 
+/// `UNIT_DYNAMIC_FLAGS` bit 5 — `UNIT_DYNFLAG_DEAD` (vmangos `SharedDefines.h:1158`). The client
+/// reads it as "this body is a corpse" wherever it reads health for display; the server sets it for
+/// **feign death** and for `CREATURE_FLAG_EXTRA_APPEAR_DEAD` spawns, in both cases with health left
+/// intact. Every consumer goes through [`ObjectFields::unit_reads_dead`] (decision 1022).
+const UNIT_DYNFLAG_DEAD: u32 = 0x20;
+
+/// `UNIT_STAND_STATE_DEAD` (vmangos `UnitDefines.h:109`) — the third leg of the client's
+/// reads-dead predicate `0x605f90`. vmangos never writes it, so it is inert against our server.
+///
+/// The client reads it through the virtual `[vtbl+0xa4]`, and the **two classes install different
+/// functions there** — `CGUnit_C` `0x60be50`, `CGPlayer_C` `0x5ed570` (memoised at `[this+0x1d68]`
+/// for the local player) — but both return the same byte, `[descr+0x210]` = `UNIT_FIELD_BYTES_1`
+/// byte 0, which is exactly what [`ObjectFields::unit_stand_state`] reads (wow-re
+/// `feign-death-dyndead.md` §1).
+const STAND_STATE_DEAD: u8 = 7;
+
+/// The raw→display divisor per power type — the reference's `0x6e7130`, a lookup into the table at
+/// `0x86f978`: **`{1, 10, 1, 1, 1000}`** for MANA / RAGE / FOCUS / ENERGY / HAPPINESS, with `1` for
+/// any out-of-range type (`test ecx,ecx; jl → 1`). Rage is stored ×10 on the wire and pet happiness
+/// ×1000 (vmangos `GetCreatePowers`: `POWER_RAGE → 1000`, `POWER_HAPPINESS → 1050000`), so the real
+/// client's 100 rage and 1050 happiness are this divide, not a different field.
+///
+/// Applied by `UnitMana`/`UnitManaMax` only — the raw accessors stay raw, and the pet happiness
+/// bucket thresholds are on the RAW scale, which is why both forms have to exist (decision 1034).
+fn power_display_scale(ty: u8) -> u32 {
+    match ty {
+        1 => 10,   // rage
+        4 => 1000, // happiness
+        _ => 1,
+    }
+}
+
 /// Which field [`ObjectFields::unit_owner`] falls back to when `CHARMEDBY` is clear — the one
 /// thing the client's two owner-guid readers do differently. Named rather than defaulted because
 /// picking the wrong one is invisible until a totem or a guardian behaves like a pet.
@@ -101,13 +133,78 @@ impl ObjectFields {
     pub fn unit_max_health(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_MAXHEALTH)
     }
-    /// Whether the unit is **dead** (health 0 on a real unit). Absent health reads as **zero** — a
-    /// create block only carries *non-zero* fields (vmangos `_SetCreateBits`), so an already-dead
-    /// corpse streams in with `MAXHEALTH` but **no** `HEALTH` at all; the real client's descriptor
-    /// array is zero-initialized, so absent *is* 0 to it. The `MAXHEALTH > 0` guard keeps a unit
-    /// whose snapshot hasn't arrived (empty store) from reading as dead.
+    /// Whether the unit is **really dead** — health 0 on a real unit, the RAW field predicate.
+    /// Absent health reads as **zero** — a create block only carries *non-zero* fields (vmangos
+    /// `_SetCreateBits`), so an already-dead corpse streams in with `MAXHEALTH` but **no** `HEALTH`
+    /// at all; the real client's descriptor array is zero-initialized, so absent *is* 0 to it. The
+    /// `MAXHEALTH > 0` guard keeps a unit whose snapshot hasn't arrived (empty store) from reading
+    /// as dead.
+    ///
+    /// This is the predicate for everything that keys on the body actually being a corpse — the
+    /// death arc and its release/ghost UI, loot and skinning, the selection's death-clear edge. For
+    /// **how the unit reads to the eye** — which a feigning hunter shares with a corpse — use
+    /// [`Self::unit_reads_dead`] (decision 1022).
     pub fn unit_is_dead(&self) -> bool {
         self.unit_max_health().unwrap_or(0) > 0 && self.unit_health().unwrap_or(0) == 0
+    }
+    /// Whether the unit **reads as dead** to the client — the reference's own one predicate
+    /// `0x605f90`, byte-exact: really dead (`[descr+0x40] <= 0`), **or** carrying
+    /// `UNIT_DYNFLAG_DEAD` (`0x605f9d`: `[descr+0x224] >> 5 & 1` — **feign death**), **or** stand
+    /// state 7 `UNIT_STAND_STATE_DEAD` (`0x605faa`: `vtbl+0xa4` == 7).
+    ///
+    /// Feign death is exactly this bit and nothing else: vmangos `Unit::SetFeignDeath`
+    /// (`Unit.cpp:9491`/`9500`) sets and clears it while leaving `UNIT_FIELD_HEALTH` alone, and
+    /// `Object::BuildValuesUpdate` only rewrites `TRACK_UNIT`/`TAPPED` per viewer — so the flag
+    /// reaches **every** viewer, the feigner included. The client then reads dead everywhere it
+    /// matters: `UnitHealth`/`UnitMana` answer 0 ([`Self::unit_shown_health`],
+    /// [`Self::unit_shown_power`]), `UnitIsDead 0x517ac0` answers true, the animation chain's top
+    /// resolver `0x5fcff0` claims and holds the corpse pose, and the plate/loop-sound gates drop.
+    ///
+    /// The stand-state leg is the reference's; vmangos never writes stand state 7, so against our
+    /// server the triple and the narrower `UnitIsDead 0x517ac0` pair (health ≤ 0 ∨ dynflag)
+    /// coincide.
+    pub fn unit_reads_dead(&self) -> bool {
+        self.unit_is_dead()
+            || self.unit_dynamic_flags() & UNIT_DYNFLAG_DEAD != 0
+            || self.unit_stand_state() == STAND_STATE_DEAD
+    }
+    /// Health **as the UI reads it** — the `UnitHealth 0x5174d0` law, byte-exact: a unit carrying
+    /// `UNIT_DYNFLAG_DEAD` answers **0** (`0x51753c`–`0x517551`), everything else answers the raw
+    /// field clamped at zero (`0x517553`–`0x517560`: `setle`/`dec`/`and`). So a feigning hunter's
+    /// health bar empties for himself and for everyone watching.
+    ///
+    /// Deliberately NOT mirrored on the max: `UnitHealthMax 0x5175b0` reads `[descr+0x58]` with no
+    /// gate at all, which is what makes the bar render `0/max` (empty) rather than vanish.
+    pub fn unit_shown_health(&self) -> Option<u32> {
+        if self.unit_dynamic_flags() & UNIT_DYNFLAG_DEAD != 0 {
+            return Some(0);
+        }
+        self.unit_health()
+    }
+    /// Power **as the UI reads it** — the `UnitMana 0x517670` law, both halves (decision 1034):
+    /// the `UNIT_DYNFLAG_DEAD` gate (`0x5176d6`–`0x5176e6`) ahead of the power-slot read, and then
+    /// the **raw→display divide** by [`power_display_scale`] (`0x517704 call 0x6e7130; 0x51770f
+    /// div ecx`). Rage rides the wire ×10 and pet happiness ×1000; without the divide a warrior's
+    /// bar reads `0/1000` and a pet's `…/1050000`.
+    ///
+    /// `UnitManaMax 0x5177e0` divides too (`0x517864`) but has **no** dead gate, so the bar empties
+    /// against a real maximum — see [`Self::unit_shown_max_power`].
+    ///
+    /// Not transcribed: the `powerType == POWER_HEALTH (-2)` substitution at `0x5176f7`. The
+    /// reference means to read HEALTH there, but `0x5176e8 movzx` zero-extends the byte while
+    /// `0x5176ec cmp edx,0xfffffffe` sign-extends its imm8, so the equality can never hold and the
+    /// leg is **dead code as compiled in 5875** (wow-re `feign-death-dyndead.md` §3, both §5
+    /// workers independently). Rendering it would be reproducing a bug, not the behaviour.
+    pub fn unit_shown_power(&self, ty: u8) -> Option<u32> {
+        if self.unit_dynamic_flags() & UNIT_DYNFLAG_DEAD != 0 {
+            return (ty < 5).then_some(0);
+        }
+        Some(self.unit_power(ty)? / power_display_scale(ty))
+    }
+    /// Maximum power **as the UI reads it** — `UnitManaMax 0x5177e0`: the same
+    /// [`power_display_scale`] divide (`0x517864`), and deliberately **no** dead gate.
+    pub fn unit_shown_max_power(&self, ty: u8) -> Option<u32> {
+        Some(self.unit_max_power(ty)? / power_display_scale(ty))
     }
     /// `UNIT_FIELD_LEVEL` — the unit's level.
     pub fn unit_level(&self) -> Option<u32> {
@@ -269,7 +366,8 @@ impl ObjectFields {
         self.get_f32(FIELD_UNIT_BOUNDINGRADIUS).unwrap_or(0.0)
     }
     /// `UNIT_DYNAMIC_FLAGS` — per-viewer dynamic state; bit `0x1` = **lootable** (the cursor's Loot
-    /// branch — wow-re cursor RE, client `+0x224`). Absent counts as 0.
+    /// branch — wow-re cursor RE, client `+0x224`), bit `0x2` = tracked (Hunter's Mark), bit `0x20`
+    /// = **dead-looking** ([`Self::unit_reads_dead`] — feign death). Absent counts as 0.
     pub fn unit_dynamic_flags(&self) -> u32 {
         self.get_u32(FIELD_UNIT_DYNAMIC_FLAGS).unwrap_or(0)
     }

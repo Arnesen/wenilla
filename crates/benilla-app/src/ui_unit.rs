@@ -334,13 +334,24 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
     UnitState {
         exists: true,
         name,
-        health: store.0.unit_health().unwrap_or(0),
+        // The UI-facing health/power getters, not the raw fields (decision 1022): a unit carrying
+        // `UNIT_DYNFLAG_DEAD` — a feigning hunter — answers 0 to `UnitHealth 0x5174d0` and
+        // `UnitMana 0x517670`, while the *max* getters stay ungated, so its bars read 0/max (empty)
+        // for itself and for everyone watching. The zeroes ride the ordinary per-field diff in
+        // [`fire_transitions`], which fires `UNIT_HEALTH` + the power event on the flag's edge —
+        // exactly the pair the reference's `UNIT_DYNAMIC_FLAGS` watcher fires there
+        // (`0x6004c5`/`0x6004f0`, event `0x10` and `0x11 + powerType`). The power pair also carries
+        // the raw→display divide the same two getters do (decision 1034) — rage rides the wire ×10
+        // and pet happiness ×1000, so these are the numbers the reference shows, not the wire's.
+        health: store.0.unit_shown_health().unwrap_or(0),
         max_health: store.0.unit_max_health().unwrap_or(0),
         level: store.0.unit_level().unwrap_or(0),
         power_type,
-        power: store.0.unit_power(power_type).unwrap_or(0),
-        max_power: store.0.unit_max_power(power_type).unwrap_or(0),
-        dead: store.0.unit_is_dead(),
+        power: store.0.unit_shown_power(power_type).unwrap_or(0),
+        max_power: store.0.unit_shown_max_power(power_type).unwrap_or(0),
+        // `UnitIsDead 0x517ac0` — health ≤ 0 **or** the dead-looking flag, so a feigning unit is
+        // dead to the API, to the target frame's DEAD text and to the greyed portrait alike.
+        dead: store.0.unit_reads_dead(),
         // The released-ghost predicate (decision 0308 §1): PLAYER_FLAGS bit 0x10 — a ghost's
         // health is 1, so `dead` above is false for it. Zero/absent on creatures.
         ghost: store.0.player_is_ghost(),
@@ -803,6 +814,72 @@ mod tests {
             combo_edge(None, (0, 0)),
             Some(true),
             "first sight announces once, as the descriptor block's first write does"
+        );
+    }
+
+    /// **A feigning hunter's frame reads as a corpse's** (decision 1022) — the symptom the whole
+    /// change exists for: the wire says nothing but `UNIT_DYNFLAG_DEAD`, and the snapshot has to
+    /// turn that into empty bars against a real maximum plus `UnitIsDead`. Asserted through
+    /// `snapshot` rather than the field getters (which have their own byte-law test) because what
+    /// can regress here is the *wiring* — a future edit reaching for `unit_health` again.
+    #[test]
+    fn a_feigning_unit_snapshots_empty_bars_over_a_real_maximum() {
+        use benilla_protocol::messages::ObjectFields;
+
+        /// `UNIT_FIELD_HEALTH` / `MAXHEALTH` / `POWER1` / `MAXPOWER1` / `DYNAMIC_FLAGS`.
+        const HEALTH: u16 = 22;
+        const POWER1: u16 = 23;
+        const MAXHEALTH: u16 = 28;
+        const MAXPOWER1: u16 = 29;
+        const DYNFLAGS: u16 = 143;
+
+        let vitals = [
+            (HEALTH, 1200),
+            (MAXHEALTH, 1500),
+            (POWER1, 300),
+            (MAXPOWER1, 900),
+        ];
+        let alive = snapshot(
+            &ObjectStore(ObjectFields::from_pairs(&vitals)),
+            Some("Hunter".into()),
+            0,
+        );
+        assert_eq!((alive.health, alive.max_health), (1200, 1500));
+        assert_eq!((alive.power, alive.max_power), (300, 900));
+        assert!(!alive.dead);
+
+        let feigning = snapshot(
+            &ObjectStore(ObjectFields::from_pairs(
+                &[vitals.as_slice(), &[(DYNFLAGS, 0x20)]].concat(),
+            )),
+            Some("Hunter".into()),
+            0,
+        );
+        assert_eq!(
+            (feigning.health, feigning.max_health),
+            (0, 1500),
+            "UnitHealth 0x5174d0 zeroes, UnitHealthMax 0x5175b0 does not — an EMPTY bar, not a gone one"
+        );
+        assert_eq!(
+            (feigning.power, feigning.max_power),
+            (0, 900),
+            "UnitMana 0x517670 zeroes, UnitManaMax 0x5177e0 does not"
+        );
+        assert!(feigning.dead, "UnitIsDead 0x517ac0's dynflag leg");
+        assert!(
+            !feigning.ghost,
+            "feign is not a ghost — PLAYER_FLAGS is clear"
+        );
+
+        // …and the flag moves the two fields [`fire_transitions`] diffs, so the edge announces
+        // itself as `UNIT_HEALTH` + the power event — the very pair the reference's own dynamic-
+        // flags watcher fires there (`0x6004c5`, `0x6004f0`). Nothing else about the unit moved,
+        // which is why routing the flag through the getters is enough: no extra watcher needed.
+        assert_ne!(alive.health, feigning.health);
+        assert_ne!(alive.power, feigning.power);
+        assert_eq!(
+            (alive.max_health, alive.max_power, alive.level),
+            (feigning.max_health, feigning.max_power, feigning.level),
         );
     }
 

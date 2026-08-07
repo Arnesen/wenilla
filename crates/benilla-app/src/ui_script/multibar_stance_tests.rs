@@ -329,6 +329,39 @@ fn shipped_stance_bar_drives_end_to_end() {
         "clicking the active stance must not untoggle its checked ring"
     );
 
+    // RIGHT-CLICK IS DEAD ON THIS BAR — no flash, no cast — and that is the reference (decisions
+    // 1023 + 1030). `ShapeshiftButtonTemplate` inherits `ActionButtonTemplate` and then overrides
+    // <OnLoad> with a body that only scales the cooldown, dropping the
+    // `RegisterForClicks("LeftButtonUp","RightButtonUp")` that `ActionButton_OnLoad` gives every
+    // other action-style button (ref ActionButton.lua:109). The default {LeftButtonUp} stands, and
+    // `0x77924b` gates the PushedTexture on that same mask. 1027 diverged and 1030 reverted it, so
+    // this asserts the quirk on purpose: the left press below proves the flash works at all here.
+    let depressed = |s: &UiScript| {
+        s.extract().iter().any(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains("Quickslot-Depress"))
+        })
+    };
+    s.mouse_move(56.0, 116.0);
+    s.mouse_button(56.0, 116.0, "RightButton", true);
+    assert!(
+        !depressed(&s),
+        "a right-press must NOT flash — unregistered"
+    );
+    s.mouse_button(56.0, 116.0, "RightButton", false);
+    assert!(
+        s.take_shapeshift_casts().is_empty(),
+        "and must not cast — the ref never routes a right-click here at all"
+    );
+    s.mouse_button(56.0, 116.0, "LeftButton", true);
+    assert!(depressed(&s), "the LEFT press does flash — the mask has it");
+    s.mouse_button(56.0, 116.0, "LeftButton", false);
+    let _ = s.take_shapeshift_casts();
+    assert!(
+        s.eval::<bool>("return BenillaShapeshiftButton1:GetChecked()")
+            .unwrap(),
+        "and the active form stays lit through either"
+    );
+
     // An emptied push hides the whole frame (the formless class path, live: shapeshift unlearned).
     s.set_shapeshift_forms(vec![]);
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);

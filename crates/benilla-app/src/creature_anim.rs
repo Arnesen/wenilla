@@ -232,6 +232,48 @@ pub(crate) fn cancel_auto_repeat_local(
     let _ = net.0.send(crate::net::ClientCommand::CancelAutoRepeat);
 }
 
+/// The one local **StopAttack** — benilla's `0x5ecac0` (wow-re §5 trio-verified,
+/// `object-layer/scratch/melee-autorepeat-exclusion.md`): player-only, a no-op unless an attack
+/// lock is held, then `CMSG_ATTACKSTOP` (its builder `0x624370` pushes opcode `0x142`) followed by
+/// the tail jump `0x5ecb63 → CancelQueuedCast 0x6e6f30` — which takes the **queued on-next-swing
+/// spell** down with the attack: `0x6e6f30`'s first leg tests the inflight id `[0xceca88]` for
+/// `Attributes & 0x404` and hands it to `CancelCast 0x6e4940(dl=1, reason 0x1c)`, whose casting arm
+/// sends `CMSG_CANCEL_CAST 0x12f` naming it and then pops the slot through `0x6e4ad0`.
+///
+/// This is the un-queue [`crate::ui_cast::QueuedMeleeSpell`] names as its real clear path, and it
+/// is why a Raptor Strike ring goes dark the moment Auto Shot starts (the auto-repeat arm inside
+/// the cast commit calls straight into here, `0x6e5976`, guarded by nothing but "the caster is the
+/// active player").
+///
+/// The lock is our server-echoed [`Engaged`] — the ref's `[+0xc48]`, which it sets *locally* at
+/// attack-start and which **StopAttack does not clear** (only the `SMSG_ATTACKSTOP` echo does,
+/// `0x624e40`), so the Attack button's own ring survives this call in both clients. Two ref fields
+/// are deliberately unmodelled, neither with a benilla reader: `[+0xc50]` ("locally initiated, not
+/// server-confirmed") and `[+0xc54]` ("stop sent, awaiting the echo") — the latter's sole reader
+/// image-wide is `0x5eccda`, inside `Attack 0x5ecb70`, which no benilla cast path enters while
+/// engaged (see [`crate::ui_action::cast_send`]'s tail). The two ratio legs `0x5ecac0` runs before
+/// the stop are `TriggerTutorial(0xa)` / `(0xb)` — the low-health / low-mana popups, not audio and
+/// not part of this seam.
+pub(crate) fn stop_attack_local(
+    engaged: bool,
+    queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
+    net: &crate::net::NetCommands,
+) {
+    if !engaged {
+        // The ref's `!IsAttacking(0x60ecb0) && [+0xc50] == 0` early-out: nothing running,
+        // nothing sent — and the queued strike, which cannot exist without a swing to fire it,
+        // survives untouched.
+        return;
+    }
+    let _ = net.0.send(crate::net::ClientCommand::AttackStop);
+    if let Some(spell_id) = queued_melee.current() {
+        let _ = net
+            .0
+            .send(crate::net::ClientCommand::CancelCast { spell_id });
+        queued_melee.clear_if(spell_id);
+    }
+}
+
 /// A unit is mid-cast (`SMSG_SPELL_START` .. `GO`/`FAILED_OTHER`, decision 0099 phase 1) — the
 /// wire-truth state seam. Inserted on `SpellStart` only when it carries a nonzero cast time (an
 /// instant cast's `SpellGo` follows with nothing to interrupt, so it never gets one); removed on

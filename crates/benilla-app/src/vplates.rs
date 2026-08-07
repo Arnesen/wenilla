@@ -494,7 +494,8 @@ fn drive_vplates(
         // A DEAD unit shows no plate — the per-tick gate `0x60f600`'s FIRST, unconditional
         // test (§8 Q2, byte-confirmed): signed `UNIT_FIELD_HEALTH ≤ 0`, absent = 0 (the
         // zero-init descriptor). A poll, not a death callback; the lootable bit is never
-        // consulted; feign keeps health > 0 and stays plated.
+        // consulted. Feign death keeps health > 0, so it clears THIS leg — the gate that takes a
+        // feigning body's plate away is the hostile-only one below (decision 1022).
         if store.is_none_or(|s| s.0.unit_health().unwrap_or(0) == 0) {
             continue;
         }
@@ -520,6 +521,14 @@ fn drive_vplates(
         let is_player = net.kind == EntityKind::Player;
         let friendly = rank >= 4;
         if friendly && !mode.friends || !friendly && !mode.enemies {
+            continue;
+        }
+        // The gate's dead-looking leg, which sits on the HOSTILE side of that same split
+        // (`0x60f72f test al,al; jne` → friendly goes to the creature-type check `0x60f750`;
+        // hostile falls into `0x60f733 shr eax,5; test al,1` → hide). So a feigning hunter's
+        // plate vanishes for the enemies he is hiding from, which is the point of the spell,
+        // while a friendly one keeps his (decision 1022).
+        if !friendly && store.is_some_and(|s| s.0.unit_reads_dead()) {
             continue;
         }
         // Project the plate point: the overhead anchor + 2/3 yd, per frame, no smoothing. A

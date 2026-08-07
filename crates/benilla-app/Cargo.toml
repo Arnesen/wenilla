@@ -71,6 +71,10 @@ cosmic-text = "0.16"
 # public-in-crate types). Pinned to the exact version `cosmic-text` 0.16 depends on so there's one
 # `fontdb` in the graph.
 fontdb = "0.23"
+# kira's own backend dependency, named directly so the mixer can hand cpal an explicit device buffer
+# size instead of accepting `BufferSize::Default` (decision 1026). `CpalBackendSettings`' fields ARE
+# cpal types, so this must stay the exact version kira resolves — one cpal in the graph.
+cpal = "0.17"
 kira = { version = "0.12", default-features = false, features = ["cpal", "mp3", "wav", "pcm", "adpcm"] }
 mint = "0.5"
 # The gossip greeting is a weighted random DRAW per menu-open, not a fixed pick (wow-re

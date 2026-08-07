@@ -569,6 +569,79 @@ impl WorldSession {
         )
     }
 
+    /// Send a chat line on an arbitrary lane — the generalised twin of [`Self::send_chat`]
+    /// (which is this with `CHAT_TYPE_SAY`). `target` is the whisper target on
+    /// `CHAT_TYPE_WHISPER` and the channel name on `CHAT_TYPE_CHANNEL`, `None` elsewhere. Spoken
+    /// in the character's own tongue, with the same server-side rules.
+    pub fn send_chat_kind(
+        &mut self,
+        chat_type: u32,
+        target: Option<&str>,
+        message: &str,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_MESSAGECHAT,
+            &messages::messagechat_kind(chat_type, self.chat_language, target, message),
+        )
+    }
+
+    /// Join a channel — the unsplit twin of [`WorldWriter::join_channel`]; `password` is empty for
+    /// a channel that has none.
+    pub fn join_channel(&mut self, name: &str, password: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_JOIN_CHANNEL,
+            &messages::join_channel(name, password),
+        )
+    }
+
+    /// Leave a channel — the unsplit twin of [`WorldWriter::leave_channel`].
+    pub fn leave_channel(&mut self, name: &str) -> Result<()> {
+        self.send(opcode::CMSG_LEAVE_CHANNEL, &messages::leave_channel(name))
+    }
+
+    /// Invite a player to our group by name (`CMSG_GROUP_INVITE`); they answer with
+    /// `SMSG_GROUP_INVITE` and, if they want in, [`Self::group_accept`].
+    pub fn group_invite(&mut self, member_name: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_GROUP_INVITE,
+            &messages::group_invite(member_name),
+        )
+    }
+
+    /// Accept the group invite we were just offered (`CMSG_GROUP_ACCEPT`, empty body).
+    pub fn group_accept(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_GROUP_ACCEPT, &messages::group_accept())
+    }
+
+    /// Leave/disband our group (`CMSG_GROUP_DISBAND`, empty body) — probes tear the group down so
+    /// the next run starts ungrouped.
+    pub fn group_disband(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_GROUP_DISBAND, &messages::group_disband())
+    }
+
+    /// Send an **addon message** — a `CMSG_MESSAGECHAT` on `chat_type`'s lane with
+    /// [`messages::LANGUAGE_ADDON`] in the language field, which is what makes it addon traffic
+    /// rather than speech (decision 1029). `target` is the channel name on
+    /// [`messages::CHAT_TYPE_CHANNEL`] and `None` on the group/guild lanes; `text` is the raw
+    /// payload (`prefix`, TAB, the addon's own encoding) — this verb does not compose it.
+    ///
+    /// Probe-only, and deliberately: benilla runs FrameXML, not third-party addons, so it has
+    /// nothing to *say* over this lane. It exists so the receive gate can be proved against the
+    /// live server (`addon_chat_probe`) rather than argued from folk memory of the lane. The
+    /// server drops the whole message unless `AddonChannel` is on and `chat_type` is one of the
+    /// lanes `IsLanguageAllowedForChatType` permits (see [`messages::LANGUAGE_ADDON`]).
+    pub fn send_addon_message(
+        &mut self,
+        chat_type: u32,
+        target: Option<&str>,
+        text: &str,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_MESSAGECHAT,
+            &messages::messagechat_kind(chat_type, messages::LANGUAGE_ADDON, target, text),
+        )
+    }
+
     /// Echo a same-map teleport ack — the unsplit twin of [`WorldWriter::teleport_ack`] (without it
     /// the server freezes our movement after a `.go`).
     pub fn teleport_ack(&mut self, guid: u64, counter: u32) -> Result<()> {

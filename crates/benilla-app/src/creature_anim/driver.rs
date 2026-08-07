@@ -483,10 +483,17 @@ pub(super) fn drive_animations(
         // Which body a trace line is about — the rider's own, or the mount it is sitting on.
         let subject = if mount_body.is_some() { "mount " } else { "" };
         let walk = speeds.map_or(DEFAULT_WALK_SPEED, |s| s.0.walk);
-        // Dead ⇒ health 0 with a real max. Absent health counts as ZERO (`unit_is_dead`): a create
-        // block omits zero fields, so an already-dead corpse streams in with no HEALTH at all —
-        // requiring an explicit `Some(0)` here is exactly the bug where corpses stood up on relog.
-        let dead = store.is_some_and(|s| s.0.unit_is_dead());
+        // Dead ⇒ health 0 with a real max, **or** the dead-looking dynamic flag (`unit_reads_dead`
+        // — the reference's own `0x605f90`, decision 1022): feign death leaves health untouched and
+        // signals purely through `UNIT_DYNFLAG_DEAD`, and the reference runs it through this exact
+        // path — the flag's watcher `0x600440` calls `0x60ea30` (play Death) and the per-frame
+        // chain's top resolver `0x5fcff0` then claims and holds the corpse pose, the same pair the
+        // real death handler `0x625190` runs. So a hunter feigning collapses and lies there, for
+        // himself and for everyone watching, and stands back up when the flag clears.
+        // Absent health counts as ZERO: a create block omits zero fields, so an already-dead corpse
+        // streams in with no HEALTH at all — requiring an explicit `Some(0)` here is exactly the bug
+        // where corpses stood up on relog.
+        let dead = store.is_some_and(|s| s.0.unit_reads_dead());
         // Mounted (decision 0441): `UNIT_FIELD_MOUNTDISPLAYID` nonzero — the wire's one mounted
         // signal. The rider's base pins to Mount(91) below, Specials/one-shot full-body routes are
         // suppressed, and the sheath reconcile force-stows; the locomotion the selector would have
@@ -571,6 +578,17 @@ pub(super) fn drive_animations(
         // Death overrides every state (a corpse doesn't transition); play Death and hold.
         if dead {
             if drv.gait != Some(DEATH) {
+                // One line per collapse, naming WHICH death it is — a body lying down with full
+                // health is a feign, and without this the two are indistinguishable in a log.
+                debug!(
+                    "death pose: unit {entity} arms Death ({DEATH}) — {}{}",
+                    if store.is_some_and(|s| s.0.unit_is_dead()) {
+                        "killed"
+                    } else {
+                        "feign (UNIT_DYNFLAG_DEAD, health intact)"
+                    },
+                    if first { ", streamed in dead" } else { "" }
+                );
                 if let Some(c) = find_resolved(anims, DEATH, catalog)
                     .or_else(|| find_resolved(anims, STAND, catalog))
                 {
