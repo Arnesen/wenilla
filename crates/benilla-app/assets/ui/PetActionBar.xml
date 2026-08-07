@@ -245,8 +245,15 @@
         -- Note what the key path does NOT do — it is a bare CastPetAction, with none of the click
         -- path's forks: no shift pick-up, no right-button autocast, and no IsPetAttackActive
         -- call-off. That is the reference's split, not a simplification of ours: the fork lives in
-        -- PetActionButton_OnClick, which a key press never reaches. So CTRL-1 on a pet already
-        -- attacking re-issues Attack where a left click would call it off.
+        -- PetActionButton_OnClick, which a key press never reaches.
+        --
+        -- On a PET bar none of that is visible, because the call-off fork is DEAD CODE there:
+        -- IsPetAttackActive needs the [0xb714b0] latch, and `0x4bd420` raises it only when the
+        -- bar's unit is the one you are POSSESSING (ui_pet.rs's `possessing` carries the carve —
+        -- UNIT_FLAG_POSSESSED, never a hunter's or warlock's pet). A pet's Attack button can never
+        -- latch lit, so click and key both simply order the attack. The split is visible on a
+        -- POSSESS bar (Mind Control, Eye of Kilrogg, Eyes of the Beast): there a click sends
+        -- PetStopAttack and CTRL-1 re-issues the order instead.
         function BenillaPetActionButtonDown(id)
             local button = getglobal("BenillaPetActionButton" .. id)
             if ( button:GetButtonState() == "NORMAL" ) then
@@ -390,6 +397,78 @@
                 BenillaPetAutocast_Update(getglobal("BenillaPetActionButton" .. i), frame.clock)
             end
         end
+
+        -- ── The pet menu's two dialogs (ref StaticPopup.lua l.738-748 + l.1069-1102 + l.365-374,
+        --    decision 1066) ────────────────────────────────────────────────────────────────────
+        -- They live here rather than with the rows that raise them (UnitPopup.xml) for the same
+        -- reason every other dialog in this codebase lives with its arc's frame file: registering
+        -- into StaticPopupDialogs is a LOAD-TIME dependency on UiPanels.xml's engine, and
+        -- UnitPopup.xml is a shared engine that eight isolation prefixes load without it. Raising
+        -- them is not a dependency — StaticPopup_Show resolves at click time.
+        --
+        -- ABANDON_PET is the plain confirm. RENAME_PET is a CHAIN of two, which is the reference's
+        -- own shape and not a flourish: the first collects the name, the second reads it back
+        -- ("Name your pet 'Bruce'?") before anything is sent — because a rename is one-shot, so a
+        -- typo is permanent in exactly the way the abandon is. That second Show happens while the
+        -- first dialog is still up, which is why the engine's two instances are both needed.
+        StaticPopupDialogs["ABANDON_PET"] = {
+            text = ABANDON_PET,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function()
+                PetAbandon();
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        StaticPopupDialogs["RENAME_PET"] = {
+            text = PET_RENAME_LABEL,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            hasEditBox = 1,
+            -- The 12-letter cap is the reference's, and it is the client's only name check: the
+            -- server re-validates with CheckPetName and refuses with SMSG_PET_NAME_INVALID.
+            maxLetters = 12,
+            OnAccept = function()
+                -- `this` is the clicked button, so its parent is THIS dialog — never
+                -- StaticPopup1 by name, which would read the wrong box the moment this dialog
+                -- lands in the second instance (the chain below is exactly that case).
+                local text = getglobal(this:GetParent():GetName() .. "EditBox"):GetText()
+                local dialog = StaticPopup_Show("PETRENAMECONFIRM", text)
+                if dialog then
+                    dialog.data = text
+                end
+            end,
+            EditBoxOnEnterPressed = function()
+                local text = getglobal(this:GetParent():GetName() .. "EditBox"):GetText()
+                local dialog = StaticPopup_Show("PETRENAMECONFIRM", text)
+                if dialog then
+                    dialog.data = text
+                end
+                this:GetParent():Hide()
+            end,
+            OnShow = function()
+                getglobal(this:GetName() .. "EditBox"):SetFocus()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        StaticPopupDialogs["PETRENAMECONFIRM"] = {
+            -- "Name your pet '%s'?" — the name arrives as text_arg1 AND as `data`; the first
+            -- fills the question, the second is what actually gets sent.
+            text = PET_RENAME_CONFIRMATION,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function(data)
+                PetRename(data);
+            end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
     ]]></Script>
 
     <!--

@@ -765,13 +765,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 // The tail (VERIFIED vmangos `HandleCreatureQueryOpcode`, 5875 = every build
                 // guard included): type_flags, type, pet_family, RANK, unk, pet_spell_list_id,
                 // display_id (u32 ×7), then civilian + racial_leader (u8 ×2). We keep `type`
-                // (the `CreatureType.dbc` id — the TAB-target filter's input), `rank` (the unit
-                // tooltip's Elite/Boss word, decision 0276's level-line law), `type_flags` (bit
-                // 0x10 hides its faction line), and the `civilian`/`racial_leader` pair (its
-                // green CIVILIAN / white LEADER lines); the rest stays alignment-only.
+                // (the `CreatureType.dbc` id — the TAB-target filter's input), `pet_family` (the
+                // `CreatureFamily.dbc` id behind `UnitCreatureFamily` and the diet tooltip,
+                // decision 1062), `rank` (the unit tooltip's Elite/Boss word, decision 0276's
+                // level-line law), `type_flags` (bit 0x10 hides its faction line), and the
+                // `civilian`/`racial_leader` pair (its green CIVILIAN / white LEADER lines); the
+                // rest stays alignment-only.
                 let type_flags = read_u32_le(&mut r)?;
                 let creature_type = read_u32_le(&mut r)?;
-                let _pet_family = read_u32_le(&mut r)?;
+                let pet_family = read_u32_le(&mut r)?;
                 let rank = read_u32_le(&mut r)?;
                 let _unk = read_u32_le(&mut r)?;
                 let _pet_spell_list = read_u32_le(&mut r)?;
@@ -784,6 +786,7 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                         name,
                         subname,
                         creature_type,
+                        pet_family,
                         rank,
                         type_flags,
                         civilian,

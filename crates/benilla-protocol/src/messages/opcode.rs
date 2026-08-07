@@ -256,6 +256,29 @@ pub const CMSG_PET_STOP_ATTACK: u16 = 0x02EA; // 746
 /// whose aura to drop.
 pub const CMSG_PET_CANCEL_AURA: u16 = 0x026B; // 619
 
+// The pet right-click menu's two outbound verbs (decision 1066; VERIFIED vmangos
+// `Opcodes_1_12_1.h`: 374/375). Bodies in [`super::pet`].
+/// **Give the pet up permanently** — the right-click menu's Abandon row, and `PetAbandon
+/// 0x4be4c0`'s only packet (wow-re `ui/scratch/pet-action-bar-api.md` §11c, `push 0x176`
+/// @`0x4bd765`). `HandlePetAbandon` deletes a hunter pet (`PET_SAVE_AS_DELETED`) and merely
+/// unsummons anything else (`PET_SAVE_NOT_IN_SLOT`, `PetHandler.cpp:347-374`).
+///
+/// The menu's **Dismiss** row is NOT this opcode, which is worth stating because the two would be
+/// indistinguishable in play: `PetDismiss 0x4be4d0` opens no packet at all and hands the packed
+/// word `0x07000003` to the pet bar's own dispatcher, so it leaves as [`CMSG_PET_ACTION`].
+pub const CMSG_PET_ABANDON: u16 = 0x0176; // 374
+/// Rename the pet — `PetRename 0x4be4e0` → `0x4bd840` (`push 0x177` @`0x4bd8fe`). Gated server-side
+/// on `UNIT_FLAG_PET_RENAME` and **one-shot**: the handler clears that bit on success, so the row
+/// disappears after the first rename (`PetHandler.cpp:302-345`). Nothing client-side clears it —
+/// wow-re's census found no writer of that byte anywhere in `.text`.
+///
+/// A refused name answers with `SMSG_PET_NAME_INVALID` (0x178), which is **not modelled** and does
+/// not need to be: vmangos sends it with an empty body — `SendPetNameInvalid` drops both the reason
+/// code and the name with the comment "not read by vanilla client" (`PetHandler.cpp:542-548`) — and
+/// the shipped 1.12 `FrameXML` has no event and no string for it. It lands in `ServerPacket::Other`
+/// under its own name, which is the whole of what there is to do with it.
+pub const CMSG_PET_RENAME: u16 = 0x0177; // 375
+
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in
 /// [`super::gameobject::gameobject_query`] — the ask-once GO template lookup, identical shape to
 /// `CMSG_CREATURE_QUERY`.

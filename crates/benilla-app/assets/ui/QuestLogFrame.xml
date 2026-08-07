@@ -176,8 +176,23 @@
                 end
                 return
             end
-            -- pin §5, QuestLogTitleButton_OnClick (QuestLogFrame.lua:469-501): shift-click toggles
-            -- the watch. Guard order matches the ref exactly: already watched → unwatch,
+            -- pin §5, QuestLogTitleButton_OnClick (QuestLogFrame.lua:469-501): shift-click either
+            -- posts the quest's NAME into an open chat edit box (l.478-480) or, with chat closed,
+            -- toggles the watch (l.481-500 — the ref's own `else`). Chat wins; the watch is the
+            -- fallback, not the other way round (decision 1059).
+            --
+            -- The insert (l.480) is `gsub(this:GetText(), " *(.*)", "%1")` — the row LABEL with its
+            -- leading indent trimmed, i.e. the bare quest name; note it is plain text, NOT a
+            -- hyperlink (1.12 has no |Hquest: link). We read `GetQuestLogTitle(index)` instead of
+            -- the label, because our label is not the ref's: this window appends the Complete/Failed
+            -- tag onto the ONE title string (the v1 simplification in BenillaQuestLogList_Update,
+            -- where the ref keeps a separate right-justified $parentTag FontString), so the ref's
+            -- gsub over our label would post "Quest 1 (Complete)". The API title is exactly the
+            -- string the ref's own trim yields — same result, different expression. `ChatFrameEditBox
+            -- and` guards a window test that hasn't loaded ChatFrame.xml (BenillaPaperDollSlot_OnClick's
+            -- precedent).
+            --
+            -- Guard order inside the watch arm matches the ref exactly: already watched → unwatch,
             -- unconditionally; else zero objectives (QUEST_WATCH_NO_OBJECTIVES) or the watch list
             -- full (QUEST_WATCH_TOO_MANY) put the ref's red line on the errors frame
             -- (BenillaErrorsFrame_AddMessage — the ref's UIErrorsFrame:AddMessage call sites,
@@ -187,7 +202,12 @@
             -- fires an event off a plain Add/RemoveQuestWatch call; we mirror that exactly.
             if mouseButton == "LeftButton" and IsShiftKeyDown() then
                 local title = GetQuestLogTitle(index)
-                if IsQuestWatched(index) then
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    -- The visibility test stays HERE, not in the helper: it is the ref's own fork
+                    -- (l.474/478) — with chat open this click never watches, and the helper's
+                    -- return would conflate "chat closed" with "nothing to post".
+                    BenillaChatEdit_InsertLink(title)
+                elseif IsQuestWatched(index) then
                     -- Clearing the timer too: a lingering timed entry would later expire and
                     -- silently unwatch a re-added MANUAL watch.
                     if title then BENILLA_QUEST_WATCH_TIMERS[title] = nil end
@@ -531,11 +551,20 @@
         -- GetQuestLogRewardInfo (pin §6): both answer the shared 5-tuple `name, texture, count,
         -- quality, usable` — the same shape QuestFrame.xml's GetQuestItemInfo(kind, index) answers
         -- for the questgiver panels, just under quest-log-specific getter names instead of one
-        -- kind-dispatched function.
-        function BenillaQuestLogItem_Set(button, getter, index)
+        -- kind-dispatched function. `kind` ("choice"/"reward") rides alongside because the LINK
+        -- getter IS kind-dispatched — GetQuestLogItemLink(this.type, this:GetID()), ref
+        -- QuestLogFrame.lua:545/549 — and because it is the ref's own `questItem.type`
+        -- (QuestFrame.lua:369/476, the shared layout routine both windows run).
+        function BenillaQuestLogItem_Set(button, getter, index, kind)
             local name, texture, count, quality, usable, itemId = getter(index)
             button.index = index
+            button.kind = kind
             button.itemId = itemId
+            -- ref QuestFrame.lua:388/490 ("-- For the tooltip"), the same stamp the giver window's
+            -- BenillaQuestItem_Set makes: only the reward-SPELL row ever reads "spell" (l.445), and
+            -- v1 builds none (GetQuestLogRewardSpell is nil — this file's header). The click arms
+            -- below guard on it exactly as the ref does, so the guard is live when that row lands.
+            button.rewardType = "item"
             button.quality = quality
             button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
             button.name:SetText(name or "...")
@@ -544,6 +573,32 @@
             if quality and BenillaTooltip_QualityColor then r, g, b = BenillaTooltip_QualityColor(quality) end
             button.name:SetTextColor(r, g, b)
             button:Show()
+        end
+
+        -- ref QuestLogRewardItem_OnClick (QuestLogFrame.lua:542-552), the OnClick
+        -- QuestLogRewardItemTemplate carries (ref QuestLogFrame.xml:118-120): CTRL previews the
+        -- reward in the dressing room (decision 1060), SHIFT posts its link into an open chat edit
+        -- box (decision 1059). There is no third arm here — a quest-log reward row is never
+        -- selectable, so a plain click is inert, which is why these rows carried no OnClick before
+        -- this arc.
+        --
+        -- Guard-for-guard with the ref: ctrl is gated on `this.rewardType ~= "spell"` (l.544), and
+        -- so is shift — but on the ELSEIF line itself (l.547), where the giver window's twin puts it
+        -- inside (QuestFrame.lua:121). Same outcome, and transcribed where the ref puts it. Ours
+        -- adds `ChatFrameEditBox and` (ChatFrame.xml is a separate file a window test need not
+        -- load — BenillaPaperDollSlot_OnClick's precedent) and a nil-link guard: `link` is nil until
+        -- the ask-once item template lands, a state the reference's synchronous item cache never
+        -- has, and EditBox:Insert takes a string (DressUpItemLink carries the same guard itself —
+        -- ref DressUpFrame.lua:11-13).
+        function BenillaQuestLogRewardItem_OnClick(button)
+            if IsControlKeyDown() then
+                if button.rewardType ~= "spell" then
+                    DressUpItemLink(GetQuestLogItemLink(button.kind, button.index))
+                end
+            elseif IsShiftKeyDown() and button.rewardType ~= "spell" then
+                -- The visible/non-nil pair is the shared helper's (UIParent.xml).
+                BenillaChatEdit_InsertLink(GetQuestLogItemLink(button.kind, button.index))
+            end
         end
 
         -- The reward-panel layout, ported verbatim from the ref's shared `QuestFrameItems_Update`
@@ -589,7 +644,7 @@
             for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
                 local choice = getglobal("BenillaQuestLogChoice" .. i)
                 if i <= lastChoice then
-                    BenillaQuestLogItem_Set(choice, GetQuestLogChoiceInfo, i)
+                    BenillaQuestLogItem_Set(choice, GetQuestLogChoiceInfo, i, "choice")
                     if i == 1 then
                         choice:SetPoint("TOPLEFT", chooseText, "BOTTOMLEFT", -3, -5)
                     elseif i % 2 == 1 then
@@ -628,7 +683,7 @@
             for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
                 local reward = getglobal("BenillaQuestLogReward" .. i)
                 if i <= lastReward then
-                    BenillaQuestLogItem_Set(reward, GetQuestLogRewardInfo, i)
+                    BenillaQuestLogItem_Set(reward, GetQuestLogRewardInfo, i, "reward")
                     if i == 1 then
                         reward:SetPoint("TOPLEFT", receiveText, "BOTTOMLEFT", -3, -5)
                     elseif i % 2 == 1 then
@@ -1076,6 +1131,10 @@
                 GameTooltip:Show()
             </OnEnter>
             <OnLeave>GameTooltip:Hide()</OnLeave>
+            <!-- ref QuestLogRewardItemTemplate's own OnClick (ref QuestLogFrame.xml:118-120): the
+                 CTRL dressing-room preview + the SHIFT chat-link post, and nothing else — a plain
+                 click on a quest-log reward row is inert (decisions 1059/1060). -->
+            <OnClick>BenillaQuestLogRewardItem_OnClick(self)</OnClick>
         </Scripts>
     </Button>
 

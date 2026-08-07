@@ -6,7 +6,15 @@ use super::*;
 
 impl ObjectFields {
     /// `OBJECT_FIELD_ENTRY` (3) — the object's template entry (an item object's item id, a
-    /// GameObject's template). The one field that names WHAT a streamed object is.
+    /// GameObject's template, a creature's `creature_template` row). The one field that names WHAT
+    /// a streamed object is.
+    ///
+    /// **For a PET this is the only route to its template**, and that is load-bearing: a
+    /// `HIGHGUID_PET` guid carries a *pet number* in the slot a creature's entry occupies
+    /// ([`crate::guid::pet_number`]), so [`crate::guid::entry`] refuses it — but vmangos still
+    /// writes the real `cinfo->entry` here (`Creature::InitEntry`, `Creature.cpp:376`,
+    /// `SetEntry(entry) // normal entry always`). Decision 1062's creature-family lookup goes
+    /// through this field for exactly that reason.
     pub fn object_entry(&self) -> Option<u32> {
         self.get_u32(3)
     }

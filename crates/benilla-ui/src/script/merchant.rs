@@ -52,6 +52,13 @@ pub struct MerchantItem {
     /// (`None` while it's in flight — the tooltip shows nothing it can't know yet). Still plain
     /// data: the engine renders whatever numbers the app resolved, it holds no item model.
     pub stats: Option<ItemStatsHead>,
+    /// The row's full escaped `|cff…|Hitem:…|h[Name]|h|r` link (`GetMerchantItemLink`, decision
+    /// 1059) — what the row click's ctrl/shift arms hand to `DressUpItemLink` /
+    /// `ChatFrameEditBox:Insert` (`MerchantFrame.lua:303`/`:306`). `None` while the template answer
+    /// is in flight (the link embeds the name), and `None` on a **buyback** row: 1.12 has no
+    /// `GetBuybackItemLink` — the reference's buyback arm is an unmodified `BuybackItem(this:GetID())`
+    /// with no ctrl/shift branch at all (`MerchantFrame.lua:358-361`), so nothing would read it.
+    pub link: Option<String>,
 }
 
 /// An item template's tooltip stat head (the app's `ItemInfo` view, resolved per row): what the
@@ -224,6 +231,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Integer(i64::from(it.num_available)),
                 usable_value(usable),
             ]))
+        })?,
+    )?;
+
+    // GetMerchantItemLink(index) → the row's full escaped `|cff…|Hitem:…|h[Name]|h|r` link | nil.
+    // 1-based like GetMerchantItemInfo; nil out of range and nil while the row's template answer is
+    // in flight (the link embeds the name). The reference's row click reads it for both LEFT-button
+    // modifier arms — `DressUpItemLink(GetMerchantItemLink(this:GetID()))` (`MerchantFrame.lua:303`)
+    // and `ChatFrameEditBox:Insert(...)` (`:306`); ours routes the second through
+    // `BenillaChatEdit_InsertLink`, whose whole job is the nil this getter can answer. Merchant rows
+    // only: see [`MerchantItem::link`] for why a buyback row carries none. Decision 1059.
+    g.set(
+        "GetMerchantItemLink",
+        lua.create_function(|lua, index: usize| {
+            let link = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .merchant
+                    .as_ref()
+                    .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
+                    .and_then(|it| it.link.clone())
+            };
+            match link {
+                Some(link) => Ok(Value::String(lua.create_string(&link)?)),
+                None => Ok(Value::Nil),
+            }
         })?,
     )?;
 
@@ -479,6 +511,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// without a `CursorSetMode` (wow-re cursor-system.md §7).
 fn arm_vendor_cursor(lua: &Lua, price_of: impl FnOnce(&MerchantState) -> Option<u32>) {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    // The sell-cursor family bails on `IsTargeting` at its first instruction (wow-re
+    // `item-target-cursor-and-dropitemonunit.md`) — an armed spell keeps its cast cursor.
+    if model.spell_targeting {
+        return;
+    }
     let Some(price) = model.merchant.as_ref().and_then(price_of) else {
         return;
     };
@@ -487,6 +524,7 @@ fn arm_vendor_cursor(lua: &Lua, price_of: impl FnOnce(&MerchantState) -> Option<
     } else {
         UiCursorMode::UnableBuy
     });
+    model.ui_cursor_dirty = true;
 }
 
 #[cfg(test)]
@@ -509,6 +547,7 @@ mod tests {
                         quality: 1,
                         ..Default::default()
                     }),
+                    link: Some("|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r".into()),
                 },
                 // An in-flight row: the vendor list arrived, the item-template answer hasn't.
                 MerchantItem {
@@ -519,6 +558,7 @@ mod tests {
                     num_available: 3,
                     item_id: 4540,
                     stats: None,
+                    link: None,
                 },
             ],
             ..Default::default()
@@ -559,6 +599,19 @@ mod tests {
                 "local n, t, p, q, a, u = GetMerchantItemInfo(9)\n\
                  return n == nil and t == nil and p == 0 and q == 1 and a == 0 and u == 1",
             )
+            .unwrap());
+
+        // GetMerchantItemLink: the resolved row's link; nil while the template is in flight and nil
+        // out of range (the row click's ctrl/shift arms hand this straight on — decision 1059).
+        assert_eq!(
+            s.eval::<String>("return GetMerchantItemLink(1)").unwrap(),
+            "|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r"
+        );
+        assert!(s
+            .eval::<bool>("return GetMerchantItemLink(2) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetMerchantItemLink(9) == nil")
             .unwrap());
     }
 

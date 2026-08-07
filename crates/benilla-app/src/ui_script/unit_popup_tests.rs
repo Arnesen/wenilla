@@ -425,3 +425,299 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+// ── The PET menu (decision 1066; report B219) ───────────────────────────────────────────────────
+
+/// The pet menu's own prefix. Two things join the popup prefix: `UiPanels.xml` (the StaticPopup
+/// engine, because two of the four rows go behind a dialog) and `PetActionBar.xml`, which is where
+/// those three dialogs are registered — with the pet arc, not with the rows. `Cooldown.xml` and
+/// `ActionBar.xml` are the pet bar's own load deps, not this menu's.
+fn load_pet_menu_frames(s: &UiScript) {
+    for file in [
+        "Fonts.xml",
+        "UIParent.xml",
+        "UiPanels.xml",
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml",
+        "UnitPopup.xml",
+        "UnitFrames.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "PetActionBar.xml",
+    ] {
+        load_xml(s, file);
+    }
+}
+
+/// The PET rows' labels and both dialogs' text, verbatim from the real
+/// `Interface\FrameXML\GlobalStrings.lua` off the 1.12.1 patch chain (l.3028-3052 and l.3) — which
+/// is what the app itself runs at boot; this only stands in for it in a bare harness.
+fn bake_pet_strings(s: &UiScript) {
+    s.run(
+        r#"
+        PET_PAPERDOLL = "Pet Details"
+        PET_RENAME = "Rename"
+        PET_ABANDON = "Abandon"
+        PET_DISMISS = "Dismiss"
+        CANCEL = "Cancel"
+        OKAY = "Okay"
+        ACCEPT = "Accept"
+        YES = "Yes"
+        NO = "No"
+        ABANDON_PET = "Are you sure you want to permanently abandon your pet?"
+        PET_RENAME_LABEL = "Enter desired name of pet:"
+        PET_RENAME_CONFIRMATION = "Name your pet '%s'?"
+        -- ToggleCharacter lives in CharacterFrame.xml, which the paperdoll row needs and this
+        -- isolation prefix does not load. Recorded rather than stubbed away, so the row's click
+        -- is still proven to reach the right panel name.
+        function ToggleCharacter(tab) BENILLA_TEST_TOGGLED = tab end
+    "#,
+    )
+    .unwrap();
+}
+
+/// A pet that exists, so `UnitExists("pet")` passes the dropdown's own gate.
+fn a_pet(s: &mut UiScript, name: &str) {
+    s.set_unit(
+        "pet",
+        Some(UnitState {
+            exists: true,
+            name: Some(name.into()),
+            health: 100,
+            max_health: 100,
+            level: 20,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event(
+        "UNIT_PET",
+        vec![benilla_ui::script::ScriptValue::Str("player".into())],
+    );
+}
+
+/// Open the pet menu through the real hit path, and return nothing — the assertions read
+/// `DropDownList1` afterwards.
+fn right_click_the_pet_frame(s: &mut UiScript) {
+    s.resolve();
+    let (cx, cy) = s
+        .eval::<(f64, f64)>("return BenillaPetFrame:GetCenter()")
+        .unwrap();
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    s.resolve();
+}
+
+/// **A hunter's pet shows Abandon and hides Dismiss; a warlock's demon does the reverse** — the
+/// one predicate that forks the whole menu (`UnitPopup.lua:402-417`).
+///
+/// This is the assertion B219 turns on. Getting the sense backwards is silent both ways: a hunter
+/// offered only Dismiss still cannot get past a taming step, and a demon offered Abandon is
+/// offered a row the reference never shows.
+#[test]
+fn the_pet_menu_forks_between_abandon_and_dismiss() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_pet_strings(&s);
+    load_pet_menu_frames(&s);
+    a_pet(&mut s, "Bruce");
+
+    // A freshly tamed hunter pet: both bits set.
+    s.set_pet_menu(true, true);
+    right_click_the_pet_frame(&mut s);
+    assert!(
+        s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
+        "right-clicking the pet frame opens the PET menu"
+    );
+    assert_eq!(
+        s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
+        5,
+        "title + Pet Details + Rename + Abandon + Cancel — no Dismiss"
+    );
+    for (row, text) in [
+        (2, "Pet Details"),
+        (3, "Rename"),
+        (4, "Abandon"),
+        (5, "Cancel"),
+    ] {
+        assert_eq!(
+            s.eval::<String>(&format!("return DropDownList1Button{row}:GetText()"))
+                .unwrap(),
+            text
+        );
+    }
+
+    // The same pet after one rename — the server clears only the rename bit, so only that row goes.
+    s.run("CloseDropDownMenus()").unwrap();
+    s.set_pet_menu(true, false);
+    right_click_the_pet_frame(&mut s);
+    assert_eq!(
+        s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
+        4,
+        "title + Pet Details + Abandon + Cancel"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button3:GetText()")
+            .unwrap(),
+        "Abandon",
+        "Rename is gone and Abandon has moved up into its row"
+    );
+
+    // A warlock's demon: neither bit. The menu flips whole.
+    s.run("CloseDropDownMenus()").unwrap();
+    s.set_pet_menu(false, false);
+    right_click_the_pet_frame(&mut s);
+    assert_eq!(
+        s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
+        3,
+        "title + Dismiss + Cancel"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button2:GetText()")
+            .unwrap(),
+        "Dismiss"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Dismiss goes straight out; Abandon goes behind the confirm** — the reference's own asymmetry
+/// (`UnitPopup_OnClick` l.590-593), and the one that matters: sending a summon away costs nothing,
+/// giving up a tamed pet is a server-side delete.
+#[test]
+fn dismiss_sends_immediately_and_abandon_waits_for_the_confirm() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_pet_strings(&s);
+    load_pet_menu_frames(&s);
+    a_pet(&mut s, "Snuffles");
+
+    // A demon: Dismiss is row 2, and clicking it queues the verb with no dialog in between.
+    s.set_pet_menu(false, false);
+    right_click_the_pet_frame(&mut s);
+    click_row(&mut s, 2);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "Dismiss asks nothing"
+    );
+    assert_eq!(s.take_pet_gives_up(), (0, 1), "one dismiss, no abandon");
+
+    // A hunter pet: Abandon is row 4, and clicking it only opens the confirm.
+    s.set_pet_menu(true, true);
+    right_click_the_pet_frame(&mut s);
+    click_row(&mut s, 4);
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "Abandon opens the ABANDON_PET confirm"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Are you sure you want to permanently abandon your pet?"
+    );
+    assert_eq!(
+        s.take_pet_gives_up(),
+        (0, 0),
+        "and sends NOTHING until it is accepted"
+    );
+
+    // Cancel really cancels.
+    click_frame(&mut s, "StaticPopup1Button2");
+    assert_eq!(s.take_pet_gives_up(), (0, 0));
+    assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+
+    // Accept sends.
+    right_click_the_pet_frame(&mut s);
+    click_row(&mut s, 4);
+    click_frame(&mut s, "StaticPopup1Button1");
+    assert_eq!(s.take_pet_gives_up(), (1, 0), "one abandon");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The rename is a chain of two dialogs**, and the second reads the typed name back before
+/// anything is sent (`RENAME_PET` → `PETRENAMECONFIRM`, ref StaticPopup.lua l.1069-1102 + l.365).
+///
+/// The chain is also what proves the popup engine's two instances are both live, and why the
+/// dialogs must read their OWN edit box rather than `StaticPopup1EditBox` by name: the confirm
+/// opens while the name dialog is still up, so the second one lands in instance 2.
+#[test]
+fn renaming_a_pet_reads_the_name_back_before_sending_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_pet_strings(&s);
+    load_pet_menu_frames(&s);
+    a_pet(&mut s, "Bruce");
+    s.set_pet_menu(true, true);
+
+    right_click_the_pet_frame(&mut s);
+    click_row(&mut s, 3);
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Enter desired name of pet:"
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup1EditBox:IsVisible()")
+            .unwrap(),
+        "the name dialog carries an edit box"
+    );
+
+    s.run(r#"StaticPopup1EditBox:SetText("Rexxar")"#).unwrap();
+    click_frame(&mut s, "StaticPopup1Button1");
+    assert_eq!(
+        s.take_pet_renames(),
+        Vec::<String>::new(),
+        "accepting the NAME dialog sends nothing — it only asks again"
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup2:IsVisible()").unwrap(),
+        "the confirm opens in the second instance, while the first is still up"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup2Text:GetText()")
+            .unwrap(),
+        "Name your pet 'Rexxar'?",
+        "and it reads the typed name back"
+    );
+
+    click_frame(&mut s, "StaticPopup2Button1");
+    assert_eq!(
+        s.take_pet_renames(),
+        vec!["Rexxar".to_string()],
+        "only the CONFIRM sends, and it sends the name from the box"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The paperdoll row reaches the pet paper doll panel (decision 1057) — the fifth build the menu
+/// was blocked on, and the only row here that opens a window rather than a wire verb.
+#[test]
+fn the_pet_details_row_opens_the_pet_paper_doll() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_pet_strings(&s);
+    load_pet_menu_frames(&s);
+    a_pet(&mut s, "Bruce");
+    s.set_pet_menu(true, true);
+
+    right_click_the_pet_frame(&mut s);
+    click_row(&mut s, 2);
+    assert_eq!(
+        s.eval::<String>("return BENILLA_TEST_TOGGLED").unwrap(),
+        "BenillaPetPaperDollFrame"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Click an open dropdown row through the real hit path.
+fn click_row(s: &mut UiScript, row: u32) {
+    click_frame(s, &format!("DropDownList1Button{row}"));
+}
+
+/// Click any named frame through the real hit path.
+fn click_frame(s: &mut UiScript, name: &str) {
+    let (x, y) = s
+        .eval::<(f64, f64)>(&format!("return {name}:GetCenter()"))
+        .unwrap();
+    s.mouse_button(x as f32, y as f32, "LeftButton", true);
+    s.mouse_button(x as f32, y as f32, "LeftButton", false);
+    s.resolve();
+}

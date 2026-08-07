@@ -478,17 +478,21 @@ fn name_and_creature_query_roundtrip() {
     }
 
     // SMSG_CREATURE_QUERY_RESPONSE hit: entry, name, 3 empty names, subname, the 7-u32 tail
-    // (type_flags, TYPE — kept: the TAB critter filter's input — family, rank, unk,
-    // pet_spell_id, display_id), 2 u8 tail.
+    // (type_flags, TYPE — the TAB critter filter's input — FAMILY, RANK, unk, pet_spell_id,
+    // display_id), 2 u8 tail. Family and rank are given DIFFERENT non-zero values on purpose:
+    // they are adjacent dwords, so a one-column slip between them reads as plausible data and
+    // shows up only as a pet whose level line names the wrong beast (decision 1062).
     let body = hx(concat!(
         "45000000",
-        "596f756e6720576f6c6600",                   // "Young Wolf"
-        "000000",                                   // name2..4 empty
-        "5465737400",                               // subname "Test"
-        "10000000",                                 // type_flags = 0x10 (hide-faction-tooltip)
-        "01000000",                                 // type = 1 (Beast)
-        "0000000000000000000000000000000000000000", // family..display_id (5 × u32)
-        "0101"                                      // civilian, racial_leader
+        "596f756e6720576f6c6600",   // "Young Wolf"
+        "000000",                   // name2..4 empty
+        "5465737400",               // subname "Test"
+        "10000000",                 // type_flags = 0x10 (hide-faction-tooltip)
+        "01000000",                 // type = 1 (Beast)
+        "01000000",                 // pet_family = 1 (Wolf)
+        "02000000",                 // rank = 2 (rare elite)
+        "000000000000000000000000", // unk, pet_spell_list_id, display_id
+        "0101"                      // civilian, racial_leader
     ));
     match messages::parse_server(messages::opcode::SMSG_CREATURE_QUERY_RESPONSE, &body).unwrap() {
         ServerPacket::CreatureQueryResponse { entry, info } => {
@@ -499,7 +503,8 @@ fn name_and_creature_query_roundtrip() {
                     name: "Young Wolf".into(),
                     subname: "Test".into(),
                     creature_type: 1,
-                    rank: 0,
+                    pet_family: 1,
+                    rank: 2,
                     type_flags: 0x10,
                     civilian: true,
                     racial_leader: true,

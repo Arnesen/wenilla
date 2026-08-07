@@ -54,6 +54,11 @@ pub(crate) struct CreatureRecord {
     pub(crate) name: String,
     pub(crate) subname: Option<String>,
     pub(crate) creature_type: u32,
+    /// `CreatureFamily.dbc` id — the pet paper doll's family word and, through the row's food
+    /// mask, its diet tooltip (decision 1062). `0` on everything that is neither a tameable beast
+    /// nor a warlock minion, which is most of the table; the family table has no row 0, so a `0`
+    /// resolves to nil without needing a sentinel of its own.
+    pub(crate) pet_family: u32,
     /// Elite rank 0..4 **as the template declares it** — read it through [`gated_rank`], never
     /// directly, unless you specifically want the ungated template value.
     pub(crate) rank: u32,
@@ -213,6 +218,20 @@ impl NameCache {
         self.pets.insert(pet_number, name);
     }
 
+    /// Forget a pet's cached name so the next [`Self::resolve`] asks for it again (decision 1066).
+    ///
+    /// **The one hole in the ask-once discipline, and the one place it has to have one.** A player's
+    /// or a creature's name cannot change under a cache entry; a pet's can — its owner renames
+    /// it — and nothing on the wire pushes the new one, because a pet's name does not ride its
+    /// descriptor. What *does* arrive is a bumped `UNIT_FIELD_PET_NAME_TIMESTAMP`, and observing
+    /// that is what calls this (`crate::ui_pet::unit`). Clearing the pending marker matters too: a
+    /// rename racing an in-flight query would otherwise have its re-ask deduped away and leave the
+    /// stale name in place forever.
+    pub(crate) fn forget_pet(&mut self, pet_number: u32) {
+        self.pending_pets.remove(&pet_number);
+        self.pets.remove(&pet_number);
+    }
+
     /// Record a creature-name answer (`SMSG_CREATURE_QUERY_RESPONSE`); `None` = unknown entry.
     pub(crate) fn insert_creature(&mut self, entry: u32, record: Option<CreatureRecord>) {
         self.pending_creatures.remove(&entry);
@@ -323,6 +342,7 @@ mod tests {
                 name: "Young Wolf".into(),
                 subname: None,
                 creature_type: 0,
+                pet_family: 0,
                 rank: 0,
                 type_flags: 0,
                 civilian: false,

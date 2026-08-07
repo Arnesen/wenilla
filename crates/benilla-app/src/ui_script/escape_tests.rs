@@ -76,6 +76,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
             quantity: 1,
             quality: Some(1),
             is_coin: false,
+            link: None,
         }],
     }));
     s.fire_event("LOOT_OPENED", vec![]);

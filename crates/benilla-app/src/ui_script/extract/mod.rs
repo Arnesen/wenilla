@@ -463,15 +463,36 @@ pub(super) fn drive_script(
                 }
                 // A portrait region samples the circular-masked variant so the square icon/model
                 // doesn't poke past the frame ring's thin band (SetPortraitToTexture, decision 0084).
-                let handle = path.as_deref().and_then(|p| {
-                    assets.as_mut().and_then(|a| {
-                        if circular {
+                //
+                // A path the archives don't have draws **nothing** — never a white slab. This arm
+                // used to fall through to `color.unwrap_or(WHITE)` with a `None` texture, which
+                // `ui_pass` renders as the shared 1×1 white image tinted white: an opaque white
+                // rectangle at the region's rect, which is how B221's macro icons reached the
+                // director's screen. wow-re settles what the reference does: `TextureCreate` does
+                // build an 8×8 placeholder, but `CSimpleTexture::SetTexture` (`0x770200`) checks the
+                // status severity and at ≥2 releases it and returns **without touching the widget's
+                // texture** — the widget keeps what it had, and Lua gets `nil`. Nothing goes white.
+                // We can't keep the *previous* art (a path is re-resolved per frame at extract, not
+                // latched at `SetTexture`), so the faithful-enough result is an empty cell; what
+                // matters is that it is never a phantom quad. The `Backdrop` and live-portrait arms
+                // already guard exactly this way.
+                //
+                // `assets` missing ENTIRELY is a data-less run (the headless UI tests), not a bad
+                // path — those keep the old behaviour rather than blanking every textured quad.
+                let handle = match (path.as_deref(), assets.as_mut()) {
+                    (Some(p), Some(a)) => {
+                        let resolved = if circular {
                             a.portrait_texture(p, &mut images)
                         } else {
                             a.sprite_texture(p, &mut images)
+                        };
+                        if resolved.is_none() {
+                            continue;
                         }
-                    })
-                });
+                        resolved
+                    }
+                    _ => None,
+                };
                 // A pathless Texture region is a solid color; a textured one tints by it.
                 let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
                 color[3] *= eq.alpha;

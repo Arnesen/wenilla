@@ -411,6 +411,17 @@ mod tests {
             cast_fail_text(0x4D, Some(&rage), &g).unwrap(),
             "Not enough rage"
         );
+        // The environment gate's pair (decision 1056) — both are plain passthroughs, so what the
+        // player reads IS the GlobalStrings value. A typo'd key here would degrade a real refusal
+        // to a dead-looking button, which is what this test exists to catch.
+        assert_eq!(
+            cast_fail_text(0x50, None, &g).unwrap(),
+            "Cannot use while swimming"
+        );
+        assert_eq!(
+            cast_fail_text(0x58, None, &g).unwrap(),
+            "Can only use while swimming"
+        );
         // The data-suppression face on the real file: the absent keys show nothing.
         assert_eq!(cast_fail_text(0x08, None, &g), None);
         assert_eq!(cast_fail_text(0x21, None, &g), None);

@@ -1,7 +1,7 @@
-//! The pet bar's `WorldWriter` sends — mirroring [`crate::messages::pet`] (decisions 0982, 0988).
+//! The pet's `WorldWriter` sends — mirroring [`crate::messages::pet`] (decisions 0982, 0988, 1066).
 //!
-//! Four verbs, and the thing to know about them is that **no reply packet answers any of them**.
-//! The first three are intents the client has already applied to its own state before sending
+//! Six verbs, and the thing to know about the bar's four is that **no reply packet answers any of
+//! them**. The first three are intents the client has already applied to its own state before sending
 //! (wow-re §10.1/§10.2: the reaction, command and autocast paths all write `[0xb71468]` or the
 //! slot word and fire `PET_BAR_UPDATE` *before* the packet leaves). The bar's contents change only
 //! when a fresh `SMSG_PET_SPELLS` arrives — a summon, a swap, a learned spell — never as a reply
@@ -11,6 +11,11 @@
 //! the one verb the client does *not* pre-apply, because what it changes is the pet's own
 //! descriptor. The aura leaves in a `UNIT_FIELD_AURA` delta, and the slot's icon follows from
 //! that — so the round trip is visible, just not as an answer.
+//!
+//! The menu's two ([`WorldWriter::pet_abandon`], [`WorldWriter::pet_rename`]) invert that: neither
+//! is pre-applied, because what each asks for is not a UI state the server ignores but a change to
+//! the world that it may refuse — and the answer arrives as the pet leaving, or as a bumped name
+//! timestamp in its descriptor.
 //!
 //! Every one carries the pet's guid: the server re-checks ownership on each
 //! (`PetHandler.cpp`'s `GetCharmerOrOwnerGuid` gate) and silently drops anything naming a unit we
@@ -88,6 +93,31 @@ impl WorldWriter {
         self.send(
             opcode::CMSG_PET_SPELL_AUTOCAST,
             &messages::pet_spell_autocast(pet_guid, spell_id, enabled),
+        )
+    }
+
+    /// Give the pet up (`CMSG_PET_ABANDON`, layout in [`messages::pet_abandon`]) — the right-click
+    /// menu's Abandon **and** its Dismiss, which are one message (decision 1066).
+    ///
+    /// Unlike everything above it this one is not pre-applied and does not need to be: what answers
+    /// it is the pet leaving — `SMSG_PET_SPELLS` with a zero guid tears the bar down, and the
+    /// object's own removal takes the frame with it. Optimism would only race that.
+    pub fn pet_abandon(&mut self, pet_guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_PET_ABANDON, &messages::pet_abandon(pet_guid))
+    }
+
+    /// Rename the pet (`CMSG_PET_RENAME`, layout in [`messages::pet_rename`]) — the `RENAME_PET` →
+    /// `PETRENAMECONFIRM` popup chain's payload.
+    ///
+    /// Also not pre-applied, and here that is load-bearing: the server validates the name
+    /// (`ObjectMgr::CheckPetName`, the reserved-name list) and may refuse it outright, so a client
+    /// that wrote the new name locally would show a name the world does not agree with. What
+    /// arrives on success is a bumped `UNIT_FIELD_PET_NAME_TIMESTAMP` in the pet's descriptor,
+    /// which is what makes the name cache re-ask.
+    pub fn pet_rename(&mut self, pet_guid: u64, name: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_PET_RENAME,
+            &messages::pet_rename(pet_guid, name),
         )
     }
 }

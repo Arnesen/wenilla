@@ -4,7 +4,7 @@
 //! `loot_tests.rs` mirrors it for `set_loot`/`LootState`).
 
 use benilla_ui::script::{
-    ExtractedQuad, LootRollEntry, LootRollsState, QuadContent, ScriptValue, UiScript,
+    DressUpIntent, ExtractedQuad, LootRollEntry, LootRollsState, QuadContent, ScriptValue, UiScript,
 };
 
 /// Load one shipped `assets/ui/<file>` into `s` (the loot tests' loader, duplicated here so this
@@ -90,6 +90,11 @@ fn setup() -> UiScript {
     s
 }
 
+/// The two resolved rolls' item links, exactly as `ui_loot_roll.rs` builds them (`item_link`:
+/// quality colour + the four-field `|Hitem:` payload) — what the icon button's ctrl/shift arms read.
+const STAFF_LINK: &str = "|cffa335ee|Hitem:17182:0:0:0|h[Staff of Jordan]|h|r";
+const SWORD_LINK: &str = "|cffffffff|Hitem:25:0:0:0|h[Worn Shortsword]|h|r";
+
 /// A resolved Epic (BoP) roll and an in-flight one (item template not landed yet) — the same two
 /// shapes `loot_roll.rs`'s own test module fixtures, reused here against the real shipped XML.
 fn rolls() -> LootRollsState {
@@ -104,6 +109,8 @@ fn rolls() -> LootRollsState {
                 bind_on_pickup: true,
                 time_left_ms: 42_000,
                 item_id: 17182,
+                // The link lands with the name — one template answer fills both (decision 1059).
+                link: Some(STAFF_LINK.into()),
             },
             LootRollEntry {
                 roll_id: 8,
@@ -114,8 +121,10 @@ fn rolls() -> LootRollsState {
                 bind_on_pickup: false,
                 time_left_ms: 60_000,
                 item_id: 25,
+                link: Some(SWORD_LINK.into()),
             },
-            // The item-template query hasn't landed: name/texture/quality all nil (loot_roll.rs).
+            // The item-template query hasn't landed: name/texture/quality all nil (loot_roll.rs) —
+            // and no link either: it embeds the name, so it cannot exist before the name does.
             LootRollEntry {
                 roll_id: 9,
                 name: None,
@@ -125,6 +134,7 @@ fn rolls() -> LootRollsState {
                 bind_on_pickup: false,
                 time_left_ms: 55_000,
                 item_id: 4306,
+                link: None,
             },
         ],
     }
@@ -503,4 +513,81 @@ fn managed_positions_engage_for_the_bare_frame_name() {
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s), 102.0, "back to the multibar-only stack");
+}
+
+/// The roll popup's item icon (ref `$parentIconFrame` OnClick, LootFrame.xml l.353-361): CTRL
+/// previews the rolled item in the dressing room (decision 1060), SHIFT posts its link into an open
+/// chat edit box (decision 1059). Both read `GetLootRollItemLink(rollID)`, the binding this arc
+/// added — so this pins that getter against the real shipped XML too.
+///
+/// The control that must not change: the Need/Greed/Pass buttons still vote. The icon button is new
+/// click surface on a frame whose whole job is a three-button vote, and a stray vote from the icon
+/// (or a swallowed one from the dice) is exactly the regression worth catching.
+#[test]
+fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
+    let mut s = setup();
+    load_xml(&s, "GroupLootFrame.xml");
+    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink, the shared shift-insert helper
+    load_xml(&s, "DressUpFrame.xml");
+    load_xml(&s, "ChatFrame.xml");
+    s.set_loot_rolls(rolls());
+
+    // Roll 8 (BoE Worn Shortsword) claims frame 1 — a non-BoP roll, so the dice below can land a
+    // real vote rather than the bind-on-pickup confirm.
+    s.fire_event(
+        "START_LOOT_ROLL",
+        vec![ScriptValue::Int(8), ScriptValue::Int(60_000)],
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.resolve();
+    let quads = s.extract();
+    let (x, y) = quad_center(&quads, "INV_Sword_04");
+
+    // A plain click on the icon does nothing at all — the reference's handler has no third branch,
+    // and the vote is the dice's job, not the icon's.
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(
+        s.take_loot_roll_votes().is_empty() && s.take_loot_roll_confirms().is_empty(),
+        "an unmodified icon click votes nothing"
+    );
+
+    // SHIFT with the chat edit box open → the link.
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.set_modifiers(true, false, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        SWORD_LINK,
+        "the rolled item's full escaped link landed in the chat box"
+    );
+
+    // CTRL → the dressing room wearing it.
+    s.set_modifiers(false, true, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.take_dressup_intents(),
+        vec![DressUpIntent::Dress, DressUpIntent::TryOn(25)],
+        "re-dress first, then try the rolled item on"
+    );
+    assert!(
+        s.take_loot_roll_votes().is_empty() && s.take_loot_roll_confirms().is_empty(),
+        "no modified icon click may vote"
+    );
+
+    // The control: Need on the dice still reaches the wire (roll 8 is not bind-on-pickup).
+    let (nx, ny) = quad_center(&quads, "UI-GroupLoot-Dice-Up");
+    s.mouse_button(nx, ny, "LeftButton", true);
+    s.mouse_button(nx, ny, "LeftButton", false);
+    assert_eq!(
+        s.take_loot_roll_votes(),
+        vec![(8, 1)],
+        "the Need button still votes"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

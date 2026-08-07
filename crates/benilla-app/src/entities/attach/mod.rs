@@ -35,8 +35,9 @@ mod char_skin;
 use char_skin::{build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip};
 mod dress;
 use dress::{spawn_part, PartDress};
-mod glue_preview;
-pub(super) use glue_preview::build_glue_preview;
+mod preview;
+pub(crate) use preview::equip_slot;
+pub(super) use preview::{build_dressup_preview, build_glue_preview};
 mod redress;
 pub(super) use redress::redress_player_looks;
 

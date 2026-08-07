@@ -11,9 +11,11 @@
 //! 1.12's loot API is a flat set of globals the FrameXML `LootFrame.lua` drives (VERIFIED against the
 //! extracted `LootFrame.lua`, scratchpad): `GetNumLootItems()`, `GetLootSlotInfo(slot)` →
 //! `texture, item, quantity, quality` (`LootFrame.lua:81`), `LootSlotIsItem(slot)` /
-//! `LootSlotIsCoin(slot)` (`LootFrame.lua:80`), `LootSlot(slot)` (the C `LootButton` behaviour, the
-//! action a row click performs — `LootFrame.lua:94`), and `CloseLoot()` (fired from `OnHide`,
-//! `LootFrame.lua:143-145`). `slot` is **1-based**; an out-of-range slot answers `nil`.
+//! `LootSlotIsCoin(slot)` (`LootFrame.lua:80`), `GetLootSlotLink(slot)` → the row's item link (what
+//! the row click's ctrl/shift arms read, `LootFrame.lua:149`/`:152` — decision 1059),
+//! `LootSlot(slot)` (the C `LootButton` behaviour, the action a row click performs —
+//! `LootFrame.lua:94`), and `CloseLoot()` (fired from `OnHide`, `LootFrame.lua:143-145`).
+//! `slot` is **1-based**; an out-of-range slot answers `nil`.
 //!
 //! The **coin pile is a synthesized client-side row** (first in the list when the loot carries gold):
 //! `LootSlotIsCoin` is true for it, its `item` text is the formatted money amount, and `LootSlot(1)`
@@ -48,6 +50,14 @@ pub struct LootRow {
     /// row. A benilla extension riding as a TRAILING return of `GetLootSlotInfo` (the era 4-tuple
     /// never carried it; tooltip content was C++'s alone), same idiom as the quest item getters.
     pub item_id: u32,
+    /// The row's full escaped `|cff…|Hitem:…|h[Name]|h|r` link (`GetLootSlotLink`, decision 1059).
+    /// `None` for the synthesized coin row (there is no item to link) and while the ask-once
+    /// template answer is in flight — the link embeds the name, so it cannot exist before `name`
+    /// does; the same `Option` shape [`super::char_stats::InvSlotView::link`] carries. Both arms of
+    /// the row click take a nil in stride: `DressUpItemLink` returns on one (its own guard,
+    /// `DressUpFrame.lua:10-16`) and the shift arm goes through `BenillaChatEdit_InsertLink`, which
+    /// drops it — our `EditBox:Insert` binding is typed `String` and would raise.
+    pub link: Option<String>,
 }
 
 /// One open loot window: its rows (coin first when present). Pushed whole by the app; `None` means no
@@ -129,6 +139,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetLootSlotLink(slot) → the row's full escaped `|cff…|Hitem:…|h[Name]|h|r` link | nil. 1-based
+    // like GetLootSlotInfo beside it; nil out of range, nil for the coin row, and nil while the
+    // item-template query is in flight (the link embeds the name). The reference's row click reads
+    // it for BOTH modifier arms — `DressUpItemLink(GetLootSlotLink(this.slot))` (`LootFrame.lua:149`)
+    // and `ChatFrameEditBox:Insert(GetLootSlotLink(this.slot))` (`:152`); ours routes the second
+    // through `BenillaChatEdit_InsertLink`, whose whole job is the nil this getter can answer.
+    // Decision 1059.
+    g.set(
+        "GetLootSlotLink",
+        lua.create_function(|lua, slot: usize| {
+            let link = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model
+                    .loot
+                    .as_ref()
+                    .and_then(|l| slot.checked_sub(1).and_then(|n| l.rows.get(n)))
+                    .and_then(|r| r.link.clone())
+            };
+            match link {
+                Some(link) => Ok(Value::String(lua.create_string(&link)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // LootSlotIsItem(slot) → true for a real item row (in range, not the coin pile).
     g.set(
         "LootSlotIsItem",
@@ -186,7 +221,7 @@ mod tests {
     fn loot() -> LootState {
         LootState {
             rows: vec![
-                // The coin pile, always first.
+                // The coin pile, always first. No link: there is no item to link (decision 1059).
                 LootRow {
                     item_id: 0,
                     name: Some("1g 23s 45c".into()),
@@ -194,8 +229,9 @@ mod tests {
                     quantity: 1,
                     quality: Some(1),
                     is_coin: true,
+                    link: None,
                 },
-                // A resolved item.
+                // A resolved item — name, quality AND link all landed together (one template answer).
                 LootRow {
                     item_id: 0,
                     name: Some("Wool Cloth".into()),
@@ -203,6 +239,7 @@ mod tests {
                     quantity: 3,
                     quality: Some(1),
                     is_coin: false,
+                    link: Some("|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r".into()),
                 },
                 // An in-flight item: the loot arrived, the item-template answer hasn't.
                 LootRow {
@@ -212,6 +249,7 @@ mod tests {
                     quantity: 1,
                     quality: None,
                     is_coin: false,
+                    link: None,
                 },
             ],
         }
@@ -253,8 +291,18 @@ mod tests {
             )
             .unwrap());
 
+        // GetLootSlotLink: the resolved item's link, nil for the coin row and for the in-flight one
+        // (both arms of the reference's row click hand this straight on — decision 1059).
+        assert_eq!(
+            s.eval::<String>("return GetLootSlotLink(2)").unwrap(),
+            "|cffffffff|Hitem:2589:0:0:0|h[Wool Cloth]|h|r"
+        );
+        assert!(s.eval::<bool>("return GetLootSlotLink(1) == nil").unwrap());
+        assert!(s.eval::<bool>("return GetLootSlotLink(3) == nil").unwrap());
+
         // Out of range → nil.
         assert!(s.eval::<bool>("return GetLootSlotInfo(9) == nil").unwrap());
+        assert!(s.eval::<bool>("return GetLootSlotLink(9) == nil").unwrap());
         assert!(s.eval::<bool>("return not LootSlotIsItem(9)").unwrap());
         assert!(s.eval::<bool>("return not LootSlotIsCoin(9)").unwrap());
     }

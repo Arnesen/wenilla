@@ -608,28 +608,42 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::PetName { pet_number, name }]
         }
         ServerPacket::CreatureQueryResponse { entry, info } => {
-            let (name, subname, creature_type, rank, type_flags, civilian, racial_leader) =
-                match info {
-                    Some(i) => (
-                        Some(i.name),
-                        // An EMPTY wire subname is NO subname (vmangos sends "" for creatures
-                        // without one; the client renders no line for it — the nameplate
-                        // builder's verified shape, 0x608f50). Mapped here, once, so no consumer
-                        // ever sees a present-but-empty tooltip/nameplate line.
-                        Some(i.subname).filter(|s| !s.is_empty()),
-                        Some(i.creature_type),
-                        i.rank,
-                        i.type_flags,
-                        i.civilian,
-                        i.racial_leader,
-                    ),
-                    None => (None, None, None, 0, 0, false, false),
-                };
+            let (
+                name,
+                subname,
+                creature_type,
+                pet_family,
+                rank,
+                type_flags,
+                civilian,
+                racial_leader,
+            ) = match info {
+                Some(i) => (
+                    Some(i.name),
+                    // An EMPTY wire subname is NO subname (vmangos sends "" for creatures
+                    // without one; the client renders no line for it — the nameplate
+                    // builder's verified shape, 0x608f50). Mapped here, once, so no consumer
+                    // ever sees a present-but-empty tooltip/nameplate line.
+                    Some(i.subname).filter(|s| !s.is_empty()),
+                    Some(i.creature_type),
+                    // NOT wrapped in an `Option` like the type beside it: family `0` already
+                    // means "this template has no family", which is exactly what a miss means
+                    // too, so both answer the same `0` rather than two shapes for one state
+                    // (`CreatureFamily.dbc` has no row 0 — decision 1062).
+                    i.pet_family,
+                    i.rank,
+                    i.type_flags,
+                    i.civilian,
+                    i.racial_leader,
+                ),
+                None => (None, None, None, 0, 0, 0, false, false),
+            };
             vec![SessionEvent::CreatureName {
                 entry,
                 name,
                 subname,
                 creature_type,
+                pet_family,
                 rank,
                 type_flags,
                 civilian,

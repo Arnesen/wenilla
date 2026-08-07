@@ -528,6 +528,9 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
             num_available: -1,
             item_id: 159,
             stats: None,
+            // Not this test's subject (the slot manager is) — a row with no template answer yet
+            // carries no link (decision 1059).
+            link: None,
         }],
         ..Default::default()
     }));
@@ -657,6 +660,9 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
             num_available: -1,
             item_id: 159,
             stats: None,
+            // Not this test's subject (the slot manager is) — a row with no template answer yet
+            // carries no link (decision 1059).
+            link: None,
         }],
         ..Default::default()
     }));

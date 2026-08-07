@@ -347,6 +347,10 @@ pub enum SessionEvent {
         /// The template's `CreatureType.dbc` id (Beast, Humanoid, Critter, …) — the TAB-target
         /// critter/totem filter's input. `None` on a server miss.
         creature_type: Option<u32>,
+        /// The template's `CreatureFamily.dbc` id (Wolf, Cat, Imp, …) — `UnitCreatureFamily`'s
+        /// word and, through that row's pet-food mask, the diet tooltip (decision 1062). `0` for
+        /// everything that is neither a tameable beast nor a warlock minion, and `0` on a miss.
+        pet_family: u32,
         /// Elite rank 0..4 (the unit tooltip's rank word, decision 0276). `0` on a miss.
         rank: u32,
         /// The template type flags — bit `0x10` hides the tooltip's faction-name line. `0` on a miss.

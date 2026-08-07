@@ -113,6 +113,7 @@ mod ui_cast;
 mod ui_char;
 mod ui_chat;
 mod ui_craft;
+mod ui_dressup;
 mod ui_duel;
 mod ui_follow;
 mod ui_gamma;
@@ -133,6 +134,7 @@ mod ui_party;
 mod ui_pass;
 mod ui_pet;
 mod ui_pet_book;
+mod ui_pet_doll;
 mod ui_pet_stats;
 mod ui_quest;
 mod ui_quest_log;
@@ -220,6 +222,7 @@ use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
 use ui_pet::UiPetPlugin;
 use ui_pet_book::UiPetBookPlugin;
+use ui_pet_doll::UiPetDollPlugin;
 use ui_pet_stats::UiPetStatsPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
@@ -689,6 +692,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The inspect feed (decision 0631): another player's equipment off their PUBLIC visible-item
     // entries, plus the "inspect" booth's unit + yaw. Right after the character feed it mirrors.
     .add_plugins(ui_inspect::InspectUiPlugin)
+    // The dressing-room feed (decision 1060): the window's try-on intents → the player's own look
+    // with the tried-on items substituted in, plus the "dressup" booth's yaw. Beside the inspect
+    // feed, whose shape it shares (intents in, a booth look out).
+    .add_plugins(ui_dressup::DressUpUiPlugin)
     .add_plugins(UiActionPlugin)
     // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
     // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and
@@ -723,6 +730,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The pet's paper-doll stat block (happiness/loyalty/XP/training points). Its own plugin
     // because it runs off descriptor fields and two DBC tables rather than off `SMSG_PET_SPELLS`.
     .add_plugins(UiPetStatsPlugin)
+    // The pet paper doll's SHARED surface (decision 1057) — the combat-stats snapshot under the
+    // `"pet"` token and the page's model booth. Apart from the block above because these values
+    // pass through the character sheet's own bindings and events, with no hunter gate.
+    .add_plugins(UiPetDollPlugin)
     // The connection-telemetry feed: the averaged ping RTT behind `GetNetStats()`, which the main
     // bar's performance meter polls (decision 0658).
     .add_plugins(UiNetPlugin)

@@ -84,7 +84,9 @@ const UI_MANIFEST: &[&str] = &[
     // never has one never sees it. Right after the stance bar, whose row it shares (either
     // one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
     // (CooldownFrame_SetTimer), ActionBar.xml (the `BenillaActionBar` anchor target) and
-    // GameTooltip.xml (its hover).
+    // GameTooltip.xml (its hover). It is also the pet ARC's file, so decision 1066's three
+    // right-click-menu dialogs (ABANDON_PET / RENAME_PET / PETRENAMECONFIRM) register here —
+    // which adds UiPanels.xml to its dependency set, already far above.
     "PetActionBar.xml",
     // The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
     // loads MainMenuBarMicroButtons right after MainMenuBar). After ActionBar.xml: it anchors
@@ -136,6 +138,12 @@ const UI_MANIFEST: &[&str] = &[
     // windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all
     // already loaded above.
     "CharacterFrame.xml",
+    // The Pet tab (decision 1057): the same separate-top-level-file shape as SkillFrame below,
+    // and ahead of it because it is the earlier tab. It leans on CharacterFrame.xml for real —
+    // the `(unit, prefix)` stat setters, the `BenillaStatRow`/`BenillaMagicResistanceFrame`
+    // templates and the tab row it raises tab 2 of — all of which only exist once that file has
+    // loaded, so this order is a requirement here, not just tidiness.
+    "PetPaperDollFrame.xml",
     // The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
     // top-level file (SkillFrame.xml's own header comment — this engine has no cross-file
     // `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
@@ -149,6 +157,12 @@ const UI_MANIFEST: &[&str] = &[
     // itself (its slot template, handlers, and booth slot are all its own — the two windows
     // share only the reference's art).
     "InspectFrame.xml",
+    // The dressing room (decision 1060): the ctrl-click item preview. Loaded right after the
+    // windows whose slots feed it (the character window above, the bags before that) and before
+    // everything else that ctrl-clicks into it — order is legibility only, since `DressUpItemLink`
+    // is a global resolved at call time. Needs UiPanels (the panel manager, its left-slot row) and
+    // Fonts; its booth pane needs nothing loaded at all.
+    "DressUpFrame.xml",
     // The spellbook window (decision 0216 §8, slice 5): the P-key window, the spell SOURCE
     // for the cursor-payload arc. Loaded right after CharacterFrame (the same "player-state
     // windows grouped" posture, same Fonts/UiPanels/GameTooltip-only dependency set); the

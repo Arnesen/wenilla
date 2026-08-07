@@ -14,7 +14,8 @@
           right-click opens the name-only FRIEND dropdown (FriendsFrame_ShowDropdown, the
           minimal FriendsFrame stand-in below), shift-click inserts into the chat editbox. The
           ref's shift-click friends/ignore popup fills + SendWho("n-"..name) wait on the
-          friends/who arc (both guarded). The ITEM branch's Ctrl-DressUp needs a dressing room.
+          friends/who arc (both guarded). The ITEM branch's Ctrl-DressUp landed with the dressing
+          room itself (decision 1060).
         - No UIPanelWindows row (the ref has none either): ShowUIPanel's unregistered branch is
           a plain Show, and SetHyperlink's own empty-gate shows/hides the plate.
     -->
@@ -49,7 +50,10 @@
                 return
             end
             if IsControlKeyDown() then
-                -- ref: DressUpItemLink(text) - no dressing room exists.
+                -- ref l.50: ctrl-clicking an item link in chat previews it on your own character
+                -- (decision 1060). `text` is the FULL escaped link, not the bare payload —
+                -- DressUpItemLink pulls the id out of it itself.
+                DressUpItemLink(text)
                 return
             end
             if IsShiftKeyDown() then

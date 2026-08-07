@@ -904,6 +904,7 @@ mod tests {
                 name: "Ol' Sooty".into(),
                 subname: None,
                 creature_type: 1,
+                pet_family: 4, // Bear — a real tameable family, so the record is a plausible one
                 rank: 1,
                 type_flags: 0,
                 civilian: false,

@@ -717,6 +717,20 @@ pub(crate) enum ClientCommand {
         spell_id: u32,
         enabled: bool,
     },
+    /// Give the pet up permanently (`CMSG_PET_ABANDON`, decision 1066) — the right-click menu's
+    /// **Abandon**, and only that row.
+    ///
+    /// **Its Dismiss is not this**, however alike they read: `PetDismiss 0x4be4d0` opens no packet
+    /// and goes down the pet bar's ordinary [`Self::PetAction`] path with the word `0x07000003`
+    /// (wow-re §11c). Both would have worked against vmangos, which is why it is written here.
+    ///
+    /// No reply: the answer is `SMSG_PET_SPELLS` with a zero guid, and the pet object leaving.
+    PetAbandon { pet_guid: u64 },
+    /// Rename the pet (`CMSG_PET_RENAME`, decision 1066) — the `PETRENAMECONFIRM` popup's accept.
+    ///
+    /// The server may refuse the name outright, so nothing is applied locally; success arrives as a
+    /// bumped `UNIT_FIELD_PET_NAME_TIMESTAMP` on the pet, which is what re-asks the name cache.
+    PetRename { pet_guid: u64, name: String },
     /// Start melee auto-attack on `guid` (`CMSG_ATTACKSWING`); echoed as `SMSG_ATTACKSTART`.
     AttackSwing { guid: u64 },
     /// Stop melee auto-attack (`CMSG_ATTACKSTOP`); echoed as `SMSG_ATTACKSTOP`, whose receive path

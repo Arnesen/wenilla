@@ -301,6 +301,12 @@ impl super::UiScript {
     pub fn take_target_clear(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().target_clear)
     }
+
+    /// Drain the unit tokens `DropItemOnUnit` queued since the last call — the app runs every gate
+    /// and, on the pet leg, casts the learned Feed Pet spell at the held item (`0x48d960`).
+    pub fn take_drop_item_on_unit(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().drop_item_on_unit)
+    }
 }
 
 /// Pick the interesting token from a directional two-unit call (`UnitIsEnemy(a, b)`): whichever

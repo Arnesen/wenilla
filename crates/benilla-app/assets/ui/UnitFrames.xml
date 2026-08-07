@@ -223,8 +223,19 @@
         -- flag to build one from — UnitIsPlayer is the nearest honest read, so a charmed mob or
         -- another player's pet falls through to the unit tooltip where the reference would explain
         -- the menu. The player case, which is the one anybody hovers, is exact.
+        -- ref UnitFrame_OnEnter l.55-57, ahead of everything else: the ONLY lit/grey cursor split
+        -- over a UI element in 1.12, and it is authored here in Lua rather than in the engine
+        -- (wow-re item-target-cursor-and-dropitemonunit.md 4.3). Bag and paper-doll slots have no
+        -- such branch, which is why they show the ordinary pointer.
         function BenillaUnitFrame_OnEnter(frame)
             local unit = frame.unit
+            if SpellIsTargeting() then
+                if SpellCanTargetUnit(unit) then
+                    SetCursor("CAST_CURSOR")
+                else
+                    SetCursor("CAST_ERROR_CURSOR")
+                end
+            end
             if not UnitExists(unit) then return end
             GameTooltip_SetDefaultAnchor(GameTooltip, frame)
             if SHOW_NEWBIE_TIPS == "1" then
@@ -249,6 +260,10 @@
         -- lingers on a ramp reads as a stuck tooltip, where a unit readout fading is the client's
         -- signature. (Items Hide, units fade — that split still holds for the world mouseover.)
         function BenillaUnitFrame_OnLeave(frame)
+            -- ref UnitFrame_OnLeave l.86: leaving a unit frame while still targeting goes to the
+            -- GREY cast cursor, not to the base one — you have left the only thing the armed spell
+            -- could have bound.
+            if SpellIsTargeting() then SetCursor("CAST_ERROR_CURSOR") end
             if SHOW_NEWBIE_TIPS == "1" then
                 GameTooltip:Hide()
             else
@@ -708,6 +723,11 @@
             local name
             if UnitIsUnit("target", "player") then
                 menu = "SELF"
+            elseif UnitIsUnit("target", "pet") then
+                -- Selecting your own pet and right-clicking the TARGET frame gives you the pet
+                -- menu — the ref's own second branch (TargetFrame.lua l.440-441), which sat as a
+                -- comment here until the "pet" token (0990) and then the menu itself (1066).
+                menu = "PET"
             elseif UnitIsPlayer("target") then
                 if UnitInParty("target") then
                     menu = "PARTY"
@@ -715,8 +735,6 @@
                     menu = "PLAYER"
                 end
             else
-                -- The ref checks UnitIsUnit("target", "pet") → PET before this branch; no "pet"
-                -- token exists until the pet slice (phase 4).
                 menu = "RAID_TARGET_ICON"
                 name = RAID_TARGET_ICON
             end
@@ -1169,16 +1187,12 @@
         0988's warning was answered rather than dodged. Its three siblings (`GetPetLoyalty`,
         `GetPetTrainingPoints`, `GetPetExperience`) landed with it.
 
-        STILL DEFERRED, each with its reason:
-        - The PET right-click menu. The reference opens it from PetFrame_OnClick's else arm
-          (`ToggleDropDownMenu(1, nil, PetFrameDropDown)` — PetFrame.lua:127-129), and its four
-          entries (UnitPopup.xml's PET_PAPERDOLL / PET_RENAME / PET_ABANDON / PET_DISMISS) each
-          need a binding that is its own build — the pet paper doll most of all. Two more are
-          needed just to decide what the menu SHOWS: `PetCanBeAbandoned` forks it, hiding
-          paperdoll/rename/abandon for a warlock pet and hiding dismiss for a hunter's, so the
-          same menu reads "Abandon" (permanent, behind the ABANDON_PET confirm) on a hunter pet
-          and "Dismiss" on a demon. They stay suppressed in UnitPopup.xml; the frame takes no
-          right click rather than opening a menu of dead rows.
+        The PET RIGHT-CLICK MENU is no longer deferred either — decision 1066 built the last of
+        the five things it was waiting on (the pet paper doll, the fifth, landed as 1057). The
+        frame's else arm opens PetFrameDropDown below; the rows, their fork and their dialogs are
+        UnitPopup.xml's.
+
+        STILL DEFERRED, with its reason:
         - PartyMemberBuffTooltip on hover (the ref's OnEnter panel): it belongs to the party
           frames' own deferred buff panel, not here.
     -->
@@ -1348,20 +1362,52 @@
             BenillaPetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, alpha)
         end
 
-        -- ref PetFrame_OnClick's left branch, all three legs in the ref's own order. The right
-        -- branch (the PET menu) is the named deferral in the header.
+        -- ref PetFrame_OnClick, now whole (decision 1066 built the right branch). Its FIRST leg is
+        -- the one that is easy to drop: with a spell armed, a RIGHT click disarms rather than
+        -- opening the menu, and it precedes both branches.
         function BenillaPetFrame_OnClick(button)
-            if button ~= "LeftButton" then return end
-            if SpellIsTargeting() then
-                SpellTargetUnit("pet")
-            elseif CursorHasItem() then
-                DropItemOnUnit("pet")
+            if SpellIsTargeting() and button == "RightButton" then
+                SpellStopTargeting()
+                return
+            end
+            if button == "LeftButton" then
+                if SpellIsTargeting() then
+                    SpellTargetUnit("pet")
+                elseif CursorHasItem() then
+                    DropItemOnUnit("pet")
+                else
+                    TargetUnit("pet")
+                end
             else
-                TargetUnit("pet")
+                -- No anchor arguments, unlike the player and target frames: the ref opens this one
+                -- at the CURSOR (PetFrame.lua l.128).
+                ToggleDropDownMenu(1, nil, PetFrameDropDown)
+            end
+        end
+
+        -- The PET menu's owner (ref PetFrame.lua l.158-166). The UnitExists gate is the ref's own,
+        -- and it is not redundant with the frame being hidden: this dropdown is also what the
+        -- TARGET frame's menu falls through to when you have your own pet selected.
+        function PetFrameDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, PetFrameDropDown_Initialize, "MENU")
+        end
+
+        function PetFrameDropDown_Initialize()
+            if UnitExists("pet") then
+                UnitPopup_ShowMenu(PetFrameDropDown, "PET", "pet")
             end
         end
 
         function BenillaPetFrame_OnEnter(frame)
+            -- The pet frame is a unit frame in the reference, and takes the same cursor split:
+            -- hovering it with a spell armed lights or greys exactly as the target frame does.
+            if SpellIsTargeting() then
+                if SpellCanTargetUnit("pet") then
+                    SetCursor("CAST_CURSOR")
+                else
+                    SetCursor("CAST_ERROR_CURSOR")
+                end
+            end
             if not UnitExists("pet") then return end
             GameTooltip_SetDefaultAnchor(GameTooltip, frame)
             if GameTooltip:SetUnit("pet") then
@@ -1410,6 +1456,18 @@
             <Anchor point="TOPLEFT"><Offset><AbsDimension x="80" y="-60"/></Offset></Anchor>
         </Anchors>
         <Frames>
+            <!-- The PET-menu dropdown host (ref $parentDropDown, PetFrame.xml l.35-51): a hidden
+                 state-holder, like the player and target frames'. It carries the ref's own id=1
+                 and its 10×10 size; nothing anchors to it, because this menu opens at the cursor.
+                 It lives INSIDE the pet frame, which means it is only ever initialized once the
+                 pet frame exists — the same nesting the reference uses. -->
+            <Frame name="PetFrameDropDown" inherits="UIDropDownMenuTemplate" id="1" hidden="true">
+                <Size><AbsDimension x="10" y="10"/></Size>
+                <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-20"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>PetFrameDropDown_OnLoad()</OnLoad>
+                </Scripts>
+            </Frame>
             <!-- Bars first, pushed one frame level under the TextureFrame at load (see OnLoad). -->
             <StatusBar name="$parentHealthBar">
                 <Size><AbsDimension x="70" y="8"/></Size>
@@ -1512,7 +1570,7 @@
             <OnEvent>BenillaPetFrame_OnEvent(this)</OnEvent>
             <OnUpdate>BenillaPetFrame_OnUpdate(this, arg1)</OnUpdate>
             <OnEnter>BenillaPetFrame_OnEnter(this)</OnEnter>
-            <OnLeave>GameTooltip:FadeOut()</OnLeave>
+            <OnLeave>if SpellIsTargeting() then SetCursor("CAST_ERROR_CURSOR") end GameTooltip:FadeOut()</OnLeave>
             <OnClick>BenillaPetFrame_OnClick(arg1)</OnClick>
         </Scripts>
     </Frame>

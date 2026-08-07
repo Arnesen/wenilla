@@ -673,6 +673,28 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SpellCanTargetUnit("unit") — the ref's `0x6e6d00`: resolve the token, then ask `0x6e6460`'s
+    // UNIT leg whether the standing word can bind it. Its one shipped caller is
+    // `UnitFrame_OnEnter`, and it is what picks CAST_CURSOR over CAST_ERROR_CURSOR — the only
+    // lit/grey cursor split over a UI element in 1.12.
+    //
+    // The token is not consulted yet, and that is honest rather than lazy: the answer is `false`
+    // for **every** unit while any word benilla can arm is standing (location / item / gameobject —
+    // no unit satisfies those), so no token can change it. The app derives the flag from the word
+    // itself, so this starts discriminating by unit the moment the residual unit-word machine
+    // lands rather than silently staying wrong.
+    g.set(
+        "SpellCanTargetUnit",
+        lua.create_function(|lua, _unit: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            if model.spell_can_target_unit {
+                Ok(Value::Boolean(true))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+
     // SpellStopTargeting() — the ref's Script::SpellStopTargeting (`0x6e6e30`: if IsTargeting →
     // StopTargeting `0x6e4900` → AbortCast(0x1c), which in targeting mode just clears the word,
     // no packet). The 1/nil return is load-bearing exactly like SpellStopCasting's above: the

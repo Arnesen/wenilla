@@ -310,6 +310,74 @@ fn left_clicking_the_pet_frame_targets_it() {
     assert!(s.take_target_requests().is_empty());
 }
 
+/// **All three legs of `PetFrame_OnClick` survive the click** — B208's "dropping food from the bag
+/// onto the pet doesn't feed" (decision 1055).
+///
+/// The handler transcribed the reference's three legs correctly from the day it shipped, but two of
+/// the globals it calls — `DropItemOnUnit` and `SpellTargetUnit` — were never registered, so the
+/// middle leg called a nil value and the whole handler errored out. Nothing fed, and nothing said
+/// why. The bottom-leg test above could not catch it: it only ever exercises the `else`.
+///
+/// So this walks the legs the reference's own order picks between them (`SpellIsTargeting()` first,
+/// then `CursorHasItem()`, then plain target — `PetFrame.lua:114-129`), and asserts each *runs*.
+/// The feed itself is the app's half, gated and sent in `ui_action::drop_item`; what the VM owes is
+/// a queued token and no error.
+#[test]
+fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
+    let mut s = load_pet_frame();
+    s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
+    s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
+
+    // The three globals the handler reaches for must all exist. Named individually so a failure
+    // says which one went missing rather than just "attempt to call a nil value".
+    for global in [
+        "SpellIsTargeting",
+        "CursorHasItem",
+        "DropItemOnUnit",
+        "SpellTargetUnit",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return _G[\"{global}\"] ~= nil"))
+                .unwrap_or(false),
+            "{global} is not registered — the pet frame's click calls it"
+        );
+    }
+
+    // The middle leg, for real: put food in the backpack, pick it up the way a player does, then
+    // click the pet. Before the fix this click errored instead of queueing anything.
+    s.set_container(
+        0,
+        Some(benilla_ui::script::ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::from([(
+                1,
+                benilla_ui::script::ContainerSlot {
+                    item_id: 2287, // Haunch of Meat — pet food
+                    count: 1,
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    s.fire_event("BAG_UPDATE", vec![ScriptValue::Int(0)]);
+    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    assert!(
+        s.eval::<bool>("return CursorHasItem()").unwrap(),
+        "the food is on the cursor"
+    );
+
+    s.run("BenillaPetFrame_OnClick(\"LeftButton\")")
+        .expect("the cursor-holds-an-item leg must not error");
+    assert_eq!(
+        s.take_drop_item_on_unit(),
+        vec!["pet".to_string()],
+        "a held item + a pet click queues the drop"
+    );
+    // …and it is the DROP leg, not the target leg — the reference's if/elseif is exclusive.
+    assert!(s.take_target_requests().is_empty());
+}
+
 /// The GlobalStrings the happiness tooltip resolves by key. Loaded from the MPQ in production; the
 /// test declares the ones it reads, the pet-bar tests' convention. (That the real keys exist in the
 /// shipped file is asserted separately, by name, in `ui_pet_stats`.)
@@ -336,6 +404,10 @@ fn stats(
         loyalty: Some("(Loyalty Level 6) Best Friend".into()),
         training_points: (170, 130),
         experience: (4200, 8000),
+        // The unit frame draws neither the family word (the paper doll's level line) nor the diet
+        // (its tooltip) — decision 1062. Left at their defaults on purpose: the happiness icon
+        // these tests drive must not start depending on them.
+        ..benilla_ui::script::PetStats::default()
     }
 }
 

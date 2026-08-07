@@ -69,10 +69,14 @@ pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: 
 }
 
 /// While targeting, the world cursor is the classifier's pre-empt (cursor-system §5). Runs right
-/// after [`crate::target`]'s classifier in the target chain and overwrites its verdict. Because it
-/// writes the *base* [`WorldCursor`], it also pre-empts every UI overlay downstream
-/// ([`crate::cursor`]'s repair/sell latches only arm while the base is Point) — the same total
-/// pre-emption the reference's step 2 has.
+/// after [`crate::target`]'s classifier in the target chain and overwrites its verdict.
+///
+/// **That pre-emption is the WORLD's, and only the world's** (decisions 1055, 1061). This computes
+/// the world's verdict every frame — [`crate::target::reticle`] reads `WorldCursor.unable` as the
+/// AoE ring's colour, so it must stay live even while the mouse is parked on a bag. What the
+/// reference gates is the *display*: its hover handler `0x481790` runs only while the WorldFrame is
+/// the frame manager's mouse-focus frame, so over a UI frame the cursor simply keeps its last
+/// value. That gate lives in [`crate::cursor`], over the one sticky mode.
 ///
 /// **The verdict is per-seam, and the default is grey** (decision 0949). The reference reaches a
 /// cursor through the pick, and while targeting the pick flags come from the word alone

@@ -15,6 +15,11 @@
 //! Return conventions are the 1.12 API's own, matching [`super::action`]: 1/nil booleans, and the
 //! cooldown as `(start_s on the GetTime clock, duration_s, enable)` with the same
 //! elapsed-goes-cold rule `GetActionCooldown` uses.
+//!
+//! Two later families joined the bar's eight through the same two-way seam, because they are about
+//! the same unit and move on the same push: the **hunter stat block** ([`PetStats`], decision 1005)
+//! that the pet paper doll and the happiness icon read, and the **right-click menu**
+//! (`PetCanBeAbandoned`/`PetCanBeRenamed`/`PetAbandon`/`PetDismiss`/`PetRename`, decision 1066).
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -79,13 +84,19 @@ pub(crate) struct StoredPetAction {
 }
 
 /// The hunter-pet stat block behind `GetPetHappiness`/`GetPetLoyalty`/`GetPetTrainingPoints`/
-/// `GetPetExperience` and `HasPetUI`'s second return (decision 1005; wow-re §11b).
+/// `GetPetExperience` and `HasPetUI`'s second return (decision 1005; wow-re §11b), plus the two
+/// **family**-derived answers `UnitCreatureFamily("pet")` and `GetPetFoodTypes()` (decision 1062).
 ///
-/// **All four bindings share one gate** — `0x6116e0(pet)`, "is this a hunter's pet" — which is why
-/// they share one pushed struct: a warlock's imp resolves perfectly well and still answers nothing,
-/// because happiness, loyalty and training points are hunter machinery.
+/// **The four stat bindings share one gate** — `0x6116e0(pet)`, "is this a hunter's pet" — which is
+/// why they share one pushed struct: a warlock's imp resolves perfectly well and still answers
+/// nothing, because happiness, loyalty and training points are hunter machinery.
 ///
-/// **Their failure conventions differ, and the difference is the API.** `GetPetLoyalty` fails to
+/// **The two family fields sit on OPPOSITE sides of that gate, and the split is carved.**
+/// [`Self::family`] is outside it — `UnitCreatureFamily 0x51a310` has no class test, so a warlock
+/// minion shows "Imp" and gating it would blank a line the reference fills. [`Self::food_types`] is
+/// inside it — `GetPetFoodTypes 0x4bea10` shares `0x6116e0` with the four stats.
+///
+/// **The stat failure conventions differ, and the difference is the API.** `GetPetLoyalty` fails to
 /// **nil**; the two pairs fail to **`(0, 0)` — numbers, not nil**; `GetPetHappiness` fails to
 /// **`(nil, 100.0, 0.0)`**, nil in the first slot and numbers in the other two. `PetFrame.lua`
 /// hides the happiness icon on `not happiness` alone, so collapsing any of these into a uniform
@@ -109,6 +120,27 @@ pub struct PetStats {
     pub training_points: (u16, u16),
     /// `GetPetExperience` → `(currXP, nextXP)`.
     pub experience: (u32, u32),
+    /// `UnitCreatureFamily("pet")` — the localized `CreatureFamily.dbc` word ("Imp", "Wind
+    /// Serpent"), read from the cached creature-query record (`0x51a310`: `[[unit+0xb30]+0x1c]` →
+    /// column `8 + locale`). Exactly **one** return on every path.
+    ///
+    /// `None` is the binding's **nil**, and the reference reaches it four ways that all mean "no
+    /// word to print": no cached record yet (the creature query is still in flight), family id `0`,
+    /// an id past the table, and — the one nobody guesses — **a null row in the middle of the id
+    /// space**: 10/13/14/18/22 have no row in the shipped file, so this is a lookup miss, never a
+    /// bounds check. The page guards its whole level-line `SetText` on this
+    /// (ref `PetPaperDollFrame.lua:68-70`), so nil renders no line rather than a half one.
+    pub family: Option<String>,
+    /// `GetPetFoodTypes()` — the localized diet names the family's pet-food mask selects, in
+    /// **record order** (`0x4bea10`: bit `1 << (recordID - 1)` against `CreatureFamily` column 7,
+    /// the name from `ItemPetFood` column `1 + locale`). Varargs; the client returns the count and
+    /// **never a nil**, so empty is zero values rather than one nil.
+    ///
+    /// **Empty is a real answer**, and it has two independent causes: a family whose mask is `0`
+    /// (every warlock minion), and the binding's own `0x6116e0` gate — owner-is-me *and* the local
+    /// player is a Hunter — which a charmed beast under a non-hunter fails even though its family
+    /// row has a mask. The app applies that gate; this field is what it produced.
+    pub food_types: Vec<String>,
 }
 
 /// The pet bar's pushed state: the slots plus the two bar-wide bits the reference exposes
@@ -136,6 +168,16 @@ pub(crate) struct PetBarState {
     ///
     /// It sits before the cursor fork, so it blocks the DROP as well as the pick-up.
     pub(crate) pickup_allowed: bool,
+    /// `PetCanBeAbandoned()` — **the pet right-click menu's whole fork** (decision 1066).
+    ///
+    /// Three of the PET menu's four rows show only when this is true (paperdoll, rename, abandon)
+    /// and the fourth — Dismiss — shows only when it is *false* (`UnitPopup.lua:402-417`). So it is
+    /// not "am I allowed to abandon"; it is "is this a pet I keep rather than a summon I called",
+    /// and it is what makes one menu read *Abandon* on a hunter's pet and *Dismiss* on a demon.
+    pub(crate) can_be_abandoned: bool,
+    /// `PetCanBeRenamed()` — an independent predicate, ANDed with the one above for the rename row
+    /// alone. One-shot server-side: a hunter pet carries it only until its first rename.
+    pub(crate) can_be_renamed: bool,
 }
 
 impl super::UiScript {
@@ -148,40 +190,48 @@ impl super::UiScript {
         pickup_allowed: bool,
         slots: Vec<PetActionView>,
     ) {
-        let mut model = self.model_mut();
-        model.pet_bar = PetBarState {
-            has_bar,
-            actions_usable,
-            pickup_allowed,
-            slots: slots
-                .into_iter()
-                .map(|view| {
-                    // The cooldown arrives with its absolute start already on the `GetTime` clock
-                    // (ms) — storing is a pure unit conversion, `set_shapeshift_forms`' seam.
-                    let cooldown = view.cooldown.map(|(start_ms, duration_ms, enabled)| {
-                        (
-                            start_ms as f64 / 1000.0,
-                            f64::from(duration_ms) / 1000.0,
-                            enabled,
-                        )
-                    });
-                    StoredPetAction { view, cooldown }
-                })
-                .collect(),
-            // The stat block rides its own setter: `SMSG_PET_SPELLS` replaces the bar wholesale,
-            // but happiness moves every few seconds off a plain descriptor field, so tying the two
-            // together would make the bar's diff-and-fire churn on a number no button draws.
-            has_ui: model.pet_bar.has_ui,
-            stats: std::mem::take(&mut model.pet_bar.stats),
-        };
+        // Field-by-field, never `pet_bar = PetBarState { .. }`: the struct also holds state that
+        // moves on OTHER clocks (the stat block, the menu predicates), and rebuilding it wholesale
+        // meant every one of those had to be hand-carried across this assignment or be silently
+        // reset once a frame. Assigning what this setter owns cannot forget them.
+        let bar = &mut self.model_mut().pet_bar;
+        bar.has_bar = has_bar;
+        bar.actions_usable = actions_usable;
+        bar.pickup_allowed = pickup_allowed;
+        bar.slots = slots
+            .into_iter()
+            .map(|view| {
+                // The cooldown arrives with its absolute start already on the `GetTime` clock
+                // (ms) — storing is a pure unit conversion, `set_shapeshift_forms`' seam.
+                let cooldown = view.cooldown.map(|(start_ms, duration_ms, enabled)| {
+                    (
+                        start_ms as f64 / 1000.0,
+                        f64::from(duration_ms) / 1000.0,
+                        enabled,
+                    )
+                });
+                StoredPetAction { view, cooldown }
+            })
+            .collect();
     }
 
     /// Push the hunter-pet stat block ([`PetStats`]) — the four paper-doll bindings plus
-    /// `HasPetUI`. Separate from [`Self::set_pet_actions`] because it changes on a different clock.
+    /// `HasPetUI`. Separate from [`Self::set_pet_actions`] because it changes on a different clock:
+    /// `SMSG_PET_SPELLS` replaces the bar wholesale, but happiness moves every few seconds off a
+    /// plain descriptor field, so tying the two together would make the bar's diff-and-fire churn
+    /// on a number no button draws.
     pub fn set_pet_stats(&mut self, has_ui: bool, stats: PetStats) {
         let bar = &mut self.model_mut().pet_bar;
         bar.has_ui = has_ui;
         bar.stats = stats;
+    }
+
+    /// Push the right-click menu's two predicates (decision 1066) — a third clock again, the pet's
+    /// own `UNIT_FIELD_FLAGS`, which the rename's one-shot bit moves independently of both.
+    pub fn set_pet_menu(&mut self, can_be_abandoned: bool, can_be_renamed: bool) {
+        let bar = &mut self.model_mut().pet_bar;
+        bar.can_be_abandoned = can_be_abandoned;
+        bar.can_be_renamed = can_be_renamed;
     }
 
     /// Drain the 1-based slot indices `CastPetAction` queued since the last call. What each index
@@ -209,6 +259,22 @@ impl super::UiScript {
     /// break the server's body-size fork between the one- and two-entry forms.
     pub fn take_pet_set_actions(&mut self) -> Vec<Vec<(u32, u32)>> {
         std::mem::take(&mut self.model_mut().pet_set_actions)
+    }
+
+    /// Drain the `PetAbandon()` and `PetDismiss()` calls queued, as `(abandons, dismisses)` —
+    /// counts, since neither verb carries an argument. Kept apart for the reason on the model's
+    /// fields: two bindings, not one, whatever they end up sharing on the wire.
+    pub fn take_pet_gives_up(&mut self) -> (u32, u32) {
+        let m = &mut *self.model_mut();
+        (
+            std::mem::replace(&mut m.pet_abandons, 0),
+            std::mem::replace(&mut m.pet_dismisses, 0),
+        )
+    }
+
+    /// Drain the names `PetRename(name)` queued, in order.
+    pub fn take_pet_renames(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.model_mut().pet_renames)
     }
 }
 
@@ -413,12 +479,135 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitCreatureFamily(unit) → the localized family word, or NIL. Exactly ONE return on every
+    // path (`0x51a310`, wow-re-VERIFIED) — decision 1062.
+    //
+    // **Scoped to the `"pet"` token, and that narrowing is stated rather than hidden.** The real
+    // binding resolves any unit and reads `[[unit+0xb30]+0x1c]` off its cached creature-query
+    // record, so `UnitCreatureFamily("target")` on a wild boar answers "Boar" there and nil here —
+    // INTERIM, exactly the shape `UnitDefense`'s non-player answer took in 1057. The pet page is
+    // the only consumer in the shipped FrameXML, and a pet is the one unit whose record we cannot
+    // reach through `guid::entry` (its guid slot holds a pet number, not a template id), so the pet
+    // feed resolves it explicitly and the other tokens wait for a second consumer — at which point
+    // this moves onto `UnitState` beside `creature_type_name`.
+    //
+    // Note there is NO class gate here: a warlock's imp answers "Imp". That is the carved shape,
+    // and it is what makes the family word and `GetPetFoodTypes` below behave differently for the
+    // same pet.
+    //
+    // All four of the reference's nil paths arrive as one pushed `None` — no cached record, id 0,
+    // id past the table, and a null row (ids 10/13/14/18/22 are absent from the shipped file). A
+    // missing or absent token is nil too, through the same match.
+    g.set(
+        "UnitCreatureFamily",
+        lua.create_function(move |lua, token: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let family = token
+                .filter(|t| t == "pet")
+                .and_then(|_| model.pet_bar.stats.family.as_deref());
+            Ok(match family {
+                Some(name) => Value::String(lua.create_string(name)?),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
+    // GetPetFoodTypes() → the diet names as VARARGS, one Lua return per food type, in record
+    // order — the shape `BuildListString(GetPetFoodTypes())` needs (ref
+    // `PetPaperDollFrame.xml:269`). `0x4bea10` returns the pushed COUNT and never a nil, so the
+    // empty case is zero values.
+    //
+    // An empty diet returns NOTHING, not an empty string: the reference's `BuildListString` then
+    // reads `arg[1]` as nil and returns nil, which is the behaviour a single empty-string return
+    // would silently break. It is reachable two ways, both real — a family whose mask is 0 (every
+    // warlock minion), and the binding's own `0x6116e0` hunter gate, which the app applies before
+    // filling this list.
+    g.set(
+        "GetPetFoodTypes",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let values: Vec<Value> = model
+                .pet_bar
+                .stats
+                .food_types
+                .iter()
+                .map(|f| lua.create_string(f).map(Value::String))
+                .collect::<mlua::Result<_>>()?;
+            Ok(MultiValue::from_vec(values))
+        })?,
+    )?;
+
     // PetStopAttack() — queue the call-off. No argument: the wire carries only the pet's guid.
     g.set(
         "PetStopAttack",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.pet_stop_attacks += 1;
+            Ok(())
+        })?,
+    )?;
+
+    // ── The right-click menu (decision 1066) ─────────────────────────────────────────────────
+    // Two predicates that decide what the PET menu SHOWS, and three verbs it can pick. The
+    // predicates are 1/nil like the rest of this file, which is all `UnitPopup.lua` needs — every
+    // one of its four uses is a bare `not PetCanBeAbandoned()` or an AND of the two.
+
+    // PetCanBeAbandoned() → 1/nil. Do not read this as "may I abandon": it forks the whole menu.
+    g.set(
+        "PetCanBeAbandoned",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(flag(model.pet_bar.can_be_abandoned))
+        })?,
+    )?;
+
+    // PetCanBeRenamed() → 1/nil. Independent of the above; the rename row wants both.
+    g.set(
+        "PetCanBeRenamed",
+        lua.create_function(move |lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(flag(model.pet_bar.can_be_renamed))
+        })?,
+    )?;
+
+    // PetAbandon() — the ABANDON_PET popup's OnAccept, i.e. the confirmed permanent one.
+    g.set(
+        "PetAbandon",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.pet_abandons += 1;
+            Ok(())
+        })?,
+    )?;
+
+    // PetDismiss() — the menu row itself, with NO confirm in front of it (`UnitPopup.lua:590`
+    // calls it directly, unlike abandon). Nothing is lost when a summon is sent away.
+    g.set(
+        "PetDismiss",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.pet_dismisses += 1;
+            Ok(())
+        })?,
+    )?;
+
+    // PetRename(name) — the PETRENAMECONFIRM popup's OnAccept, carrying the text the RENAME_PET
+    // edit box collected.
+    //
+    // The argument reaches `lua_tostring`, so a NUMBER coerces (wow-re §11c) — `mlua::String`
+    // accepts one the same way. What the reference does with the RESULT is the app's business and
+    // is queued for it rather than dropped here: an empty name raises `ERR_NULL_PETNAME` and an
+    // over-long one is truncated, both at the send. Only a missing or unconvertible argument dies
+    // here, because there is nothing to queue.
+    g.set(
+        "PetRename",
+        lua.create_function(|lua, name: Option<mlua::String>| {
+            let Some(name) = name else {
+                return Ok(());
+            };
+            let name = name.to_str()?.to_string();
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.pet_renames.push(name);
             Ok(())
         })?,
     )?;
@@ -590,6 +779,81 @@ mod tests {
             .unwrap());
     }
 
+    /// The right-click menu's two predicates and three verbs (decision 1066).
+    ///
+    /// The predicate half is checked the way `UnitPopup.lua` actually reads them — as the four
+    /// row conditions — because that is the only thing they are for, and getting the Dismiss row's
+    /// **inverted** sense wrong would show a hunter both Abandon and Dismiss.
+    #[test]
+    fn the_menu_predicates_fork_the_rows_and_the_verbs_queue() {
+        let mut s = UiScript::new().unwrap();
+
+        // No pet pushed: every row is off, which is what keeps a menu of dead rows from opening.
+        assert!(s
+            .eval::<bool>("return PetCanBeAbandoned() == nil and PetCanBeRenamed() == nil")
+            .unwrap());
+
+        // A hunter's freshly tamed pet: abandon/rename/paperdoll show, dismiss hides.
+        s.set_pet_menu(true, true);
+        assert_eq!(s.eval::<i64>("return PetCanBeAbandoned()").unwrap(), 1);
+        assert!(
+            s.eval::<bool>("return PetCanBeAbandoned() and PetCanBeRenamed()")
+                .unwrap(),
+            "the rename row wants BOTH"
+        );
+        assert!(!s.eval::<bool>("return not PetCanBeAbandoned()").unwrap());
+
+        // The same pet after one rename — the bit is one-shot, so only the rename row goes.
+        s.set_pet_menu(true, false);
+        assert!(s.eval::<bool>("return PetCanBeAbandoned() ~= nil").unwrap());
+        assert!(s.eval::<bool>("return PetCanBeRenamed() == nil").unwrap());
+
+        // A warlock's demon: the fork flips whole. Dismiss is the row that shows.
+        s.set_pet_menu(false, false);
+        assert!(s.eval::<bool>("return not PetCanBeAbandoned()").unwrap());
+
+        // The verbs. Abandon and dismiss are counted apart; rename carries its text.
+        assert_eq!(s.take_pet_gives_up(), (0, 0));
+        s.run("PetAbandon() PetDismiss() PetDismiss()").unwrap();
+        assert_eq!(s.take_pet_gives_up(), (1, 2));
+        assert_eq!(s.take_pet_gives_up(), (0, 0), "drain empties");
+
+        // An empty name IS queued — the reference's empty check raises `ERR_NULL_PETNAME` at the
+        // send, so swallowing it here would swallow the error with it. A number coerces
+        // (`lua_tostring`); a missing argument has nothing to queue.
+        s.run("PetRename(\"Bruce\") PetRename(\"\") PetRename(7) PetRename()")
+            .unwrap();
+        assert_eq!(
+            s.take_pet_renames(),
+            vec!["Bruce".to_string(), String::new(), "7".to_string()]
+        );
+        assert!(s.take_pet_renames().is_empty(), "drain empties");
+    }
+
+    /// A bar push must not wipe the state that rides other clocks — the trap the old wholesale
+    /// `pet_bar = PetBarState { .. }` assignment set, and the reason [`UiScript::set_pet_actions`]
+    /// assigns field by field.
+    #[test]
+    fn pushing_the_bar_leaves_the_stats_and_the_menu_alone() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_menu(true, true);
+        s.set_pet_stats(
+            true,
+            PetStats {
+                hunter_pet: true,
+                happiness: Some(3),
+                ..Default::default()
+            },
+        );
+
+        s.set_pet_actions(true, true, true, slots());
+
+        assert_eq!(s.eval::<i64>("return PetCanBeAbandoned()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return PetCanBeRenamed()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return HasPetUI()").unwrap(), 1);
+        assert_eq!(s.eval::<i64>("return GetPetHappiness()").unwrap(), 3);
+    }
+
     /// A disabled bar still EXISTS — `PetHasActionBar` stays true while `GetPetActionsUsable`
     /// goes false. The pair is what greys every icon without taking the bar off screen.
     #[test]
@@ -611,6 +875,15 @@ mod tests {
             loyalty: Some("(Loyalty Level 6) Best Friend".into()),
             training_points: (170, 130),
             experience: (4200, 8000),
+            family: Some("Boar".into()),
+            food_types: vec![
+                "Meat".into(),
+                "Fish".into(),
+                "Cheese".into(),
+                "Bread".into(),
+                "Fungus".into(),
+                "Fruit".into(),
+            ],
         }
     }
 
@@ -719,5 +992,128 @@ mod tests {
         assert!(s
             .eval::<bool>("local h, dmg = GetPetHappiness() return h == nil and dmg == 100")
             .unwrap());
+    }
+
+    /// **`UnitCreatureFamily`'s nil paths — all four of them** (decision 1062). The reference
+    /// guards its whole level-line `SetText` on this binding, so an accidental `""` in place of
+    /// nil would print a bare "Level 58 " with a trailing space instead of nothing at all.
+    #[test]
+    fn unit_creature_family_is_nil_on_every_absent_path() {
+        let mut s = UiScript::new().unwrap();
+        // 1. No pet at all — nothing has ever been pushed.
+        assert!(s
+            .eval::<bool>(r#"return UnitCreatureFamily("pet") == nil"#)
+            .unwrap());
+
+        // 2. A pet whose template carries family 0, and 3. a pet whose creature query has not
+        //    answered yet. Both arrive here as the same pushed `None` (the app resolves which is
+        //    which); what matters at this seam is that a live pet with no family word is nil and
+        //    not an empty string.
+        s.set_pet_stats(
+            true,
+            PetStats {
+                family: None,
+                ..hunter_stats()
+            },
+        );
+        assert!(s
+            .eval::<bool>(r#"return UnitCreatureFamily("pet") == nil"#)
+            .unwrap());
+        assert!(
+            s.eval::<bool>(r#"return UnitCreatureFamily("pet") ~= ''"#)
+                .unwrap(),
+            "nil, never an empty string — '' is TRUTHY in Lua, so it would pass the ref's guard \
+             and print a bare 'Level 58 ' with a trailing space"
+        );
+
+        // 4. Any other token: the INTERIM narrowing, stated in the binding's own comment.
+        s.set_pet_stats(true, hunter_stats());
+        assert_eq!(
+            s.eval::<String>(r#"return UnitCreatureFamily("pet")"#)
+                .unwrap(),
+            "Boar"
+        );
+        for token in [r#""target""#, r#""player""#, "nil"] {
+            assert!(
+                s.eval::<bool>(&format!("return UnitCreatureFamily({token}) == nil"))
+                    .unwrap(),
+                "{token} must answer nil"
+            );
+        }
+    }
+
+    /// `GetPetFoodTypes` returns **varargs**, one value per diet — the shape
+    /// `BuildListString(GetPetFoodTypes())` depends on. A single comma-joined string would read
+    /// identically in the tooltip and be wrong for every other caller.
+    #[test]
+    fn get_pet_food_types_returns_one_value_per_diet() {
+        let mut s = UiScript::new().unwrap();
+        // No pet: ZERO returns, which is what makes the ref's `BuildListString` answer nil.
+        assert_eq!(
+            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
+                .unwrap(),
+            0
+        );
+
+        s.set_pet_stats(true, hunter_stats());
+        assert_eq!(
+            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
+                .unwrap(),
+            6,
+            "a boar's six diets are six returns, not one string"
+        );
+        assert!(s
+            .eval::<bool>(
+                "local a, b, c = GetPetFoodTypes() \
+                 return a == 'Meat' and b == 'Fish' and c == 'Cheese'"
+            )
+            .unwrap());
+
+        // An empty diet is a real answer (every warlock family ships a zero food mask) and is
+        // still zero returns, not one empty string.
+        s.set_pet_stats(
+            true,
+            PetStats {
+                food_types: vec![],
+                ..hunter_stats()
+            },
+        );
+        assert_eq!(
+            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
+                .unwrap(),
+            0
+        );
+    }
+
+    /// The family **word** answers regardless of the hunter gate — `UnitCreatureFamily 0x51a310`
+    /// has no class test at all, so a warlock's minion shows "Imp" on the page's level line while
+    /// every hunter-gated binding beside it says nothing.
+    ///
+    /// (The **diet** is the other way round — it shares `0x6116e0` — but that gate is the app's to
+    /// apply, so at this seam it is simply an empty list. `ui_pet_stats` pins the gate itself.)
+    #[test]
+    fn the_family_word_answers_for_a_non_hunter_pet() {
+        let mut s = UiScript::new().unwrap();
+        s.set_pet_stats(
+            true,
+            PetStats {
+                hunter_pet: false,
+                family: Some("Imp".into()),
+                food_types: vec![],
+                ..PetStats::default()
+            },
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return UnitCreatureFamily("pet")"#)
+                .unwrap(),
+            "Imp"
+        );
+        // …while every hunter-gated binding still says nothing.
+        assert!(s.eval::<bool>("return GetPetLoyalty() == nil").unwrap());
+        assert_eq!(
+            s.eval::<i64>(r##"return select("#", GetPetFoodTypes())"##)
+                .unwrap(),
+            0
+        );
     }
 }

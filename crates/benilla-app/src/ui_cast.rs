@@ -236,6 +236,16 @@ impl QueuedMeleeSpell {
 /// in `0xcecaa8`. `AbortCast` cancels the cast and pops the strike back up — so the cast dies on
 /// the first Esc and the strike on the second. Reading `PendingCast` first reproduces that
 /// without our needing the push/pop pair.
+///
+/// One knowing divergence there, pinned by wow-re's `spell/scratch/esc-queued-strike.md` §Q(c)
+/// and weighed in decision 1058: the ref's pop *reads* `0xcecaa8` and never writes it, so a
+/// second Esc re-asserts the same strike locally and only the server echo converges it. We have
+/// no separate save slot to go stale, so ours clears. The two agree everywhere it shows: in the
+/// un-nested case the ref's pop reads a zero save and clears too, and in the nested case vmangos
+/// drops the melee slot on press **1** regardless (`HandleCancelCastOpcode` is spellId-blind
+/// about `CURRENT_MELEE_SPELL`), so both clients converge off that echo. Reproducing the
+/// re-assert would mean modelling `0xcecaa8` as a third slot to hold a value that is stale by
+/// construction, for a window one localhost round trip wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Inflight {
     /// An ordinary cast — ours to send-guard, to paint a bar for, and to reap.
@@ -1137,6 +1147,13 @@ mod tests {
         /// pushes it down (`PushPopNestedCast 0x6e4ad0`), so `0xceca88` holds the CAST. One Esc
         /// takes the cast; `AbortCast`'s pop restores the strike, and the next Esc takes that.
         /// One press, one thing — the ladder's law all the way down.
+        ///
+        /// This is the **local** law, which is all a harness with no server can show, and it is
+        /// the ref's local law too (wow-re `esc-queued-strike.md` §Q(c)) — with the one knowing
+        /// difference `Inflight`'s doc names: the ref's press 2 re-asserts the strike instead of
+        /// clearing it. On a live wire neither client gets this far, because vmangos drops the
+        /// melee slot on press **1** regardless of the id in the packet, and both converge off
+        /// that echo. So what this pins is the ordering, not a two-press ritual a player sees.
         #[test]
         fn esc_takes_the_cast_first_and_the_strike_on_the_next_press() {
             let (mut app, rx) = harness(HashMap::new());

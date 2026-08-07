@@ -80,10 +80,17 @@ fn eight_entries() -> QuestLogState {
                 count: 1,
                 quality: 1,
                 usable: true,
+                // The reward row's ctrl/shift payload (`GetQuestLogItemLink`, decisions 1059/1060)
+                // — `ui_quest_log.rs` builds it through `ui_items::item_link` once the template
+                // lands, so the fixture carries that exact shape.
+                link: Some(HAMMER_LINK.into()),
             }],
         }),
     }
 }
+
+/// The fixture reward's full escaped link — a real 1.12 item, quality white.
+const HAMMER_LINK: &str = "|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r";
 
 /// The loader itself: every file the window depends on parses and materializes with no errors.
 #[test]
@@ -594,6 +601,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
                 count: 1,
                 quality: 1,
                 usable: true,
+                ..Default::default()
             },
             QuestItemView {
                 item_id: 0,
@@ -602,6 +610,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
                 count: 1,
                 quality: 1,
                 usable: true,
+                ..Default::default()
             },
         ],
         rewards: vec![QuestItemView {
@@ -611,6 +620,7 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
             count: 1,
             quality: 1,
             usable: true,
+            ..Default::default()
         }],
     });
     s.set_quest_log(state);
@@ -711,6 +721,7 @@ fn overflowing_entry() -> QuestLogState {
                 count: 1,
                 quality: 1,
                 usable: true,
+                ..Default::default()
             }],
         }),
     }
@@ -984,4 +995,139 @@ fn popup_children_inherit_the_dialog_stratum() {
         button_z > backdrop_z,
         "the buttons draw ABOVE their dialog's backdrop (button z {button_z:x} vs backdrop z {backdrop_z:x})"
     );
+}
+
+/// The quest log's reward rows carry the same modifier fork as the questgiver's (decisions
+/// 1059/1060) — ref `QuestLogRewardItem_OnClick` (QuestLogFrame.lua:542-552), the OnClick the ref's
+/// own `QuestLogRewardItemTemplate` adds (ref QuestLogFrame.xml:118-120). There is no third arm
+/// here: a quest-log reward row is never selectable, so a plain click stays inert — which is the
+/// regression this pins, since the row had NO OnClick at all before this arc.
+///
+/// Ordering note: the dressing room docks the same left UIPanel slot as the log window, so the ctrl
+/// arm runs last — opening the room closes the log, exactly as it does in play.
+#[test]
+fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
+    load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
+    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+
+    s.set_quest_log(eight_entries());
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return BenillaQuestLogReward1:IsShown()")
+            .unwrap(),
+        "the fixture's one fixed reward row is laid out"
+    );
+    let _ = s.take_dressup_intents();
+
+    // A PLAIN click is inert: no room, no chat text, no error (the row has no select arm).
+    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    assert!(
+        s.take_dressup_intents().is_empty(),
+        "a plain click never opens the dressing room"
+    );
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        "",
+        "a plain click posts nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // SHIFT + chat open → the reward's full escaped link (ref l.547-550).
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.set_modifiers(true, false, false);
+    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        HAMMER_LINK,
+        "shift-click posted the reward's link"
+    );
+    assert!(
+        s.take_dressup_intents().is_empty(),
+        "the shift arm never opens the room"
+    );
+
+    // CTRL → the room wearing the reward (ref l.543-546): re-dress first, then try it on.
+    s.set_modifiers(false, true, false);
+    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.take_dressup_intents(),
+        vec![
+            benilla_ui::script::DressUpIntent::Dress,
+            benilla_ui::script::DressUpIntent::TryOn(2024)
+        ],
+        "ctrl-click opened the room wearing the reward"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// A quest log TITLE row is a quest NAME, not an item — ref `QuestLogTitleButton_OnClick`
+/// (QuestLogFrame.lua:469-505): with the chat edit box up, shift-click inserts the row's own text
+/// with its leading indent trimmed (l.478-480, plain text — 1.12 has no `|Hquest:` link); the
+/// quest-watch toggle is that branch's `else` (l.481-500). Both halves in one test because it is the
+/// *fork* that matters: watching is the behaviour that already shipped, and the insert must not have
+/// eaten it. The select-and-repaint tail (l.503-504) runs either way.
+#[test]
+fn shift_click_on_a_title_posts_the_quest_name_with_chat_open_and_watches_with_it_closed() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
+    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+
+    s.set_quest_log(eight_entries());
+    s.run("ToggleQuestLog()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // Row 1's centre — the same seat `shift_click_toggles_the_watch_checkbox_and_the_tracker_hud`
+    // computes (list TOPLEFT+(19,-75), 300×16).
+    s.resolve();
+    let win = frame_rect(&s.extract(), 384.0, 512.0);
+    let (rx, ry) = (win.left + 19.0 + 150.0, win.top - 75.0 - 8.0);
+    let shift_click = |s: &mut UiScript| {
+        s.set_modifiers(true, false, false);
+        s.mouse_button(rx, ry, "LeftButton", true);
+        s.mouse_button(rx, ry, "LeftButton", false);
+        s.set_modifiers(false, false, false);
+    };
+
+    // Chat CLOSED → the watch toggle, exactly as before.
+    shift_click(&mut s);
+    assert!(
+        s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        "with chat closed, shift-click still toggles the quest watch"
+    );
+    shift_click(&mut s); // and back off, so the assertion below is unambiguous
+    assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+
+    // Chat OPEN → the bare quest name, and NO watch.
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    shift_click(&mut s);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        "Quest 1",
+        "the trimmed quest name landed in the chat box (ref's gsub result, no row indent)"
+    );
+    assert!(
+        !s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        "with chat open the watch must NOT toggle — the ref makes watching the else"
+    );
+    // The tail runs either way (ref l.503-504): the click still selects the row.
+    assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

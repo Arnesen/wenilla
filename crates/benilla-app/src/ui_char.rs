@@ -5,11 +5,17 @@
 //!
 //! Three jobs, each frame, before the VM ticks ([`UiInput`]):
 //!
-//! - **[`PlayerCombatStats`]** from the self player's [`ObjectStore`] — the stat/resistance/
-//!   damage/attack-power fields (all OWNER_ONLY, verified streamed in 0208) plus the two resolved
-//!   weapon-skill pairs: the app picks WHICH skill line the equipped main-hand/ranged item uses
-//!   (`weapon_subclass_skill` — vmangos `Item.cpp`'s table; no weapon = unarmed 162) and reads its
-//!   `PLAYER_SKILL_INFO` triplet, so the engine-free binding just serves the pair.
+//! - **[`UnitCombatStats`]** from the self player's [`ObjectStore`] — the stat/resistance/
+//!   damage/attack-power fields (all OWNER_ONLY, verified streamed in 0208) plus the three resolved
+//!   skill pairs: the app picks WHICH skill line the equipped main-hand/ranged item uses
+//!   (`weapon_subclass_skill` — vmangos `Item.cpp`'s table; no weapon = unarmed 162), reads its
+//!   `PLAYER_SKILL_INFO` triplet and the Defense line's ([`SKILL_DEFENSE`]), so the engine-free
+//!   bindings just serve the pairs.
+//!
+//!   The descriptor half is [`unit_combat_stats`], which any unit's store goes through — the pet
+//!   paper doll's feed ([`crate::ui_pet_doll`], decision 1057) is the second caller. What
+//!   [`combat_stats`] adds on top is exactly the player-only half: the four values derived from the
+//!   equipped items, and the skill pairs, neither of which a creature has.
 //! - **`InventorySlots`** from the inv-slot guids → [`Items`] objects → templates → the
 //!   [`ItemDisplays`] icon — index 0 the ammo slot (`PLAYER_AMMO_ID`, its count summed across the
 //!   backpack + the four equipped bags), 1..=19 the equipment slots, 20..=23 the four equipped-bag
@@ -28,15 +34,16 @@
 //! Events, fired on snapshot transitions (grouped by the ref's own registration set,
 //! `PaperDollFrame.lua:14-28` — arg1 `"player"`): `UNIT_STATS`, `UNIT_RESISTANCES`, `UNIT_DAMAGE`,
 //! `UNIT_ATTACK_SPEED`, `UNIT_ATTACK_POWER`, `UNIT_RANGED_ATTACK_POWER`, `UNIT_RANGEDDAMAGE`,
-//! `UNIT_ATTACK` (the weapon-skill pairs), and `UNIT_INVENTORY_CHANGED` on any slot-view change.
-//! A first snapshot counts as a transition of every group (the `ui_unit` rule).
+//! `UNIT_ATTACK` (the weapon-skill pairs) — [`fire_stat_transitions`], shared with the pet feed —
+//! and `UNIT_INVENTORY_CHANGED` on any slot-view change. A first snapshot counts as a transition of
+//! every group (the `ui_unit` rule).
 
 use bevy::prelude::*;
 
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
-    weapon_subclass_skill, InvSlotView, InventorySlots, PlayerCombatStats, ScriptValue, SkillEntry,
-    SkillsState, UiScript, EQUIPMENT_BAG, SKILL_UNARMED,
+    weapon_subclass_skill, InvSlotView, InventorySlots, ScriptValue, SkillEntry, SkillsState,
+    UiScript, UnitCombatStats, EQUIPMENT_BAG, SKILL_DEFENSE, SKILL_UNARMED,
 };
 
 use crate::entities::ItemDisplays;
@@ -67,7 +74,7 @@ fn fixed(v: f32) -> i64 {
 /// snapshots pushed, so events fire on transitions only.
 #[derive(Resource, Default)]
 struct CharFeedState {
-    last_stats: Option<PlayerCombatStats>,
+    last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
 }
 
@@ -306,13 +313,15 @@ fn skill_pair(store: &ObjectStore, skill_id: u32) -> (u32, i32) {
     (0, 0)
 }
 
-/// Build the combat-stats snapshot from the self player's descriptor (field mappings pinned in
-/// decision 0208; the absent shapes are the descriptor's zero defaults, `percent` 1.0).
-fn combat_stats(
-    store: &ObjectStore,
-    items: &mut Items,
-    commands: &NetCommands,
-) -> PlayerCombatStats {
+/// Build the **descriptor-only** combat-stats snapshot for ANY unit's store (field mappings pinned
+/// in decision 0208; the absent shapes are the descriptor's zero defaults, `percent` 1.0).
+///
+/// Nothing here reads inventory, templates or skill lines — so it is exactly the part a pet can go
+/// through ([`crate::ui_pet_doll`], decision 1057). The `player_*` reads are deliberately left in:
+/// a creature has no PLAYER block, so they read absent and fall to their defaults, which is the
+/// right pet answer (no buff decomposition, `damage_percent` the divide-safe 1.0) rather than a
+/// second unit-only copy of the same twenty lines.
+pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
     let f = &store.0;
     let round = |v: Option<f32>| v.unwrap_or(0.0).round() as i32;
 
@@ -336,23 +345,7 @@ fn combat_stats(
     let (ap_pos, ap_neg) = f.unit_attack_power_mods();
     let (rap_pos, rap_neg) = f.unit_ranged_attack_power_mods();
 
-    // The offhand-speed gate is an offhand *weapon* (a shield doesn't swing); the wand check is
-    // the ranged item's subclass. Both read the equipped item's template (ask-once in flight →
-    // false this frame, refined when it lands).
-    let has_offhand = slot_entry(store, items, SLOT_OFF_HAND)
-        .and_then(|e| items.template(e, 0, commands))
-        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON);
-    let has_wand = slot_entry(store, items, SLOT_RANGED)
-        .and_then(|e| items.template(e, 0, commands))
-        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
-
-    let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
-    let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
-        .and_then(|e| items.template(e, 0, commands))
-        .filter(|t| t.class == ITEM_CLASS_WEAPON)
-        .and_then(|t| weapon_subclass_skill(t.subclass));
-
-    PlayerCombatStats {
+    UnitCombatStats {
         stats,
         stat_pos,
         stat_neg,
@@ -370,7 +363,6 @@ fn combat_stats(
         // damage/speed division finite on the first frames.
         main_attack_time_ms: f.unit_base_attack_time(0).unwrap_or(2000),
         offhand_attack_time_ms: f.unit_base_attack_time(1).unwrap_or(2000),
-        has_offhand,
         attack_power: f.unit_attack_power().unwrap_or(0),
         attack_power_pos: i32::from(ap_pos),
         attack_power_neg: i32::from(ap_neg),
@@ -380,9 +372,45 @@ fn combat_stats(
         ranged_attack_time_ms: f.unit_ranged_attack_time().unwrap_or(2000),
         ranged_min_damage: f.unit_min_ranged_damage().unwrap_or(0.0),
         ranged_max_damage: f.unit_max_ranged_damage().unwrap_or(0.0),
+        // The equipment- and skill-derived half is the PLAYER feed's ([`combat_stats`]); a unit
+        // with neither keeps these defaults.
+        has_offhand: false,
+        has_wand: false,
+        main_weapon_skill: (0, 0),
+        ranged_weapon_skill: (0, 0),
+        defense_skill: (0, 0),
+    }
+}
+
+/// The player's snapshot: [`unit_combat_stats`] plus the half only *we* have — the two values that
+/// need the equipped items' templates, and the three `PLAYER_SKILL_INFO` pairs.
+fn combat_stats(store: &ObjectStore, items: &mut Items, commands: &NetCommands) -> UnitCombatStats {
+    // The offhand-speed gate is an offhand *weapon* (a shield doesn't swing); the wand check is
+    // the ranged item's subclass. Both read the equipped item's template (ask-once in flight →
+    // false this frame, refined when it lands).
+    let has_offhand = slot_entry(store, items, SLOT_OFF_HAND)
+        .and_then(|e| items.template(e, 0, commands))
+        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON);
+    let has_wand = slot_entry(store, items, SLOT_RANGED)
+        .and_then(|e| items.template(e, 0, commands))
+        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
+
+    let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
+    let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
+        .and_then(|e| items.template(e, 0, commands))
+        .filter(|t| t.class == ITEM_CLASS_WEAPON)
+        .and_then(|t| weapon_subclass_skill(t.subclass));
+
+    UnitCombatStats {
+        has_offhand,
+        has_wand,
         main_weapon_skill: skill_pair(store, main_skill),
         ranged_weapon_skill: ranged_skill_id.map_or((0, 0), |id| skill_pair(store, id)),
-        has_wand,
+        // `UnitDefense`'s pair. Its repaint wire is `SKILL_LINES_CHANGED` (which the ref's
+        // `PaperDollFrame` registers, l.28, and `watch_skill_ups` already fires), NOT a
+        // `UNIT_DEFENSE` — the character sheet never registers one.
+        defense_skill: skill_pair(store, SKILL_DEFENSE),
+        ..unit_combat_stats(store)
     }
 }
 
@@ -604,6 +632,109 @@ fn inventory_slots(
     inv
 }
 
+/// Fire the paper doll's per-group repaint events for one unit's snapshot transition, `arg1 =
+/// token` — the [`crate::ui_unit::fire_transitions`] shape, for the combat-stats surface.
+///
+/// The groups ARE the ref's own event registrations (`PaperDollFrame.lua:14-28`, which
+/// `PetPaperDollFrame.lua:12-20` repeats verbatim for the pet page), so each event fires exactly
+/// when a value some handler of it reads has moved; `prev == None` (a first snapshot) counts as a
+/// transition of every group, the `ui_unit` rule.
+///
+/// Shared by both feeds rather than transcribed twice (decision 1057): the pet page calls the same
+/// `PaperDollFrame_Set*` helpers off the same events, so two copies of this grouping could only
+/// ever drift into one page repainting on an edge the other misses.
+pub(crate) fn fire_stat_transitions(
+    script: &mut UiScript,
+    token: &str,
+    prev: Option<&UnitCombatStats>,
+    stats: &UnitCombatStats,
+) {
+    let tok = || ScriptValue::Str(token.to_string());
+    let changed = |sel: fn(&UnitCombatStats) -> Vec<i64>| prev.is_none_or(|p| sel(p) != sel(stats));
+    if changed(|s| {
+        let mut v: Vec<i64> = s.stats.iter().map(|&x| i64::from(x)).collect();
+        v.extend(
+            s.stat_pos
+                .iter()
+                .chain(s.stat_neg.iter())
+                .map(|&x| i64::from(x)),
+        );
+        v
+    }) {
+        script.fire_event("UNIT_STATS", vec![tok()]);
+    }
+    if changed(|s| {
+        s.resistances
+            .iter()
+            .chain(s.resistance_pos.iter())
+            .chain(s.resistance_neg.iter())
+            .map(|&x| i64::from(x))
+            .collect()
+    }) {
+        script.fire_event("UNIT_RESISTANCES", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            fixed(s.min_damage),
+            fixed(s.max_damage),
+            fixed(s.min_offhand_damage),
+            fixed(s.max_offhand_damage),
+            i64::from(s.physical_bonus_pos),
+            i64::from(s.physical_bonus_neg),
+            fixed(s.damage_percent),
+        ]
+    }) {
+        script.fire_event("UNIT_DAMAGE", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            i64::from(s.main_attack_time_ms),
+            i64::from(s.offhand_attack_time_ms),
+            i64::from(s.has_offhand),
+        ]
+    }) {
+        script.fire_event("UNIT_ATTACK_SPEED", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            i64::from(s.attack_power),
+            i64::from(s.attack_power_pos),
+            i64::from(s.attack_power_neg),
+        ]
+    }) {
+        script.fire_event("UNIT_ATTACK_POWER", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            i64::from(s.ranged_attack_power),
+            i64::from(s.ranged_attack_power_pos),
+            i64::from(s.ranged_attack_power_neg),
+            i64::from(s.has_wand),
+        ]
+    }) {
+        script.fire_event("UNIT_RANGED_ATTACK_POWER", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            fixed(s.ranged_min_damage),
+            fixed(s.ranged_max_damage),
+            i64::from(s.ranged_attack_time_ms),
+        ]
+    }) {
+        script.fire_event("UNIT_RANGEDDAMAGE", vec![tok()]);
+    }
+    if changed(|s| {
+        vec![
+            i64::from(s.main_weapon_skill.0),
+            i64::from(s.main_weapon_skill.1),
+            i64::from(s.ranged_weapon_skill.0),
+            i64::from(s.ranged_weapon_skill.1),
+        ]
+    }) {
+        script.fire_event("UNIT_ATTACK", vec![tok()]);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn feed_char(
     script: Option<NonSendMut<UiScript>>,
@@ -641,94 +772,7 @@ fn feed_char(
         // paints the OLD values and, being transition-gated, never corrects itself).
         let prev = feed.last_stats.take();
         script.set_player_combat_stats(Some(stats.clone()));
-        let tok = || ScriptValue::Str("player".to_string());
-        // Group the transitions by the ref's own event registrations (PaperDollFrame.lua:14-28);
-        // a first snapshot fires every group whose data is present (the ui_unit rule).
-        let changed = |sel: fn(&PlayerCombatStats) -> Vec<i64>| {
-            prev.as_ref().is_none_or(|p| sel(p) != sel(&stats))
-        };
-        if changed(|s| {
-            let mut v: Vec<i64> = s.stats.iter().map(|&x| i64::from(x)).collect();
-            v.extend(
-                s.stat_pos
-                    .iter()
-                    .chain(s.stat_neg.iter())
-                    .map(|&x| i64::from(x)),
-            );
-            v
-        }) {
-            script.fire_event("UNIT_STATS", vec![tok()]);
-        }
-        if changed(|s| {
-            s.resistances
-                .iter()
-                .chain(s.resistance_pos.iter())
-                .chain(s.resistance_neg.iter())
-                .map(|&x| i64::from(x))
-                .collect()
-        }) {
-            script.fire_event("UNIT_RESISTANCES", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                fixed(s.min_damage),
-                fixed(s.max_damage),
-                fixed(s.min_offhand_damage),
-                fixed(s.max_offhand_damage),
-                i64::from(s.physical_bonus_pos),
-                i64::from(s.physical_bonus_neg),
-                fixed(s.damage_percent),
-            ]
-        }) {
-            script.fire_event("UNIT_DAMAGE", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                i64::from(s.main_attack_time_ms),
-                i64::from(s.offhand_attack_time_ms),
-                i64::from(s.has_offhand),
-            ]
-        }) {
-            script.fire_event("UNIT_ATTACK_SPEED", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                i64::from(s.attack_power),
-                i64::from(s.attack_power_pos),
-                i64::from(s.attack_power_neg),
-            ]
-        }) {
-            script.fire_event("UNIT_ATTACK_POWER", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                i64::from(s.ranged_attack_power),
-                i64::from(s.ranged_attack_power_pos),
-                i64::from(s.ranged_attack_power_neg),
-                i64::from(s.has_wand),
-            ]
-        }) {
-            script.fire_event("UNIT_RANGED_ATTACK_POWER", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                fixed(s.ranged_min_damage),
-                fixed(s.ranged_max_damage),
-                i64::from(s.ranged_attack_time_ms),
-            ]
-        }) {
-            script.fire_event("UNIT_RANGEDDAMAGE", vec![tok()]);
-        }
-        if changed(|s| {
-            vec![
-                i64::from(s.main_weapon_skill.0),
-                i64::from(s.main_weapon_skill.1),
-                i64::from(s.ranged_weapon_skill.0),
-                i64::from(s.ranged_weapon_skill.1),
-            ]
-        }) {
-            script.fire_event("UNIT_ATTACK", vec![tok()]);
-        }
+        fire_stat_transitions(&mut script, "player", prev.as_ref(), &stats);
         feed.last_stats = Some(stats);
     }
 

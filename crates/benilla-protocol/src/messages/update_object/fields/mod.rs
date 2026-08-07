@@ -112,6 +112,14 @@ const FIELD_UNIT_MOUNTDISPLAYID: u16 = 133;
 /// client decides a creature has **no** classification (rank forced to 0), so no elite dragon, no
 /// ELITE/BOSS tooltip word and no world-boss skull on an enslaved mob.
 const FIELD_UNIT_PETNUMBER: u16 = 139;
+/// `UNIT_FIELD_PET_NAME_TIMESTAMP` (`OBJECT_END(6) + 0x86` = 140, PUBLIC — vmangos
+/// `UpdateFields_1_12_1.cpp:80`) — the unix second at which this pet's name was last set.
+///
+/// It matters because a pet's name does **not** ride its descriptor: it is answered once by
+/// `CMSG_PET_NAME_QUERY` and cached by pet NUMBER, so a rename would otherwise stay invisible until
+/// relog. The server bumps this on every `SetName` (`Pet.cpp:285`, and `HandlePetRename`'s last
+/// line `PetHandler.cpp:344`), which makes a **change** here the cache's one invalidation signal.
+const FIELD_UNIT_PET_NAME_TIMESTAMP: u16 = 140;
 /// `UNIT_FIELD_PETEXPERIENCE` (idx 141) / `UNIT_FIELD_PETNEXTLEVELEXP` (142) — a hunter pet's XP
 /// bar, the `(currXP, nextXP)` pair `GetPetExperience 0x4be840` returns in that order.
 /// Byte-verified client-side at `[unit+0x110]+0x21c` / `+0x220` (wow-re
@@ -127,6 +135,15 @@ const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
 /// `UNIT_CHANNEL_SPELL` (idx 144, `OBJECT_END(6) + 0x8A`, PUBLIC — VERIFIED vmangos
 /// `UpdateFields_1_12_1.h:89`) — the spell id a unit is channeling (`0` = not channeling).
 const FIELD_UNIT_CHANNEL_SPELL: u16 = 144;
+/// `UNIT_CREATED_BY_SPELL` (idx 146, `OBJECT_END(6) + 0x8C`, PUBLIC — vmangos
+/// `UpdateFields_1_12_1.h`) — the spell that summoned this unit (`0` = not summoned by one). The
+/// **first** of the three gates on the reference's feed-pet path `0x6ea1e0`: a unit with no
+/// creating spell is not a pet you can feed, whatever else it is.
+///
+/// The index is fixed by construction rather than asserted from a header we don't ship: this table
+/// already pins both ends of a contiguous run — `PETEXPERIENCE` 141, `PETNEXTLEVELEXP` 142,
+/// `DYNAMIC_FLAGS` 143, `CHANNEL_SPELL` 144, `MOD_CAST_SPEED` 145, then this, then `NPC_FLAGS` 147.
+const FIELD_UNIT_CREATED_BY_SPELL: u16 = 146;
 const FIELD_UNIT_NPC_FLAGS: u16 = 147;
 /// `UNIT_NPC_EMOTESTATE` (`OBJECT_END + 0x8E`; PUBLIC — VERIFIED vmangos `UpdateFields_1_12_1.h:93`)
 /// — the unit's looping **state emote** as an `Emotes.dbc` id (dance, NPC cooking/working flavor).

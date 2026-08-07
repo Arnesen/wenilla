@@ -106,6 +106,12 @@ pub(crate) enum TargetingWants {
     GameObject,
 }
 
+/// The unit-shaped bits of the flag_word — what a UNIT candidate could ever satisfy, and so what
+/// `SpellCanTargetUnit` answers for. None of them can appear in a word that reaches the targeting
+/// cursor today (the resolver binds or refuses a unit word before it gets here), which is exactly
+/// why this is a mask test rather than a `false`.
+const UNIT_WORD_BITS: u16 = 0x0002 | 0x0004 | 0x0008 | 0x0080 | 0x0100 | 0x0200 | 0x0400 | 0x8000;
+
 impl TargetingWants {
     /// The seam's own mask test, verbatim.
     fn matches(self, word: u16) -> bool {
@@ -246,6 +252,15 @@ pub(crate) fn feed_targeting_to_vm(
     if let Some(mut script) = script {
         script.set_spell_targeting(targeting.active());
         script.set_item_pick_armed(targeting.wants(TargetingWants::Item));
+        // `SpellCanTargetUnit`'s answer (`0x6e6460`'s unit leg). Derived from the word rather than
+        // hardcoded false: none of the three seams benilla models can be satisfied by a unit, so it
+        // is false today — and it becomes right on its own if the residual unit-word machine lands.
+        script.set_spell_can_target_unit(
+            targeting
+                .0
+                .as_ref()
+                .is_some_and(|t| t.word & UNIT_WORD_BITS != 0),
+        );
         if *last != targeting.spell() {
             *last = targeting.spell();
             script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);

@@ -131,8 +131,15 @@
           whose click jumps to the page (the era redirect law), capped at the static pool's size.
           Both bars wear the shared kit's trough (the recessed channel — 1.12 authors that art
           per window, so it is opt-in there and declared beside each bar here).
-        - **Setting-page cuts (0957 Audio, 0959 Graphics)**: setting-row tooltips (the era
-          OPTION_TOOLTIP_* hovers) are not wired; Defaults resets the VISIBLE page only (the
+        - **Row tooltips are 1.12's own strings on the era's seat (B223, decision 1054)**: every
+          row whose setting exists in a 1.12 panel raises that panel's `OPTION_TOOLTIP_*` text —
+          the description ALONE, wrapped, in the engine's default gold (the 1.12/1.14 option-row
+          plate, and this window's own since 1008's Character Specific row), seated the era way
+          (ANCHOR_RIGHT off the label half, x -10). The era's name-line-then-description pair
+          (`Settings.InitTooltip` → `GameTooltip_AddHighlightLine(name)`) is cut: its title would
+          repeat the label the cursor is already on. **Auto Loot** is the one row with no 1.12
+          string — no 1.12 row exists for it (its label is era's too) — and raises no plate.
+        - **Setting-page cuts (0957 Audio, 0959 Graphics)**: Defaults resets the VISIBLE page only (the
           era confirm dialog is not modeled); era rows with no 1.12 CVar +
           benilla knob behind them (output device, Dialog volume, loop music, channels, cache;
           the whole era Graphics dropdown zoo) don't ship. A slider shows the 1.12 panel's
@@ -609,8 +616,13 @@
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
         }
 
-        function OptionsRow_OnLoad(row, cvar, label, child)
+        -- `tip` is the GlobalStrings KEY of the row's description (B223, decision 1054) — the key,
+        -- not the text: it resolves at HOVER, the way the 1.12 Interface panel resolves its own
+        -- (UIOptionsFrame.lua l.265, `getglobal("OPTION_TOOLTIP_"..key)`), so the row is wired
+        -- before GlobalStrings has to exist. nil = no 1.12 string for this setting (Auto Loot).
+        function OptionsRow_OnLoad(row, cvar, label, tip, child)
             row.cvar = cvar
+            row.tip = tip
             -- The search tag: the era's default is exactly the setting's display name
             -- (SettingControls.lua l.773 AddSearchTags(name)), uppercased at registration
             -- (Blizzard_Settings.lua l.60).
@@ -725,9 +737,47 @@
 
         -- The era row-wide hover wash (HoverBackgroundTemplate, white a=0.1): the row and every
         -- control on it show the SAME texture, so crossing from label to slider doesn't blink.
+        -- ONE seam carries the wash AND the plate (B223): every surface that lights the row also
+        -- raises its tooltip, so the two can never disagree — and the crossing is still seamless,
+        -- since the engine fires OnLeave before OnEnter within a move (pointer.rs), leaving the
+        -- hide/re-show inside a single frame.
         function OptionsRow_Hover(row, on)
             local hover = getglobal(row:GetName() .. "Hover")
-            if on then hover:Show() else hover:Hide() end
+            if on then
+                hover:Show()
+                OptionsRow_ShowTooltip(row)
+            else
+                hover:Hide()
+                GameTooltip:Hide()
+            end
+        end
+
+        -- The row's descriptive plate (B223, decision 1054).
+        -- STRING: 1.12's own per-option text, by GlobalStrings key (see OptionsRow_OnLoad). A row
+        -- with no 1.12 string raises NOTHING — a plate whose only line echoes the label the cursor
+        -- is on is noise, and inventing a description would be inventing fidelity.
+        -- SHAPE: the 1.12/1.14 option-row plate — the description alone, wrapped, in the tooltip's
+        -- default gold (OptionsFrameTemplates.xml l.52-64: SetOwner + SetText(text, …, 1)); this
+        -- window already wears it on the Keybindings page's Character Specific row (1008). The era
+        -- pair (a white name line over the description) is cut — see the SCOPE note.
+        -- SEAT: the era's (DefaultTooltipMixin.OnEnter — ANCHOR_RIGHT, x -10, off the row's LABEL
+        -- half), carried by the $parentTip region, so the plate opens at the same column on every
+        -- row whichever surface the cursor crossed.
+        function OptionsRow_ShowTooltip(row)
+            local text = row.tip and getglobal(row.tip)
+            if text then
+                GameTooltip:SetOwner(getglobal(row:GetName() .. "Tip"), "ANCHOR_RIGHT", -10, 0)
+                GameTooltip:SetText(text, nil, nil, nil, nil, 1)
+            else
+                -- A mute row PUTS AWAY whatever the last row raised. Entering a row asserts "this
+                -- row's plate is what shows", so an early return isn't enough: the ordinary cursor
+                -- path is saved by the outgoing row's own OnLeave, but any caller that enters
+                -- without one (a driven hover, a re-layout under the cursor) would leave the
+                -- neighbour's description standing over a row it doesn't describe — a plate saying
+                -- the wrong thing is worse than a row saying nothing. 1.12's own handler has the
+                -- bare early-out; this is deliberate, and it is why the mute case has a test.
+                GameTooltip:Hide()
+            end
         end
 
         function OptionsCheckbox_OnClick(box)
@@ -1076,6 +1126,18 @@
             </Layer>
         </Layers>
         <Frames>
+            <!-- The tooltip's SEAT (B223): the era's own anchor region, verbatim geometry — the
+                 row's LABEL half, TOPLEFT out to (BOTTOM, -80), i.e. the control column
+                 (SettingsListElementTemplate's $parentTooltip, Blizzard_SettingControls.xml
+                 l.57-61). The era hangs its hover wash AND its mouse scripts here; ours borrows
+                 the RECT only — the row lights and raises as one surface (OptionsRow_Hover) — so
+                 this frame stays mouse-less and can never steal the row's own hover. -->
+            <Frame name="$parentTip">
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
             <CheckButton name="$parentCheck">
                 <Size><AbsDimension x="30" y="29"/></Size>
                 <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor></Anchors>
@@ -1135,6 +1197,16 @@
             </Layer>
         </Layers>
         <Frames>
+            <!-- The tooltip's seat — the era label-half region (the checkbox template's comment is
+                 the recipe). The era anchors a SLIDER row's plate off the slider itself instead
+                 (SettingControls.lua l.556, ANCHOR_RIGHT +20); ours keeps the one column, so a
+                 walk down a page doesn't make the plate hop 250 units per row. -->
+            <Frame name="$parentTip">
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
             <Frame name="$parentControl">
                 <Size><AbsDimension x="250" y="40"/></Size>
                 <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="3"/></Offset></Anchor></Anchors>
@@ -1218,6 +1290,14 @@
             </Layer>
         </Layers>
         <Frames>
+            <!-- The tooltip's seat — the era label-half region (the checkbox template's comment is
+                 the recipe). -->
+            <Frame name="$parentTip">
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
             <Frame name="$parentDropdown" inherits="UIDropDownMenuTemplate">
                 <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-71" y="-2"/></Offset></Anchor></Anchors>
             </Frame>
@@ -1599,7 +1679,10 @@
                                      deselectOnClick=="0"; era wraps the CVar in NegateBoolean);
                                      labels are 1.12 GlobalStrings where the row exists there
                                      (GAMEFIELD_DESELECT_TEXT, INVERT_MOUSE), era's for Auto Loot
-                                     (no 1.12 row exists). -->
+                                     (no 1.12 row exists) — and the tooltip keys are those same
+                                     1.12 keys through the panel's own `_TEXT`-stripping lookup
+                                     (UIOptionsFrame.lua l.265), which is why Sticky Targeting's
+                                     description is GAMEFIELD_DESELECT's. -->
                                 <Frame name="$parentControls" hidden="true">
                                     <Anchors>
                                         <Anchor point="TOPLEFT"/>
@@ -1612,7 +1695,8 @@
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "deselectOnClick", "Sticky Targeting")
+                                                OptionsRow_OnLoad(self, "deselectOnClick", "Sticky Targeting",
+                                                    "OPTION_TOOLTIP_GAMEFIELD_DESELECT")
                                                 self.invert = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1621,6 +1705,10 @@
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
+                                            <!-- No tip: 1.12 has no Auto Loot row, so no
+                                                 OPTION_TOOLTIP_* for it either (verified — the
+                                                 5875 GlobalStrings has no AUTO_LOOT key at all,
+                                                 and no 1.12 panel names the CVar). -->
                                             <Scripts><OnLoad>OptionsRow_OnLoad(self, "autoLootDefault", "Auto Loot")</OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowInvertMouse" inherits="OptionsCheckboxRowTemplate">
@@ -1628,7 +1716,8 @@
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
-                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse")</OnLoad></Scripts>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse",
+                                                "OPTION_TOOLTIP_INVERT_MOUSE")</OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
                                 </Frame>
@@ -1653,7 +1742,8 @@
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")
+                                                OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound",
+                                                    "OPTION_TOOLTIP_ENABLE_ALL_SOUND")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1662,7 +1752,8 @@
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
-                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterVolume", "Master Volume")</OnLoad></Scripts>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterVolume", "Master Volume",
+                                                "OPTION_TOOLTIP_MASTER_VOLUME")</OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowSound" inherits="OptionsSliderRowTemplate">
                                             <Anchors>
@@ -1670,7 +1761,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowMaster" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "SoundVolume", "Sound Volume", 1)
+                                                OptionsRow_OnLoad(self, "SoundVolume", "Sound Volume",
+                                                    "OPTION_TOOLTIP_SOUND_VOLUME", 1)
                                                 -- era parentInitializer (search pulls Master in
                                                 -- above a matched child, SettingsPanel.lua l.665)
                                                 self.parentRow = "RowMaster"
@@ -1682,7 +1774,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowSound" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "MusicVolume", "Music Volume", 1)
+                                                OptionsRow_OnLoad(self, "MusicVolume", "Music Volume",
+                                                    "OPTION_TOOLTIP_MUSIC_VOLUME", 1)
                                                 self.parentRow = "RowMaster"
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1692,7 +1785,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "AmbienceVolume", "Ambience Volume", 1)
+                                                OptionsRow_OnLoad(self, "AmbienceVolume", "Ambience Volume",
+                                                    "OPTION_TOOLTIP_AMBIENCE_VOLUME", 1)
                                                 self.parentRow = "RowMaster"
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1702,7 +1796,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")
+                                                OptionsRow_OnLoad(self, "EnableMusic", "Enable Music",
+                                                    "OPTION_TOOLTIP_ENABLE_MUSIC")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1712,7 +1807,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")
+                                                OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience",
+                                                    "OPTION_TOOLTIP_ENABLE_AMBIENCE")
                                                 self.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>
@@ -1742,7 +1838,8 @@
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "uiScale", "UI Scale")
+                                                OptionsRow_OnLoad(self, "uiScale", "UI Scale",
+                                                    "OPTION_TOOLTIP_UI_SCALE")
                                                 OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
                                                 -- era registers its uiscale row CommitFlag.Apply
                                                 -- (Graphics.lua l.684): the one row whose live
@@ -1757,7 +1854,8 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail")
+                                                OptionsRow_OnLoad(self, "WorldDetail", "Environment Detail",
+                                                    "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
                                                 -- The stop names are the era preset ladder's (its
                                                 -- quality dropdowns say Low/Medium/High); 1.12's
                                                 -- slider had no stop labels to quote.
@@ -1787,21 +1885,24 @@
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                             </Anchors>
-                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNamePlayer", "Player Names")</OnLoad></Scripts>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNamePlayer", "Player Names",
+                                                "OPTION_TOOLTIP_SHOW_PLAYER_NAMES")</OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowNpcNames" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowPlayerNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
-                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameNPC", "NPC Names")</OnLoad></Scripts>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameNPC", "NPC Names",
+                                                "OPTION_TOOLTIP_SHOW_NPC_NAMES")</OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowOwnName" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowNpcNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
-                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameOwn", "Show Own Name")</OnLoad></Scripts>
+                                            <Scripts><OnLoad>OptionsRow_OnLoad(self, "UnitNameOwn", "Show Own Name",
+                                                "OPTION_TOOLTIP_SHOW_OWN_NAME")</OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
                                 </Frame>

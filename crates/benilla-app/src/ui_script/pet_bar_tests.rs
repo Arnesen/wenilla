@@ -517,10 +517,15 @@ fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
 /// fires the slot.
 ///
 /// The load-bearing half is what the key path does NOT do: it is a bare `CastPetAction`, with none
-/// of `PetActionButton_OnClick`'s forks. Pinned below on the Attack token with the pet ALREADY
-/// attacking — a left click there calls the attack off (the test above), while the key re-issues
-/// it. That asymmetry is the reference's, and the only thing that could hide a regression into it
-/// is a test that never presses a key on an active slot.
+/// of `PetActionButton_OnClick`'s forks. Pinned below on an Attack token fed as already-active — a
+/// left click on that same view calls the attack off (the test above) while the key re-issues it.
+///
+/// **What that fixture is and is not.** `attack_active` is pushed straight onto the view here, and
+/// on a real *pet* bar it can never be true: `ui_pet`'s `possessing` carve (`0x4bd420`) raises the
+/// latch only for a unit you are POSSESSING, so on a hunter's bar the click fork is dead code and
+/// key and click behave identically. The state below is a **possess** bar's — Mind Control, Eye of
+/// Kilrogg — which is the one case where the two paths genuinely diverge, and therefore the only
+/// one worth pinning. Read as "ordinary pets differ from clicks", this test would be lying.
 #[test]
 fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     let mut s = UiScript::new().unwrap();
@@ -544,8 +549,9 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
         "the press is visual only — the ref fires on the release"
     );
 
-    // Up releases the art and casts — slot 1 is Attack and the pet is already attacking, so a
-    // LEFT CLICK here would call it off instead. The key has no such fork.
+    // Up releases the art and casts — slot 1 is Attack and the view says the order is live, so a
+    // LEFT CLICK here would call it off instead (a possess bar's case; see the header). The key
+    // has no such fork.
     s.run("BenillaPetActionButtonUp(1)").unwrap();
     assert_eq!(state(&s), "NORMAL");
     assert_eq!(s.take_pet_actions(), vec![1]);

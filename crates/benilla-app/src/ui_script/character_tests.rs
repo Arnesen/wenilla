@@ -14,8 +14,8 @@
 //! command itself is still owed once the unrelated breakage clears, per this crate's own gates.
 
 use benilla_ui::script::{
-    ExtractedQuad, InvSlotView, InventorySlots, PlayerCombatStats, QuadContent, ScriptValue,
-    SoundRequest, UiScript, UnitState,
+    ExtractedQuad, InvSlotView, InventorySlots, QuadContent, ScriptValue, SoundRequest, UiScript,
+    UnitCombatStats, UnitState,
 };
 
 /// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the questlog/panel
@@ -62,8 +62,8 @@ fn player_unit() -> UnitState {
 /// A minimal combat-stats snapshot: STR effective 15 (a +2 pos buff, so the stat line shows green),
 /// 120 armor (school 0), 3 arcane resistance (school 6), a mainhand-only melee weapon (2.6s speed,
 /// 10-15 damage, 80 AP) and NO ranged weapon equipped (exercises the "N/A" ranged fallback).
-fn combat_stats() -> PlayerCombatStats {
-    PlayerCombatStats {
+fn combat_stats() -> UnitCombatStats {
+    UnitCombatStats {
         stats: [15, 12, 20, 8, 9],
         stat_pos: [2, 0, 0, 0, 0],
         resistances: [120, 5, 0, 0, 0, 0, 3],

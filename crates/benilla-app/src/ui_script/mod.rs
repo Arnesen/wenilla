@@ -719,7 +719,13 @@ mod questlog_tests;
 mod character_tests;
 
 #[cfg(test)]
+mod pet_paperdoll_tests;
+
+#[cfg(test)]
 mod inspect_tests;
+
+#[cfg(test)]
+mod dressup_tests;
 
 #[cfg(test)]
 mod minimap_tests;

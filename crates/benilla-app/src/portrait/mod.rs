@@ -84,6 +84,8 @@ use booth::{
     spawn_booth_effects, spawn_booth_model, BoothBillboardSpec, BoothEffects, BoothMotion,
     BoothPart, BoothRider,
 };
+mod dressup;
+pub(crate) use dressup::{DressUpBake, DressUpLook, DressUpPreview};
 mod glue_booth;
 pub(crate) use glue_booth::{
     CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard,
@@ -110,6 +112,12 @@ const PAPERDOLL_SLOT: &str = "paperdoll";
 /// slots already do separately: body framing like the paper doll, an arbitrary unit like
 /// `"target"`. Both run through [`sync_body_booth`]; only the unit and the yaw differ.
 const INSPECT_SLOT: &str = "inspect";
+/// The **pet paper doll**'s model pane (decision 1057) — the character window's tab 2. Composed
+/// exactly like [`INSPECT_SLOT`] (body framing + an arbitrary unit + a live yaw), pointed at the
+/// pet instead of at another player; it too runs through [`sync_body_booth`]. It gets its own booth
+/// rather than sharing the `"pet"` portrait slot because that one is a 256² *bust* for the pet unit
+/// frame — different subject framing, different resolution, and a yaw the portrait must never have.
+const PETDOLL_SLOT: &str = "petdoll";
 /// World is layer 0, the UI quad pass layer 1; portraits sit on their own high layers so nothing in the
 /// world leaks into a booth and vice-versa (one layer per slot: base, base+1, …).
 const PORTRAIT_LAYER_BASE: usize = 2;
@@ -117,6 +125,8 @@ const PORTRAIT_LAYER_BASE: usize = 2;
 const PAPERDOLL_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
 /// The inspect booth's render layer — the next one past the paper doll's.
 const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
+/// The pet-doll booth's render layer — the next one past inspect's (the one ladder below).
+const PETDOLL_LAYER: usize = INSPECT_LAYER + 1;
 /// The glue booth's render layer — the next one past inspect's. **Every booth layer is computed
 /// HERE**, in one ladder, because they were not: the glue booth (`930b327c`) and the inspect booth
 /// (`ead3b0c9`) each defined "the next layer past the paper doll's" in a different file and landed
@@ -124,19 +134,26 @@ const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
 /// resolves an emitter's booth camera by *finding the first camera whose layers intersect*, so the
 /// glue scene's 28 emitters addressed the INSPECT camera, which is off at the glue screens, and the
 /// login screen's braziers simulated forever without ever being drawn (decision 0775).
-pub(super) const GLUE_LAYER: usize = INSPECT_LAYER + 1;
-/// The pipe_warm **twin booth**'s render layer — the next one past the glue booth's (same ladder
+pub(super) const GLUE_LAYER: usize = PETDOLL_LAYER + 1;
+/// The **dressing room**'s render layer (decision 1060) — the next one past the glue booth's, by
+/// the same ladder rule.
+pub(super) const DRESSUP_LAYER: usize = GLUE_LAYER + 1;
+/// The pipe_warm **twin booth**'s render layer — the next one past the dressing room's (same ladder
 /// rule as [`GLUE_LAYER`]). This camera exists only while the warm pass runs
 /// ([`spawn_warm_booth`]); nothing but menagerie rigs ever rides its layer.
-pub(crate) const WARM_BOOTH_LAYER: usize = GLUE_LAYER + 1;
+pub(crate) const WARM_BOOTH_LAYER: usize = DRESSUP_LAYER + 1;
 
 // The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
 // and the emitter→camera match, and the failure above was silent in both.
 const _: () = assert!(
     PAPERDOLL_LAYER != INSPECT_LAYER
-        && INSPECT_LAYER != GLUE_LAYER
+        && INSPECT_LAYER != PETDOLL_LAYER
+        && PETDOLL_LAYER != GLUE_LAYER
+        && PAPERDOLL_LAYER != PETDOLL_LAYER
         && PAPERDOLL_LAYER != GLUE_LAYER
-        && WARM_BOOTH_LAYER > GLUE_LAYER,
+        && INSPECT_LAYER != GLUE_LAYER
+        && DRESSUP_LAYER > GLUE_LAYER
+        && WARM_BOOTH_LAYER > DRESSUP_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(
@@ -308,6 +325,25 @@ pub(crate) struct InspectBooth {
 }
 
 impl Default for InspectBooth {
+    fn default() -> Self {
+        Self {
+            yaw: 0.61,
+            unit: None,
+        }
+    }
+}
+
+/// The pet paper doll's model pane input (decision 1057) — the [`InspectBooth`] shape exactly:
+/// a yaw the pane's rotate buttons write, and the unit [`crate::ui_pet_doll`] resolved the pet
+/// token to this frame (`None` with no pet out, or while its object hasn't streamed — which empties
+/// the booth, the same "no pet" the rest of the page shows).
+#[derive(Resource)]
+pub(crate) struct PetDollBooth {
+    pub(crate) yaw: f32,
+    pub(crate) unit: Option<Entity>,
+}
+
+impl Default for PetDollBooth {
     fn default() -> Self {
         Self {
             yaw: 0.61,
@@ -503,8 +539,11 @@ impl Plugin for PortraitPlugin {
         app.init_resource::<PortraitImages>()
             .init_resource::<PaperDollBooth>()
             .init_resource::<InspectBooth>()
+            .init_resource::<PetDollBooth>()
             .init_resource::<glue_booth::GluePreview>()
             .init_resource::<glue_booth::GluePreviewBake>()
+            .init_resource::<dressup::DressUpPreview>()
+            .init_resource::<dressup::DressUpBake>()
             .init_resource::<Booths>()
             .init_resource::<BoothLight>()
             .init_resource::<crate::ui_session::InteractNpc>()
@@ -522,8 +561,10 @@ impl Plugin for PortraitPlugin {
                     sync_portraits,
                     sync_paperdoll,
                     sync_inspect_booth,
+                    sync_petdoll_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
+                    dressup::sync_dressup_booth,
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
                 )
@@ -738,15 +779,17 @@ fn setup_booths(
         );
     }
 
-    // The two **body** booths — the character window's paper doll (decision 0208 §5) and the
-    // inspect window's pane (decision 0631 §4). Same off-screen pipeline as the portrait slots
-    // (transparent target, HDR + the FFXGlow node, negative order so the bake is ready before
-    // the world/UI cameras), but their own 512² targets, their own layers, and a body-framing
-    // projection (aimed per-bake by `sync_body_booth`). Kept a separate spawn from the portrait
-    // loop above so those two cameras stay byte-for-byte what the director approved.
+    // The three **body** booths — the character window's paper doll (decision 0208 §5), the
+    // inspect window's pane (decision 0631 §4) and the pet paper doll's (decision 1057). Same
+    // off-screen pipeline as the portrait slots (transparent target, HDR + the FFXGlow node,
+    // negative order so the bake is ready before the world/UI cameras), but their own 512²
+    // targets, their own layers, and a body-framing projection (aimed per-bake by
+    // `sync_body_booth`). Kept a separate spawn from the portrait loop above so these cameras
+    // stay byte-for-byte what the director approved.
     for (i, (slot, layer_index)) in [
         (PAPERDOLL_SLOT, PAPERDOLL_LAYER),
         (INSPECT_SLOT, INSPECT_LAYER),
+        (PETDOLL_SLOT, PETDOLL_LAYER),
     ]
     .into_iter()
     .enumerate()
@@ -801,6 +844,9 @@ fn setup_booths(
 
     // The glue booth (decisions 0423 + 0465): its own slot/layer/target, framed per-bake.
     glue_booth::spawn_glue_booth(&mut commands, &mut images, &mut portraits, &mut booths);
+    // The dressing room (decision 1060): a third body pane, tuple-driven like the glue booth but
+    // lit and framed like the paper doll.
+    dressup::spawn_dressup_booth(&mut commands, &mut images, &mut portraits, &mut booths);
 }
 
 /// `true` while the `WOW_PORTRAIT_TEST` debug bake owns the booths (checked once — env vars don't
@@ -1188,9 +1234,50 @@ fn sync_inspect_booth(
     );
 }
 
-/// Bake `unit`'s full-body dressed look into the `slot` booth at `yaw` — the shared body of both
-/// body booths (decision 0208 §5 for the paper doll, 0631 §4 for inspect). `unit` is `None` when
-/// there is nothing to show, which empties the booth.
+/// The pet paper doll's model pane (decision 1057) — the inspect pane's exact twin, pointed at the
+/// pet [`crate::ui_pet_doll`] resolved this frame.
+#[allow(clippy::too_many_arguments)]
+fn sync_petdoll_booth(
+    mut commands: Commands,
+    mut booths: ResMut<Booths>,
+    mut portraits: ResMut<PortraitImages>,
+    mut booth_light: ResMut<BoothLight>,
+    creatures: Option<Res<Creatures>>,
+    ent_q: Query<&NetEntity>,
+    look: DressedLook,
+    petdoll: Res<PetDollBooth>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
+    mut env_cache: Local<Option<bool>>,
+    mut last_yaw: Local<Option<f32>>,
+    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    anim_data: Option<Res<crate::creature_anim::AnimData>>,
+) {
+    if test_mode(&mut env_cache) {
+        return;
+    }
+    sync_body_booth(
+        &mut palettes,
+        PETDOLL_SLOT,
+        petdoll.unit,
+        petdoll.yaw,
+        &mut last_yaw,
+        &mut commands,
+        &mut booths,
+        &mut portraits,
+        &mut booth_light,
+        creatures.as_deref(),
+        &ent_q,
+        &look,
+        &mut wow_mats,
+        &mut cams,
+        anim_data.as_deref(),
+    );
+}
+
+/// Bake `unit`'s full-body dressed look into the `slot` booth at `yaw` — the shared body of all
+/// three body booths (decision 0208 §5 for the paper doll, 0631 §4 for inspect, 1057 for the pet
+/// doll). `unit` is `None` when there is nothing to show, which empties the booth.
 #[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
     palettes: &mut crate::rig_palette::RigPalettes,

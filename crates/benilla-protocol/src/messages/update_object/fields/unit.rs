@@ -109,6 +109,13 @@ impl ObjectFields {
     pub fn unit_created_by(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_CREATEDBY).filter(|&g| g != 0)
     }
+    /// `UNIT_CREATED_BY_SPELL` — the spell that summoned this unit, `None` when zero (nothing
+    /// summoned it). The reference's feed-pet validator `0x6ea1e0` requires it non-zero before it
+    /// will accept a unit as a feedable pet — the first of that function's three gates.
+    pub fn unit_created_by_spell(&self) -> Option<u32> {
+        self.get_u32(FIELD_UNIT_CREATED_BY_SPELL)
+            .filter(|&s| s != 0)
+    }
     /// `UNIT_FIELD_PETNUMBER` — non-zero iff this unit is somebody's **pet or charm**.
     ///
     /// Not a count and not an index anyone displays: the client reads it as a pure boolean, as the
@@ -124,6 +131,15 @@ impl ObjectFields {
     /// rank their template gives them.
     pub fn unit_is_pet_or_charm(&self) -> bool {
         self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0) != 0
+    }
+    /// `UNIT_FIELD_PET_NAME_TIMESTAMP` — when this pet's name was last set. `None` when the field
+    /// has never been sent (a create omits zeros), which reads the same as "never renamed".
+    ///
+    /// The **only** thing to do with the value is compare it with the last one seen: a pet's name
+    /// lives in a query cache keyed by pet number, and this changing is what says that cache has
+    /// gone stale (see the constant).
+    pub fn unit_pet_name_timestamp(&self) -> Option<u32> {
+        self.get_u32(FIELD_UNIT_PET_NAME_TIMESTAMP)
     }
     /// `UNIT_FIELD_HEALTH` — current hit points (0 ⇒ dead).
     pub fn unit_health(&self) -> Option<u32> {

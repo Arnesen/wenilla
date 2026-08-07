@@ -44,6 +44,11 @@ pub struct CreatureQueryInfo {
     pub subname: String,
     /// `CreatureType.dbc` id (Beast/Humanoid/… — the level line's type word + the TAB filter).
     pub creature_type: u32,
+    /// `CreatureFamily.dbc` id (Wolf/Cat/Imp/… — `UnitCreatureFamily`'s row, and through that row's
+    /// pet-food mask, `GetPetFoodTypes`'s diet list; decision 1062). `0` for anything that is not a
+    /// tameable beast or a warlock minion — which is most of the table, and the reason both
+    /// consumers treat a missing row as nil rather than as an error.
+    pub pet_family: u32,
     /// Elite rank: 0 normal, 1 elite, 2 rare-elite, 3 world boss, 4 rare — the unit tooltip's
     /// rank word `{"", Elite, Elite, Boss, ""}` (decision 0276's byte-verified table).
     pub rank: u32,
@@ -226,9 +231,9 @@ pub enum ServerPacket {
     },
     /// `SMSG_CREATURE_QUERY_RESPONSE` — a creature template's display data, answering
     /// `CMSG_CREATURE_QUERY`. We surface what the UI consumes ([`CreatureQueryInfo`]: name,
-    /// subname, `CreatureType.dbc` id, the elite **rank**, the civilian flag); the rest of the
-    /// tail (type flags/family/pet spells/display id/racial leader) is parsed for alignment and
-    /// dropped until a consumer exists. A **miss** (unknown entry) is a lone `u32` of
+    /// subname, `CreatureType.dbc` id, the `CreatureFamily.dbc` id, the elite **rank**, the type
+    /// flags, and the civilian/racial-leader pair); only `unk`, the pet spell-list id and the
+    /// display id are still parsed for alignment and dropped. A **miss** (unknown entry) is a lone `u32` of
     /// `entry | 0x8000_0000` → `None` (VERIFIED vmangos `HandleCreatureQueryOpcode`, both
     /// branches).
     CreatureQueryResponse {

@@ -1,12 +1,25 @@
 //! The character-window stats + equipment seam (decision 0208 §3) — the paper doll's data feed.
 //!
-//! Same engine-free shape as [`super::unit`]: the app pushes a **player combat-stats snapshot**
-//! ([`super::UiScript::set_player_combat_stats`]) and an **inventory-slot snapshot**
+//! Same engine-free shape as [`super::unit`]: the app pushes a **combat-stats snapshot** per unit
+//! that has one ([`super::UiScript::set_player_combat_stats`] /
+//! [`super::UiScript::set_pet_combat_stats`]) and an **inventory-slot snapshot**
 //! ([`super::UiScript::set_inventory_slots`]) each frame they change, and the stat/slot globals
-//! here read that plain data. Every stat binding is **player-token-only, faithfully**: the 1.12
-//! fields behind them (`UNIT_FIELD_STAT*`, `POSSTAT`/`NEGSTAT`, the damage/AP block) are
-//! PRIVATE/OWNER_ONLY — no other unit ever streams them — so any non-`"player"` token serves the
-//! absent shape (zeros / nils), exactly like `UnitXP` (decision 0208 §3).
+//! here read that plain data.
+//!
+//! **The stat family is unit-parameterised, as the reference's is** (decision 1057): every
+//! `PaperDollFrame_Set*(unit, prefix)` helper the character sheet calls with `"player"`, the pet
+//! sheet calls with `"pet"` (ref `PetPaperDollFrame.lua:73-81`), through these very bindings. So
+//! `UnitStat`/`UnitResistance`/`UnitArmor`/… route on the token — `"player"` and `"pet"` each read
+//! their own pushed snapshot, and **every other token (and a snapshot the app has not pushed yet)
+//! serves the absent shape**: zeros, `percent` 1.0. That last part *is* faithful — the 1.12 fields
+//! behind these (`UNIT_FIELD_STAT*`, `POSSTAT`/`NEGSTAT`, the damage/AP block) are
+//! PRIVATE/OWNER_ONLY, so no third unit ever streams them. A pet's descriptor carries the UNIT
+//! half and no PLAYER block at all, which is why its buff decompositions read `0` and the ref's
+//! own pet sheet shows plain white numbers.
+//!
+//! (Until 1057 the router was a hard `token == "player"` test documented as "the faithful
+//! player-only gate". It was neither: it was "no consumer yet". The reference passes `"pet"` into
+//! the same bindings, and the gate was simply never exercised.)
 //!
 //! Return shapes are the ref Lua's own inverse math (ref-PaperDollFrame): the descriptor carries
 //! the *effective* value plus the split positive/negative buff deltas; `base = effective − pos −
@@ -57,13 +70,25 @@ pub fn weapon_subclass_skill(subclass: u32) -> Option<u32> {
 /// when no weapon is equipped (`Player::GetBaseWeaponSkillValue`, `Objects/Player.cpp:20184`).
 pub const SKILL_UNARMED: u32 = 162;
 
-/// The player's combat-stats snapshot behind the paper doll's stat pane — plain data the app
-/// derives from the descriptor accessors ([`UnitStat`]/[`UnitResistance`]/… read it). Arrays are
+/// `SKILL_DEFENSE` — the Defense skill line `UnitDefense` reports. **Read out of the shipped
+/// 1.12.1 `SkillLine.dbc` this session**, not remembered: the file's 123 records carry exactly one
+/// row whose enUS `displayName` (column 3, the `SkillLinefmt` layout in
+/// `benilla_formats::skill_lines`) is `"Defense"`, and it is id **95**, category 6 (Weapon Skills).
+/// Corroborated by vmangos `SharedDefines.h:961` (`SKILL_DEFENSE = 95`).
+pub const SKILL_DEFENSE: u32 = 95;
+
+/// One unit's combat-stats snapshot behind a paper doll's stat pane — plain data the app derives
+/// from that unit's descriptor accessors ([`UnitStat`]/[`UnitResistance`]/… read it). Arrays are
 /// in field order: stats 0..4 = Str/Agi/Stam/Int/Spi (`UNIT_FIELD_STAT0..4`), schools 0..6 with
 /// `[0]` = armor/physical. The `*_neg` values are **negative-or-zero** (the stored wire sign; see
 /// the module doc).
+///
+/// Two units carry one: the player and (decision 1057) the pet. A **creature's** descriptor has no
+/// PLAYER block, so every field sourced from one — the stat/resistance buff splits, the
+/// damage-done mods, the skill pairs — keeps its default for a pet, which is exactly the ref pet
+/// sheet's plain white numbers with no buff decomposition in the tooltip.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PlayerCombatStats {
+pub struct UnitCombatStats {
     /// Effective (post-buff) primary stats (`UNIT_FIELD_STAT0..4`).
     pub stats: [i32; 5],
     /// Positive stat buff deltas (`PLAYER_FIELD_POSSTAT0..4`, ≥ 0).
@@ -113,16 +138,24 @@ pub struct PlayerCombatStats {
     pub main_weapon_skill: (u32, i32),
     /// The ranged weapon's skill pair (`UnitRangedAttack`).
     pub ranged_weapon_skill: (u32, i32),
+    /// The [`SKILL_DEFENSE`] line's `(value, temp+perm bonus)` pair, read out of `PLAYER_SKILL_INFO`
+    /// like the two weapon pairs above; `UnitDefense` serves it verbatim.
+    ///
+    /// **The player's only.** A creature has no skill block, and the client does not read one for
+    /// it: `UnitDefense` forks on the resolved unit's vtable and gives a non-player
+    /// `UNIT_FIELD_LEVEL * 5` instead ([`cgunit_skill`]), so the pet feed never fills this and the
+    /// binding never reads it for a pet.
+    pub defense_skill: (u32, i32),
     /// Whether a wand is equipped (`HasWandEquipped` — the ref swaps the ranged-attack action for
     /// wand Shoot on it).
     pub has_wand: bool,
 }
 
-impl Default for PlayerCombatStats {
+impl Default for UnitCombatStats {
     /// All-zeros except `damage_percent` = `1.0` — the multiplicative identity, so the absent
     /// shape never feeds the ref's `bonus / percent` math a division by zero.
     fn default() -> Self {
-        PlayerCombatStats {
+        UnitCombatStats {
             stats: [0; 5],
             stat_pos: [0; 5],
             stat_neg: [0; 5],
@@ -150,6 +183,7 @@ impl Default for PlayerCombatStats {
             ranged_max_damage: 0.0,
             main_weapon_skill: (0, 0),
             ranged_weapon_skill: (0, 0),
+            defense_skill: (0, 0),
             has_wand: false,
         }
     }
@@ -304,8 +338,14 @@ fn ammo_alert_status(slot: &Option<InvSlotView>) -> u8 {
 impl super::UiScript {
     /// Push (or clear, with `None`) the player's combat-stats snapshot — the app calls this each
     /// frame any of the backing descriptor fields changed (decision 0208 §3).
-    pub fn set_player_combat_stats(&mut self, stats: Option<PlayerCombatStats>) {
+    pub fn set_player_combat_stats(&mut self, stats: Option<UnitCombatStats>) {
         self.model_mut().player_combat_stats = stats;
+    }
+
+    /// The `"pet"` twin (decision 1057) — `None` whenever there is no pet, which is what makes
+    /// every `Unit*("pet")` fall back to the absent shape the moment one is dismissed.
+    pub fn set_pet_combat_stats(&mut self, stats: Option<UnitCombatStats>) {
+        self.model_mut().pet_combat_stats = stats;
     }
 
     /// Push the equipment/ammo slot snapshot (index 0 = ammo, 1..=19 equipment). Recomputes the
@@ -347,23 +387,44 @@ impl super::UiScript {
     pub fn paperdoll_yaw(&self) -> f32 {
         self.model_ref().paperdoll_yaw
     }
+
+    /// The **pet** paper doll pane's yaw (`BenillaPetPaperDollModel_SetFacing` wrote it) — the
+    /// exact twin of [`Self::paperdoll_yaw`] and of `UiScript::inspect_yaw`, sampled each frame by
+    /// `crate::ui_pet_doll` onto its booth (decision 1057).
+    pub fn pet_paperdoll_yaw(&self) -> f32 {
+        self.model_ref().pet_paperdoll_yaw
+    }
 }
 
-/// Read the player combat-stats snapshot under a short model borrow — but only for the
-/// `"player"` token; any other token (and a not-yet-pushed snapshot) reads the default (the
-/// absent shape: zeros, `damage_percent` 1.0). The faithful player-only gate (module doc).
-fn with_player_stats<T>(
+/// Read a unit's combat-stats snapshot under a short model borrow, routed by token: `"player"` and
+/// `"pet"` each read their own pushed snapshot, anything else — and a snapshot the app has not
+/// pushed yet — reads the default (the absent shape: zeros, `damage_percent` 1.0). See the module
+/// doc for why exactly these two tokens and no more.
+fn with_unit_stats<T>(
     lua: &Lua,
     token: &Option<String>,
-    f: impl FnOnce(&PlayerCombatStats) -> T,
+    f: impl FnOnce(&UnitCombatStats) -> T,
 ) -> T {
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    let absent = PlayerCombatStats::default();
-    let stats = match token.as_deref() {
-        Some("player") => model.player_combat_stats.as_ref().unwrap_or(&absent),
-        _ => &absent,
+    let absent = UnitCombatStats::default();
+    let pushed = match token.as_deref() {
+        Some("player") => model.player_combat_stats.as_ref(),
+        Some("pet") => model.pet_combat_stats.as_ref(),
+        _ => None,
     };
-    f(stats)
+    f(pushed.unwrap_or(&absent))
+}
+
+/// A **non-player** unit's answer to both skill-shaped questions — `UnitDefense` and
+/// `UnitAttackBothHands` — which is `UNIT_FIELD_LEVEL * 5`, flat.
+///
+/// It is one helper because it is one function in the client: both bindings dispatch through the
+/// resolved unit's vtable, and a `CGUnit_C` lands on a three-line body that multiplies the level by
+/// five and writes 0 to the modifier (`0x613680` / `0x6136b0`, wow-re
+/// `ui/scratch/pet-paperdoll-stat-api.md`). Nothing here is skill data — a creature has no skill
+/// block at all, which is exactly why the client substitutes a formula.
+fn cgunit_skill(model: &Model, token: &str) -> i64 {
+    model.units.get(token).map_or(0, |u| i64::from(u.level)) * 5
 }
 
 /// Read inventory slot `slot` under a short borrow, cloned out so the caller holds no borrow.
@@ -413,7 +474,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitStat",
         lua.create_function(|lua, (token, i): (Option<String>, i64)| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 let Some(idx) = i.checked_sub(1).and_then(|v| usize::try_from(v).ok()) else {
                     return (0, 0, 0, 0);
                 };
@@ -436,7 +497,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitResistance",
         lua.create_function(|lua, (token, school): (Option<String>, i64)| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 let Some(idx) = usize::try_from(school).ok().filter(|&v| v < 7) else {
                     return (0, 0, 0, 0);
                 };
@@ -460,7 +521,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitArmor",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 let (eff, pos, neg) = (s.resistances[0], s.resistance_pos[0], s.resistance_neg[0]);
                 (
                     i64::from(eff - pos - neg),
@@ -480,7 +541,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitDamage",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     f64::from(s.min_damage),
                     f64::from(s.max_damage),
@@ -500,7 +561,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitAttackSpeed",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     f64::from(s.main_attack_time_ms) / 1000.0,
                     s.has_offhand
@@ -515,7 +576,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitAttackPower",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     i64::from(s.attack_power),
                     i64::from(s.attack_power_pos),
@@ -529,7 +590,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitRangedAttackPower",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     i64::from(s.ranged_attack_power),
                     i64::from(s.ranged_attack_power_pos),
@@ -542,15 +603,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // UnitAttackBothHands("player") → (base, modifier) — the main-hand weapon-skill line: skill
     // value + its temp+perm bonus, resolved app-side via the weapon_subclass_skill table (unarmed
     // = SKILL_UNARMED when nothing's equipped).
+    //
+    // A non-player unit takes the same virtual fork `UnitDefense` does (`0x6136b0`, wow-re
+    // `ui/scratch/pet-paperdoll-stat-api.md`) and lands on the identical `level * 5` — and that
+    // one **ignores its hand index outright**, so both hands answer the same pair. The pet sheet's
+    // Attack row therefore reads 300 at level 60, exactly like its Defense row.
     g.set(
         "UnitAttackBothHands",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
-                (
-                    i64::from(s.main_weapon_skill.0),
-                    i64::from(s.main_weapon_skill.1),
-                )
-            }))
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match token.as_deref() {
+                Some("player") => model.player_combat_stats.as_ref().map_or((0, 0), |s| {
+                    (
+                        i64::from(s.main_weapon_skill.0),
+                        i64::from(s.main_weapon_skill.1),
+                    )
+                }),
+                Some("pet") => (cgunit_skill(&model, "pet"), 0),
+                _ => (0, 0),
+            })
         })?,
     )?;
 
@@ -558,12 +629,39 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitRangedAttack",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     i64::from(s.ranged_weapon_skill.0),
                     i64::from(s.ranged_weapon_skill.1),
                 )
             }))
+        })?,
+    )?;
+
+    // UnitDefense(unit) → (base, modifier). The ref reads exactly two numbers and folds the
+    // modifier's sign itself (PaperDollFrame.lua:259-271: modifier > 0 → a green posBuff, < 0 → a
+    // red negBuff).
+    //
+    // **The fork is a VIRTUAL CALL on the resolved unit, not a token test** (wow-re
+    // `ui/scratch/pet-paperdoll-stat-api.md`, the §5 that corrected decision 1057's INTERIM):
+    // `[vtbl+0xac]` is either `CGPlayer_C 0x5eda20` — resolve the Defense SkillLine (`0x6de040`)
+    // and read `PLAYER_SKILL_INFO` — or `CGUnit_C 0x613680`, which is three lines:
+    // `*out1 = UNIT_FIELD_LEVEL * 5; *out2 = 0`. **A level-60 pet shows 300**, not the 0 that
+    // 1057 shipped while the dispatch was out. The outer gate is SELF **or**
+    // `UNIT_FIELD_SUMMONEDBY == my guid`, which our pet passes and no other token we serve does —
+    // so `"player"` takes the skill leg, `"pet"` the level leg (a warlock's minion included: it is
+    // summoned by us too), and everything else the gate-failure zeros.
+    g.set(
+        "UnitDefense",
+        lua.create_function(|lua, token: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(match token.as_deref() {
+                Some("player") => model.player_combat_stats.as_ref().map_or((0, 0), |s| {
+                    (i64::from(s.defense_skill.0), i64::from(s.defense_skill.1))
+                }),
+                Some("pet") => (cgunit_skill(&model, "pet"), 0),
+                _ => (0, 0),
+            })
         })?,
     )?;
 
@@ -573,7 +671,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "UnitRangedDamage",
         lua.create_function(|lua, token: Option<String>| {
-            Ok(with_player_stats(lua, &token, |s| {
+            Ok(with_unit_stats(lua, &token, |s| {
                 (
                     f64::from(s.ranged_attack_time_ms) / 1000.0,
                     f64::from(s.ranged_min_damage),
@@ -618,6 +716,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
             match player_inv_slot(lua, &token, slot).and_then(|v| v.icon) {
                 Some(icon) => Ok(Value::String(lua.create_string(&icon)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // GetInventoryItemLink(unit, slot) → the full escaped `|cff…|Hitem:…|h[Name]|h|r` | nil (nil
+    // while the template answer is in flight — the link is built from the item's name + quality,
+    // and neither is known until it lands). Unit-keyed like its siblings, so the reference's paper
+    // doll and its inspect twin both reach it from one binding:
+    // `DressUpItemLink(GetInventoryItemLink("player", this:GetID()))` (PaperDollFrame.lua:650) and
+    // the shift-click `ChatFrameEditBox:Insert(...)` beside it (l.653). Decision 1059.
+    g.set(
+        "GetInventoryItemLink",
+        lua.create_function(|lua, (token, slot): (Option<String>, i64)| {
+            match player_inv_slot(lua, &token, slot).and_then(|v| v.link) {
+                Some(link) => Ok(Value::String(lua.create_string(&link)?)),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -727,17 +841,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // BenillaPetPaperDollModel_SetFacing(radians) — the PET pane's own bake yaw (decision 1057),
+    // the exact twin of `BenillaInspectModel_SetFacing`: a third scalar, because tab 1 and tab 2
+    // are two panes that can sit at two different facings.
+    g.set(
+        "BenillaPetPaperDollModel_SetFacing",
+        lua.create_function(|lua, radians: f32| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .pet_paperdoll_yaw = radians;
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{weapon_subclass_skill, SKILL_UNARMED};
-    use crate::script::{InvSlotView, PlayerCombatStats, UiScript};
+    use crate::script::{InvSlotView, UiScript, UnitCombatStats};
 
     /// A filled snapshot exercising every field the bindings read.
-    fn stats() -> PlayerCombatStats {
-        PlayerCombatStats {
+    fn stats() -> UnitCombatStats {
+        UnitCombatStats {
             stats: [25, 20, 22, 10, 11],
             stat_pos: [4, 0, 0, 0, 0],
             stat_neg: [0, -2, 0, 0, 0],
@@ -765,7 +892,24 @@ mod tests {
             ranged_max_damage: 47.0,
             main_weapon_skill: (25, 2),
             ranged_weapon_skill: (18, 0),
+            defense_skill: (55, 4),
             has_wand: false,
+        }
+    }
+
+    /// A pet's snapshot: the UNIT half filled, every PLAYER-block-sourced field at its default —
+    /// what `ui_char::unit_combat_stats` really produces over a creature's descriptor.
+    fn pet_stats() -> UnitCombatStats {
+        UnitCombatStats {
+            stats: [63, 45, 68, 32, 42],
+            resistances: [1810, 0, 15, 0, 0, 0, 0],
+            min_damage: 30.5,
+            max_damage: 44.5,
+            main_attack_time_ms: 2000,
+            attack_power: 178,
+            attack_power_pos: 12,
+            attack_power_neg: -4,
+            ..Default::default()
         }
     }
 
@@ -885,7 +1029,7 @@ mod tests {
             .eval::<bool>(r#"local m, o = UnitAttackSpeed("player") return m == 2.9 and o == nil"#)
             .unwrap());
         // With an offhand: both speeds, in seconds.
-        s.set_player_combat_stats(Some(PlayerCombatStats {
+        s.set_player_combat_stats(Some(UnitCombatStats {
             has_offhand: true,
             ..stats()
         }));
@@ -951,11 +1095,190 @@ mod tests {
         );
     }
 
+    /// **The pet routing, end to end** (decision 1057) — the thing no build gate can catch: a
+    /// pushed pet snapshot really is what `Unit*("pet")` answers, while `"player"` still answers
+    /// the player's and a third token still answers the absent shape. The failure this guards is
+    /// silent: a mis-routed reader shows a pet sheet full of the *player's* numbers, or of zeros,
+    /// and nothing errors.
+    #[test]
+    fn the_pet_token_reads_the_pet_snapshot_and_only_it() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_combat_stats(Some(stats()));
+        s.set_pet_combat_stats(Some(pet_stats()));
+
+        // Stamina (index 3): the pet's 68 with no buff split, the player's 22 with its own.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("pet", 3)"#)
+                .unwrap(),
+            (68, 68, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 3)"#)
+                .unwrap(),
+            (22, 22, 0, 0)
+        );
+        // Str, where the two genuinely differ AND the player carries a buff: the pet must not
+        // inherit either number.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("pet", 1)"#)
+                .unwrap(),
+            (63, 63, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
+                .unwrap(),
+            (21, 25, 4, 0)
+        );
+        // Resistances: fire (school 2) — 15 for the pet, 20 (+25/−5) for the player.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitResistance("pet", 2)"#)
+                .unwrap(),
+            (15, 15, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitResistance("player", 2)"#)
+                .unwrap(),
+            (0, 20, 25, -5)
+        );
+        // UnitArmor (school 0): the pet's 1810 undecomposed, the player's 150 split.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64, i64)>(r#"return UnitArmor("pet")"#)
+                .unwrap(),
+            (1810, 1810, 1810, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64, i64)>(r#"return UnitArmor("player")"#)
+                .unwrap(),
+            (130, 150, 150, 30, -10)
+        );
+        // The rest of the family routes too — and `percent` stays the divide-safe 1.0 for the pet
+        // (the ref Lua divides the damage range by it).
+        assert_eq!(
+            s.eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("pet")"#)
+                .unwrap(),
+            (30.5, 44.5, 0.0, 0.0, 0, 0, 1.0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64)>(r#"return UnitAttackPower("pet")"#)
+                .unwrap(),
+            (178, 12, -4)
+        );
+        // No offhand ⇒ the second return is nil, the same gate as the player's.
+        assert!(s
+            .eval::<bool>(r#"local m, o = UnitAttackSpeed("pet") return m == 2.0 and o == nil"#)
+            .unwrap());
+
+        // A third token is still the absent shape…
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("target", 1)"#)
+                .unwrap(),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64, i64)>(r#"return UnitArmor("target")"#)
+                .unwrap(),
+            (0, 0, 0, 0, 0)
+        );
+        // …and so is `"pet"` once the pet is dismissed (the feed pushes None).
+        s.set_pet_combat_stats(None);
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("pet", 1)"#)
+                .unwrap(),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            s.eval::<(f64, f64, f64, f64, i64, i64, f64)>(r#"return UnitDamage("pet")"#)
+                .unwrap(),
+            (0.0, 0.0, 0.0, 0.0, 0, 0, 1.0)
+        );
+        // The player's is untouched by any of it.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
+                .unwrap(),
+            (21, 25, 4, 0)
+        );
+    }
+
+    /// `UnitDefense` always answers two numbers (the ref reads `local base, modifier`), and **the
+    /// two legs are different functions, not one function with missing data**: the player's is the
+    /// skill pair, a pet's is `level * 5` with a flat 0 modifier (the vtable fork,
+    /// `0x5eda20`/`0x613680`). `UnitAttackBothHands` takes the same fork and must agree with it —
+    /// that agreement is the point, since a mismatch is exactly what a snapshot-only
+    /// implementation would produce.
+    #[test]
+    fn unit_defense_forks_the_player_skill_from_a_pets_level_times_five() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_combat_stats(Some(stats()));
+        s.set_pet_combat_stats(Some(pet_stats()));
+        s.set_unit(
+            "pet",
+            Some(super::super::UnitState {
+                exists: true,
+                level: 60,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("player")"#)
+                .unwrap(),
+            (55, 4)
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("pet")"#)
+                .unwrap(),
+            (300, 0),
+            "a level-60 pet: level * 5, modifier flat 0"
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitAttackBothHands("pet")"#)
+                .unwrap(),
+            (300, 0),
+            "the Attack row takes the same fork — and ignores its hand index"
+        );
+        // The pet's snapshot carries neither pair, which is the whole point: the numbers above
+        // cannot have come from it.
+        assert_eq!(pet_stats().defense_skill, (0, 0));
+        assert_eq!(pet_stats().main_weapon_skill, (0, 0));
+        // A pet the level feed has not reached yet reads 0 rather than a stale or invented number.
+        s.set_unit("pet", None);
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("pet")"#)
+                .unwrap(),
+            (0, 0)
+        );
+        // A token that fails the client's SELF-or-SUMMONEDBY gate gets the failure zeros, not
+        // some other unit's level.
+        s.set_unit(
+            "target",
+            Some(super::super::UnitState {
+                exists: true,
+                level: 63,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("target")"#)
+                .unwrap(),
+            (0, 0)
+        );
+        // A negative modifier survives the round trip — the ref branches on `modifier < 0` to
+        // paint the number red.
+        s.set_player_combat_stats(Some(UnitCombatStats {
+            defense_skill: (300, -25),
+            ..stats()
+        }));
+        assert_eq!(
+            s.eval::<(i64, i64)>(r#"return UnitDefense("player")"#)
+                .unwrap(),
+            (300, -25)
+        );
+    }
+
     #[test]
     fn has_wand_equipped_reads_the_flag() {
         let mut s = UiScript::new().unwrap();
         assert!(!s.eval::<bool>("return HasWandEquipped()").unwrap());
-        s.set_player_combat_stats(Some(PlayerCombatStats {
+        s.set_player_combat_stats(Some(UnitCombatStats {
             has_wand: true,
             ..stats()
         }));
@@ -1125,5 +1448,19 @@ mod tests {
         assert_eq!(s.paperdoll_yaw(), 0.61);
         s.run("BenillaPaperDollModel_SetFacing(-0.5)").unwrap();
         assert_eq!(s.paperdoll_yaw(), -0.5);
+    }
+
+    /// The pet pane's yaw is a THIRD scalar, not a share of the character pane's: the two tabs can
+    /// sit at different facings, so a write to either must leave the other alone.
+    #[test]
+    fn pet_paperdoll_facing_is_independent_of_the_character_panes() {
+        let s = UiScript::new().unwrap();
+        assert_eq!(s.pet_paperdoll_yaw(), 0.0, "unset default");
+        s.run("BenillaPetPaperDollModel_SetFacing(1.2)").unwrap();
+        assert_eq!(s.pet_paperdoll_yaw(), 1.2);
+        assert_eq!(s.paperdoll_yaw(), 0.0, "the character pane did not move");
+        s.run("BenillaPaperDollModel_SetFacing(0.61)").unwrap();
+        assert_eq!(s.pet_paperdoll_yaw(), 1.2, "…and neither did the pet pane");
+        assert_eq!(s.paperdoll_yaw(), 0.61);
     }
 }

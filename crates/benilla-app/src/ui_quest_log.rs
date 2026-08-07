@@ -237,6 +237,11 @@ fn resolve_template_item(
             .and_then(|i| i.catalog.get(t.display_info_id))
             .and_then(|d| d.icon.clone())
     });
+    // `GetQuestLogItemLink`'s payload (decisions 1059/1060) — the same shared link builder, and the
+    // same in-flight `None`, as the questgiver panels' [`crate::ui_quest::resolve_item`].
+    let link = name
+        .as_ref()
+        .map(|n| crate::ui_items::item_link(entry, n, quality));
     QuestItemView {
         name,
         texture,
@@ -244,6 +249,7 @@ fn resolve_template_item(
         quality,
         item_id: entry,
         usable: true, // v1: soft-gray only, server authoritative (mirrors ui_quest.rs's resolve_item)
+        link,
     }
 }
 

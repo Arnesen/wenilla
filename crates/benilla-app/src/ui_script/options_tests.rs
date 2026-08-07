@@ -1396,3 +1396,267 @@ fn the_page_scroll_bar_wears_the_trough_with_its_arrows_in_the_sockets() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+// ── B223 · the row tooltips (decision 1054) ─────────────────────────────────────────────────────
+
+/// Hover the middle of a named row's LABEL half (left of the control column) — the surface the
+/// reporter's cursor was on when the row lit and said nothing. Callers pin `ERA_WINDOW_SCALE = 1`
+/// first (the wash test's own idiom): frame rects are in the frame's scale space, the pointer is
+/// in the screen's, and at scale 1 the two are the same numbers.
+fn hover_label(s: &mut UiScript, frame: &str) {
+    s.resolve();
+    let g = |s: &mut UiScript, verb: &str| -> f32 {
+        s.eval(&format!("return {frame}:{verb}()")).unwrap()
+    };
+    let (l, t, b) = (g(s, "GetLeft"), g(s, "GetTop"), g(s, "GetBottom"));
+    s.mouse_move(l + 60.0, (t + b) * 0.5);
+}
+
+/// A hovered row raises its 1.12 description, on the era's seat, and drops it on leave — the row
+/// itself, its checkbox, and (B223's report) the label the cursor actually crosses. The string
+/// resolves by KEY at hover, so seeding it AFTER the window loaded still paints: that is the
+/// property the 1.12 panel's own `getglobal("OPTION_TOOLTIP_"..key)` lookup buys.
+#[test]
+fn a_hovered_row_raises_its_1_12_description_on_the_era_seat() {
+    let mut s = harness_on(audio_harness());
+    s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Checking this will prevent the deselection.\"")
+        .unwrap();
+    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+
+    let row = "OptionsFrameContainerBodyControlsRowStickyTarget";
+    hover_label(&mut s, row);
+    s.resolve();
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the label half raises the plate — the reported gap"
+    );
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Checking this will prevent the deselection."
+    );
+    assert_eq!(
+        s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),
+        1,
+        "the description ALONE — the era's white name line is cut (1054)"
+    );
+    // The era seat: BOTTOMLEFT on the label region's TOPRIGHT, hung 10 back over the control
+    // column (DefaultTooltipMixin's ANCHOR_RIGHT / x -10).
+    let owned: bool = s
+        .eval(&format!("return GameTooltip:IsOwned({row}Tip)"))
+        .unwrap();
+    assert!(owned, "owned by the row's $parentTip region");
+    let (tip_right, tip_top): (f32, f32) = (
+        s.eval(&format!("return {row}Tip:GetRight()")).unwrap(),
+        s.eval(&format!("return {row}Tip:GetTop()")).unwrap(),
+    );
+    let (left, bottom): (f32, f32) = (
+        s.eval("return GameTooltip:GetLeft()").unwrap(),
+        s.eval("return GameTooltip:GetBottom()").unwrap(),
+    );
+    assert!(
+        (left - (tip_right - 10.0)).abs() < 0.01 && (bottom - tip_top).abs() < 0.01,
+        "plate at ({left}, {bottom}); the era seat is ({}, {tip_top})",
+        tip_right - 10.0
+    );
+
+    // Crossing onto the checkbox keeps it up (one seam lights the wash and raises the plate, so
+    // the row's OnLeave and the box's OnEnter cancel out inside the one move).
+    let (bl, br, bt, bb): (f32, f32, f32, f32) = (
+        s.eval(&format!("return {row}Check:GetLeft()")).unwrap(),
+        s.eval(&format!("return {row}Check:GetRight()")).unwrap(),
+        s.eval(&format!("return {row}Check:GetTop()")).unwrap(),
+        s.eval(&format!("return {row}Check:GetBottom()")).unwrap(),
+    );
+    s.mouse_move((bl + br) * 0.5, (bt + bb) * 0.5);
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the plate survives the crossing onto the control"
+    );
+
+    // Leaving the row puts it away.
+    s.mouse_move(5.0, 5.0);
+    assert!(
+        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "OnLeave drops the plate"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The row with no 1.12 string raises NOTHING — not a plate echoing the label under the cursor,
+/// and not the LAST row's description left standing over it. Auto Loot is that row: 1.12 has no
+/// Auto Loot setting, so no `OPTION_TOOLTIP_*` for it. The second leg is the live probe's find: a
+/// hover driven without the outgoing row's OnLeave (1054) must still put the neighbour away.
+#[test]
+fn a_row_with_no_1_12_string_raises_no_plate() {
+    let mut s = harness_on(audio_harness());
+    s.run("OPTION_TOOLTIP_GAMEFIELD_DESELECT = \"Sticky's own description.\"")
+        .unwrap();
+    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    hover_label(&mut s, "OptionsFrameContainerBodyControlsRowAutoLoot");
+    s.resolve();
+    assert!(
+        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "no 1.12 description, no plate"
+    );
+    assert!(
+        s.eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootHover:IsVisible()")
+            .unwrap(),
+        "…but the row still lights: the wash is not gated on the string"
+    );
+
+    // Sticky's plate up, then straight into the mute row with no OnLeave in between.
+    s.run("OptionsRow_Hover(OptionsFrameContainerBodyControlsRowStickyTarget, 1)")
+        .unwrap();
+    assert!(s.eval::<bool>("return GameTooltip:IsVisible()").unwrap());
+    s.run("OptionsRow_Hover(OptionsFrameContainerBodyControlsRowAutoLoot, 1)")
+        .unwrap();
+    assert!(
+        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the mute row puts the neighbour's description away — it never describes THIS row"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The RUNTIME leg on the real client data (`ui_quest`'s pattern): every key the rows carry
+/// resolves to a non-empty string in the shipped 1.12 `GlobalStrings.lua` — the guard against a
+/// typo'd key degrading a description to silence — and the ONE row without a key is Auto Loot.
+/// Pins the reporter's own row end to end (B223's screenshot text). Skips without client data.
+#[test]
+fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let src = chain
+        .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+        .expect("GlobalStrings.lua in the chain");
+    let strings = UiScript::new().expect("VM");
+    strings
+        .run(&String::from_utf8_lossy(&src))
+        .expect("GlobalStrings runs clean");
+
+    // The mapping, read off the LIVE rows so a page added later can't slip the check.
+    let s = harness();
+    let listing: String = s
+        .eval(
+            "local out = {} \
+             for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+               for _, rkey in ipairs(rows) do \
+                 local row = getglobal(\"OptionsFrameContainerBody\" .. page .. rkey) \
+                 table.insert(out, page .. rkey .. \"=\" .. (row.tip or \"\")) \
+               end \
+             end \
+             return table.concat(out, \",\")",
+        )
+        .unwrap();
+
+    let mut untipped = vec![];
+    let mut checked = 0;
+    for entry in listing.split(',') {
+        let (row, key) = entry.split_once('=').expect("row=key");
+        if key.is_empty() {
+            untipped.push(row.to_string());
+            continue;
+        }
+        assert!(
+            key.starts_with("OPTION_TOOLTIP_"),
+            "{row}: {key} is not a 1.12 option-tooltip key"
+        );
+        let text: String = strings
+            .lua()
+            .globals()
+            .get::<String>(key)
+            .unwrap_or_default();
+        assert!(
+            !text.is_empty() && text != "PLACE_HOLDER",
+            "{row}: {key} resolves to nothing in the real GlobalStrings"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 14, "every row but one carries a live 1.12 key");
+    assert_eq!(
+        untipped,
+        vec!["ControlsRowAutoLoot".to_string()],
+        "Auto Loot is the only row 1.12 never had"
+    );
+
+    // The reporter's row, byte for byte off the MPQ chain.
+    assert_eq!(
+        strings
+            .lua()
+            .globals()
+            .get::<String>("OPTION_TOOLTIP_GAMEFIELD_DESELECT")
+            .unwrap(),
+        "Checking this will prevent the deselection of targets by clicking on the gamefield.  \
+         Targets can only be cleared by pressing escape or clicking another target."
+    );
+}
+
+/// EVERY row on every page, all three control flavors: hovering it raises a plate exactly when
+/// the row carries a 1.12 key, and no row's hover errors. The teeth are the per-template
+/// `$parentTip` seat — a flavor missing that region would take `SetOwner(nil, …)` and print a red
+/// line instead of a plate, which no key-mapping check would ever see.
+#[test]
+fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
+    let mut s = harness_on(audio_harness());
+    // Stand-in strings for every key the rows name (the real texts are the data test's job).
+    s.run(
+        "for page, rows in pairs(OPTIONS_PAGE_ROWS) do \
+           for _, rkey in ipairs(rows) do \
+             local row = getglobal(\"OptionsFrameContainerBody\" .. page .. rkey) \
+             if row.tip then setglobal(row.tip, \"described: \" .. rkey) end \
+           end \
+         end",
+    )
+    .unwrap();
+    s.run("ERA_WINDOW_SCALE = 1").unwrap();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+
+    let mut raised = 0;
+    for page in ["Controls", "Audio", "Graphics", "Nameplates"] {
+        s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
+            .unwrap();
+        let rows: String = s
+            .eval(&format!(
+                "return table.concat(OPTIONS_PAGE_ROWS.{page}, \",\")"
+            ))
+            .unwrap();
+        for rkey in rows.split(',') {
+            let row = format!("OptionsFrameContainerBody{page}{rkey}");
+            hover_label(&mut s, &row);
+            s.resolve();
+            let tipped: bool = s.eval(&format!("return {row}.tip ~= nil")).unwrap();
+            let shown: bool = s.eval("return GameTooltip:IsVisible()").unwrap();
+            assert_eq!(
+                shown, tipped,
+                "{row}: plate shown {shown}, has key {tipped}"
+            );
+            if tipped {
+                assert_eq!(
+                    s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+                        .unwrap(),
+                    format!("described: {rkey}"),
+                    "{row}: the plate reads ITS OWN row's description"
+                );
+                assert!(
+                    s.eval::<bool>(&format!("return GameTooltip:IsOwned({row}Tip)"))
+                        .unwrap(),
+                    "{row}: seated on its own $parentTip region"
+                );
+                raised += 1;
+            }
+            s.mouse_move(5.0, 5.0);
+        }
+        assert!(
+            s.errors().is_empty(),
+            "{page}: script errors: {:?}",
+            s.errors()
+        );
+    }
+    assert_eq!(raised, 14, "14 of the 15 rows have a 1.12 description");
+}

@@ -341,5 +341,66 @@
             end
             return modKeys..localizedName;
         end
+
+        -- ref UIParent.lua:1051-1057, transcribed 1:1 (decision 1062). The reference's own
+        -- list joiner, and it is exactly as plain as it looks: a bare ", " between every item,
+        -- with NO "and" before the last one and NO localization string of any kind — 1.12 has
+        -- no LIST_DELIMITER/AND global for it to reach for, and it does not build one. (The
+        -- richer `BuildColoredListString` right below it in the reference — the per-item
+        -- met/unmet red — already lives in TradeSkillFrame.xml as a guarded global, 0437 phase
+        -- 3; folding that one up here beside this is a follow-up, not this slice's churn.)
+        --
+        -- Callers: the pet paper doll's diet tooltip and PetStable.lua's, both as
+        -- `format(PET_DIET_TEMPLATE, BuildListString(GetPetFoodTypes()))`.
+        --
+        -- ZERO arguments returns NIL, not "" — the ref reads `arg[1]` off an empty vararg and
+        -- returns it unchanged. That is load-bearing: `format("%s", nil)` errors, so a caller
+        -- that can pass nothing (a warlock minion's empty diet) must be gated by its own UI, and
+        -- it is — the diet icon is hunter-only. Quietly returning "" here would hide that.
+        --
+        -- Lua-5.0 `arg`/`arg.n` has no equivalent (LUA_COMPAT_VARARG isn't shipped) —
+        -- `select("#", ...)`/`select(i, ...)`, TradeSkillFrame.xml's own substitution.
+        function BuildListString(...)
+            local n = select("#", ...);
+            if ( n == 0 ) then
+                return nil;
+            end
+            local list = select(1, ...);
+            for i = 2, n do
+                local item = select(i, ...);
+                list = list..", "..item;
+            end
+            return list;
+        end
+
+        -- BenillaChatEdit_InsertLink(link) → true if it went in, else nil (decision 1059).
+        --
+        -- Every shift-click site in this UI does the same two things before inserting: check the
+        -- chat edit box is up, and — ours alone — check the link is not nil. That nil case is
+        -- **benilla's, not the reference's**: our item templates resolve asynchronously
+        -- (`CMSG_ITEM_QUERY_SINGLE`, answered a frame or many later), so a `Get…Link` getter
+        -- legitimately answers nil for a slot whose name and quality have not landed, where the real
+        -- client's synchronous item cache always has one. `EditBox:Insert` takes a string (the
+        -- byte-modelled `0x77bee0`), so an unguarded nil is a script error — which is exactly the
+        -- bug this function exists to make impossible to reintroduce at the next site. A dozen call
+        -- sites were growing a dozen copies of the same two-line guard, and three of them shipped
+        -- without it.
+        --
+        -- The RETURN is what lets a caller fork on "did chat take it?" — a bag slot's shift-click
+        -- posts the link when chat is open and opens the stack splitter when it is not (ref
+        -- ContainerFrame.lua:567-577). Blizzard themselves eventually factored this exact helper out
+        -- for this exact reason: 2.0's `ChatEdit_InsertLink(text)`, returning true/false, called from
+        -- every one of these sites. 1.12 has no such function, so ours carries a benilla name rather
+        -- than pretending to be reference API.
+        function BenillaChatEdit_InsertLink(link)
+            if not link then
+                return nil
+            end
+            if not ChatFrameEditBox or not ChatFrameEditBox:IsVisible() then
+                return nil
+            end
+            ChatFrameEditBox:Insert(link)
+            return true
+        end
     ]]></Script>
 </Ui>

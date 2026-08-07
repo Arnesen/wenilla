@@ -39,6 +39,7 @@ pub(crate) mod cast_target;
 mod drain;
 #[cfg(test)]
 mod drain_tests;
+pub(crate) mod drop_item;
 mod errors;
 mod feed;
 #[cfg(test)]
@@ -195,11 +196,22 @@ pub(crate) struct LearnedAbilities {
     /// `[0xb700e8]` — our known `SPELL_EFFECT_SKIN_PLAYER_CORPSE` spell (the PvP insignia). Kept
     /// for symmetry with the reference's pair; the insignia arm of the cursor isn't modelled yet.
     pub(crate) skin_player_corpse: Option<u32>,
+    /// `[0xcecad8]` — our known `SPELL_EFFECT_FEED_PET` spell (Feed Pet 6991), `None` if we never
+    /// learned one. The reference latches it the same way, at learn time: `0x6ea1d0` (←
+    /// `0x5e9e49`) stores the spell whose `Effect[0] == 0x65`. It is the **third gate** on
+    /// [`targeting::drop_item_on_unit`]'s pet leg, and the spell that leg casts — so, like
+    /// `skinning`, one lookup here rather than a second scan at the drop.
+    pub(crate) feed_pet: Option<u32>,
 }
 
 /// `SpellEffects` value `0x74` — `SPELL_EFFECT_SKIN_PLAYER_CORPSE` (the "Remove Insignia" family),
 /// the second of the two effects `0x4b25e0` latches.
 const SPELL_EFFECT_SKIN_PLAYER_CORPSE: u32 = 0x74;
+
+/// `SpellEffects` value `0x65` (101) — `SPELL_EFFECT_FEED_PET`, the effect the reference tests at
+/// learn time to latch `[0xcecad8]` (wow-re `ui/scratch/item-target-cursor-and-dropitemonunit.md`).
+/// Feed Pet 6991 is the only shipped row carrying it.
+const SPELL_EFFECT_FEED_PET: u32 = 0x65;
 
 /// Re-derive [`LearnedAbilities`] whenever the spell book changes — our stand-in for the
 /// reference's learn/unlearn write sites. Change-detected, so it is a no-op on almost every frame;
@@ -221,14 +233,22 @@ fn track_learned_abilities(
             .copied()
             .find(|&id| spells.catalog.get(id).is_some_and(|d| d.effect_1 == effect))
     };
-    let (skinning, skin_player_corpse) = (
+    let (skinning, skin_player_corpse, feed_pet) = (
         first_with(benilla_formats::SPELL_EFFECT_SKINNING),
         first_with(SPELL_EFFECT_SKIN_PLAYER_CORPSE),
+        first_with(SPELL_EFFECT_FEED_PET),
     );
-    if (skinning, skin_player_corpse) != (learned.skinning, learned.skin_player_corpse) {
+    if (skinning, skin_player_corpse, feed_pet)
+        != (
+            learned.skinning,
+            learned.skin_player_corpse,
+            learned.feed_pet,
+        )
+    {
         *learned = LearnedAbilities {
             skinning,
             skin_player_corpse,
+            feed_pet,
         };
     }
 }

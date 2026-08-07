@@ -244,7 +244,14 @@ impl Plugin for TargetPlugin {
                     crate::ui_action::targeting::commit_object_cast_on_click,
                     click::act_on_right_click,
                     click::clear_target_requests,
-                    click::target_unit_requests,
+                    // The two unit-token drains, grouped as one element (the outer chain is at
+                    // Bevy's 20-tuple limit): `TargetUnit`'s selection commit, and
+                    // `DropItemOnUnit`'s pet-leg feed (decision 1055). Independent of each other —
+                    // one writes `Selection`, the other sends a cast — so they need no order.
+                    (
+                        click::target_unit_requests,
+                        crate::ui_action::drop_item::drop_item_on_unit,
+                    ),
                     // The chat layer's by-name asks (decision 0886), beside the UI's token asks:
                     // both are non-mouse selection writers committing through `scan::commit`.
                     // The chat layer's by-name asks, grouped as one chained element (the outer

@@ -130,12 +130,13 @@ pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use parse::parse_server;
 pub use pet::{
-    pet_action, pet_cancel_aura, pet_set_action, pet_spell_autocast, pet_stop_attack,
-    PetActionEntry, PetMode, PetSpellCooldown, PetSpells, PET_ACTION_SLOTS, PET_ACT_COMMAND,
-    PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION, PET_AUTOCAST_ALLOWED,
-    PET_AUTOCAST_ON, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS, PET_COMMAND_FOLLOW, PET_COMMAND_STAY,
-    PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE, PET_REACT_DEFENSIVE, PET_REACT_PASSIVE,
-    PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST, PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
+    pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,
+    pet_stop_attack, PetActionEntry, PetMode, PetSpellCooldown, PetSpells, PET_ACTION_SLOTS,
+    PET_ACT_COMMAND, PET_ACT_DISABLED, PET_ACT_ENABLED, PET_ACT_PASSIVE, PET_ACT_REACTION,
+    PET_AUTOCAST_ALLOWED, PET_AUTOCAST_ON, PET_COMMAND_ATTACK, PET_COMMAND_DISMISS,
+    PET_COMMAND_FOLLOW, PET_COMMAND_STAY, PET_COOLDOWN_PERMANENT, PET_REACT_AGGRESSIVE,
+    PET_REACT_DEFENSIVE, PET_REACT_PASSIVE, PET_STATE_BAR_DISABLED, PET_TYPE_SPELL_FIRST,
+    PET_TYPE_SPELL_LAST, PET_UNUSABLE_UNIT_FLAGS,
 };
 pub use pose::{set_sheathed, stand_state_change};
 pub use progression::{learn_talent, ExplorationXp, LevelUpInfo, XpGain};

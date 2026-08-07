@@ -38,8 +38,9 @@
           - `InspectTitleText` / `InspectGuildText` — both `hidden="true"` in the ref itself, filled
             only from PVP-rank / guild-query data (0208's own two named gaps). Not transcribed.
           - Ctrl-click `DressUpItemLink` and shift-click chat-link insert (ref
-            `InspectPaperDollFrame.lua:104-112`) — 0208's named deferrals; the click recognizes the
-            modifiers and does nothing rather than falling through to a verb the ref wouldn't run.
+            `InspectPaperDollFrame.lua:104-112`) — 0208's named deferrals, both LANDED (decisions
+            1059/1060): ctrl previews the inspected item on your own body, shift posts its link.
+            Nothing else happens on a click, which is still the reference's own shape.
           - `UnitHasRelicSlot` (ref l.123, l.22) — vanilla-always-false, so the relic branch can
             never fire. Dropped outright, as CharacterFrame.xml drops it.
           - The held-button continuous spin (ref `InspectModelFrame_OnUpdate`, l.7-22) needs
@@ -248,14 +249,25 @@
             end
         end
 
-        -- ref InspectPaperDollItemSlotButton_OnClick (l.104-112): both branches are named deferrals
-        -- (header), so this recognizes the modifiers and does nothing — deliberately inert rather
-        -- than falling through to a verb the reference would never have run on an inspected item.
+        -- ref InspectPaperDollItemSlotButton_OnClick (l.104-112): CTRL previews the inspected
+        -- player's item on YOUR character in the dressing room (decision 1060), SHIFT posts its
+        -- link to chat (decision 1059) — "link me that" being most of why anyone inspects. Both
+        -- read through the unit-keyed `GetInventoryItemLink(unit, slot)`, the same binding the
+        -- paper doll uses: a foreign player's worn items are PUBLIC descriptor data, so their
+        -- links are as readable as our own (decision 0631's whole premise). Nothing else happens on
+        -- a click here — the reference has no third branch, and an inspected item is not ours to
+        -- pick up or use.
         function BenillaInspectSlot_OnClick(button, mouseButton)
+            local unit = getglobal("BenillaInspectFrame").unit
             if IsControlKeyDown() then
-                return -- DressUpItemLink: no dressing room yet
+                -- DressUpItemLink carries the reference's own nil guard (DressUpFrame.lua:11-13).
+                DressUpItemLink(GetInventoryItemLink(unit, button.invSlotId))
             elseif IsShiftKeyDown() then
-                return -- chat-link insert: named deferral
+                -- The visible-and-non-nil guards both live in the shared helper (UIParent.xml).
+                -- Waiting on a template is the COMMON case at this window — an inspected player's
+                -- gear is usually gear we have never seen — so the nil arm is a live path here,
+                -- not a theoretical one.
+                BenillaChatEdit_InsertLink(GetInventoryItemLink(unit, button.invSlotId))
             end
         end
 

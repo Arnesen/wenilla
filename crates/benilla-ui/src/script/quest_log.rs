@@ -355,6 +355,38 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     install_detail_item(lua, "GetQuestLogChoiceInfo", |d| &d.choices)?;
     install_detail_item(lua, "GetQuestLogRewardInfo", |d| &d.rewards)?;
 
+    // GetQuestLogItemLink(type, index) → the full escaped `|cff…|Hitem:…|h[Name]|h|r` | nil — the
+    // quest log's twin of `GetQuestItemLink` ([`super::quest`]), read by the reward rows' ctrl/shift
+    // click arms: `DressUpItemLink(GetQuestLogItemLink(this.type, this:GetID()))` (ref
+    // QuestLogFrame.lua:545) and the `ChatFrameEditBox:Insert(...)` beside it (l.549). Unlike the
+    // *Info* pair above this one is kind-DISPATCHED, because that is the shape the reference's own
+    // handler calls it with (`this.type` is "choice"/"reward", set by the shared
+    // `QuestFrameItems_Update`); an unknown type, an out-of-range index, or a row whose template
+    // answer is still in flight all read nil. Decisions 1059/1060.
+    g.set(
+        "GetQuestLogItemLink",
+        lua.create_function(|lua, (kind, index): (String, usize)| {
+            let link = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.quest_log.detail.as_ref().and_then(|d| {
+                    let v = match kind.as_str() {
+                        "choice" => &d.choices,
+                        "reward" => &d.rewards,
+                        _ => return None,
+                    };
+                    index
+                        .checked_sub(1)
+                        .and_then(|n| v.get(n))
+                        .and_then(|it| it.link.clone())
+                })
+            };
+            match link {
+                Some(l) => Ok(Value::String(lua.create_string(&l)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // IsCurrentQuestFailed() → the selection's slot state is FAIL (ref appends " - (Failed)").
     g.set(
         "IsCurrentQuestFailed",
@@ -566,12 +598,13 @@ mod tests {
                 reward_money: 40,
                 choices: vec![],
                 rewards: vec![QuestItemView {
-                    item_id: 0,
+                    item_id: 2024,
                     name: Some("Militia Hammer".into()),
                     texture: None,
                     count: 1,
                     quality: 1,
                     usable: true,
+                    link: Some("|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r".into()),
                 }],
             }),
         }
@@ -673,6 +706,24 @@ mod tests {
             .unwrap());
         assert!(s
             .eval::<bool>("return GetQuestLogChoiceInfo(1) == nil")
+            .unwrap());
+
+        // GetQuestLogItemLink: kind-dispatched (the shape the ref's QuestLogRewardItem_OnClick
+        // calls it with — `this.type`), nil for the empty choice list, an out-of-range index and
+        // an unknown type.
+        assert_eq!(
+            s.eval::<String>("return GetQuestLogItemLink(\"reward\", 1)")
+                .unwrap(),
+            "|cffffffff|Hitem:2024:0:0:0|h[Militia Hammer]|h|r"
+        );
+        assert!(s
+            .eval::<bool>("return GetQuestLogItemLink(\"choice\", 1) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetQuestLogItemLink(\"reward\", 9) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetQuestLogItemLink(\"bogus\", 1) == nil")
             .unwrap());
     }
 

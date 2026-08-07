@@ -389,15 +389,34 @@ fn coin_icon(copper: u32) -> &'static str {
 /// Resolve one wire [`LootItem`] into the Lua-facing [`LootRow`]: the icon comes straight from the
 /// wire `display_info_id` (no template wait), name + quality from the ask-once template cache (`None`
 /// while in flight — the row shows a placeholder and fills in when the answer lands).
+///
+/// The row's **link** (`GetLootSlotLink`, decision 1059) comes off that same one template answer, out
+/// of the one shared builder [`receive_line`] uses ([`crate::ui_items::item_link_full`], our
+/// transcription of `0x52adb0`) and with the same arguments: enchant `0`, the wire's own
+/// `randomPropertyId`, and suffix factor `0` — `SMSG_LOOT_RESPONSE`'s `randomSuffix` is a literal `0`
+/// server-side (`LootMgr.cpp:841`, which is why [`LootItem`] doesn't even carry it), so there is
+/// nothing else to pass. One builder, no drifting twins — the reason the zeros live in `item_link`
+/// rather than at each call site.
 fn resolve_item(
     item: &LootItem,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> LootRow {
-    let (name, quality) = match items.template(item.item_id, 0, commands) {
-        Some(t) => (Some(t.name.clone()), Some(t.quality)),
-        None => (None, None),
+    let (name, quality, link) = match items.template(item.item_id, 0, commands) {
+        Some(t) => (
+            Some(t.name.clone()),
+            Some(t.quality),
+            Some(crate::ui_items::item_link_full(
+                item.item_id,
+                0,
+                item.random_property_id,
+                0,
+                &t.name,
+                t.quality,
+            )),
+        ),
+        None => (None, None, None),
     };
     let texture = icons
         .and_then(|i| i.catalog.get(item.display_info_id))
@@ -409,6 +428,7 @@ fn resolve_item(
         quality,
         is_coin: false,
         item_id: item.item_id,
+        link,
     }
 }
 
@@ -430,6 +450,9 @@ fn snapshot(
             quality: Some(COIN_QUALITY),
             is_coin: true,
             item_id: 0,
+            // No link: the coin pile is a synthesized row with no item behind it, so a modified
+            // click on it finds nil and does nothing (decision 1059).
+            link: None,
         });
     }
     for it in &loot.items {

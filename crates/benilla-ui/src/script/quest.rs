@@ -59,6 +59,11 @@ pub struct QuestItemView {
     /// Whether the reward is usable by the player's class/race — v1 always `true` (soft gray only,
     /// the server stays authoritative).
     pub usable: bool,
+    /// The full escaped `|cff…|Hitem:…|h[Name]|h|r` link (`GetQuestItemLink` /
+    /// `GetQuestLogItemLink` serve it) — the ctrl/shift click arms' payload (decisions 1059/1060).
+    /// `None` until the ask-once item template lands: the link is built from the name **and** the
+    /// quality, and neither is known before then, exactly like [`super::InvSlotView::link`].
+    pub link: Option<String>,
 }
 
 /// One open questgiver panel: the active sub-panel plus every field the four panels might read.
@@ -275,6 +280,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetQuestItemLink(type, index) → the full escaped `|cff…|Hitem:…|h[Name]|h|r` | nil. The
+    // questgiver panels' ctrl/shift click arms read it — `DressUpItemLink(GetQuestItemLink(
+    // this.type, this:GetID()))` (ref QuestFrame.lua:118/130) and the shift-click
+    // `ChatFrameEditBox:Insert(...)` beside it (l.122/134). Same `type`/`index` addressing as
+    // `GetQuestItemInfo` above; nil for an out-of-range row, an unknown type, or a row whose
+    // template answer is still in flight (see [`QuestItemView::link`]). Decisions 1059/1060.
+    g.set(
+        "GetQuestItemLink",
+        lua.create_function(|lua, (kind, index): (String, usize)| {
+            let link = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.quest.as_ref().and_then(|q| {
+                    item_vec(q, &kind)
+                        .and_then(|v| index.checked_sub(1).and_then(|n| v.get(n)))
+                        .and_then(|it| it.link.clone())
+                })
+            };
+            match link {
+                Some(l) => Ok(Value::String(lua.create_string(&l)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // GetRewardSpell() → nil (spell-reward rows out of scope in v1, decision 0088).
     g.set(
         "GetRewardSpell",
@@ -344,12 +373,13 @@ mod tests {
             body: "Kill the kobolds infesting the mine.".into(),
             objectives: "Slay 10 Kobold Vermin.".into(),
             rewards: vec![QuestItemView {
-                item_id: 0,
+                item_id: 7278,
                 name: Some("Brdle Leather Boots".into()),
                 texture: Some("Interface\\Icons\\INV_Boots_01".into()),
                 count: 1,
                 quality: 2,
                 usable: true,
+                link: Some("|cff1eff00|Hitem:7278:0:0:0|h[Brdle Leather Boots]|h|r".into()),
             }],
             choices: vec![
                 QuestItemView {
@@ -359,6 +389,7 @@ mod tests {
                     count: 1,
                     quality: 1,
                     usable: true,
+                    ..Default::default()
                 },
                 QuestItemView {
                     item_id: 0,
@@ -367,6 +398,7 @@ mod tests {
                     count: 1,
                     quality: 1,
                     usable: true,
+                    ..Default::default()
                 },
             ],
             reward_money: 1234,
@@ -415,6 +447,24 @@ mod tests {
             .unwrap());
         assert!(s
             .eval::<bool>("return GetQuestItemInfo(\"bogus\", 1) == nil")
+            .unwrap());
+
+        // GetQuestItemLink: the resolved row's full escaped link; nil for a row still waiting on
+        // its template (choice 2 has no name yet, so no link either), and nil out of range /
+        // unknown type — the three nils the ref's ctrl/shift arms hand to DressUpItemLink.
+        assert_eq!(
+            s.eval::<String>("return GetQuestItemLink(\"reward\", 1)")
+                .unwrap(),
+            "|cff1eff00|Hitem:7278:0:0:0|h[Brdle Leather Boots]|h|r"
+        );
+        assert!(s
+            .eval::<bool>("return GetQuestItemLink(\"choice\", 2) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetQuestItemLink(\"reward\", 9) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetQuestItemLink(\"bogus\", 1) == nil")
             .unwrap());
     }
 
@@ -474,6 +524,7 @@ mod tests {
                 count: 8,
                 quality: 0,
                 usable: true,
+                ..Default::default()
             }],
             required_money: 500,
             completable: true,

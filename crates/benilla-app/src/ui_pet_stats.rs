@@ -15,12 +15,24 @@
 //! `== 4 || == 0xB` is Rogue and Druid, wow-re `combo-point-gate.md`.) A warlock's imp therefore
 //! resolves perfectly and still answers nothing — happiness, loyalty and training points are
 //! hunter machinery — and each binding says "nothing" in its own way ([`benilla_ui::script::PetStats`]).
+//!
+//! **Two more bindings ride here off the pet's `CreatureFamily.dbc` row** (decision 1062), and they
+//! sit on **opposite sides of that gate** — which is the whole reason they are worth naming
+//! together. `UnitCreatureFamily("pet")` (`0x51a310`) has no class test whatsoever, so a warlock's
+//! imp shows "Imp" on the page's level line; `GetPetFoodTypes()` (`0x4bea10`) shares the very same
+//! `0x6116e0` gate as the four stats above, so a minion — or a charmed beast under a non-hunter —
+//! answers an empty diet even when its family row has a food mask. Both are one lookup on the same
+//! clock as the block above, pushed by the same setter, which is why they live here rather than in
+//! [`crate::ui_pet`]'s token feed: splitting them would mean two systems racing the same
+//! [`crate::names::NameCache`] entry for the same answer. See [`family_for`] for the one thing that
+//! is not obvious: a pet's creature-template entry is its *descriptor's*, never its guid's.
 
 use bevy::prelude::*;
 
 use benilla_ui::script::{PetStats, UiScript};
 
-use crate::net::ObjectStore;
+use crate::names::NameCache;
+use crate::net::{NetCommands, ObjectStore};
 use crate::ui_pet::{PetBar, PetUnit};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -43,6 +55,18 @@ pub(crate) struct PetStatTables {
     pub(crate) loyalty: benilla_formats::PetLoyaltyNames,
 }
 
+/// The **family** pair — `CreatureFamily.dbc` (the word) and `ItemPetFood.dbc` (the diet the row's
+/// mask names), decision 1062.
+///
+/// A separate resource from [`PetStatTables`] rather than four fields on it, so the two halves
+/// degrade independently: a missing `ItemPetFood.dbc` must not take happiness down with it, and a
+/// missing `PetPersonality.dbc` must not blank the level line.
+#[derive(Resource)]
+pub(crate) struct PetFamilyTables {
+    pub(crate) families: benilla_formats::CreatureFamilies,
+    pub(crate) foods: benilla_formats::PetFoodNames,
+}
+
 pub(crate) struct UiPetStatsPlugin;
 
 impl Plugin for UiPetStatsPlugin {
@@ -53,16 +77,70 @@ impl Plugin for UiPetStatsPlugin {
     }
 }
 
+/// The pet's family word and diet, resolved from its cached creature template (decision 1062).
+///
+/// **A pet's creature template entry is its descriptor's `OBJECT_FIELD_ENTRY`, never its guid.**
+/// A `HIGHGUID_PET` guid carries a *pet number* in the entry-shaped slot (`crate::guid::pet_number`
+/// — vmangos `Pet::Create` feeds `Object::_Create`'s entry parameter `petNumber`), which is exactly
+/// why [`NameCache::resolve`] sends a pet-*name* query for one; but `Creature::InitEntry` still
+/// writes the real template id into the descriptor (`Creature.cpp:376`, `SetEntry(entry) // normal
+/// entry always`), so the template query has a key after all. That is the whole reason this reaches
+/// past the guid: an Imp's descriptor says entry 416, whose template says `pet_family` 23, whose
+/// `CreatureFamily.dbc` row says "Imp".
+///
+/// This is the **resolving** read — it issues the ask-once creature query on a miss — and it is the
+/// only one for the pet, so the answer lands in the shared cache for anything else that wants it.
+/// A miss returns `(None, vec![])`, which is the same shape as "this template has no family": the
+/// binding's nil either way, and the query is in flight for the next frame.
+fn family_for(
+    pet: Option<&ObjectStore>,
+    names: &mut NameCache,
+    commands: &NetCommands,
+    tables: Option<&PetFamilyTables>,
+) -> (Option<String>, Vec<String>) {
+    let Some(entry) = pet.and_then(|s| s.0.object_entry()).filter(|&e| e != 0) else {
+        return (None, Vec::new());
+    };
+    // The guid argument is the query body's second field and the server ignores it entirely
+    // (vmangos `HandleCreatureQueryOpcode` answers off `packet.entry` alone), so the template-only
+    // `0` convention `Items::template` already uses applies here too.
+    let _ = names.resolve_creature(entry, 0, commands);
+    let Some(tables) = tables else {
+        return (None, Vec::new());
+    };
+    let Some(family) = names
+        .creature_record(entry)
+        .and_then(|r| tables.families.get(r.pet_family))
+    else {
+        return (None, Vec::new());
+    };
+    (
+        Some(family.name.clone()),
+        tables
+            .foods
+            .for_mask(family.pet_food_mask)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// Resolve the whole stat block for the current pet, or [`PetStats::default`] when there is none.
 ///
-/// Split from the system so the composition is testable: every one of these five values passes
+/// Split from the system so the composition is testable: every one of the five *stat* values passes
 /// through the *same* `hunter_pet` gate, and a bug that let one leak past it would show up as a
 /// warlock with a loyalty level rather than as a compile error.
+///
+/// `family` ([`family_for`]'s pair) is threaded in already resolved, and the two halves land on
+/// **opposite sides of the hunter gate** — the word survives it (`UnitCreatureFamily` has no class
+/// test), the diet does not (`GetPetFoodTypes` shares `0x6116e0`). See the gate's own comment.
 fn stats_for(
     pet: Option<&ObjectStore>,
     self_store: Option<&ObjectStore>,
     tables: Option<&PetStatTables>,
+    family: (Option<String>, Vec<String>),
 ) -> (bool, PetStats) {
+    let (family, food_types) = family;
     let Some(fields) = pet.map(|s| &s.0) else {
         return (false, PetStats::default());
     };
@@ -76,7 +154,22 @@ fn stats_for(
         && self_store.map(|s| ((s.0.unit_bytes_0().unwrap_or(0) >> 8) & 0xff) as u8)
             == Some(CLASS_HUNTER);
     if !hunter {
-        return (has_ui, PetStats::default());
+        // **The family WORD rides past the gate; the DIET does not** — and the split is carved,
+        // not chosen. `UnitCreatureFamily 0x51a310` has no class test at all (its only nil paths
+        // are "no record / id 0 / out of range / a null row"), so a warlock's minion shows "Imp"
+        // on the page's level line. `GetPetFoodTypes 0x4bea10` is gated on `0x6116e0(pet)` — the
+        // same owner-is-me + class-is-Hunter gate as the four stat bindings — so it answers
+        // *nothing* for a minion even though the word is there. The shipped data hides the
+        // difference for warlocks (every minion family ships food mask 0), but not for a
+        // **charmed beast under a non-hunter**: a mind-controlled boar has family 5 and mask 63,
+        // and the reference still answers an empty diet for it. (wow-re, 2026-08-06.)
+        return (
+            has_ui,
+            PetStats {
+                family,
+                ..PetStats::default()
+            },
+        );
     }
     let (happiness, damage_percentage, loyalty_rate) = tables
         .and_then(|t| t.personalities.for_pet(None))
@@ -100,26 +193,30 @@ fn stats_for(
             }),
             training_points: fields.unit_training_points(),
             experience: fields.unit_pet_experience(),
+            family,
+            food_types,
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn feed_pet_stats(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
     pet: PetUnit,
     self_store: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     tables: Option<Res<PetStatTables>>,
+    family_tables: Option<Res<PetFamilyTables>>,
+    mut names: ResMut<NameCache>,
+    commands: Res<NetCommands>,
     mut last: Local<Option<(bool, PetStats)>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let fresh = stats_for(
-        pet.store(bar.spells.pet_guid),
-        self_store.iter().next(),
-        tables.as_deref(),
-    );
+    let store = pet.store(bar.spells.pet_guid);
+    let family = family_for(store, &mut names, &commands, family_tables.as_deref());
+    let fresh = stats_for(store, self_store.iter().next(), tables.as_deref(), family);
     // Push only on change. Happiness moves on its own clock and the frame repaints off UNIT_*
     // events, so a per-frame push would be pure churn — but the DIFF is what makes this cheap,
     // not a timer, so a real change still lands the same frame it arrives.
@@ -143,16 +240,53 @@ fn feed_pet_stats(
         fresh.1.damage_percentage.to_bits(),
         fresh.1.loyalty_rate.to_bits(),
     ));
+    // The pet page's other two repaint wires (ref `PetPaperDollFrame.lua:9,21`), cut the same
+    // narrow way: `UNIT_PET_EXPERIENCE` is the XP bar's ONLY wire (`PetExpBar_Update`, l.43-44 —
+    // the one event arm that repaints nothing else), and `UNIT_PET_TRAINING_POINTS` reaches only
+    // `PetPaperDollFrame_Update`'s training-point text. Firing each off its own pair rather than
+    // off the whole block keeps happiness drift — which moves every few seconds while a pet is
+    // out — from repainting two numbers that did not change.
+    let xp_moved = last.as_ref().map(|(_, s)| s.experience) != Some(fresh.1.experience);
+    let training_moved =
+        last.as_ref().map(|(_, s)| s.training_points) != Some(fresh.1.training_points);
     if happiness_moved {
         debug!(
             "ui_pet_stats: happiness {:?} ({}% damage), loyalty {:?}",
             fresh.1.happiness, fresh.1.damage_percentage, fresh.1.loyalty
         );
     }
+    // **The family lands LATE and fires NOTHING — a named hole, not an oversight** (decision
+    // 1062). It arrives with the creature-query answer, a round trip after the pet streams, and
+    // no event the pet page registers is guaranteed to fire then: `fire_transitions` has no arm
+    // for it, `UNIT_CLASSIFICATION_CHANGED` (the reference's own "a creature query landed" wire,
+    // decision 0782) is neither registered by the page nor even edge-able for a pet, whose gated
+    // rank is pinned at 0. Inventing a fire site — `PET_UI_UPDATE`, or `UNIT_LEVEL` because the
+    // family shares the level's line — would be asserting a mechanism nobody has carved.
+    //
+    // What makes it *survivable* rather than broken: the query goes out the frame the pet's
+    // descriptor arrives, thousands of frames before a human can open the character window, so
+    // the page's own `OnShow` → `_Update` covers every ordinary open. The one reachable blank is
+    // a page already sitting open at the instant a pet is summoned, which the next stat event
+    // (`UNIT_STATS`/`UNIT_DAMAGE`/…, all of which the page registers and all of which fire
+    // repeatedly while a pet's descriptor streams) repaints within a frame or two. This line is
+    // the instrument for it: a family that never appears names itself here.
+    if last.as_ref().map(|(_, s)| &s.family) != Some(&fresh.1.family) {
+        debug!(
+            "ui_pet_stats: pet family {:?}, diet {:?}",
+            fresh.1.family, fresh.1.food_types
+        );
+    }
     *last = Some(fresh.clone());
     script.set_pet_stats(fresh.0, fresh.1);
+    // Push before firing — dispatch runs the Lua handlers synchronously (the `ui_unit` rule).
     if happiness_moved {
         script.fire_event("UNIT_HAPPINESS", vec![]);
+    }
+    if xp_moved {
+        script.fire_event("UNIT_PET_EXPERIENCE", vec![]);
+    }
+    if training_moved {
+        script.fire_event("UNIT_PET_TRAINING_POINTS", vec![]);
     }
 }
 
@@ -168,6 +302,12 @@ mod tests {
     const PETXP: u16 = 141;
     const PETNEXTXP: u16 = 142;
     const TRAINING: u16 = 149;
+    /// `OBJECT_FIELD_ENTRY` — the pet's creature-template id ([`family_for`]'s whole key).
+    const ENTRY: u16 = 3;
+    /// Real `creature_template` entries on the live VM, so the family ids below are the ones the
+    /// server would actually send: Imp → `pet_family` 23, Stonetusk Boar → 5.
+    const IMP_ENTRY: u32 = 416;
+    const BOAR_ENTRY: u32 = 113;
 
     fn hunter() -> ObjectStore {
         // BYTES_0 byte 1 = class. Hunter = 3.
@@ -181,9 +321,11 @@ mod tests {
         ObjectStore(ObjectFields::from_pairs(&[(BYTES_0, 9 << 8)]))
     }
 
-    /// A boar: pet number set, loyalty level 6, happy, part-trained, mid-XP.
+    /// A boar: pet number set, loyalty level 6, happy, part-trained, mid-XP, and its real
+    /// `creature_template` entry in `OBJECT_FIELD_ENTRY`.
     fn boar() -> ObjectStore {
         ObjectStore(ObjectFields::from_pairs(&[
+            (ENTRY, BOAR_ENTRY),
             (PETNUMBER, 42),
             (BYTES_1, 6 << 8),             // loyalty level in byte 1
             (POWER5, 1_000_000),           // maximum happiness
@@ -193,18 +335,63 @@ mod tests {
         ]))
     }
 
-    fn tables() -> Option<PetStatTables> {
+    fn chain() -> Option<benilla_formats::Chain> {
         let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
         if !data.is_dir() {
             eprintln!("skipping: vanilla client not present at {}", data.display());
             return None;
         }
-        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        Some(benilla_formats::open_chain(&data).expect("open chain"))
+    }
+
+    fn tables() -> Option<PetStatTables> {
+        let mut chain = chain()?;
         Some(PetStatTables {
             personalities: benilla_formats::load_pet_personalities(&mut chain)
                 .expect("personality"),
             loyalty: benilla_formats::load_pet_loyalty_names(&mut chain).expect("loyalty"),
         })
+    }
+
+    fn family_tables() -> Option<PetFamilyTables> {
+        let mut chain = chain()?;
+        Some(PetFamilyTables {
+            families: benilla_formats::load_creature_families(&mut chain).expect("families"),
+            foods: benilla_formats::load_pet_food_names(&mut chain).expect("foods"),
+        })
+    }
+
+    /// The "no family resolved" pair, for the stat tests that are not about the family.
+    fn no_family() -> (Option<String>, Vec<String>) {
+        (None, Vec::new())
+    }
+
+    /// A `NameCache` with `entry`'s creature record already cached, carrying `pet_family` —
+    /// i.e. the state after `SMSG_CREATURE_QUERY_RESPONSE` has landed.
+    fn cache_with(entry: u32, pet_family: u32) -> NameCache {
+        let mut names = NameCache::default();
+        names.insert_creature(
+            entry,
+            Some(crate::names::CreatureRecord {
+                name: "Snarl".into(),
+                subname: None,
+                creature_type: 1,
+                pet_family,
+                rank: 0,
+                type_flags: 0,
+                civilian: false,
+                racial_leader: false,
+            }),
+        );
+        names
+    }
+
+    fn commands() -> (
+        NetCommands,
+        crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (NetCommands(tx), rx)
     }
 
     /// The whole block end to end on the real DBC data — the packed/derived reads are the point:
@@ -213,7 +400,7 @@ mod tests {
     #[test]
     fn a_hunters_boar_reads_every_field() {
         let Some(t) = tables() else { return };
-        let (has_ui, s) = stats_for(Some(&boar()), Some(&hunter()), Some(&t));
+        let (has_ui, s) = stats_for(Some(&boar()), Some(&hunter()), Some(&t), no_family());
         assert!(has_ui && s.hunter_pet);
         assert_eq!(s.happiness, Some(3));
         assert_eq!(s.damage_percentage, 125.0);
@@ -238,7 +425,7 @@ mod tests {
                 (BYTES_1, 0),
                 (POWER5, raw),
             ]));
-            let (_, s) = stats_for(Some(&store), Some(&hunter()), Some(&t));
+            let (_, s) = stats_for(Some(&store), Some(&hunter()), Some(&t), no_family());
             (s.happiness, s.damage_percentage)
         };
         assert_eq!(at(0), (Some(1), 75.0), "an unhappy pet deals 75%");
@@ -252,7 +439,7 @@ mod tests {
     #[test]
     fn a_warlocks_minion_has_a_ui_and_no_stats() {
         let Some(t) = tables() else { return };
-        let (has_ui, s) = stats_for(Some(&boar()), Some(&warlock()), Some(&t));
+        let (has_ui, s) = stats_for(Some(&boar()), Some(&warlock()), Some(&t), no_family());
         assert!(
             has_ui,
             "the pet number is what HasPetUI's first return reads"
@@ -270,7 +457,7 @@ mod tests {
     fn no_pet_number_means_no_pet_ui() {
         let Some(t) = tables() else { return };
         let possessed = ObjectStore(ObjectFields::from_pairs(&[(POWER5, 1_000_000)]));
-        let (has_ui, s) = stats_for(Some(&possessed), Some(&hunter()), Some(&t));
+        let (has_ui, s) = stats_for(Some(&possessed), Some(&hunter()), Some(&t), no_family());
         assert!(!has_ui);
         assert!(!s.hunter_pet);
     }
@@ -285,7 +472,7 @@ mod tests {
             (BYTES_1, 0),
             (POWER5, 1_000_000),
         ]));
-        let (_, s) = stats_for(Some(&fresh), Some(&hunter()), Some(&t));
+        let (_, s) = stats_for(Some(&fresh), Some(&hunter()), Some(&t), no_family());
         assert_eq!(s.loyalty, None);
         assert_eq!(s.happiness, Some(3), "…but happiness still answers");
     }
@@ -294,7 +481,7 @@ mod tests {
     /// wrong bucket: nil happiness with `(100.0, 0.0)` beside it.
     #[test]
     fn absent_dbc_data_degrades_to_the_failure_numbers() {
-        let (has_ui, s) = stats_for(Some(&boar()), Some(&hunter()), None);
+        let (has_ui, s) = stats_for(Some(&boar()), Some(&hunter()), None, no_family());
         assert!(has_ui && s.hunter_pet);
         assert_eq!(s.happiness, None);
         assert_eq!((s.damage_percentage, s.loyalty_rate), (100.0, 0.0));
@@ -344,8 +531,125 @@ mod tests {
     /// No pet at all: no UI, no stats, and nothing that could be mistaken for a real answer.
     #[test]
     fn no_pet_is_no_ui() {
-        let (has_ui, s) = stats_for(None, Some(&hunter()), None);
+        let (has_ui, s) = stats_for(None, Some(&hunter()), None, no_family());
         assert!(!has_ui);
         assert_eq!(s, PetStats::default());
+    }
+
+    /// **The family lookup end to end on the real DBC data** (decision 1062), including all three
+    /// nil sources the binding has to reproduce.
+    ///
+    /// The load-bearing fact under test is the KEY: the pet's template entry is read from
+    /// `OBJECT_FIELD_ENTRY`, not from its guid (whose entry-shaped slot holds a pet number). A
+    /// version that asked the guid would query a nonexistent template and answer nil forever —
+    /// silently, since nil is a legitimate answer here.
+    #[test]
+    fn the_pets_family_resolves_off_its_descriptor_entry() {
+        let Some(t) = family_tables() else { return };
+        let (cmds, rx) = commands();
+
+        // 1. No pet at all.
+        let mut names = NameCache::default();
+        assert_eq!(family_for(None, &mut names, &cmds, Some(&t)), no_family());
+        assert!(rx.try_recv().is_err(), "nothing to ask about");
+
+        // 2. A pet whose creature query has NOT answered yet — nil, and the ask goes out (once).
+        let pet = ObjectStore(ObjectFields::from_pairs(&[
+            (ENTRY, IMP_ENTRY),
+            (PETNUMBER, 7),
+        ]));
+        assert_eq!(
+            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
+            no_family(),
+            "un-queried is nil, not a guess"
+        );
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(crate::net::ClientCommand::CreatureQuery { entry, .. }) if entry == IMP_ENTRY
+            ),
+            "the pet's DESCRIPTOR entry is what gets queried"
+        );
+        assert!(rx.try_recv().is_err(), "ask-once");
+
+        // 3. The answer lands with family 0 — a template with no family. Still nil, and this is
+        //    the common case for every non-tameable creature.
+        let mut names = cache_with(IMP_ENTRY, 0);
+        assert_eq!(
+            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
+            no_family()
+        );
+
+        // 4. The answer lands with the Imp's real family (23, from the live `creature_template`).
+        //    A warlock minion: a word, and an EMPTY diet — mask 0 in the shipped DBC.
+        let mut names = cache_with(IMP_ENTRY, 23);
+        assert_eq!(
+            family_for(Some(&pet), &mut names, &cmds, Some(&t)),
+            (Some("Imp".into()), Vec::new())
+        );
+
+        // 5. A hunter's boar (entry 113 → family 5): a word AND the six-diet list, in bit order.
+        let mut names = cache_with(BOAR_ENTRY, 5);
+        let (name, diet) = family_for(Some(&boar()), &mut names, &cmds, Some(&t));
+        assert_eq!(name.as_deref(), Some("Boar"));
+        assert_eq!(diet, ["Meat", "Fish", "Cheese", "Bread", "Fungus", "Fruit"]);
+
+        // 6. No DBC tables at all: nil, degraded to exactly the blank level line 1057 shipped.
+        let mut names = cache_with(BOAR_ENTRY, 5);
+        assert_eq!(
+            family_for(Some(&boar()), &mut names, &cmds, None),
+            no_family()
+        );
+    }
+
+    /// **The family WORD survives the hunter gate; the DIET does not** — the carved split
+    /// (wow-re, 2026-08-06: `UnitCreatureFamily 0x51a310` has no class test, `GetPetFoodTypes
+    /// 0x4bea10` shares `0x6116e0` with the four stats).
+    ///
+    /// The pet here is deliberately a **boar under a non-hunter** — a charmed beast, family 5,
+    /// food mask 63 — because that is the one case where the gate is observable at all: a warlock
+    /// minion's family ships mask 0, so an ungated implementation would look identical for it and
+    /// diverge only here. Folding the family word into the gate would blank a level line the
+    /// reference fills; leaving the diet out of it would feed a priest's mind-controlled boar a
+    /// six-item menu the reference never shows.
+    #[test]
+    fn a_charmed_beast_keeps_its_family_word_and_loses_its_diet() {
+        let Some(t) = tables() else { return };
+        let boar_diet: Vec<String> = ["Meat", "Fish", "Cheese", "Bread", "Fungus", "Fruit"]
+            .map(String::from)
+            .to_vec();
+        let (_, s) = stats_for(
+            Some(&boar()),
+            Some(&warlock()),
+            Some(&t),
+            (Some("Boar".into()), boar_diet.clone()),
+        );
+        assert!(!s.hunter_pet);
+        assert_eq!(s.family.as_deref(), Some("Boar"), "the word is ungated");
+        assert!(
+            s.food_types.is_empty(),
+            "…but the diet shares 0x6116e0 with the stats"
+        );
+        assert_eq!(s.loyalty, None, "…as does the hunter machinery");
+        assert_eq!(s.happiness, None);
+
+        // The same pet under a HUNTER gets both.
+        let (_, s) = stats_for(
+            Some(&boar()),
+            Some(&hunter()),
+            Some(&t),
+            (Some("Boar".into()), boar_diet.clone()),
+        );
+        assert_eq!(s.family.as_deref(), Some("Boar"));
+        assert_eq!(s.food_types, boar_diet);
+    }
+
+    /// …and with no pet, the family goes with everything else — a stale word left on the block
+    /// would outlive the pet on a page that is about to close.
+    #[test]
+    fn no_pet_drops_the_family_too() {
+        let (_, s) = stats_for(None, Some(&hunter()), None, (Some("Imp".into()), vec![]));
+        assert_eq!(s.family, None);
+        assert!(s.food_types.is_empty());
     }
 }

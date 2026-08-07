@@ -44,20 +44,23 @@
         `BenillaGroupLootFrame`s byte-identical instances of the same template (each registers only
         `CANCEL_LOOT_ROLL` on itself, ref l.487-489/493-495, verbatim).
 
-        NO DRESSING-ROOM / CHAT-LINK INSERT (CraftFrame.xml's/TradeSkillFrame.xml's own identical
-        deviation). The ref icon button's Ctrl-click `DressUpItemLink`/Shift-click
-        `ChatFrameEditBox:Insert` (ref l.353-360) and its `this.hasItem = 1` OnLoad flag (ref l.339,
-        read only by UIParent.lua's own generic Ctrl-click dressing-room handler) are dropped — no
-        dressing room exists; a real, now-inert vestige, not a benilla omission. Likewise the ref's
-        `CursorUpdate()`/`ResetCursor()`/`CursorOnUpdate()` hover-cursor calls (ref l.344,348,351) have
-        no engine counterpart and are omitted — LootFrame.xml's own row template
-        (`BenillaLootButtonTemplate`) already established this same omission for item-row hover.
+        THE DRESSING-ROOM / CHAT-LINK CLICK LANDED (decisions 1059/1060 — this note used to read "no
+        dressing room exists", which was true until the room did). The ref icon button's Ctrl-click
+        `DressUpItemLink`/Shift-click `ChatFrameEditBox:Insert` (ref l.353-361) are transcribed in
+        `BenillaGroupLootFrame_Icon_OnClick` below, over the `GetLootRollItemLink(rollID)` binding the
+        same arc added to `loot_roll.rs`. Still dropped: the ref's `this.hasItem = 1` OnLoad flag
+        (ref l.338-340) and its `CursorUpdate()`/`ResetCursor()`/`CursorOnUpdate()` hover-cursor calls
+        (ref l.344,348,351) — the flag exists only to feed those, and they are the Ctrl-hover
+        MAGNIFIER, a separate affordance (`ShowInspectCursor`, which the bags and the vendor rows do
+        wire) that this button has never had. LootFrame.xml's own row template
+        (`BenillaLootButtonTemplate`) carries the same hover-cursor omission.
 
         THE ITEM TOOLTIP uses `GameTooltip:SetItemById(itemId, name, quality)` (LootFrame.xml's own
-        `BenillaLootItem_OnEnter` idiom), not the reference's `SetLootRollItem`/`GetLootRollItemLink`
-        (neither exists here) — `itemId` is the benilla-extension 6th return of `GetLootRollItemInfo`
+        `BenillaLootItem_OnEnter` idiom), not the reference's `SetLootRollItem` (no such tooltip
+        method here) — `itemId` is the benilla-extension 6th return of `GetLootRollItemInfo`
         (see `loot_roll.rs`), always populated once a roll is known (unlike name/texture/quality, which
-        may be `nil` while the item template is still in flight).
+        may be `nil` while the item template is still in flight). `GetLootRollItemLink` DOES exist now
+        (decision 1059) but is the click's, not the hover's: the tooltip wants the id, not the markup.
 
         `toplevel="true"` (ref l.243) IS OMITTED — `SetToplevel` isn't in the v1 object model yet
         (`loader/geometry.rs`'s `apply_attrs`: a warn-once "gap", same as `movable`/`resizable`); other
@@ -78,6 +81,7 @@
 
         The Era API this drives (`benilla-ui/src/script/loot_roll.rs`, decision 0591):
         `GetLootRollItemInfo(rollID)` -> texture,name,count,quality,bindOnPickUp,itemID;
+        `GetLootRollItemLink(rollID)` -> the item's link (the icon click's two arms, decision 1059);
         `GetLootRollTimeLeft(rollID)` -> ms remaining; `RollOnLoot(rollID, rollType)` (0 Pass / 1 Need /
         2 Greed). Events: `START_LOOT_ROLL(rollID, rollTime)` claims a frame; `CANCEL_LOOT_ROLL(rollID)`
         hides the one that owns it (`crates/benilla/src/ui_loot_roll.rs` fires both).
@@ -248,6 +252,34 @@
         function BenillaGroupLootFrame_Icon_OnLeave()
             GameTooltip:Hide()
         end
+
+        -- The item icon's click (ref $parentIconFrame OnClick, LootFrame.xml l.353-361, transcribed
+        -- whole): CTRL previews the rolled item in the dressing room (decision 1060), SHIFT posts
+        -- its link into an open chat edit box (decision 1059) — "link me that" being most of what a
+        -- roll popup gets asked. Both read `GetLootRollItemLink(rollID)`, the binding this arc added
+        -- (loot_roll.rs); it answers nil while the item template is still in flight, and both arms
+        -- drop that nil — the ctrl one inside DressUpItemLink (DressUpFrame.lua l.10-16), the shift
+        -- one inside BenillaChatEdit_InsertLink.
+        --
+        -- Nothing else happens on this button, exactly as in the reference: the vote lives on the
+        -- Pass/Need/Greed buttons and the icon is a preview/link affordance only. The ref's
+        -- `this.hasItem = 1` OnLoad flag (l.338-340) stays dropped — it exists solely for the
+        -- CursorUpdate/CursorOnUpdate ctrl-hover magnifier (l.344/351), which this button still does
+        -- not wire (see the header). No RegisterForClicks either, also as in the reference: a Button
+        -- is registered for LeftButtonUp by default (widget/kinds/mod.rs), which is the whole set
+        -- this handler wants.
+        function BenillaGroupLootFrame_Icon_OnClick(button)
+            local rollId = button:GetParent().rollID
+            if IsControlKeyDown() then
+                DressUpItemLink(GetLootRollItemLink(rollId)) -- ref l.354-355
+            elseif IsShiftKeyDown() then
+                -- ref l.356-359, through the shared helper (UIParent.xml): it carries the ref's own
+                -- edit-box-visible guard AND our nil-link one, which this popup needs routinely —
+                -- the frame is up the instant START_LOOT_ROLL fires, well before the item template
+                -- answers, and until it does there is no link to post.
+                BenillaChatEdit_InsertLink(GetLootRollItemLink(rollId))
+            end
+        end
     ]]></Script>
 
     <!--
@@ -305,8 +337,9 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The item icon (ref $parentIconFrame, l.314-363): hover-tooltip only here — the ref's
-                 Ctrl/Shift dressing-room/chat-link branch and hasItem OnLoad flag are dropped (header). -->
+            <!-- The item icon (ref $parentIconFrame, l.314-363): hover tooltip + the ref's own
+                 Ctrl/Shift dressing-room/chat-link click (l.353-361, landed — decision 1059/1060);
+                 only the hasItem OnLoad flag stays dropped (header). -->
             <Button name="$parentIconFrame" enableMouse="true">
                 <Size><AbsDimension x="34" y="34"/></Size>
                 <Anchors>
@@ -325,6 +358,7 @@
                 <Scripts>
                     <OnEnter>BenillaGroupLootFrame_Icon_OnEnter(self)</OnEnter>
                     <OnLeave>BenillaGroupLootFrame_Icon_OnLeave()</OnLeave>
+                    <OnClick>BenillaGroupLootFrame_Icon_OnClick(self)</OnClick>
                 </Scripts>
             </Button>
             <!-- Pass (ref $parentPassButton, l.364-384): the ref inherits UIPanelCloseButton, which

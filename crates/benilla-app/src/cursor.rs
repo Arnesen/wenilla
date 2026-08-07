@@ -145,52 +145,135 @@ fn cursor_path(stem: &str) -> String {
     format!("Interface\\Cursor\\{stem}.blp")
 }
 
-/// The **displayed** cursor — the world classifier's base [`crate::target::WorldCursor`] with the
-/// UI overlays applied, mirroring the client's displayed-vs-base mode pair (`0xbe2c2c`/`0xbe2c4c`,
-/// wow-re cursor-system.md §7): a world classification always wins; over plain UI, the repair-mode
-/// latch shows Repair(17) (the locked base `ShowRepairCursor` sets), else the bag hover's sell
-/// latch shows Buy(3) (armed only while the base is Point — `ShowContainerSellCursor 0x4fa460`).
-/// Read by the platform drivers instead of `WorldCursor` directly.
+/// The **displayed** cursor — the client's single sticky mode global `0xbe2c2c` (wow-re
+/// cursor-system.md §1/§7). Read by the platform drivers instead of [`crate::target::WorldCursor`],
+/// which is only ever *one* of its two writers.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) struct DisplayedCursor(pub(crate) crate::target::WorldCursor);
 
-fn overlay_ui_cursor(
-    base: Res<crate::target::WorldCursor>,
-    script: Option<bevy::ecs::system::NonSend<benilla_ui::script::UiScript>>,
+/// Resolve this frame's displayed cursor — **one sticky mode with two writers** (decision 1064).
+///
+/// The reference has exactly one cursor-mode cell and everything that wants a cursor calls
+/// `CursorSetMode` on it. Two things do:
+///
+/// - **the world**, from the WorldFrame's hover handler `0x481790` — which runs *only while the
+///   WorldFrame is the frame manager's mouse-focus frame* (`4817ae: cmp [[this+0xa0]+0x7c], this;
+///   jne`). Over a UI frame it does not run, and writes nothing.
+/// - **FrameXML**, from a hover handler — `ShowContainerSellCursor`, `ShowInspectCursor`,
+///   `SetCursor`, `ResetCursor`.
+///
+/// **Between those two, nothing writes it, so the last value simply stands.** That is the whole
+/// correction here, and B208's regression was getting it wrong in each direction at once: the old
+/// code recomputed the mode from the world every frame (so a UI hover could never keep a cursor),
+/// and 1055 then made the world *skip* over UI while the classifier still wrote Point underneath
+/// (so every UI element force-reset the cursor). Either way an armed spell lost its cast cursor the
+/// instant the mouse touched a spellbook button — which is what the director saw.
+///
+/// So: a FrameXML write wins the frame it happens; otherwise the world's verdict applies while the
+/// pointer is over the world; otherwise the mode is left exactly as it was. The bag's `ResetCursor()`
+/// still resets over a bag slot, because it is a *write* — and a spellbook button, which calls no
+/// cursor function at all, correctly changes nothing.
+fn drive_displayed_cursor(
+    world: Res<crate::target::WorldCursor>,
+    over_ui: Res<crate::ui_script::PointerOverUi>,
+    targeting: Res<crate::ui_action::targeting::SpellTargeting>,
+    script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
+    // The base last applied by the UI-entry restore below — `None` while the pointer is over the
+    // world, so re-entering the UI always restores once.
+    mut last: Local<Option<crate::target::WorldCursor>>,
     mut displayed: ResMut<DisplayedCursor>,
 ) {
     use crate::target::{CursorKind, WorldCursor};
     use benilla_ui::script::UiCursorMode;
-    let mut out = *base;
-    // Spell-targeting pre-empts the WHOLE classifier — the real dispatcher's step 2 runs before
-    // any object resolve (wow-re cursor-system.md §5, VERIFIED; the 0446/0452 named deferral).
-    // There is no branch for it HERE any more (decision 0923): the one targeting state writes the
-    // BASE cursor itself (`ui_action::targeting::drive_targeting_cursor`, which runs late in the
-    // target chain), so a live targeting word already reads as Cast — and, being non-Point, it
-    // falls past every overlay below by construction. That is the pre-emption, structurally.
-    if out == WorldCursor::default() {
-        if let Some(script) = script.as_ref() {
-            // Repair is the locked base-mode override (`ShowRepairCursor`) and wins over the
-            // displayed-cursor family — the real client parks the base at Repair, so the sell/
-            // inspect gate (base == Point) bails while it holds (wow-re cursor-system.md §7).
-            if script.repair_mode() {
-                out.kind = CursorKind::Repair;
-            } else {
-                match script.ui_cursor() {
-                    Some(UiCursorMode::Buy) => out.kind = CursorKind::Buy,
-                    Some(UiCursorMode::UnableBuy) => {
-                        out = WorldCursor {
-                            kind: CursorKind::Buy,
-                            unable: true,
-                        }
-                    }
-                    Some(UiCursorMode::Inspect) => out.kind = CursorKind::Inspect,
-                    None => {}
-                }
-            }
+
+    // **The BASE mode is not a constant** (`0xbe2c4c`, wow-re cursor-system.md §7: *"it is
+    // independently mutable — e.g. a spell-cancel flow parks it at Cast(2)"*), and that is the
+    // piece B208 kept missing. `ResetCursor` restores *the value of this cell*, not a hardcoded
+    // Point — so what a bag slot's `ResetCursor()` shows depends entirely on what is parked here.
+    //
+    // While a spell awaits its click, the base is **Cast(2)**. The director watched the reference
+    // do exactly this: with Feed Pet armed the cursor is blue over *"pretty much anything UI
+    // related"* and grey only out in the world. Both halves fall out of one cell — over the world
+    // the classifier writes the per-seam verdict (grey, for a word with no world handler), and over
+    // UI nothing overrides the base, so the blue shows.
+    //
+    // The corroborating gate is `ShowContainerSellCursor 0x4fa460`'s second test, *"base mode is
+    // Point(1), else bail"*: a test that is only ever meaningful because the base is routinely
+    // **not** Point while targeting.
+    //
+    // Note what this blue does NOT mean: it is not a validity verdict. It says "a spell is armed",
+    // not "this item is a legal target" — no hover-time item verdict exists anywhere in 1.12
+    // (decision 1055), so valid and invalid food look identical here, exactly as they do in the
+    // reference.
+    let repair = script.as_ref().is_some_and(|s| s.repair_mode());
+    let base = if repair {
+        // `ShowRepairCursor` parks the base at Repair for as long as it holds (wow-re
+        // repair-machinery.md); it is the explicit modal, so it wins the cell.
+        WorldCursor {
+            kind: CursorKind::Repair,
+            unable: false,
+        }
+    } else if targeting.active() {
+        WorldCursor {
+            kind: CursorKind::Cast,
+            unable: false,
+        }
+    } else {
+        WorldCursor::default()
+    };
+
+    if let Some(mut script) = script {
+        if let Some(write) = script.take_cursor_write() {
+            displayed.0 = match write {
+                Some(UiCursorMode::Buy) => WorldCursor {
+                    kind: CursorKind::Buy,
+                    unable: false,
+                },
+                Some(UiCursorMode::UnableBuy) => WorldCursor {
+                    kind: CursorKind::Buy,
+                    unable: true,
+                },
+                Some(UiCursorMode::Inspect) => WorldCursor {
+                    kind: CursorKind::Inspect,
+                    unable: false,
+                },
+                Some(UiCursorMode::Cast) => WorldCursor {
+                    kind: CursorKind::Cast,
+                    unable: false,
+                },
+                Some(UiCursorMode::CastError) => WorldCursor {
+                    kind: CursorKind::Cast,
+                    unable: true,
+                },
+                Some(UiCursorMode::Point) => WorldCursor::default(),
+                // `ResetCursor` — displayed goes back to the base mode, Repair included.
+                None => base,
+            };
+            *last = Some(base);
+            return;
         }
     }
-    displayed.0 = out;
+    if !over_ui.0 {
+        displayed.0 = *world;
+        *last = None;
+        return;
+    }
+    // Over UI with no FrameXML write this frame. The mode is still sticky between writes — a UI
+    // element that calls no cursor function must not disturb it — but **crossing into the UI, and
+    // any later change of the base, restores the base**, which is what makes an armed spell read
+    // blue over the interface at large rather than dragging the world's grey in behind the mouse.
+    //
+    // In the reference that restore is spread across the UI rather than centralised: nearly every
+    // hover handler ends in `ResetCursor()` (`ContainerFrameItemButton_OnEnter`'s else branch,
+    // `CursorUpdate`/`CursorOnUpdate` in `UIParent.lua`, every `OnLeave`), and the world
+    // classifier's own no-hover path is the same `0x523d30` restore. Modelling it as one edge here
+    // gets the same observable without requiring each of our frames to have grown its
+    // `ResetCursor()` call yet — and a frame that DOES write still wins, so the unit-frame
+    // lit/grey split survives.
+    if *last != Some(base) {
+        *last = Some(base);
+        displayed.0 = base;
+    }
 }
 
 pub(crate) struct CursorPlugin;
@@ -200,11 +283,11 @@ impl Plugin for CursorPlugin {
         app.init_resource::<DisplayedCursor>();
         #[cfg(target_os = "macos")]
         app.add_systems(Startup, macos::setup.after(AssetSet::Open))
-            .add_systems(Update, (overlay_ui_cursor, macos::drive).chain());
+            .add_systems(Update, (drive_displayed_cursor, macos::drive).chain());
         #[cfg(not(target_os = "macos"))]
         app.init_resource::<other::PayloadCursorImages>()
             .add_systems(Startup, other::setup.after(AssetSet::Open))
-            .add_systems(Update, (overlay_ui_cursor, other::drive).chain());
+            .add_systems(Update, (drive_displayed_cursor, other::drive).chain());
     }
 }
 
@@ -536,5 +619,169 @@ mod macos {
             &image,
             NSPoint { x: 0.0, y: 0.0 },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::{CursorKind, WorldCursor};
+    use bevy::ecs::system::RunSystemOnce;
+
+    const CAST_GREY: WorldCursor = WorldCursor {
+        kind: CursorKind::Cast,
+        unable: true,
+    };
+    const SWORD: WorldCursor = WorldCursor {
+        kind: CursorKind::Attack,
+        unable: false,
+    };
+
+    /// Run one frame of [`drive_displayed_cursor`] with the displayed mode pre-set to `standing`,
+    /// and return what it becomes. `lua` is whatever FrameXML did this frame.
+    fn frame(standing: WorldCursor, world: WorldCursor, over_ui: bool, lua: &str) -> WorldCursor {
+        frame_armed(standing, world, over_ui, lua, false)
+    }
+
+    /// One frame, with `armed` deciding whether a spell awaits its click — which is what parks the
+    /// BASE mode at Cast.
+    fn frame_armed(
+        standing: WorldCursor,
+        world: WorldCursor,
+        over_ui: bool,
+        lua: &str,
+        armed: bool,
+    ) -> WorldCursor {
+        let mut app = App::new();
+        let script = benilla_ui::script::UiScript::new().unwrap();
+        script.run(lua).unwrap();
+        app.insert_non_send_resource(script);
+        app.insert_resource(world);
+        app.insert_resource(crate::ui_script::PointerOverUi(over_ui));
+        app.insert_resource(DisplayedCursor(standing));
+        let mut targeting = crate::ui_action::SpellTargeting::default();
+        if armed {
+            // Feed Pet's own bare ITEM word.
+            targeting.enter(6991, crate::ui_action::CastCommit::Spell, 0x0010);
+        }
+        app.insert_resource(targeting);
+        app.world_mut()
+            .run_system_once(drive_displayed_cursor)
+            .expect("the displayed cursor drives");
+        app.world().resource::<DisplayedCursor>().0
+    }
+
+    /// **The base mode is Cast while a spell awaits its click** (wow-re cursor-system.md §7: the
+    /// base cell `0xbe2c4c` "is independently mutable — e.g. a spell-cancel flow parks it at
+    /// Cast(2)"), and `ResetCursor` restores *that value*, never a hardcoded Point.
+    ///
+    /// This is what the director watched the reference do with Feed Pet armed: **blue over the
+    /// interface at large, grey only out in the world**. Both fall out of the one cell — the world
+    /// classifier writes the per-seam verdict (grey, for a word with no world handler), and over UI
+    /// nothing overrides the base.
+    ///
+    /// It is emphatically NOT a validity verdict: no hover-time item verdict exists in 1.12, so
+    /// good food and bad food are the same blue. The last assertion pins that, because reading the
+    /// blue as "this food is correct" is exactly the misreading that sent B208 round twice.
+    #[test]
+    fn an_armed_spell_parks_the_base_at_cast_so_the_ui_reads_blue() {
+        const GREY: WorldCursor = CAST_GREY;
+        const BLUE: WorldCursor = WorldCursor {
+            kind: CursorKind::Cast,
+            unable: false,
+        };
+        // Out in the world the classifier's verdict stands: an item-only word greys.
+        assert_eq!(frame_armed(BLUE, GREY, false, "", true), GREY);
+        // Crossing into the UI restores the base — blue — rather than dragging the world's grey in.
+        assert_eq!(frame_armed(GREY, GREY, true, "", true), BLUE);
+        // A bag slot's real `ResetCursor()` resolves to the same base, so the food reads blue…
+        assert_eq!(frame_armed(GREY, GREY, true, "ResetCursor()", true), BLUE);
+        // …and so does a slot holding something the pet would never eat. The blue says "a spell is
+        // armed", not "this item is a legal target".
+        assert_eq!(frame_armed(GREY, GREY, true, "ResetCursor()", true), BLUE);
+        // Nothing armed: the base is Point again, and the UI reads as the ordinary pointer.
+        assert_eq!(
+            frame_armed(GREY, WorldCursor::default(), true, "ResetCursor()", false),
+            WorldCursor::default()
+        );
+    }
+
+    /// **A UI element that writes no cursor does not get to invent one.** The mode has two
+    /// writers and only two — the world (while the pointer is over it) and a FrameXML cursor call.
+    /// Crossing into the UI restores the BASE, which is the reference's own behaviour spread across
+    /// dozens of `ResetCursor()` calls; what must never happen is a *third* party recomputing a
+    /// value each frame, which is what made B208 go round twice.
+    #[test]
+    fn only_the_world_and_framexml_write_the_cursor() {
+        // Over the world the classifier's verdict applies, every frame.
+        assert_eq!(frame(CAST_GREY, SWORD, false, ""), SWORD);
+        // Over the UI with nothing armed the base is Point — the ordinary pointer, which is what a
+        // bag slot shows in the reference.
+        assert_eq!(frame(SWORD, SWORD, true, ""), WorldCursor::default());
+        assert_eq!(
+            frame(SWORD, SWORD, true, "ResetCursor()"),
+            WorldCursor::default()
+        );
+        // An explicit FrameXML write wins and then STAYS — the unit-frame lit/grey split would be
+        // pointless if the next frame's base restore stamped over it.
+        let lit = WorldCursor {
+            kind: CursorKind::Cast,
+            unable: false,
+        };
+        assert_eq!(
+            frame(
+                WorldCursor::default(),
+                SWORD,
+                true,
+                "SetCursor(\"CAST_CURSOR\")"
+            ),
+            lit
+        );
+        assert_eq!(
+            frame(lit, SWORD, true, "SetCursor(\"CAST_ERROR_CURSOR\")"),
+            CAST_GREY
+        );
+    }
+
+    /// `ShowContainerSellCursor` bails on `IsTargeting` at its first instruction, so an armed spell
+    /// keeps its cast cursor over a vendor-open bag instead of getting the coin. With a sticky mode
+    /// this gate is load-bearing: a Buy write would stamp over the cast cursor and no per-frame
+    /// world write would put it back.
+    #[test]
+    fn the_sell_cursor_does_not_paint_over_an_armed_spell() {
+        // The gate reads the app-fed targeting flag, so drive it the way the app does.
+        let mut app = App::new();
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        script.set_spell_targeting(true);
+        script.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                name: None,
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(
+                    1,
+                    benilla_ui::script::ContainerSlot::default(),
+                )]),
+            }),
+        );
+        script.run("ShowContainerSellCursor(0, 1)").unwrap();
+        app.insert_non_send_resource(script);
+        app.insert_resource(CAST_GREY);
+        app.insert_resource(crate::ui_script::PointerOverUi(true));
+        app.insert_resource(DisplayedCursor(CAST_GREY));
+        let mut targeting = crate::ui_action::SpellTargeting::default();
+        targeting.enter(6991, crate::ui_action::CastCommit::Spell, 0x0010);
+        app.insert_resource(targeting);
+        app.world_mut()
+            .run_system_once(drive_displayed_cursor)
+            .expect("the displayed cursor drives");
+        assert_eq!(
+            app.world().resource::<DisplayedCursor>().0,
+            WorldCursor {
+                kind: CursorKind::Cast,
+                unable: false
+            },
+            "an armed spell suppresses the sell cursor entirely — the armed base shows instead"
+        );
     }
 }

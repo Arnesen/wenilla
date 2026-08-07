@@ -97,10 +97,85 @@ pub(super) fn cast_range_refusal(
 /// test at `0x609c6f`, the exact vmangos `SPELL_ATTR_ALLOW_WHILE_MOUNTED` mirror). A spell
 /// with no loaded record has no exemption to claim — the gate holds (the ref always has the
 /// record; refusing without data errs toward the ref's visible behavior). The sibling
-/// mount-REQUIRED gate (reason 0x53 off `SpellRec+0x5c & 0x40`, `0x609c05`) is recorded but
-/// unbuilt — no 1.12 player spell exercises it.
+/// mount-REQUIRED gate (reason 0x53, `0x609c05`) is recorded but unbuilt — no 1.12 player spell
+/// exercises it. It is **two-armed** like the water pair below, not the single `+0x5c & 0x40`
+/// read this comment used to claim: arm A is `AuraInterruptFlags & 0x40` (the `cl` at
+/// `0x609c05` is the untouched low byte of `ecx = [esi+0x58]`, loaded 0x104 bytes earlier for
+/// the unsheathed leg), arm B is `ChannelInterruptFlags & 0x40` at `0x609c3a` — corrected by
+/// the 1063 §5 in wow-re `mounted-action-gate.md`. Note the plain mounted gate above is NOT in
+/// that family: it is single-armed on `Attributes`.
 pub(super) fn cast_mounted_refusal(mounted: bool, spell: Option<&SpellDisplay>) -> bool {
     mounted && spell.is_none_or(|d| d.attributes & 0x0100_0000 == 0)
+}
+
+/// The interrupt-flag water pair — the two bits that say *which side of the surface this aura
+/// can live on*: `0x80` cancels it on ENTERING water, `0x100` on LEAVING it (vmangos
+/// `AURA_INTERRUPT_UNDER_WATER_CANCELS` / `AURA_INTERRUPT_ABOVE_WATER_CANCELS`, bits 7/8). The
+/// requirement validator reads the same pair to refuse the *cast* whose aura could not survive
+/// the caster's current side.
+const INTERRUPT_UNDER_WATER: u32 = 0x80;
+const INTERRUPT_ABOVE_WATER: u32 = 0x100;
+
+/// `AttributesEx & (IS_CHANNELED 0x4 | IS_SELF_CHANNELED 0x40)` — the gate on **arm B** of every
+/// leg in this family (byte-verified `0x609d6a`/`0x609db1`). A channeled spell's requirement
+/// bits live in its CHANNEL column, so the validator reads that column too — but only for a
+/// spell that actually channels, which is what keeps Summon Baby Shark 25849 (`Channel 0x100`,
+/// `AttributesEx 0`) out of the gate.
+const ATTR_EX_CHANNELED: u32 = 0x44;
+
+/// `SPELL_FAILED_ONLY_ABOVEWATER` — "Cannot use while swimming".
+pub(super) const ERR_ONLY_ABOVEWATER: u8 = 0x50;
+/// `SPELL_FAILED_ONLY_UNDERWATER` — "Can only use while swimming".
+pub(super) const ERR_ONLY_UNDERWATER: u8 = 0x58;
+
+/// The **pre-send** water refusal (decisions 1056 + 1063) — the requirement validator
+/// `0x6094f0`'s environment block `0x609d33–0x609de2`, byte-carved by the wow-re §5 trio
+/// (`system/spell/scratch/water-cast-gate.md`). It sits after the mounted/posture/day/night
+/// legs and before the moving gate (`0x609de3`), which is where the ladder runs it — so a druid
+/// standing on land is refused **before** the form gate `0x612480` ever evaluates.
+///
+/// One gate, two faces, and each face has **two arms** reading the same bit in two columns:
+///
+/// | reason | bit | arm A — `AuraInterruptFlags` (+0x58) | arm B — `ChannelInterruptFlags` (+0x5c), if channeled |
+/// |---|---|---|---|
+/// | [`ERR_ONLY_UNDERWATER`] `0x58` | `0x100` | `0x609d36` / swim `0x609d46` | `0x609d6f` / swim `0x609d7b` |
+/// | [`ERR_ONLY_ABOVEWATER`] `0x50` | `0x80` | `0x609da4` / swim `0x609dac` | `0x609db5` / swim `0x609dc2` |
+///
+/// The swimming state is `[[caster+0x118]+0x40] & 0x200000` — the same wire-layout movement word
+/// the moving gate reads, four times over, twice in each face.
+///
+/// **Arm B is not dead code, and leaving it out is visibly wrong**: Fishing rank 1 (7620)
+/// carries `AuraInterruptFlags 0x80`, but ranks 2–4 (7731/7732/18248) carry **zero** and reach
+/// the gate only through their `ChannelInterruptFlags 0x3cac`. Arm A alone would refuse rank 1
+/// mid-swim and let its own upgrades through.
+///
+/// What the two bits actually select in the 5875 data: `0x80` is 245 rows — every mount, Travel
+/// Form, the campfires, all of Food/Drink (`0x40080`), Fishing — and `0x100` is exactly five:
+/// Aquatic Form 1066, the Lava/Slime swim auras 16455/16456, Master Angler 24346/24347.
+///
+/// **No exemption skips this block** (every jump into the run was enumerated) — unlike the
+/// mounted gate's `Attributes` bit 24. And the gate must be LOCAL: vmangos's `CheckCast` gates
+/// water only on `SPELL_AURA_MOUNTED` (`Spell.cpp:6379`), so it happily grants a druid aquatic
+/// form on dry cobblestone (ledger B176, with the screenshot to prove it). An uncataloged spell
+/// passes, like every other data-driven rung on this ladder.
+///
+/// The legs are evaluated `0x58` before `0x50`, the binary's own order; they are mutually
+/// exclusive on the swim bit, so the order is fidelity, not behaviour.
+pub(super) fn cast_water_refusal(move_flags_word: u32, spell: Option<&SpellDisplay>) -> Option<u8> {
+    let d = spell?;
+    let swimming = move_flags_word & crate::creature_anim::move_flags::SWIMMING != 0;
+    // Arm A always; arm B only for a spell that actually channels.
+    let requires = |bit: u32| {
+        d.aura_interrupt_flags & bit != 0
+            || (d.attributes_ex & ATTR_EX_CHANNELED != 0 && d.channel_interrupt_flags & bit != 0)
+    };
+    if !swimming && requires(INTERRUPT_ABOVE_WATER) {
+        return Some(ERR_ONLY_UNDERWATER);
+    }
+    if swimming && requires(INTERRUPT_UNDER_WATER) {
+        return Some(ERR_ONLY_ABOVEWATER);
+    }
+    None
 }
 
 /// The AuraInterruptFlags-space MOVING|TURNING pair (`0x18`) — the moving gate's
@@ -712,6 +787,161 @@ mod tests {
         assert!(!cast_mounted_refusal(false, Some(&plain)));
         assert!(!cast_mounted_refusal(false, None));
         assert!(cast_mounted_refusal(true, None), "no record, no exemption");
+    }
+
+    /// The water refusal (`0x609d33–0x609de2`) — both faces of the environment gate and both
+    /// arms of each face, on the real 5875 columns: Aquatic Form's `0x100` needs the SWIMMING
+    /// bit set, the mount/Travel-Form/food `0x80` needs it clear, Fishing's ranks reach it
+    /// through the CHANNEL column, and a spell carrying neither bit passes on both sides.
+    #[test]
+    fn cast_water_refusal_reads_both_sides_of_the_surface() {
+        use crate::creature_anim::move_flags as mf;
+        // Aquatic Form 1066: AuraInterruptFlags 0x100 — above-water cancels it, so the cast
+        // needs water. This is ledger B176: on land it must refuse, and it must not send.
+        let aquatic = SpellDisplay {
+            aura_interrupt_flags: 0x100,
+            ..Default::default()
+        };
+        assert_eq!(
+            cast_water_refusal(0, Some(&aquatic)),
+            Some(ERR_ONLY_UNDERWATER)
+        );
+        assert_eq!(cast_water_refusal(mf::SWIMMING, Some(&aquatic)), None);
+        // Travel Form 783 / every mount: 0x80 — entering water cancels it, so it refuses the
+        // other way round.
+        let travel = SpellDisplay {
+            aura_interrupt_flags: 0x80,
+            ..Default::default()
+        };
+        assert_eq!(
+            cast_water_refusal(mf::SWIMMING, Some(&travel)),
+            Some(ERR_ONLY_ABOVEWATER)
+        );
+        assert_eq!(cast_water_refusal(0, Some(&travel)), None);
+        // Food 433's shape (0x40080 = STANDING_CANCELS | UNDER_WATER_CANCELS) — the eating half
+        // of ledger B155 rides the same 0x80 arm.
+        let food = SpellDisplay {
+            aura_interrupt_flags: 0x4_0080,
+            ..Default::default()
+        };
+        assert_eq!(
+            cast_water_refusal(mf::SWIMMING, Some(&food)),
+            Some(ERR_ONLY_ABOVEWATER)
+        );
+        assert_eq!(cast_water_refusal(0, Some(&food)), None);
+        // ARM B (decision 1063): a CHANNELED spell's requirement bits live in its channel
+        // column. Fishing ranks 2–4's shape — AuraInterruptFlags zero, ChannelInterruptFlags
+        // 0x3cac (which carries 0x80), AttributesEx 0x21004004 (IS_CHANNELED).
+        let fishing_r2 = SpellDisplay {
+            aura_interrupt_flags: 0,
+            channel_interrupt_flags: 0x3cac,
+            attributes_ex: 0x2100_4004,
+            ..Default::default()
+        };
+        assert_eq!(
+            cast_water_refusal(mf::SWIMMING, Some(&fishing_r2)),
+            Some(ERR_ONLY_ABOVEWATER),
+            "arm A is empty here — only the channel column refuses it"
+        );
+        assert_eq!(cast_water_refusal(0, Some(&fishing_r2)), None);
+        // …and the `AttributesEx & 0x44` gate on arm B is load-bearing: Summon Baby Shark
+        // 25849's shape carries the channel bit but does not channel, so it is NOT gated.
+        let not_channeled = SpellDisplay {
+            channel_interrupt_flags: 0x100,
+            attributes_ex: 0,
+            ..Default::default()
+        };
+        assert_eq!(cast_water_refusal(0, Some(&not_channeled)), None);
+        assert_eq!(cast_water_refusal(mf::SWIMMING, Some(&not_channeled)), None);
+        // Cat Form 768 / Bear Form 5487 carry neither bit: usable on both sides, always.
+        let cat = SpellDisplay::default();
+        assert_eq!(cast_water_refusal(0, Some(&cat)), None);
+        assert_eq!(cast_water_refusal(mf::SWIMMING, Some(&cat)), None);
+        // No record, nothing to read — the press passes, like every other data-driven rung.
+        assert_eq!(cast_water_refusal(0, None), None);
+        assert_eq!(cast_water_refusal(mf::SWIMMING, None), None);
+    }
+
+    /// The water gate against the **real 5875 Spell.dbc** — the census the whole gate rests on.
+    /// The leg↔bit assignment is not a naming choice we could get backwards: exactly five rows
+    /// in the shipped data carry the water-REQUIRED bit, and Aquatic Form is one of them, while
+    /// the water-FORBIDDEN bit is a broad set led by the mounts, Travel Form and food/drink.
+    /// Skips without client data.
+    #[test]
+    fn the_water_bits_split_the_5875_data_the_way_the_gate_assumes() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
+
+        // Every spell the client would refuse OUT of water, by id.
+        let mut needs_water: Vec<u32> = catalog
+            .iter()
+            .filter(|(_, d)| d.aura_interrupt_flags & INTERRUPT_ABOVE_WATER != 0)
+            .map(|(id, _)| id)
+            .collect();
+        needs_water.sort_unstable();
+        assert_eq!(
+            needs_water,
+            vec![1066, 16455, 16456, 24346, 24347],
+            "the water-required set: Aquatic Form, the Lava/Slime swim auras, Master Angler"
+        );
+
+        // The other face: broad, and led by exactly the things you cannot do mid-swim.
+        let forbids_water = |id: u32| {
+            catalog
+                .get(id)
+                .is_some_and(|d| d.aura_interrupt_flags & INTERRUPT_UNDER_WATER != 0)
+        };
+        assert!(forbids_water(783), "Travel Form");
+        assert!(forbids_water(458), "Brown Horse");
+        assert!(forbids_water(433), "Food");
+        assert!(forbids_water(430), "Drink");
+        assert!(forbids_water(818), "Basic Campfire");
+
+        // ARM B's reason to exist, on the real rows (decision 1063). Fishing rank 1 carries the
+        // bit in the AURA column; its own upgrades carry NOTHING there and reach the gate only
+        // through the CHANNEL column. Arm A alone would refuse rank 1 mid-swim and let 2–4 fish.
+        let swim = crate::creature_anim::move_flags::SWIMMING;
+        assert!(forbids_water(7620), "Fishing rank 1 — arm A");
+        for rank in [7731, 7732, 18248] {
+            let d = catalog
+                .get(rank)
+                .unwrap_or_else(|| panic!("Fishing {rank} missing"));
+            assert_eq!(d.aura_interrupt_flags, 0, "Fishing {rank}: arm A is empty");
+            assert!(d.attributes_ex & ATTR_EX_CHANNELED != 0, "and it channels");
+            assert_eq!(
+                cast_water_refusal(swim, Some(d)),
+                Some(ERR_ONLY_ABOVEWATER),
+                "Fishing {rank} still refuses mid-swim, through the channel column"
+            );
+            assert_eq!(cast_water_refusal(0, Some(d)), None, "and fishes on shore");
+        }
+
+        // The forms that carry neither bit — usable on both sides, and the control that says the
+        // gate is reading a real per-spell column and not a class-wide accident.
+        for (id, name) in [(768, "Cat Form"), (5487, "Bear Form"), (2645, "Ghost Wolf")] {
+            let d = catalog.get(id).unwrap_or_else(|| panic!("{name} missing"));
+            assert_eq!(d.aura_interrupt_flags & 0x180, 0, "{name} is side-agnostic");
+            assert_eq!(cast_water_refusal(0, Some(d)), None, "{name} on land");
+            assert_eq!(cast_water_refusal(swim, Some(d)), None, "{name} swimming");
+        }
+
+        // And end to end, on the real rows: B176's exact press.
+        let aquatic = catalog.get(1066).expect("Aquatic Form");
+        assert_eq!(
+            cast_water_refusal(0, Some(aquatic)),
+            Some(ERR_ONLY_UNDERWATER),
+            "on land, Aquatic Form refuses — the B176 report"
+        );
+        assert_eq!(
+            cast_water_refusal(crate::creature_anim::move_flags::SWIMMING, Some(aquatic)),
+            None,
+            "swimming, it goes through"
+        );
     }
 
     /// The moving refusal (`0x609de3`) — every leg of the byte-verified condition: the

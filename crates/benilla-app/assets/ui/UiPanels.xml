@@ -45,6 +45,11 @@
         -- registration line (`UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }`),
         -- quoted verbatim — same left-slot competition as Gossip/Merchant/Trainer above.
         UIPanelWindows["BenillaTaxiFrame"] = { area = "left", pushable = 0 }
+        -- The dressing room (decision 1060, DressUpFrame.xml): the ref's own UIParent.lua l.41
+        -- registration (`UIPanelWindows["DressUpFrame"] = { area = "left", pushable = 2 }`), quoted
+        -- verbatim — pushable=2 lets the NPC-session windows (pushable=0) shove it aside, which is
+        -- what makes "ctrl-click a merchant's item" show both.
+        UIPanelWindows["BenillaDressUpFrame"] = { area = "left", pushable = 2 }
         UIPanelWindows["BenillaQuestFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["BenillaQuestLogFrame"] = { area = "left", pushable = 0 }
         UIPanelWindows["BenillaLootFrame"] = { area = "left", pushable = 7 }

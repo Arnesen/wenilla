@@ -91,18 +91,91 @@ pub(crate) fn normalize_path(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
 }
 
-/// The archive key a UI **sprite** reference resolves to: [`normalize_path`] plus the FrameXML
-/// extensionless→`.blp` rule (`Interface\Buttons\UI-Quickslot2` → `interface\buttons\ui-quickslot2.blp`;
-/// a path that already carries an extension passes through). One function because every sprite
-/// entry point needs it — the five decoders below and, deliberately, the shipped-XML sweep that
-/// asserts each `file=` in our own UI actually resolves (`ui_script::shipped_xml_tests`): a sweep
-/// re-implementing this rule could agree with itself while disagreeing with the renderer.
+/// The **cache key** a UI sprite reference folds to: [`normalize_path`], then an extension of
+/// **exactly three characters** stripped — a dot at `len - 4`.
+///
+/// That is the reference's own rule (`0x449590`, which strips a 3-char extension and returns which
+/// of `{".tga", ".blp"}` it was), and its texture cache is keyed on the resulting stem — so
+/// `Foo`, `Foo.blp` and `Foo.tga` are **one** entry, not three. Ours keys the same way, which is
+/// why this is separate from [`sprite_candidates`]: the key identifies the texture, the candidates
+/// are the files that might hold it.
+///
+/// Note a 3-char extension is stripped whatever it is: `Foo.bmp` keys as `Foo`. A longer or shorter
+/// one is not an extension to the client at all — `Foo.jpeg` keys as `Foo.jpeg` and looks for
+/// `Foo.jpeg.blp`.
 pub(crate) fn sprite_key(path: &str) -> String {
-    let mut key = normalize_path(path);
-    if !key.rsplit('\\').next().is_some_and(|f| f.contains('.')) {
-        key.push_str(".blp");
+    let key = normalize_path(path);
+    match key.len().checked_sub(4) {
+        Some(dot) if key.as_bytes()[dot] == b'.' => key[..dot].to_string(),
+        _ => key,
     }
-    key
+}
+
+/// The two archive names a UI sprite reference may live under, **in the order the reference tries
+/// them** — `TextureCreate`'s fixed two-candidate chain (`0x449d90`, extension table `0x835248 =
+/// {".tga", ".blp"}`). The supplied extension's pipeline goes first, the other second; both open
+/// through the same Storm primitive, and a miss on the first is silent, so the second is a genuine
+/// fallback rather than an error path.
+///
+/// | reference | first | second |
+/// |---|---|---|
+/// | `Foo` (no 3-char extension) | `Foo.blp` | `Foo.tga` |
+/// | `Foo.blp` | `Foo.blp` | `Foo.tga` |
+/// | `Foo.tga` | `Foo.tga` | `Foo.blp` |
+/// | `Foo.bmp` (any other 3-char) | `Foo.blp` | `Foo.tga` |
+/// | `Foo.jpeg` (not 3 chars) | `Foo.jpeg.blp` | `Foo.jpeg.tga` |
+///
+/// This chain is what makes `Interface\Icons\Ability_Druid_Mangle.tga` — a real macro-chooser entry,
+/// since `Ability_Druid_Mangle.tga.blp` ships and the chooser stores names extension-stripped —
+/// resolve to `…Mangle.blp` on the second try instead of drawing a white square (bug B221). The old
+/// rule here passed an extensioned path through untouched and had no second try at all.
+///
+/// One function, used by the decoders below *and* by the sweeps that assert our own paths resolve
+/// (`ui_script::shipped_xml_tests`, `ui_macro::tests`): a sweep re-implementing this could agree
+/// with itself while disagreeing with what actually draws.
+pub(crate) fn sprite_candidates(path: &str) -> [String; 2] {
+    let stem = sprite_key(path);
+    let normalized = normalize_path(path);
+    // `normalize_path` has already folded case, so a plain compare is the case-insensitive one.
+    if normalized.len() >= 4 && normalized[normalized.len() - 4..] == *".tga" {
+        [format!("{stem}.tga"), format!("{stem}.blp")]
+    } else {
+        [format!("{stem}.blp"), format!("{stem}.tga")]
+    }
+}
+
+/// Decode a UI sprite key to RGBA8, **warning once per key that fails to resolve**.
+///
+/// Every sprite cache below stores misses as well as hits, and each calls this on the miss path
+/// *before* inserting — so the warning is self-limiting by construction (one line per distinct key
+/// for the process's life), with no separate "already warned" set to keep.
+///
+/// It exists because the renderer's fallback for an unresolvable path is **silent and looks like
+/// art**: a `Texture` region whose file can't be found still pushes a quad, which `ui_pass` draws
+/// with the shared 1×1 white image tinted white — an opaque WHITE RECTANGLE at the region's exact
+/// rect. That fallback can't itself be made loud (it is what lets flat-shaded quads batch into one
+/// texture run), so a miss has to be reported here instead. Bug B221 — macro-chooser icons
+/// rendering as white squares — was invisible to every layer of the client until this line existed:
+/// `shipped_xml_tests` sweeps only static XML `file=` attributes, never a path that arrives at
+/// runtime from a DBC.
+///
+/// Walks [`sprite_candidates`] in order and takes the first that both reads and decodes; only when
+/// **both** fail is it a miss. A candidate that reads but won't decode falls through exactly like
+/// one that isn't there — the reference's two loaders both fail silently, so a bad first candidate
+/// can't poison the second.
+fn decode_sprite(chain: &Mutex<Chain>, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+    let candidates = sprite_candidates(path);
+    let mut chain = chain.lock_recover();
+    for candidate in &candidates {
+        if let Ok(decoded) = read_texture_rgba(&mut chain, candidate) {
+            return Some(decoded);
+        }
+    }
+    warn!(
+        "texture miss: '{path}' does not resolve in the patch chain (tried {})",
+        candidates.join(", ")
+    );
+    None
 }
 
 /// Mutate an asset only when `differs` says its current state doesn't already match.
@@ -202,8 +275,7 @@ impl WorldAssets {
         if let Some(cached) = self.sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = read_texture_rgba(&mut self.chain.lock_recover(), &key)
-            .ok()
+        let loaded = decode_sprite(&self.chain, path)
             .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
         self.sprites.insert(key, loaded.clone());
         loaded
@@ -214,8 +286,7 @@ impl WorldAssets {
     /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub(crate) fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        let key = sprite_key(path);
-        read_texture_rgba(&mut self.chain.lock_recover(), &key).ok()
+        decode_sprite(&self.chain, path)
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing — the frame `Backdrop` tiled pieces
@@ -232,8 +303,7 @@ impl WorldAssets {
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = read_texture_rgba(&mut self.chain.lock_recover(), &key)
-            .ok()
+        let loaded = decode_sprite(&self.chain, path)
             .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
         self.tiled_sprites.insert(key, loaded.clone());
         loaded
@@ -252,8 +322,7 @@ impl WorldAssets {
         if let Some(cached) = self.portraits.get(&key) {
             return cached.clone();
         }
-        let loaded = read_texture_rgba(&mut self.chain.lock_recover(), &key)
-            .ok()
+        let loaded = decode_sprite(&self.chain, path)
             .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
         self.portraits.insert(key, loaded.clone());
         loaded
@@ -271,9 +340,8 @@ impl WorldAssets {
         if let Some(cached) = self.masks.get(&key) {
             return cached.clone();
         }
-        let loaded = read_texture_rgba(&mut self.chain.lock_recover(), &key)
-            .ok()
-            .map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
+        let loaded =
+            decode_sprite(&self.chain, path).map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
         self.masks.insert(key, loaded.clone());
         loaded
     }

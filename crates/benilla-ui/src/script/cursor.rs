@@ -426,6 +426,12 @@ impl super::UiScript {
         self.model_mut().item_pick_armed = armed;
     }
 
+    /// Push what `SpellCanTargetUnit` answers — whether the standing targeting word could bind a
+    /// unit at all (see [`crate::script::Model::spell_can_target_unit`]).
+    pub fn set_spell_can_target_unit(&mut self, can: bool) {
+        self.model_mut().spell_can_target_unit = can;
+    }
+
     /// Drain the `(bag, slot)` clicks the armed item half consumed since the last call. A doll
     /// click reports as [`EQUIPMENT_BAG`] + its 1-based inventory slot — the ONE bag space, so
     /// the app resolves both seams with one lookup.

@@ -104,6 +104,13 @@
             button.kind = kind
             button.index = index
             button.itemId = itemId
+            -- ref l.388/490 ("-- For the tooltip"): every laid-out reward/choice row is stamped
+            -- rewardType = "item"; the ONE row that ever reads "spell" is the reward-spell row
+            -- (l.445), which v1 doesn't build (GetRewardSpell() is nil, decision 0088). The click
+            -- arms below guard on it exactly as the ref does, so the guard is live the day that
+            -- row lands. (Deviation, harmless: the ref leaves required rows' rewardType unset —
+            -- l.197-200 stamps only `.type` — which reads the same `~= "spell"` either way.)
+            button.rewardType = "item"
             button.quality = quality
             button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
             button.name:SetText(name or "...")
@@ -559,9 +566,65 @@
             end
         end
 
-        -- ref QuestRewardItem_OnClick (l.127-141): only a REWARD-panel choice row is selectable (the
-        -- detail panel's rows, and both panels' FIXED reward rows, are informational only — no
-        -- OnClick wired to them, matching the ref's separate QuestRewardItemTemplate vs QuestItemTemplate).
+        -- ── The item-row modifier fork, shared by every quest-item row in this window ─────────────
+        -- ref QuestItem_OnClick (QuestFrame.lua:115-125), the OnClick QuestItemTemplate itself
+        -- carries (QuestFrameTemplates.xml:162-164) — so it covers the DETAIL panel's choice/reward
+        -- rows, the PROGRESS panel's required rows, and the reward panel's FIXED reward rows.
+        -- CTRL previews the item in the dressing room (decision 1060), SHIFT posts its link into an
+        -- open chat edit box (decision 1059); a plain click does nothing here, which is why these
+        -- rows carried no OnClick before this arc.
+        --
+        -- Two guards the ref's own code has, transcribed: the ctrl arm is gated on
+        -- `this.rewardType ~= "spell"` (l.117 — a spell reward has no item to wear), and the shift
+        -- arm additionally requires the edit box to be VISIBLE (l.121; the `and rewardType ~=
+        -- "spell"` rides the same line there). Ours adds `ChatFrameEditBox and` — ChatFrame.xml is
+        -- a separate file a window test need not load, exactly as BenillaPaperDollSlot_OnClick does.
+        --
+        -- One benilla-only guard: `link` is nil until the ask-once item template lands (a state the
+        -- reference's synchronous item cache never has), and EditBox:Insert takes a string. The ref
+        -- already carries the twin of this guard inside DressUpItemLink (ref DressUpFrame.lua:11-13).
+        function BenillaQuestItem_OnClick(button)
+            if IsControlKeyDown() then
+                if button.rewardType ~= "spell" then
+                    DressUpItemLink(GetQuestItemLink(button.kind, button.index))
+                end
+            elseif IsShiftKeyDown() then
+                -- The ref's spell guard rides this arm (l.121); the "edit box up" and "link not
+                -- nil" pair is the shared helper's (UIParent.xml — one law, one place).
+                if button.rewardType ~= "spell" then
+                    BenillaChatEdit_InsertLink(GetQuestItemLink(button.kind, button.index))
+                end
+            end
+        end
+
+        -- ref QuestRewardItem_OnClick (l.127-141), the OnClick the REWARD panel's choice rows carry
+        -- through QuestRewardItemTemplate (QuestFrameTemplates.xml:169-171). The first two arms are
+        -- QuestItem_OnClick's verbatim (only the shift arm's spell guard differs — the ref drops it
+        -- here, l.133); the choice SELECT is the THIRD arm, so a ctrl- or shift-click must NOT also
+        -- pick the reward. That ordering is the whole point of the fork.
+        function BenillaQuestRewardItem_OnClick(button)
+            if IsControlKeyDown() then
+                if button.rewardType ~= "spell" then
+                    DressUpItemLink(GetQuestItemLink(button.kind, button.index))
+                end
+            elseif IsShiftKeyDown() then
+                -- No spell guard on this arm — the ref drops it here (l.133). The visible/non-nil
+                -- pair is the shared helper's (UIParent.xml).
+                BenillaChatEdit_InsertLink(GetQuestItemLink(button.kind, button.index))
+            elseif button.kind == "choice" then
+                -- ref l.136's own `this.type == "choice"` test. The ref needs it because its reward
+                -- panel packs choices AND fixed rewards into ONE QuestRewardItem1..10 pool; ours
+                -- keeps two pools and hangs this template only on BenillaQuestRewardChoice*, so the
+                -- test is belt-and-braces — kept because it is the ref's, and because it is what
+                -- makes the template safe to reuse if the pools are ever merged.
+                BenillaQuestRewardChoice_OnClick(button)
+            end
+        end
+
+        -- The third arm alone (ref l.136-139): only a REWARD-panel choice row is selectable — the
+        -- detail panel's rows and both panels' FIXED reward rows ride the plain
+        -- `BenillaQuestItemTemplate`, whose OnClick has no select arm at all, matching the ref's
+        -- separate QuestRewardItemTemplate vs QuestItemTemplate.
         function BenillaQuestRewardChoice_OnClick(button)
             getglobal("BenillaQuestFrame").itemChoice = button.index
             -- Ref QuestRewardItem_OnClick l.137-138 verbatim: the glow frame seats at (-8,7) on
@@ -702,14 +765,20 @@
                 GameTooltip:Show()
             </OnEnter>
             <OnLeave>GameTooltip:Hide()</OnLeave>
+            <!-- ref QuestItemTemplate's own OnClick (QuestFrameTemplates.xml:162-164): the CTRL
+                 dressing-room preview + the SHIFT chat-link post, and nothing else — a plain click
+                 on one of these rows is inert (decisions 1059/1060). -->
+            <OnClick>BenillaQuestItem_OnClick(self)</OnClick>
         </Scripts>
     </Button>
 
     <!-- A REWARD-panel choice row: the same visual, plus the ref's `QuestRewardItemTemplate` click
-         (choose highlight) — the detail panel's rows (and both panels' FIXED reward rows) stay plain
-         `BenillaQuestItemTemplate` with no OnClick (ref: only reward-panel CHOICE rows select). -->
+         (QuestFrameTemplates.xml:167-173) — the ctrl/shift arms shared with the base template, then
+         the choose highlight as the THIRD arm. The detail panel's rows and both panels' FIXED reward
+         rows stay on plain `BenillaQuestItemTemplate`, whose OnClick has no select arm (ref: only
+         reward-panel CHOICE rows select). -->
     <Button name="BenillaQuestRewardItemTemplate" inherits="BenillaQuestItemTemplate" virtual="true" hidden="true">
-        <Scripts><OnClick>BenillaQuestRewardChoice_OnClick(self)</OnClick></Scripts>
+        <Scripts><OnClick>BenillaQuestRewardItem_OnClick(self)</OnClick></Scripts>
     </Button>
 
     <!-- A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):

@@ -33,9 +33,10 @@
 
         The Era loot API this drives (all app-fed via the loot seam, benilla-ui `script/loot.rs`):
         GetNumLootItems(), GetLootSlotInfo(slot) -> texture,item,quantity,quality, LootSlotIsItem/
-        LootSlotIsCoin(slot), LootSlot(slot) (the row click's action), CloseLoot() (from OnHide). The
-        synthesized coin pile is row 1 when the loot carries gold; a row click sends the money or the
-        item's wire slot (the app maps it).
+        LootSlotIsCoin(slot), GetLootSlotLink(slot) (the row's item link, read by the click's
+        ctrl/shift arms — decision 1059), LootSlot(slot) (the row click's action), CloseLoot() (from
+        OnHide). The synthesized coin pile is row 1 when the loot carries gold; a row click sends the
+        money or the item's wire slot (the app maps it).
 
         Paging (LootFrame.lua l.27-31,70-73,105-118): 4 rows/page; > 4 items spends one slot on the
         pager, showing 3 rows + Up/Down. We keep the current page across content-change repaints
@@ -70,12 +71,66 @@
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         end
 
+        -- ref LootFrameItem_OnClick (LootFrame.lua l.147-162): CTRL previews the row's item in the
+        -- dressing room (decision 1060), SHIFT posts its link into an open chat edit box (decision
+        -- 1059) — both through GetLootSlotLink, the row-link binding this arc added (loot.rs).
+        --
+        -- WHERE THE TAKE LIVES, and why the gate below reads three modifiers where FrameXML names
+        -- two (VERIFIED at the 1.12.1 bytes — wow-re `ui/scratch/loot-click-modifier-gate.md`,
+        -- decision 1067). The reference's Lua handler suppresses NOTHING, because the take is the C
+        -- `CLootButton`'s own click behaviour (`LootFrame.lua:94`'s `button:SetSlot(slot)` hands the
+        -- widget the slot). `CLootButton::OnClick 0x4c1820` runs the Lua `<OnClick>` FIRST and
+        -- unconditionally, then gates itself on `0x41f8f0(0/1/2)` — byte-identically the predicates
+        -- behind `IsShiftKeyDown`/`IsControlKeyDown`/**`IsAltKeyDown`** — and only then sends
+        -- (`0x4c2790` → `0x5e1ad0` → `push 0x108`, CMSG_AUTOSTORE_LOOT_ITEM).
+        --
+        -- Three consequences, all of them this handler's shape:
+        --  · **ALT suppresses the take too**, though no FrameXML file mentions alt. Its gate is C.
+        --  · The gate is on ANY modifier being HELD, not on "the arm that handled it": a shift-click
+        --    with the chat box closed does nothing in Lua and still must not loot.
+        --  · The button code is never read (`0x4c1820` doesn't look at it), so a RIGHT-click loots
+        --    exactly like a left one — which is why this handler takes no `mouseButton`.
+        --
+        -- benilla folds that C action into this Lua handler (`LootSlot(button.slot)`, this file's
+        -- model since 0084), so the gate has to be an early return here. Named divergence, not a
+        -- transcription slip: 1.12 exposes no plain "take slot N" binding at all — the real
+        -- `LootSlot 0x4c2e70` is the LOOT_BIND *confirmation continuation* (flag 1, gated on the
+        -- stashed slot at `[0x847cec]`; its only FrameXML caller is `StaticPopup.lua:606`). Moving
+        -- the take host-side onto the widget, and shrinking `LootSlot()` to that continuation, is
+        -- 1067's named follow-up.
+        --
+        -- The reference's tail (StaticPopup_Hide("CONFIRM_LOOT_DISTRIBUTION") and the four
+        -- LootFrame.selected* fields, l.155-161) is the MASTER-LOOT dropdown's bookkeeping —
+        -- GroupLootDropDown reads exactly those four (l.164+). benilla ships no master loot
+        -- (benilla-protocol's loot module: CMSG_LOOT_MASTER_GIVE/SMSG_LOOT_MASTER_LIST out of
+        -- scope), so returning early skips nothing that exists.
+        --
+        -- The coin row has no link (it is synthesized, with no item behind it — ui_loot.rs), so a
+        -- modified click on it finds nil: DressUpItemLink returns on a nil link (DressUpFrame.lua
+        -- l.10-16) and the insert is skipped. It does not fall through to looting the money either,
+        -- which is the same law the item rows follow.
         function BenillaLootItem_OnClick(button)
             -- The row remembers its resolved loot slot from the last Update; act on it (LootFrame.lua
             -- l.94-95 stores button.slot, the click calls LootSlot on it).
-            if button.slot then
-                LootSlot(button.slot)
+            if not button.slot then return end
+            if IsControlKeyDown() then
+                DressUpItemLink(GetLootSlotLink(button.slot)) -- ref l.148-149
+                return
+            elseif IsShiftKeyDown() then
+                -- ref l.150-153, through the shared helper (UIParent.xml): it carries the ref's own
+                -- "only when the edit box is up" guard AND our nil-link one, which this row needs
+                -- more than most — the coin row never has a link, and an item row has none until
+                -- its template lands. A shift-click with chat closed does nothing here: a loot row
+                -- has no stack to split, unlike a bag slot.
+                BenillaChatEdit_InsertLink(GetLootSlotLink(button.slot))
+                return
+            elseif IsAltKeyDown() then
+                -- The C gate's third modifier (`0x41f8f0(2)` @ `0x4c1841`). Nothing is bound to
+                -- alt in FrameXML, so this arm does nothing at all — its entire job is to NOT
+                -- loot, which is what the real client does and what we did not.
+                return
             end
+            LootSlot(button.slot)
         end
 
         -- Hover: the item name coloured by quality (loot rows carry it — GetLootSlotInfo's 4th

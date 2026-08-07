@@ -17,6 +17,8 @@
 //!   (`LootFrame.lua:261`) — `bindOnPickUp` swaps the frame to the gold BoP backdrop.
 //! - `GetLootRollTimeLeft(rollID)` → the milliseconds left, polled from the Timer's `OnUpdate`
 //!   (`LootFrame.lua:287-296`).
+//! - `GetLootRollItemLink(rollID)` → the rolled item's link, read by the icon button's ctrl/shift
+//!   arms (`LootFrame.xml:353-361` — decision 1059).
 //! - `RollOnLoot(rollID, rollType)` — `0` Pass, `1` Need, `2` Greed, wired to the frame's
 //!   PassButton/RollButton/GreedButton `OnClick` (`LootFrame.xml:375`/`:398`/`:425`).
 //! - `CANCEL_LOOT_ROLL` fires with `arg1 = rollID`; the matching frame hides (`LootFrame.lua:279-285`).
@@ -58,6 +60,13 @@ pub struct LootRollEntry {
     /// extension riding as a TRAILING return of `GetLootRollItemInfo`, the same idiom
     /// [`super::loot::LootRow::item_id`] uses on `GetLootSlotInfo`.
     pub item_id: u32,
+    /// The rolled item's full escaped `|cff…|Hitem:…|h[Name]|h|r` link (`GetLootRollItemLink`,
+    /// decision 1059) — what the icon button's ctrl/shift arms hand to `DressUpItemLink` /
+    /// `ChatFrameEditBox:Insert` (`LootFrame.xml:353-361`). `None` while the item-template query is
+    /// in flight: the link embeds the name, so it lands with `name`/`quality`, not before. A roll
+    /// popup shows the instant `START_LOOT_ROLL` fires, so this nil is the common case for the first
+    /// frames of every roll — both click arms drop it rather than posting an empty link.
+    pub link: Option<String>,
 }
 
 /// Every group loot roll currently open, in the order the app opened them. Pushed whole each frame.
@@ -114,6 +123,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 r.item_id,
             );
             lua.pack_multi(vals)
+        })?,
+    )?;
+
+    // GetLootRollItemLink(rollID) → the rolled item's full escaped link | nil. Unknown id → nil, and
+    // nil while the item template is in flight (the link embeds the name). The reference's icon
+    // button reads it for both modifier arms — `DressUpItemLink(GetLootRollItemLink(...))` and
+    // `ChatFrameEditBox:Insert(...)`, `LootFrame.xml:353-361`; ours routes the second through
+    // `BenillaChatEdit_InsertLink`, whose whole job is the nil this getter can answer. Decision 1059.
+    g.set(
+        "GetLootRollItemLink",
+        lua.create_function(|lua, roll_id: u32| {
+            let link = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                find(&model, roll_id).and_then(|r| r.link.clone())
+            };
+            match link {
+                Some(link) => Ok(mlua::Value::String(lua.create_string(&link)?)),
+                None => Ok(mlua::Value::Nil),
+            }
         })?,
     )?;
 
@@ -182,7 +210,7 @@ mod tests {
     fn rolls() -> LootRollsState {
         LootRollsState {
             rolls: vec![
-                // A resolved BoP item.
+                // A resolved BoP item — name, quality and link land together (one template answer).
                 LootRollEntry {
                     roll_id: 7,
                     name: Some("Staff of Jordan".into()),
@@ -192,6 +220,7 @@ mod tests {
                     bind_on_pickup: true,
                     time_left_ms: 42_000,
                     item_id: 17182,
+                    link: Some("|cffa335ee|Hitem:17182:0:0:0|h[Staff of Jordan]|h|r".into()),
                 },
                 // An in-flight item: the roll opened, the item-template answer hasn't landed.
                 LootRollEntry {
@@ -203,6 +232,7 @@ mod tests {
                     bind_on_pickup: false,
                     time_left_ms: 60_000,
                     item_id: 4306,
+                    link: None,
                 },
             ],
         }
@@ -245,9 +275,22 @@ mod tests {
             )
             .unwrap());
 
+        // GetLootRollItemLink: the resolved roll's link; nil while the template is in flight (the
+        // icon button's ctrl/shift arms hand this straight on — decision 1059).
+        assert_eq!(
+            s.eval::<String>("return GetLootRollItemLink(7)").unwrap(),
+            "|cffa335ee|Hitem:17182:0:0:0|h[Staff of Jordan]|h|r"
+        );
+        assert!(s
+            .eval::<bool>("return GetLootRollItemLink(8) == nil")
+            .unwrap());
+
         // An unknown id → nil / 0, never an error.
         assert!(s
             .eval::<bool>("return GetLootRollItemInfo(99) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return GetLootRollItemLink(99) == nil")
             .unwrap());
         assert_eq!(s.eval::<i64>("return GetLootRollTimeLeft(99)").unwrap(), 0);
     }

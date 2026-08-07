@@ -20,7 +20,11 @@
         repair pair, the page turners. We keep the real geometry of everything we DO ship.
 
         Clicks (decision 0081 v1): RIGHT-click a row → BuyMerchantItem. LEFT-click is PickupMerchantItem
-        in the real client (a drag-buy) — a no-op here until the cursor-item arc.
+        in the real client (a drag-buy) — a no-op here until the cursor-item arc. CTRL-left-click
+        previews the item in the dressing room and SHIFT-left-click posts its link to an open chat
+        edit box (the ref's own fork, MerchantFrame.lua l.301-306 — decisions 1059/1060, over the
+        GetMerchantItemLink feed); the shift-with-chat-closed stack-split half of that arm waits on a
+        GetMerchantItemMaxStack binding (named at the handler).
 
         UIPanel slot system (decision 0084 §2): carries NO hardcoded <Anchors> — ShowUIPanel/SetLeftFrame
         SetPoints it to the left slot (TOPLEFT UIParent, 0, -104) on open; every show goes through
@@ -200,13 +204,47 @@
 
         function BenillaMerchantItem_OnClick(button, mouseButton)
             -- Buyback tab: either click buys the slot back (ref MerchantItemButton_OnClick's else
-            -- arm, l.358-361). Merchant tab: RIGHT-click = BuyMerchantItem (the real right-click
-            -- branch); LEFT-click is PickupMerchantItem (a drag-buy onto the cursor) in the real
-            -- client — a no-op here until the cursor-item arc lands.
+            -- arm, l.358-361) — and, as there, with NO modifier branch of any kind: 1.12 ships no
+            -- GetBuybackItemLink, so a buyback row carries no link at all (ui_merchant.rs).
             if BenillaMerchantFrame.selectedTab == 2 then
                 BuybackItem(button.merchantIndex)
+                return
+            end
+            local index = BenillaMerchantFrame_ItemIndex(button)
+            if mouseButton == "LeftButton" then
+                -- The reference's LEFT-button modifier fork (ref l.301-306): CTRL previews the
+                -- vendor's item in the dressing room (decision 1060) — which is what the Ctrl-hover
+                -- magnifier this window already arms has been promising — and SHIFT posts its link
+                -- into an open chat edit box (decision 1059). Both return: a modified click must
+                -- never also buy.
+                if IsControlKeyDown() then
+                    DressUpItemLink(GetMerchantItemLink(index))
+                    return
+                elseif IsShiftKeyDown() then
+                    -- ref l.304-306, through the shared helper (UIParent.xml): it carries the ref's
+                    -- own edit-box-visible guard AND our nil-link one (a row whose item template is
+                    -- still in flight has no link yet).
+                    BenillaChatEdit_InsertLink(GetMerchantItemLink(index))
+                    -- DEFERRED, in the ref's own words: the `else` half of that shift arm is
+                    -- `local maxStack = GetMerchantItemMaxStack(this:GetID())` →
+                    -- `OpenStackSplitFrame(maxStack, ...)`, buying up to what you can afford
+                    -- (ref l.307-327). `GetMerchantItemMaxStack` has no binding here, so a
+                    -- shift-click with chat CLOSED does nothing rather than guess a max stack.
+                    return
+                end
+                -- Plain LEFT-click is PickupMerchantItem, a drag-buy onto the cursor (ref l.329) —
+                -- still a no-op here until the cursor-item arc lands.
             elseif mouseButton == "RightButton" then
-                BuyMerchantItem(BenillaMerchantFrame_ItemIndex(button))
+                -- The ref's right-button leg opens with `if IsControlKeyDown() ... then return`
+                -- (l.332-333): a Ctrl-held right-click does nothing at all, and in particular must
+                -- not buy while the player is Ctrl-clicking around to preview. Its shift arm is the
+                -- same GetMerchantItemMaxStack stack-split deferred above (l.334-353) — and the
+                -- ref's own `maxStack <= 1` case re-enters to buy a single unit (l.341-343), which
+                -- is exactly what falling through to BuyMerchantItem does here.
+                if IsControlKeyDown() then
+                    return
+                end
+                BuyMerchantItem(index)
             end
         end
 

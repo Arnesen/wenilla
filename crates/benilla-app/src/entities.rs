@@ -46,7 +46,7 @@ use display::{
 /// Attaching a visual to each net entity (the back half of this subsystem) — kept in its own file as it
 /// carries the bulk of the per-entity spawn logic (skeleton/animation, character geoset + skin, fade).
 mod attach;
-use attach::{attach_entity_visuals, build_glue_preview};
+use attach::{attach_entity_visuals, build_dressup_preview, build_glue_preview};
 
 /// The dynamic point lights an entity's own model carries into the world — the held torch above all:
 /// decision 0016's law applied to the *entity* half of the scene, not just the placed half.
@@ -117,6 +117,9 @@ pub(crate) use chain_beam::ChainHops;
 use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // The container feed reads the icon column off the same catalog resource (one DBC parse).
 pub(crate) use attach::spawn_joints;
+// The one InventoryType → equipment-slot table (`attach::preview`): the dressing-room feed places a
+// tried-on item by the very same map the preview it feeds dresses by (decision 1060).
+pub(crate) use attach::equip_slot;
 pub(crate) use equipment::ItemDisplays;
 pub(crate) use equipment::{BoneAttach, Equipment};
 
@@ -459,6 +462,11 @@ impl Plugin for EntitiesPlugin {
                     // the freshly-built display model, for the create booth to bake. After
                     // `update_display_models` (its want-list built the body) — server-less, at char select.
                     build_glue_preview,
+                    // The dressing room's preview (decision 1060): the same tuple-driven assembly,
+                    // for the item nobody in the world is wearing. Beside the glue one — same
+                    // dependency (the display cache built by `update_display_models` above), same
+                    // retry-until-ready latch.
+                    build_dressup_preview,
                     attach_entity_visuals,
                     // WMO-gameobject doodad props (the ship's sails): resolve the MODD list the
                     // frame after the WMO visual attaches, then spawn each prop as its M2 lands
@@ -745,6 +753,29 @@ fn setup_entities(
         (p, l) => warn!(
             "pet stat tables unavailable, happiness/loyalty stay blank: {:#}",
             p.err().or(l.err()).expect("at least one of the two failed")
+        ),
+    }
+    // The family pair (decision 1062) — its own resource, so it degrades independently of the
+    // happiness tables above rather than taking them down with it.
+    match (
+        benilla_formats::load_creature_families(&mut chain),
+        benilla_formats::load_pet_food_names(&mut chain),
+    ) {
+        (Ok(families), Ok(foods)) => {
+            info!(
+                "pet family tables: {} families, {} food types",
+                families.len(),
+                foods.len()
+            );
+            commands.insert_resource(crate::ui_pet_stats::PetFamilyTables { families, foods });
+        }
+        // No family tables ⇒ `UnitCreatureFamily("pet")` answers nil, which the reference's own
+        // guard turns into a BLANK level line on the pet page (ref `PetPaperDollFrame.lua:68-70`),
+        // and the diet tooltip shows nothing at all. That is exactly the state 1057 shipped in —
+        // degraded to the faithful fallback, not wrong.
+        (f, p) => warn!(
+            "pet family tables unavailable, the pet's level line stays blank: {:#}",
+            f.err().or(p.err()).expect("at least one of the two failed")
         ),
     }
     match CharacterGeosets::load(&mut chain) {

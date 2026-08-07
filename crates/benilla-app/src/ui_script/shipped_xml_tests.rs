@@ -98,7 +98,8 @@ fn loading_the_shipped_ui_queues_no_sounds() {
 ///
 /// The shape half runs everywhere; the resolve half needs client data and skips without it (a
 /// hand-kept list of real file names would rot into agreeing with itself — the `text=` sweep's
-/// argument below). Resolution goes through the renderer's own `sprite_key`, not a copy of it.
+/// argument below). Resolution goes through the renderer's own `sprite_candidates`, not a copy of it —
+/// including its `.blp`/`.tga` fallback, so the sweep accepts exactly what the renderer accepts.
 #[test]
 fn every_shipped_texture_path_resolves_in_the_client_archives() {
     use benilla_ui::framexml::{Element, TopLevel};
@@ -163,7 +164,11 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
     let chain = benilla_formats::open_chain(&data).expect("open chain");
     let missing: Vec<String> = refs
         .iter()
-        .filter(|(_, _, path)| !chain.contains(&crate::assets::sprite_key(path)))
+        .filter(|(_, _, path)| {
+            !crate::assets::sprite_candidates(path)
+                .iter()
+                .any(|c| chain.contains(c))
+        })
         .map(|(file, tag, path)| format!("{file}: <{tag} file=\"{path}\">"))
         .collect();
     assert!(

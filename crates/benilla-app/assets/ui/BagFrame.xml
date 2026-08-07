@@ -100,11 +100,28 @@
             local bagId = button:GetParent():GetID()
             if mouseButton == "LeftButton" then
                 local info = C_Container.GetContainerItemInfo(bagId, button.slot)
-                -- The stack-split trigger — SHIFT + left-click on an unlocked stack of ≥2, the
-                -- reference fork verbatim (ContainerFrame.lua:567-577; ctrl's dress-up and the
-                -- chat-link insert are named deferrals). `ignoreModifiers` (the drag-trio calls,
-                -- both true) suppresses the fork, the reference's own drag/receive contract.
+                -- The modifier fork, the reference's own order (ContainerFrame.lua:563-579;
+                -- BankFrame.lua:141-152 for a bank slot, which is this same handler at container
+                -- -1). `ignoreModifiers` (the drag-trio calls, both true) suppresses it whole —
+                -- the reference's drag/receive contract.
+                --
+                -- CTRL: preview the item on your own character in the dressing room (decision 1060).
+                if IsControlKeyDown() and not ignoreModifiers then
+                    DressUpItemLink(C_Container.GetContainerItemLink(bagId, button.slot))
+                    return
+                end
+                -- SHIFT: post the item's link into the chat edit box if it's open, ELSE split the
+                -- stack. The ref's own `else` (l.567-577) — and note it gates on `IsShown()` here
+                -- where its siblings use `IsVisible()`; ours are the same thing (the edit box's only
+                -- parent is UIParent), so the ref's own word is quoted at each site.
                 if IsShiftKeyDown() and not ignoreModifiers then
+                    -- The visibility test is the REF'S fork, not the helper's: with chat open this
+                    -- arm never splits, even in the one benilla state where nothing can be posted
+                    -- (an unresolved template — `BenillaChatEdit_InsertLink`'s own note).
+                    if ChatFrameEditBox and ChatFrameEditBox:IsShown() then
+                        BenillaChatEdit_InsertLink(C_Container.GetContainerItemLink(bagId, button.slot))
+                        return
+                    end
                     if info and not info.isLocked and (info.stackCount or 1) >= 2 then
                         button.SplitStack = function(btn, n)
                             SplitContainerItem(bagId, btn.slot, n)
@@ -175,12 +192,13 @@
             -- mode → the sell cursor over this slot; else a readable item (a mail letter copy —
             -- right-click opens the reader) → the Inspect magnifier; anything else restores the
             -- base cursor. The OnUpdate re-enter keeps it current while hovering (the ref's own
-            -- loop). The ref's `IsControlKeyDown() and hasItem` magnifier arm (the Ctrl+click
-            -- dress-up preview cursor) is omitted with the dress-up feature itself.
+            -- loop). The ref's `IsControlKeyDown() and hasItem` magnifier arm (l.638) is the
+            -- dress-up preview's own cursor tell — it landed with the dressing room (decision
+            -- 1060); `info` is non-nil above, which is the ref's `hasItem`.
             if BenillaMerchantFrame and BenillaMerchantFrame:IsShown()
                 and BenillaMerchantFrame.selectedTab == 1 and not InRepairMode() then
                 ShowContainerSellCursor(bagId, button.slot)
-            elseif info.isReadable then
+            elseif info.isReadable or IsControlKeyDown() then
                 ShowInspectCursor()
             else
                 ResetCursor()

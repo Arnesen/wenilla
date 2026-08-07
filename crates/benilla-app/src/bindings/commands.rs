@@ -91,9 +91,12 @@ pub(crate) mod cmd {
     pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(63);
     pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(64);
     pub(crate) const ATTACK_TARGET: Cmd = Cmd(65);
-    pub(crate) const TOGGLE_UI: Cmd = Cmd(86);
-    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(87);
-    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(88);
+    // These three shift whenever a row lands ahead of them in SPECS (1057's `TOGGLECHARACTER3`
+    // moved them 86/87/88 → 87/88/89). `the_cmd_handles_index_their_rows` is what makes that
+    // loud and cheap instead of silent: it names the handle and the row it actually points at.
+    pub(crate) const TOGGLE_UI: Cmd = Cmd(87);
+    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(88);
+    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(89);
 }
 
 /// The registry, 1.12 `Bindings.xml` order. Sub-tables (action buttons, shapeshift, raid
@@ -579,6 +582,19 @@ pub(crate) static SPECS: &[Spec] = &[
         INTERFACE,
         Kind::Edge(r#"ToggleCharacter("BenillaSkillFrame")"#),
         Some("K"),
+        None
+    ),
+    // The pet paper doll is TOGGLECHARACTER**3**, not 2 — 1.12's `Bindings.xml` numbers these by
+    // page, not by tab (0 = PaperDoll, 1 = Skill, 2 = Reputation, 3 = PetPaperDoll, 4 = Honor), so
+    // the name is the reference's and has nothing to do with our tab index. `SHIFT-P` is byte-real
+    // from the client's own `bindings-cache.wtf`, and identical in two independent accounts (ONE
+    // and WINUSER) — which is what rules out a player rebind (the `TOGGLEUI` trap, 0870).
+    // Decision 1057.
+    spec!(
+        "TOGGLECHARACTER3",
+        INTERFACE,
+        Kind::Edge(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#),
+        Some("SHIFT-P"),
         None
     ),
     spec!(

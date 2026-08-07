@@ -22,9 +22,12 @@
       that last entry's stated reason ("its CMSG family is its own slice") was simply WRONG: 0890
       verified auto-follow sends nothing at all, it is pure client-side movement, so the row was
       waiting on a wire slice that does not exist. It was the motion law it really needed.
-      Everything a menu SHOWS works. The PET menu and the RAID_* rank rows stay
-      in the tables but are unreachable (no "pet" token, no raid roster) — their OnClick branches
-      are trimmed with the rest.
+      Everything a menu SHOWS works. The PET menu opened with decision 1066: its four rows and the
+      one predicate that forks them are below, its opener is UnitFrames.xml's PetFrameDropDown, and
+      the two dialogs behind Abandon and Rename are registered in PetActionBar.xml (with the pet
+      arc, like every other dialog in this codebase — this file must stay loadable without the
+      popup engine). The RAID_* rank rows stay in the tables but are unreachable (no raid roster) —
+      their OnClick branches are trimmed with the rest.
     - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub → the
       TEXT stub below keeps the table lines verbatim (the ref's TEXT() is the localization
       identity).
@@ -126,6 +129,7 @@
         UnitPopupFrames = {
             "PlayerFrameDropDown",
             "TargetFrameDropDown",
+            "PetFrameDropDown",
             "PartyMemberFrame1DropDown",
             "PartyMemberFrame2DropDown",
             "PartyMemberFrame3DropDown",
@@ -404,13 +408,27 @@
                 elseif ( value == "RAID_LEADER" or value == "RAID_PROMOTE" or value == "RAID_DEMOTE" or value == "RAID_REMOVE" ) then
                     -- The raid roster (GetRaidRosterInfo) is a later arc — no raid menus open yet.
                     UnitPopupShown[index] = 0;
-                elseif ( value == "PET_PAPERDOLL" or value == "PET_RENAME" or value == "PET_ABANDON" or value == "PET_DISMISS" ) then
-                    -- The "pet" token exists now (0990), but none of these four rows does: each
-                    -- wants its own binding (paperdoll a whole panel), and `PetCanBeAbandoned`
-                    -- besides, which is what forks abandon-vs-dismiss. So the PET menu stays shut
-                    -- at its opener (UnitFrames.xml's pet frame takes no right click) and these
-                    -- stay suppressed here — the two halves of one deferral, not two.
-                    UnitPopupShown[index] = 0;
+                -- The four PET rows, ref UnitPopup.lua l.402-417 verbatim (decision 1066). ONE
+                -- predicate decides all four, and Dismiss reads it INVERTED: a hunter's pet is
+                -- abandonable, so it offers paperdoll/rename/abandon and hides dismiss; a
+                -- warlock's demon is not, so it offers only dismiss. Rename wants both bits,
+                -- because its own is one-shot — the server clears it after the first rename.
+                elseif ( value == "PET_PAPERDOLL" ) then
+                    if ( not PetCanBeAbandoned() ) then
+                        UnitPopupShown[index] = 0;
+                    end
+                elseif ( value == "PET_RENAME" ) then
+                    if ( not PetCanBeAbandoned() or not PetCanBeRenamed() ) then
+                        UnitPopupShown[index] = 0;
+                    end
+                elseif ( value == "PET_ABANDON" ) then
+                    if ( not PetCanBeAbandoned() ) then
+                        UnitPopupShown[index] = 0;
+                    end
+                elseif ( value == "PET_DISMISS" ) then
+                    if ( PetCanBeAbandoned() ) then
+                        UnitPopupShown[index] = 0;
+                    end
                 elseif ( string.sub(value, 1, 12) == "RAID_TARGET_" ) then
                     if ( (inParty == 0) or ((isLeader == 0) and (isAssistant == 0)) ) then
                         UnitPopupShown[index] = 0;
@@ -596,11 +614,25 @@
                 -- already knows the unit's name to the letter, so unlike `/follow rag` it must not
                 -- prefix-match its way onto a bystander. Client-side movement only, no wire.
                 FollowByName(name, 1);
+
+            -- The four PET arms, ref UnitPopup_OnClick l.590-597 verbatim (decision 1066). The
+            -- asymmetry is the reference's and it is the right one: DISMISS runs immediately,
+            -- ABANDON goes behind a confirm. Sending a summon away costs nothing; giving up a
+            -- tamed pet is permanent, and the server deletes it (`PET_SAVE_AS_DELETED`).
+            elseif ( button == "PET_DISMISS" ) then
+                PetDismiss();
+            elseif ( button == "PET_ABANDON" ) then
+                StaticPopup_Show("ABANDON_PET");
+            elseif ( button == "PET_PAPERDOLL" ) then
+                ToggleCharacter("BenillaPetPaperDollFrame");
+            elseif ( button == "PET_RENAME" ) then
+                StaticPopup_Show("RENAME_PET");
             end
             -- DEFERRED branches trimmed with their rows (header): TARGET,
-            -- GUILD_*, RESET_INSTANCES, PET_*, RAID_LEADER/PROMOTE/DEMOTE/REMOVE.
+            -- GUILD_*, RESET_INSTANCES, RAID_LEADER/PROMOTE/DEMOTE/REMOVE.
             PlaySound("UChatScrollButton");
         end
+
     ]]></Script>
 
     <!-- The OnUpdate driver (ref UIParent.xml l.21 runs UnitPopup_OnUpdate from UIParent's own

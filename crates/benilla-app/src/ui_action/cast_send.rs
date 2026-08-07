@@ -454,6 +454,18 @@ fn send_spell_cast(
         cast_errors.0.push((spell_id, 0x39));
         return;
     }
+    // The ENVIRONMENT leg of the SAME requirement validator (`0x609d39–0x609d7b`, between the
+    // mounted block above and the moving block below; decision 1056): a spell whose aura cannot
+    // survive the caster's current side of the water surface refuses locally — 0x50 "Cannot use
+    // while swimming" for the mount/Travel-Form/food set, 0x58 "Can only use while swimming" for
+    // Aquatic Form. The gate must be local: vmangos's CheckCast has no shapeshift or food water
+    // arm at all, so without this the server grants a druid aquatic form standing on dry land
+    // (ledger B176) and lets you eat mid-swim (B155's eating half). The condition is [`state`]'s.
+    if let Some(reason) = state::cast_water_refusal(ctx.self_move_flags, def) {
+        debug!("ui_action: cast {spell_id} refused locally — water side ({reason:#x})");
+        cast_errors.0.push((spell_id, reason));
+        return;
+    }
     // The moving leg of the SAME requirement validator (`0x609de3`, after the mounted/posture/
     // environment blocks, before the form leg — wow-re `moving-cast-gate.md`, decision 0862): a
     // cast-time (or movement-sensitive) press while already moving refuses locally with the

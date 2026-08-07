@@ -556,6 +556,44 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // DropItemOnUnit(unit) — drop the cursor's held item onto a unit (`0x48d960`). Two legs in the
+    // reference: the PET leg feeds the pet, the PLAYER leg opens a trade. Queues the raw token and
+    // nothing else — every gate reads state this VM does not hold, so the app owns all of them
+    // (`ui_action::targeting::drop_item_on_unit`).
+    //
+    // This binding **existed in our shipped `PetFrame_OnClick` before it existed here**: the
+    // handler transcribed the reference's three legs faithfully, and the middle one called a nil
+    // global, so the whole handler errored out the moment you clicked your pet holding anything.
+    // That is B208's "dropping food onto the pet doesn't feed" — the reported bug was a missing
+    // registration, not a missing mechanism.
+    g.set(
+        "DropItemOnUnit",
+        lua.create_function(|lua, token: Option<String>| {
+            if let Some(token) = token {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.drop_item_on_unit.push(token);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // SpellTargetUnit(unit) — bind a unit to the spell awaiting its click. The other leg of
+    // `PetFrame_OnClick`, tested BEFORE `CursorHasItem()` (ref `PetFrame.lua:114-129`), and dead
+    // in our VM for the same reason `DropItemOnUnit` was.
+    //
+    // It is registered as an accepted **no-op**, deliberately, and that is faithful for every word
+    // benilla can currently arm: the targeting cursor models the location / item / gameobject
+    // seams (0792/0923/0939), and a *unit* cannot satisfy any of them — the reference's
+    // `BindTarget 0x6e5b40` would reject it at the same three mask tests our seams ask. The word
+    // that would make this do something is the residual unit-word machine that `cast_target`'s
+    // header names as still deferred (a unit-target spell never enters targeting mode here at all;
+    // it resolves to `CastWireTarget::Unit` or refuses). So: present, silent, and honest — what it
+    // must NOT be is absent, which is what took the handler down with it.
+    g.set(
+        "SpellTargetUnit",
+        lua.create_function(|_, _token: Option<String>| Ok(()))?,
+    )?;
+
     // ClearTarget() — drop the current selection (the reference API returns 1 when it cleared,
     // nil when there was nothing to clear; `ToggleGameMenu`'s ESC chain depends on the nil to
     // fall through to opening the menu). Reads the same per-token store `UnitExists("target")`

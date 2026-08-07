@@ -401,6 +401,11 @@ fn snapshot(
                 bind_on_pickup: t.is_some_and(|t| t.bonding == BIND_WHEN_PICKED_UP),
                 time_left_ms: r.remaining_ms,
                 item_id: r.item_id,
+                // The icon button's ctrl/shift arms read this (`GetLootRollItemLink`, decision
+                // 1059). Same builder and same arguments as the announcement lines' own link a few
+                // functions up ([`render`]) — one `item_link` call site per resolved roll, `None`
+                // until the template answers, exactly like `name`/`quality` beside it.
+                link: t.map(|t| item_link(r.item_id, &t.name, t.quality)),
             }
         })
         .collect();
@@ -832,6 +837,8 @@ mod tests {
             bind_on_pickup: name.is_some(),
             time_left_ms,
             item_id: 17182,
+            // Lands with the name — one template answer fills both (decision 1059).
+            link: name.map(|n| item_link(17182, n, 4)),
         }
     }
 

@@ -322,6 +322,12 @@ fn resolve_item(
     let texture = icons
         .and_then(|i| i.catalog.get(it.display_id))
         .and_then(|d| d.icon.clone());
+    // The ctrl/shift click arms' payload (`GetQuestItemLink`, decisions 1059/1060) — built through
+    // THE link builder, never a hand-rolled format (`ui_items::item_link`'s own doc). `None` until
+    // the template lands: the link needs both the name and the quality.
+    let link = name
+        .as_ref()
+        .map(|n| crate::ui_items::item_link(it.item_id, n, quality));
     QuestItemView {
         name,
         texture,
@@ -329,6 +335,7 @@ fn resolve_item(
         quality,
         item_id: it.item_id,
         usable: true, // v1: soft gray only, server authoritative (decision 0088)
+        link,
     }
 }
 

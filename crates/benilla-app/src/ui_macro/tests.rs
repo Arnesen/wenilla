@@ -213,3 +213,70 @@ fn either_line_ending_splits_a_body() {
         "\\r alone splits; \\r\\n does not leave an empty token"
     );
 }
+
+/// **Every icon the chooser offers RESOLVES to real art, and the catalog is the archive's** — the
+/// tripwire for B221, where four pages of the picker each showed a solid WHITE cell.
+///
+/// This is `ui_script::shipped_xml_tests`' resolve sweep for the paths that sweep structurally
+/// cannot see. That one walks static `file=` attributes in our own XML; a macro icon never appears
+/// in XML — it arrives at runtime as `SetTexture(GetMacroIconInfo(i))`. Nothing checked that those
+/// resolve, and an unresolvable path drew as an opaque white rectangle, so the picker shipped with
+/// white squares in it and every gate green.
+///
+/// The catalog is now the archive enumeration the reference itself does
+/// ([`benilla_formats::load_macro_icons`]), not a `SpellIcon.dbc` scan, so a name with no file
+/// behind it can no longer enter the list at all — what this guards is the other half: that the
+/// **resolution rule** still finds every enumerated name. `Ability_Druid_Mangle.tga` is the entry
+/// that matters (the chooser stores names extension-stripped, and `…Mangle.tga.blp` ships): it only
+/// resolves via the reference's second `.blp` candidate, and the old rule had no second candidate.
+///
+/// Resolution goes through the renderer's own [`crate::assets::sprite_candidates`], never a copy of
+/// it: a sweep re-implementing the rule could agree with itself while disagreeing with what draws.
+///
+/// Needs client data; skips without it, like the XML sweep.
+#[test]
+fn every_macro_chooser_icon_resolves_in_the_client_archives() {
+    /// Icons on a stock 5875 install: `patch.MPQ` 77 + `interface.MPQ` 443 = 520 raw names under
+    /// `Interface\Icons\` matching `Spell_`/`Ability_`, less 3 that differ only by case or
+    /// extension — independently counted off the binary's own enumeration by the wow-re note
+    /// `system/ui/scratch/macro-icon-chooser.md`. The DBC scan this replaced served 521, a
+    /// different set: it included five names with no file and missed art the archive has.
+    const CHOOSER_ICONS_5875: usize = 517;
+
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: no client data at {}", data.display());
+        return;
+    }
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let icons = benilla_formats::load_macro_icons(&mut chain).expect("load chooser catalog");
+    assert_eq!(
+        icons.len(),
+        CHOOSER_ICONS_5875,
+        "chooser catalog size moved — the enumeration or its filter changed"
+    );
+
+    let missing: Vec<String> = icons
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !crate::assets::sprite_candidates(p)
+                .iter()
+                .any(|c| chain.contains(c))
+        })
+        .map(|(i, p)| format!("#{} {p}", i + 1))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "chooser icons that resolve to nothing (each draws as a white square): {missing:#?}"
+    );
+
+    // Sorted, not archive order: the reference `qsort`s case-insensitively before deduping, so the
+    // order the player scrolls is alphabetical.
+    let mut sorted = icons.clone();
+    sorted.sort_by_key(|p| p.to_ascii_lowercase());
+    assert_eq!(
+        icons, sorted,
+        "the chooser list must be case-insensitively sorted"
+    );
+}

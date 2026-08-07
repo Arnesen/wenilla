@@ -5,8 +5,8 @@
 //! folder's one-file-per-window convention.
 
 use benilla_ui::script::{
-    ContainerState, ExtractedQuad, ItemStatsHead, MerchantItem, MerchantState, QuadContent,
-    ScriptValue, SoundRequest, UiScript,
+    ContainerState, DressUpIntent, ExtractedQuad, ItemStatsHead, MerchantItem, MerchantState,
+    QuadContent, ScriptValue, SoundRequest, UiScript,
 };
 
 /// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
@@ -91,6 +91,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
                 num_available: -1,
                 item_id: 159,
                 stats: None,
+                link: None,
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -100,6 +101,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
                 num_available: 5,
                 item_id: 1251,
                 stats: None,
+                link: None,
             },
         ],
         ..Default::default()
@@ -589,6 +591,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
                     block: 0,
                     sell_price: 0,
                 }),
+                link: None,
             },
             MerchantItem {
                 name: Some("Chipped Buckler".into()),
@@ -611,6 +614,7 @@ fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
                     block: 1,
                     sell_price: 0,
                 }),
+                link: None,
             },
         ],
         ..Default::default()
@@ -794,6 +798,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
                 num_available: -1,
                 item_id: 159,
                 stats: None,
+                link: None,
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -803,6 +808,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
                 num_available: -1,
                 item_id: 1251,
                 stats: None,
+                link: None,
             },
         ],
         ..Default::default()
@@ -937,6 +943,7 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
             num_available: -1,
             item_id: 159,
             stats: None,
+            link: None,
         }],
         buyback: vec![
             buyback_item("Bandit Cloak", 116),
@@ -1089,6 +1096,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
                 num_available: -1,
                 item_id: 159,
                 stats: None,
+                link: None,
             },
             MerchantItem {
                 name: Some("Linen Bandage".into()),
@@ -1098,6 +1106,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
                 num_available: 5,
                 item_id: 1251,
                 stats: None,
+                link: None,
             },
         ],
         ..Default::default()
@@ -1199,4 +1208,115 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
         has("5"),
         "recipient money shows the digit. all text quads: {texts:?}"
     );
+}
+
+/// The vendor row's LEFT-button modifier fork (ref `MerchantItemButton_OnClick`,
+/// MerchantFrame.lua l.301-306): CTRL previews the item in the dressing room (decision 1060), SHIFT
+/// posts its link into an open chat edit box (decision 1059) — both over `GetMerchantItemLink`, the
+/// binding this arc added. Neither may buy: this window's click *is* a purchase, so a modified click
+/// that fell through would spend the player's money.
+///
+/// The controls that must not change: a plain RIGHT-click still buys, and (the reference's own
+/// right-button guard, l.332-333) a CTRL-held right-click buys nothing at all.
+#[test]
+fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
+    const WATER_LINK: &str = "|cffffffff|Hitem:159:0:0:0|h[Refreshing Spring Water]|h|r";
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "UIParent.xml", // BenillaChatEdit_InsertLink, the shared shift-insert helper
+        "GameTooltip.xml",
+        "MerchantFrame.xml",
+        "DressUpFrame.xml",
+        "ChatFrame.xml",
+    ] {
+        load_xml(&s, file);
+    }
+
+    s.set_money(12_345);
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            name: Some("Refreshing Spring Water".into()),
+            texture: Some("Interface\\Icons\\INV_Drink_18".into()),
+            price: 25,
+            quantity: 1,
+            num_available: -1,
+            item_id: 159,
+            stats: None,
+            // Fed exactly as `ui_merchant.rs` builds it off the row's template answer.
+            link: Some(WATER_LINK.into()),
+        }],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.resolve();
+    let quads = s.extract();
+    let icon = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("INV_Drink_18"))
+        })
+        .and_then(|q| q.rect)
+        .expect("no row icon quad");
+    let (x, y) = (
+        (icon.left + icon.right) * 0.5,
+        (icon.bottom + icon.top) * 0.5,
+    );
+
+    // The control first: an unmodified right-click still buys row 1.
+    s.mouse_button(x, y, "RightButton", true);
+    s.mouse_button(x, y, "RightButton", false);
+    assert_eq!(
+        s.take_merchant_buys(),
+        vec![(1, 1)],
+        "an unmodified right-click still buys"
+    );
+
+    // The reference's right-button guard (l.332-333): CTRL-held, a right-click does nothing.
+    s.set_modifiers(false, true, false);
+    s.mouse_button(x, y, "RightButton", true);
+    s.mouse_button(x, y, "RightButton", false);
+    s.set_modifiers(false, false, false);
+    assert!(
+        s.take_merchant_buys().is_empty(),
+        "a ctrl-held right-click must not buy (ref l.332-333)"
+    );
+
+    // SHIFT + LEFT with the chat edit box open → the link, no purchase.
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.set_modifiers(true, false, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        WATER_LINK,
+        "the vendor row's full escaped link landed in the chat box"
+    );
+    assert!(
+        s.take_merchant_buys().is_empty(),
+        "a shift-click must not also buy"
+    );
+
+    // CTRL + LEFT → the dressing room wearing it, no purchase. Last: opening the room takes a
+    // UIPanel slot and can move the vendor window.
+    s.set_modifiers(false, true, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.take_dressup_intents(),
+        vec![DressUpIntent::Dress, DressUpIntent::TryOn(159)],
+        "re-dress first, then try the vendor's item on"
+    );
+    assert!(
+        s.take_merchant_buys().is_empty(),
+        "a ctrl-click must not also buy"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

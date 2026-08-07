@@ -179,6 +179,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
         count: 1,
         quality,
         usable: true,
+        ..Default::default()
     };
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
@@ -239,9 +240,17 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     );
 
     // The detail panel's choice rows are informational only (ref: only the REWARD panel's rows
-    // select) — clicking one must not raise (no OnClick wired) and must not set an itemChoice.
+    // select). They DO carry an OnClick now (`BenillaQuestItem_OnClick`, the ref's own
+    // QuestItemTemplate script — the ctrl/shift fork, decisions 1059/1060), but it has no select
+    // arm at all: an unmodified click must not raise and must not set an itemChoice.
     s.run("BenillaQuestDetailChoice1:Click()").ok();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return BenillaQuestFrame.itemChoice")
+            .unwrap(),
+        0,
+        "a detail-panel row never selects a reward"
+    );
 }
 
 /// The reward panel's choice rows ARE selectable (ref `QuestRewardItem_OnClick`) — clicking one moves
@@ -263,6 +272,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
         count: 1,
         quality: 1,
         usable: true,
+        ..Default::default()
     };
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Reward,
@@ -645,4 +655,128 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
         t2 <= b1 + 0.5,
         "row 2 starts at/below row 1's bottom: row1 bottom {b1}, row2 top {t2}"
     );
+}
+
+/// The questgiver rows' modifier fork (decisions 1059/1060), on the panel where it can do the most
+/// damage: the REWARD panel, whose choice rows are also the quest's reward *selection*. Ref
+/// `QuestRewardItem_OnClick` (QuestFrame.lua:127-141) — ctrl previews, shift posts the link, and the
+/// choice SELECT is the third arm, so neither modified click may also pick the reward. The fixed
+/// reward row beside it rides the plainer `QuestItem_OnClick` (l.115-125, the base
+/// QuestItemTemplate's own OnClick) and previews the same way with no select arm to disturb.
+///
+/// Ordering note: the dressing room docks the same left UIPanel slot as the questgiver window
+/// (`UiPanels.xml`, `pushable = 2` vs the giver's `0`), so the ctrl arm is exercised last — opening
+/// it closes the giver window, exactly as it does in play.
+#[test]
+fn reward_rows_preview_and_post_without_selecting_the_choice() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "QuestFrame.xml");
+    load_xml(&s, "UIParent.xml"); // BenillaChatEdit_InsertLink lives here
+    load_xml(&s, "DressUpFrame.xml"); // DressUpItemLink lives here
+    load_xml(&s, "ChatFrame.xml"); // ChatFrameEditBox lives here
+
+    const SWORD: &str = "|cffffffff|Hitem:2299:0:0:0|h[Worn Sword]|h|r";
+    const MACE: &str = "|cffffffff|Hitem:2300:0:0:0|h[Worn Mace]|h|r";
+    let item = |id: u32, name: &str, link: &str| benilla_ui::script::QuestItemView {
+        item_id: id,
+        name: Some(name.into()),
+        texture: None,
+        count: 1,
+        quality: 1,
+        usable: true,
+        link: Some(link.into()),
+    };
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Reward,
+        title: "A Threat Within".into(),
+        body: "Well done.".into(),
+        choices: vec![
+            item(2299, "Worn Sword", SWORD),
+            item(2300, "Worn Mace", MACE),
+        ],
+        rewards: vec![item(
+            2504,
+            "Worn Shortbow",
+            "|cffffffff|Hitem:2504:0:0:0|h[Worn Shortbow]|h|r",
+        )],
+        ..QuestState::default()
+    }));
+    s.fire_event(
+        "QUEST_COMPLETE",
+        vec![ScriptValue::Str("Marshal McBride".into())],
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The regression this fork could break: a PLAIN click still picks the choice (the ref's third
+    // arm). Row 2 is picked here so the modified clicks below — aimed at row 1 — would visibly
+    // move it if they leaked into the select arm.
+    s.run("BenillaQuestRewardChoice2:Click()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return BenillaQuestFrame.itemChoice")
+            .unwrap(),
+        2,
+        "a plain click still selects the reward choice"
+    );
+    assert!(s
+        .eval::<bool>("return BenillaQuestRewardChoiceHighlight:IsShown()")
+        .unwrap());
+    assert!(
+        s.take_dressup_intents().is_empty(),
+        "a plain click never opens the dressing room"
+    );
+
+    // SHIFT + chat open → the row's full escaped link, and the selection is untouched.
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.set_modifiers(true, false, false);
+    s.run("BenillaQuestRewardChoice1:Click()").unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        SWORD,
+        "shift-click posted choice 1's link"
+    );
+    assert_eq!(
+        s.eval::<i64>("return BenillaQuestFrame.itemChoice")
+            .unwrap(),
+        2,
+        "the shift arm returns — it must NOT also select the clicked choice"
+    );
+
+    // A FIXED reward row (plain BenillaQuestItemTemplate → BenillaQuestItem_OnClick) posts too.
+    s.run("ChatFrameEditBox:SetText(\"\")").unwrap();
+    s.set_modifiers(true, false, false);
+    s.run("BenillaQuestRewardReward1:Click()").unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.eval::<String>("return ChatFrameEditBox:GetText()")
+            .unwrap(),
+        "|cffffffff|Hitem:2504:0:0:0|h[Worn Shortbow]|h|r"
+    );
+
+    // CTRL → the dressing room wearing the clicked reward, and STILL no reselect. The intent pair
+    // is ordered: Dress (the room was closed, so it re-dresses in the player's own gear) then TryOn.
+    s.set_modifiers(false, true, false);
+    s.run("BenillaQuestRewardChoice1:Click()").unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.take_dressup_intents(),
+        vec![
+            benilla_ui::script::DressUpIntent::Dress,
+            benilla_ui::script::DressUpIntent::TryOn(2299)
+        ],
+        "ctrl-click opened the room wearing choice 1"
+    );
+    assert_eq!(
+        s.eval::<i64>("return BenillaQuestFrame.itemChoice")
+            .unwrap(),
+        2,
+        "the ctrl arm returns — it must NOT also select the clicked choice"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

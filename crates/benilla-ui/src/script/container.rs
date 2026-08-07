@@ -180,13 +180,25 @@ impl super::UiScript {
         std::mem::take(&mut self.model_mut().container_destroys)
     }
 
-    /// The Lua-set **displayed-cursor override** (`Show*SellCursor`/`ShowInspectCursor`/
-    /// `ResetCursor`): `None` = show the base (world-classifier) mode, else the mode the FrameXML
-    /// cursor family armed. The app overlays it over the world classifier's Point — the 5875
-    /// mechanism (wow-re cursor-system.md §7: the displayed mode swaps only when the base mode is
-    /// Point; `ResetCursor` restores displayed = base).
+    /// The mode the last FrameXML cursor call armed — `None` after a `ResetCursor`. This is the
+    /// *value* of the most recent write; whether a write happened at all is
+    /// [`Self::take_cursor_write`], and that is what the app acts on (decision 1061).
     pub fn ui_cursor(&self) -> Option<UiCursorMode> {
         self.model_ref().ui_cursor
+    }
+
+    /// Drain the pending cursor write: `Some(mode)` = a `Show*Cursor` armed `mode`, `Some(None)` =
+    /// a `ResetCursor` asked for the base mode, `None` = **no FrameXML cursor call happened**, so
+    /// the sticky mode stands untouched.
+    ///
+    /// The three-state return is the point. A UI element with no cursor handler must leave the
+    /// cursor exactly as it was — that is how an armed spell keeps its cast cursor while the mouse
+    /// crosses a spellbook button, and reading a two-state latch instead is what made it snap to
+    /// Point (decision 1061).
+    #[allow(clippy::option_option)]
+    pub fn take_cursor_write(&mut self) -> Option<Option<UiCursorMode>> {
+        let mut model = self.model_mut();
+        std::mem::take(&mut model.ui_cursor_dirty).then_some(model.ui_cursor)
     }
 }
 
@@ -204,6 +216,14 @@ pub enum UiCursorMode {
     UnableBuy,
     /// Inspect(7) — the magnifier the Ctrl-hover shows over an item (`ShowInspectCursor`).
     Inspect,
+    /// Point(1) — `SetCursor("POINT_CURSOR")`, and what a `ResetCursor` resolves to.
+    Point,
+    /// Cast(2) — `SetCursor("CAST_CURSOR")`: the lit cast cursor a unit frame shows while a spell
+    /// that CAN bind that unit is armed (`UnitFrame_OnEnter`).
+    Cast,
+    /// UnableCast(22) — `SetCursor("CAST_ERROR_CURSOR")`: the greyed twin, for a unit the armed
+    /// spell cannot bind, and for `UnitFrame_OnLeave` while still targeting.
+    CastError,
 }
 
 /// The pick/place/swap gesture behind `PickupContainerItem` (decision 0216 §2, amended by 0218;
@@ -512,8 +532,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ShowContainerSellCursor(bag, slot) — arm the pouch cursor for a sellable hover (5875
     // `0x4fa460`, wow-re cursor-system.md §7: Buy(3) only when the slot actually holds an item —
     // an empty slot leaves the cursor unchanged; no Unable twin, no SellPrice check — selling
-    // never grays). The spell-targeting and base-mode-Point gates live app-side where those states
-    // are known.
+    // never grays), and the reference's own `IsTargeting` bail at its first instruction.
     lua.globals().set(
         "ShowContainerSellCursor",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
@@ -523,8 +542,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .get(&bag)
                 .and_then(|c| c.slots.get(&slot))
                 .is_some();
-            if occupied {
+            // `IsTargeting` bails at the function's FIRST instruction — an armed spell suppresses
+            // the sell cursor outright (wow-re `item-target-cursor-and-dropitemonunit.md`). Now
+            // that the mode is sticky, this gate has to be here rather than app-side: a write of
+            // Buy would otherwise stamp over the cast cursor and there would be no per-frame world
+            // write to put it back.
+            if occupied && !model.spell_targeting {
                 model.ui_cursor = Some(UiCursorMode::Buy);
+                model.ui_cursor_dirty = true;
             }
             Ok(())
         })?,
@@ -536,9 +561,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "ShowInspectCursor",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .ui_cursor = Some(UiCursorMode::Inspect);
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.ui_cursor = Some(UiCursorMode::Inspect);
+            model.ui_cursor_dirty = true;
             Ok(())
         })?,
     )?;
@@ -558,6 +583,36 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // SetCursor(name) — the reference's `0x489490`: a name->mode table (POINT/CAST/BUY/ATTACK =
+    // 1..4, each with an `*_ERROR` twin at +20) into `CursorSetMode`, falling back to a custom
+    // bitmap for an unknown name. Only the modes FrameXML actually names are mapped here; anything
+    // else is ignored rather than guessed, and a **no-arg call is a `ResetCursor`**, which is the
+    // reference's own documented shape.
+    //
+    // Its one shipped caller is the unit-frame hover pair (`UnitFrame_OnEnter`/`OnLeave`), which is
+    // the ONLY lit/grey cursor split over a UI element in 1.12 — and it is authored in Lua, not in
+    // C++ (wow-re `item-target-cursor-and-dropitemonunit.md` §4.3).
+    lua.globals().set(
+        "SetCursor",
+        lua.create_function(|lua, name: Option<String>| {
+            let mode = match name.as_deref() {
+                None => None, // no-arg == ResetCursor
+                Some("POINT_CURSOR") => Some(UiCursorMode::Point),
+                Some("CAST_CURSOR") => Some(UiCursorMode::Cast),
+                Some("CAST_ERROR_CURSOR") => Some(UiCursorMode::CastError),
+                Some("BUY_CURSOR") => Some(UiCursorMode::Buy),
+                Some("BUY_ERROR_CURSOR") => Some(UiCursorMode::UnableBuy),
+                // An unmapped name: the reference would load a custom bitmap. We have no such art,
+                // and silently painting the wrong stock cursor would be worse than leaving the
+                // sticky mode alone, so this is a no-op rather than a guess.
+                Some(_) => return Ok(()),
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.ui_cursor = mode;
+            model.ui_cursor_dirty = true;
+            Ok(())
+        })?,
+    )?;
     // ResetCursor — displayed mode back to the base (the world classifier's) mode (5875
     // `0x48ac70` → `0x523d30`): clear the whole override, whichever `Show*Cursor` armed it.
     lua.globals().set(
@@ -565,6 +620,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             model.ui_cursor = None;
+            model.ui_cursor_dirty = true;
             Ok(())
         })?,
     )?;

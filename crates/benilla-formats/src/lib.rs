@@ -26,7 +26,8 @@ mod unit_blood;
 pub use creatures::{
     load_creature_catalog, CreatureCatalog, CreatureModel, FootprintParams, NpcAppearance,
 };
-pub use dbc::load_macro_icons;
+pub use macro_icons::load_macro_icons;
+mod macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
@@ -40,6 +41,10 @@ pub use factions::{
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
+mod creature_families;
+pub use creature_families::{
+    load_creature_families, load_pet_food_names, CreatureFamilies, CreatureFamily, PetFoodNames,
+};
 mod gameobjects;
 pub use gameobjects::{
     go_sound_slot, load_gameobject_catalog, load_gameobject_sounds, GameObjectCatalog,

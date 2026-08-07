@@ -29,6 +29,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_items::item_link;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -206,6 +207,12 @@ fn resolve_item(
     } else {
         item.current_count as i32
     };
+    // The row's link (`GetMerchantItemLink`, decision 1059) — what the row click's ctrl/shift arms
+    // hand on. Off the SAME one template answer as `name`/`stats`, through the one shared builder
+    // ([`crate::ui_items::item_link`], our transcription of the client's own `0x52adb0`): a vendor
+    // row carries no enchant and no random property on the wire, so the no-ids form is the right
+    // one here.
+    let link = template.map(|t| item_link(item.entry, &t.name, t.quality));
     MerchantItem {
         name,
         texture,
@@ -214,6 +221,7 @@ fn resolve_item(
         num_available,
         item_id: item.entry,
         stats,
+        link,
     }
 }
 
@@ -274,6 +282,10 @@ fn resolve_buyback(
         num_available: 0,
         item_id: entry,
         stats,
+        // No link on a buyback row: 1.12 has no `GetBuybackItemLink`, and the reference's buyback
+        // click carries no ctrl/shift branch at all — it is a bare `BuybackItem(this:GetID())`
+        // (`MerchantFrame.lua:358-361`). Nothing reads it, so nothing builds it (decision 1059).
+        link: None,
     }
 }
 
