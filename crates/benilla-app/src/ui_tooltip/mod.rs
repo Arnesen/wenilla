@@ -292,7 +292,7 @@ const EFFECT_ATTACK: u32 = 78;
 /// gate** while dodge/parry/block require it. That is why Attack — whose `Attributes` carry `0x10`,
 /// not the passive `0x40` — still shows a crit line, which is exactly the missing line reported.
 fn chance_line(d: &benilla_formats::SpellDisplay, store: Option<&ObjectStore>) -> Option<String> {
-    let (label, percentage) = match d.effect_1 {
+    let (label, percentage) = match d.effects[0] {
         EFFECT_ATTACK => ("crit", store?.0.player_crit_percentage()?),
         EFFECT_DODGE if d.passive => ("dodge", store?.0.player_dodge_percentage()?),
         EFFECT_PARRY if d.passive => ("parry", store?.0.player_parry_percentage()?),

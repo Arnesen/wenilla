@@ -56,9 +56,14 @@ pub struct SpellDisplay {
     /// three exclusions ([`Self::in_spellbook`]). Nonzero keeps the spell out of the book; reads
     /// 0 for every ordinary player spell.
     pub cast_ui: u32,
-    /// `Effect[0]` (column 61, module docs) — the first effect type. Only
-    /// [`Self::is_melee_auto_attack`] consumes it (`== SPELL_EFFECT_ATTACK`).
-    pub effect_1: u32,
+    /// `Effect[3]` (column 61 == [`COL_EFFECT_1`], module docs) — each effect's type. Slot 0 is what
+    /// almost every consumer wants (the auto-attack gate [`Self::is_melee_auto_attack`], the
+    /// tradeskill/enchant/duel classifications); the trainer's icon law is the one caller that scans
+    /// all three, hunting a learn-wrapper effect in any slot (wow-re
+    /// `system/ui/scratch/spell-icon-substitution-law.md` §1, `0x4d8fed`'s three-slot loop). Carried
+    /// as the `[T; 3]` array every other per-effect column already uses — it was a lone `effect_1`
+    /// until that scan needed the siblings.
+    pub effects: [u32; 3],
     /// This spell's `SPELL_EFFECT_OPEN_LOCK` effect, or `None` if it opens no lock. The GameObject
     /// interact-cast (decisions 0239/0752) matches it against a lock slot across the player's known
     /// spells: "Opening" for keyless chests, "Mining"/"Herb Gathering"/"Pick Lock" for skill locks.
@@ -259,7 +264,7 @@ impl Default for SpellDisplay {
             attributes_ex3: 0,
             passive: false,
             cast_ui: 0,
-            effect_1: 0,
+            effects: [0, 0, 0],
             open_lock: None,
             spell_level: 0,
             dispel: 0,
@@ -452,7 +457,7 @@ impl SpellDisplay {
     /// carrying it is 6603 "Attack" (its `SpellIconID` → the `Temp` placeholder the client never
     /// shows, substituting the main-hand weapon icon instead).
     pub fn is_melee_auto_attack(&self) -> bool {
-        self.effect_1 == SPELL_EFFECT_ATTACK
+        self.effects[0] == SPELL_EFFECT_ATTACK
     }
 
     /// The spell **tooltip's** passive gate (wow-re `tooltip-content-law.md` §3.4): the
@@ -469,7 +474,7 @@ impl SpellDisplay {
     pub fn tooltip_omits_cast_line(&self) -> bool {
         self.passive
             || matches!(
-                self.effect_1,
+                self.effects[0],
                 SPELL_EFFECT_TRADE_SKILL | SPELL_EFFECT_ATTACK
             )
     }
@@ -480,7 +485,7 @@ impl SpellDisplay {
     /// show a pie AND their presses can never be cooldown-refused.
     pub fn cooldown_query_excluded(&self) -> bool {
         matches!(
-            self.effect_1,
+            self.effects[0],
             SPELL_EFFECT_TRADE_SKILL | SPELL_EFFECT_ATTACK
         )
     }

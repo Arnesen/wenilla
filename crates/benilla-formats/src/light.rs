@@ -241,7 +241,11 @@ fn light_params_schema() -> Schema {
 }
 
 /// The client's distance→strength ramp for an area light: `1` within `start`, falling linearly to
-/// `0` at `end` (and `0` beyond). Matches `getEnvInfo`'s `blendAlpha`.
+/// `0` at `end` (and `0` beyond). Byte-VERIFIED (`dn_light_select 0x6d2d00`, wow-re
+/// `system/lighting/scratch/ctb.md`): `w = dist ≤ inner ? 1 : 1 − (dist−inner)/(outer−inner)`, with
+/// the containment gate `dist ≤ outer` — so a sphere entering at its outer radius enters at **w = 0**.
+/// That is what makes the area blend continuous across a sphere boundary, and it is the invariant
+/// decision 1104's water fix rests on.
 fn blend_alpha(dist: f32, start: f32, end: f32) -> f32 {
     if dist >= end {
         0.0
@@ -491,7 +495,17 @@ impl LightCatalog {
             .and_then(atmo_of)
             .unwrap_or(Atmosphere::DEFAULT);
 
-        // Collect local spheres covering `pos` with their blendAlpha, strongest first.
+        // Collect every local sphere CONTAINING `pos` (`dist ≤ outer`), then apply them
+        // **farthest first** so the nearest lands last and dominates.
+        //
+        // The order is by DISTANCE, not by blend weight — byte-VERIFIED (`dn_light_select 0x6d2d00`,
+        // wow-re `ctb.md` + `merge.md`, the latter's ordering corrected by an emulator difftest
+        // oracle): the client pushes the in-radius rows into a **max-heap keyed on distance** and
+        // drains it root-first, calling `dn_record_overblend 0x6d30e0(dst, row, w)` for **every**
+        // entry including a lone one. Sorting by weight instead (what we did before decision 1104)
+        // inverts the pair whenever a wide sphere out-weighs a tight near one, and then the near
+        // zone's own palette gets *diluted* by its neighbour instead of overwriting it — the
+        // Stranglethorn river that read muddy yellow-green instead of LP 26's grey-green.
         let mut locals: Vec<(f32, &Light)> = self
             .lights
             .iter()
@@ -501,15 +515,14 @@ impl LightCatalog {
                     .map(|i| (l.pos[i] - pos[i]).powi(2))
                     .sum::<f32>()
                     .sqrt();
-                let a = blend_alpha(d, l.falloff_start, l.falloff_end);
-                (a > 0.0).then_some((a, l))
+                (d <= l.falloff_end).then_some((d, l))
             })
             .collect();
         locals.sort_by(|a, b| b.0.total_cmp(&a.0));
 
-        for (alpha, l) in locals {
+        for (dist, l) in locals {
             if let Some(atmo) = atmo_of(l) {
-                acc = acc.lerp(&atmo, alpha);
+                acc = acc.lerp(&atmo, blend_alpha(dist, l.falloff_start, l.falloff_end));
             }
         }
         acc
@@ -518,6 +531,12 @@ impl LightCatalog {
     /// Debug (step 2): dump every light sphere on `map` near `pos` — distance, falloff, `blendAlpha`,
     /// and its clear-weather ambient + sun colors — then the faithful blended result vs the single
     /// [`pick_light`] sample, so we can see whether the residual under-red lives in the **values**.
+    ///
+    /// Rows print **nearest first** but the blend applies them **farthest first** (see
+    /// [`Self::sample_blended`]) — the last row listed is the first one merged, and the top row wins.
+    /// The closing `water` lines are the river/lake and ocean swatch endpoints: a discontinuity there
+    /// across two nearby positions is the Tirisfal→Silverpine class of bug (decision 1104), and it is
+    /// invisible in the ambient/sun columns because the water rows are their own bands.
     pub fn debug_blend(&self, map: u32, pos: [f32; 3], time: u32) {
         let mut rows: Vec<(f32, f32, &Light)> = self
             .lights
@@ -584,6 +603,22 @@ impl LightCatalog {
             "  => blended    : amb {} sun {}",
             c(blended.ambient),
             c(blended.sun_diffuse)
+        );
+        // The water swatch is what the liquid materials actually read (`WowLighting.water_*`), and it
+        // rides this same blend — print it so "the water popped here" is one command, not a session.
+        println!(
+            "  => water river: shallow {} a={:.2}  deep {} a={:.2}",
+            c(blended.water_river[0]),
+            blended.water_river_alpha[0],
+            c(blended.water_river[1]),
+            blended.water_river_alpha[1],
+        );
+        println!(
+            "  => water ocean: shallow {} a={:.2}  deep {} a={:.2}",
+            c(blended.water_ocean[0]),
+            blended.water_ocean_alpha[0],
+            c(blended.water_ocean[1]),
+            blended.water_ocean_alpha[1],
         );
     }
 

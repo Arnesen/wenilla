@@ -404,16 +404,24 @@
             addRow("used", LABEL_USED, GRAY_CODE)
         end
 
-        -- A row's func fires with the row button as `this` (this.value / this.checked = the PRE-click
-        -- state, since benilla's kit doesn't auto-toggle the check). Flip the engine filter, re-init the
-        -- open menu to refresh its checks (keepShownOnClick keeps it up), reset scroll, repaint.
+        -- A row's func fires with the row button as `this`, carrying the PRE-click state (this.value /
+        -- this.checked): the kit's UIDropDownMenuButton_OnClick runs the func FIRST and only then, for a
+        -- keepShownOnClick row, flips the check texture + this.checked itself. So the func's whole job is
+        -- to flip the ENGINE filter to the inverse of the pre-click check, reset scroll, and repaint —
+        -- the visible check is the kit's to move, and the next open re-derives every row from
+        -- GetTrainerServiceTypeFilter anyway.
+        --
+        -- It must NOT re-Initialize the open menu here. Doing so re-ran AddButton, which sets
+        -- `button.checked` (and the Check texture) from the fresh engine state — so the kit's flip
+        -- immediately afterwards inverted the ALREADY-correct row and put it back. The check never
+        -- appeared to move, and because `this.checked` then read stale-true forever, a filter switched
+        -- off could never be switched back on.
         function BenillaTrainerFilterDropDown_OnClick()
             if this.checked then
                 SetTrainerServiceTypeFilter(this.value, 0)
             else
                 SetTrainerServiceTypeFilter(this.value, 1)
             end
-            UIDropDownMenu_Initialize(BenillaTrainerFilterDropDown, BenillaTrainerFilterDropDown_Initialize)
             BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
             BenillaTrainerFrame_Update()
         end

@@ -209,9 +209,19 @@ impl UiScript {
                             alpha_gradient: data.alpha_gradient,
                         }
                     } else {
+                        // The draw gate is the TEXTURE slot, never the colour (`0x7706e0`: `+0xcc`
+                        // empty -> emit NOTHING — `texture-color-composition.md` §4, VERIFIED). A
+                        // vertex colour is a tint on whatever texture exists; alone it is not
+                        // drawable content — it survives `SetTexture(nil)` by design ("a tint
+                        // outlives the art it was tinting") and used to leak out of here as a
+                        // solid plate the moment the art was cleared (the white action buttons on
+                        // a character switch; the 2026-07-10 grey wells were the same class).
+                        let has_texture = data.texture.is_some() || data.fill.is_some();
                         QuadContent::Texture {
                             path: data.texture,
-                            color: texture_color(data.fill, data.vertex_color),
+                            color: has_texture
+                                .then(|| texture_color(data.fill, data.vertex_color))
+                                .flatten(),
                             additive: data.additive,
                             tex_coords: data.tex_coords,
                             circular: data.circular,

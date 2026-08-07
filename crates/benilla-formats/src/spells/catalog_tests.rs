@@ -90,7 +90,10 @@ fn real_spell_catalog_reads_ranged_attributes() {
     // the client's own melee-substitution trigger (decision 0231); an ordinary spell doesn't.
     // A column slip on Effect[0] fails here.
     let attack = cat.get(6603).expect("Attack");
-    assert_eq!(attack.effect_1, 78, "6603 Effect[0] == SPELL_EFFECT_ATTACK");
+    assert_eq!(
+        attack.effects[0], 78,
+        "6603 Effect[0] == SPELL_EFFECT_ATTACK"
+    );
     assert!(attack.is_melee_auto_attack());
     assert!(!fireball.is_melee_auto_attack());
     assert!(
@@ -307,20 +310,23 @@ fn real_spell_catalog_pins_the_skin_latch_effects() {
 
     // Skinning (8613) — `0x4b2623: cmp [esi+0xf4], 0x5f`.
     assert_eq!(
-        cat.get(8613).unwrap().effect_1,
+        cat.get(8613).unwrap().effects[0],
         crate::SPELL_EFFECT_SKINNING,
         "Skinning carries SPELL_EFFECT_SKINNING (95 == 0x5f)"
     );
     // Remove Insignia (22027) — the `[0xb700e8]` half, `0x4b2632: cmp [esi+0xf4], 0x74`.
     assert_eq!(
-        cat.get(22027).unwrap().effect_1,
+        cat.get(22027).unwrap().effects[0],
         0x74,
         "Remove Insignia carries SPELL_EFFECT_SKIN_PLAYER_CORPSE (116 == 0x74)"
     );
     // Nothing an ordinary caster starts with does — the latch stays empty for a non-skinner.
-    assert_ne!(cat.get(133).unwrap().effect_1, crate::SPELL_EFFECT_SKINNING);
     assert_ne!(
-        cat.get(6247).unwrap().effect_1,
+        cat.get(133).unwrap().effects[0],
+        crate::SPELL_EFFECT_SKINNING
+    );
+    assert_ne!(
+        cat.get(6247).unwrap().effects[0],
         crate::SPELL_EFFECT_SKINNING
     );
 }
@@ -791,7 +797,7 @@ fn real_crafting_columns_read_created_item_and_focus() {
     ] {
         let d = cat.get(spell).expect("recipe in the catalog");
         assert_eq!(
-            d.effect_1, SPELL_EFFECT_CREATE_ITEM,
+            d.effects[0], SPELL_EFFECT_CREATE_ITEM,
             "spell {spell} creates"
         );
         assert_eq!(d.effect_item_type[0], item, "spell {spell} created item");
@@ -806,7 +812,7 @@ fn real_crafting_columns_read_created_item_and_focus() {
     // The openers carry effect 47 and no product: Tailoring 3908, Enchanting 7411.
     for opener in [3908u32, 7411] {
         let d = cat.get(opener).expect("opener in the catalog");
-        assert_eq!(d.effect_1, SPELL_EFFECT_TRADE_SKILL, "opener {opener}");
+        assert_eq!(d.effects[0], SPELL_EFFECT_TRADE_SKILL, "opener {opener}");
         assert_eq!(
             d.effect_item_type, [0; 3],
             "opener {opener} creates nothing"
@@ -828,14 +834,14 @@ fn the_tooltip_gates_read_effect_and_mask() {
     assert!(attribute_passive.tooltip_omits_cast_line());
     // 6603 "Attack"'s shape: Effect[0] = 78, attributes 0x10 (NOT the passive bit).
     let auto_attack = SpellDisplay {
-        effect_1: 78,
+        effects: [78, 0, 0],
         attributes: 0x10,
         ..Default::default()
     };
     assert!(!auto_attack.passive, "the attribute bit is clear");
     assert!(auto_attack.tooltip_omits_cast_line(), "the Effect[0] leg");
     let trade_skill = SpellDisplay {
-        effect_1: 47,
+        effects: [47, 0, 0],
         ..Default::default()
     };
     assert!(trade_skill.tooltip_omits_cast_line());
@@ -948,7 +954,7 @@ fn real_item_target_family_and_its_gate_columns() {
     // (`0x495d60`'s loop, `495de4`–`496050`); [`SpellDisplay`] carries only slot 0. That is
     // byte-equivalent on shipped data and this is why: across the whole item-target family, not
     // one row puts its enchant effect anywhere but slot 0. Read raw, since the catalog itself
-    // only keeps `effect_1`.
+    // only keeps `effects[0]`.
     let raw = chain.read_file(SPELL).expect("Spell.dbc");
     let set = parse(&raw, spell_schema(), "Spell.dbc").expect("parse Spell.dbc");
     let is_enchant = |e: u32| {

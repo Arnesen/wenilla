@@ -650,6 +650,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 racial_leader,
             }]
         }
+        ServerPacket::PageTextQueryResponse {
+            page_id,
+            text,
+            next_page_id,
+        } => vec![SessionEvent::PageText {
+            page_id,
+            text,
+            next_page_id,
+        }],
         ServerPacket::GameObjectQueryResponse { entry, info } => {
             let event = match info {
                 Some(i) => SessionEvent::GameObjectInfo {

@@ -89,7 +89,7 @@ pub(crate) fn spell_usable(
     commands: &NetCommands,
 ) -> (bool, bool) {
     // Early-out (`0x6e3d99`): a tradeskill "spell" is always usable.
-    if d.effect_1 == SPELL_EFFECT_TRADE_SKILL {
+    if d.effects[0] == SPELL_EFFECT_TRADE_SKILL {
         return (true, false);
     }
     // Leg 1: dead casters use nothing without the castable-while-dead attribute.
@@ -384,7 +384,7 @@ mod tests {
 
         // The early-out beats every gate.
         let tradeskill = SpellDisplay {
-            effect_1: SPELL_EFFECT_TRADE_SKILL,
+            effects: [SPELL_EFFECT_TRADE_SKILL, 0, 0],
             mana_cost: 9999,
             stances: 0x1,
             ..Default::default()

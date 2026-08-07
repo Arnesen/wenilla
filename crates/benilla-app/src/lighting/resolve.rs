@@ -295,19 +295,6 @@ pub(super) fn update_time_lighting(
             }
         })
         .unwrap_or(Atmosphere::DEFAULT);
-    // The from-above water swatch is built from a SINGLE dominant `LightParams`' RAW water rows, NOT
-    // the area-light blend (VERIFIED WoW.21: the STV river swatch = LP 26 exactly; at Elwynn / Loch
-    // Modan pick == blend so this is a no-op there). `sample_blended` cross-mixes the water rows with
-    // neighbouring params and muddies the zone tint in overlap regions — the STV jungle river read a
-    // muddy yellow-green `[80,99,36]` instead of LP 26's grey-green `[90,140,140]`. So resolve the
-    // water tint via `pick_light` (single most-local sphere); the rest of the atmosphere stays on the
-    // faithful blend. (Underwater/weather on the surface tint is a deferred edge case — `sample` uses
-    // the clear slot; the submerged *scene* still comes from `atmo` above.)
-    let water_atmo = sampler
-        .as_ref()
-        .map(|s| s.0.sample(map, wow_pos, minute * 2, false))
-        .unwrap_or(atmo);
-
     // Sun direction from vanilla DayNight (fixed azimuth, slight elevation wobble, always up). Sampled
     // continuously (`minute_f`) — the shared global-light buffer makes per-frame light changes O(1)
     // (terrain + models read it directly; no per-material re-push), so the interim whole-minute quantize
@@ -356,11 +343,16 @@ pub(super) fn update_time_lighting(
         wmo_fog_start,
         wmo_fog_end,
         sky: atmo.sky,
-        // Water tint + alphas from the PICKED dominant param (see `water_atmo` above), not the blend.
-        water_river: water_atmo.water_river,
-        water_ocean: water_atmo.water_ocean,
-        water_river_alpha: water_atmo.water_river_alpha,
-        water_ocean_alpha: water_atmo.water_ocean_alpha,
+        // The water swatch rides the SAME area blend as every other band — byte-VERIFIED, decision
+        // 1104: the gather record's 18 colour slots (rows 14–17 at `+0x34..+0x40`) are all merged by
+        // `dn_record_overblend 0x6d30e0`, so there is no single-sphere pick anywhere in the client's
+        // water path. Resolving it off `pick_light` made the tint DISCONTINUOUS — it snapped whenever
+        // a tighter sphere's outer radius was crossed, i.e. at exactly the point where that sphere's
+        // own weight is zero (Tirisfal → Silverpine: green water to near-black brown in one step).
+        water_river: atmo.water_river,
+        water_ocean: atmo.water_ocean,
+        water_river_alpha: atmo.water_river_alpha,
+        water_ocean_alpha: atmo.water_ocean_alpha,
         glow: quantize_glow(atmo.glow), // per-zone bloom weight (LightParams.glow)
         // Dawn/dusk sky-dome warp: `S = dawn_dusk_curve(dayfrac) × highlightSky`. 0 across midday and
         // in highlightSky=0 zones, so it only warps the sky at ~06:30/21:30 in highlightSky=1 zones

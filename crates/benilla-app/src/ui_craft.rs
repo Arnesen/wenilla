@@ -19,9 +19,7 @@
 
 use bevy::prelude::*;
 
-use benilla_formats::{
-    SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
-};
+use benilla_formats::{SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY};
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, UiScript};
 
@@ -29,7 +27,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
-use crate::ui_items::count_of;
+use crate::ui_items::{count_of, item_icon};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_tradeskill::SpellFocus;
@@ -84,6 +82,21 @@ fn skill_rank(store: &ObjectStore, skill_id: u32) -> (u32, u32, i32) {
     (0, 0, 0)
 }
 
+/// **Law D** — the Craft window's row icon, transcribing `GetCraftIcon 0x4f7160` (byte-VERIFIED;
+/// wow-re `ui/scratch/spell-icon-substitution-law.md` §2, folded back by decision 1107): **always**
+/// this recipe's own `SpellIconID`, straight off `Spell.dbc`.
+///
+/// The one-liner is the point, and it is not an oversight to be "improved". The Craft window and
+/// the TradeSkill window are two translation units of the *same* node, and their icon laws are
+/// exact opposites: `+0x19c` (`EffectItemType[0]`) is never read anywhere in `[0x4f7160,
+/// 0x4f7204]` — no item lookup, no `"%s%s%s"` path composition, no async callback. So a rod-making
+/// `CREATE_ITEM` recipe fronts the *spell's* icon here while the byte-identical recipe in the
+/// TradeSkill window fronts the *rod's* ([`crate::ui_tradeskill`]'s Law C). Substituting the
+/// product here — which this used to do — is wrong on this surface with no diff to catch it.
+fn craft_icon(d: &benilla_formats::SpellDisplay) -> Option<String> {
+    d.icon.clone()
+}
+
 /// Build the craft snapshot — `None` when the window is closed or the catalogs haven't loaded.
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set (the feed precedent)
 fn feed_craft(
@@ -126,7 +139,7 @@ fn feed_craft(
             .filter(|&&s| {
                 spells.catalog.get(s).is_some_and(|d| {
                     (d.cast_ui != 0 || d.attributes & ATTR_IS_TRADESKILL != 0)
-                        && d.effect_1 != benilla_formats::SPELL_EFFECT_TRADE_SKILL
+                        && d.effects[0] != benilla_formats::SPELL_EFFECT_TRADE_SKILL
                 }) && skill_lines.catalog.spell_to_line(s) == Some(line)
             })
             .filter_map(|&s| {
@@ -136,13 +149,13 @@ fn feed_craft(
                 let mut num_available = u32::MAX;
                 for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
                     let have = count_of(&store.0, &items, entry);
+                    // A reagent is an ITEM row, so it terminates in the one genuinely shared chain
+                    // (wow-re §5): ItemTemplate → ItemDisplayInfo → icon. Unlike the *recipe* icon
+                    // above, there is nothing per-binding about this one.
                     let (name, icon) = match items.template(entry, 0, &commands) {
                         Some(t) => (
                             Some(t.name.clone()),
-                            icons
-                                .as_deref()
-                                .and_then(|i| i.catalog.get(t.display_info_id))
-                                .and_then(|di| di.icon.clone()),
+                            item_icon(icons.as_deref(), t.display_info_id),
                         ),
                         None => (None, None),
                     };
@@ -174,25 +187,10 @@ fn feed_craft(
                     }
                 }
                 let needs_item_target = matches!(
-                    d.effect_1,
+                    d.effects[0],
                     SPELL_EFFECT_ENCHANT_ITEM | SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
                 );
-                // A rod-making recipe (CREATE_ITEM) fronts the product's icon like a tradeskill
-                // row; an enchant fronts its spell icon.
-                let icon = (d.effect_1 == SPELL_EFFECT_CREATE_ITEM && d.effect_item_type[0] != 0)
-                    .then(|| {
-                        items
-                            .template(d.effect_item_type[0], 0, &commands)
-                            .map(|t| t.display_info_id)
-                            .and_then(|di| {
-                                icons
-                                    .as_deref()
-                                    .and_then(|i| i.catalog.get(di))
-                                    .and_then(|x| x.icon.clone())
-                            })
-                    })
-                    .flatten()
-                    .or_else(|| d.icon.clone());
+                let icon = craft_icon(d);
                 Some(CraftRecipe {
                     spell_id: s,
                     name: d.name.clone(),
@@ -283,5 +281,38 @@ fn drain_craft(
     if script.take_craft_close() {
         debug!("ui_craft: client-side close (no packet)");
         open.line = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_formats::{SpellDisplay, SPELL_EFFECT_CREATE_ITEM};
+
+    /// Law D never looks at an item. The regression this pins is the *sibling* one: a rod-making
+    /// `CREATE_ITEM` recipe — the exact case our old code substituted the product for — still
+    /// fronts the spell's own icon here, because `EffectItemType[0]` is never read anywhere in
+    /// `GetCraftIcon`'s extent. Craft and TradeSkill disagree on purpose.
+    #[test]
+    fn law_d_is_always_the_spells_own_icon_even_for_a_rod_recipe() {
+        let rod = SpellDisplay {
+            name: "Runed Copper Rod".into(),
+            icon: Some("SPELL".into()),
+            effects: [SPELL_EFFECT_CREATE_ITEM, 0, 0],
+            effect_item_type: [6218, 0, 0],
+            ..Default::default()
+        };
+        assert_eq!(craft_icon(&rod), Some("SPELL".into()));
+    }
+
+    /// A recipe with no `SpellIconID` row resolved is nil — the binding's `lua_pushnil` return.
+    /// There is no item arm to fall through to.
+    #[test]
+    fn law_d_is_nil_when_the_spell_carries_no_icon() {
+        let d = SpellDisplay {
+            effect_item_type: [6218, 0, 0],
+            ..Default::default()
+        };
+        assert_eq!(craft_icon(&d), None);
     }
 }

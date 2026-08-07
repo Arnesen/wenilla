@@ -12,7 +12,7 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
-    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, pet,
+    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, page_text, pet,
     progression, quest, social, spellbook, spells, taxi, trade, trainer, update_object, vendor,
     world_state, Character, CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
@@ -807,6 +807,14 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE => {
             let (entry, info) = gameobject::read_gameobject_query_response(&mut r)?;
             ServerPacket::GameObjectQueryResponse { entry, info }
+        }
+        opcode::SMSG_PAGE_TEXT_QUERY_RESPONSE => {
+            let (page_id, text, next_page_id) = page_text::read_page_text_query_response(&mut r)?;
+            ServerPacket::PageTextQueryResponse {
+                page_id,
+                text,
+                next_page_id,
+            }
         }
         opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM => {
             let (guid, anim_id) = gameobject::read_gameobject_custom_anim(&mut r)?;

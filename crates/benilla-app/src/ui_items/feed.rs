@@ -386,7 +386,7 @@ pub(super) fn feed_player_req(
         actions
             .spells
             .iter()
-            .any(|&id| s.catalog.get(id).is_some_and(|sd| sd.effect_1 == 40))
+            .any(|&id| s.catalog.get(id).is_some_and(|sd| sd.effects[0] == 40))
     });
     let state = benilla_ui::script::PlayerReqState {
         level: store.0.unit_level().unwrap_or(0),

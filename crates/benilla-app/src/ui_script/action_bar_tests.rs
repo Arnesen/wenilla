@@ -824,3 +824,69 @@ fn state_events_leave_empty_wells_untinted() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The white-buttons regression (director-reported 2026-08-07, decision 1108): a slot that was
+/// OCCUPIED — UpdateUsable painted its icon's 1/1/1 usable tint — then goes EMPTY (the feed's
+/// character-switch diff: `set_action(None)` + `ACTIONBAR_SLOT_CHANGED`) kept the tint on the
+/// now-artless icon region and drew it as a solid WHITE square. Two laws close it, both asserted
+/// here: the empty arm HIDES the icon (ref ActionButton.lua l.168), and the engine emits nothing
+/// for a texture-less region whatever its surviving tint (`0x7706e0` — the draw gate is `+0xcc`,
+/// never the colour).
+#[test]
+fn an_occupied_slot_going_empty_leaves_no_white_plate() {
+    use benilla_ui::script::ActionState;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.set_action(
+        3,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_Nature_HealingTouch".into()),
+            kind: 0x00,
+            action: 5185,
+            count: 0,
+        }),
+    );
+    s.set_action_state(
+        3,
+        Some(ActionState {
+            usable: true,
+            ..Default::default()
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    // The usable pass paints the occupied icon's 1/1/1 usable tint — the tint that survives.
+    s.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| matches!(&q.content,
+            QuadContent::Texture { path: Some(p), .. } if p.contains("Spell_Nature_HealingTouch"))),
+        "the occupied slot draws its icon"
+    );
+
+    // The character switch: the new character's table has nothing in slot 3.
+    s.set_action(3, None);
+    s.set_action_state(3, None);
+    s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(3)]);
+    s.resolve();
+    for q in s.extract() {
+        match &q.content {
+            QuadContent::Texture { path: Some(p), .. }
+                if p.contains("Spell_Nature_HealingTouch") =>
+            {
+                panic!("the emptied slot still draws the old icon")
+            }
+            QuadContent::Texture {
+                path: None,
+                color: Some(c),
+                ..
+            } if q.rect.is_some_and(|r| r.right - r.left <= 40.0) => {
+                // Well-sized only, as in the sibling test: page-wide solids are legitimate.
+                panic!("the emptied slot draws its surviving tint as a solid plate: {c:?}")
+            }
+            _ => {}
+        }
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

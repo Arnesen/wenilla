@@ -289,6 +289,46 @@ impl Items {
     }
 }
 
+/// The ask-once trio every UI resolver needs to be tested: the template cache, the command
+/// channel, and — crucially — the channel's live **receiver**, without which every `ItemQuery`
+/// send fails and the "asked the server" half of the law goes unobservable. `items` starts empty,
+/// so a fresh `TestDeps` reads as "template in flight"; seed one with [`Items::insert_template`]
+/// to test the landed arm.
+///
+/// Shared because the three icon laws (`ui_trainer::service_icon`, `ui_tradeskill::recipe_icon`,
+/// `ui_craft::craft_icon`) all terminate in this same cache — the fixture is the one thing they
+/// legitimately have in common, unlike the laws themselves.
+#[cfg(test)]
+pub(crate) struct TestDeps {
+    pub(crate) items: Items,
+    pub(crate) commands: NetCommands,
+    rx: crossbeam_channel::Receiver<ClientCommand>,
+}
+
+#[cfg(test)]
+impl TestDeps {
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        TestDeps {
+            items: Items::default(),
+            commands: NetCommands(tx),
+            rx,
+        }
+    }
+
+    /// The entries the resolver asked the server for — an ask-once gate firing is observable here
+    /// even when the icon it feeds is still `None`.
+    pub(crate) fn queried_entries(&self) -> Vec<u32> {
+        self.rx
+            .try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::ItemQuery { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// A minimal, VALID item template named `name` — the shared test seam for every module that
 /// needs a landed template (the sentinels that matter are `allowable_*` = −1 and `stackable` = 1).
 #[cfg(test)]

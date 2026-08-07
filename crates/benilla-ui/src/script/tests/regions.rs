@@ -526,3 +526,51 @@ fn a_solid_colour_texel_multiplies_with_the_vertex_colour() {
         "the vertex colour outlives the texel it was multiplying"
     );
 }
+
+/// The draw gate is the TEXTURE slot, never the colour (`texture-color-composition.md` §4,
+/// VERIFIED): `0x7706e0` tests `+0xcc` and emits NOTHING when it is empty, whatever the vertex
+/// colour holds. Since the tint deliberately survives `SetTexture(nil)` ("a tint outlives the art
+/// it was tinting"), a cleared region used to leak its tint out of extract as a solid plate — an
+/// occupied action button going empty on a character switch drew its surviving 1/1/1 usable-tint
+/// as a solid WHITE square (decision 1108; the 2026-07-10 grey wells were the same class).
+#[test]
+fn a_vertex_colour_without_a_texture_draws_nothing() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Owner")
+        f:SetPoint("BOTTOMLEFT", 0, 0)
+        f:SetWidth(100) f:SetHeight(50)
+        icon = f:CreateTexture("Icon", "ARTWORK")
+        icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")
+        icon:SetVertexColor(1, 1, 1)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let drawn = |s: &UiScript| {
+        s.extract()
+            .iter()
+            .filter(|q| {
+                matches!(&q.content, QuadContent::Texture { path, color, .. }
+                    if path.is_some() || color.is_some())
+            })
+            .count()
+    };
+    assert_eq!(drawn(&s), 1, "tinted art draws");
+
+    // The slot empties: the art clears, the tint stays (distinct storage) — and nothing draws.
+    s.run("icon:SetTexture(nil)").unwrap();
+    assert_eq!(
+        s.eval::<(f32, f32, f32, f32)>("return icon:GetVertexColor()")
+            .unwrap(),
+        (1.0, 1.0, 1.0, 1.0),
+        "the tint survives the clear"
+    );
+    assert_eq!(
+        drawn(&s),
+        0,
+        "no texture at +0xcc -> emit NOTHING, never a solid plate of the surviving tint"
+    );
+}

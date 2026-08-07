@@ -259,7 +259,14 @@ const COL_EFFECT_MISC_1: usize = 106;
 const COL_EFFECT_TRIGGER_1: usize = 109;
 /// `SpellEffects` value `36` — `SPELL_EFFECT_LEARN_SPELL`: a trainer's learn wrapper carries it, and
 /// its `EffectTriggerSpell` is the ability the player ends up with (decision 0247's taught spell).
-const SPELL_EFFECT_LEARN_SPELL: u32 = 36;
+pub const SPELL_EFFECT_LEARN_SPELL: u32 = 36;
+/// `SpellEffects` value `57` — `SPELL_EFFECT_LEARN_PET_SPELL`, the learn wrapper's pet twin. The
+/// trainer's **icon** law accepts either in its three-slot wrapper scan (byte-verified: the paired
+/// `cmp ecx,0x24` / `cmp ecx,0x39` at `0x4d8ff5`/`0x4d8ffa`, wow-re
+/// `system/ui/scratch/spell-icon-substitution-law.md` §1). [`SpellCatalog::learned_spell`]'s
+/// **display** hop deliberately stays 36-only — that is decision 0247's verified grouping hop, and
+/// widening it is a separate question nothing has asked.
+pub const SPELL_EFFECT_LEARN_PET_SPELL: u32 = 57;
 
 /// `SpellEffects` value `SPELL_EFFECT_OPEN_LOCK` — the lock-opening effect the GameObject
 /// interact-cast matches (decision 0239; RE `cursor-system.md` §8, the client's
@@ -634,7 +641,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 attributes_ex3: u32_at(r, COL_ATTRIBUTES_EX3).unwrap_or(0),
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
-                effect_1: u32_at(r, COL_EFFECT_1).unwrap_or(0),
+                effects: [0, 1, 2].map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0)),
                 spell_level: u32_at(r, COL_SPELL_LEVEL).unwrap_or(0),
                 // Scan the three effects for OPEN_LOCK and take that effect's LockType (its
                 // EffectMiscValue) together with the value inputs the lock resolver compares

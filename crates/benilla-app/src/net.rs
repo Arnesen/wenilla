@@ -861,6 +861,11 @@ pub(crate) enum ClientCommand {
     /// `guid`. Sent ask-once when a GameObject streams in ([`crate::go_templates`]); the answer's
     /// `lockId` decides whether a right-click uses it or casts an OPEN_LOCK spell.
     GameObjectQuery { entry: u32, guid: u64 },
+    /// Ask for one page of a book (`CMSG_PAGE_TEXT_QUERY`, decision 1105): the `PageText` id + the
+    /// asking object's `guid` (an item's or a TEXT GameObject's — the server discards it). Sent
+    /// ask-once by [`crate::ui_item_text::PageTexts`] when a reader opens on a page it hasn't got;
+    /// vmangos answers with the whole forward chain, one `SMSG_PAGE_TEXT_QUERY_RESPONSE` per page.
+    PageTextQuery { page_id: u32, guid: u64 },
     /// Cast an OPEN_LOCK spell at a **GameObject** (`CMSG_CAST_SPELL`, decision 0239): the right-click
     /// on a locked chest / mining vein / herb node. The server runs `EffectOpenLock` → a chest opens
     /// its loot (`SMSG_LOOT_RESPONSE`); the profession/skill gate is the server's.

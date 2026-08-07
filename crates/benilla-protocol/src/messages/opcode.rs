@@ -23,6 +23,15 @@ pub const SMSG_GAMEOBJECT_QUERY_RESPONSE: u16 = 0x005F; // 95
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 93. Answers `CMSG_QUEST_QUERY`; body in
 /// [`super::quest::read_quest_query_response`] ([`super::QuestTemplate`]).
 pub const SMSG_QUEST_QUERY_RESPONSE: u16 = 0x005D; // 93
+
+// The **page-text** query pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 90/91) — the ask-once cache
+// behind every readable BOOK, and a different one from the mail letter's `CMSG_ITEM_TEXT_QUERY`
+// further down: a `PageText.wdb` id names one *page*, chained by `nextPageId`, and it is what a
+// readable item TEMPLATE (`PageText`) and a world book/plaque GameObject (`GAMEOBJECT_TYPE_TEXT`'s
+// `data[0]`) both read from. Bodies in [`super::page_text`]; decision 1105.
+pub const CMSG_PAGE_TEXT_QUERY: u16 = 0x005A; // 90
+pub const SMSG_PAGE_TEXT_QUERY_RESPONSE: u16 = 0x005B; // 91
+
 pub const SMSG_NEW_WORLD: u16 = 0x003E;
 // The far-teleport preamble pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 63/64). TRANSFER_PENDING's
 // optional transport block decides how NEW_WORLD's coordinates read — boat-local when present,

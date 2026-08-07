@@ -259,7 +259,7 @@ fn the_pinned_c6_lines_on_real_data() {
     // 2 · Attack (6603) — `Effect[0] == 78` omits the cast|cooldown line WHOLE, even though
     // `Attributes & 0x40` is clear. Before the §3.4 gate widened, this read "Instant".
     let d = spells.catalog.get(6603).expect("Attack 6603");
-    assert_eq!(d.effect_1, 78, "SPELL_EFFECT_ATTACK");
+    assert_eq!(d.effects[0], 78, "SPELL_EFFECT_ATTACK");
     assert!(!d.passive, "6603 carries Attributes 0x10, not 0x40");
     let v = spell_tooltip_view(6603, &spells, &mut t.ctx(0, None)).expect("Attack view");
     assert_eq!(v.cast_time, None, "the law's Effect[0] gate");
@@ -277,7 +277,7 @@ fn the_pinned_c6_lines_on_real_data() {
     assert_eq!(v.chance.as_deref(), Some("2.62% chance to crit"));
     // Dodge (81) is passive and reads its own field.
     let dodge = spells.catalog.get(81).expect("Dodge 81");
-    assert_eq!(dodge.effect_1, 20, "SPELL_EFFECT_DODGE");
+    assert_eq!(dodge.effects[0], 20, "SPELL_EFFECT_DODGE");
     assert!(dodge.passive, "81 carries Attributes 0x40");
     let v =
         spell_tooltip_view(81, &spells, &mut t.ctx_for(0, None, Some(&rated))).expect("Dodge view");

@@ -363,6 +363,76 @@ fn filter_hides_a_state_keeping_headers() {
     );
 }
 
+/// The filter rows toggle **through the real dropdown kit** — the path a mouse takes, which the test
+/// above deliberately shortcuts by faking `this`. `UIDropDownMenuButton_OnClick` runs the row's func
+/// and only THEN flips the check for a `keepShownOnClick` row, so the func must not repaint the row
+/// itself: an in-func `UIDropDownMenu_Initialize` re-derived the check from the fresh engine state and
+/// the kit's flip then inverted it straight back — the check never moved on screen, and `this.checked`
+/// stuck true, so a filter turned off could never be turned back on. Click, re-click, and re-open all
+/// have to agree.
+#[test]
+fn filter_rows_toggle_through_the_dropdown_kit() {
+    let mut s = trainer_script();
+    s.set_money(50);
+    s.set_trainer(Some(menu()));
+    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+
+    // Open the menu the way the capsule's arrow does. Row 2 is "Unavailable" (Initialize's order),
+    // checked because trainer_script() turned every state on.
+    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let row_checked = |s: &mut UiScript| {
+        s.eval::<bool>("return DropDownList1Button2Check:IsVisible() and true or false")
+            .unwrap()
+    };
+    assert!(row_checked(&mut s), "Unavailable starts checked");
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
+
+    // Click it: the check clears, the engine filter clears, and Cleave (the unavailable service)
+    // drops out of the tree. Its Arms header stays.
+    s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(!row_checked(&mut s), "the click clears the row's check");
+    assert!(
+        !s.eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
+            .unwrap(),
+        "and the engine's unavailable filter with it"
+    );
+    assert_eq!(
+        s.eval::<i64>("return GetNumTrainerServices()").unwrap(),
+        5,
+        "Cleave is hidden"
+    );
+
+    // Click it again: back on, both on screen and in the engine — the case the old code could never
+    // reach, because `this.checked` never went false.
+    s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
+        .unwrap();
+    assert!(row_checked(&mut s), "the re-click restores the check");
+    assert!(
+        s.eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
+            .unwrap(),
+        "and re-enables the filter"
+    );
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
+
+    // Close and re-open: Initialize re-derives every row from the engine, so the menu agrees with
+    // what the clicks left behind (the two states left on, "used" still on from trainer_script()).
+    s.run("this = DropDownList1Button2; UIDropDownMenuButton_OnClick()")
+        .unwrap();
+    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+        .unwrap(); // same owner → closes
+    s.run("ToggleDropDownMenu(1, nil, BenillaTrainerFilterDropDown)")
+        .unwrap(); // re-open → re-Initialize
+    assert!(
+        !row_checked(&mut s),
+        "a re-opened menu shows the filter the clicks actually left off"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// A menu bigger than the 11 visible rows (one skill line, 15 services → a 16-row tree), so the list
 /// scrolls. The wheel spins the list even when the cursor is over a row — the engine bubbles the spin
 /// up the parent chain to the window, which drives the faux-scroll bar.

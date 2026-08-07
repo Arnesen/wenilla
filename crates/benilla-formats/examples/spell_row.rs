@@ -13,11 +13,11 @@ fn main() -> anyhow::Result<()> {
             continue;
         };
         println!(
-            "{id} {:?}\n  Targets={:#06x} implicitA1={} effect_1={}\n  equippedClass={} subclassMask={:#x} invTypeMask={:#x}",
+            "{id} {:?}\n  Targets={:#06x} implicitA1={} effects[0] = {}\n  equippedClass={} subclassMask={:#x} invTypeMask={:#x}",
             d.name,
             d.targets,
             d.implicit_target_a1,
-            d.effect_1,
+            d.effects[0],
             d.equipped_item_class,
             d.equipped_item_subclass_mask,
             d.equipped_item_inventory_type_mask,

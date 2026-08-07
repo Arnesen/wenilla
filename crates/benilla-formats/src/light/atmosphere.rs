@@ -54,9 +54,10 @@ pub(super) const LP_HIGHLIGHT: usize = 1;
 /// `LightParams.dbc` field indices of the **water-blend alphas** — the from-above swatch's depth-alpha
 /// ramp endpoints (`swatch.a = lerp(shallow, deep, V)`; the runtime reads these into `gWorldLight+0x114..`
 /// via `FUN_006b6b60`). Layout follows the glow shift: glow is field 4 (+0x10), so these are fields 5–8
-/// (+0x14..+0x20). **[VERIFY against a real file/trace]** — confirmed by `probe_water_pickblend` that
-/// LP 26 (STV) waterShallow ≈ 0.85 matches the WoW.21 swatch alpha 216/255; if a future file disagrees,
-/// re-check the offset (cf. the glow +0x0C-vs-+0x10 trap).
+/// (+0x14..+0x20). Cross-check: LP 26 (Stranglethorn) `waterShallow` ≈ 0.85 matches the WoW.21 apitrace
+/// swatch alpha 216/255, and the area blend resolves LP 26 whole at that river (test
+/// `light_area_blend_order.rs`). If a future file disagrees, re-check the offset (cf. the glow
+/// +0x0C-vs-+0x10 trap).
 pub(super) const LP_WATER_SHALLOW_ALPHA: usize = 5;
 pub(super) const LP_WATER_DEEP_ALPHA: usize = 6;
 pub(super) const LP_OCEAN_SHALLOW_ALPHA: usize = 7;

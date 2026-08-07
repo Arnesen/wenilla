@@ -71,7 +71,7 @@
 //! VISIBLE index from that flat position on every read, [`super::skills`]'s own by-identity
 //! persistence pattern adapted to a field this module can't change the type of).
 //!
-//! ## The tooltip channel — KNOWN GAP, not fixed here
+//! ## The tooltip channel
 //!
 //! `GameTooltip:SetTradeSkillItem(skillIndex [, reagentIndex])` is registered in
 //! [`super::tooltip_item`], beside `SetMerchantItem`, through the same id-keyed item renderer: with
@@ -80,16 +80,10 @@
 //! the renderer's own name-only line — the recipe's name for the product channel — rather than a
 //! no-op, since that fallback already exists and reads better than a blank hover.
 //!
-//! **As of this grouping landing, `tooltip_item`'s `SetTradeSkillItem` still indexes
-//! [`TradeSkillState::recipes`] directly by the raw `skillIndex` it's called with** — it does NOT
-//! route through [`recipe_at`]'s visible-index mapping (that module is outside this change's file
-//! scope). The XML's list-row hover (`BenillaTradeSkillSkillButton_OnEnter`) is guarded here to
-//! never call it on a header row, but the product-icon and reagent-slot hovers pass
-//! `BenillaTradeSkillFrame.selectedSkill` — a genuine VISIBLE index of a selected recipe — straight
-//! through, so once any group precedes the selected recipe's own group, those two hovers will show
-//! the WRONG item. `tooltip_item::install`'s `SetTradeSkillItem` closure needs a follow-up edit to
-//! resolve through [`recipe_at`] (now `pub(crate)` for exactly this) instead of `ts.recipes.get(...)`
-//! directly.
+//! `skillIndex` is a **VISIBLE** index and is resolved through [`recipe_at`] (`pub(crate)` for
+//! exactly this), never a raw [`TradeSkillState::recipes`] position — headers interleave with rows
+//! since the TU-B grouping landed, so a raw index would show the wrong item the moment any group
+//! precedes the selected recipe's own. A header index resolves to `None` and the hover is a no-op.
 
 use std::collections::HashSet;
 

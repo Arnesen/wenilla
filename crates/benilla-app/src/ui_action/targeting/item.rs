@@ -108,8 +108,8 @@ pub(crate) fn item_bind_verdict(
     new: Option<NewEnchant>,
     confirmed: bool,
 ) -> ItemBind {
-    let perm = def.effect_1 == benilla_formats::SPELL_EFFECT_ENCHANT_ITEM;
-    if !perm && def.effect_1 != benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY {
+    let perm = def.effects[0] == benilla_formats::SPELL_EFFECT_ENCHANT_ITEM;
+    if !perm && def.effects[0] != benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY {
         return ItemBind::Bind;
     }
     if def.equipped_item_subclass_mask != 0 {
@@ -355,7 +355,7 @@ mod tests {
 
         // Enchant Bracer - Minor Health (7418): armor, any subclass, WRIST only.
         let bracer = SpellDisplay {
-            effect_1: ENCHANT,
+            effects: [ENCHANT, 0, 0],
             equipped_item_class: CLASS_ARMOR as i32,
             equipped_item_subclass_mask: 0x1f,
             equipped_item_inventory_type_mask: 1 << INVTYPE_WRIST,
@@ -379,7 +379,7 @@ mod tests {
 
         // Instant Poison (8679): weapon class, a subclass mask, NO inventory-type requirement.
         let poison = SpellDisplay {
-            effect_1: benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
+            effects: [benilla_formats::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, 0, 0],
             equipped_item_class: CLASS_WEAPON as i32,
             equipped_item_subclass_mask: 0x2a5f3,
             equipped_item_inventory_type_mask: 0,
@@ -405,7 +405,7 @@ mod tests {
         // its loop, finds no 53/54 arm, and falls straight through to the bind — anything goes,
         // and the server judges.
         let disenchant = SpellDisplay {
-            effect_1: 99,
+            effects: [99, 0, 0],
             equipped_item_class: -1,
             ..Default::default()
         };
@@ -443,7 +443,7 @@ mod tests {
 
         // A permanent weapon enchant whose row binds the item (the ZG/imbue family's `Flags & 1`).
         let perm = SpellDisplay {
-            effect_1: ENCHANT,
+            effects: [ENCHANT, 0, 0],
             effect_misc_value: [1900, 0, 0],
             ..Default::default()
         };
@@ -525,7 +525,7 @@ mod tests {
         // 3 · The slot fork (`495ed3: cmpl $0x35 / setne`) — the ONE place effect 53 and 54
         // diverge. A permanent enchant asks about PERM; a poison asks about TEMP.
         let temp_spell = SpellDisplay {
-            effect_1: TEMP,
+            effects: [TEMP, 0, 0],
             effect_misc_value: [1900, 0, 0],
             ..Default::default()
         };
@@ -554,7 +554,7 @@ mod tests {
 
         // 4 · The equip gate still runs FIRST — a refusal beats both confirms (495e10 < 495e93).
         let bracer_only = SpellDisplay {
-            effect_1: ENCHANT,
+            effects: [ENCHANT, 0, 0],
             effect_misc_value: [1900, 0, 0],
             equipped_item_class: 4,
             equipped_item_subclass_mask: 0x1f,

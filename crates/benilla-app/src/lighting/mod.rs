@@ -65,16 +65,18 @@ pub(crate) struct WowLighting {
     /// Fed to the `SkyPlugin` dome material; interpolated across the dome by elevation.
     pub(crate) sky: [[f32; 3]; 5],
     /// **Per-kind water-surface tint** `[shallow, deep]` — `Atmosphere.water_river` (IntBand rows
-    /// 16/17) and `.water_ocean` (rows 14/15), RAW, resolved from the **picked dominant `LightParams`**
-    /// (`sample`/`pick_light`), NOT the area-light blend — the blend cross-mixes neighbouring params
-    /// and muddies the zone tint in overlap regions (VERIFIED STV). The from-above depth swatch is a
-    /// 2-endpoint linear lerp of these by the per-vertex depth `V` (river/lake `V = clamp(byte/42)`;
-    /// VERIFIED `WoW.exe FUN_0068a830` + `c81768`). Pushed onto the per-kind liquid materials by
-    /// [`apply_wow_lighting`] via [`WowLighting::water_colors`].
+    /// 16/17) and `.water_ocean` (rows 14/15), RAW, resolved from the **area-light blend**, exactly
+    /// like every other band: the client's gather record carries all 18 colour rows and
+    /// `dn_record_overblend 0x6d30e0` merges all 18 per light (rows 14–17 are its `+0x34..+0x40`
+    /// step-9 loop) — there is no single-sphere pick in the water path (decision 1104, superseding
+    /// the `pick_light` split whose discontinuity snapped the tint at Tirisfal→Silverpine). The
+    /// from-above depth swatch is a 2-endpoint linear lerp of these by the per-vertex depth `V`
+    /// (river/lake `V = clamp(byte/42)`; VERIFIED `WoW.exe FUN_0068a830` + `c81768`). Pushed onto the
+    /// per-kind liquid materials by [`apply_wow_lighting`] via [`WowLighting::water_colors`].
     pub(crate) water_river: [[f32; 3]; 2],
     pub(crate) water_ocean: [[f32; 3]; 2],
     /// **Per-kind water-blend alphas** `[shallow, deep]` — `LightParams.water/oceanShallow/DeepAlpha`,
-    /// from the picked param (like the tint). The swatch's depth-alpha ramp endpoints. Per-zone:
+    /// blended across the same spheres as the tint. The swatch's depth-alpha ramp endpoints. Per-zone:
     /// Elwynn/Loch Modan shallow ≈0.5, STV ≈0.85; deep ≈1.0. Replaces the hardcoded `*_SHALLOW_ALPHA`
     /// constants for the live path (they remain as the `setup_liquid` frame-0 seed + DBC-absent default).
     pub(crate) water_river_alpha: [f32; 2],

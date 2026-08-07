@@ -260,6 +260,16 @@ pub enum ServerPacket {
         entry: u32,
         info: Option<GameObjectQueryInfo>,
     },
+    /// `SMSG_PAGE_TEXT_QUERY_RESPONSE` — one page of a book, answering `CMSG_PAGE_TEXT_QUERY`
+    /// (the ask-once page cache every readable reaches: a readable item template's `PageText` and a
+    /// `GAMEOBJECT_TYPE_TEXT` object's `data[0]`, decision 1105). Pages **chain** —
+    /// `next_page_id == 0` is the last one — and vmangos answers a single query with one of these
+    /// per page of the whole chain.
+    PageTextQueryResponse {
+        page_id: u32,
+        text: String,
+        next_page_id: u32,
+    },
     /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` — a GameObject plays a one-shot Custom animation. Payload
     /// VERIFIED vmangos `GameObject::SendGameObjectCustomAnim`: `u64 guid, u32 animId`. The
     /// client arms GO substate `8 + animId` (AnimationData 153..156, `animId >= 4` rejected) —
@@ -1110,6 +1120,7 @@ impl ServerPacket {
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),
             ServerPacket::PetNameQueryResponse { .. } => "SMSG_PET_NAME_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectQueryResponse { .. } => "SMSG_GAMEOBJECT_QUERY_RESPONSE".into(),
+            ServerPacket::PageTextQueryResponse { .. } => "SMSG_PAGE_TEXT_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
             ServerPacket::FishNotHooked => "SMSG_FISH_NOT_HOOKED".into(),
             ServerPacket::FishEscaped => "SMSG_FISH_ESCAPED".into(),

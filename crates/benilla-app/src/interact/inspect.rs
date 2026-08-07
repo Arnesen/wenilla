@@ -66,6 +66,9 @@ pub(super) struct InspectStores<'w, 's> {
     lit: Query<'w, 's, EntityLightReadout>,
     factions: Option<Res<'w, crate::target::ring::Factions>>,
     self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
+    /// The ask-once GO template cache — the readable head a TEXT object's line reports
+    /// (decision 1105).
+    go_templates: Res<'w, crate::go_templates::GameObjectTemplates>,
 }
 
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
@@ -139,6 +142,7 @@ pub(super) fn inspect_ui(
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
     let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
+    let go_templates = &*stores.go_templates;
     let (stores, kinds, collision, lit) = (
         &stores.stores,
         &stores.kinds,
@@ -212,18 +216,41 @@ pub(super) fn inspect_ui(
             // types whose `+0x14` is a constant `xor al,al`.
             let reaction =
                 crate::target::cursor_mode::go_reaction(factions, s.0.gameobject_faction(), self_store);
-            let channel_owned = crate::target::cursor_mode::fishing_channel_owned(
-                self_store,
-                net_entity.and_then(|p| guids.get(p).ok()).map(|g| g.0),
-            );
-            let interact =
-                if crate::target::cursor_mode::go_highlightable(s, reaction, channel_owned) {
+            let go_guid = net_entity.and_then(|p| guids.get(p).ok()).map(|g| g.0);
+            let overrides = crate::target::cursor_mode::GoOverrides {
+                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
+                    self_store, go_guid,
+                ),
+                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
+                    go_guid.and_then(|g| go_templates.get(g)?.meeting_stone_area),
+                ),
+            };
+            let interact = if crate::target::cursor_mode::go_highlightable(s, reaction, overrides) {
                 "interact ✓"
             } else {
                 "interact ✗"
             };
+            // TEXT (type 9) only: the **readable head** (decision 1105). A book that opens no
+            // window is either "no page in the template" or a fault downstream, and only this
+            // line tells the two apart — the symptom is identical from the chair, and the first
+            // one is the reference behaving correctly. `page —` = the template says none;
+            // `page ?` = its ask-once query hasn't answered yet.
+            let page_text = if s.0.gameobject_type_id() == crate::target::cursor_mode::GO_TYPE_TEXT
+            {
+                let go_guid = net_entity.and_then(|p| guids.get(p).ok()).map(|g| g.0);
+                match go_guid
+                    .and_then(|g| go_templates.get(g))
+                    .map(|t| t.text_page.map_or(0, |p| p.page_id))
+                {
+                    None => " · page ?".to_string(),
+                    Some(0) => " · page —".to_string(),
+                    Some(id) => format!(" · page {id}"),
+                }
+            } else {
+                String::new()
+            };
             format!(
-                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}",
+                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}{page_text}",
                 s.0.gameobject_type_id()
             )
         });

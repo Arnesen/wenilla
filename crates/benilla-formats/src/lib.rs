@@ -56,6 +56,8 @@ mod exhaustion;
 pub use exhaustion::{load_exhaustion, ExhaustionRow};
 mod bank_bag_slot_prices;
 pub use bank_bag_slot_prices::{load_bank_bag_slot_prices, BankBagSlotPrices};
+mod page_text_material;
+pub use page_text_material::{load_page_text_material_catalog, PageTextMaterialCatalog};
 mod stationery;
 pub use stationery::{load_stationery_catalog, StationeryCatalog, STATIONERY_DEFAULT};
 mod lock;
@@ -138,7 +140,8 @@ pub use spells::{
     SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
-    SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
+    SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
+    SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,
 };
 mod skill_lines;
 pub use skill_lines::{

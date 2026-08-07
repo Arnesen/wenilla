@@ -492,7 +492,7 @@ mod tests {
         const ATTACK: u32 = 6603;
         let mut attack = spell("Attack", None, 0x10);
         attack.icon = Some("Interface\\Icons\\Temp".into()); // the real DBC placeholder
-        attack.effect_1 = 78; // SPELL_EFFECT_ATTACK — makes it the melee auto-attack
+        attack.effects[0] = 78; // SPELL_EFFECT_ATTACK — makes it the melee auto-attack
         let catalog = SpellCatalog::from_displays(HashMap::from([(ATTACK, attack)]));
         let known: HashSet<u32> = [ATTACK].into_iter().collect();
 

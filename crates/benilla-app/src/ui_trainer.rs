@@ -4,9 +4,11 @@
 //!
 //! The net bridge fills [`TrainerOpen`] from the wire (`SMSG_TRAINER_LIST` → the trainer's services +
 //! greeting, reached through the gossip trainer option). Each frame [`feed_trainer`] resolves each
-//! wire [`TrainerSpell`] to a Lua-facing [`TrainerService`] — name/subtext/icon from the spell
-//! catalog (`Spell.dbc`, loaded whole at startup, so no ask-once query like the item rows need), the
-//! skill-requirement name from the skill-line catalog, the green/red/gray state straight off the wire
+//! wire [`TrainerSpell`] to a Lua-facing [`TrainerService`] — name/subtext from the spell catalog
+//! (`Spell.dbc`, loaded whole at startup), the **icon** from its own byte-verified law
+//! ([`service_icon`], which at a *tradeskill* trainer fronts the taught recipe's created item and so
+//! does need the ask-once item-template query the item rows use), the skill-requirement name from
+//! the skill-line catalog, the green/red/gray state straight off the wire
 //! `state` byte — pushes the snapshot ([`UiScript::set_trainer`]), and fires `TRAINER_SHOW` on open /
 //! `TRAINER_UPDATE` on a content change / `TRAINER_CLOSED` on clear. [`drain_trainer`] pulls the Lua
 //! intents back out: the Train button's `BuyTrainerService` → `CMSG_TRAINER_BUY_SPELL` for the open
@@ -22,7 +24,9 @@
 
 use std::collections::HashSet;
 
-use benilla_formats::{SkillLineCatalog, SpellCatalog};
+use benilla_formats::{
+    SkillLineCatalog, SpellCatalog, SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
+};
 use benilla_protocol::messages::{trainer_spell_state, TrainerSpell};
 use bevy::prelude::*;
 
@@ -31,9 +35,12 @@ use benilla_ui::script::{
     TrainerState, UiScript,
 };
 
+use crate::entities::ItemDisplays;
+use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_action::{PlayerActions, Spells};
+use crate::ui_items::item_icon;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 use crate::ui_spellbook::SkillLines;
@@ -129,6 +136,62 @@ fn train_error_text(code: u32) -> String {
     .to_string()
 }
 
+/// The trainer's **icon law** — `GetTrainerServiceIcon 0x4d8f50`, byte-verified whole in wow-re
+/// (`system/ui/scratch/spell-icon-substitution-law.md` §1; the binding is not a marshal, the entire
+/// resolution is inlined there). Three gates, then a fallback:
+///
+/// 1. **The trainer type is 2** (tradeskill/profession — `[0xb73a08]`, the trainer-list packet's
+///    type dword stored verbatim). A class/mount/pet trainer never substitutes.
+/// 2. **The WIRE spell has a learn-wrapper effect** in any of its three slots —
+///    `SPELL_EFFECT_LEARN_SPELL` or `SPELL_EFFECT_LEARN_PET_SPELL` (`0x4d8ff5`/`0x4d8ffa`). The
+///    **first** matching slot wins; its `EffectTriggerSpell` is the taught spell.
+/// 3. **That taught spell creates an item** (`EffectItemType[0] != 0`, `0x4d906a`) → the created
+///    item's `ItemDisplayInfo` icon.
+///
+/// Otherwise: the **WIRE (wrapper) spell's own `SpellIconID`** (`0x4d9008`). This is the fact
+/// benilla had backwards — `esi` is pinned to the wire record at `0x4d8fd7` and is never reassigned
+/// on any path reaching the fallback, so **the client never paints the taught spell's own icon at a
+/// trainer**. We used to, which is what put a blue `Spell_Shadow_SealOfKings` crown on Copper
+/// Shortsword: spell 2756 (the wrapper the server sends) hops to 2739 (the recipe), whose own
+/// `SpellIconID` is that crown — while the law wants item 2847's sword.
+///
+/// A gate-3 hit whose item template is not cached yet returns `None` (the client pushes Lua `nil`
+/// and repaints on the cache callback, `0x4d9140` → `TRAINER_UPDATE`). Our equivalent is free: the
+/// template answer changes the snapshot, so [`feed_trainer`]'s diff re-fires `TRAINER_UPDATE` on its
+/// own.
+fn service_icon(
+    wire_spell: u32,
+    trainer_type: u32,
+    spells: &SpellCatalog,
+    icons: Option<&ItemDisplays>,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> Option<String> {
+    let wire = spells.get(wire_spell)?;
+    if trainer_type == TRAINER_TYPE_TRADESKILL {
+        // Gate 2: the first learn-wrapper slot wins — a miss (or a zero trigger) falls straight
+        // through to the wire icon rather than scanning on, exactly as the loop's `je` does.
+        let taught = wire
+            .effects
+            .iter()
+            .position(|&e| e == SPELL_EFFECT_LEARN_SPELL || e == SPELL_EFFECT_LEARN_PET_SPELL)
+            .map(|i| wire.effect_trigger_spell[i])
+            .filter(|&t| t != 0);
+        // Gate 3: the taught spell's product item, slot 0 only.
+        if let Some(product) = taught
+            .and_then(|t| spells.get(t))
+            .map(|d| d.effect_item_type[0])
+            .filter(|&e| e != 0)
+        {
+            return items
+                .template(product, 0, commands)
+                .map(|t| t.display_info_id)
+                .and_then(|d| item_icon(icons, d));
+        }
+    }
+    wire.icon.clone()
+}
+
 /// The green/red/gray colour a wire `state` byte maps to (decision 0237): GRAY → known, GREEN →
 /// learnable, everything else (RED + any unexpected value) → gated.
 fn category(state: u8) -> TrainerServiceCategory {
@@ -145,12 +208,16 @@ fn category(state: u8) -> TrainerServiceCategory {
 /// the ability-req names + rank from the same spell catalog, the state/cost/gates straight off the
 /// wire. `known` is the player's known-spell set ([`PlayerActions::spells`]) — each prerequisite
 /// ability is coloured by whether the player already knows that specific spell (see below).
+#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn resolve_service(
     wire: &TrainerSpell,
     trainer_type: u32,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
     known: &HashSet<u32>,
+    icons: Option<&ItemDisplays>,
+    items: &mut Items,
+    commands: &NetCommands,
 ) -> TrainerService {
     // The trainer offers a LEARN wrapper (decision 0247); the ability it teaches — with the skill
     // line the tree groups by, and the real display name/icon — is the taught spell. Resolve it once
@@ -229,7 +296,10 @@ fn resolve_service(
         spell_id: wire.spell,
         name: display.map(|d| d.name.clone()),
         subtext: display.and_then(|d| d.rank.clone()),
-        texture: display.and_then(|d| d.icon.clone()),
+        // The NAME/subtext hop through the taught spell stays (decisions 0247/0252 — the wrapper is
+        // not in SkillLineAbility, so grouping and display MUST hop). The ICON does not: it is its
+        // own byte-verified law over the WIRE spell ([`service_icon`]).
+        texture: service_icon(wire.spell, trainer_type, spells, icons, items, commands),
         // The detail pane's description body, left empty by design. The real
         // `GetTrainerServiceDescription` returns the spell's *tooltip* — `Spell.dbc`'s Description
         // with its `$s1`/`$o1`/`$d`/`$a1` tokens substituted from the spell's effect base points,
@@ -251,11 +321,15 @@ fn resolve_service(
 
 /// Build the Lua-facing snapshot from [`TrainerOpen`] + the spell/skill catalogs — `None` when no
 /// trainer is open.
+#[allow(clippy::too_many_arguments)] // the resolver's full catalog set
 fn snapshot(
     open: &TrainerOpen,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
     known: &HashSet<u32>,
+    icons: Option<&ItemDisplays>,
+    items: &mut Items,
+    commands: &NetCommands,
 ) -> Option<TrainerState> {
     open.trainer?;
     Some(TrainerState {
@@ -264,7 +338,18 @@ fn snapshot(
         services: open
             .services
             .iter()
-            .map(|w| resolve_service(w, open.trainer_type, spells, skill_lines, known))
+            .map(|w| {
+                resolve_service(
+                    w,
+                    open.trainer_type,
+                    spells,
+                    skill_lines,
+                    known,
+                    icons,
+                    items,
+                    commands,
+                )
+            })
             .collect(),
         // The engine synthesizes the skill-line tree in `set_trainer` — the app pushes only the flat
         // services (each carrying its resolved skill line above).
@@ -283,6 +368,10 @@ fn feed_trainer(
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
+    // A tradeskill trainer's rows front the CREATED ITEM's icon, so the feed needs the ask-once
+    // template cache + `ItemDisplayInfo.dbc` — the tradeskill window's own pair ([`service_icon`]).
+    icons: Option<Res<ItemDisplays>>,
+    mut items: ResMut<Items>,
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
@@ -316,6 +405,9 @@ fn feed_trainer(
         &spells.catalog,
         Some(&skill_lines.catalog),
         &actions.spells,
+        icons.as_deref(),
+        &mut items,
+        &commands,
     );
     // The trainer's name resolves through the NameCache (a creature-name query, ask-once — the
     // real client's `UnitName("npc")`). `None`/empty while in flight; the title shows the static
@@ -400,11 +492,38 @@ fn drain_trainer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_formats::{ItemDisplay, ItemDisplayCatalog, SpellDisplay};
     use std::collections::HashMap;
 
     /// An empty spell catalog (`Spell.dbc` not resolved) — the resolver's name/icon lookups miss.
     fn empty_catalog() -> SpellCatalog {
         SpellCatalog::from_displays(HashMap::new())
+    }
+
+    /// The feed-side trio [`service_icon`] needs — the shared seam, since the tradeskill and craft
+    /// icon laws terminate in the same ask-once cache. Gate 3's "template in flight" arm is the
+    /// default; the tests that want a landed template seed one.
+    use crate::items::TestDeps as Deps;
+
+    /// [`resolve_service`] with the icon trio defaulted — the shape the gate/state tests want.
+    fn resolve_service(
+        wire: &TrainerSpell,
+        trainer_type: u32,
+        spells: &SpellCatalog,
+        skill_lines: Option<&SkillLineCatalog>,
+        known: &HashSet<u32>,
+    ) -> TrainerService {
+        let mut deps = Deps::new();
+        super::resolve_service(
+            wire,
+            trainer_type,
+            spells,
+            skill_lines,
+            known,
+            None,
+            &mut deps.items,
+            &deps.commands,
+        )
     }
 
     fn wire(spell: u32, state: u8, cost: u32, req_level: u8, req_skill: u32) -> TrainerSpell {
@@ -419,6 +538,246 @@ mod tests {
             req_skill_value: if req_skill != 0 { 100 } else { 0 },
             req_spells: [0, 0, 0],
         }
+    }
+
+    /// [`snapshot`] with the icon trio defaulted.
+    fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
+        let mut deps = Deps::new();
+        snapshot(
+            open,
+            spells,
+            None,
+            &HashSet::new(),
+            None,
+            &mut deps.items,
+            &deps.commands,
+        )
+    }
+
+    /// The icon law's fixture (wow-re `spell-icon-substitution-law.md` §1's shape, synthetic so
+    /// every gate is reachable): wrapper 100 teaches 200 via a slot-0 `LEARN_SPELL`; 200 creates
+    /// item 777; item 777's display 5 carries the "real" art. Each spell has a DISTINCT icon so a
+    /// wrong arm is named by the assertion, not merely unequal.
+    fn icon_catalog() -> SpellCatalog {
+        let wrapper = SpellDisplay {
+            name: "Copper Shortsword".into(),
+            icon: Some("WRAPPER".into()),
+            effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+            effect_trigger_spell: [200, 0, 0],
+            ..Default::default()
+        };
+        let taught = SpellDisplay {
+            name: "Copper Shortsword".into(),
+            icon: Some("TAUGHT".into()),
+            effect_item_type: [777, 0, 0],
+            ..Default::default()
+        };
+        SpellCatalog::from_displays(HashMap::from([(100, wrapper), (200, taught)]))
+    }
+
+    /// The product item's template + `ItemDisplayInfo` row, landed.
+    fn landed_item(deps: &mut Deps) -> ItemDisplays {
+        let mut t = crate::items::test_template("Copper Shortsword");
+        t.display_info_id = 5;
+        deps.items.insert_template(777, Some(t));
+        ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::from([(
+            5,
+            ItemDisplay {
+                icon: Some("ITEM".into()),
+                ..Default::default()
+            },
+        )])))
+    }
+
+    fn icon_of(
+        spells: &SpellCatalog,
+        trainer_type: u32,
+        wire_spell: u32,
+        land: bool,
+    ) -> Option<String> {
+        let mut deps = Deps::new();
+        let icons = land.then(|| landed_item(&mut deps));
+        service_icon(
+            wire_spell,
+            trainer_type,
+            spells,
+            icons.as_ref(),
+            &mut deps.items,
+            &deps.commands,
+        )
+    }
+
+    /// The trainer icon law, arm by arm. The director's report — a blue `Spell_Shadow_SealOfKings`
+    /// crown where the sword belongs — was BOTH halves of this wrong: we substituted nothing, and we
+    /// fell back to the taught spell's icon, which the client never paints at a trainer on any path.
+    #[test]
+    fn trainer_icon_substitutes_the_product_only_at_a_tradeskill_trainer() {
+        let spells = icon_catalog();
+
+        // Gate 1+2+3 all pass, template landed → the created ITEM's icon.
+        assert_eq!(
+            icon_of(&spells, TRAINER_TYPE_TRADESKILL, 100, true).as_deref(),
+            Some("ITEM")
+        );
+
+        // Gate 1 fails (a class trainer): the WIRE spell's own icon — never the taught spell's.
+        // This is the corrected fallback; the old code returned "TAUGHT" here.
+        assert_eq!(
+            icon_of(&spells, 0, 100, true).as_deref(),
+            Some("WRAPPER"),
+            "a class trainer serves the wrapper's own icon, not the taught spell's"
+        );
+
+        // Gate 2 fails (no learn-wrapper effect in any slot) → the wire spell's own icon. Spell 200
+        // creates an item, so only the missing wrapper effect can be keeping the substitution off.
+        assert_eq!(
+            icon_of(&spells, TRAINER_TYPE_TRADESKILL, 200, true).as_deref(),
+            Some("TAUGHT"),
+            "200 IS the wire spell here, so its own icon is the right answer"
+        );
+
+        // A spell with no record at all → nil (every failure funnels there, 0x4d911c).
+        assert_eq!(icon_of(&spells, TRAINER_TYPE_TRADESKILL, 999, true), None);
+    }
+
+    /// Gate 3: a wrapper whose taught spell creates NO item falls back to the wire icon — the
+    /// class/pet-trainer population, which is why the fallback arm has to be right.
+    #[test]
+    fn trainer_icon_falls_back_when_the_taught_spell_makes_no_item() {
+        let wrapper = SpellDisplay {
+            icon: Some("WRAPPER".into()),
+            effects: [SPELL_EFFECT_LEARN_SPELL, 0, 0],
+            effect_trigger_spell: [200, 0, 0],
+            ..Default::default()
+        };
+        let taught = SpellDisplay {
+            icon: Some("TAUGHT".into()),
+            ..Default::default() // effect_item_type all zero
+        };
+        let spells = SpellCatalog::from_displays(HashMap::from([(100, wrapper), (200, taught)]));
+        assert_eq!(
+            icon_of(&spells, TRAINER_TYPE_TRADESKILL, 100, true).as_deref(),
+            Some("WRAPPER")
+        );
+    }
+
+    /// The wrapper scan covers all three effect slots and accepts `LEARN_PET_SPELL` (57) as well as
+    /// `LEARN_SPELL` (36) — the paired `cmp ecx,0x24` / `cmp ecx,0x39` at `0x4d8ff5`/`0x4d8ffa`.
+    #[test]
+    fn trainer_icon_scans_every_effect_slot_for_either_learn_effect() {
+        let wrapper = SpellDisplay {
+            icon: Some("WRAPPER".into()),
+            effects: [0, SPELL_EFFECT_LEARN_PET_SPELL, 0],
+            effect_trigger_spell: [0, 200, 0],
+            ..Default::default()
+        };
+        let taught = SpellDisplay {
+            effect_item_type: [777, 0, 0],
+            ..Default::default()
+        };
+        let spells = SpellCatalog::from_displays(HashMap::from([(100, wrapper), (200, taught)]));
+        assert_eq!(
+            icon_of(&spells, TRAINER_TYPE_TRADESKILL, 100, true).as_deref(),
+            Some("ITEM"),
+            "a pet-learn effect in slot 1 substitutes just the same"
+        );
+    }
+
+    /// The in-flight case: gate 3 passes but the item template is not cached, so the icon reads
+    /// `None` **and the template gets asked for exactly once**. The real client pushes Lua nil here
+    /// and repaints from the cache callback (`0x4d9140` → `TRAINER_UPDATE`); our equivalent is the
+    /// feed's own snapshot diff, which re-fires once the answer changes the texture.
+    #[test]
+    fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
+        let spells = icon_catalog();
+        let mut deps = Deps::new();
+        let icons =
+            ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::new()));
+
+        let first = service_icon(
+            100,
+            TRAINER_TYPE_TRADESKILL,
+            &spells,
+            Some(&icons),
+            &mut deps.items,
+            &deps.commands,
+        );
+        assert_eq!(first, None, "no template yet → nil, not the wrapper's icon");
+        assert_eq!(
+            deps.queried_entries(),
+            vec![777],
+            "and the created item's template was asked for"
+        );
+
+        // A second frame before the answer lands must not re-ask (the ask-once cache).
+        let _ = service_icon(
+            100,
+            TRAINER_TYPE_TRADESKILL,
+            &spells,
+            Some(&icons),
+            &mut deps.items,
+            &deps.commands,
+        );
+        assert!(
+            deps.queried_entries().is_empty(),
+            "asked once, not per frame"
+        );
+    }
+
+    /// The director's exact case on the real shipped `Spell.dbc` — the check wow-re's §7 pins:
+    /// spell 2756 is the wrapper a Blacksmithing trainer sends, 2739 the recipe it teaches, 2847 the
+    /// sword. At a tradeskill trainer the law must reach for item 2847; at a class trainer it must
+    /// serve 2756's own icon. Skips without client data.
+    #[test]
+    fn trainer_icon_on_real_data_reaches_for_the_crafted_item() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+
+        // The two textures a wrong law produces, straight off the shipped DBC.
+        let wrapper_icon = spells.get(2756).unwrap().icon.clone();
+        let recipe_icon = spells.get(2739).unwrap().icon.clone();
+        assert_eq!(
+            recipe_icon.as_deref(),
+            Some("Interface\\Icons\\Spell_Shadow_SealOfKings"),
+            "the blue crown the director saw IS the recipe spell's own icon"
+        );
+
+        // A tradeskill trainer: gate 3 fires for item 2847 and the icon waits on the template —
+        // crucially it is NOT the crown.
+        let mut deps = Deps::new();
+        let icons =
+            ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::new()));
+        let icon = service_icon(
+            2756,
+            TRAINER_TYPE_TRADESKILL,
+            &spells,
+            Some(&icons),
+            &mut deps.items,
+            &deps.commands,
+        );
+        assert_eq!(
+            icon, None,
+            "waiting on the item template, not painting the crown"
+        );
+        assert_eq!(
+            deps.queried_entries(),
+            vec![2847],
+            "the law reached for the crafted sword's template"
+        );
+
+        // A class trainer with the same wire spell: the wrapper's own icon, not the recipe's.
+        let mut deps = Deps::new();
+        let class_icon = service_icon(2756, 0, &spells, None, &mut deps.items, &deps.commands);
+        assert_eq!(class_icon, wrapper_icon);
+        assert_ne!(
+            class_icon, recipe_icon,
+            "the taught spell's icon is never painted at a trainer"
+        );
     }
 
     /// The learn-spell hop end-to-end on real 5875 data (decision 0247): a warrior trainer sends the
@@ -587,7 +946,7 @@ mod tests {
     fn snapshot_is_none_when_closed_and_lists_services_when_open() {
         let spells = empty_catalog();
         let mut open = TrainerOpen::default();
-        assert!(snapshot(&open, &spells, None, &HashSet::new()).is_none());
+        assert!(snap(&open, &spells).is_none());
 
         open.open(
             0x42,
@@ -598,7 +957,7 @@ mod tests {
             ],
             "Learn from me.".into(),
         );
-        let state = snapshot(&open, &spells, None, &HashSet::new()).expect("open → Some");
+        let state = snap(&open, &spells).expect("open → Some");
         assert_eq!(state.greeting, "Learn from me.");
         assert_eq!(state.services.len(), 2);
         assert_eq!(
@@ -608,7 +967,7 @@ mod tests {
         assert_eq!(state.services[1].category, TrainerServiceCategory::Used);
 
         open.clear();
-        assert!(snapshot(&open, &spells, None, &HashSet::new()).is_none());
+        assert!(snap(&open, &spells).is_none());
         assert_eq!(open.trainer, None);
     }
 }

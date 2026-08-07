@@ -427,14 +427,17 @@ pub(super) fn update_hovered_object(
                         s.0.gameobject_faction(),
                         self_store,
                     );
-                    let channel_owned = crate::target::cursor_mode::fishing_channel_owned(
-                        self_store,
-                        guids.get(net).ok().map(|g| g.0),
-                    );
+                    let go_guid = guids.get(net).ok().map(|g| g.0);
+                    let overrides = crate::target::cursor_mode::GoOverrides {
+                        channel_owned: crate::target::cursor_mode::fishing_channel_owned(
+                            self_store, go_guid,
+                        ),
+                        meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
+                            go_guid.and_then(|g| go_templates.get(g)?.meeting_stone_area),
+                        ),
+                    };
                     u32::from(crate::target::cursor_mode::go_highlightable(
-                        s,
-                        reaction,
-                        channel_owned,
+                        s, reaction, overrides,
                     ))
                 })
             };
@@ -472,7 +475,7 @@ pub(super) fn update_hovered_object(
     // than the old behaviour (which tooltipped the portcullis itself) and documented rather than
     // silently accepted; closing it wants the single-pick arbitration, which is its own slice.
     if let Ok(store) = stores.get(net_entity) {
-        let generic_highlight = go_templates.get(guid.0).map(|t| t.generic_highlight);
+        let tmpl = go_templates.get(guid.0);
         let reaction = crate::target::cursor_mode::go_reaction(
             factions.as_deref(),
             store.0.gameobject_faction(),
@@ -482,9 +485,17 @@ pub(super) fn update_hovered_object(
             store.0.gameobject_type_id(),
             store.0.gameobject_flags(),
             store.0.gameobject_dynamic_flags(),
-            generic_highlight,
+            tmpl.map(|t| t.highlight_column),
             reaction,
-            crate::target::cursor_mode::fishing_channel_owned(self_store, Some(guid.0)),
+            crate::target::cursor_mode::GoOverrides {
+                channel_owned: crate::target::cursor_mode::fishing_channel_owned(
+                    self_store,
+                    Some(guid.0),
+                ),
+                meeting_stone_queued: crate::target::cursor_mode::meeting_stone_queued(
+                    tmpl.and_then(|t| t.meeting_stone_area),
+                ),
+            },
         ) {
             return;
         }

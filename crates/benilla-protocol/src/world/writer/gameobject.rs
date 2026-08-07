@@ -34,4 +34,17 @@ impl WorldWriter {
             &messages::gameobject_query(entry, guid),
         )
     }
+
+    /// Ask for one page of a book (`CMSG_PAGE_TEXT_QUERY`, layout in
+    /// [`messages::page_text_query`]) — the ask-once page cache a readable reaches when the reader
+    /// opens on it (decision 1105). `guid` names the asking object (the book item or the
+    /// `GAMEOBJECT_TYPE_TEXT` world object); the server resolves the page from the id alone.
+    /// Answered by `SMSG_PAGE_TEXT_QUERY_RESPONSE` — once per page of the whole chain, not just
+    /// the one asked for.
+    pub fn page_text_query(&mut self, page_id: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_PAGE_TEXT_QUERY,
+            &messages::page_text_query(page_id, guid),
+        )
+    }
 }

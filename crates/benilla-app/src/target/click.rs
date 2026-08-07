@@ -142,7 +142,8 @@ const EMOTE_TALK: u16 = 60;
 /// auto-approach yet) — the selection still lands. Attack, by contrast, is never range-gated
 /// (`unable` only grays): the server holds the swing until we're in reach, as the real client does.
 /// A right-click on empty ground was just a turn — it never deselects.
-#[allow(clippy::too_many_arguments)]
+// The `ui_feedback` tuple is the 16-SystemParam ceiling's overflow bundle, commented at its site.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn act_on_right_click(
     mut clicks: MessageReader<WorldRightClick>,
     hovered: Res<Hovered>,
@@ -171,9 +172,12 @@ pub(super) fn act_on_right_click(
         ResMut<crate::ui_action::CastErrors>,
         ResMut<crate::ui_loot::LootLatch>,
         ResMut<crate::ui_mail::MailOpen>,
+        // The reader session the TEXT branch opens (decision 1105) — like the mailbox, a
+        // client-side window with no packet behind it.
+        ResMut<crate::ui_item_text::ItemTextOpen>,
     ),
 ) {
-    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail) = ui_feedback;
+    let (mut ui_error_keys, mut cast_errors, mut loot_latch, mut mail, mut item_text) = ui_feedback;
     if clicks.read().last().is_none() {
         return;
     }
@@ -206,6 +210,29 @@ pub(super) fn act_on_right_click(
                     if !cursor.unable {
                         debug!("right-click mailbox: open mail window {guid:#x}");
                         mail.click(guid);
+                    }
+                    return;
+                }
+                // TEXT (GO type 9): a book, plaque or sign — READ it, client-side, before the lock
+                // fork (a readable is never locked). Its strategy overrides the use-slot the same
+                // way the mailbox does — `0x5f58c0` calls the local page-text opener
+                // `0x4e32e0(goGuid, 0)` and never the shared `CMSG_GAMEOBJ_USE` sender (decision
+                // 1105; wow-re cursor-system §4's "TEXT type 9 — its own handler"). Sending USE
+                // instead is what left every world book dead: vmangos' `GameObject::Use` has no
+                // type-9 case at all, so the packet is answered with silence.
+                //
+                // `arg2 == 0` here means the reference's **toggle**: right-clicking the book whose
+                // reader is already open closes it. The page id + material are NOT resolved here —
+                // the reader asks the object's template for them as it paints, like the reference's
+                // `vtbl+0x74` getter, so a click that beats the ask-once template query still opens.
+                if go.is_some_and(|(s, _)| s.0.gameobject_type_id() == cursor_mode::GO_TYPE_TEXT) {
+                    if !cursor.unable {
+                        if item_text.toggle_closed(guid) {
+                            debug!("right-click text gameobject: re-click closes {guid:#x}");
+                        } else {
+                            debug!("right-click text gameobject: read {guid:#x}");
+                            item_text.open_pages(guid);
+                        }
                     }
                     return;
                 }

@@ -251,6 +251,7 @@ pub(super) fn drain_container_uses(
                     use_spell: t.use_spell.map(|u| u.spell_id),
                     unwraps_gift: t.unwraps_gift(inst_flags),
                     opens_loot: t.opens_loot(),
+                    page_text: t.page_text,
                 })
             });
 
@@ -334,23 +335,38 @@ pub(super) fn drain_container_uses(
             );
             continue;
         }
+        // #5 — readable: an item TEMPLATE carrying `PageText` (`0x5d8e4c`) — a book — opens the
+        // reader on its page chain, client-side, no permission packet (`0x4e32e0(itemGuid)`;
+        // decision 1105). Above #6 and above the open arm, which is the reference's own order and
+        // the INVERSE of the tooltip's, where OPENABLE wins over READABLE: a template that is both
+        // readable and lootable *shows* `<Right Click to Open>` and *reads* on click —
+        // byte-verified, not a slip of ours.
+        if let Some(c) = clicked.filter(|c| c.page_text != 0) {
+            if item_text.toggle_closed(c.guid) {
+                debug!("ui_items: re-click closes the book {:#x}", c.guid);
+            } else {
+                debug!(
+                    "ui_items: read book {:#x} (page {}, lua bag {bag} slot {slot})",
+                    c.guid, c.page_text
+                );
+                item_text.open_pages(c.guid);
+            }
+            continue;
+        }
         // #6 — readable: an item INSTANCE carrying `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made
         // permanent letter) opens the reader — client-side, no permission packet (vmangos'
         // `CMSG_READ_ITEM` handler gates on the *template*'s PageText, which is 0 for the Plain
         // Letter; the text rides the ask-once `CMSG_ITEM_TEXT_QUERY` instead).
-        //
-        // The dispatcher's arm **#5** — the same local open off the *template*'s `PageText`
-        // (`0x5d8e4c`) — has no feed here yet (books/pages aren't built). When it lands it belongs
-        // immediately above this one, and still above the open arm: the send order is the INVERSE
-        // of the tooltip's, where OPENABLE wins over READABLE. A template that is both readable
-        // and lootable therefore *shows* `<Right Click to Open>` and *reads* on click — the
-        // reference's own inversion, byte-verified, not a slip of ours.
         if let Some(c) = clicked.filter(|c| c.item_text_id != 0) {
-            debug!(
-                "ui_items: read item {:#x} (text {}, lua bag {bag} slot {slot})",
-                c.guid, c.item_text_id
-            );
-            item_text.open(c.guid, c.item_text_id);
+            if item_text.toggle_closed(c.guid) {
+                debug!("ui_items: re-click closes the letter {:#x}", c.guid);
+            } else {
+                debug!(
+                    "ui_items: read letter {:#x} (text {}, lua bag {bag} slot {slot})",
+                    c.guid, c.item_text_id
+                );
+                item_text.open_letter(c.guid, c.item_text_id);
+            }
             continue;
         }
         // #8 — the open arm (`0x5d8f7c: test al,4` → emitter `0x5edc80`): a **bare** template
@@ -439,6 +455,10 @@ struct Clicked {
     unwraps_gift: bool,
     /// `ItemInfo::opens_loot` for this template — dispatcher arm #8.
     opens_loot: bool,
+    /// The template's `PageText` — dispatcher arm #5's book gate (decision 1105); `0` = not a
+    /// book. The reader re-reads the head (and the material) off the template itself as it paints,
+    /// like the reference, so only the fork's predicate is carried here.
+    page_text: u32,
 }
 
 /// Drain the pick/place/swap/split moves `PickupContainerItem`/`SplitContainerItem` queued and

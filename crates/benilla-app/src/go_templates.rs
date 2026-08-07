@@ -38,15 +38,24 @@ pub(crate) struct GoTemplate {
     pub(crate) lock_id: u32,
     /// The display name — the hover tooltip's gold first line (decision 0276's GO law).
     pub(crate) name: String,
-    /// GENERIC (type 5) only: the template's `data[1]`, the vanilla **highlight** column, nonzero
-    /// on 1387 of the 1870 shipped type-5 templates. It is GENERIC's whole mouseover-eligibility
-    /// answer (`0x5f4830`, decision 0762) — a road signpost hovers because this is 1, and its
-    /// neighbours with 0 are scenery the reference never lets you hover at all.
-    pub(crate) generic_highlight: bool,
+    /// The vanilla **highlight** column, for the two types whose mouseover-eligibility slot reads
+    /// it instead of running a predicate (decision 1106): GENERIC(5)'s `data[1]` (`0x5f4830`,
+    /// decision 0762 — nonzero on 1387 of the 1870 shipped type-5 templates, which is why a road
+    /// signpost hovers and the scenery beside it never does) and CAPTURE_POINT(29)'s `data[19]`
+    /// (`0x5f6d80` — byte-for-byte the same shape, a different slot). `false` for every other type,
+    /// which never consults it.
+    pub(crate) highlight_column: bool,
+    /// MEETINGSTONE (type 23) only: the template's `data[2]` = **areaID**, the sole input of that
+    /// type's own `highlightable` slot (`0x5f6990` — decision 1106). `None` for every other type.
+    pub(crate) meeting_stone_area: Option<u32>,
     /// MO_TRANSPORT (type 15) path parameters — `Some` only for boats/zeppelins (decision 0438):
     /// the template's `data0..2` = (taxiPathId, moveSpeed, accelRate), the inputs the transport
     /// timetable is built from.
     pub(crate) mo_transport: Option<MoTransport>,
+    /// TEXT (type 9) only: the book/plaque's page chain head + frame material (decision 1105).
+    /// `Some` with a nonzero `page_id` is what makes a right-click *read* it; a type-9 template
+    /// with no page (vanilla ships a handful) opens nothing at all, exactly like the reference.
+    pub(crate) text_page: Option<TextPage>,
 }
 
 /// A MO_TRANSPORT template's path tuple (`gameobject_template.data0..2`, decision 0438).
@@ -55,6 +64,18 @@ pub(crate) struct MoTransport {
     pub(crate) taxi_path_id: u32,
     pub(crate) move_speed: f32,
     pub(crate) accel_rate: f32,
+}
+
+/// A TEXT (type 9) template's readable head — `data[0]`/`data[2]` (vmangos `GameObjectInfo::text`
+/// = `pageID, language, pageMaterial, allowMounted`; decision 1105). The client reads both through
+/// the same per-type attribute→slot table (`0x621b00`, attribute `0x11` = pageMaterial), so the
+/// two layouts are the one layout.
+#[derive(Clone, Copy)]
+pub(crate) struct TextPage {
+    /// `data[0]` — the first page's `PageText` id; `0` = nothing to read.
+    pub(crate) page_id: u32,
+    /// `data[2]` — the `PageTextMaterial.dbc` id the reader's frame paints with.
+    pub(crate) material: u32,
 }
 
 /// `entry → template`, ask-once per connection (mirrors [`crate::names::NameCache`]'s discipline).
@@ -89,21 +110,39 @@ impl GameObjectTemplates {
             .and_then(|slot| data.get(slot))
             .map(|&v| v.max(0) as u32)
             .unwrap_or(0);
+        // The highlight column, at the slot its type reads it from (decision 1106): GENERIC(5)
+        // `data[1]`, CAPTURE_POINT(29) `data[19]`. Both slots are resolved by the same
+        // `0x621b00(type, semantic 0x12)` lookup in the reference; the two shipped answers are
+        // inlined here for the same reason [`go_lock_slot`] inlines the lock's.
+        let highlight_column = match type_id {
+            5 => data[1] != 0,
+            29 => data[19] != 0,
+            _ => false,
+        };
+        // MEETINGSTONE (23): data[2] = areaID (vmangos `gameobject_template`), the one input of
+        // that type's own highlightable slot.
+        let meeting_stone_area = (type_id == 23).then(|| data[2].max(0) as u32);
         // MO_TRANSPORT (15): data0..2 = taxiPathId / moveSpeed / accelRate (vmangos
         // `GameObjectInfo::moTransport`; decision 0438).
-        let generic_highlight = type_id == 5 && data[1] != 0;
         let mo_transport = (type_id == 15).then(|| MoTransport {
             taxi_path_id: data[0].max(0) as u32,
             move_speed: data[1].max(0) as f32,
             accel_rate: data[2].max(0) as f32,
+        });
+        // TEXT (9): data[0] = pageID, data[2] = pageMaterial (decision 1105).
+        let text_page = (type_id == 9).then(|| TextPage {
+            page_id: data[0].max(0) as u32,
+            material: data[2].max(0) as u32,
         });
         self.templates.insert(
             entry,
             GoTemplate {
                 lock_id,
                 name,
-                generic_highlight,
+                highlight_column,
+                meeting_stone_area,
                 mo_transport,
+                text_page,
             },
         );
     }
@@ -161,6 +200,24 @@ mod tests {
         // A chest doesn't.
         t.insert(2, 3, "Chest".into(), &data);
         assert!(t.templates[&2].mo_transport.is_none());
+    }
+
+    /// TEXT (9) captures the readable head — `data[0]` page id, `data[2]` material (decision
+    /// 1105); no other type does.
+    #[test]
+    fn insert_captures_the_text_page_head() {
+        let mut t = GameObjectTemplates::default();
+        let mut data = [0i32; 24];
+        data[0] = 1416; // pageID
+        data[1] = 0; // language
+        data[2] = 2; // pageMaterial (Stone)
+        t.insert(2036, 9, "Book".into(), &data);
+        let page = t.templates[&2036].text_page.expect("type 9 captures");
+        assert_eq!(page.page_id, 1416);
+        assert_eq!(page.material, 2);
+        // A goober with the same bytes does not — its data[0] is a lockId.
+        t.insert(2037, 10, "Lever".into(), &data);
+        assert!(t.templates[&2037].text_page.is_none());
     }
 
     #[test]

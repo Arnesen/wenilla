@@ -256,6 +256,24 @@ pub(crate) fn slot_guid_count(
     }
 }
 
+/// An item template's icon path — its `DisplayInfoID` joined through `ItemDisplayInfo.dbc` (the
+/// [`ItemDisplays`] catalog the equipment feed already loads).
+///
+/// This is the **one** thing the client's spell-icon surfaces genuinely share. The *laws* do not:
+/// wow-re's `system/ui/scratch/spell-icon-substitution-law.md` settled that there is no shared
+/// spell-icon resolver at all — six Lua getters, six laws inlined per binding, disagreeing even
+/// between the TradeSkill and Craft windows. But every arm that ends at an item ends *here*, at the
+/// same `ItemTemplate+0x18 → 0x5d88b0 → rec+0x14` chain (§5 of that note). So the join lives once,
+/// and each window keeps its own law above it.
+pub(crate) fn item_icon(
+    icons: Option<&crate::entities::ItemDisplays>,
+    display_info_id: u32,
+) -> Option<String> {
+    icons
+        .and_then(|i| i.catalog.get(display_info_id))
+        .and_then(|d| d.icon.clone())
+}
+
 /// Count of item `entry` across the backpack + equipped bags. The quest-log feed
 /// ([`crate::ui_quest_log`]) needs this for an item-collection objective: unlike a creature/GO
 /// objective, item-objective progress is *not* one of the `PLAYER_QUEST_LOG` slot's 6-bit counters

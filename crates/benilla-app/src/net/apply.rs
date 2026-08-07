@@ -183,6 +183,9 @@ pub(super) fn apply_net_updates(
             // through the VM's own GlobalStrings by `ui_action::feed_actions`).
             ResMut<crate::ui_pet::PetBar>,
             ResMut<crate::ui_action::UiErrorKeys>,
+            // The ask-once book-page cache (decision 1105) — every readable's text, keyed by
+            // `PageText` id; the reader session repaints off it.
+            ResMut<crate::ui_item_text::PageTexts>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -329,6 +332,7 @@ pub(super) fn apply_net_updates(
             mut mirror_timers,
             mut pet_bar,
             mut ui_error_keys,
+            mut page_texts,
         ),
     ) = caches;
     let (
@@ -1316,6 +1320,13 @@ pub(super) fn apply_net_updates(
             SessionEvent::MailItemText { text_id, text } => {
                 mail::mail_item_text(text_id, text, &mut mail_open)
             }
+            // The book-page cache (decision 1105) — one page per packet, the whole chain in
+            // answer to the first ask; the reader repaints off it on the next feed.
+            SessionEvent::PageText {
+                page_id,
+                text,
+                next_page_id,
+            } => page_texts.insert(page_id, text, next_page_id),
             SessionEvent::ReceivedMail { seconds } => {
                 mail::received_mail(seconds, &mut mail_pending, &mail_open, &net_commands)
             }

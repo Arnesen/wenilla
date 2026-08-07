@@ -1016,6 +1016,15 @@ pub enum SessionEvent {
         equip_error: Option<u32>,
         item: Option<(u32, u32)>,
     },
+    /// `SMSG_PAGE_TEXT_QUERY_RESPONSE` — one page of a book, answering `CMSG_PAGE_TEXT_QUERY`.
+    /// The ask-once page cache both readables reach: a readable item template's `PageText` and a
+    /// `GAMEOBJECT_TYPE_TEXT` object's `data[0]` (decision 1105). `next_page_id == 0` ends the
+    /// chain; vmangos pushes the whole chain in answer to the first query.
+    PageText {
+        page_id: u32,
+        text: String,
+        next_page_id: u32,
+    },
     /// `SMSG_ITEM_TEXT_QUERY_RESPONSE` — a letter's body text, answering `CMSG_ITEM_TEXT_QUERY`
     /// (a mail's nonzero `item_text_id` triggers the ask-once fetch; decision 0544).
     MailItemText { text_id: u32, text: String },

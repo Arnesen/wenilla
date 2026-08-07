@@ -260,3 +260,84 @@ fn set_hyperlink_renders_items_and_ignores_other_links() {
     .unwrap();
     assert!(s.take_errors().is_empty());
 }
+
+/// One tradeskill recipe fixture — the product id is `spell_id + 10_000`, so the tooltip's own
+/// name names which recipe the channel actually landed on.
+fn ts_recipe(spell_id: u32, name: &str, group: (u32, u32, &str)) -> TradeSkillRecipe {
+    TradeSkillRecipe {
+        group: Some((group.0, group.1, group.2.to_string())),
+        spell_id,
+        name: name.into(),
+        difficulty: TradeSkillDifficulty::Optimal,
+        num_available: 1,
+        icon: None,
+        min_made: 1,
+        max_made: 1,
+        cooldown_secs: None,
+        product_item: spell_id + 10_000,
+        product_inv_type: 0,
+        product_item_level: 0,
+        reagents: vec![TradeSkillReagent {
+            item: spell_id + 20_000,
+            name: Some(format!("{name} Reagent")),
+            icon: None,
+            need: 1,
+            have: 1,
+        }],
+        tools: vec![],
+    }
+}
+
+/// `SetTradeSkillItem`'s index is a **VISIBLE** row index, not a position in `recipes` — headers
+/// interleave with rows, so the two differ the moment any group precedes the recipe. This is the
+/// exact mis-index the tradeskill module doc once carried as a known gap: with one header above it,
+/// visible row 4 is the SECOND group's recipe, and a raw `recipes[4-1]` lookup would land on the
+/// first group's second recipe instead. Both the product channel and the reagent channel are
+/// pinned, since the detail-icon and reagent-slot hovers are the two callers that pass a genuine
+/// visible index straight through. A HEADER row is a no-op, not a shifted hit.
+#[test]
+fn set_trade_skill_item_indexes_visible_rows_not_raw_recipes() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"local tt = CreateFrame("GameTooltip", "TT")"#)
+        .unwrap();
+
+    // Two groups, two recipes each. Visible order: [1] "Bolts" header, [2] Alpha Bolt,
+    // [3] Beta Bolt, [4] "Cloak" header, [5] Alpha Cloak, [6] Beta Cloak.
+    s.set_trade_skill(Some(TradeSkillState {
+        line: 197,
+        line_name: "Tailoring".into(),
+        rank: 57,
+        max_rank: 75,
+        recipes: vec![
+            ts_recipe(1, "Beta Bolt", (1, 2, "Bolts")),
+            ts_recipe(2, "Alpha Bolt", (1, 2, "Bolts")),
+            ts_recipe(3, "Beta Cloak", (2, 1, "Cloak")),
+            ts_recipe(4, "Alpha Cloak", (2, 1, "Cloak")),
+        ],
+        repeat_count: 1,
+    }));
+    assert_eq!(s.eval::<i64>("return GetNumTradeSkills()").unwrap(), 6);
+
+    // Visible row 5 is "Alpha Cloak" (spell 4) — its product is 10_004. A raw recipes[5-1] lookup
+    // would land on recipe index 4 (out of range, a silent no-op); recipes[4-1] on "Beta Cloak".
+    // `TTTextLeft1` need not exist when a call renders nothing (what an out-of-range RAW index
+    // does), so read it defensively — that case must surface as an assert_eq naming the row, not
+    // as a Lua nil-index panic three lines away from the claim.
+    let name_at = |s: &mut UiScript, row: i64, reagent: &str| -> String {
+        s.run(&format!("TT:SetTradeSkillItem({row}{reagent})"))
+            .unwrap();
+        s.eval::<String>("return TTTextLeft1 and TTTextLeft1:GetText() or '<nothing rendered>'")
+            .unwrap()
+    };
+    assert_eq!(name_at(&mut s, 5, ""), "Alpha Cloak");
+    assert_eq!(name_at(&mut s, 6, ""), "Beta Cloak");
+    assert_eq!(name_at(&mut s, 2, ""), "Alpha Bolt");
+
+    // The reagent channel takes the same mapping.
+    assert_eq!(name_at(&mut s, 5, ", 1"), "Alpha Cloak Reagent");
+
+    // A header row resolves to nothing — the hover is a no-op, so the previous render stands
+    // rather than a neighbouring recipe's tooltip appearing under the cursor.
+    assert_eq!(name_at(&mut s, 4, ""), "Alpha Cloak Reagent");
+}

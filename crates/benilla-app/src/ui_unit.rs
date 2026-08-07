@@ -778,33 +778,56 @@ fn feed_units(
     }
 
     // The ding feed: `PLAYER_LEVEL_UP` (arg1 = the new level) when our avatar's
-    // `UNIT_FIELD_LEVEL` rises — the event the exhaustion tick (1082) and the max-level rail
-    // (1094) register; it was a dead registration until 1094. Trigger PROVISIONAL (0578's
-    // pattern): fired off the descriptor diff, which lands in the same update batch as the
-    // ding's XP fields, so consumers read a coherent picture. The real client plausibly fires
-    // it from its `SMSG_LEVELUP_INFO` handler instead, with the packet's gain tuple as arg2+ —
-    // unpinned, and no 1.12 FrameXML consumer reads past arg1 (`ReputationWatchBar_Update`
-    // takes arg1; the tick's handler takes none), so the extra args wait for a consumer.
-    // A DROP (a GM `.level` down) fires nothing, like a first sighting — only a rise dings.
+    // `UNIT_FIELD_LEVEL` CHANGES — the event the exhaustion tick (1082) and the max-level rail
+    // (1094) register; it was a dead registration until 1094. Any change, not only a rise:
+    // vmangos `GiveLevel` runs for demotions too (a GM `.character level` down) and sends
+    // `SMSG_LEVELUP_INFO` unconditionally, so the real client hears every change — 1094's
+    // rise-only guard left the rail latched shown after a 60→1 demote (the 1106 live repro).
+    // Trigger PROVISIONAL (0578's pattern): fired off the descriptor diff, which lands in the
+    // same update batch as the ding's XP fields, so consumers read a coherent picture. The
+    // real client plausibly fires it from its `SMSG_LEVELUP_INFO` handler instead, with the
+    // packet's gain tuple as arg2+ — unpinned, and no 1.12 FrameXML consumer reads past arg1
+    // (`ReputationWatchBar_Update` takes arg1; the tick's handler takes none), so the extra
+    // args wait for a consumer.
     if let Some((store, _)) = self_q.iter().next() {
         if let Some(level) = store.0.unit_level() {
             let prev = feed.last_level.replace(level);
-            if prev.is_some_and(|p| level > p) {
+            if prev.is_some_and(|p| level != p) {
                 script.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(i64::from(level))]);
             }
         }
     }
 
-    // Initial pull: fire PLAYER_ENTERING_WORLD once so frames do their first paint on their own —
-    // gated on our avatar's descriptor EXISTING. 1087 stated the real client's guarantee (the
-    // player object lands before this event) and moved the XP/rest pushes above the fire, but the
-    // fire itself still went out on frame 1, seconds before login: every one-shot first-paint
-    // read empty state, and only consumers with their own diff events recovered. The 1094 live
-    // probe caught the one that couldn't — a level-60 login read UnitLevel()=0 at the fire and
-    // kept the XP strip. With the gate the guarantee is structural for every consumer.
-    if !feed.entered_world && self_pair.is_some() {
-        script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
-        feed.entered_world = true;
+    // Initial pull: fire PLAYER_ENTERING_WORLD once PER WORLD ENTRY so frames do their first
+    // paint on their own — gated on our avatar's descriptor EXISTING. 1087 stated the real
+    // client's guarantee (the player object lands before this event) and moved the XP/rest
+    // pushes above the fire, but the fire itself still went out on frame 1, seconds before
+    // login: every one-shot first-paint read empty state, and only consumers with their own
+    // diff events recovered. The 1094 live probe caught the one that couldn't — a level-60
+    // login read UnitLevel()=0 at the fire and kept the XP strip. With the gate the guarantee
+    // is structural for every consumer.
+    //
+    // The absent arm is the world-EXIT edge (logout / char switch — the self entity despawns
+    // with the streamed world): the real client fires this event on *every* world entry (it
+    // tears the whole UI down between them; the once-per-process frame tree is our documented
+    // interim, `IngameUiLoaded`), so re-arm the fire and forget the player-global diff
+    // memories. Forgetting them makes every next-login first sighting re-seed SILENTLY — the
+    // byte-verified fresh-CREATE notify silence (1098 §4), now holding per entry: without it a
+    // 60→1 char switch latched the max-level rail shown over a level-1 body (1106's live
+    // repro), and a normal→rested char switch would misfire "You feel rested." at login.
+    if self_pair.is_some() {
+        if !feed.entered_world {
+            script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+            feed.entered_world = true;
+        }
+    } else if feed.entered_world {
+        feed.entered_world = false;
+        feed.last_xp = None;
+        feed.last_rest = None;
+        feed.last_level = None;
+        feed.last_combo = None;
+        feed.in_combat = None;
+        feed.pvp_desired = None;
     }
 
     for (token, snap) in [("player", &player), ("target", &target)] {

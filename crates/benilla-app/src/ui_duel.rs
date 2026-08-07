@@ -410,7 +410,7 @@ fn duel_spell(
         spells
             .catalog
             .get(*id)
-            .is_some_and(|s| s.effect_1 == SPELL_EFFECT_DUEL)
+            .is_some_and(|s| s.effects[0] == SPELL_EFFECT_DUEL)
     })
 }
 
@@ -498,7 +498,7 @@ mod tests {
         let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
         let mut hits: Vec<u32> = catalog
             .iter()
-            .filter(|(_, s)| s.effect_1 == SPELL_EFFECT_DUEL)
+            .filter(|(_, s)| s.effects[0] == SPELL_EFFECT_DUEL)
             .map(|(id, _)| id)
             .collect();
         hits.sort_unstable();

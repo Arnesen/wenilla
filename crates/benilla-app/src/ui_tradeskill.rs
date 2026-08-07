@@ -38,7 +38,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
-use crate::ui_items::count_of;
+use crate::ui_items::{count_of, item_icon};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_unit::UnitFeed;
@@ -194,12 +194,39 @@ pub(crate) fn difficulty(rank: u32, low: u32, high: u32) -> TradeSkillDifficulty
     }
 }
 
-/// An item template's icon path — `ItemDisplayInfo.dbc` via the [`ItemDisplays`] catalog (the
-/// container feed's own join).
-fn item_icon(icons: Option<&ItemDisplays>, display_info_id: u32) -> Option<String> {
-    icons
-        .and_then(|i| i.catalog.get(display_info_id))
-        .and_then(|d| d.icon.clone())
+/// **Law C** — the TradeSkill window's row icon, transcribing `GetTradeSkillIcon 0x4fdae0`
+/// (byte-VERIFIED; wow-re `ui/scratch/spell-icon-substitution-law.md` §2, folded back by decision
+/// 1107). Read `EffectItemType[0]` **unconditionally** as an item id and paint that item's icon;
+/// on any miss — a zero id, a template not yet landed — return **`None`**.
+///
+/// Two things the binding pointedly does *not* do, both of which this used to:
+///
+/// - **No `CREATE_ITEM` gate.** `Effect[0]` (`+0xf4`) is never read anywhere in `[0x4fdae0,
+///   0x4fdc29]`. So this takes `d.effect_item_type[0]` directly rather than the `product_item`
+///   computed beside it — that variable's `CREATE_ITEM` gate belongs to the separately-verified
+///   *made-count* law (wow-re `tradeskill` TU-C) and has no business steering an icon.
+/// - **No spell-icon fallback.** `+0x1d4`/`+0x1d8` and the `SpellIcon.dbc` globals appear nowhere
+///   in the extent — proof by exhaustion over its three return paths, the last of which is a bare
+///   `lua_pushnil`. A row whose item will not resolve shows *nothing*, never the recipe's own art.
+///
+/// `None` while the ask-once template is in flight is the client's behaviour too: it pushes nil and
+/// repaints when the async item callback rebuilds the list and fires `TRADE_SKILL_UPDATE`.
+///
+/// The sibling laws deliberately disagree with this one — see [`crate::ui_craft`] (Law D, always
+/// the spell's own icon) and [`crate::ui_trainer::service_icon`] (Law B). There is no shared
+/// resolver in the real client and there is none here.
+fn recipe_icon(
+    d: &benilla_formats::SpellDisplay,
+    icons: Option<&ItemDisplays>,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> Option<String> {
+    let item = d.effect_item_type[0];
+    if item == 0 {
+        return None;
+    }
+    let display = items.template(item, 0, commands)?.display_info_id;
+    item_icon(icons, display)
 }
 
 /// Build one recipe row: reagents/tools/product resolved through the ask-once template cache
@@ -245,10 +272,10 @@ fn resolve_recipe(
     }
 
     // The product (CREATE_ITEM's EffectItemType, slot 0 — every probed recipe carries it there;
-    // a multi-slot product is unobserved in 5875) — its icon fronts the row when resolved. The
-    // made-count is byte-VERIFIED (wow-re `tradeskill` TU-C): min = BasePoints + BaseDice,
-    // max = BasePoints + DieSides × BaseDice (multiplicative), clamped ≥ 1.
-    let (product_item, min_made, max_made) = if d.effect_1 == SPELL_EFFECT_CREATE_ITEM {
+    // a multi-slot product is unobserved in 5875): the tooltip channel's item and the header key's
+    // source. The made-count is byte-VERIFIED (wow-re `tradeskill` TU-C): min = BasePoints +
+    // BaseDice, max = BasePoints + DieSides × BaseDice (multiplicative), clamped ≥ 1.
+    let (product_item, min_made, max_made) = if d.effects[0] == SPELL_EFFECT_CREATE_ITEM {
         let base = d.effect_base_points[0].max(0) as u32;
         let dice = d.effect_base_dice[0].max(0) as u32;
         let die = d.effect_die_sides[0].max(0) as u32;
@@ -257,15 +284,7 @@ fn resolve_recipe(
     } else {
         (0, 1, 1)
     };
-    let product_icon = (product_item != 0)
-        .then(|| {
-            items
-                .template(product_item, 0, commands)
-                .map(|t| t.display_info_id)
-                .and_then(|d| item_icon(icons, d))
-        })
-        .flatten();
-    let icon = product_icon.or_else(|| d.icon.clone());
+    let icon = recipe_icon(d, icons, items, commands);
     // The VERIFIED header key (wow-re `tradeskill` TU-B): the created item's (class, subclass),
     // named from ItemSubClass.dbc (verbose-first). `None` while the ask-once template is in
     // flight — the client's own one-frame header deferral; the engine buckets it trailing. The
@@ -492,5 +511,100 @@ fn drain_trade_skill(
         debug!("ui_tradeskill: client-side close (no packet)");
         open.line = None;
         repeat.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::items::{test_template, TestDeps};
+    use benilla_formats::{
+        ItemDisplay, ItemDisplayCatalog, SpellDisplay, SPELL_EFFECT_ENCHANT_ITEM,
+    };
+    use std::collections::HashMap;
+
+    /// A recipe whose `Effect[0]` is `effect` and whose `EffectItemType[0]` is `item`, carrying its
+    /// own distinct spell icon so a wrong arm is *named* by the assertion, not merely unequal.
+    fn recipe(effect: u32, item: u32) -> SpellDisplay {
+        SpellDisplay {
+            name: "Runed Copper Breastplate".into(),
+            icon: Some("SPELL".into()),
+            effects: [effect, 0, 0],
+            effect_item_type: [item, 0, 0],
+            ..Default::default()
+        }
+    }
+
+    /// Item 777's template + `ItemDisplayInfo` row, landed — the icon Law C actually wants.
+    fn landed_item(deps: &mut TestDeps) -> ItemDisplays {
+        let mut t = test_template("Runed Copper Breastplate");
+        t.display_info_id = 5;
+        deps.items.insert_template(777, Some(t));
+        ItemDisplays::icons_for_tests(ItemDisplayCatalog::from_displays(HashMap::from([(
+            5,
+            ItemDisplay {
+                icon: Some("ITEM".into()),
+                ..Default::default()
+            },
+        )])))
+    }
+
+    /// The ordinary arm: a `CREATE_ITEM` recipe fronts its product's item art, never the spell's.
+    #[test]
+    fn law_c_paints_the_created_items_icon() {
+        let mut deps = TestDeps::new();
+        let icons = landed_item(&mut deps);
+        let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
+        assert_eq!(
+            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            Some("ITEM".into()),
+        );
+    }
+
+    /// **No `CREATE_ITEM` gate** — `Effect[0]` is never read by `0x4fdae0`. A recipe carrying a
+    /// non-`CREATE_ITEM` effect in slot 0 still resolves `EffectItemType[0]` as an item id. This is
+    /// the half our old code got wrong by gating; it is asserted with a deliberately absurd effect
+    /// so the test fails the moment someone reintroduces a gate of any shape.
+    #[test]
+    fn law_c_does_not_gate_on_the_effect_type() {
+        let mut deps = TestDeps::new();
+        let icons = landed_item(&mut deps);
+        let d = recipe(SPELL_EFFECT_ENCHANT_ITEM, 777);
+        assert_eq!(
+            recipe_icon(&d, Some(&icons), &mut deps.items, &deps.commands),
+            Some("ITEM".into()),
+        );
+    }
+
+    /// **No spell-icon fallback** — the binding's third return is a bare `lua_pushnil`. Every miss
+    /// arm is `None`, and in particular NOT `"SPELL"`: a zero item id (an enchant recipe), an item
+    /// whose template will never land, and a missing `ItemDisplayInfo` row.
+    #[test]
+    fn law_c_pushes_nil_on_every_miss_never_the_spells_icon() {
+        let mut deps = TestDeps::new();
+        let icons = landed_item(&mut deps);
+
+        // EffectItemType[0] == 0: 0x55ba30 short-circuits on a zero id before hashing.
+        let none = recipe(SPELL_EFFECT_ENCHANT_ITEM, 0);
+        assert_eq!(
+            recipe_icon(&none, Some(&icons), &mut deps.items, &deps.commands),
+            None,
+        );
+
+        // A template that never lands (the async row) — nil, and the ask goes out exactly once.
+        let missing = recipe(SPELL_EFFECT_CREATE_ITEM, 999);
+        assert_eq!(
+            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            None,
+        );
+        assert_eq!(
+            recipe_icon(&missing, Some(&icons), &mut deps.items, &deps.commands),
+            None,
+        );
+        assert_eq!(deps.queried_entries(), vec![999], "ask-once, not ask-often");
+
+        // The template landed but ItemDisplayInfo is unresolved — still nil, still not "SPELL".
+        let d = recipe(SPELL_EFFECT_CREATE_ITEM, 777);
+        assert_eq!(recipe_icon(&d, None, &mut deps.items, &deps.commands), None);
     }
 }

@@ -427,6 +427,7 @@
             local action = BenillaActionButton_Action(button)
             if HasAction(action) then
                 button.icon:SetTexture(GetActionTexture(action) or BENILLA_FALLBACK_ICON)
+                button.icon:Show()
                 button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
                 button:Show()
                 button.rangeTimer = -1
@@ -436,7 +437,12 @@
                 BenillaActionButton_UpdateCooldown(button)
                 BenillaActionButton_UpdateFlash(button)
             else
-                button.icon:SetTexture(nil)
+                -- ref l.168: the empty arm HIDES the icon region — it does not clear the path. The
+                -- distinction is load-bearing here: UpdateUsable's SetVertexColor tint survives a
+                -- SetTexture(nil) ("a tint outlives the art"), and an occupied slot going empty on
+                -- a character switch left that white tint on a pathless region — the solid white
+                -- buttons of the 2026-08-07 report (decision 1108, with the engine-side draw gate).
+                button.icon:Hide()
                 button.count:SetText("")
                 button.cooldown:Hide()
                 button.rangeTimer = nil

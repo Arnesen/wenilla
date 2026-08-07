@@ -3,7 +3,7 @@
 //! action-button machinery. Same file, two concerns: the strip along the bar's top is the
 //! player-progress readout; the buttons are the input surface.
 
-use benilla_ui::script::{ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{QuadContent, ScriptValue, UiScript, UnitState};
 
 /// The XP bar's load set: the manifest prefix it actually needs — fonts, UIParent, the
 /// tooltip, `TextStatusBar.xml` (the numerals machinery `BenillaExpBar_OnLoad` wires in),
@@ -247,6 +247,44 @@ fn the_max_level_rail_replaces_the_xp_bar_at_60() {
     assert!(
         ok,
         "at 60 the rail replaces the strip and the tick goes with it"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The gryphon end caps stay over the strip and the rail across ANY show/hide history —
+/// including the faithful hidden→visible tail re-stamp (0x76ae10 / 0884, which a stale-rail
+/// recovery exercises: decision 1106's whole bug walked through here). The protection is
+/// 0884's own key order: the caps ride the art frame's OVERLAY and the strip's fill its
+/// ARTWORK, and within a `(strata, level)` bucket the LAYER outranks every stamp — no
+/// re-stamp can lift a lower layer over them.
+#[test]
+fn the_gryphons_outrank_the_bars_across_hide_show_cycles() {
+    let mut s = exp_bar_harness();
+    s.set_player_xp(300, 400);
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    // The relog shape: the strip hidden (a stale max-level rail), then re-shown; the rail's
+    // own arrival is ALWAYS a hidden→visible re-stamp (it is born hidden).
+    s.run("BenillaExpBar:Hide() BenillaExpBar:Show()").unwrap();
+    s.run("BenillaMaxLevelBar:Show()").unwrap();
+    s.resolve();
+    let quads = s.extract();
+    let z_max = |suffix: &str| {
+        quads
+            .iter()
+            .filter(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                        if p.ends_with(suffix))
+            })
+            .map(|q| q.z)
+            .max()
+    };
+    let fill = z_max("UI-StatusBar").expect("the strip's fill");
+    let rail = z_max("UI-MainMenuBar-MaxLevel").expect("the rail's plates");
+    let cap = z_max("UI-MainMenuBar-EndCap-Dwarf").expect("the gryphon end caps");
+    assert!(
+        fill < cap && rail < cap,
+        "the end caps must paint over the re-shown bars \
+         (fill z={fill:#x}, rail z={rail:#x}, cap z={cap:#x})"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

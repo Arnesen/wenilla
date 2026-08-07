@@ -944,7 +944,7 @@ mod tests {
         cds.start_gcd(772, &fireball(), t0);
         let mid = t0 + Duration::from_millis(200);
         let attack = SpellDisplay {
-            effect_1: 78, // SPELL_EFFECT_ATTACK
+            effects: [78, 0, 0], // SPELL_EFFECT_ATTACK
             start_recovery_category: 133,
             ..Default::default()
         };

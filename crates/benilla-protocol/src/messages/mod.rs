@@ -37,6 +37,7 @@ mod movement;
 pub mod opcode;
 mod opcode_names;
 mod packet;
+mod page_text;
 mod parse;
 mod pet;
 mod pose;
@@ -128,6 +129,7 @@ pub use mirror_timer::{
 pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, TransportPose};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
+pub use page_text::page_text_query;
 pub use parse::parse_server;
 pub use pet::{
     pet_abandon, pet_action, pet_cancel_aura, pet_rename, pet_set_action, pet_spell_autocast,

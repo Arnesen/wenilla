@@ -227,11 +227,12 @@ fn track_learned_abilities(
         return;
     }
     let first_with = |effect: u32| {
-        actions
-            .spells
-            .iter()
-            .copied()
-            .find(|&id| spells.catalog.get(id).is_some_and(|d| d.effect_1 == effect))
+        actions.spells.iter().copied().find(|&id| {
+            spells
+                .catalog
+                .get(id)
+                .is_some_and(|d| d.effects[0] == effect)
+        })
     };
     let (skinning, skin_player_corpse, feed_pet) = (
         first_with(benilla_formats::SPELL_EFFECT_SKINNING),

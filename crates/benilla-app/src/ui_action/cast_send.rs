@@ -247,7 +247,7 @@ fn send_spell_cast(
     // special branch (wow-re `wave-cast.md`, VERIFIED) — an `Effect[0] == SPELL_EFFECT_TRADE_SKILL`
     // cast NEVER reaches the wire; the crafting book opens client-side instead. Before the
     // cooldown ladder, exactly where the client dispatches it (`6e4bce`, ahead of every gate).
-    if def.is_some_and(|d| d.effect_1 == benilla_formats::SPELL_EFFECT_TRADE_SKILL) {
+    if def.is_some_and(|d| d.effects[0] == benilla_formats::SPELL_EFFECT_TRADE_SKILL) {
         debug!("ui_action: cast {spell_id} is a profession opener — the crafting book opens, no packet");
         trade_skill_opens.0.push(spell_id);
         return;
