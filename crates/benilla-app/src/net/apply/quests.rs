@@ -196,6 +196,7 @@ pub(super) fn quest_giver_failed(
             key: crate::ui_quest::questgiver_failed_key(reason),
             fill_s: Some(title),
             fill_d: None,
+            info: false,
         },
     );
     if matches!(reason, 4 | 50) {
@@ -261,6 +262,7 @@ mod tests {
                 key: "ERR_QUEST_FAILED_BAG_FULL_S",
                 fill_s: Some("A Threat Within".into()),
                 fill_d: None,
+                info: false,
             }
         );
         assert_eq!(msgs[1].0, MsgSurface::Error);

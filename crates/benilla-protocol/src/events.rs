@@ -374,6 +374,18 @@ pub enum SessionEvent {
         name: String,
         data: [i32; 24],
     },
+    /// A GameObject plays a one-shot **Custom** animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`):
+    /// the client arms GO substate `8 + anim_id` — AnimationData ids 153..156 (Custom0..3),
+    /// `anim_id >= 4` rejected at the consumer (wow-re `gameobject-anim-arm.md` §step 8).
+    /// The load-bearing sender is the fishing bobber's bite (`anim_id 0`, the splash;
+    /// decision 1086).
+    GameObjectCustomAnim { guid: u64, anim_id: u32 },
+    /// The fishing channel ended with nothing hooked (`SMSG_FISH_NOT_HOOKED`, empty body):
+    /// the red `ERR_FISH_NOT_HOOKED` toast (decision 1086).
+    FishNotHooked,
+    /// The hooked fish got away — the fishing-skill roll failed on the bobber click
+    /// (`SMSG_FISH_ESCAPED`, empty body): the red `ERR_FISH_ESCAPED` toast (decision 1086).
+    FishEscaped,
     /// A server-pushed 2D sound kit (`SMSG_PLAY_SOUND`): BG events, quest/zone scripts.
     PlaySound { sound_id: u32 },
     /// A server-pushed music kit for the music channel (`SMSG_PLAY_MUSIC`).

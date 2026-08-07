@@ -52,6 +52,22 @@ type EntityLightReadout = (
     Has<crate::interior::ContainmentAttach>,
 );
 
+/// Everything the identity card reads off the **net entity** under the cursor, as one named
+/// [`SystemParam`] — the descriptor store and the coarse kind the line gates go by, the GameObject
+/// collision readout (decision 0763), the light readout, and the two remaining inputs of the
+/// **interact gate** ([`crate::target::cursor_mode::go_highlightable`]): the faction catalog and our
+/// own store. A bundle because `inspect_ui` sits at Bevy's 16-param ceiling; a named struct rather
+/// than the tuple it grew out of, so each member says what it is at the point of use.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct InspectStores<'w, 's> {
+    stores: Query<'w, 's, &'static ObjectStore>,
+    kinds: Query<'w, 's, &'static crate::net::NetEntity>,
+    collision: Query<'w, 's, GoCollisionReadout>,
+    lit: Query<'w, 's, EntityLightReadout>,
+    factions: Option<Res<'w, crate::target::ring::Factions>>,
+    self_store: Query<'w, 's, &'static ObjectStore, With<crate::net::SelfPlayer>>,
+}
+
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
@@ -64,16 +80,7 @@ pub(super) fn inspect_ui(
     // The pickable mesh is a child of the net entity; its descriptor store (`ObjectStore`) lives on the
     // parent, so the readout hops child → parent.
     parents: Query<&ChildOf>,
-    // Bundled into one param (the same arity ceiling as `click_input` below): the descriptor
-    // store + the coarse kind the line gates go by.
-    stores: (
-        Query<&ObjectStore>,
-        Query<&crate::net::NetEntity>,
-        // The GameObject collision readout (decision 0763): whether a hull exists, whether it is
-        // currently disabled, and the client's stored state the gate reads.
-        Query<GoCollisionReadout>,
-        Query<EntityLightReadout>,
-    ),
+    stores: InspectStores,
     guids: Query<&crate::net::Guid>,
     castings: Query<&crate::creature_anim::Casting>,
     drivers: Query<&crate::creature_anim::AnimDriver>,
@@ -131,7 +138,13 @@ pub(super) fn inspect_ui(
         .entity
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
-    let (stores, kinds, collision, lit) = (&stores.0, &stores.1, &stores.2, &stores.3);
+    let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
+    let (stores, kinds, collision, lit) = (
+        &stores.stores,
+        &stores.kinds,
+        &stores.collision,
+        &stores.lit,
+    );
     let store = net_entity.and_then(|p| stores.get(p).ok());
     // The unit's server name through the query cache — asks on first hover, fills on a later frame
     // (the same ask-once path the unit frames use).
@@ -189,8 +202,28 @@ pub(super) fn inspect_ui(
             } else {
                 format!(" [{}]", named.join("|"))
             };
+            // The **interact gate**, stated rather than inferred (wow-re cursor-system §4a): the
+            // strategy vtable's `+0x14` **highlightable** slot is the single predicate behind the
+            // cursor, the +64 brighten, the right-click USE and the pick priority — so a GO reading
+            // `interact ✗` is saying all four are off *by design*, and one reading `interact ✓` while
+            // showing no gear says the fault is downstream in the cursor naming. That distinction is
+            // exactly what the type-8 anvil report cost a hand-derivation to make: an anvil hovers
+            // (this card is up) and must still read `interact ✗`, because SPELL_FOCUS is one of the
+            // types whose `+0x14` is a constant `xor al,al`.
+            let reaction =
+                crate::target::cursor_mode::go_reaction(factions, s.0.gameobject_faction(), self_store);
+            let channel_owned = crate::target::cursor_mode::fishing_channel_owned(
+                self_store,
+                net_entity.and_then(|p| guids.get(p).ok()).map(|g| g.0),
+            );
+            let interact =
+                if crate::target::cursor_mode::go_highlightable(s, reaction, channel_owned) {
+                "interact ✓"
+            } else {
+                "interact ✗"
+            };
             format!(
-                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text}",
+                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text} · {interact}",
                 s.0.gameobject_type_id()
             )
         });

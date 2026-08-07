@@ -36,7 +36,8 @@
 //!
 //! `SkillRaceClassInfo.dbc` — `SkillRaceClassInfofmt = "diiiiiix"` (8 fields, 32 B/record):
 //! `id`(0) · **`skillId` = column 1** · **`raceMask` = column 2** · **`classMask` = column 3** ·
-//! **`flags` = column 4** · `reqLevel`(5) · `skillTierId`(6) · `skillCostID`(7, unused). This is
+//! **`flags` = column 4** · **`reqLevel` = column 5** · `skillTierId`(6) ·
+//! **`skillCostID` = column 7**. This is
 //! the table the client's spellbook tab classifier routes through (decision 0228): a spell's skill
 //! line is looked up here for the player's race+class, and if the matching row's `flags` bit `0x80`
 //! (`SKILL_FLAG_DISPLAY_SORTED`, cmangos `DBCEnums.h`) is set — or no row matches — the spell's tab
@@ -52,9 +53,11 @@
 //! 11 fields, 44 B/record): `id`(0) · the 8-locale `name` block (enUS ⇒ **column 1**) + flags(9) ·
 //! **`displayOrder` = column 10** — the skills pane's header vocabulary and group order (decision
 //! 0437 phase 4): Class Skills(7, order 2) · Professions(11, 3) · Secondary(9, 4) · Weapon(6, 5) ·
-//! Armor(8, 6) · Languages(10, 7); `Attributes`(5, 1) never carries player rows and
-//! `Not Displayed`(12, 8) is the hide bucket. A skill line's own `categoryId` is `SkillLine.dbc`
-//! column 1 (the `SkillLinefmt` layout above).
+//! Armor(8, 6) · Languages(10, 7); `Attributes`(5, 1) never carries player rows, and
+//! `Not Displayed`(12, 8) is a header like any other — **not** a hide bucket, whatever its name
+//! suggests: the client drops `GENERIC (DND)` by its `SkillRaceClassInfo.flags & 0x2`, never by its
+//! category (decision 1091). A skill line's own `categoryId` is `SkillLine.dbc` column 1 (the
+//! `SkillLinefmt` layout above).
 //!
 //! Skill line ids are stable, well-known constants across the whole classic tool ecosystem
 //! (vmangos `SharedDefines.h`'s `SkillType` enum, itself commented "Data from SpellLine.dbc (1.12.1
@@ -95,14 +98,14 @@ const SKILL_LINE_CATEGORY: &str = "DBFilesClient\\SkillLineCategory.dbc";
 const SKILL_LINE_CATEGORY_FIELDS: usize = 11;
 const COL_SLC_NAME_ENUS: usize = 1;
 const COL_SLC_ORDER: usize = 10;
-/// `SkillLineCategory` id 12 — "Not Displayed": the skills pane hides lines in this bucket.
-pub const SKILL_CATEGORY_NOT_DISPLAYED: u32 = 12;
 
 const SKILL_RACE_CLASS_INFO_FIELDS: usize = 8;
 const COL_SRCI_SKILL_ID: usize = 1;
 const COL_SRCI_RACE_MASK: usize = 2;
 const COL_SRCI_CLASS_MASK: usize = 3;
 const COL_SRCI_FLAGS: usize = 4;
+const COL_SRCI_MIN_LEVEL: usize = 5;
+const COL_SRCI_COST_INDEX: usize = 7;
 
 /// `SkillRaceClassInfo.flags` bit `0x80` — cmangos `DBCEnums.h`'s `SKILL_FLAG_DISPLAY_SORTED`. The
 /// spellbook tab classifier reads it as the low byte's sign (`(int8) < 0`): set ⇒ the skill line's
@@ -116,6 +119,35 @@ const SKILL_FLAG_DISPLAY_SORTED: u32 = 0x80;
 /// server's own `CMSG_UNLEARN_SKILL` handler enforces (vmangos `SkillHandler.cpp` — a request
 /// for a line without it is dropped and anticheat-flagged, so the client must never offer it).
 const SKILL_FLAG_UNLEARNABLE: u32 = 0x20;
+
+/// `SkillRaceClassInfo.flags` bit `0x1` — a line the Skills tab lists even at **rank 0** (the list
+/// build's `0x4d2cb0` untrained gate). Unnamed in the mangos enums; named here for what the bytes
+/// do.
+const SKILL_FLAG_ALWAYS_DISPLAY: u32 = 0x1;
+
+/// `SkillRaceClassInfo.flags` bit `0x2` — the Skills tab **drops the line entirely**
+/// (`4d2d9f test dl,0x2`, wow-re `skillframe-display-list.md`). mangos names this bit
+/// `SKILL_FLAG_NO_SKILLUP_MESSAGE` from a different call site; in the display list it is a hide
+/// bit, and it is what keeps `Dual Wield`, the racial lines, the per-mount riding lines and
+/// `GENERIC (DND)` off the real client's pane.
+const SKILL_FLAG_HIDDEN: u32 = 0x2;
+
+/// `SkillRaceClassInfo.flags` bit `0x4` — an untrained (rank 0) line becomes visible once the
+/// player reaches the row's `reqLevel`. Also one of the two bits gating the client's step-cost
+/// lookup; unnamed in the mangos enums.
+const SKILL_FLAG_TRAINABLE_AT_LEVEL: u32 = 0x4;
+
+/// `SkillRaceClassInfo.flags` bit `0x400` — vmangos `DBCEnums.h`'s `SKILL_FLAG_MONO_VALUE` (a
+/// single-rank line). The real client's `GetSkillLineInfo` **overrides** its `skillMaxRank` return
+/// to `1` whenever the admitting row carries this bit, whatever the player's own skill descriptor
+/// says (wow-re `system/tradeskill/scratch/skillframe-seed-abandon.md`: `0x4d3610`, the
+/// `4d38b1 test ah,0x4` branch). That override is why a class skill the server reports as `300/300`
+/// draws as `SkillFrame.lua`'s gray, rank-text-less "proficiency" bar in the real client — the Lua
+/// gate is `skillMaxRank == 1`, and the DBC, not the wire, is what puts it there. Real build-5875
+/// data for a night-elf hunter: set on `Beast Mastery`/`Marksmanship`/`Survival` (0x410), `Dual
+/// Wield`/`Night Elf Racial`/the per-mount riding lines (0x492); clear on every weapon line, the
+/// armor proficiencies, the languages, `Riding` and the professions.
+const SKILL_FLAG_MONO_VALUE: u32 = 0x400;
 
 /// One skill line's display identity (`SkillLine.dbc`) — a spellbook tab's name + icon, and the
 /// skills pane's grouping key.
@@ -136,13 +168,64 @@ pub struct SkillLineInfo {
     pub description: String,
 }
 
-/// One `SkillRaceClassInfo.dbc` row's tab-classification inputs: which race/class it admits and
-/// whether its skill line's spells sort into General ([`SKILL_FLAG_DISPLAY_SORTED`]).
+/// One `SkillRaceClassInfo.dbc` row: which race/class it admits, plus everything the client reads
+/// off it ([`SkillRaceClass`], the caller-facing half).
 #[derive(Clone, Copy, Debug)]
 struct SrciRow {
     race_mask: u32,
     class_mask: u32,
-    flags: u32,
+    row: SkillRaceClass,
+}
+
+/// The `SkillRaceClassInfo.dbc` row the client resolved for a given skill line × race × class —
+/// the whole of what its Skills-tab display law reads (wow-re
+/// `system/tradeskill/scratch/skillframe-display-list.md`: the list build `0x4d2cb0` and
+/// `GetSkillLineInfo 0x4d3610`). Copy-cheap; obtained from
+/// [`SkillLineCatalog::race_class`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SkillRaceClass {
+    /// `flags` (column 4) — the bit field the predicates below read.
+    pub flags: u32,
+    /// `reqLevel` (column 5) — the player level at which a not-yet-trained line starts showing
+    /// (only consulted with [`SKILL_FLAG_TRAINABLE_AT_LEVEL`]).
+    pub min_level: u32,
+    /// `skillCostID` (column 7) — `GetSkillLineInfo`'s 12th return is this **plus one**
+    /// (`0x4d3a06`). Inert on this build: every branch that would paint from it is repainted by
+    /// the normal-skill/proficiency branches after it.
+    pub cost_index: u32,
+}
+
+impl SkillRaceClass {
+    /// Whether the Skills tab drops this line **entirely** — `flags & 0x2`, the client's own
+    /// `4d2d9f test dl,0x2 / jne` in the list build. This is what makes `Dual Wield`, the racial
+    /// lines, the per-mount riding lines and `GENERIC (DND)` invisible in the real client even
+    /// though the server sends them like any other skill.
+    pub fn hidden(self) -> bool {
+        self.flags & SKILL_FLAG_HIDDEN != 0
+    }
+
+    /// Whether this is a **single-rank** line — `flags & 0x400`, which makes the client's
+    /// `GetSkillLineInfo` report `skillMaxRank = 1` whatever the descriptor says
+    /// ([`SKILL_FLAG_MONO_VALUE`]).
+    pub fn mono(self) -> bool {
+        self.flags & SKILL_FLAG_MONO_VALUE != 0
+    }
+
+    /// Whether the line can be unlearned — `flags & 0x20` ([`SKILL_FLAG_UNLEARNABLE`]). The
+    /// client ANDs this with a nonzero skill **step**; that half lives with the descriptor, at
+    /// the feed.
+    pub fn unlearnable(self) -> bool {
+        self.flags & SKILL_FLAG_UNLEARNABLE != 0
+    }
+
+    /// Whether a line the player holds at **rank 0** still gets a row, for a player at
+    /// `player_level` — the list build's own gate (`0x4d2cb0`): shown outright with
+    /// [`SKILL_FLAG_ALWAYS_DISPLAY`], else only when it is [`SKILL_FLAG_TRAINABLE_AT_LEVEL`] and
+    /// the player has reached [`Self::min_level`]. A line at rank ≥ 1 never consults this.
+    pub fn displays_untrained(self, player_level: u32) -> bool {
+        self.flags & SKILL_FLAG_ALWAYS_DISPLAY != 0
+            || (self.flags & SKILL_FLAG_TRAINABLE_AT_LEVEL != 0 && player_level >= self.min_level)
+    }
 }
 
 /// One spell's `SkillLineAbility.dbc` row (module doc columns; first row wins across race/class
@@ -267,7 +350,7 @@ impl SkillLineCatalog {
         }
         match self.srci_row(line, race, class) {
             // A matching row without the sort flag keeps the line's own tab.
-            Some(r) if r.flags & SKILL_FLAG_DISPLAY_SORTED == 0 => line,
+            Some(r) if r.row.flags & SKILL_FLAG_DISPLAY_SORTED == 0 => line,
             // The sort flag, or no admitting row for this race/class → General.
             _ => 0,
         }
@@ -296,8 +379,27 @@ impl SkillLineCatalog {
     /// `SkillHandler.cpp`). `false` with no routing data, unknown race/class, or no admitting
     /// row — a missing button beats offering an unlearn the server would anticheat-flag.
     pub fn abandonable(&self, line_id: u32, race: u8, class: u8) -> bool {
-        self.srci_row(line_id, race, class)
-            .is_some_and(|r| r.flags & SKILL_FLAG_UNLEARNABLE != 0)
+        self.race_class(line_id, race, class)
+            .is_some_and(SkillRaceClass::unlearnable)
+    }
+
+    /// The `SkillRaceClassInfo` row the client resolves for `line_id` × `race`/`class` (1-based
+    /// unit bytes) — [`SkillRaceClass`], the whole of what the Skills tab's display law reads.
+    /// `None` when no row admits this character: the real client's list build drops such a line
+    /// outright (`0x4d2cb0`'s `!srci → continue`), so a caller building the pane must too.
+    pub fn race_class(&self, line_id: u32, race: u8, class: u8) -> Option<SkillRaceClass> {
+        self.srci_row(line_id, race, class).map(|r| r.row)
+    }
+
+    /// Whether `line_id` is a **single-rank** line for `race`/`class` (1-based unit bytes): the
+    /// admitting `SkillRaceClassInfo` row carries [`SKILL_FLAG_MONO_VALUE`] (`0x400`), so the
+    /// client's `GetSkillLineInfo` reports its `skillMaxRank` as `1` no matter what the server's
+    /// descriptor holds — and the skills pane draws it as a proficiency (gray bar, no rank text).
+    /// `false` with no routing data, unknown race/class, or no admitting row: a line we can't
+    /// classify keeps the server's own numbers rather than being silently blanked.
+    pub fn mono_value(&self, line_id: u32, race: u8, class: u8) -> bool {
+        self.race_class(line_id, race, class)
+            .is_some_and(SkillRaceClass::mono)
     }
 
     /// A skill line's display (name + tab icon), by id.
@@ -411,7 +513,11 @@ fn load_race_class_info(chain: &mut Chain) -> HashMap<u32, Vec<SrciRow>> {
         map.entry(skill).or_default().push(SrciRow {
             race_mask: u32_at(r, COL_SRCI_RACE_MASK).unwrap_or(0),
             class_mask: u32_at(r, COL_SRCI_CLASS_MASK).unwrap_or(0),
-            flags: u32_at(r, COL_SRCI_FLAGS).unwrap_or(0),
+            row: SkillRaceClass {
+                flags: u32_at(r, COL_SRCI_FLAGS).unwrap_or(0),
+                min_level: u32_at(r, COL_SRCI_MIN_LEVEL).unwrap_or(0),
+                cost_index: u32_at(r, COL_SRCI_COST_INDEX).unwrap_or(0),
+            },
         });
     }
     map
@@ -672,10 +778,9 @@ mod tests {
         assert_eq!(cat.category(9), Some(("Secondary Skills", 4)));
         assert_eq!(cat.category(6), Some(("Weapon Skills", 5)));
         assert_eq!(cat.category(10), Some(("Languages", 7)));
-        assert_eq!(
-            cat.category(SKILL_CATEGORY_NOT_DISPLAYED),
-            Some(("Not Displayed", 8))
-        );
+        // Category 12 is a real row like any other — NOT a hide bucket: the client's list build
+        // drops `GENERIC (DND)` by its `flags & 0x2`, never by its category (decision 1091).
+        assert_eq!(cat.category(12), Some(("Not Displayed", 8)));
         assert_eq!(cat.category(0), None);
 
         // The join: Tailoring (197) is a Profession; First Aid (129) is Secondary; the Fire
@@ -715,6 +820,81 @@ mod tests {
         }
         // Unknown race/class → no button (the conservative arm).
         assert!(!cat.abandonable(164, 0, 0));
+    }
+
+    /// `SkillRaceClassInfo.flags & 0x400` on the real build-5875 file (a night-elf hunter, race 4
+    /// / class 3): the class talent lines, Dual Wield, the racial and the per-mount riding lines
+    /// are MONO — the client reports their `skillMaxRank` as 1 and the pane draws them as gray
+    /// proficiencies — while every weapon line, armor proficiency, language, `Riding` and
+    /// profession keeps its real rank. Skips without client data.
+    #[test]
+    fn real_mono_value_split_class_lines_yes_weapons_no() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
+
+        // Beast Mastery / Survival / Marksmanship (0x410), Dual Wield / Night Elf Racial / the
+        // Tiger Riding mount line / GENERIC (DND) (0x492).
+        for line in [50u32, 51, 163, 118, 126, 150, 183] {
+            assert!(cat.mono_value(line, 4, 3), "line {line} is single-rank");
+        }
+        // Weapon lines (Axes/Bows/Daggers/Crossbows/Unarmed/Defense), armor proficiencies
+        // (Cloth/Leather/Mail), languages (Common/Darnassian), Riding, First Aid.
+        for line in [
+            44u32, 45, 173, 226, 162, 95, 415, 414, 413, 98, 113, 762, 129,
+        ] {
+            assert!(!cat.mono_value(line, 4, 3), "line {line} keeps its rank");
+        }
+        // Unknown race/class → keep the server's numbers (the conservative arm).
+        assert!(!cat.mono_value(50, 0, 0));
+    }
+
+    /// `SkillRaceClassInfo.flags & 0x2` on the real build-5875 file — the bit that keeps a line
+    /// off the Skills tab entirely (decision 1091; wow-re `0x4d2cb0`'s `4d2d9f test dl,0x2`), plus
+    /// the `reqLevel` column the untrained gate reads. A night-elf hunter, race 4 / class 3.
+    /// Skips without client data.
+    #[test]
+    fn real_hidden_lines_are_the_ones_the_reference_client_never_lists() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
+        let row = |line: u32| cat.race_class(line, 4, 3).expect("an admitting row");
+
+        // Dual Wield, Night Elf Racial, Tiger Riding, GENERIC (DND) — all 0x492, all absent from
+        // the real client's pane however high the server ranks them.
+        for line in [118u32, 126, 150, 183] {
+            assert!(row(line).hidden(), "line {line} never gets a row");
+        }
+        // Everything the ref does list: the class lines, weapons, armor, languages, Riding.
+        for line in [50u32, 51, 163, 44, 95, 162, 413, 414, 415, 98, 762, 129] {
+            assert!(!row(line).hidden(), "line {line} is listed");
+        }
+
+        // reqLevel (column 5) reads for real: Mail 40, Dual Wield 20.
+        assert_eq!(row(413).min_level, 40, "Mail");
+        assert_eq!(row(118).min_level, 20, "Dual Wield");
+        // The untrained gate is all but inert on this build's data, and the test says so: NO row
+        // in the whole file carries 0x1, and exactly ONE carries 0x4 (line 493, reqLevel 0 — a
+        // line `SkillLine.dbc` doesn't even have). So a rank-0 line is simply never listed; a
+        // `reqLevel` on its own does nothing without 0x4.
+        assert!(
+            !row(413).displays_untrained(60),
+            "Mail at rank 0 stays off the pane at any level — 0x80 carries neither gate bit"
+        );
+        assert!(
+            row(493).displays_untrained(0),
+            "the single 0x4 row shows from level 0 (its reqLevel is 0)"
+        );
+        // No admitting row at all → the caller drops the line (the client's own `!srci → continue`).
+        assert_eq!(cat.race_class(118, 0, 0), None);
     }
 
     /// The `forward_spellid` rank graph on the real build-5875 file — the action bar's

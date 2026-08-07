@@ -23,6 +23,22 @@ use super::super::{
     SpeedChangeMessage, Spline, UnitSpeeds,
 };
 
+/// A GameObject plays its one-shot **Custom** animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`, decision
+/// 1086) — bridged to the GO animation machine ([`crate::go_anim`]), which owns the reject
+/// (`anim_id >= 4`), the id mapping (153..156) and the model-ownership gate. The load-bearing
+/// sender: the fishing bobber's bite splash (`anim_id 0`).
+pub(super) fn gameobject_custom_anim(
+    guid: u64,
+    anim_id: u32,
+    plays: &mut MessageWriter<crate::go_anim::GoCustomAnim>,
+) {
+    debug!("net: gameobject {guid:#x} custom anim {anim_id}");
+    plays.write(crate::go_anim::GoCustomAnim {
+        go_guid: guid,
+        anim_id,
+    });
+}
+
 /// An object entered range / was created (`SMSG_UPDATE_OBJECT` create block): spawn or refresh the
 /// entity, warm the ask-once caches, and seed its descriptor store via the per-drain `pending` map.
 #[allow(clippy::too_many_arguments)]

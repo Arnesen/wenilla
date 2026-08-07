@@ -199,18 +199,19 @@ impl Loader<'_> {
         let color = children_named(region, "Color").next().map(color_of);
         if is_texture {
             if let Some(file) = region.attr("file") {
+                // A `<Texture file=…>` with a `<Color>` child DISCARDS the colour — it is not a
+                // tint (wow-re `system/ui/scratch/texture-color-composition.md`, VERIFIED).
+                // `CSimpleTexture::LoadXML 0x76fe20` runs its child loop (`0x76fec1`-`0x7700fc`,
+                // where `<Color>` lands in `SetTexture(const CImVector*)` `0x770360`) to completion
+                // BEFORE it reads `file=` at `0x770102`, and a successful load overwrites the very
+                // same `+0xcc` slot (`0x7702cb`/`0x7702dc`) — the generated solid is released
+                // unused. Even the load-FAILURE fallback ignores it, hard-coding `0xff00ff00`
+                // (`0x77016a`). So: load the art, drop the colour.
                 self.call_region(region_wrapper, "SetTexture", file.to_string(), dbg);
-                if let Some(c) = color {
-                    // A texture with both a file and a <Color> is a tint (vertex color).
-                    self.call_region(
-                        region_wrapper,
-                        "SetVertexColor",
-                        (c[0], c[1], c[2], c[3]),
-                        dbg,
-                    );
-                }
             } else if let Some(c) = color {
-                // No file: a solid colour fill (SetTexture(r,g,b,a)).
+                // No file: a solid colour fill (SetTexture(r,g,b,a)) — the client really generates
+                // an 8×8 texture out of it, which is why its alpha later MULTIPLIES with any
+                // SetVertexColor rather than being replaced by it (`RegionData::fill`).
                 self.call_region(region_wrapper, "SetTexture", (c[0], c[1], c[2], c[3]), dbg);
             }
             // `<TexCoords left right top bottom>`: the UV sub-rect this texture samples (decision

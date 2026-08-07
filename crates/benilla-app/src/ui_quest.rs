@@ -921,6 +921,7 @@ mod tests {
                     key: questgiver_failed_key(4),
                     fill_s: Some("A Threat Within".into()),
                     fill_d: None,
+                    info: false,
                 },
                 &g
             )

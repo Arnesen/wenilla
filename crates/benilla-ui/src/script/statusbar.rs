@@ -172,9 +172,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let data = model.region_data.entry(rh).or_default();
                 match &a1 {
-                    Value::String(s) => data.texture = Some(s.to_str()?.to_string()),
+                    Value::String(s) => {
+                        data.texture = Some(s.to_str()?.to_string());
+                        data.fill = None;
+                    }
+                    // A solid bar writes the same slot the path form does — each clears the other.
+                    // `SetStatusBarColor` is the TINT (the fill region's vertex colour) and is a
+                    // separate slot entirely: a bar can carry art AND a colour, and they multiply.
                     Value::Number(_) | Value::Integer(_) => {
-                        data.color = Some([
+                        data.texture = None;
+                        data.fill = Some([
                             num_f32(&a1),
                             num_f32(&a2),
                             num_f32(&a3),
@@ -211,7 +218,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let id = ensure_bar(lua, &this, None)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let rh = *model.id_to_region.get(&id).expect("bar region id");
-                model.region_data.entry(rh).or_default().color = Some([r, g, b, a.unwrap_or(1.0)]);
+                model.region_data.entry(rh).or_default().vertex_color =
+                    Some([r, g, b, a.unwrap_or(1.0)]);
                 Ok(())
             },
         )?,
@@ -223,7 +231,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let c = bar
                 .and_then(|rh| model.region_data.get(&rh))
-                .and_then(|d| d.color)
+                .and_then(|d| d.vertex_color)
                 .unwrap_or([1.0, 1.0, 1.0, 1.0]);
             Ok((c[0], c[1], c[2], c[3]))
         })?,

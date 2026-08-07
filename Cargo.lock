@@ -592,6 +592,7 @@ dependencies = [
  "benilla-formats",
  "benilla-protocol",
  "benilla-ui",
+ "benilla-wmo",
  "bevy",
  "bevy_egui",
  "bytemuck",

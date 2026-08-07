@@ -600,6 +600,7 @@ pub(super) fn seed_ui_fixture(
             items.insert_template(90_118, Some(template("Ruined Pelt", 1)));
             loot.open(
                 NPC_GUID,
+                benilla_protocol::messages::loot_type::CORPSE,
                 4, // 4 copper — the coin row
                 vec![
                     benilla_protocol::messages::LootItem {

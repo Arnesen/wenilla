@@ -24,8 +24,8 @@ fn shipped_action_bar_drives_end_to_end() {
         );
         if file == "ActionBar.xml" {
             assert_eq!(
-                report.frames, 33,
-                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button"
+                report.frames, 34,
+                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button"
             );
         }
     }

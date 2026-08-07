@@ -297,6 +297,13 @@ pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
 /// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
 /// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.
 pub const CMSG_GAMEOBJ_USE: u16 = 0x00B1; // 177
+/// A GameObject plays a one-shot **custom** animation (VERIFIED vmangos `Opcodes_1_12_1.h`: 179;
+/// body in [`super::read_gameobject_custom_anim`] — `u64 guid + u32 animId`, from
+/// `GameObject::SendGameObjectCustomAnim`). The client arms GO substate `8 + animId`
+/// (Custom0..3, AnimationData ids 153..156), rejecting `animId >= 4` — wow-re
+/// `gameobject-anim-arm.md` §"one-shot channel" step 8. The load-bearing sender: the fishing
+/// bobber's bite (`animId 0` — the splash; decision 1086).
+pub const SMSG_GAMEOBJECT_CUSTOM_ANIM: u16 = 0x00B3; // 179
 /// VERIFIED vmangos `Opcodes_1_12_1.h:183`: 180 — and the reference writes this literal
 /// (`0x5e2110`, its area-trigger check, builds `0xb4` + the trigger id). Body in
 /// [`super::area_trigger`]: the `AreaTrigger.dbc` id the player just walked into.
@@ -343,6 +350,15 @@ pub const SMSG_CHAT_PLAYER_NOT_FOUND: u16 = 0x02A9; // 681
 /// A cross-faction whisper was refused (VERIFIED vmangos `Opcodes_1_12_1.h`: 537); empty body
 /// (`WorldPackets::Chat::ChatWrongFaction::AppendBodyTo`, `Server/Packets/Chat.cpp:16-18`).
 pub const SMSG_CHAT_WRONG_FACTION: u16 = 0x0219; // 537
+/// The fishing channel ended with nothing on the hook (VERIFIED vmangos `Opcodes_1_12_1.h`: 456;
+/// empty body — `GameObject::Update`'s bobber-expiry arm and `Use(FISHINGNODE)`'s
+/// clicked-too-early arm both send size 0). The red `ERR_FISH_NOT_HOOKED` toast — "No fish are
+/// hooked." (decision 1086).
+pub const SMSG_FISH_NOT_HOOKED: u16 = 0x01C8; // 456
+/// The hooked fish got away — the fishing-skill roll failed on the click (VERIFIED vmangos
+/// `Opcodes_1_12_1.h`: 457; empty body — `GameObject::Use`'s FISHINGNODE failure arm). The red
+/// `ERR_FISH_ESCAPED` toast — "Your fish got away!" (decision 1086).
+pub const SMSG_FISH_ESCAPED: u16 = 0x01C9; // 457
 /// A server notice the real client flashes in the red UIErrorsFrame (VERIFIED vmangos
 /// `Opcodes_1_12_1.h`: 459): one cstring (`WorldSession::SendNotification`,
 /// `Server/WorldSession.cpp:900-915`) — "You do not know that language", trade refusals, and kin.

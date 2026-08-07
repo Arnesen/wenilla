@@ -587,6 +587,8 @@ fn drive_mouseover_tooltip(
     mut go_inputs: crate::target::lock::GoLockInputs,
     // The known-spell set the resolver's SKILL arm scans.
     player_actions: Res<crate::ui_action::PlayerActions>,
+    // The cursor seat crosses the VM seam (0582/0584): the anchor below is UI units, not px.
+    ui_scale: Res<crate::ui_script::UiScaleCvar>,
     mut last: Local<LastHover>,
     mut last_lines: Local<Option<UnitState>>,
 ) {
@@ -647,12 +649,16 @@ fn drive_mouseover_tooltip(
         // settle it. Flagged INTERIM in 0766 rather than presented as verified.
         let cursor_seated =
             stores.get(entity).map(|s| s.0.gameobject_type_id()) == Ok(GO_TYPE_GENERIC);
+        // Window px → the VM's y-up 768-virtual units (÷s, the input seam's own conversion) —
+        // the anchor this point seats is resolved in UI units, so a raw-px point lands the
+        // plate (s−1)× the cursor's distance from the bottom-left corner away from it.
         let cursor_ui = cursor_seated
             .then(|| {
-                window
-                    .iter()
-                    .next()
-                    .and_then(|w| w.cursor_position().map(|c| (c.x, w.height() - c.y)))
+                window.iter().next().and_then(|w| {
+                    let s = crate::ui_script::seam_scale(w.height(), ui_scale.0);
+                    w.cursor_position()
+                        .map(|c| (c.x / s, (w.height() - c.y) / s))
+                })
             })
             .flatten();
         if *last == LastHover::Go(guid) {

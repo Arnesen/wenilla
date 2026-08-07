@@ -243,6 +243,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     s.set_container(0, Some(backpack()));
     s.run("BenillaBagToggle_OnClick()").unwrap();
     s.set_loot(Some(LootState {
+        fishing: false,
         rows: vec![LootRow {
             item_id: 0,
             name: Some("Wool Cloth".into()),

@@ -46,14 +46,19 @@ use crate::schedule::WorldStage;
 
 mod by_name;
 mod click;
-mod cursor_mode;
+// `pub(crate)` for the hover inspector's interact-gate line (`interact/inspect.rs`): the overlay
+// states the very predicate the cursor runs ([`cursor_mode::go_highlightable`]) rather than a
+// re-derivation of it, so the readout can never drift from the behaviour it is reporting on.
+pub(crate) mod cursor_mode;
 mod flash;
 mod highlight;
 mod hover;
 pub(crate) mod lock;
 mod relations;
 mod reticle;
-mod ring;
+// `pub(crate)` for the same reason as `cursor_mode`: the faction catalog is one of
+// [`cursor_mode::go_highlightable`]'s three inputs, so the inspector needs it to run the real gate.
+pub(crate) mod ring;
 mod scan;
 
 pub(crate) use cursor_mode::{CursorKind, WorldCursor, GO_TYPE_GENERIC, SERVICE_RANGE_SQ};

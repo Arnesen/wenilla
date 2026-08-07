@@ -176,15 +176,26 @@ pub(super) fn feed_actions(
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
     }
 
-    // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]) ride the same
-    // red line; the key IS the GlobalStrings lookup, no code table between.
-    let key_texts: Vec<String> = ui_error_keys
+    // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]); the key IS the
+    // GlobalStrings lookup, no code table between. The entry's type arm picks the line: type 1
+    // (`UiError::info`) is the yellow `UI_INFO_MESSAGE`, type 2 the red `UI_ERROR_MESSAGE` —
+    // the reference's one pipeline forking on the registry type (wow-re `fish-msg-handlers.md`;
+    // the fishing verdicts are the yellow tenants).
+    let key_texts: Vec<(String, bool)> = ui_error_keys
         .0
         .drain(..)
-        .filter_map(|e| ui_error_text(&e, &|key| script.lua().globals().get::<String>(key).ok()))
+        .filter_map(|e| {
+            ui_error_text(&e, &|key| script.lua().globals().get::<String>(key).ok())
+                .map(|t| (t, e.info))
+        })
         .collect();
-    for text in key_texts {
-        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    for (text, info) in key_texts {
+        let event = if info {
+            "UI_INFO_MESSAGE"
+        } else {
+            "UI_ERROR_MESSAGE"
+        };
+        script.fire_event(event, vec![ScriptValue::Str(text)]);
     }
 
     // The ENGINE's own by-key refusals ride the very same line. `benilla_ui` is engine-free and

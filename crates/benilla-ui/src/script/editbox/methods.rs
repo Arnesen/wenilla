@@ -160,7 +160,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     .region_data
                     .entry(rh)
                     .or_default()
-                    .color = Some([r, g, b, a.unwrap_or(1.0)]);
+                    .vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
                 Ok(())
             },
         )?,

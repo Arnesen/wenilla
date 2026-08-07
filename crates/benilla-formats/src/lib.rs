@@ -52,6 +52,8 @@ pub use gameobjects::{
 };
 mod durability;
 pub use durability::{load_durability_tables, DurabilityTables};
+mod exhaustion;
+pub use exhaustion::{load_exhaustion, ExhaustionRow};
 mod bank_bag_slot_prices;
 pub use bank_bag_slot_prices::{load_bank_bag_slot_prices, BankBagSlotPrices};
 mod stationery;
@@ -140,7 +142,7 @@ pub use spells::{
 };
 mod skill_lines;
 pub use skill_lines::{
-    load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SlaInfo, SKILL_CATEGORY_NOT_DISPLAYED,
+    load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SkillRaceClass, SlaInfo,
 };
 mod spell_focus;
 pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
@@ -172,19 +174,19 @@ pub use models::{
     m2_texture_transform_count, non_separable_billboard_bones, owner_last_rung,
     owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
-    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
-    parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
-    parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
-    parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
-    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
-    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
-    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, CharSkinSlot,
-    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
-    GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light, M2PortraitCamera,
-    ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim,
-    ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
-    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
+    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
+    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
+    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
+    wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
+    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
+    wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
+    CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
+    GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light,
+    M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
+    RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim,
+    WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
+    WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

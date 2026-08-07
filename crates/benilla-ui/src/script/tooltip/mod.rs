@@ -67,7 +67,7 @@ fn apply_font(d: &mut RegionData, name: &str, fo: Option<&FontObject>) {
         d.outline = f.outline;
         d.font_shadow = f.shadow;
         if let Some(c) = f.color {
-            d.color = Some(c);
+            d.vertex_color = Some(c);
         }
     }
 }
@@ -139,7 +139,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                             d.font_height = src.font_height;
                             d.outline = src.outline;
                             d.font_shadow = src.font_shadow;
-                            d.color = src.color;
+                            d.vertex_color = src.vertex_color;
                         }
                         None => {
                             let font = if i == 1 {
@@ -262,7 +262,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
 fn write_cell(model: &mut Model, rh: crate::widget::RegionHandle, text: &str, color: [f32; 4]) {
     let d = model.region_data.entry(rh).or_default();
     d.text = Some(text.to_string());
-    d.color = Some(color);
+    d.vertex_color = Some(color);
     d.hidden = false;
 }
 

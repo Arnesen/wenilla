@@ -78,3 +78,82 @@ fn too_short_yields_no_camera() {
     // No MD20 camera array header → None, no panic.
     assert!(parse_m2_portrait_camera(&[0u8; 16]).is_none());
 }
+
+/// **The model-frame pane camera** — raw `cameras[1]`, the rig a 1.12 `<PlayerModel>` widget renders
+/// through (wow-re `system/ui/scratch/modelframe-camera-law.md`: `0x505b30` → the chooser `0x505890`
+/// takes a literal index 1, NOT `cameraLookup`; decision 1089).
+///
+/// Byte-level regression pin against the numbers the RE reports, read here independently through our
+/// own parser — the two agreeing is the cross-check. The universal clips (`near = 8/36`,
+/// `far = 1000/36`) come along because a wrong stride would land on neither.
+#[test]
+fn pane_cameras_match_the_authored_records() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let reader = Chain::open(&data).expect("open vanilla patch chain");
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+    for (path, eye, target, fov) in [
+        (
+            "Character\\Human\\Male\\HumanMale.m2",
+            [3.6585_f32, 0.0338, 0.9227],
+            [-0.3644_f32, 0.0291, 0.9873],
+            0.97991_f32,
+        ),
+        (
+            "Character\\Tauren\\Male\\TaurenMale.m2",
+            [4.4317, -0.0213, 1.0861],
+            [0.2520, -0.0210, 1.0086],
+            0.87991,
+        ),
+        (
+            "Creature\\Boar\\Boar.m2",
+            [4.8611, 0.0, 1.8056],
+            [-0.1389, 0.0, 0.9722],
+            0.76101,
+        ),
+    ] {
+        let bytes = reader.read(path).expect("read model");
+        let cam = benilla_formats::parse_m2_camera(&bytes, 1)
+            .unwrap_or_else(|| panic!("{path}: no cameras[1]"));
+        eprintln!("{path}: {cam:?}");
+        assert!(close(cam.fov, fov), "{path}: fov {} vs {fov}", cam.fov);
+        assert!(
+            close(cam.near_clip, 8.0 / 36.0),
+            "{path}: near {}",
+            cam.near_clip
+        );
+        assert!(
+            close(cam.far_clip, 1000.0 / 36.0),
+            "{path}: far {}",
+            cam.far_clip
+        );
+        for (got, want) in cam
+            .position
+            .iter()
+            .zip(eye)
+            .chain(cam.target.iter().zip(target))
+        {
+            assert!(close(*got, want), "{path}: eye/target {got} vs {want}");
+        }
+        assert!(close(cam.roll, 0.0), "{path}: roll {}", cam.roll);
+    }
+
+    // The standoff is AUTHORED per model, which is the whole point: nothing normalizes a pane, so a
+    // gnome's camera sits ~2.2yd out and a boar's ~4.9. If these ever converged, some engine-side
+    // fit would have crept back in.
+    let x = |path: &str| {
+        let bytes = reader.read(path).expect("read model");
+        benilla_formats::parse_m2_camera(&bytes, 1)
+            .unwrap_or_else(|| panic!("{path}: no cameras[1]"))
+            .position[0]
+    };
+    let gnome = x("Character\\Gnome\\Female\\GnomeFemale.m2");
+    let tauren = x("Character\\Tauren\\Male\\TaurenMale.m2");
+    assert!(
+        gnome < 2.5 && tauren > 4.0,
+        "authored standoffs collapsed: gnome {gnome}, tauren {tauren}"
+    );
+}

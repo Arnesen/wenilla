@@ -25,7 +25,7 @@ use crate::entities::Creatures;
 use crate::model_render::m2_url;
 use crate::terrain::WowModelMaterial;
 
-use super::framing::{attachment_point, DIAG_TO_VERT};
+use super::framing::{attachment_point, diag_to_vert, PORTRAIT_CROP_ASPECT};
 use super::{
     aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
     BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
@@ -954,14 +954,24 @@ pub(super) fn sync_glue_booth(
         // Aspect 1.0 into `body_frame`: only its TRANSFORM is kept here — the projection
         // beside it is the window-sized one this booth needs (decision 1069's aspect rides on
         // the discarded half).
+        //
+        // Since 1089 that transform is the model's own `<PlayerModel>` pane camera (raw index 1),
+        // which is the client's full-body character framing — the right stand-in, and the fov below
+        // now comes off the same record rather than from the retired body-fit constant. The crop
+        // aspect is the portrait bake's 4/3 rather than this window's: exact framing here does not
+        // matter, because `sync_glue_scene` re-aims onto the scene's authored camera the frame the
+        // art lands, and this rig only ever shows for those few loading frames.
         let (t, _) = body_frame(&anchors, 1.0);
+        let record_fov = anchors
+            .pane_camera
+            .map_or(super::framing::PANE_FIXED_FOV, |c| c.fov);
         aim(
             &mut cams,
             GLUE_SLOT,
             &(
                 t,
                 Projection::from(PerspectiveProjection {
-                    fov: DIAG_TO_VERT * super::framing::BODY_FOV,
+                    fov: diag_to_vert(record_fov, PORTRAIT_CROP_ASPECT),
                     near: 0.02,
                     far: 100.0,
                     ..default()

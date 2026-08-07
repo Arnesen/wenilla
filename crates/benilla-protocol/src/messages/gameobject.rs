@@ -8,7 +8,7 @@
 
 use std::io;
 
-use crate::wire::{read_cstring, read_i32_le, read_u32_le};
+use crate::wire::{read_cstring, read_i32_le, read_u32_le, read_u64_le};
 
 /// Body of `CMSG_GAMEOBJ_USE` (opcode `0xB1`/177 — VERIFIED vmangos
 /// `Server/Protocol/Opcodes_1_12_1.h`): one full `u64` guid, the GameObject to use. Read server-side
@@ -83,6 +83,17 @@ pub(super) fn read_gameobject_query_response(
     ))
 }
 
+/// Read `SMSG_GAMEOBJECT_CUSTOM_ANIM` → `(guid, anim_id)`. VERIFIED vmangos
+/// `GameObject::SendGameObjectCustomAnim`: a full `u64` guid then `u32 animId`. The client-side
+/// meaning (wow-re `gameobject-anim-arm.md` §"one-shot channel" step 8): arm the GO's Custom
+/// substate `8 + animId` — AnimationData ids 153..156 — with `animId >= 4` rejected; the
+/// consumer applies that gate, this layer parses verbatim.
+pub(super) fn read_gameobject_custom_anim(r: &mut &[u8]) -> io::Result<(u64, u32)> {
+    let guid = read_u64_le(r)?;
+    let anim_id = read_u32_le(r)?;
+    Ok((guid, anim_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +153,33 @@ mod tests {
             }
             other => panic!("expected GameObjectQueryResponse, got {}", other.name()),
         }
+    }
+
+    #[test]
+    fn gameobject_custom_anim_decodes() {
+        // A full little-endian guid + u32 animId (VERIFIED vmangos
+        // `GameObject::SendGameObjectCustomAnim`). The bobber's bite is animId 0.
+        let body = hx("f0debc9a7856341200000000");
+        match parse_server(opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM, &body).unwrap() {
+            ServerPacket::GameObjectCustomAnim { guid, anim_id } => {
+                assert_eq!(guid, 0x1234_5678_9abc_def0);
+                assert_eq!(anim_id, 0);
+            }
+            other => panic!("expected GameObjectCustomAnim, got {}", other.name()),
+        }
+    }
+
+    #[test]
+    fn fish_verdicts_decode_from_empty_bodies() {
+        // Both fishing verdicts are size-0 sends (vmangos `GameObject::Update`/`Use`).
+        assert!(matches!(
+            parse_server(opcode::SMSG_FISH_NOT_HOOKED, &[]).unwrap(),
+            ServerPacket::FishNotHooked
+        ));
+        assert!(matches!(
+            parse_server(opcode::SMSG_FISH_ESCAPED, &[]).unwrap(),
+            ServerPacket::FishEscaped
+        ));
     }
 
     #[test]

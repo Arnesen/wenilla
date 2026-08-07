@@ -44,6 +44,13 @@ pub(crate) struct UiError {
     pub key: &'static str,
     pub fill_s: Option<String>,
     pub fill_d: Option<u32>,
+    /// The message record's **type arm** (wow-re `fish-msg-handlers.md`, byte-proven — the
+    /// registry entry's `+4` type, last written `mov edx,1` at `0x486235`): the reference's
+    /// `DisplayError` pipeline is one, and the type selects the UIErrorsFrame event — type 1
+    /// fires the **yellow** `UI_INFO_MESSAGE` (0xe1), type 2 the **red** `UI_ERROR_MESSAGE`
+    /// (0xe0). `true` = the yellow info arm (the fishing verdicts are the first tenants);
+    /// `false` = the red error arm, the default.
+    pub info: bool,
 }
 
 impl UiError {
@@ -54,6 +61,15 @@ impl UiError {
             key,
             fill_s: None,
             fill_d: None,
+            info: false,
+        }
+    }
+
+    /// A fill-less **type-1** message — the yellow `UI_INFO_MESSAGE` arm (see [`UiError::info`]).
+    pub(crate) fn info_key(key: &'static str) -> Self {
+        Self {
+            info: true,
+            ..Self::key(key)
         }
     }
 }
@@ -303,6 +319,7 @@ mod ui_error_tests {
             key,
             fill_s: s.map(String::from),
             fill_d: d,
+            info: false,
         }
     }
 

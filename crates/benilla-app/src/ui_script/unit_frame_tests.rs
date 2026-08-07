@@ -1389,3 +1389,59 @@ fn the_player_frame_flashes_zzz_while_resting() {
     assert!(clear, "neither state → no status dressing at all");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The zzz badge paints OVER the level number (decision 1093): the ref keeps the number in the
+/// texture frame's BACKGROUND layer and the state icons up in OVERLAY, so the opaque badge covers
+/// it while resting. The layer split is the only mechanism that CAN hide it — a fontstring never
+/// ducks under a texture of its own layer (0884's bucket-wide quads-then-text law) — which is
+/// exactly how 1082's transcription slipped: it put the number in OVERLAY beside the icons, and
+/// the number rode on the badge (director report, 2026-08-07).
+#[test]
+fn the_rest_badge_covers_the_level_number() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Prober".into()),
+            health: 100,
+            max_health: 100,
+            level: 12,
+            power_type: 0,
+            power: 80,
+            max_power: 80,
+            dead: false,
+            reaction: 0,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.set_rest_state(1, 500, true);
+    s.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+    s.resolve();
+    let quads = s.extract();
+
+    // Every UI-StateIcon quad (the badge AND its ADD glow — the glow rides a later frame and
+    // sits higher still): even the LOWEST must clear the number.
+    let badge = quads
+        .iter()
+        .filter(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("UI-StateIcon"))
+        })
+        .map(|q| q.z)
+        .min()
+        .expect("the zzz badge");
+    let level = quads
+        .iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "12"))
+        .expect("the level text");
+    assert!(
+        badge > level.z,
+        "the badge must cover the level number (badge z={badge:#x}, level z={:#x})",
+        level.z
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

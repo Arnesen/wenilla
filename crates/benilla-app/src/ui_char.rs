@@ -186,15 +186,19 @@ fn watch_skill_ups(
     }
 }
 
-/// The skills-pane feed (decision 0437 phase 4): every known `PLAYER_SKILL_INFO` line resolved to
-/// a flat [`SkillEntry`] — name off `SkillLine.dbc`, group off the line's `categoryId` ×
-/// `SkillLineCategory.dbc` (name + displayOrder) — pushed via `set_skills` on change; the ENGINE
-/// groups/sorts/folds (the trainer-tree pattern). Hidden faithfully: the `Not Displayed` category
-/// (12) and any line without a `SkillLine.dbc` row. Group order and the within-group name sort
-/// are still an INTERIM — but not the 0437 §5 dispatch's: none of its six TUs covered the
-/// Skills-pane's own grouping (that dispatch resolved as decision 0446, adjudicating the
-/// crafting-book windows only). This law is unpinned, awaiting its own dispatch, named as a
-/// follow-up in decision 0530.
+/// The skills-pane feed (decision 0437 phase 4, corrected by 1091): every `PLAYER_SKILL_INFO` line
+/// the real client would LIST, resolved to a flat [`SkillEntry`] — name off `SkillLine.dbc`, group
+/// off the line's `categoryId` × `SkillLineCategory.dbc` (name + displayOrder) — pushed via
+/// `set_skills` on change; the ENGINE groups/sorts/folds.
+///
+/// The inclusion predicate is the client's own list build (`0x4d2cb0`, wow-re
+/// `system/tradeskill/scratch/skillframe-display-list.md`), transcribed in its order: a line needs
+/// a `SkillLine.dbc` row, an admitting `SkillRaceClassInfo` row and a real `SkillLineCategory` row;
+/// `flags & 0x2` drops it outright; and a line held at **rank 0** appears only if its flags admit
+/// it at this player's level. Note what is NOT a filter: the `Not Displayed` category (12). We used
+/// to hide on it, which happened to hide `GENERIC (DND)` for the right-looking reason — the client
+/// drops that line by its `0x2` bit like `Dual Wield` and the racials, and lists a category-12 line
+/// without `0x2` under its own header (decision 1091).
 fn feed_skills(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
@@ -207,45 +211,22 @@ fn feed_skills(
     let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
         return;
     };
-    // The unlearn-button predicate needs the player's race/class (SkillRaceClassInfo row-match —
-    // the spellbook's own General-collapse inputs, `ui_spellbook::build_book`).
+    // The display predicate reads the player's own race/class (the SkillRaceClassInfo row-match —
+    // the spellbook's own General-collapse inputs, `ui_spellbook::build_book`) and level (the
+    // untrained gate).
     let (race, class) = (
         store.0.unit_race().unwrap_or(0),
         store.0.unit_class().unwrap_or(0),
     );
+    let level = store.0.unit_level().unwrap_or(0);
     let mut entries = Vec::new();
     for i in 0..PLAYER_SKILL_SLOTS {
         let Some(slot) = store.0.player_skill(i) else {
             continue;
         };
-        if slot.skill_id == 0 {
-            continue;
+        if let Some(e) = skills_row(&slot, &skill_lines.catalog, race, class, level) {
+            entries.push(e);
         }
-        let Some(line) = skill_lines.catalog.line(u32::from(slot.skill_id)) else {
-            continue; // no SkillLine row — nothing to name it by, the client shows nothing
-        };
-        if line.category_id == benilla_formats::SKILL_CATEGORY_NOT_DISPLAYED {
-            continue;
-        }
-        let (category_name, category_order) = skill_lines
-            .catalog
-            .category(line.category_id)
-            .map(|(n, o)| (n.to_string(), o))
-            .unwrap_or_else(|| ("Other".to_string(), u32::MAX));
-        entries.push(SkillEntry {
-            skill_id: u32::from(slot.skill_id),
-            name: line.name.clone(),
-            value: u32::from(slot.value),
-            max: u32::from(slot.max),
-            modifier: i32::from(slot.temp_bonus) + i32::from(slot.perm_bonus),
-            category_id: line.category_id,
-            category_name,
-            category_order,
-            description: line.description.clone(),
-            abandonable: skill_lines
-                .catalog
-                .abandonable(u32::from(slot.skill_id), race, class),
-        });
     }
     let fresh = SkillsState { entries };
     if last.as_ref() == Some(&fresh) {
@@ -253,6 +234,55 @@ fn feed_skills(
     }
     script.set_skills(fresh.clone());
     *last = Some(fresh);
+}
+
+/// One `PLAYER_SKILL_INFO` slot as the Skills tab's row — or `None` when the real client's list
+/// build would not list it at all ([`feed_skills`]'s doc for the citations; the order of the tests
+/// is the client's own, `0x4d2cb0`). Pure, so the whole display predicate is testable against real
+/// DBC data and a real character's skill block (`ui_script::skills_frame_tests`).
+pub(crate) fn skills_row(
+    slot: &benilla_protocol::messages::PlayerSkillSlot,
+    catalog: &benilla_formats::SkillLineCatalog,
+    race: u8,
+    class: u8,
+    level: u32,
+) -> Option<SkillEntry> {
+    if slot.skill_id == 0 {
+        return None;
+    }
+    let id = u32::from(slot.skill_id);
+    // No SkillLine row — nothing to name it by, and the client lists nothing.
+    let line = catalog.line(id)?;
+    // No row admitting this race/class → the client drops the line (its `!srci → continue`).
+    let rc = catalog.race_class(id, race, class)?;
+    // A category that must really exist (the client's own null-row test) — and note the category
+    // ITSELF is never a filter: `Not Displayed` (12) is a header like any other.
+    let (category_name, category_order) = catalog.category(line.category_id)?;
+    // The hide bit: `Dual Wield`, the racials, the mount lines, `GENERIC (DND)`.
+    if rc.hidden() {
+        return None;
+    }
+    // An untrained line shows only where the flags admit it at this level.
+    if slot.value == 0 && !rc.displays_untrained(level) {
+        return None;
+    }
+    Some(SkillEntry {
+        skill_id: id,
+        name: line.name.clone(),
+        value: u32::from(slot.value),
+        max: u32::from(slot.max),
+        temp_bonus: i32::from(slot.temp_bonus),
+        perm_bonus: i32::from(slot.perm_bonus),
+        min_level: rc.min_level,
+        cost_index: rc.cost_index,
+        category_id: line.category_id,
+        category_name: category_name.to_string(),
+        category_order,
+        description: line.description.clone(),
+        // The client ANDs the DBC's unlearnable bit with a nonzero skill STEP (`0x4d3953`).
+        abandonable: slot.step != 0 && rc.unlearnable(),
+        mono: rc.mono(),
+    })
 }
 
 /// The abandon drain (the skills pane's unlearn button → the `UNLEARN_SKILL` popup's accept →

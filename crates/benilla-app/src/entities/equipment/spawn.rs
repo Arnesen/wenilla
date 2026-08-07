@@ -308,6 +308,18 @@ fn spawn_slot(
             });
         }
     }
+    // The fishing line's near anchor (wow-re `fishing-line.md`, decision 1099): a MAINHAND prop
+    // whose model authors `$CCH` is the pole (the reference gates on ItemCache {class 2, subclass
+    // 20} + the marker's presence; exactly one weapon model in the chain authors the marker, so
+    // presence alone is data-equivalent — unlike the bow's trail-marker trap above, which is why
+    // the bowstring can't key the same way). The drawer spans it to the owner's channel bobber.
+    if slot_idx == 0 {
+        if let Some(tip) = dm.cch_marker {
+            commands
+                .entity(root)
+                .insert(crate::fishing_line::FishingPoleTip { owner: entity, tip });
+        }
+    }
     // **The item rig** (decisions 0841, withdrawn by 0847, RESTORED by 0854) — the one case an
     // attach model runs a joint palette. 0847 pulled it believing a spherical billboard swept the
     // spikes through the plate; that was wrong (0853: the spikes run ALONG their bone, worst vertex

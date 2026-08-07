@@ -61,7 +61,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let data = model.region_data.entry(rh).or_default();
             data.portrait_unit = Some(unit);
             data.texture = None;
-            data.color = None;
+            data.fill = None;
             data.circular = true;
             Ok(())
         })?,
@@ -81,7 +81,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let data = model.region_data.entry(rh).or_default();
             data.portrait_unit = Some(token);
             data.texture = None;
-            data.color = None;
+            data.fill = None;
             data.circular = false;
             Ok(())
         })?,
@@ -209,10 +209,27 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                model.region_data.entry(rh).or_default().color = Some([r, g, b, a.unwrap_or(1.0)]);
+                model.region_data.entry(rh).or_default().vertex_color =
+                    Some([r, g, b, a.unwrap_or(1.0)]);
                 Ok(())
             },
         )?,
+    )?;
+    // GetVertexColor — the setter's own pair, a real 5875 binding (`0x79aa50`, wow-re
+    // `system/ui/ledger.tsv`; it sits directly above `SetVertexColor 0x79abd0` in the same region
+    // method family). Never set = the untinted white every region draws at by default.
+    m.set(
+        "GetVertexColor",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let c = model
+                .region_data
+                .get(&rh)
+                .and_then(|d| d.vertex_color)
+                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            Ok((c[0], c[1], c[2], c[3]))
+        })?,
     )?;
     m.set(
         "SetTexture",
@@ -225,29 +242,35 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 // and any live-unit-portrait binding.
                 data.circular = false;
                 data.portrait_unit = None;
+                // Both forms write the SAME `+0xcc` texture slot — the path form loads a file
+                // there (`0x770200`), the colour form generates an 8×8 solid into it
+                // (`0x770360`) — so each clears the other. NEITHER touches the vertex colour at
+                // `+0xb8`: a tint outlives the art it was tinting.
                 match &arg {
                     // SetTexture("") clears, same as SetTexture(nil) — the ref lua blanks state
                     // art with the empty string (QuestLogFrame.lua:165-166).
                     Value::String(s) if s.to_str()?.is_empty() => {
                         data.texture = None;
-                        data.color = None;
+                        data.fill = None;
                     }
                     Value::String(s) => {
                         data.texture = Some(s.to_str()?.to_string());
+                        data.fill = None;
                     }
                     Value::Number(_) | Value::Integer(_) => {
-                        data.color = Some([
+                        data.fill = Some([
                             as_f32(&arg),
                             g.unwrap_or(0.0),
                             b.unwrap_or(0.0),
                             a.unwrap_or(1.0),
                         ]);
+                        data.texture = None;
                     }
                     // SetTexture(nil) clears (the live API's blank-the-region form); a cleared
                     // texture region draws nothing.
                     Value::Nil => {
                         data.texture = None;
-                        data.color = None;
+                        data.fill = None;
                     }
                     _ => {}
                 }
@@ -681,7 +704,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             d.outline = font.outline;
             d.font_shadow = font.shadow;
             if let Some(c) = font.color {
-                d.color = Some(c);
+                d.vertex_color = Some(c);
             }
             if let Some(j) = font.justify_h {
                 d.justify_h = j;
@@ -773,8 +796,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             Ok((path, height, flags))
         })?,
     )?;
-    // SetTextColor(r, g, b [, a]) — a FontString's text color (distinct name from SetVertexColor,
-    // same storage in v1: the resolved text color the renderer draws with).
+    // SetTextColor(r, g, b [, a]) — a FontString's text color. A different binding name for the
+    // same `+0xb8` vertex-colour slot `SetVertexColor` writes: a FontString has no texel of its own
+    // to multiply against, so its vertex colour IS the colour it draws.
     m.set(
         "SetTextColor",
         lua.create_function(
@@ -785,7 +809,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                     .region_data
                     .entry(rh)
                     .or_default()
-                    .color = Some([r, g, b, a.unwrap_or(1.0)]);
+                    .vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
                 Ok(())
             },
         )?,

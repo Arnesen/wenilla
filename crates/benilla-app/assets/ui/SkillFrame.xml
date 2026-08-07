@@ -111,19 +111,52 @@
         function BenillaSkillFrame_PaintBar(bar, skillName, skillRank, skillModifier, skillMaxRank)
             local nameText = getglobal(bar:GetName() .. "SkillName")
             local rankText = getglobal(bar:GetName() .. "SkillRank")
+            -- The trough behind the fill (ref `$parentBackground`), recoloured per branch alongside
+            -- the fill itself — ref SkillFrame.lua:158 (normal) and :167 (proficiency), and the
+            -- detail pane's identical pair at :356/:376. The ref sets the normal-skill pair BEFORE
+            -- its `skillMaxRank` gate and lets the proficiency arm overwrite it; setting each arm's
+            -- own pair here is the same result with no dead write. The ref's THIRD writer of this
+            -- texture — the `skillCostType == 1/2/3` green/yellow/red block at :96-111, and the
+            -- `stepCost` "Learn <skill>" gray at :126 — is unreachable for us and would be
+            -- overwritten here even if it weren't: `stepCost`/`rankCost` are always nil and
+            -- `numTempPoints` always 0 (skills.rs's module doc — dead 1.12 data, deviation 1/5), so
+            -- every entry row takes the ref's own `else -- Normal skill` arm.
+            local bgTexture = getglobal(bar:GetName() .. "Background")
             nameText:SetText(skillName)
             nameText:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
             rankText:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
-            if skillMaxRank == 0 then
-                -- A 1.12 proficiency line the app reports as 0/0 (SkillEntry's own doc) — barless
-                -- plain text, deviation-free reading of the ref's own "skillMaxRank == 1" gray-bar
-                -- intent, adapted to our app's 0/0 shape (this file's header comment, no-fillbar note).
+            if skillMaxRank == 1 then
+                -- ref SkillFrame.lua:161-167 verbatim: "If max rank in a skill is 1 assume that
+                -- its a proficiency" — a FULL gray bar and NO rank text. Two kinds of line land
+                -- here, and the ref can't tell them apart because it doesn't need to: the armor
+                -- proficiencies, which the server really does report as 1/1, and the single-rank
+                -- lines (class skills, Dual Wield, racials, the per-mount riding lines) whose
+                -- `skillMaxRank` the engine already overrode to 1 off
+                -- `SkillRaceClassInfo.flags & 0x400` (skills.rs's `SkillEntry::mono`) — which is
+                -- why a hunter's `Beast Mastery 300/300` draws gray and numberless here, exactly
+                -- as it does in the real client.
+                bar:SetMinMaxValues(0, 1)
+                bar:SetValue(1)
+                bar:SetStatusBarColor(0.5, 0.5, 0.5)
+                rankText:SetText("")
+                bgTexture:SetVertexColor(1.0, 1.0, 1.0, 0.5)
+            elseif skillMaxRank == 0 then
+                -- Not reachable off a live server (a line the player HAS always carries a max ≥ 1)
+                -- and the ref leaves this case to fall through its own if/elseif untouched —
+                -- which, on a recycled row, would leave the PREVIOUS skill's bar and rank text
+                -- sitting there. We blank instead: a stale-state hole is a quirk, not behaviour.
                 bar:SetMinMaxValues(0, 1)
                 bar:SetValue(0)
                 bar:SetStatusBarColor(0, 0, 0, 0)
                 rankText:SetText("")
+                -- back to the template's own declared base, so a recycled row shows a neutral empty
+                -- trough rather than the previous skill's blue or white. The base lives in the
+                -- TEXEL (the template's `<Color 1,1,1,0.2>`), so restoring it means an IDENTITY
+                -- vertex colour — writing 0.2 here would multiply it to 0.04 (decision 1101).
+                bgTexture:SetVertexColor(1.0, 1.0, 1.0, 1.0)
             else
                 bar:SetStatusBarColor(0.0, 0.0, 1.0, 0.5)
+                bgTexture:SetVertexColor(0.0, 0.0, 0.75, 0.5)
                 bar:SetMinMaxValues(0, skillMaxRank)
                 bar:SetValue(skillRank)
                 -- ref SkillFrame.lua:178-186, transcribed byte-exact (this file's header comment,

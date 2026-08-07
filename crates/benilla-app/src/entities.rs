@@ -235,11 +235,14 @@ impl Creatures {
         self.catalog.model(display_id).map(|m| m.blood)
     }
 
-    /// A built display's portrait framing: the model's **authored portrait camera** (the real
-    /// client's exact rig, wow-re portrait-render §4) when it has one, plus the heuristic anchors
-    /// (head bone / neck height / footprint, model-local pre-scale) the booth falls back to for a
-    /// camera-less model. `None` while the display's model is still loading (the booth's part
-    /// source — the attach-spawned children — won't exist yet either).
+    /// A built display's booth framing — the model's own **authored cameras**, which is what both
+    /// booth families frame through: `camera` for the round portrait (`cameraLookup[0]`, wow-re
+    /// portrait-render §4) and `pane_camera` for a `<PlayerModel>` body pane (raw index 1, wow-re
+    /// `modelframe-camera-law.md`). Each carries the fallback data its own path needs when the model
+    /// has no such camera: the heuristic anchors (head bone / neck height / footprint) for the
+    /// portrait, the bbox centre for the pane's fixed camera. All model-local pre-scale. `None`
+    /// while the display's model is still loading (the booth's part source — the attach-spawned
+    /// children — won't exist yet either).
     pub(crate) fn display_anchors(
         &self,
         display_id: u32,
@@ -248,6 +251,8 @@ impl Creatures {
         dm.parts.as_ref()?; // not yet built
         Some(crate::portrait::PortraitAnchors {
             camera: dm.portrait_camera,
+            pane_camera: dm.pane_camera,
+            bbox_center: dm.bake_center_local,
             head: crate::portrait::head_anchor(&dm.skeleton, &dm.attachments),
             pivot_height: dm.pivot_height_local,
             ground_radius: dm.ground_radius_local,

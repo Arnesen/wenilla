@@ -289,6 +289,19 @@ impl super::UiScript {
         model.resting = resting;
     }
 
+    /// Push Exhaustion.dbc — `(rest-state byte, localized name, factor)` rows for the
+    /// `GetRestState`/`GetXPExhaustion` bindings (they read the table exactly as `0x48d350` /
+    /// `0x48d3f0` read the client's own copy; decision 1087). Called once at startup off the
+    /// patch chain; an empty push is ignored so a failed DBC read keeps the shipped-table
+    /// fallback the model seeds.
+    pub fn set_exhaustion_rows(&mut self, rows: Vec<(u8, String, f64)>) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut model = self.model_mut();
+        model.exhaustion = rows.into_iter().map(|(id, n, f)| (id, (n, f))).collect();
+    }
+
     /// Push the player's banked combo points (`PLAYER_FIELD_BYTES` byte 1) and the unit they sit
     /// on (`PLAYER_FIELD_COMBO_TARGET`) — the pair `Player::SetComboPoints` writes together, taken
     /// together so they can never be read half-updated. Player-level PRIVATE fields, same shape as

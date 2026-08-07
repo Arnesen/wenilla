@@ -260,6 +260,22 @@ pub enum ServerPacket {
         entry: u32,
         info: Option<GameObjectQueryInfo>,
     },
+    /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` — a GameObject plays a one-shot Custom animation. Payload
+    /// VERIFIED vmangos `GameObject::SendGameObjectCustomAnim`: `u64 guid, u32 animId`. The
+    /// client arms GO substate `8 + animId` (AnimationData 153..156, `animId >= 4` rejected) —
+    /// the fishing bobber's bite splash is `animId 0` (decision 1086).
+    GameObjectCustomAnim {
+        guid: u64,
+        anim_id: u32,
+    },
+    /// `SMSG_FISH_NOT_HOOKED` — the fishing channel ended (expiry, or clicked before the splash)
+    /// with nothing hooked. Empty body (VERIFIED vmangos `GameObject::Update`/`Use`); the red
+    /// `ERR_FISH_NOT_HOOKED` toast (decision 1086).
+    FishNotHooked,
+    /// `SMSG_FISH_ESCAPED` — the hooked fish got away (the skill roll failed on the click).
+    /// Empty body (VERIFIED vmangos `GameObject::Use`); the red `ERR_FISH_ESCAPED` toast
+    /// (decision 1086).
+    FishEscaped,
     /// `SMSG_PLAY_SOUND` — a 2D sound-kit id, map/zone-wide (BG events, scripts). Payload
     /// VERIFIED vmangos `Map::PlayDirectSoundToMap`: one `u32 soundId` (SoundEntries).
     PlaySound {
@@ -1094,6 +1110,9 @@ impl ServerPacket {
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),
             ServerPacket::PetNameQueryResponse { .. } => "SMSG_PET_NAME_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectQueryResponse { .. } => "SMSG_GAMEOBJECT_QUERY_RESPONSE".into(),
+            ServerPacket::GameObjectCustomAnim { .. } => "SMSG_GAMEOBJECT_CUSTOM_ANIM".into(),
+            ServerPacket::FishNotHooked => "SMSG_FISH_NOT_HOOKED".into(),
+            ServerPacket::FishEscaped => "SMSG_FISH_ESCAPED".into(),
             ServerPacket::PlaySound { .. } => "SMSG_PLAY_SOUND".into(),
             ServerPacket::PlayMusic { .. } => "SMSG_PLAY_MUSIC".into(),
             ServerPacket::PlayObjectSound { .. } => "SMSG_PLAY_OBJECT_SOUND".into(),

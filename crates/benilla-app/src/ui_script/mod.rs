@@ -722,6 +722,9 @@ mod questlog_tests;
 mod character_tests;
 
 #[cfg(test)]
+mod skills_frame_tests;
+
+#[cfg(test)]
 mod pet_paperdoll_tests;
 
 #[cfg(test)]

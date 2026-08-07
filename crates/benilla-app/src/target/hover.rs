@@ -427,7 +427,15 @@ pub(super) fn update_hovered_object(
                         s.0.gameobject_faction(),
                         self_store,
                     );
-                    u32::from(crate::target::cursor_mode::go_highlightable(s, reaction))
+                    let channel_owned = crate::target::cursor_mode::fishing_channel_owned(
+                        self_store,
+                        guids.get(net).ok().map(|g| g.0),
+                    );
+                    u32::from(crate::target::cursor_mode::go_highlightable(
+                        s,
+                        reaction,
+                        channel_owned,
+                    ))
                 })
             };
             let wins =
@@ -476,6 +484,7 @@ pub(super) fn update_hovered_object(
             store.0.gameobject_dynamic_flags(),
             generic_highlight,
             reaction,
+            crate::target::cursor_mode::fishing_channel_owned(self_store, Some(guid.0)),
         ) {
             return;
         }

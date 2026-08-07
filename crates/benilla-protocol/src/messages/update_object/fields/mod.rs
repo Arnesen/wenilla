@@ -8,6 +8,10 @@ use super::movement::ObjectType;
 // ObjectFields descriptor-field indices (build 5875), shared across object types.
 const FIELD_OBJECT_TYPE: u16 = 2;
 const FIELD_OBJECT_SCALE_X: u16 = 4;
+// `OBJECT_FIELD_CREATED_BY` = OBJECT_END(6) + 0x0..0x1 (vmangos `UpdateFields_1_12_1.h`): the
+// GameObject block's creator guid pair — the summoning player of a spell-spawned object
+// (fishing bobber, ritual portal); zero/absent for a world spawn.
+const FIELD_GAMEOBJECT_CREATED_BY: u16 = 6;
 const FIELD_GAMEOBJECT_DISPLAYID: u16 = 8;
 const FIELD_GAMEOBJECT_FLAGS: u16 = 9;
 // `GAMEOBJECT_ROTATION` = OBJECT_END(6) + 0x4 .. +0x7 (vmangos `UpdateFields_1_12_1.h`): the

@@ -191,6 +191,24 @@ pub(crate) const GO_TYPE_GENERIC: i32 = 5;
 const GO_TYPE_TRANSPORT: i32 = 11;
 const GO_TYPE_MAP_OBJECT: i32 = 14;
 const GO_TYPE_MO_TRANSPORT: i32 = 15;
+/// The **marker set** — SPELL_FOCUS(8), DUEL_ARBITER(16), FISHINGHOLE(25), AURA_GENERATOR(30).
+/// Their strategy vtables are the mirror image of the transports': `+0xc` (mouseover eligibility) is
+/// a constant `b0 01 c3` = `mov al,1; ret` and `+0x14` (**highlightable**) a constant
+/// `32 c0 c3` = `xor al,al; ret` (wow-re `object-layer/scratch/go-render-gate.md`, "the per-type
+/// handler vtables": vtables `0x80b8a8`/`0x80bb68`/`0x80bbf8`/`0x80c2a0`, `+0xc` targets
+/// `0x5f57e0`/`0x5f65f0`/`0x5f6660`/`0x5f6ea0`, `+0x14` targets
+/// `0x5f57f0`/`0x5f6600`/`0x5f6670`/`0x5f6eb0` — const bytes read for all four).
+///
+/// So they hover but never *interact*: the anvil, the forge, the campfire, the duel flag, the fishing
+/// school publish a mouseover (gold-name tooltip) and then show **cursor mode 0** — the plain
+/// pointer, not the Interact gear — take no `+64` brighten, and swallow the right-click
+/// (`OnUse 0x5f8660` gates on the same `+0x14`). Without this arm they fell through to
+/// [`highlightable_flags`], whose flag/faction terms a SPELL_FOCUS passes trivially (`flags 0x0`),
+/// and every anvil in the world wore the gear.
+const GO_TYPE_SPELL_FOCUS: i32 = 8;
+const GO_TYPE_DUEL_ARBITER: i32 = 16;
+const GO_TYPE_FISHINGHOLE: i32 = 25;
+const GO_TYPE_AURA_GENERATOR: i32 = 30;
 /// `GAMEOBJECT_TYPE_TEXT` (9) — a readable plaque/sign; its per-type behavior shows the **Inspect**
 /// magnifier (wow-re cursor-system §4, `0x5f5890`), not the gear.
 const GO_TYPE_TEXT: i32 = 9;
@@ -205,6 +223,23 @@ const GO_TYPE_28: i32 = 28;
 /// Interim GameObject interact-range gray (decision 0236): reuse the ~5.56 yd service reach until the
 /// size-dependent GO interact distance is byte-pinned. Squared, boundary-inclusive like the unit gates.
 const GO_INTERACT_RANGE_SQ: f32 = SERVICE_RANGE_SQ;
+/// `GAMEOBJECT_TYPE_FISHINGNODE` (17) — the fishing bobber. Its strategy (vtable `0x80bc80`, wow-re
+/// `fishing-bobber-interaction.md`) overrides exactly one consumed slot: highlightable is the
+/// channel-ownership gate ([`highlightable_flags`]'s type-17 arm); everything else is the shared base.
+pub(crate) const GO_TYPE_FISHINGNODE: i32 = 17;
+/// The per-type interact range the shared `usable 0x5f3130` compares — the strategy ctor's
+/// `[strat+0xc]` constant, **squared at the compare**, boundary-inclusive (wow-re
+/// `fishing-bobber-interaction.md` §3). FISHINGNODE's ctor sets **100.0 yd** (`0x5f66b0`,
+/// `[0x80b0b0]`) — the bobber is effectively un-range-gated for any real cast, never the ~5.56 yd
+/// reach. Other types stay on the 0236 interim (the base default is 5.0 and several per-type ctors
+/// override it — 5.5556/10.0/…; their population is a later byte-pin).
+fn go_interact_range_sq(type_id: i32) -> f32 {
+    if type_id == GO_TYPE_FISHINGNODE {
+        100.0 * 100.0
+    } else {
+        GO_INTERACT_RANGE_SQ
+    }
+}
 /// `GameObjectFlags` bits consulted by the highlightable gate (decision 0243, wow-re cursor-system §4a):
 /// `0x1` IN_USE (busy) and `0x10` NO_INTERACT both suppress interaction; their union is the fast reject.
 const GO_FLAG_IN_USE_OR_NO_INTERACT: u32 = 0x11;
@@ -215,20 +250,56 @@ const GO_FLAG_INTERACT_COND: u32 = 0x4;
 /// server sets from `GameObject::ActivateToQuest` (sparkle). Consulted only under `INTERACT_COND`.
 const GO_DYNFLAG_ACTIVATE: u32 = 0x1;
 
+/// The GameObject types whose strategy vtable **overrides** the highlightable slot (`+0x14`) with a
+/// constant `xor al,al` — so `0x5f2f80` is never reached for them and they are never highlightable,
+/// whatever their flags, faction or activate bit say. Three families, all byte-read off the 5875
+/// vtables: GENERIC(5) decoration (`0x5f47f0`), the transports (see [`GO_TYPE_TRANSPORT`]), and the
+/// marker set (see [`GO_TYPE_SPELL_FOCUS`]).
+///
+/// This is the whole per-type half of the predicate, kept as one named list because the reference
+/// keeps it as one vtable slot: adding a type here removes its cursor, its brighten, its right-click
+/// USE and its pick priority together, exactly as the binary does.
+fn strategy_never_highlightable(type_id: i32) -> bool {
+    matches!(
+        type_id,
+        GO_TYPE_GENERIC
+            | GO_TYPE_TRANSPORT
+            | GO_TYPE_MAP_OBJECT
+            | GO_TYPE_MO_TRANSPORT
+            | GO_TYPE_SPELL_FOCUS
+            | GO_TYPE_DUEL_ARBITER
+            | GO_TYPE_FISHINGHOLE
+            | GO_TYPE_AURA_GENERATOR
+    )
+}
+
 /// The client's GameObject **highlightable** predicate (decision 0243, wow-re cursor-system §4a,
 /// `0x5f2f80`) over its wire flags: whether the object shows an interact cursor / is clickable at all.
-/// GENERIC decoration and the transport family are never highlightable (their strategy vtables
-/// override the slot with constant-false); a busy (IN_USE) or NO_INTERACT object isn't; and an
-/// **INTERACT_COND** object (the quest gate) is highlightable only when the server has set its per-player
-/// **activate** dyn-flag — so a quest chest sparkles and opens only once the quest is held, while an
-/// ordinary door (no INTERACT_COND) is always highlightable regardless of its (zero) activate bit. The
-/// client's faction-reaction>1 term is INFERRED and not the quest gate, so it is not modeled here;
-/// `usable` (lock / range / player-state → the grayed twin) rides on top and is a later refinement.
-fn highlightable_flags(type_id: i32, flags: u32, dyn_flags: u32, reaction: Option<u8>) -> bool {
-    if matches!(
-        type_id,
-        GO_TYPE_GENERIC | GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT
-    ) {
+/// The types whose vtable constant-falses the slot never get here at all
+/// ([`strategy_never_highlightable`]); of the rest, a busy (IN_USE) or NO_INTERACT object isn't
+/// highlightable, and an **INTERACT_COND** object (the quest gate) is highlightable only when the
+/// server has set its per-player **activate** dyn-flag — so a quest chest sparkles and opens only once
+/// the quest is held, while an ordinary door (no INTERACT_COND) is always highlightable regardless of
+/// its (zero) activate bit. `usable` (lock / range / player-state → the grayed twin) rides on top and
+/// is a later refinement.
+///
+/// `channel_owned` is the FISHINGNODE override's one input (`0x5f6710`, wow-re
+/// `fishing-bobber-interaction.md` §2): whether the active player's `UNIT_FIELD_CHANNEL_OBJECT`
+/// equals **this** GO's guid. The bobber is highlightable only to the player currently channeling
+/// at exactly it — NOT a `CREATED_BY` compare — then tail-jumps into this shared gate. Someone
+/// else's bobber (or yours after the channel drops) produces nothing at all: no cursor, no
+/// tooltip/brighten (the `+0xc` thunk), and a silent dead right-click. Ignored for every other type.
+fn highlightable_flags(
+    type_id: i32,
+    flags: u32,
+    dyn_flags: u32,
+    reaction: Option<u8>,
+    channel_owned: bool,
+) -> bool {
+    if strategy_never_highlightable(type_id) {
+        return false;
+    }
+    if type_id == GO_TYPE_FISHINGNODE && !channel_owned {
         return false;
     }
     // The FACTION term (`0x5f2f80` @ `0x5f3026/29`, decision 0764). `reaction` is the GameObject's
@@ -302,8 +373,14 @@ pub(crate) fn go_reaction(
 /// |---|---|
 /// | `0x5f9db0` = `jmp [+0x14]` = **[`highlightable_flags`] itself** | 0 DOOR · 1 BUTTON · 2 QUESTGIVER · 3 CHEST · 4 BINDER · 6 TRAP · 7 CHAIR · 9 TEXT · 10 GOOBER · 12 AREADAMAGE · 13 CAMERA · 17 FISHINGNODE · 18 RITUAL · 19 MAILBOX · 20 AUCTIONHOUSE · 22 SPELLCASTER · 23 MEETINGSTONE · 24 FLAGSTAND · 26 FLAGDROP · 27 MINI_GAME · 28 LOTTERY_KIOSK · + the default |
 /// | `0x5f4830` = **`template.data[1] != 0`** (the vanilla "highlight" column) | 5 GENERIC |
-/// | `mov al,1` — always | 8 SPELL_FOCUS · 16 DUEL_ARBITER · 25 FISHINGHOLE |
+/// | `mov al,1` — always | 8 SPELL_FOCUS · 16 DUEL_ARBITER · 25 FISHINGHOLE · 30 AURA_GENERATOR |
 /// | `xor al,al` — never | 11 TRANSPORT · 14 MAP_OBJECT · 15 MO_TRANSPORT |
+///
+/// **This slot is not the cursor's.** For the marker set the two slots point opposite ways — `+0xc`
+/// constant-TRUE, `+0x14` constant-FALSE ([`GO_TYPE_SPELL_FOCUS`]) — so an anvil is *fully* hovered
+/// (mouseover published, gold-name tooltip) and *not at all* interactable (plain pointer, no
+/// brighten, no USE). Eligibility is never a stand-in for [`highlightable_flags`], and neither is
+/// its negation.
 ///
 /// **This refutes the old "the tooltip is not gated by highlightable" reading** — that note verified
 /// the publisher correctly and then generalised **GENERIC's** behaviour to all 31 types. The
@@ -319,37 +396,56 @@ pub(crate) fn mouseover_eligible(
     dyn_flags: u32,
     generic_highlight: Option<bool>,
     reaction: Option<u8>,
+    channel_owned: bool,
 ) -> bool {
     match type_id {
         GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT => false,
-        GO_TYPE_SPELL_FOCUS | GO_TYPE_DUEL_ARBITER | GO_TYPE_FISHINGHOLE => true,
+        GO_TYPE_SPELL_FOCUS
+        | GO_TYPE_DUEL_ARBITER
+        | GO_TYPE_FISHINGHOLE
+        | GO_TYPE_AURA_GENERATOR => true,
         GO_TYPE_GENERIC => generic_highlight.unwrap_or(true),
-        _ => highlightable_flags(type_id, flags, dyn_flags, reaction),
+        _ => highlightable_flags(type_id, flags, dyn_flags, reaction, channel_owned),
     }
 }
 
-/// The three types whose eligibility slot is a constant `mov al,1` — always the mouseover, whatever
-/// their flags say.
-const GO_TYPE_SPELL_FOCUS: i32 = 8;
-const GO_TYPE_DUEL_ARBITER: i32 = 16;
-const GO_TYPE_FISHINGHOLE: i32 = 25;
-
 /// [`highlightable_flags`] read off a hovered GameObject's descriptor store. An absent
 /// `GAMEOBJECT_TYPE_ID` is the wire default `0` = DOOR (vmangos omits the zero field), so a door
-/// resolves to a highlightable type rather than being wrongly rejected as "unknown". Gates the
-/// CURSOR (and, via it, the click) only — the mouseover tooltip is *not* coupled to it
-/// (§5-VERIFIED, wow-re 2026-07-20): the pick registers every GO regardless of highlightable and
-/// the publisher dispatches the tooltip by kind, so a GENERIC(5) signpost tooltips (0349's
-/// reference close-up) while showing no cursor. Also the GO pick's **pass-2 priority** (decision
-/// 1071): the reference's classify `0x480c90` ranks a highlightable GameObject `1` (via
-/// `0x5f8800`, this same strategy `+0x14` predicate), else `0`.
-pub(super) fn go_highlightable(store: &ObjectStore, reaction: Option<u8>) -> bool {
+/// resolves to a highlightable type rather than being wrongly rejected as "unknown".
+///
+/// Gates the **cursor**, the `+64` **brighten**, the right-click **USE** (`OnUse 0x5f8660` calls this
+/// same `+0x14` first) and the GO pick's **pass-2 priority** (decision 1071: classify `0x480c90`
+/// ranks a highlightable GameObject `1` via `0x5f8800`, else `0`) — the four consumers of one vtable
+/// slot. It is **not** the mouseover publish, which is the sibling slot `+0xc`
+/// ([`mouseover_eligible`]): the two agree for most types and deliberately disagree for GENERIC(5)
+/// (a signpost tooltips while showing no cursor — 0349's reference close-up) and for the marker set
+/// (an anvil tooltips while showing no cursor either).
+pub(crate) fn go_highlightable(
+    store: &ObjectStore,
+    reaction: Option<u8>,
+    channel_owned: bool,
+) -> bool {
     highlightable_flags(
         store.0.gameobject_type_id(),
         store.0.gameobject_flags(),
         store.0.gameobject_dynamic_flags(),
         reaction,
+        channel_owned,
     )
+}
+
+/// The FISHINGNODE highlightable override's input (`0x5f6710`): is the local player currently
+/// channeling at exactly this GameObject — `self.UNIT_FIELD_CHANNEL_OBJECT == go_guid`. `false`
+/// when the self store hasn't streamed or the guid is unknown: an unverifiable bobber shows
+/// nothing, matching the reference's no-active-player early-false.
+pub(crate) fn fishing_channel_owned(
+    self_store: Option<&ObjectStore>,
+    go_guid: Option<u64>,
+) -> bool {
+    match (self_store, go_guid) {
+        (Some(s), Some(g)) => s.0.unit_channel_object() == Some(g),
+        _ => false,
+    }
 }
 
 /// A `LockType.dbc` **CursorName** stem → the [`CursorKind`] it names — the client's
@@ -520,7 +616,8 @@ pub(super) fn classify_cursor(
             store.0.gameobject_faction(),
             Some(self_store),
         );
-        if !go_highlightable(store, reaction) {
+        let channel_owned = fishing_channel_owned(Some(self_store), hovered_object.guid);
+        if !go_highlightable(store, reaction, channel_owned) {
             return None;
         }
         // The type's own cursor wins; a base type reads its lock's data-named cursor (needs the
@@ -557,7 +654,8 @@ pub(super) fn classify_cursor(
                 )
                 .blocks_usable(facts.flag_locked)
             });
-        let unable = kind != CursorKind::PickLock && (lock_unmet || dist_sq > GO_INTERACT_RANGE_SQ);
+        let unable = kind != CursorKind::PickLock
+            && (lock_unmet || dist_sq > go_interact_range_sq(store.0.gameobject_type_id()));
         Some((kind, unable))
     };
     // The reference makes one pick over all CGObjects and switches on type; benilla picks unit and
@@ -675,86 +773,209 @@ mod tests {
     /// becomes the mouseover at all, so a false here is "no tooltip, no brighten, no cursor".
     #[test]
     fn mouseover_eligibility_matches_the_per_type_slot_table() {
-        // The three constant-TRUE slots (`mov al,1`) ignore their flags entirely.
+        // The constant-TRUE slots (`mov al,1`) ignore their flags entirely.
         for t in [
             GO_TYPE_SPELL_FOCUS,
             GO_TYPE_DUEL_ARBITER,
             GO_TYPE_FISHINGHOLE,
+            GO_TYPE_AURA_GENERATOR,
         ] {
-            assert!(mouseover_eligible(t, GO_FLAG_INTERACT_COND, 0, None, None));
-            assert!(mouseover_eligible(t, 0x10, 0, None, None));
+            assert!(mouseover_eligible(
+                t,
+                GO_FLAG_INTERACT_COND,
+                0,
+                None,
+                None,
+                false
+            ));
+            assert!(mouseover_eligible(t, 0x10, 0, None, None, false));
         }
         // The three constant-FALSE slots (`xor al,al`) — the transport family is never a mouseover.
         for t in [GO_TYPE_TRANSPORT, GO_TYPE_MAP_OBJECT, GO_TYPE_MO_TRANSPORT] {
-            assert!(!mouseover_eligible(t, 0, GO_DYNFLAG_ACTIVATE, None, None));
+            assert!(!mouseover_eligible(
+                t,
+                0,
+                GO_DYNFLAG_ACTIVATE,
+                None,
+                None,
+                false
+            ));
         }
         // GENERIC answers from its template's `data[1]` alone — the signpost that hovers vs the
         // scenery beside it that does not. Not from `highlightable_flags`, which rejects GENERIC.
-        assert!(mouseover_eligible(GO_TYPE_GENERIC, 0, 0, Some(true), None));
+        assert!(mouseover_eligible(
+            GO_TYPE_GENERIC,
+            0,
+            0,
+            Some(true),
+            None,
+            false
+        ));
         assert!(!mouseover_eligible(
             GO_TYPE_GENERIC,
             0,
             0,
             Some(false),
-            None
+            None,
+            false
         ));
         assert!(
-            mouseover_eligible(GO_TYPE_GENERIC, 0, 0, None, None),
+            mouseover_eligible(GO_TYPE_GENERIC, 0, 0, None, None, false),
             "template not answered yet reads eligible, so a signpost isn't blank while it queries"
         );
         // Everything else IS highlightable — which is the whole correction. A pre-quest
         // INTERACT_COND object (the Stone of Binding, a Stratholme portcullis at flags 0x24) and an
         // IN_USE / NO_INTERACT object show NOTHING, where we used to tooltip them.
-        assert!(!mouseover_eligible(0, GO_FLAG_INTERACT_COND, 0, None, None));
+        assert!(!mouseover_eligible(
+            0,
+            GO_FLAG_INTERACT_COND,
+            0,
+            None,
+            None,
+            false
+        ));
         assert!(mouseover_eligible(
             0,
             GO_FLAG_INTERACT_COND,
             GO_DYNFLAG_ACTIVATE,
             None,
-            None
+            None,
+            false
         ));
-        assert!(!mouseover_eligible(3, 0x10, 0, None, None)); // NO_INTERACT chest
-        assert!(!mouseover_eligible(3, 0x1, 0, None, None)); // IN_USE chest
-                                                             // The FACTION term (decision 0764): a door whose template is hostile to us is not
-                                                             // eligible — no cursor, no tooltip, no brighten. This is Deadmines' Factory Door
-                                                             // (faction 114, flags 0x20), which the director could still hover and open.
-        assert!(!mouseover_eligible(0, 0x20, 0, None, Some(1)));
-        assert!(mouseover_eligible(0, 0x20, 0, None, Some(3)));
-        assert!(mouseover_eligible(0, 0x20, 0, None, Some(4)));
+        assert!(!mouseover_eligible(3, 0x10, 0, None, None, false)); // NO_INTERACT chest
+        assert!(!mouseover_eligible(3, 0x1, 0, None, None, false)); // IN_USE chest
+                                                                    // The FACTION term (decision 0764): a door whose template is hostile to us is not
+                                                                    // eligible — no cursor, no tooltip, no brighten. This is Deadmines' Factory Door
+                                                                    // (faction 114, flags 0x20), which the director could still hover and open.
+        assert!(!mouseover_eligible(0, 0x20, 0, None, Some(1), false));
+        assert!(mouseover_eligible(0, 0x20, 0, None, Some(3), false));
+        assert!(mouseover_eligible(0, 0x20, 0, None, Some(4), false));
         // TRAP inverts it: hostile-to-us is exactly the case a trap DOES highlight for.
-        assert!(mouseover_eligible(GO_TYPE_TRAP, 0, 0, None, Some(1)));
-        assert!(!mouseover_eligible(GO_TYPE_TRAP, 0, 0, None, Some(3)));
+        assert!(mouseover_eligible(GO_TYPE_TRAP, 0, 0, None, Some(1), false));
+        assert!(!mouseover_eligible(
+            GO_TYPE_TRAP,
+            0,
+            0,
+            None,
+            Some(3),
+            false
+        ));
         // An unresolvable reaction never blanks the world.
-        assert!(mouseover_eligible(0, 0x20, 0, None, None));
+        assert!(mouseover_eligible(0, 0x20, 0, None, None, false));
         // A plain door is still eligible — the everyday case must not regress.
-        assert!(mouseover_eligible(0, 0, 0, None, None));
-        assert!(mouseover_eligible(19, 0, 0, None, None)); // mailbox
+        assert!(mouseover_eligible(0, 0, 0, None, None, false));
+        assert!(mouseover_eligible(19, 0, 0, None, None, false)); // mailbox
     }
 
     #[test]
     fn highlightable_gates_the_quest_object_but_not_the_plain_door() {
         // An ordinary unlocked door (no INTERACT_COND) is highlightable regardless of its zero activate
         // bit — plain doors must never gray out.
-        assert!(highlightable_flags(0, 0, 0, None)); // DOOR, no flags
-                                                     // A GENERIC decoration is never highlightable.
-        assert!(!highlightable_flags(GO_TYPE_GENERIC, 0, 0, None));
+        assert!(highlightable_flags(0, 0, 0, None, false)); // DOOR, no flags
+                                                            // A GENERIC decoration is never highlightable.
+        assert!(!highlightable_flags(GO_TYPE_GENERIC, 0, 0, None, false));
         // Neither is the transport family (the byte-dumped constant-false +0x14 slots): no gear,
         // no tooltip, no USE on a boat / elevator / map object — flags can't make them so.
         for t in [GO_TYPE_TRANSPORT, GO_TYPE_MAP_OBJECT, GO_TYPE_MO_TRANSPORT] {
-            assert!(!highlightable_flags(t, 0, GO_DYNFLAG_ACTIVATE, None));
+            assert!(!highlightable_flags(t, 0, GO_DYNFLAG_ACTIVATE, None, false));
         }
+        // Nor the marker set, whose `+0x14` is the same byte-dumped `xor al,al` — an anvil / forge /
+        // brazier (SPELL_FOCUS, flags 0x0, faction 0 ⇒ NEUTRAL, every flag term passing) is exactly
+        // the case that used to reach the predicate and come back true, wearing the Interact gear.
+        for t in [
+            GO_TYPE_SPELL_FOCUS,
+            GO_TYPE_DUEL_ARBITER,
+            GO_TYPE_FISHINGHOLE,
+            GO_TYPE_AURA_GENERATOR,
+        ] {
+            assert!(!highlightable_flags(t, 0, 0, None, false));
+            assert!(!highlightable_flags(
+                t,
+                0,
+                GO_DYNFLAG_ACTIVATE,
+                Some(3),
+                false
+            ));
+        }
+        // And the two slots point OPPOSITE ways for the marker set: hovered (tooltip) but never
+        // interactable (no cursor, no brighten, no USE). The reported anvil, both halves at once.
+        assert!(mouseover_eligible(
+            GO_TYPE_SPELL_FOCUS,
+            0,
+            0,
+            None,
+            Some(3),
+            false
+        ));
+        assert!(!highlightable_flags(
+            GO_TYPE_SPELL_FOCUS,
+            0,
+            0,
+            Some(3),
+            false
+        ));
         // A busy (IN_USE) or NO_INTERACT object is not highlightable.
-        assert!(!highlightable_flags(3, 0x1, 0, None)); // CHEST, IN_USE
-        assert!(!highlightable_flags(3, 0x10, 0, None)); // CHEST, NO_INTERACT
-                                                         // The quest gate: an INTERACT_COND object is highlightable only with the activate bit set — the
-                                                         // exact bug, a quest chest without the quest.
-        assert!(!highlightable_flags(3, GO_FLAG_INTERACT_COND, 0, None)); // quest chest, no quest → clear
+        assert!(!highlightable_flags(3, 0x1, 0, None, false)); // CHEST, IN_USE
+        assert!(!highlightable_flags(3, 0x10, 0, None, false)); // CHEST, NO_INTERACT
+                                                                // The quest gate: an INTERACT_COND object is highlightable only with the activate bit set — the
+                                                                // exact bug, a quest chest without the quest.
+        assert!(!highlightable_flags(
+            3,
+            GO_FLAG_INTERACT_COND,
+            0,
+            None,
+            false
+        )); // quest chest, no quest → clear
         assert!(highlightable_flags(
             3,
             GO_FLAG_INTERACT_COND,
             GO_DYNFLAG_ACTIVATE,
-            None
+            None,
+            false
         )); // quest chest, quest held → usable
+    }
+
+    #[test]
+    fn the_bobber_is_channel_gated_and_reaches_a_hundred_yards() {
+        // The FISHINGNODE highlightable override (`0x5f6710`, wow-re fishing-bobber-interaction.md):
+        // only the player whose UNIT_FIELD_CHANNEL_OBJECT names exactly this GO passes — someone
+        // else's bobber (or yours after the channel drops) shows nothing at all.
+        assert!(highlightable_flags(GO_TYPE_FISHINGNODE, 0, 0, None, true));
+        assert!(!highlightable_flags(GO_TYPE_FISHINGNODE, 0, 0, None, false));
+        // The pass tail-jumps the SHARED gate, so the flags still apply on top.
+        assert!(!highlightable_flags(
+            GO_TYPE_FISHINGNODE,
+            0x10,
+            0,
+            None,
+            true
+        ));
+        // The mouseover thunk (`+0xc` → `+0x14`) rides the same predicate: no tooltip either.
+        assert!(!mouseover_eligible(
+            GO_TYPE_FISHINGNODE,
+            0,
+            0,
+            None,
+            None,
+            false
+        ));
+        assert!(mouseover_eligible(
+            GO_TYPE_FISHINGNODE,
+            0,
+            0,
+            None,
+            None,
+            true
+        ));
+        // Every other type ignores the channel input entirely.
+        assert!(highlightable_flags(0, 0, 0, None, false));
+        // The per-type range: the bobber's ctor constant is 100.0 yd (squared at the compare) —
+        // effectively un-range-gated — while everything else stays on the interim reach.
+        assert_eq!(go_interact_range_sq(GO_TYPE_FISHINGNODE), 100.0 * 100.0);
+        assert_eq!(go_interact_range_sq(0), GO_INTERACT_RANGE_SQ);
+        // The channel compare itself: owned iff self's channel object is exactly this guid.
+        assert!(!fishing_channel_owned(None, Some(7)));
+        assert!(!fishing_channel_owned(None, None));
     }
 
     #[test]

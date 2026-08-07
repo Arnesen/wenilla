@@ -149,17 +149,23 @@ fn set_slot_texture(lua: &Lua, this: &Table, slot: Slot, args: &MultiValue) -> m
         // plain region.
         Some(Value::String(s)) if s.to_str()?.is_empty() => {
             data.texture = None;
-            data.color = None;
+            data.fill = None;
         }
-        Some(Value::String(s)) => data.texture = Some(s.to_str()?.to_string()),
+        Some(Value::String(s)) => {
+            data.texture = Some(s.to_str()?.to_string());
+            data.fill = None;
+        }
+        // The colour form generates a solid texture into the same slot the path form loads into
+        // ([`RegionData::fill`]) — never a tint, so each clears the other.
         Some(v @ (Value::Number(_) | Value::Integer(_))) => {
             let arg = |i: usize| args.get(i).map(as_f32);
-            data.color = Some([
+            data.fill = Some([
                 as_f32(v),
                 arg(1).unwrap_or(0.0),
                 arg(2).unwrap_or(0.0),
                 arg(3).unwrap_or(1.0),
             ]);
+            data.texture = None;
         }
         _ => {}
     }

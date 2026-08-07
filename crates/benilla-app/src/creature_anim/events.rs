@@ -134,7 +134,7 @@ pub(super) fn fire_anim_events(
 /// start** ([`FRESH_CLIP_HEAD`]) returns `-1.0` so the head window `[0, cur]` fires — we watched this
 /// clip begin, and `t = 0` keyframes are real (the emote voices carry `$CSD` at `0.000`). A clip
 /// change that *starts* deep in its timeline (the corpse settle's `seek_to(duration)`) stays silent.
-fn advance_track(
+pub(crate) fn advance_track(
     last: &mut bevy::ecs::entity::EntityHashMap<(AnimationNodeIndex, f32)>,
     entity: Entity,
     node: AnimationNodeIndex,

@@ -149,8 +149,8 @@ impl UiScript {
                         data.font_height = fo.height.or(data.font_height);
                         data.font_shadow = fo.shadow.or(data.font_shadow);
                         data.outline = fo.outline;
-                        if data.color.is_none() {
-                            data.color = fo.color;
+                        if data.vertex_color.is_none() {
+                            data.vertex_color = fo.color;
                         }
                         // The object's own justify (`<NormalFont inherits=… justifyH="LEFT"/>` —
                         // how the ref left-aligns a ButtonText).
@@ -164,7 +164,7 @@ impl UiScript {
                     // The button-level state color wins over the font object AND the region's own
                     // explicit color — the client's Button color slots repaint the label outright.
                     if let Some(c) = state_color {
-                        data.color = Some(c);
+                        data.vertex_color = Some(c);
                     }
                     // Region-rect precedence (decision 0068 v1): anchored regions resolved in
                     // [`resolve`] → their owner-relative rect; else an explicitly-sized region draws
@@ -198,7 +198,7 @@ impl UiScript {
                     let content = if is_text {
                         QuadContent::Text {
                             text: data.text,
-                            color: data.color,
+                            color: data.vertex_color,
                             justify_h: data.justify_h,
                             justify_v: data.justify_v,
                             font: data.font_path,
@@ -211,7 +211,7 @@ impl UiScript {
                     } else {
                         QuadContent::Texture {
                             path: data.texture,
-                            color: data.color,
+                            color: texture_color(data.fill, data.vertex_color),
                             additive: data.additive,
                             tex_coords: data.tex_coords,
                             circular: data.circular,
@@ -260,6 +260,26 @@ impl UiScript {
             }
         }
         out
+    }
+}
+
+/// The single colour a Texture region draws with: **`texel × vertexColour`**, per channel and
+/// **alpha included** (wow-re `system/ui/scratch/texture-color-composition.md`, VERIFIED — the
+/// stage-0 combine's `MODULATE(TEXTURE, DIFFUSE)` for both colour and alpha).
+///
+/// `fill` is the region's own solid-colour texture ([`RegionData::fill`] — the client generates a
+/// real 8×8 texel block from it), so where it is set it IS the texel and the product is the drawn
+/// colour. Where it isn't, the texel comes from `path`'s art and this returns the tint alone for the
+/// renderer to modulate the sample by; `None` means untinted.
+///
+/// The correction this encodes: a `<Color 1,1,1,0.2>` trough later `SetVertexColor(0,0,0.75,0.5)`'d
+/// draws at alpha **0.1**. benilla used to store one colour slot and let the second call *replace*
+/// the first, which drew it at 0.5.
+fn texture_color(fill: Option<[f32; 4]>, vertex: Option<[f32; 4]>) -> Option<[f32; 4]> {
+    match (fill, vertex) {
+        (Some(f), Some(v)) => Some([f[0] * v[0], f[1] * v[1], f[2] * v[2], f[3] * v[3]]),
+        (Some(c), None) | (None, Some(c)) => Some(c),
+        (None, None) => None,
     }
 }
 

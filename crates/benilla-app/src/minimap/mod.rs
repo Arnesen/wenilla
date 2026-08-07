@@ -269,6 +269,7 @@ fn emit_minimap(
         unit_pos,
         window,
         mut blip_hover,
+        ui_scale,
         group,
         tracked,
         self_store,
@@ -534,8 +535,12 @@ fn emit_minimap(
             wy,
             wz: wow[2],
             cursor,
-            // The same point in UI space (y-up) — the tooltip's cursor seat.
-            cursor_ui: cursor.zip(win).map(|(c, w)| Vec2::new(c.x, w.height() - c.y)),
+            // The same point in UI space (y-up, ÷s through the 0582/0584 seam — the tooltip's
+            // anchor resolves in the VM's 768-virtual units, not window px): the cursor seat.
+            cursor_ui: cursor.zip(win).map(|(c, w)| {
+                let s = crate::ui_script::seam_scale(w.height(), ui_scale.0);
+                Vec2::new(c.x / s, (w.height() - c.y) / s)
+            }),
         }
     });
     let mut hover = blips::MinimapBlipHover::None;

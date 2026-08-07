@@ -3,7 +3,7 @@
 //! action-button machinery. Same file, two concerns: the strip along the bar's top is the
 //! player-progress readout; the buttons are the input surface.
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{ScriptValue, UiScript, UnitState};
 
 /// The XP bar's load set: the manifest prefix it actually needs — fonts, UIParent, the
 /// tooltip, `TextStatusBar.xml` (the numerals machinery `BenillaExpBar_OnLoad` wires in),
@@ -101,7 +101,8 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
 
-    // The binding trio underneath (the app-feed shape the XML consumes).
+    // The binding trio underneath (the app-feed shape the XML consumes) — the byte-verified
+    // contract (wow-re rested-xp-bindings.md, decision 1087).
     let (id, name, mult) = s
         .eval::<(i64, String, f64)>("return GetRestState()")
         .unwrap();
@@ -109,7 +110,7 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     assert_eq!(
         s.eval::<Option<i64>>("return GetXPExhaustion()").unwrap(),
         Some(1400),
-        "the pool is served ×2 — bar-XP, not wire units"
+        "the pool × Exhaustion.dbc row 1's factor (2.0) — bar-XP, not wire units"
     );
     assert_eq!(
         s.eval::<Option<i64>>("return IsResting()").unwrap(),
@@ -151,6 +152,33 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
         .unwrap();
     assert!(ok, "a dry pool hides the tick and returns the purple bar");
 
+    // The nil law is the BYTE's, not the pool's (0x48d3f0's `dec/jne`, decision 1087): a normal-
+    // state player with a nonzero pool — vmangos's 0 < bonus ≤ 10 hysteresis window — still reads
+    // nil, and a rested player with a drained pool reads the NUMBER 0 (the tick then parks at the
+    // bar's current fill). An unmapped byte (0 here) is the binary's nil-triple fail path.
+    s.set_rest_state(2, 5, false);
+    s.fire_event("UPDATE_EXHAUSTION", vec![]);
+    assert_eq!(
+        s.eval::<Option<i64>>("return GetXPExhaustion()").unwrap(),
+        None,
+        "normal state hides the pool even while it holds a remnant"
+    );
+    s.set_rest_state(1, 0, true);
+    s.fire_event("UPDATE_EXHAUSTION", vec![]);
+    assert_eq!(
+        s.eval::<Option<i64>>("return GetXPExhaustion()").unwrap(),
+        Some(0),
+        "rested with a drained pool is the number 0, not nil"
+    );
+    s.set_rest_state(0, 0, false);
+    assert!(
+        s.eval::<bool>("local a, b, c = GetRestState() return a == nil and b == nil and c == nil")
+            .unwrap(),
+        "an unmapped byte is the binary's (nil, nil, nil) fail path"
+    );
+    s.set_rest_state(2, 0, false);
+    s.fire_event("UPDATE_EXHAUSTION", vec![]);
+
     // A pool past the level's end (6000×2 span from 1000/10000): off the strip → hidden tick,
     // still rested blue (the ref's exhaustionTickSet > width branch).
     s.set_rest_state(1, 6000, false);
@@ -168,6 +196,57 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     assert!(
         ok,
         "a span past the level end hides the tick but keeps the blue"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The max-level rail (decision 1094, ref `ReputationWatchBar_Update`'s no-watched-faction arm):
+/// at MAX_PLAYER_LEVEL the XP strip and its tick give way to the flat brass rail; below it the
+/// strip is back. Walked over a live ding — 59 → 60 via `PLAYER_LEVEL_UP`'s arg1, the value the
+/// ref reads (not the level field, which may not have landed yet). The tick's own handler runs
+/// first (it loaded first) and re-shows the tick off the rested pool; the rail's handler then
+/// hides it — the ref's own load order, ending hidden.
+#[test]
+fn the_max_level_rail_replaces_the_xp_bar_at_60() {
+    let mut s = exp_bar_harness();
+    s.set_player_xp(1000, 10000);
+    s.set_rest_state(1, 700, true);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            level: 59,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.resolve();
+
+    let ok: bool = s
+        .eval(
+            r#"
+            return BenillaExpBar:IsShown() and not BenillaMaxLevelBar:IsShown()
+               and BenillaExhaustionTick:IsShown()
+        "#,
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "below 60 the strip and tick show, the rail stays hidden"
+    );
+
+    s.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(60)]);
+    let ok: bool = s
+        .eval(
+            r#"
+            return not BenillaExpBar:IsShown() and BenillaMaxLevelBar:IsShown()
+               and not BenillaExhaustionTick:IsShown()
+        "#,
+        )
+        .unwrap();
+    assert!(
+        ok,
+        "at 60 the rail replaces the strip and the tick goes with it"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

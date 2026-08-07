@@ -676,7 +676,9 @@ use driver::{drive_animations, drive_hand_grip};
 /// small concern, separate from the driver ([`driver`]) that advances the clips it scans.
 mod events;
 use events::fire_anim_events;
-pub(crate) use events::{footfall_side, is_footstep_sound, scan_events, AnimSoundEvent};
+pub(crate) use events::{
+    advance_track, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent,
+};
 
 mod impact;
 use impact::route_swing_impacts;

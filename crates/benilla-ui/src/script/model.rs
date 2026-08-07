@@ -702,14 +702,26 @@ pub(crate) struct Model {
     /// The player's rest snapshot, pushed together each frame any part moves
     /// ([`UiScript::set_rest_state`]) — player-globals like `money`. `rest_state` is the raw
     /// `PLAYER_BYTES_2` byte 3 (1 = rested, 2 = normal — the server writes it with hysteresis
-    /// off the pool; `0` until the feed lands, read as normal), `rest_pool` the raw
+    /// off the pool). **Defaults to 2, not 0**: every live 1.12 descriptor carries 2 from
+    /// character creation on, and the tick's faithful FrameXML compares `GetRestState() >= 3`
+    /// unguarded — a pre-feed 0 would render the binary's nil-triple fail path into an event
+    /// handler the real client can only ever run with the byte present. Byte 0 stays reachable
+    /// by explicit push, and the fail path stays faithful there. `rest_pool` is the raw
     /// `PLAYER_REST_STATE_EXPERIENCE` value in **base kill-XP units**, `resting` the
     /// `PLAYER_FLAGS_RESTING (0x20)` bit (inside an inn/city). `GetRestState`/`GetXPExhaustion`/
-    /// `IsResting` read these; the ×2 display scaling of the pool lives in the `GetXPExhaustion`
-    /// binding, where the real client applies it (decision 1082).
+    /// `IsResting` read these; the pool's display scaling is `exhaustion` row 1's factor,
+    /// applied in the `GetXPExhaustion` binding, where the real client applies it (decisions
+    /// 1082/1087).
     pub(crate) rest_state: u8,
     pub(crate) rest_pool: u32,
     pub(crate) resting: bool,
+    /// Exhaustion.dbc as the rest bindings consume it — rest-state byte → (localized name,
+    /// factor), the table `GetRestState` indexes directly and whose row 1 scales
+    /// `GetXPExhaustion` (wow-re rested-xp-bindings.md; decision 1087). Seeded with the shipped
+    /// 5875 enUS rows so the engine tests and a failed DBC read behave like the shipped client
+    /// (the GlobalStrings-fallback posture); the app overwrites it with the install's real —
+    /// localized — rows at startup ([`UiScript::set_exhaustion_rows`]).
+    pub(crate) exhaustion: HashMap<u8, (String, f64)>,
 
     /// The paper doll's combat-stats snapshot (`None` until the app's feed lands), the
     /// equipment/ammo slot views, and the model pane's persistent bake yaw — the character-window
@@ -1005,9 +1017,18 @@ impl Model {
             player_next_level_xp: 0,
             combo_points: 0,
             combo_target: 0,
-            rest_state: 0,
+            rest_state: 2,
             rest_pool: 0,
             resting: false,
+            exhaustion: [
+                (1, ("Rested".to_string(), 2.0)),
+                (2, ("Normal".to_string(), 1.0)),
+                (3, ("XXXTired".to_string(), 1.0)),
+                (4, ("XXXTired".to_string(), 0.5)),
+                (5, ("XXXExhausted".to_string(), 0.25)),
+            ]
+            .into_iter()
+            .collect(),
             player_combat_stats: None,
             pet_combat_stats: None,
             inventory_slots: Default::default(),

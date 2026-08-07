@@ -211,6 +211,33 @@ pub fn parse_m2_string_anchors(b: &[u8]) -> Option<StringAnchors> {
     })
 }
 
+/// Parse a model's first `$CCH` marker — the fishing line's near anchor on the pole (wow-re
+/// `fishing-line.md` §2: the line builder scans the M2 **events** table for `$CCH` and composes
+/// its position through the bone's pose; the bobber authors one too but the reference never reads
+/// it). Returns `(bone index, raw WoW model-space position)`; `None` for a model with no `$CCH`.
+/// Exactly one weapon model in the 5875 chain authors it (`Misc_2H_FishingPole_A_01.m2` — the
+/// `scan_events` sweep), which is what lets the held-item attach key on presence alone.
+pub fn parse_m2_cch_marker(b: &[u8]) -> Option<(u16, [f32; 3])> {
+    let (ev_count, ev_ofs) = (le_u32(b, 0x114) as usize, le_u32(b, 0x118) as usize);
+    for e in 0..ev_count {
+        let erec = ev_ofs + e * 44;
+        if erec + 44 > b.len() {
+            break;
+        }
+        if b.get(erec..erec + 4)? == b"$CCH" {
+            return Some((
+                le_u32(b, erec + 8) as u16,
+                [
+                    le_f32(b, erec + 12),
+                    le_f32(b, erec + 16),
+                    le_f32(b, erec + 20),
+                ],
+            ));
+        }
+    }
+    None
+}
+
 /// One row of the M2's baked **PlayableAnimationLookup** table (decision 0082 — missing-animation-clip
 /// resolution): re-exposed from `benilla-m2`'s [`benilla_m2::M2PlayableAnim`] (identical shape) as the
 /// bytes-in entry point alongside [`parse_m2_skeleton`]/[`parse_m2_attachments`], so callers that only

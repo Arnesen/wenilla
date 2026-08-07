@@ -208,11 +208,21 @@ pub(super) struct DisplayModel {
     /// load — the exact rig the portrait booth frames through. `None` for WMO / model-less / the few
     /// camera-less M2s (the booth then falls back to heuristic framing).
     pub(super) portrait_camera: Option<benilla_assets::PortraitCamera>,
+    /// The model's **model-frame pane camera** — raw camera-table index 1, the rig a 1.12
+    /// `<PlayerModel>` widget renders through (wow-re `ui/scratch/modelframe-camera-law.md`;
+    /// [`benilla_assets::M2Model::pane_camera`]). Captured with `parts` on load. `None` for WMO /
+    /// model-less / a model with fewer than two cameras — the body booth then uses the client's own
+    /// FIXED fallback camera instead.
+    pub(super) pane_camera: Option<benilla_assets::PortraitCamera>,
     /// A bow display's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2),
     /// captured with `parts`: `[top, bottom]` as `(bone, model-local Bevy position)`. The held-item
     /// attach marks the prop root with them so the string drawer can span the tips. `None` for
     /// every non-bow model.
     pub(super) string_anchors: Option<[(u16, Vec3); 2]>,
+    /// The fishing pole's `$CCH` line anchor (wow-re `fishing-line.md`), mesh-frame Bevy space,
+    /// captured with `parts`. The held-item attach marks the mainhand prop with it so the line
+    /// drawer can span rod tip → bobber. `None` for every model that doesn't author it.
+    pub(super) cch_marker: Option<Vec3>,
     /// The authored bbox z-extent (`maxZ − minZ`, model-local yards, pre-scale) — the overhead-anchor
     /// fallback's input (`0x608640`: a unit whose model has no PlayerName attachment anchors overhead
     /// text at `feet + scale × this × 1.25`). `0.0` for a bounds-less display.
@@ -310,12 +320,14 @@ pub(super) fn empty_shell() -> DisplayModel {
         attachments: Vec::new(),
         markers: Vec::new(),
         string_anchors: None,
+        cch_marker: None,
         inverse_bindposes: None,
         animations: None,
         first_seq_span: None,
         pivot_height_local: 0.0,
         ground_radius_local: 0.0,
         portrait_camera: None,
+        pane_camera: None,
         bbox_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
         terrain_tilt: 0,
@@ -360,12 +372,14 @@ pub(super) fn build_parts(
     let mut attachments = Vec::new();
     let mut markers = Vec::new();
     let mut string_anchors = None;
+    let mut cch_marker = None;
     let mut inverse_bindposes = None;
     let mut animations = None;
     let mut first_seq_span = None;
     let mut pivot_height_local = 0.0;
     let mut ground_radius_local = 0.0;
     let mut portrait_camera = None;
+    let mut pane_camera = None;
     let mut bbox_z_local = 0.0;
     let mut bake_center_local = Vec3::ZERO;
     let parts = match &dm.handle {
@@ -425,10 +439,12 @@ pub(super) fn build_parts(
             attachments = model.attachments.clone();
             markers = model.markers.clone();
             string_anchors = model.string_anchors;
+            cch_marker = model.cch_marker;
             inverse_bindposes = Some(model.inverse_bindposes.clone());
             animations = model.animations.clone();
             first_seq_span = model.first_seq_span;
             portrait_camera = model.portrait_camera;
+            pane_camera = model.pane_camera;
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
@@ -747,12 +763,14 @@ pub(super) fn build_parts(
     dm.attachments = attachments;
     dm.markers = markers;
     dm.string_anchors = string_anchors;
+    dm.cch_marker = cch_marker;
     dm.inverse_bindposes = inverse_bindposes;
     dm.animations = animations;
     dm.first_seq_span = first_seq_span;
     dm.pivot_height_local = pivot_height_local;
     dm.ground_radius_local = ground_radius_local;
     dm.portrait_camera = portrait_camera;
+    dm.pane_camera = pane_camera;
     dm.bbox_z_local = bbox_z_local;
     dm.bake_center_local = bake_center_local;
     dm.terrain_tilt = terrain_tilt;

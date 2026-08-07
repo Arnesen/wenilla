@@ -63,6 +63,7 @@ fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
 
 fn coin_and_two_items() -> LootState {
     LootState {
+        fishing: false,
         rows: vec![
             LootRow {
                 item_id: 0,
@@ -219,6 +220,7 @@ fn shipped_loot_frame_drives_end_to_end() {
 
     // LOOT_UPDATE with the coin row gone (looted) repaints to two rows, keeping the window open.
     s.set_loot(Some(LootState {
+        fishing: false,
         rows: coin_and_two_items().rows[1..].to_vec(),
     }));
     s.fire_event("LOOT_UPDATE", vec![]);
@@ -272,7 +274,10 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
     assert!(s.take_sounds().is_empty(), "loot close is silent (C-side)");
 
     // Re-open with an EMPTY roll: OnShow's numItems==0 fork queues exactly LOOTWINDOWOPENEMPTY.
-    s.set_loot(Some(LootState { rows: vec![] }));
+    s.set_loot(Some(LootState {
+        fishing: false,
+        rows: vec![],
+    }));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -280,6 +285,58 @@ fn loot_empty_roll_plays_the_empty_open_kit() {
         vec![SoundRequest::KitName("LOOTWINDOWOPENEMPTY".into())],
         "an empty loot roll plays the empty-open kit"
     );
+}
+
+/// The fishing fork (LootFrame.lua LootFrame_OnShow l.137-140; decision 1086): a fishing loot open
+/// plays "FISHING REEL IN" (SoundEntries "Fishing Reel in", kit 3407 — the name lookup is
+/// case-insensitive on both sides) and swaps the portrait ring's skull for the FishingLoot-Icon;
+/// the next ordinary open resets the skull (the ref re-stamps TargetDead at every show, l.133).
+#[test]
+fn fishing_loot_open_plays_the_reel_and_swaps_the_portrait() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml"); // ITEM_QUALITY_COLORS (LootFrame's palette), app load order
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "LootFrame.xml");
+    let has_icon = |quads: &[ExtractedQuad], needle: &str| {
+        quads.iter().any(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
+        })
+    };
+
+    let mut fished = coin_and_two_items();
+    fished.fishing = true;
+    s.set_loot(Some(fished));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("FISHING REEL IN".into())],
+        "a fishing loot open plays the reel-in kit"
+    );
+    let quads = s.extract();
+    assert!(
+        has_icon(&quads, "FishingLoot-Icon"),
+        "the portrait ring shows the fishing icon"
+    );
+    assert!(
+        !has_icon(&quads, "TargetDead"),
+        "…instead of the dead-target skull"
+    );
+
+    // Close, then an ordinary corpse loot: silent again, and the skull is back.
+    s.fire_event("LOOT_CLOSED", vec![]);
+    let _ = s.take_sounds();
+    s.set_loot(Some(coin_and_two_items()));
+    s.fire_event("LOOT_OPENED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.take_sounds().is_empty(),
+        "a non-fishing loot open is silent (its open kit is C-side)"
+    );
+    let quads = s.extract();
+    assert!(has_icon(&quads, "TargetDead"), "the skull is restored");
+    assert!(!has_icon(&quads, "FishingLoot-Icon"));
 }
 
 /// Paging (LootFrame.lua l.70-73,105-118): 5 items ⇒ 3 rows + a Down pager on page 1, 2 rows + an Up
@@ -303,7 +360,10 @@ fn shipped_loot_frame_pages_five_items() {
             link: None,
         })
         .collect();
-    s.set_loot(Some(LootState { rows }));
+    s.set_loot(Some(LootState {
+        fishing: false,
+        rows,
+    }));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
@@ -488,6 +548,7 @@ fn ctrl_and_shift_on_a_loot_row_preview_and_post_without_looting() {
 
     // A coin row + one resolved item: the item's link is fed exactly as `ui_loot.rs` builds it.
     s.set_loot(Some(LootState {
+        fishing: false,
         rows: vec![
             LootRow {
                 item_id: 0,

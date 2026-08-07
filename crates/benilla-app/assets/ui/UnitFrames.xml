@@ -946,6 +946,28 @@
                             </Anchors>
                             <TexCoords left="1.0" right="0.09375" top="0" bottom="0.78125"/>
                         </Texture>
+                        <!-- Name and level ride BACKGROUND with the ring art, like the ref's
+                             (ref-PlayerFrame.xml l.54-97) — NOT the OVERLAY the state icons sit
+                             in. The layer choice is load-bearing for the level number: the zzz /
+                             crossed-swords badge (OVERLAY, below) sits exactly on the level
+                             badge, and the client's bucket-wide texture-before-fontstring order
+                             (decision 0884) means a fontstring can never hide UNDER a texture
+                             of its own layer — the ref hides the number while resting by putting
+                             it in a LOWER layer than the badge. Shipped in OVERLAY by 1082, the
+                             number rode ON the badge (director report, 2026-08-07); decision 1093. -->
+                        <!-- Name 100×10 CENTER (50,19) (ref l.58-69). -->
+                        <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
+                            <Size><AbsDimension x="100" y="10"/></Size>
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="19"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                        <!-- Level number CENTER (-63,-16) (ref l.70-78). -->
+                        <FontString name="$parentLevelText" inherits="GameFontNormalSmall">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-63" y="-16"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
                     </Layer>
                     <Layer level="ARTWORK">
                         <!-- The PvP flag icon, 64×64 TOPLEFT (18,-20) (ref PlayerPVPIcon,
@@ -979,19 +1001,6 @@
                         </Texture>
                     </Layer>
                     <Layer level="OVERLAY">
-                        <!-- Name 100×10 CENTER (50,19) (ref l.58-69). -->
-                        <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
-                            <Size><AbsDimension x="100" y="10"/></Size>
-                            <Anchors>
-                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="19"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
-                        <!-- Level number CENTER (-63,-16) (ref l.70-78). -->
-                        <FontString name="$parentLevelText" inherits="GameFontNormalSmall">
-                            <Anchors>
-                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-63" y="-16"/></Offset></Anchor>
-                            </Anchors>
-                        </FontString>
                         <!-- The portrait hit indicator (ref PlayerHitIndicator, decision 0576):
                              CENTER at (73,-42) from the frame's TOPLEFT — the portrait circle's
                              center. Hidden until a UNIT_COMBAT event lands; CombatFeedback drives

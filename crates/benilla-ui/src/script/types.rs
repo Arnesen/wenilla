@@ -314,16 +314,35 @@ pub(crate) struct RegionData {
     /// the owner's `+0xc8` at draw). [`UiScript::extract`](super::UiScript::extract) folds this into
     /// [`ExtractedQuad::alpha`] alongside that owner alpha.
     ///
-    /// **Open (wow-re gap):** the findings verify a two-factor draw multiply
-    /// (`ownColorAlpha × frameAlpha`) but never pin whether `SetAlpha` writes a *distinct* field or
-    /// simply the alpha channel of [`Self::color`]. We keep it distinct so `SetAlpha` on a
-    /// FontString cannot clobber its font object's color. The two readings agree on every reference
-    /// call site (none sets both on one region); a site that does is the trigger to settle it.
+    /// **Settled for a Texture, kept distinct anyway:** `Texture:SetAlpha 0x79b580` is
+    /// `SetVertexColor(r, g, b, a)` on the *same* `+0xa8`/`+0xb8` slot as [`Self::vertex_color`], so
+    /// in the real client the two clobber each other. We keep them separate fields because the draw
+    /// result is identical either way — both readings end in one product,
+    /// `texel × ownColorAlpha × frameAlpha` — and no reference call site sets both on one region;
+    /// separate storage additionally keeps `SetAlpha` on a FontString from wiping its font object's
+    /// colour, which the CSimpleFontString half of that binding was never pinned for. The
+    /// divergence is now *known* rather than open: a call site that sets both is where it bites.
     pub(crate) alpha: Option<f32>,
     /// A texture path (`SetTexture("Interface\\...")`).
     pub(crate) texture: Option<String>,
-    /// A color: a solid fill (`SetTexture(r,g,b,a)`) or a vertex tint (`SetVertexColor`).
-    pub(crate) color: Option<[f32; 4]>,
+    /// The **solid-colour texture** (`SetTexture(r, g, b, a)`, and XML `<Texture><Color/></Texture>`
+    /// with no `file=`) — the `+0xcc` slot [`Self::texture`] also occupies, so the two are mutually
+    /// exclusive by construction: every writer of one clears the other. Not a tint. The real client
+    /// really does *generate an 8×8 texture* here (`CSimpleTexture::SetTexture(const CImVector*)`
+    /// `0x770360` → `0x44a9c0` → the `rep stos` generator `0x5c5350` fills 64 texels with the packed
+    /// ARGB), which is why the XML alpha rides in the **texel** and multiplies with
+    /// [`Self::vertex_color`] rather than being replaced by it.
+    pub(crate) fill: Option<[f32; 4]>,
+    /// The **vertex colour** (`SetVertexColor 0x79abd0` → `0x77f750`, writing `+0xb8`; a StatusBar's
+    /// `SetStatusBarColor`; a FontString's `SetTextColor` and its font object's colour) — storage
+    /// distinct from [`Self::fill`]/[`Self::texture`]'s `+0xcc`.
+    ///
+    /// **Draw law** (wow-re `system/ui/scratch/texture-color-composition.md`, VERIFIED):
+    /// `drawn = texel × vertexColour`, per channel, **alpha included**. `None` = never set = the
+    /// untinted white every region draws at by default. This is why the reference `SkillFrame`'s
+    /// row trough — declared `<Color 1,1,1,0.2>`, then `SetVertexColor(0, 0, 0.75, 0.5)`'d — draws
+    /// at alpha `0.2 × 0.5 = 0.1`, not `0.5`. [`super::extract`] does that multiply.
+    pub(crate) vertex_color: Option<[f32; 4]>,
     /// This region is a **portrait**: draw its texture masked to the inscribed circle (set by
     /// `SetPortraitToTexture`, and by `SetPortraitTexture`'s round unit binding). WoW portraits
     /// are circular — the frame ring is a thin band whose transparent corners would otherwise

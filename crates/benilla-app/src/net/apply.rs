@@ -254,6 +254,9 @@ pub(super) fn apply_net_updates(
             MessageWriter<crate::ui_unit::UnitCombatFeedback>,
             MessageWriter<crate::ui_unit::CombatTextEvent>,
             MessageWriter<crate::creature_anim::SheathRequest>,
+            // The GO one-shot Custom play (`SMSG_GAMEOBJECT_CUSTOM_ANIM` — the bobber's bite
+            // splash, decision 1086), the step-8 sibling of the `GoLidOpen` writer above.
+            MessageWriter<crate::go_anim::GoCustomAnim>,
         ),
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
@@ -636,6 +639,11 @@ pub(super) fn apply_net_updates(
             } => {
                 objects::gameobject_info(entry, type_id, display_id, name, &data, &mut go_templates)
             }
+            SessionEvent::GameObjectCustomAnim { guid, anim_id } => {
+                objects::gameobject_custom_anim(guid, anim_id, &mut audio.15 .3)
+            }
+            SessionEvent::FishNotHooked => loot::fish_verdict(false, &mut ui_error_keys),
+            SessionEvent::FishEscaped => loot::fish_verdict(true, &mut ui_error_keys),
             SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut audio.0),
             SessionEvent::PlayMusic { music_id } => world::play_music(music_id, &mut audio.0),
             SessionEvent::PlayObjectSound { sound_id, guid } => {

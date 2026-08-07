@@ -37,10 +37,10 @@ impl Loader<'_> {
                     (file.to_string(), layer.clone()),
                     dbg,
                 );
-                if let Some(c) = color {
-                    // File + <Color> = a tint on the bar texture.
-                    self.call(wrapper, "SetStatusBarColor", (c[0], c[1], c[2], c[3]), dbg);
-                }
+                // File + `<Color>` DISCARDS the colour, it does not tint — the same
+                // `CSimpleTexture::LoadXML` ordering `regions.rs`'s `<Texture>` arm cites
+                // (`0x76fe20`: the child loop runs first, then `file=` overwrites the same `+0xcc`).
+                // `<BarColor>` below is this widget's real tint.
             } else if let Some(c) = color {
                 // No file: a solid-color bar (the SetStatusBarTexture(r,g,b,a) form).
                 self.call(

@@ -1,9 +1,14 @@
 //! Portrait **framing** — how the booth camera is placed for a model.
 //!
-//! The primary path is the model's **authored portrait camera** (the mechanism — see the module
-//! docs in [`super`]): [`frame`] takes the rig verbatim, transform + projection. The rest of this
-//! file is the heuristic fallback for camera-less models (head-anchor closeup) and the bind-pose
-//! bone walk [`head_anchor`] anchors the fallback with (the posed booth seats riders on real joints).
+//! Both booth families frame through the model's **own authored camera**, and neither fits anything
+//! (the mechanism — see the module docs in [`super`]):
+//!
+//! - [`frame`] — a ROUND portrait: `cameraLookup[0]`, verbatim (wow-re portrait-render §4). Its
+//!   fallback for a camera-less model is a heuristic head closeup, anchored by the bind-pose bone
+//!   walk [`head_anchor`] (which the posed booth also uses to seat riders on real joints).
+//! - [`body_frame`] — a `<PlayerModel>` body PANE: raw `cameras[1]`, verbatim, else the client's own
+//!   synthesized *fixed* rig (wow-re `modelframe-camera-law.md`, decision 1089). No fit, no
+//!   normalization, no bone anchor anywhere on this path.
 
 use bevy::camera::{CameraProjection, PerspectiveProjection, Projection, SubCameraView};
 use bevy::math::Vec3A;
@@ -14,17 +19,27 @@ use bevy::prelude::*;
 /// camera brings its own FOV (see [`frame`]).
 pub(super) const PORTRAIT_FOV: f32 = 0.5;
 
-/// `1/√(aspect²+1)` at the diagonal-FOV convention's aspect 4/3 = 3/5 exactly — the record-fov →
-/// vertical-half-angle factor (the community's "fov × 0.6" legend, emergent not prescaled). The
-/// 4/3 enters ONLY this crop factor: the projection matrix itself carries no anamorphic squeeze
-/// (the director's ref A/B falsified it on screen; wow-re §4 reconciliation dispatched) — its
-/// `aspect` is the DESTINATION PANE's, and exists purely to cancel the UI's stretch (1069).
-pub(super) const DIAG_TO_VERT: f32 = 0.6;
+/// The aspect the **portrait bake's** own diagonal→vertical crop is computed at: the client feeds
+/// its portrait projection a fixed `4/3` (wow-re portrait-render §4), which makes the crop factor
+/// `1/√((4/3)²+1)` = `3/5` exactly — the community's "fov × 0.6" legend, emergent, not prescaled.
+///
+/// It is a *separate number* from the projection's `aspect` (see [`WowPortraitProjection::aspect`]):
+/// this one is the client's own, fixed by its bake; that one is our destination pane's, and exists
+/// purely to cancel the UI's stretch (1069). They coincide on the **model-pane** path, where the
+/// client renders straight into the pane and its crop aspect IS the pane's.
+pub(super) const PORTRAIT_CROP_ASPECT: f32 = 4.0 / 3.0;
+
+/// A camera record's *diagonal* fov → the **vertical** opening angle, at a given crop aspect:
+/// `fov/√(a²+1)`, the client's own `0x5c3cc0` relation (`t = tan((fov/2)/√(a²+1))`, `m11 = 1/t`, so
+/// `tan(fovy/2) = t` exactly). The one place a plain Bevy `PerspectiveProjection` needs it.
+pub(super) fn diag_to_vert(fov: f32, crop_aspect: f32) -> f32 {
+    fov / (crop_aspect * crop_aspect + 1.0).sqrt()
+}
 
 /// The real client's portrait **projection** (wow-re portrait-render §4, corrected `aa186e79`):
 /// gxumath `0x5c3cc0` is a *diagonal-FOV* perspective — half-angle `θ = (fov/2)/√(aspect²+1)`,
 /// `m11 = 1/tan θ`, `m00 = m11/aspect` — and the portrait bake feeds it `aspect = 4/3`
-/// ([`PORTRAIT_ASPECT`]). Net: vertical half-angle **`0.3·fov`** (the refs' tight crop; 1.72–1.75×
+/// ([`PORTRAIT_CROP_ASPECT`]). Net: vertical half-angle **`0.3·fov`** (the refs' tight crop; 1.72–1.75×
 /// tighter than a naive `tan(fov/2)` read) plus a deliberate **3:4 anamorphic squeeze** (spheres
 /// render as 4:3-tall ellipses in every real portrait).
 ///
@@ -50,12 +65,23 @@ pub(super) struct WowPortraitProjection {
     /// 1.0 for a round portrait: its region is square by construction (the circular mask is
     /// inscribed in it), so there is nothing to cancel.
     pub(super) aspect: f32,
+    /// The aspect the **client** computes its diagonal→vertical crop at — `fovy = fov/√(a²+1)`.
+    ///
+    /// Not the same question as [`Self::aspect`], and the two genuinely differ by path. The portrait
+    /// bake hardcodes `4/3` ([`PORTRAIT_CROP_ASPECT`]) while our destination region is square, so
+    /// there it is `4/3` against an `aspect` of `1.0`. A `<PlayerModel>` body pane renders *straight
+    /// into the pane* in the real client (`0x5c3cc0` with the frame's plain pixel width/height), so
+    /// there the two are the same number — and the crop genuinely moves with the pane: `318×224`
+    /// crops to `0.576·fov`, `233×224` to `0.693·fov`. Hardcoding `0.6` was only ever right at 4/3.
+    pub(super) crop_aspect: f32,
 }
 
 impl WowPortraitProjection {
-    /// Full vertical opening angle: `2θ = 0.6·fov`.
+    /// Full vertical opening angle — `2θ` where `θ = (fov/2)/√(crop_aspect²+1)` is the client's own
+    /// half-angle (`0x5c3cc0`: `t = tan θ`, `m11 = 1/t`, so `tan(fovy/2) = tan θ` exactly, no
+    /// small-angle step anywhere).
     fn fovy(&self) -> f32 {
-        DIAG_TO_VERT * self.fov
+        diag_to_vert(self.fov, self.crop_aspect)
     }
 }
 
@@ -108,9 +134,18 @@ impl CameraProjection for WowPortraitProjection {
 /// ([`Creatures::display_anchors`]). All **model-local at scale 1** (the ref bakes with root scale
 /// reset, RE `0x47a230`), matching the booth's identity-transform parts.
 pub(crate) struct PortraitAnchors {
-    /// The model's **authored portrait camera** — the real client's exact framing rig (module
-    /// docs). `None` for a camera-less model → the heuristic fields below take over.
+    /// The model's **authored portrait camera** — the real client's exact framing rig for a ROUND
+    /// portrait (`cameraLookup[0]`, module docs). `None` for a camera-less model → the heuristic
+    /// fields below take over.
     pub(crate) camera: Option<benilla_assets::PortraitCamera>,
+    /// The model's **authored pane camera** — raw camera-table index 1, the rig a `<PlayerModel>`
+    /// body pane renders through ([`benilla_assets::M2Model::pane_camera`], decision 1089). `None`
+    /// for a model with fewer than two cameras → [`body_frame`]'s fixed fallback.
+    pub(crate) pane_camera: Option<benilla_assets::PortraitCamera>,
+    /// The MD20 header bbox **centre** (Bevy model-local) — the look-at target of the client's fixed
+    /// fallback camera, and the ONLY model-derived quantity on the body-pane path when there is no
+    /// authored camera to use.
+    pub(crate) bbox_center: Vec3,
     /// The bind-pose **head anchor** (Bevy space): the KeyBone-6 head-bone pivot, else the helm
     /// attach point (id 11) — [`head_anchor`]. The heuristic fallback framing looks here; `None`
     /// (a head-less model — props) falls back to a pivot-derived guess.
@@ -200,6 +235,9 @@ pub(super) fn frame(a: &PortraitAnchors) -> (Transform, Projection) {
                 // A round portrait's sampling region is square by construction (the mask is the
                 // inscribed circle) — nothing to cancel.
                 aspect: 1.0,
+                // …but the CROP is the client's own, and its portrait bake computes it at a fixed
+                // 4/3. Two different aspects, two different jobs.
+                crop_aspect: PORTRAIT_CROP_ASPECT,
             }),
         );
     }
@@ -227,80 +265,125 @@ pub(super) fn frame(a: &PortraitAnchors) -> (Transform, Projection) {
     )
 }
 
-/// The paper-doll pane's **body framing** feeds [`WowPortraitProjection`] this fov (a *diagonal*
-/// angle in that projection's convention — the on-screen vertical opening is `0.6·BODY_FOV`, so the
-/// vertical half-angle is `0.3·BODY_FOV ≈ 14.6°`). Mild on purpose: a standing figure should read
-/// with little head-to-feet perspective divergence. NOT the portrait path's authored per-model fov —
-/// the paper doll frames the *whole* body from bounds (decision 0208 §5), never camera 0.
-pub(super) const BODY_FOV: f32 = 0.85;
+/// The client's **renormalize-to-4:3** model-root factor — `G48·(5/3)` where
+/// `G48 = [0x832a48] = 1/√(a²+1)` (`0x41ad10 SetScale`) and the `5/3` is the `.rdata` literal
+/// `[0x80655c]`. Since `f32(5/3) == f32(√((4/3)²+1))` exactly (3·4·5), it is
+/// `√((4/3)²+1)/√(a²+1)`: **1.0 at 4:3**, 0.8833 at 16:10, **0.8171 at 16:9**, 1.0412 at 5:4.
+///
+/// `a` is the **`gxResolution` CVar's width/height**, gated by the `widescreen` CVar (registered at
+/// `0x63a74f` with default `"1"` — on by default); with `widescreen = 0` the client uses `4/3` on
+/// any monitor. (wow-re `ui/scratch/modelframe-camera-law.md` §11.)
+///
+/// **It applies to exactly one path, and this is the subtle part.** The widget's model root is
+/// `T(pos)·R(facing)·S(s)`, and `0x71439b` composes the *camera's* publish through that same root
+/// (`0x718960`) — so on the AUTHORED path `s` **cancels exactly** between camera and geometry, and a
+/// client that scaled the geometry without the camera would be wrong by `1/s` (+22% at 16:9). The
+/// fixed fallback camera is the exception: `0x505890`'s synth leg writes its eye/target as
+/// model-local literals onto a fresh `CCamera` (`0x7ac930`) that is *not* in the model's camera
+/// array, so the publish never reaches it. There the geometry shrinks and the camera does not — and
+/// because it still looks at the *unscaled* bbox centre, the model also sits low by
+/// `(1−s)·centre.y`, which falls out of the transform rather than being coded.
+pub(super) fn pane_model_scale(display_aspect: f32) -> f32 {
+    const REF: f32 = 4.0 / 3.0;
+    ((REF * REF + 1.0) / (display_aspect * display_aspect + 1.0)).sqrt()
+}
 
-/// The framed window's **top**, as a multiple of the figure's head/neck height signal. The signals
-/// (neck pivot / authored-camera target / head bone) all land around the throat/face — ~0.9 of the
-/// standing height — so `> 1.0` clears the crown with air above it.
-const BODY_HEADROOM: f32 = 1.24;
-/// The framed window's **bottom**, a small fraction of the figure height *below* the feet plane
-/// (Y=0), so the boots have ground room and never touch the frame edge.
-const BODY_FOOTROOM: f32 = 0.10;
-/// Side safety: how much of the footprint half-width to keep framed when width would bind (a wide
-/// stance / a held weapon poking sideways). Height binds for a normal humanoid; this only floors it.
-const BODY_WIDTH_MARGIN: f32 = 1.15;
+/// The client's **synthesized fallback camera** for a model frame whose model carries fewer than two
+/// cameras — a *fixed* rig, not a fit (wow-re `ui/scratch/modelframe-camera-law.md`, VERIFIED
+/// `0x505890`): eye at a constant point in WoW model space, look-at the MD20 header bbox centre, and
+/// its own fov/near/far. The only model-derived quantity anywhere in it is the target.
+///
+/// A small model therefore renders *small* in the pane and a large one overflows it — there is no
+/// normalization step. Both of the numbers here are literals in the binary.
+/// `(200/36, 0, 87/36)` — the same `/36` family as the clip planes below, which is what the
+/// binary's literals decode to (`5.5555558` / `2.4166667` as f32).
+const PANE_FIXED_EYE_WOW: [f32; 3] = [200.0 / 36.0, 0.0, 87.0 / 36.0];
+/// The fixed camera's field of view, radians — a *diagonal* angle in the client's convention
+/// ([`WowPortraitProjection`]). Also the fov the pipeline-warm pass compiles with.
+pub(super) const PANE_FIXED_FOV: f32 = 0.5;
+/// `1/36` and `5000.0` — the fixed camera's clip planes, verbatim.
+const PANE_FIXED_NEAR: f32 = 1.0 / 36.0;
+const PANE_FIXED_FAR: f32 = 5000.0;
 
-/// The **paper-doll** booth camera rig (decision 0208 §5) — a full-body framing derived from the
-/// model's own bounds, *not* the authored portrait camera. Yaw is applied to the model root by the
-/// caller (the ref's `Model:SetRotation`), so this rig is yaw-independent and the fit is pure /
-/// testable.
+/// The **body pane** booth camera rig — a 1.12 `<PlayerModel>` widget's own camera, verbatim
+/// (decision 1089; wow-re `ui/scratch/modelframe-camera-law.md`).
 ///
-/// **Why not `cameraLookup[0]`.** On a player model the authored portrait camera is the face bust:
-/// HumanMale's eye/target both sit at Z ≈ 1.87 (head height) with a ~0.66yd standoff (verified from
-/// the M2 bytes — `benilla-formats` `m2_portrait_camera` regression pin; wow-re portrait-render §4 /
-/// decision 0113). Aiming through it would crop the body to the face. The real client's paper-doll
-/// pane frames a `PlayerModel` through the engine's default bounds-fit camera, not camera 0 — so we
-/// do the same.
+/// **There is no fit.** The widget renders through a frozen snapshot of the model's *authored*
+/// camera at **raw table index 1** — the `type == 1` "characterinfo" camera — and when the model has
+/// fewer than two cameras it synthesizes the fixed rig above. Nothing on that path reads a bone, an
+/// attachment, a bounding sphere or a look-target height for camera purposes; the only model-derived
+/// quantity is the fixed camera's bbox-centre target. So the pane is **not** normalized: the panes
+/// merely *look* normalized because Blizzard authored per-model standoffs — `GnomeFemale` eye
+/// x = 2.16 · `HumanMale` 3.66 · `TaurenMale` 4.43 · `Boar` 4.86.
 ///
-/// **The fit.** The figure's vertical span is `[−footroom, headroom·head_signal]` (model-local Bevy
-/// yards, feet at Y=0), where `head_signal` is the tallest of the neck pivot / authored-camera look
-/// target / head-bone anchor — all ~throat/face height. The camera sits in front of the model
-/// (−Z — WoW +X front maps to Bevy −Z under `wow_to_bevy`) at the distance that fits that span
-/// through [`WowPortraitProjection`]'s vertical opening (half-angle `0.3·BODY_FOV`, computed the
-/// same way here so the fit is exact), looking at the span's centre. Projection reused from the
-/// portrait path for module consistency — square-true, no anamorphic squeeze (decision 0116).
+/// **What this replaces, and why it was wrong.** 0208 §5 built a bounds fit off a *head/neck height
+/// signal* on the stated premise that the client uses "the engine's default bounds-fit camera". Both
+/// halves are refuted: there is no bounds fit, and the head signal is a humanoid assumption. It read
+/// plausibly on every biped we had looked at and came out too large and sitting too high the first
+/// time a quadruped went in a pane — the director's boar (2026-08-07).
 ///
-/// `aspect` is the **destination pane's** width ÷ height ([`WowPortraitProjection::aspect`]): it
-/// widens the horizontal opening, so the figure keeps its proportions once the UI stretches the
-/// square bake into a non-square pane (decision 1069).
+/// Yaw is still applied to the model *root* by the caller (the ref's `Model:SetRotation`, which
+/// writes the model's facing, not the camera), so this rig stays yaw-independent and pure.
+///
+/// `aspect` is the destination pane's width ÷ height, and on this path it is **both** of the
+/// projection's aspects: the client renders straight into the pane rect, so the same number sets the
+/// matrix and the diagonal→vertical crop (`318×224 → 0.576·fov`).
+///
+/// The **model-root scale** that goes with it is [`pane_root_scale`] — `1.0` whenever the model has
+/// its own camera, and the display-aspect renormalize factor when it does not.
 pub(super) fn body_frame(a: &PortraitAnchors, aspect: f32) -> (Transform, Projection) {
-    // Head/neck height signal (feet at Y=0). The neck pivot (attach-17.z, every character carries
-    // it), the authored bust camera's look target, and the head-bone anchor all land near the
-    // throat/face — take the tallest, floored off zero for a hypothetical bounds-less display.
-    let head_signal = a
-        .pivot_height
-        .max(a.camera.map_or(0.0, |c| c.target.y))
-        .max(a.head.map_or(0.0, |h| h.y))
-        .max(0.1);
-    let top = BODY_HEADROOM * head_signal;
-    let bottom = -BODY_FOOTROOM * head_signal;
-    // The horizontal opening is `aspect ×` the vertical, so a width that must fit costs
-    // `width / aspect` of vertical window — floor the fitted height by it, so a wide model can't
-    // out-reach the sides (and a *narrow* pane, aspect < 1, gets the extra room it needs).
-    let window = (top - bottom).max(2.0 * BODY_WIDTH_MARGIN * a.ground_radius / aspect.max(1e-3));
-    let center_y = 0.5 * (top + bottom);
-
-    // Distance that exactly fits `window` through the projection's vertical opening. Half-angle is
-    // `0.3·BODY_FOV` — `WowPortraitProjection::fovy()/2` — so the geometry matches the matrix.
-    let half_angle = 0.5 * DIAG_TO_VERT * BODY_FOV;
-    let dist = (0.5 * window) / half_angle.tan();
-
-    let target = Vec3::new(0.0, center_y, 0.0);
-    let eye = target + Vec3::new(0.0, 0.0, -dist); // in front of the model (−Z)
+    let cam = pane_camera(a);
+    // `lookAt(eye, target, up)` with up = +Y rolled about the view axis — every vanilla camera
+    // track holds a single key of (0,0,0), so roll is 0 in practice and the eye/target ARE the
+    // record's base vectors (transcribed for fidelity, not observed nonzero).
+    let fwd = (cam.target - cam.eye).normalize_or_zero();
+    let up = Quat::from_axis_angle(fwd, cam.roll) * Vec3::Y;
     (
-        Transform::from_translation(eye).looking_at(target, Vec3::Y),
-        Projection::custom(WowPortraitProjection {
-            fov: BODY_FOV,
-            near: 0.02,
-            far: 100.0,
-            aspect,
-        }),
+        Transform::from_translation(cam.eye).looking_at(cam.target, up),
+        Projection::custom(pane_projection(&cam, aspect)),
     )
+}
+
+/// The **model-root scale** a body pane applies alongside the yaw — the other half of
+/// [`body_frame`], kept a separate call because the booth re-latches it on a window resize without
+/// re-baking. `1.0` on the authored path: not because the client omits the factor there, but because
+/// it CANCELS against the camera's own publish through the same root. Only the fixed fallback camera
+/// escapes that composition, and there it is real. See [`pane_model_scale`].
+pub(super) fn pane_root_scale(a: &PortraitAnchors, display_aspect: f32) -> f32 {
+    if a.pane_camera.is_some() {
+        1.0
+    } else {
+        pane_model_scale(display_aspect)
+    }
+}
+
+/// The camera a body pane renders through: the model's authored `cameras[1]`, else the client's
+/// synthesized fixed rig aimed at the bbox centre. See [`body_frame`].
+pub(super) fn pane_camera(a: &PortraitAnchors) -> benilla_assets::PortraitCamera {
+    a.pane_camera.unwrap_or(benilla_assets::PortraitCamera {
+        eye: benilla_assets::coords::wow_to_bevy(PANE_FIXED_EYE_WOW),
+        target: a.bbox_center,
+        roll: 0.0,
+        fov: PANE_FIXED_FOV,
+        near: PANE_FIXED_NEAR,
+        far: PANE_FIXED_FAR,
+    })
+}
+
+/// A pane camera's projection: the record's scalars, with the pane's aspect in BOTH roles (the
+/// client renders straight into the pane rect, so its matrix aspect and its diagonal→vertical crop
+/// aspect are the same number). See [`WowPortraitProjection::crop_aspect`].
+pub(super) fn pane_projection(
+    cam: &benilla_assets::PortraitCamera,
+    aspect: f32,
+) -> WowPortraitProjection {
+    WowPortraitProjection {
+        fov: cam.fov,
+        near: cam.near,
+        far: cam.far,
+        aspect,
+        crop_aspect: aspect,
+    }
 }
 
 #[cfg(test)]
@@ -318,51 +401,214 @@ mod tests {
         ndc(transform, proj, p).y
     }
 
-    /// The bounds→camera fit must keep both **feet and crown** inside the frame with air to spare,
-    /// across the player size range (gnome → tauren). Locks the sign (feet below centre, crown above)
-    /// and the distance math against a regression (a flipped axis or a wrong half-angle would crop).
-    #[test]
-    fn body_frame_never_crops_feet_or_crown() {
-        // Every pane aspect the shipped windows use: the paper doll's 233×224, the dressing room's
-        // 316×351, and the square default a booth runs at before its pane has been seen.
-        for &aspect in &[1.0_f32, 233.0 / 224.0, 316.0 / 351.0] {
-            for &signal in &[0.88_f32, 1.90, 2.60] {
-                let anchors = PortraitAnchors {
-                    camera: None,
-                    head: None,
-                    pivot_height: signal,
-                    ground_radius: 0.35,
-                };
-                let (transform, projection) = body_frame(&anchors, aspect);
-                let proj = WowPortraitProjection {
-                    fov: BODY_FOV,
-                    near: 0.02,
-                    far: 100.0,
-                    aspect,
-                };
-                // Feet at the origin; a conservatively-high crown estimate (throat/face signal is
-                // ~0.9 of standing height, so the crown sits a little above `signal`).
-                let feet = ndc_y(&transform, &proj, Vec3::ZERO);
-                let crown = ndc_y(&transform, &proj, Vec3::new(0.0, 1.12 * signal, 0.0));
-                assert!(
-                    feet < 0.0,
-                    "feet should sit below frame centre, got ndc_y {feet}"
-                );
-                assert!(
-                    crown > 0.0,
-                    "crown should sit above frame centre, got ndc_y {crown}"
-                );
-                assert!(
-                    feet.abs() < 0.95,
-                    "feet cropped / no ground room (ndc_y {feet}) at signal {signal}, aspect {aspect}"
-                );
-                assert!(
-                    crown < 0.95,
-                    "crown cropped / no headroom (ndc_y {crown}) at signal {signal}, aspect {aspect}"
-                );
-                let _ = projection; // the rig carries the same projection the test rebuilds
-            }
+    /// The M2 `cameras[1]` records the RE reports, in Bevy space — `wow_to_bevy` is `(-y, z, -x)`.
+    fn cam(eye_wow: [f32; 3], target_wow: [f32; 3], fov: f32) -> benilla_assets::PortraitCamera {
+        benilla_assets::PortraitCamera {
+            eye: benilla_assets::coords::wow_to_bevy(eye_wow),
+            target: benilla_assets::coords::wow_to_bevy(target_wow),
+            roll: 0.0,
+            fov,
+            near: 0.222_222,
+            far: 27.777_8,
         }
+    }
+
+    fn anchors_with(
+        pane_camera: Option<benilla_assets::PortraitCamera>,
+        bbox_center: Vec3,
+    ) -> PortraitAnchors {
+        PortraitAnchors {
+            // Every heuristic field the RETIRED fit read is left deliberately populated and
+            // deliberately unused: if any of them ever reaches the rig again, these tests are the
+            // tripwire.
+            camera: Some(cam(
+                [0.6335, -0.3879, 1.8867],
+                [0.0627, 0.0343, 1.8636],
+                0.785,
+            )),
+            pane_camera,
+            bbox_center,
+            head: Some(Vec3::new(0.0, 1.75, 0.0)),
+            pivot_height: 1.90,
+            ground_radius: 0.35,
+        }
+    }
+
+    /// **The authored pane camera is taken verbatim** (decision 1089): eye, look-at and all three
+    /// projection scalars are the record's, at every pane aspect. Nothing is fitted, nothing is
+    /// derived from the model's size.
+    #[test]
+    fn a_pane_takes_the_models_own_camera_untouched() {
+        // HumanMale's `cameras[1]`, per the RE.
+        let human = cam([3.6585, 0.0338, 0.9227], [-0.3644, 0.0291, 0.9873], 0.97991);
+        for &aspect in &[1.0_f32, 318.0 / 224.0, 233.0 / 224.0, 316.0 / 351.0] {
+            let (transform, projection) =
+                body_frame(&anchors_with(Some(human), Vec3::ZERO), aspect);
+            assert!(
+                transform.translation.distance(human.eye) < 1e-5,
+                "eye moved: {:?} vs {:?}",
+                transform.translation,
+                human.eye
+            );
+            // Looking AT the record's target: the forward axis points from eye to target.
+            let want = (human.target - human.eye).normalize();
+            assert!(
+                transform.forward().dot(want) > 0.9999,
+                "not aimed at the record's target (dot {})",
+                transform.forward().dot(want)
+            );
+            // The projection is the record's scalars with the pane's aspect in both roles — the
+            // client renders straight into the pane rect, so the same number sets the matrix AND
+            // the diagonal→vertical crop. Compared as the CLIP MATRIX, which is what the
+            // rasteriser sees (and what a wrong field would move).
+            let want = pane_projection(&human, aspect);
+            assert_eq!(
+                (want.fov, want.near, want.far),
+                (human.fov, human.near, human.far)
+            );
+            assert_eq!((want.aspect, want.crop_aspect), (aspect, aspect));
+            assert_eq!(
+                projection.get_clip_from_view(),
+                want.get_clip_from_view(),
+                "the rig's projection is not the record's"
+            );
+        }
+    }
+
+    /// **The correction itself: the pane does NOT normalize.** A boar's authored camera stands off
+    /// 4.86yd and a gnome's 2.16, so a small model renders small and a large one large — the panes
+    /// only *look* normalized because Blizzard calibrated each standoff by hand. The retired fit
+    /// solved a distance from a head-height signal instead, which is why a quadruped came out too
+    /// big and sitting too high (director, 2026-08-07).
+    ///
+    /// Measured as apparent height: the on-screen span of one model yard at the subject.
+    #[test]
+    fn a_pane_is_not_normalized_across_models() {
+        let aspect = 318.0 / 224.0; // the pet pane
+        let bodies = [
+            // (name, cameras[1] eye, target, fov, the model's own standing height)
+            ("GnomeFemale", [2.1591_f32, 0.0, 0.6136], 0.6136, 0.85_f32),
+            ("HumanMale", [3.6585, 0.0338, 0.9227], 0.9227, 1.85),
+            ("TaurenMale", [4.4317, -0.0213, 1.0861], 1.0861, 2.60),
+        ];
+        let mut apparent = Vec::new();
+        for (name, eye, target_z, _height) in bodies {
+            let c = cam(eye, [-0.2, 0.0, target_z], 0.9);
+            let (transform, _) = body_frame(&anchors_with(Some(c), Vec3::ZERO), aspect);
+            let proj = WowPortraitProjection {
+                fov: c.fov,
+                near: c.near,
+                far: c.far,
+                aspect,
+                crop_aspect: aspect,
+            };
+            // One yard of height at the subject's own standing point.
+            let base = Vec3::new(0.0, c.target.y, 0.0);
+            let span =
+                (ndc_y(&transform, &proj, base + Vec3::Y) - ndc_y(&transform, &proj, base)).abs();
+            apparent.push((name, span));
+        }
+        // A yard subtends LESS of the frame the further out the artist put the camera — which is
+        // exactly "no normalization". Under the retired fit every model was solved to the same
+        // window, so this ordering was flat.
+        for w in apparent.windows(2) {
+            assert!(
+                w[0].1 > w[1].1,
+                "{} should show a yard larger than {} ({} vs {})",
+                w[0].0,
+                w[1].0,
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    /// The **fixed fallback** for a model with fewer than two cameras: the client's own literal eye,
+    /// aimed at the MD20 bbox centre, with its own fov/clips — and, the point of the test, *the same
+    /// camera whatever the model*. Only the look-at target moves.
+    #[test]
+    fn a_camera_less_model_gets_the_clients_fixed_rig() {
+        let want_eye = Vec3::new(0.0, 87.0 / 36.0, -200.0 / 36.0);
+        let mut eyes = Vec::new();
+        for centre in [
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.44, 0.0),
+            Vec3::new(0.1, 1.3, 0.0),
+        ] {
+            let (transform, projection) = body_frame(&anchors_with(None, centre), 318.0 / 224.0);
+            assert!(
+                transform.translation.distance(want_eye) < 1e-4,
+                "fixed eye drifted: {:?}",
+                transform.translation
+            );
+            let want = (centre - want_eye).normalize();
+            assert!(
+                transform.forward().dot(want) > 0.9999,
+                "the fixed camera must look at the bbox centre"
+            );
+            let fixed = pane_camera(&anchors_with(None, centre));
+            assert_eq!(fixed.fov, PANE_FIXED_FOV);
+            assert!((fixed.near - 1.0 / 36.0).abs() < 1e-6 && fixed.far == 5000.0);
+            assert_eq!(
+                projection.get_clip_from_view(),
+                pane_projection(&fixed, 318.0 / 224.0).get_clip_from_view()
+            );
+            eyes.push(transform.translation);
+        }
+        assert!(
+            eyes.windows(2).all(|w| w[0] == w[1]),
+            "the fallback camera is FIXED — the model's size must not move it"
+        );
+    }
+
+    /// The **renormalize-to-4:3** model-root factor, against the values the RE reports —
+    /// `√((4/3)²+1)/√(a²+1)`, which is `G48·(5/3)` with `G48 = 1/√(a²+1)`.
+    #[test]
+    fn the_model_root_renormalizes_to_four_thirds() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        assert!(
+            close(pane_model_scale(4.0 / 3.0), 1.0),
+            "the reference aspect"
+        );
+        assert!(close(pane_model_scale(16.0 / 10.0), 0.883_332));
+        assert!(close(pane_model_scale(16.0 / 9.0), 0.817_102));
+        assert!(close(pane_model_scale(5.0 / 4.0), 1.041_158));
+    }
+
+    /// **Which path the factor applies to, which is the whole subtlety.** The widget composes the
+    /// camera's publish through the SAME model root, so on the authored path `s` cancels exactly and
+    /// scaling the geometry alone would be wrong by `1/s` (+22% at 16:9). Only the fixed fallback
+    /// camera — written model-local onto a `CCamera` outside the model's array — escapes that.
+    #[test]
+    fn the_root_factor_applies_only_where_it_does_not_cancel() {
+        let human = cam([3.6585, 0.0338, 0.9227], [-0.3644, 0.0291, 0.9873], 0.97991);
+        for &a in &[4.0 / 3.0, 16.0 / 9.0, 16.0 / 10.0, 5.0 / 4.0] {
+            assert_eq!(
+                pane_root_scale(&anchors_with(Some(human), Vec3::ZERO), a),
+                1.0,
+                "an authored camera cancels the factor at aspect {a}"
+            );
+            assert_eq!(
+                pane_root_scale(&anchors_with(None, Vec3::new(0.0, 0.62, 0.0)), a),
+                pane_model_scale(a),
+                "the fixed fallback camera does not"
+            );
+        }
+    }
+
+    /// The client's diagonal→vertical crop is **aspect-dependent**, and hardcoding the 4/3 value
+    /// (0.6) was only right at 4/3. `fovy = fov/√(a²+1)` — so the pet pane's 318×224 crops to
+    /// 0.576·fov and the character pane's 233×224 to 0.693·fov.
+    #[test]
+    fn the_diagonal_crop_follows_the_pane_aspect() {
+        let close = |a: f32, b: f32| (a - b).abs() < 5e-4;
+        assert!(close(diag_to_vert(1.0, 4.0 / 3.0), 0.6), "the 4/3 legend");
+        assert!(close(diag_to_vert(1.0, 318.0 / 224.0), 0.575_86));
+        assert!(close(diag_to_vert(1.0, 233.0 / 224.0), 0.693_05));
+        assert!(close(
+            diag_to_vert(1.0, 1.0),
+            std::f32::consts::FRAC_1_SQRT_2
+        ));
     }
 
     /// **The 1069 defect, pinned.** A booth bakes into a *square* target that the UI stretches into
@@ -374,18 +620,14 @@ mod tests {
     fn a_pane_shows_the_figure_unstretched_at_any_aspect() {
         for &(w, h) in &[(316.0_f32, 351.0_f32), (233.0, 224.0), (512.0, 512.0)] {
             let aspect = w / h;
-            let anchors = PortraitAnchors {
-                camera: None,
-                head: None,
-                pivot_height: 1.90,
-                ground_radius: 0.35,
-            };
-            let (transform, _) = body_frame(&anchors, aspect);
+            let c = cam([3.6585, 0.0338, 0.9227], [-0.3644, 0.0291, 0.9873], 0.97991);
+            let (transform, _) = body_frame(&anchors_with(Some(c), Vec3::ZERO), aspect);
             let proj = WowPortraitProjection {
-                fov: BODY_FOV,
-                near: 0.02,
-                far: 100.0,
+                fov: c.fov,
+                near: c.near,
+                far: c.far,
                 aspect,
+                crop_aspect: aspect,
             };
             // A small cross at the framing centre — the on-screen size of each arm, in pane pixels.
             let mid = Vec3::new(0.0, transform.translation.y, 0.0);

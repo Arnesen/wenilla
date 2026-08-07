@@ -808,6 +808,13 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (entry, info) = gameobject::read_gameobject_query_response(&mut r)?;
             ServerPacket::GameObjectQueryResponse { entry, info }
         }
+        opcode::SMSG_GAMEOBJECT_CUSTOM_ANIM => {
+            let (guid, anim_id) = gameobject::read_gameobject_custom_anim(&mut r)?;
+            ServerPacket::GameObjectCustomAnim { guid, anim_id }
+        }
+        // Both fishing verdicts are empty-bodied (the opcode IS the message).
+        opcode::SMSG_FISH_NOT_HOOKED => ServerPacket::FishNotHooked,
+        opcode::SMSG_FISH_ESCAPED => ServerPacket::FishEscaped,
         opcode::SMSG_LOGOUT_COMPLETE => ServerPacket::LogoutComplete,
         // `{u32 reason, u8 instant}` — the `instant` byte is what the CAMP/QUIT countdown hangs
         // on (see the variant's own doc); it used to be dropped on the floor here.

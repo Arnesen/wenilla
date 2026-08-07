@@ -149,6 +149,11 @@ pub(crate) struct LootState {
     /// never at open — an empty-at-open window stays up (the reference `LootFrame_OnShow` even has a
     /// dedicated `LOOTWINDOWOPENEMPTY` sound for it). Drained by [`drain_loot`].
     auto_release: bool,
+    /// Whether the open loot came from fishing (the wire `loot_type == 3` — vmangos folds
+    /// `FISHINGHOLE`/`FISHING_FAIL` into `LOOT_FISHING` before sending). Carried into the Lua
+    /// snapshot as `IsFishingLoot()`, which `LootFrame_OnShow` keys the "FISHING REEL IN" sound
+    /// and the FishingLoot portrait overlay on (decision 1086).
+    fishing: bool,
 }
 
 /// A resolved loot-row pick: the coin pile, or an item at a concrete **wire** loot slot (carrying
@@ -162,11 +167,12 @@ impl LootState {
     /// Open (or replace) the window with a fresh loot response (`SMSG_LOOT_RESPONSE`). Quest items
     /// ride the same `items` list (the wire appends them with `slot = items.len()+i`), so they need no
     /// special handling here.
-    pub(crate) fn open(&mut self, source: u64, gold: u32, items: Vec<LootItem>) {
+    pub(crate) fn open(&mut self, source: u64, loot_type: u8, gold: u32, items: Vec<LootItem>) {
         self.source = Some(source);
         self.gold = gold;
         self.items = items;
         self.auto_release = false; // empty-at-open stays open — only a removal auto-closes
+        self.fishing = loot_type == benilla_protocol::messages::loot_type::FISHING;
     }
 
     /// A row was taken by anyone (`SMSG_LOOT_REMOVED`, keyed by the **wire** slot): drop it. The
@@ -223,6 +229,7 @@ impl LootState {
         self.gold = 0;
         self.items.clear();
         self.auto_release = false;
+        self.fishing = false;
     }
 
     /// Disconnect: drop the open window **and** any pending receive lines (mirrors the merchant/gossip
@@ -458,7 +465,10 @@ fn snapshot(
     for it in &loot.items {
         rows.push(resolve_item(it, items, icons, commands));
     }
-    Some(LootSnapshot { rows })
+    Some(LootSnapshot {
+        rows,
+        fishing: loot.fishing,
+    })
 }
 
 /// Compose one `CHAT_MSG_LOOT` receive line — the whole of `CGGameUI::OnItemPush`'s self branch,
@@ -712,6 +722,7 @@ fn drain_loot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_protocol::messages::loot_type;
 
     fn item(slot: u8, entry: u32, count: u32) -> LootItem {
         LootItem {
@@ -752,7 +763,12 @@ mod tests {
         let mut loot = LootState::default();
         assert!(loot.source.is_none());
         // gold + two items at wire slots 0 and 1.
-        loot.open(0x42, 1234, vec![item(0, 117, 1), item(1, 2589, 5)]);
+        loot.open(
+            0x42,
+            loot_type::CORPSE,
+            1234,
+            vec![item(0, 117, 1), item(1, 2589, 5)],
+        );
         assert!(loot.source.is_some());
         // Row 1 is the coin pile; rows 2/3 are the items (wire slots 0/1). The item pick carries the
         // row's display id (here `1000 + entry`) so the pickup sound resolves without a second lookup.
@@ -778,7 +794,12 @@ mod tests {
     #[test]
     fn action_maps_items_directly_when_no_coin() {
         let mut loot = LootState::default();
-        loot.open(0x42, 0, vec![item(3, 117, 1), item(7, 2589, 5)]);
+        loot.open(
+            0x42,
+            loot_type::CORPSE,
+            0,
+            vec![item(3, 117, 1), item(7, 2589, 5)],
+        );
         // No coin → row 1 is the first item (wire slot 3), row 2 the second (wire slot 7).
         assert!(matches!(
             loot.action_at(1),
@@ -796,6 +817,7 @@ mod tests {
         let mut loot = LootState::default();
         loot.open(
             0x42,
+            loot_type::CORPSE,
             0,
             vec![item(0, 117, 1), item(1, 2589, 5), item(2, 4306, 2)],
         );
@@ -815,7 +837,7 @@ mod tests {
     #[test]
     fn clear_money_drops_the_coin_row() {
         let mut loot = LootState::default();
-        loot.open(0x42, 500, vec![item(0, 117, 1)]);
+        loot.open(0x42, loot_type::CORPSE, 500, vec![item(0, 117, 1)]);
         assert!(loot.has_coin());
         assert!(matches!(loot.action_at(1), Some(LootAction::Money)));
         loot.clear_money();
@@ -831,7 +853,12 @@ mod tests {
     fn auto_release_arms_only_on_the_transition_to_empty() {
         let mut loot = LootState::default();
         // Coin + two items: taking rows one by one arms the auto-close only at the last removal.
-        loot.open(0x42, 500, vec![item(0, 117, 1), item(1, 2589, 5)]);
+        loot.open(
+            0x42,
+            loot_type::CORPSE,
+            500,
+            vec![item(0, 117, 1), item(1, 2589, 5)],
+        );
         loot.remove_slot(0);
         assert!(!loot.take_auto_release(), "items + coin remain");
         loot.clear_money();
@@ -844,7 +871,7 @@ mod tests {
     #[test]
     fn auto_release_arms_when_the_coin_line_is_the_last_row() {
         let mut loot = LootState::default();
-        loot.open(0x42, 500, vec![]);
+        loot.open(0x42, loot_type::CORPSE, 500, vec![]);
         loot.clear_money();
         assert!(
             loot.take_auto_release(),
@@ -856,12 +883,12 @@ mod tests {
     fn empty_at_open_does_not_auto_release() {
         let mut loot = LootState::default();
         // The reference keeps an empty-at-open window up (LOOTWINDOWOPENEMPTY); only a removal closes.
-        loot.open(0x42, 0, vec![]);
+        loot.open(0x42, loot_type::CORPSE, 0, vec![]);
         assert!(!loot.take_auto_release());
         // …and a fresh open clears a stale armed edge.
-        loot.open(0x43, 500, vec![]);
+        loot.open(0x43, loot_type::CORPSE, 500, vec![]);
         loot.clear_money();
-        loot.open(0x44, 0, vec![item(0, 117, 1)]);
+        loot.open(0x44, loot_type::CORPSE, 0, vec![item(0, 117, 1)]);
         assert!(
             !loot.take_auto_release(),
             "open() disarms the previous window's edge"
@@ -879,10 +906,28 @@ mod tests {
         assert_eq!(latch.0, None, "the matching release drops it");
     }
 
+    /// The `IsFishingLoot()` source (decision 1086): wire `loot_type` 3 flags the open, any other
+    /// type doesn't, and every close path drops the flag (a stale `true` would reel-in-sound the
+    /// next corpse loot).
+    #[test]
+    fn fishing_loot_type_sets_and_clears_the_flag() {
+        let mut loot = LootState::default();
+        loot.open(0x42, loot_type::FISHING, 0, vec![item(0, 117, 1)]);
+        assert!(loot.fishing);
+        loot.clear();
+        assert!(!loot.fishing);
+        loot.open(0x42, loot_type::CORPSE, 0, vec![item(0, 117, 1)]);
+        assert!(!loot.fishing);
+        // A fishing open REPLACED by an ordinary one drops the flag too (no clear in between).
+        loot.open(0x42, loot_type::FISHING, 0, vec![]);
+        loot.open(0x43, loot_type::CORPSE, 0, vec![]);
+        assert!(!loot.fishing);
+    }
+
     #[test]
     fn clear_closes_but_keeps_receives() {
         let mut loot = LootState::default();
-        loot.open(0x42, 0, vec![item(0, 117, 1)]);
+        loot.open(0x42, loot_type::CORPSE, 0, vec![item(0, 117, 1)]);
         loot.push_receive(&push(117, 1, false, false));
         loot.clear();
         assert!(loot.source.is_none());
@@ -996,7 +1041,7 @@ mod tests {
         let commands = NetCommands(tx);
         let mut loot = LootState::default();
         // A pure-copper drop: name reads "4 Copper", icon is the copper coin pile (_05).
-        loot.open(0x42, 4, vec![]);
+        loot.open(0x42, loot_type::CORPSE, 4, vec![]);
         let snap = snapshot(&loot, &mut items, None, &commands).expect("open");
         assert_eq!(snap.rows.len(), 1, "coin row only");
         assert!(snap.rows[0].is_coin);
@@ -1012,7 +1057,7 @@ mod tests {
         let mut loot = LootState::default();
         // Closed → no snapshot.
         assert!(snapshot(&loot, &mut items, None, &commands).is_none());
-        loot.open(0x42, 12_345, vec![item(0, 117, 3)]);
+        loot.open(0x42, loot_type::CORPSE, 12_345, vec![item(0, 117, 3)]);
         let snap = snapshot(&loot, &mut items, None, &commands).expect("open");
         assert_eq!(snap.rows.len(), 2, "coin + one item");
         assert!(snap.rows[0].is_coin);

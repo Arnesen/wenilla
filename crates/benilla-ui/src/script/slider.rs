@@ -200,9 +200,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let data = model.region_data.entry(rh).or_default();
                 match &a1 {
-                    Value::String(s) => data.texture = Some(s.to_str()?.to_string()),
+                    Value::String(s) => {
+                        data.texture = Some(s.to_str()?.to_string());
+                        data.fill = None;
+                    }
+                    // A solid thumb writes the same slot the path form does — each clears the other.
                     Value::Number(_) | Value::Integer(_) => {
-                        data.color = Some([
+                        data.texture = None;
+                        data.fill = Some([
                             num_f32(&a1),
                             num_f32(&a2),
                             num_f32(&a3),

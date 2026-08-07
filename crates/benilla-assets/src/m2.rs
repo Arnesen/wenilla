@@ -101,10 +101,24 @@ pub struct M2Model {
     /// create/select background scenes; their camera *lookup* is the 0xffff none sentinel, so
     /// `portrait_camera` sees nothing there). Same Bevy-space conversion as `portrait_camera`.
     pub camera0: Option<PortraitCamera>,
+    /// The camera table's **second** record — what a 1.12 `<PlayerModel>` UI widget (the paper doll,
+    /// the inspect pane, the pet page) renders through (VERIFIED, wow-re
+    /// `ui/scratch/modelframe-camera-law.md`: `0x505b30` → the chooser `0x505890` selects **raw
+    /// index 1**, the `type == 1` "characterinfo" camera, and freezes it at `0x7acf10`).
+    ///
+    /// **Raw, not through `cameraLookup`** — that array is the portrait bake's path and is not
+    /// consulted here; the index is a literal 1 whatever the record's `type` says. `None` for a
+    /// model with fewer than two cameras, where the client synthesizes a *fixed* camera instead
+    /// (transcribed at the framing site). Same Bevy-space conversion as `portrait_camera`.
+    pub pane_camera: Option<PortraitCamera>,
     /// A bow's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2), baked to Bevy
     /// space: `[top, bottom]` as `(bone index, model-local position)` — the two limb-tip points the
     /// engine-drawn string spans. `None` for every non-bow model.
     pub string_anchors: Option<[(u16, Vec3); 2]>,
+    /// The fishing pole's `$CCH` line anchor (wow-re `fishing-line.md` §2), baked to Bevy space in
+    /// the mesh frame — the rod-tip point the engine-drawn fishing line starts from. `None` for
+    /// every model that doesn't author it (exactly one weapon model in the chain does).
+    pub cch_marker: Option<Vec3>,
     /// MD20 header `GlobalModelFlags` (`+0x10`). Bits `&3` are the **terrain-conform gate**
     /// (wow-re `terrain-tilt.md`, §5 byte-verified): `1` = pitch to the ground slope (every
     /// mount + most quadrupeds), `3` = pitch **and** roll (kodo/crab/spider), `0`/`2` = level.
@@ -710,6 +724,7 @@ impl AssetLoader for M2ModelLoader {
         };
         let portrait_camera = parse_m2_portrait_camera(&bytes).map(to_bevy);
         let camera0 = benilla_formats::parse_m2_camera(&bytes, 0).map(to_bevy);
+        let pane_camera = benilla_formats::parse_m2_camera(&bytes, 1).map(to_bevy);
 
         // The bowstring anchors (bows only): raw WoW positions → Bevy, the meshes' frame.
         let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
@@ -718,6 +733,9 @@ impl AssetLoader for M2ModelLoader {
                 (a.bottom.0, wow_to_bevy(a.bottom.1)),
             ]
         });
+
+        // The fishing line's near anchor (mesh frame, like the bowstring anchors).
+        let cch_marker = benilla_formats::parse_m2_cch_marker(&bytes).map(|(_, p)| wow_to_bevy(p));
 
         // The header GlobalModelFlags word sits at a fixed offset (MD20 magic @0, +0x10) — a
         // bare scalar the sectioned parsers never touch.
@@ -740,7 +758,9 @@ impl AssetLoader for M2ModelLoader {
             markers,
             portrait_camera,
             camera0,
+            pane_camera,
             string_anchors,
+            cch_marker,
             global_flags,
         })
     }

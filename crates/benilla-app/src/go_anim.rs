@@ -59,6 +59,7 @@ use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 use std::time::Duration;
 
+use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
 use crate::schedule::WorldStage;
 
@@ -86,6 +87,20 @@ pub(crate) struct GoAnim {
     /// *genuine* wire change — a chest's wire state is constant (its lid is driven by loot events, not the
     /// wire), so an unrelated values-update (a dyn-flag, a position) must not re-close an open lid.
     last_wire: Option<u32>,
+    /// A pending one-shot **Custom** play (AnimationData id 153..156) from
+    /// `SMSG_GAMEOBJECT_CUSTOM_ANIM` — the second, disjoint arm channel of wow-re
+    /// `gameobject-anim-arm.md` §"one-shot channel" step 8 (substates 8..11, never the §243 lid
+    /// family). Armed by [`queue_custom_anim`], consumed by [`drive_go_anim`] AFTER the state arm,
+    /// so the bobber's same-frame pair (the forced `READY → ACTIVE` flip + the splash) resolves
+    /// with the splash on top (decision 1086).
+    custom: Option<u16>,
+    /// The Custom clip currently ARMED (set when [`drive_go_anim`] actually plays one) — the
+    /// completion-retire's watch (decision 1100, wow-re `go-display-sound-events.md` §6-8): the
+    /// reference's per-model completion callback fires ONCE at the clip's window end (span ×
+    /// replay-count, the loop bit ignored) and re-runs the GO state machine, which re-arms the
+    /// state's own pose over the Custom block. [`retire_custom_anim`] models exactly that; without
+    /// it the bobber's splash looped ~1.3 s forever (the director's 2-3 audible splashes).
+    custom_active: Option<u16>,
 }
 
 /// The GameObject's **stored** state — the binary's `go+0x27c`, which is what every consumer reads
@@ -166,6 +181,17 @@ fn collider_is_solid(wire_state: Option<u32>) -> bool {
 pub(crate) struct GoLidOpen {
     pub(crate) go_guid: u64,
     pub(crate) spell_id: u32,
+}
+
+/// A GameObject's one-shot Custom animation (`SMSG_GAMEOBJECT_CUSTOM_ANIM`, decision 1086), bridged
+/// from the net apply layer. The wire's `anim_id` is the Custom index (0..3 → AnimationData ids
+/// 153..156); the reference rejects `anim_id >= 4` in the handler and this side keeps that gate.
+/// The load-bearing sender is the fishing bobber's bite (`anim_id 0` — the splash, arriving beside
+/// the forced state flip and the server's own `SMSG_PLAY_OBJECT_SOUND` splash kit).
+#[derive(Message, Clone, Copy)]
+pub(crate) struct GoCustomAnim {
+    pub(crate) go_guid: u64,
+    pub(crate) anim_id: u32,
 }
 
 /// What to play for the current `GAMEOBJECT_STATE`: a held **rest** pose (first sight, or a state with no
@@ -335,6 +361,38 @@ fn open_go_lid(
     }
 }
 
+/// Caller 4 (the custom-anim opcode, decision 1086): queue the one-shot Custom play. This is the
+/// **disjoint** arm channel of wow-re `gameobject-anim-arm.md` §step 8 — it never touches
+/// [`GoAnim::state`] (the lid family), rejects `anim_id >= 4` exactly as the reference handler
+/// does, and maps the index to its AnimationData id (`153 + n`, Custom0..3). Ownership is judged
+/// at play time by [`drive_go_anim`] (the model components live there); a guid with no [`GoAnim`]
+/// — a non-animated GO type, or one still streaming in — drops the play, matching
+/// [`open_go_lid`]'s posture.
+fn queue_custom_anim(
+    mut plays: MessageReader<GoCustomAnim>,
+    index: Res<GuidIndex>,
+    mut gos: Query<&mut GoAnim>,
+) {
+    for GoCustomAnim { go_guid, anim_id } in plays.read().copied() {
+        let Some(id) = custom_anim_id(anim_id) else {
+            continue; // the reference handler's own reject (step 8)
+        };
+        let Some(&e) = index.0.get(&go_guid) else {
+            continue;
+        };
+        if let Ok(mut anim) = gos.get_mut(e) {
+            anim.custom = Some(id);
+        }
+    }
+}
+
+/// The wire Custom index → its AnimationData id (`153 + n`, Custom0..3), or `None` for the
+/// reference handler's reject (`anim_id >= 4` — wow-re `gameobject-anim-arm.md` step 8's
+/// "opcode `0xb3` byte `b` (reject `b >= 4`), substate `8+b`").
+fn custom_anim_id(anim_id: u32) -> Option<u16> {
+    (anim_id < 4).then(|| 153 + anim_id as u16)
+}
+
 /// Caller 3 (the loot-release): close a chest lid when its loot window closes. The client sends
 /// `CMSG_LOOT_RELEASE` and immediately drops the state to READY(1) — no server round-trip. We watch the
 /// open loot source guid change (any close path: the player's close, or the server's release when the last
@@ -363,6 +421,39 @@ fn close_go_lid(
 /// Play the §243 sequence for a change of the client-side [`GoAnim::state`] (written by any of the three
 /// callers). Mirrors the state-transition detection of [`crate::sound::gameobject`] (first sight silent),
 /// but points it at the model instead of the mixer — one system owns the visual, the other the audio.
+/// The **completion-driven retire** of an armed Custom clip (decision 1100; wow-re
+/// `go-display-sound-events.md` §6-8, §5-verified): the reference registers a per-model completion
+/// callback at GO model attach (`0x5f7d43` → `[M2+0x70]`) that fires ONCE when a sequence reaches
+/// its baked window end — span × replay-count, the **loop bit ignored** — and, for the transient
+/// substates (the Custom family 8..11 among them), re-runs the GO state machine at the current
+/// `GAMEOBJECT_STATE`, arming its pose through the playable-lookup fallback. For the bobber that
+/// resolves 149 → 151 → the lookup's all-fallback rows → **Stand**, landing one frame after the
+/// 1333 ms window — before the looping kernel's second `$GC0` crossing at 1533 ms. Net law: one
+/// splash per 0xB3, then the state pose.
+///
+/// Benilla's custom arm plays the clip `Never`-repeat (one window, the same endpoint), so "the
+/// window ended" is the player's finished flag; the retire then clears `shown`, which makes the
+/// state arm of [`drive_go_anim`] re-resolve the current state as a fresh rest pose — our
+/// state-machine re-run. Runs before [`drive_go_anim`] in the chain so the re-arm lands the same
+/// frame. Reads never deref-mut, so a quiet GO stays out of the Changed stream.
+fn retire_custom_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer, &ModelAnimations)>) {
+    for (mut go, player, anims) in &mut gos {
+        let Some(id) = go.custom_active else {
+            continue;
+        };
+        let done = anims
+            .find(id)
+            .is_none_or(|clip| player.animation(clip.node).is_none_or(|a| a.is_finished()));
+        if done {
+            go.custom_active = None;
+            // The completion's state-machine re-run: forget the shown pose so the state arm
+            // re-resolves it (a silent rest snap — `resolve(None, state)`), exactly the
+            // reference's re-arm-over-the-Custom-block.
+            go.shown = None;
+        }
+    }
+}
+
 fn drive_go_anim(
     mut gos: Query<
         (
@@ -375,46 +466,76 @@ fn drive_go_anim(
     >,
 ) {
     for (mut go, mut player, mut tr, anims) in &mut gos {
-        let Some(state) = go.state else {
-            continue;
-        };
-        if go.shown == Some(state) {
-            continue; // a caller touched us (e.g. `last_wire` bookkeeping) but the state didn't move
+        // ── The §243 state arm ─────────────────────────────────────────────────────────────────
+        if let Some(state) = go.state {
+            if go.shown != Some(state) {
+                let prev = go.shown;
+                go.shown = Some(state);
+                if let Some(play) = resolve(prev, state) {
+                    // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as
+                    // `creature_anim` does), through the §2c remap for a model that doesn't author
+                    // it — that is what keeps a lidless model on a real pose instead of bind.
+                    let (want, frozen) = remap_missing(anims, play.anim_id());
+                    if let Some(clip) = anims.find(want) {
+                        // Snap a rest pose (blend 0 — a stream-in must not swing); ease a motion
+                        // over its authored blend.
+                        let blend = match play {
+                            Play::Rest(_) => 0.0,
+                            Play::Motion(_) => clip.blend_time.max(0.0),
+                        };
+                        let active =
+                            tr.play(&mut player, clip.node, Duration::from_secs_f32(blend));
+                        if frozen {
+                            // A motion standing in for a missing rest pose: the reference arms it
+                            // at playback rate 0, so it holds frame 0 forever — the pose that
+                            // motion departs from.
+                            active.seek_to(0.0);
+                            active.set_speed(0.0);
+                            active.set_repeat(RepeatAnimation::Never);
+                        } else {
+                            // Explicit, not defaulted: `AnimationTransitions::play` →
+                            // `AnimationPlayer::start` only `replay()`s the node, which rewinds the
+                            // clock but keeps `speed` — so re-arming a node a frozen leg previously
+                            // parked at rate 0 (the same Open clip serves both) would stay stuck.
+                            active.set_speed(1.0);
+                            active.set_repeat(if clip.looping {
+                                RepeatAnimation::Forever
+                            } else {
+                                RepeatAnimation::Never
+                            });
+                        }
+                    }
+                    // else: nothing playable even after the remap — hold whatever the loader
+                    // seed armed.
+                }
+            }
         }
-        let prev = go.shown;
-        go.shown = Some(state);
-        let Some(play) = resolve(prev, state) else {
-            continue;
-        };
-        // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as `creature_anim` does),
-        // through the §2c remap for a model that doesn't author it — that is what keeps a lidless
-        // model on a real pose instead of bind.
-        let (want, frozen) = remap_missing(anims, play.anim_id());
-        let Some(clip) = anims.find(want) else {
-            continue; // nothing playable even after the remap: hold whatever the loader seed armed
-        };
-        // Snap a rest pose (blend 0 — a stream-in must not swing); ease a motion over its authored blend.
-        let blend = match play {
-            Play::Rest(_) => 0.0,
-            Play::Motion(_) => clip.blend_time.max(0.0),
-        };
-        let active = tr.play(&mut player, clip.node, Duration::from_secs_f32(blend));
-        if frozen {
-            // A motion standing in for a missing rest pose: the reference arms it at playback rate 0,
-            // so it holds frame 0 forever — the pose that motion departs from.
-            active.seek_to(0.0);
-            active.set_speed(0.0);
-            active.set_repeat(RepeatAnimation::Never);
-        } else {
-            // Explicit, not defaulted: `AnimationTransitions::play` → `AnimationPlayer::start` only
-            // `replay()`s the node, which rewinds the clock but keeps `speed` — so re-arming a node a
-            // frozen leg previously parked at rate 0 (the same Open clip serves both) would stay stuck.
-            active.set_speed(1.0);
-            active.set_repeat(if clip.looping {
-                RepeatAnimation::Forever
-            } else {
-                RepeatAnimation::Never
-            });
+        // ── The one-shot Custom channel (step 8, decision 1086) — AFTER the state arm, so the
+        // bobber's same-frame pair (forced READY→ACTIVE flip + splash) lands splash-on-top.
+        // Gated on the model OWNING the id; no §2c remap on this channel — an unowned Custom
+        // plays nothing. Armed for ONE window regardless of the sequence's loop flag (decision
+        // 1099, correcting 1090's loop-forever): the kernel does loop a bit0-clear clip and
+        // re-fires its events per pass, but the reference's COMPLETION callback fires at window
+        // end (span × replay-count; the bobber's replay pair is 0..0 ⇒ one 1333 ms pass) and
+        // re-runs the state machine, overwriting the Custom block before a second pass begins.
+        // `RepeatAnimation::Never` + [`retire_custom_anim`] reproduce that endpoint exactly: one
+        // pass, one `$GC0` splash, then the state pose — never a churning loop.
+        // (`is_some` pre-check: an unconditional `take()` mut-derefs the `Mut` and re-marks the
+        // component Changed every frame, keeping this Changed-filtered query hot forever.)
+        if go.custom.is_some() {
+            let id = go.custom.take().expect("checked is_some");
+            if anims.owns(id) {
+                if let Some(clip) = anims.find(id) {
+                    let active = tr.play(
+                        &mut player,
+                        clip.node,
+                        Duration::from_secs_f32(clip.blend_time.max(0.0)),
+                    );
+                    active.set_speed(1.0);
+                    active.set_repeat(RepeatAnimation::Never);
+                    go.custom_active = Some(id);
+                }
+            }
         }
     }
 }
@@ -462,19 +583,70 @@ fn drive_go_collision(
     }
 }
 
+/// Fire the event keyframes an animated GameObject's playing clip crossed this frame — the GO
+/// half of the M2 event-kernel surface (wow-re `go-display-sound-events.md`, the 1086 fold-back
+/// record): the reference registers an event callback per **family-A** GO at create
+/// (`0x5f7d1f` → vtable `+0x30` → dispatcher `0x5f3e20`), which is exactly the [`GoAnim`]
+/// population — a loader-idle family-B GO has no dispatcher and stays silent. The events flow
+/// into the same [`AnimSoundEvent`] stream the creature scanner feeds: the generic `$SND`/`$DSO`/
+/// `$DSL` audio arms apply as-is, and the GO-only display-slot family (`$GO0..5`/`$GC0..3` →
+/// `GameObjectDisplayInfo.Sound[0..9]`) is routed by [`crate::sound::gameobject`]. The
+/// load-bearing tenant: the fishing bobber's Custom0 clip authors `$GC0` at t≈3.87 s — the
+/// splash sound the real client plays from the *animation*, beside the server's explicit
+/// object-sound packet (the audible double, faithful to the reference on vmangos).
+///
+/// The playing clip is found as the creature scanner finds a variation track: of the clips with
+/// a live [`AnimationPlayer`] play, the smallest seek is the newest arm (a cross-fade's fading
+/// source is older by construction). The shared [`advance_track`]/[`scan_events`] helpers give
+/// the same arming rules — first sight silent, a watched clip-start fires its `t = 0` head, a
+/// loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never fires.
+fn fire_go_anim_events(
+    gos: Query<(Entity, &ModelAnimations, &AnimationPlayer), With<GoAnim>>,
+    mut last: Local<
+        bevy::ecs::entity::EntityHashMap<(bevy::animation::graph::AnimationNodeIndex, f32)>,
+    >,
+    mut out: MessageWriter<AnimSoundEvent>,
+) {
+    for (entity, anims, player) in &gos {
+        let playing = anims
+            .clips
+            .iter()
+            .filter_map(|c| player.animation(c.node).map(|a| (c, a.seek_time())))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((clip, cur)) = playing {
+            if let Some(prev) = advance_track(&mut last, entity, clip.node, cur) {
+                scan_events(clip, entity, prev, cur, &mut out);
+            }
+        }
+    }
+}
+
 /// Registration hook, mirrored on [`crate::sound::gameobject`]'s: the three state callers write
 /// [`GoAnim::state`], then the animation + collision consumers act on it, after the Net drain wrote this
-/// frame's descriptor deltas + queued the open-lock [`GoLidOpen`].
+/// frame's descriptor deltas + queued the open-lock [`GoLidOpen`]. The event scanner runs last —
+/// it reads the clip/seek state the drive just settled.
 pub(crate) fn plugin(app: &mut App) {
-    app.add_message::<GoLidOpen>().add_systems(
-        Update,
-        (
-            (sync_wire_go_state, open_go_lid, close_go_lid),
-            (drive_go_anim, drive_go_collision),
-        )
-            .chain()
-            .in_set(WorldStage::Present),
-    );
+    app.add_message::<GoLidOpen>()
+        .add_message::<GoCustomAnim>()
+        .add_systems(
+            Update,
+            (
+                (
+                    sync_wire_go_state,
+                    open_go_lid,
+                    close_go_lid,
+                    queue_custom_anim,
+                    // The completion retire reads last frame's finished flags and must clear
+                    // `shown` BEFORE the drive, so its state re-arm lands this frame — the
+                    // reference's own one-frame-after-window-end timing.
+                    retire_custom_anim,
+                ),
+                (drive_go_anim, drive_go_collision),
+                fire_go_anim_events,
+            )
+                .chain()
+                .in_set(WorldStage::Present),
+        );
 }
 
 #[cfg(test)]
@@ -517,6 +689,20 @@ mod tests {
         assert!(matches!(resolve(Some(0), 2), Some(Play::Rest(0x97))));
         // …and the rebuild leg stays the motion it always was.
         assert!(matches!(resolve(Some(2), 1), Some(Play::Motion(0x98))));
+    }
+
+    /// The custom-anim channel's wire mapping (step 8, decision 1086): indices 0..3 arm
+    /// Custom0..3 (AnimationData 153..156); anything else is the reference handler's reject.
+    /// The fishing bobber's bite is index 0 → 153 — exactly the second sequence
+    /// `G_FishingBobber.m2` authors.
+    #[test]
+    fn custom_anim_maps_the_wire_index_and_rejects_past_3() {
+        assert_eq!(custom_anim_id(0), Some(153)); // Custom0 — the bobber splash
+        assert_eq!(custom_anim_id(1), Some(154));
+        assert_eq!(custom_anim_id(2), Some(155));
+        assert_eq!(custom_anim_id(3), Some(156));
+        assert_eq!(custom_anim_id(4), None);
+        assert_eq!(custom_anim_id(u32::MAX), None);
     }
 
     /// A `ModelAnimations` that owns exactly `ids` — only the lookup table matters to the remap.

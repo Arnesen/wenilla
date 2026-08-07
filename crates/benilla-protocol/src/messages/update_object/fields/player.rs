@@ -501,6 +501,17 @@ impl ObjectFields {
     pub fn player_bank_bag_slots_purchased(&self) -> Option<u8> {
         self.player_bytes_2().map(|b| ((b >> 16) & 0xff) as u8)
     }
+    /// `OBJECT_FIELD_CREATED_BY` (the GameObject block's creator guid, fields 6-7 in 1.12): the
+    /// summoning player of a spell-spawned object — the fishing bobber's owner. `None` when absent
+    /// or zero (a world-spawned GO has no creator). The reference's ONE reader on the interaction
+    /// path is the faction resolver `0x5f7fd0`, which prefers the creator's reaction over
+    /// `GAMEOBJECT_FACTION` — the bobber's ownership *gate* is NOT this field but the player's own
+    /// `UNIT_FIELD_CHANNEL_OBJECT` (wow-re `fishing-bobber-interaction.md` §2, the byte-proven
+    /// negative: `0x5f6710` never reads CREATED_BY).
+    pub fn gameobject_created_by(&self) -> Option<u64> {
+        self.get_guid(FIELD_GAMEOBJECT_CREATED_BY)
+            .filter(|&g| g != 0)
+    }
     /// `GAMEOBJECT_DISPLAYID`.
     pub fn gameobject_displayid(&self) -> Option<i32> {
         self.get_i32(FIELD_GAMEOBJECT_DISPLAYID)

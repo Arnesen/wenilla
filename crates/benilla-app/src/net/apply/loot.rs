@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use super::super::SelfGuid;
 use crate::items::Items;
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
+use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_items::{EquipError, EquipErrors};
 use crate::ui_loot::{LootErrors, LootLatch, LootState};
 use crate::ui_loot_roll::LootRolls;
@@ -26,12 +27,30 @@ pub(super) fn loot_response(
     loot: &mut LootState,
 ) {
     // The loot window opens (decision 0084): fill LootState from the wire; the feed
-    // ([`crate::ui_loot`]) resolves rows + fires LOOT_OPENED next frame.
+    // ([`crate::ui_loot`]) resolves rows + fires LOOT_OPENED next frame. `loot_type` rides along
+    // for `IsFishingLoot()` (decision 1086).
     debug!(
         "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
         items.len()
     );
-    loot.open(guid, gold, items);
+    loot.open(guid, loot_type, gold, items);
+}
+
+/// A fishing verdict with no loot window (`SMSG_FISH_ESCAPED` / `SMSG_FISH_NOT_HOOKED`, both
+/// empty-bodied; decision 1086): the **yellow** toast by GlobalStrings key — `ERR_FISH_ESCAPED`
+/// ("Your fish got away!") when the skill roll failed on the click, `ERR_FISH_NOT_HOOKED`
+/// ("No fish are hooked.") when the bobber expired or was clicked before the splash. Yellow, not
+/// red: the reference handlers (`0x5e3fc5`/`0x5e3fe2` → `DisplayError` ids `0x13e`/`0x13f`) are
+/// **type-1** registry entries, which fire `UI_INFO_MESSAGE` — byte-verified in wow-re
+/// `fish-msg-handlers.md`, correcting 1086's shipped guess (the fold-back record).
+pub(super) fn fish_verdict(escaped: bool, errors: &mut UiErrorKeys) {
+    let key = if escaped {
+        "ERR_FISH_ESCAPED"
+    } else {
+        "ERR_FISH_NOT_HOOKED"
+    };
+    debug!("net: fishing verdict {key}");
+    errors.0.push(UiError::info_key(key));
 }
 
 /// The server refused to open the loot window (`SMSG_LOOT_RESPONSE`'s error shape — didn't kill
@@ -193,6 +212,39 @@ pub(super) fn inventory_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both fish-verdict keys queue as **yellow** (type-1 / `UI_INFO_MESSAGE`) entries — the
+    /// byte-verified arm, wow-re `fish-msg-handlers.md` — and both resolve to the exact 1.12
+    /// strings in the shipped `GlobalStrings.lua` (the equip-error test's runtime pattern —
+    /// a typo'd key would silently swallow the toast). Skips without client data.
+    #[test]
+    fn fish_verdict_keys_resolve_in_the_real_global_strings() {
+        let mut errors = UiErrorKeys::default();
+        fish_verdict(false, &mut errors);
+        fish_verdict(true, &mut errors);
+        assert_eq!(
+            errors.0,
+            vec![
+                UiError::info_key("ERR_FISH_NOT_HOOKED"),
+                UiError::info_key("ERR_FISH_ESCAPED"),
+            ]
+        );
+
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let g = |key: &str| s.lua().globals().get::<String>(key).expect(key);
+        assert_eq!(g("ERR_FISH_NOT_HOOKED"), "No fish are hooked.");
+        assert_eq!(g("ERR_FISH_ESCAPED"), "Your fish got away!");
+    }
 
     const ME: u64 = 0x0000_0000_0000_002A;
     const THEM: u64 = 0x0000_0000_0000_00FF;

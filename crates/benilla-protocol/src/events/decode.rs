@@ -669,6 +669,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             };
             vec![event]
         }
+        ServerPacket::GameObjectCustomAnim { guid, anim_id } => {
+            vec![SessionEvent::GameObjectCustomAnim { guid, anim_id }]
+        }
+        ServerPacket::FishNotHooked => vec![SessionEvent::FishNotHooked],
+        ServerPacket::FishEscaped => vec![SessionEvent::FishEscaped],
         // The keepalive echo: the io layer matches the sequence against its ping clock to compute
         // the round-trip time (the codec is stateless, so the timing lives with the sender).
         ServerPacket::Pong { sequence } => vec![SessionEvent::Pong { sequence }],

@@ -12,8 +12,9 @@
 //! Each portrait slot (`"player"`/`"target"`) gets its own render layer + camera rendering into a
 //! [`PortraitImages`] entry. A third slot — `"paperdoll"` (decision 0208 §5) — reuses the exact same
 //! bake pipeline for the character window's **full-body** model pane: it mirrors the *player's*
-//! dressed look like the `"player"` slot, but frames the whole standing figure from the model's
-//! bounds ([`framing::body_frame`], not the authored bust camera), bakes at 512², and spins the
+//! dressed look like the `"player"` slot, but frames it through the model's own `<PlayerModel>`
+//! camera ([`framing::body_frame`] — raw `cameras[1]`, not the authored bust camera the round
+//! portraits use; decision 1089), bakes at 512², and spins the
 //! model to a live yaw ([`PaperDollBooth`], the ref's `Model:SetRotation`). The UI samples it
 //! *square*, not through the circular mask.
 //!
@@ -471,10 +472,13 @@ fn log_bake(
 /// with `camera: None` inside, which the framing heuristics are built to handle.
 ///
 /// Both bake sites used to paper over that with `unwrap_or(PortraitAnchors { .., pivot_height: 0.0,
-/// .. })`. That is not a neutral default: [`framing::body_frame`] floors the head signal at `0.1`
-/// for "a hypothetical bounds-less display", so zero anchors aim the camera at a 0.1-unit-tall
-/// subject — the paper doll "zoomed into the max" and the wrong-size portrait of `#bugs` B106. And
-/// it latches: the camera is aimed once per bake, and the parts key cannot change afterwards
+/// .. })`. That is not a neutral default: the retired body fit floored the head signal at `0.1` for
+/// "a hypothetical bounds-less display", so zero anchors aimed the camera at a 0.1-unit-tall
+/// subject — the paper doll "zoomed into the max" and the wrong-size portrait of `#bugs` B106. (1089
+/// retired that fit, and zero anchors are no longer a *zoom* — but they are still the wrong camera:
+/// an unbuilt display has no `cameras[1]` to read, so the pane would latch the fixed fallback rig
+/// aimed at a zero bbox centre.) And it latches: the camera is aimed once per bake, and the parts
+/// key cannot change afterwards
 /// (handle ids are stable from `load()`, so mesh/model arrival is invisible to it), so the frame
 /// stays wrong until some unrelated content edge forces a re-bake.
 ///
@@ -487,6 +491,8 @@ fn booth_anchors(
     let Some(display_id) = display_id else {
         return Some(PortraitAnchors {
             camera: None,
+            pane_camera: None,
+            bbox_center: Vec3::ZERO,
             head: None,
             pivot_height: 0.0,
             ground_radius: 0.0,
@@ -570,6 +576,57 @@ pub(crate) struct BoothBridge<'w> {
 #[derive(Component)]
 pub(crate) struct BoothCam(pub(crate) String);
 
+/// **The display aspect the client's `screencoord` scale is computed from** — its `gxResolution`
+/// CVar's `width/height`, gated by the `widescreen` CVar (registered with default `"1"`, so on by
+/// default; with it off the client uses `4/3` on any monitor). Its one consumer is
+/// [`framing::pane_model_scale`], the model-root renormalize factor a `<PlayerModel>` pane applies
+/// to a model with no camera of its own.
+///
+/// **A stated deviation:** benilla has neither CVar yet, so this reads the primary window's own
+/// aspect. That is the same number whenever the client runs at its display's native resolution, and
+/// ours always does — we expose no resolution mode list to disagree with. When the graphics CVars
+/// land, this resource is the one place to repoint.
+///
+/// Defaults to `4/3` — the client's own `.data` default pair, and the aspect at which the factor is
+/// exactly `1.0`, so a booth that bakes before the window is measured is unscaled rather than wrong.
+#[derive(Resource)]
+pub(crate) struct GxAspect(pub(crate) f32);
+
+impl Default for GxAspect {
+    fn default() -> Self {
+        Self(4.0 / 3.0)
+    }
+}
+
+/// Track the primary window's aspect into [`GxAspect`] (see its deviation note). Cheap enough to run
+/// every frame; the booths latch it, so a resize re-scales the standing bake exactly once.
+fn feed_gx_aspect(
+    mut gx: ResMut<GxAspect>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let Ok(w) = window.single() else {
+        return;
+    };
+    let (px_w, px_h) = (w.resolution.width(), w.resolution.height());
+    if px_h > 0.0 {
+        let a = px_w / px_h;
+        if (a - gx.0).abs() > 1e-4 {
+            gx.0 = a;
+        }
+    }
+}
+
+/// The two **framing inputs** a body booth reads, in one param: the pane geometry the UI extract
+/// publishes ([`BoothPanes`]) and the display aspect ([`GxAspect`]).
+///
+/// Bundled rather than passed side by side because these systems sit on Bevy's 16-parameter ceiling
+/// — the same reason [`BoothBridge`] exists on the other side of the seam.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BoothFraming<'w> {
+    pub(crate) panes: Res<'w, BoothPanes>,
+    pub(crate) gx: Res<'w, GxAspect>,
+}
+
 /// Owns the portrait bake pipeline: the [`PortraitImages`] bridge + the per-slot off-screen booths.
 pub(crate) struct PortraitPlugin;
 
@@ -585,11 +642,12 @@ impl Plugin for PortraitPlugin {
             .init_resource::<dressup::DressUpBake>()
             .init_resource::<Booths>()
             .init_resource::<BoothPanes>()
+            .init_resource::<GxAspect>()
             .init_resource::<BoothLight>()
             .init_resource::<crate::ui_session::InteractNpc>()
             .add_systems(Startup, setup_booths)
             // The variant-cache reaper: booth twins die with their world source material.
-            .add_systems(Update, light::reap_dead_variants)
+            .add_systems(Update, (light::reap_dead_variants, feed_gx_aspect))
             // `feed_interact_npc` resolves the `"npc"` token's entity first; then the test bake owns
             // the booths when its env is set (the live syncs yield to it). The paper-doll sync runs
             // last (it shares the camera/booth/image resources, so the chain keeps the access ordered).
@@ -708,11 +766,12 @@ pub(crate) fn spawn_warm_booth(
             RenderTarget::Image(image.into()),
             crate::ffx_glow::FfxGlow::BOOTH,
             Projection::custom(framing::WowPortraitProjection {
-                fov: framing::BODY_FOV,
+                fov: framing::PANE_FIXED_FOV,
                 near: 0.02,
                 far: 100.0,
-                // The warm pass compiles PIPELINES, which the aspect does not key.
+                // The warm pass compiles PIPELINES, which neither aspect keys.
                 aspect: 1.0,
+                crop_aspect: 1.0,
             }),
             layer.clone(),
         ))
@@ -1216,9 +1275,9 @@ fn sync_paperdoll(
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
-    mut last_yaw: Local<Option<f32>>,
+    mut last_pose: Local<Option<(f32, f32)>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    panes: Res<BoothPanes>,
+    framing_in: BoothFraming,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1229,7 +1288,8 @@ fn sync_paperdoll(
         PAPERDOLL_SLOT,
         self_q.single().ok(),
         paperdoll.yaw,
-        &mut last_yaw,
+        &mut last_pose,
+        framing_in.gx.0,
         &mut commands,
         &mut booths,
         &mut portraits,
@@ -1240,7 +1300,7 @@ fn sync_paperdoll(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
-        &panes,
+        &framing_in.panes,
     );
 }
 
@@ -1259,9 +1319,9 @@ fn sync_inspect_booth(
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
-    mut last_yaw: Local<Option<f32>>,
+    mut last_pose: Local<Option<(f32, f32)>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    panes: Res<BoothPanes>,
+    framing_in: BoothFraming,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1272,7 +1332,8 @@ fn sync_inspect_booth(
         INSPECT_SLOT,
         inspect.unit,
         inspect.yaw,
-        &mut last_yaw,
+        &mut last_pose,
+        framing_in.gx.0,
         &mut commands,
         &mut booths,
         &mut portraits,
@@ -1283,7 +1344,7 @@ fn sync_inspect_booth(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
-        &panes,
+        &framing_in.panes,
     );
 }
 
@@ -1302,9 +1363,9 @@ fn sync_petdoll_booth(
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
-    mut last_yaw: Local<Option<f32>>,
+    mut last_pose: Local<Option<(f32, f32)>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    panes: Res<BoothPanes>,
+    framing_in: BoothFraming,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1315,7 +1376,8 @@ fn sync_petdoll_booth(
         PETDOLL_SLOT,
         petdoll.unit,
         petdoll.yaw,
-        &mut last_yaw,
+        &mut last_pose,
+        framing_in.gx.0,
         &mut commands,
         &mut booths,
         &mut portraits,
@@ -1326,7 +1388,7 @@ fn sync_petdoll_booth(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
-        &panes,
+        &framing_in.panes,
     );
 }
 
@@ -1339,7 +1401,9 @@ fn sync_body_booth(
     slot: &str,
     unit: Option<Entity>,
     yaw: f32,
-    last_yaw: &mut Option<f32>,
+    last_pose: &mut Option<(f32, f32)>,
+    // The primary window's aspect ([`GxAspect`]) — only the model-root scale reads it.
+    display_aspect: f32,
     commands: &mut Commands,
     booths: &mut Booths,
     portraits: &mut PortraitImages,
@@ -1377,7 +1441,7 @@ fn sync_body_booth(
         if booth.baked.is_some() {
             commands.entity(booth.root).despawn_related::<Children>();
             booth.baked = None;
-            *last_yaw = None;
+            *last_pose = None;
             // Render the emptied stage before sleeping (decision 0540) — and the emptied stage has
             // no emitters left, so the pane stops being live.
             booth.wake = BOOTH_SETTLE_FRAMES;
@@ -1388,15 +1452,24 @@ fn sync_body_booth(
     }
     let unit = unit.expect("unit present — parts came from its descendants");
     let key = LookKey::build(&parts, &riders, &billboards, &effects);
-    // A changed pane aspect re-runs the same path: the fit and the projection both depend on it,
-    // and it only ever moves once — the first frame the window is drawn.
+    let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
+    // Anchors first, before any teardown — a still-loading display must not be framed from
+    // fabricated zero bounds (see the portrait site, and `booth_anchors`). Resolved out here rather
+    // than inside the bake because the model-root scale below needs them on an otherwise-idle frame
+    // too (a window resize moves the scale without touching the bake).
+    let anchors_now = booth_anchors(creatures, display_id);
+    // The model-root scale, taken while the anchors are still in hand (the bake below consumes
+    // them). `1.0` until they resolve — an unscaled root is the harmless default, and the 4:3
+    // factor is 1.0 anyway.
+    let model_scale = anchors_now
+        .as_ref()
+        .map_or(1.0, |a| framing::pane_root_scale(a, display_aspect));
+    // A changed pane aspect re-runs the same path: the camera's projection depends on it, and it
+    // only ever moves once — the first frame the window is drawn.
     let parts_changed = booth.baked.as_ref() != Some(&key) || booth.aspect != aspect;
     if parts_changed {
         booth.aspect = aspect;
-        let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
-        // Anchors first, before any teardown — a still-loading display must not be framed from
-        // fabricated zero bounds (see the portrait site, and `booth_anchors`).
-        let Some(anchors) = booth_anchors(creatures, display_id) else {
+        let Some(anchors) = anchors_now else {
             booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
             log_bake(slot, "wait-anchors", &parts, &riders, &billboards, &effects);
             return;
@@ -1505,14 +1578,22 @@ fn sync_body_booth(
         );
         booth.baked = Some(key);
     }
-    // Yaw → the model root's rotation (the ref's `Model:SetRotation`; a spin about WoW +Z-up
-    // conjugates to a spin about Bevy +Y-up). Applied on a fresh bake (new root children) or
-    // whenever the pane's yaw moves — never touched on an otherwise-idle frame.
-    if parts_changed || *last_yaw != Some(yaw) {
-        commands
-            .entity(booth.root)
-            .insert(Transform::from_rotation(Quat::from_rotation_y(yaw)));
-        *last_yaw = Some(yaw);
+    // The model root: **yaw → rotation, plus the pane's model scale** — the widget's own
+    // `T(pos)·R(facing)·S(s)` with `pos` at the origin (the ref's `Model:SetRotation` writes the
+    // facing, and a spin about WoW +Z-up conjugates to a spin about Bevy +Y-up).
+    //
+    // `s` is [`framing::pane_root_scale`]: `1.0` for a model with its own camera and the
+    // display-aspect renormalize factor for one without. It rides the same latch as the yaw because
+    // it moves for the same reason — a window resize — and the reference re-snapshots on exactly
+    // that (`DISPLAY_SIZE_CHANGED → RefreshUnit()`, which both panes register). Cheap enough to
+    // re-derive here rather than key a whole re-bake on: the CAMERA does not depend on the display
+    // aspect, only the root does.
+    if parts_changed || *last_pose != Some((yaw, model_scale)) {
+        commands.entity(booth.root).insert(
+            Transform::from_rotation(Quat::from_rotation_y(yaw))
+                .with_scale(Vec3::splat(model_scale)),
+        );
+        *last_pose = Some((yaw, model_scale));
         // A spin is a content edge too (decision 0540): render the new pose, then sleep.
         booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
     }

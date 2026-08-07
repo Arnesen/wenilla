@@ -258,15 +258,21 @@
         function BenillaLootFrame_OnShow()
             -- Open sound — the window-sound convention (decision 0090), wrapper form (this handler
             -- has real logic beyond the sound, so it can't be a bare inline PlaySound).
-            -- (LootFrame.lua LootFrame_OnShow, l.131-141). ONLY the empty-roll fork is
-            -- Lua-side: an empty loot plays LOOTWINDOWOPENEMPTY (l.135-136). The normal (non-empty)
-            -- loot-open sound is C-side (the server-driven loot handler), so we stay silent for it —
-            -- there is no kit to guess. The fishing fork (l.137-139, "FISHING REEL IN" + the
-            -- FishingLoot-Icon portrait swap) is omitted: benilla ships no fishing feed. (DR 0086:
-            -- vmangos masks the lootable flag for empty rolls, so a live empty window is rare — but
-            -- the branch must exist.)
+            -- (LootFrame.lua LootFrame_OnShow, l.131-141). ONLY the empty-roll fork and the fishing
+            -- fork are Lua-side: an empty loot plays LOOTWINDOWOPENEMPTY (l.135-136); a fishing loot
+            -- (IsFishingLoot(), decision 1086) plays "FISHING REEL IN" and swaps the portrait ring's
+            -- skull for the FishingLoot-Icon (l.137-140) — reset to the skull first, exactly as the
+            -- ref does (l.133), so a corpse loot after a fishing one gets its skull back. The normal
+            -- (non-empty, non-fishing) loot-open sound is C-side (the server-driven loot handler),
+            -- so we stay silent for it — there is no kit to guess. (DR 0086: vmangos masks the
+            -- lootable flag for empty rolls, so a live empty window is rare — but the branch must
+            -- exist.)
+            getglobal("BenillaLootPortraitOverlay"):SetTexture("Interface\\TargetingFrame\\TargetDead")
             if GetNumLootItems() == 0 then
                 PlaySound("LOOTWINDOWOPENEMPTY")
+            elseif IsFishingLoot() then
+                PlaySound("FISHING REEL IN")
+                getglobal("BenillaLootPortraitOverlay"):SetTexture("Interface\\LootFrame\\FishingLoot-Icon")
             end
         end
 
@@ -353,9 +359,10 @@
         <Size><AbsDimension x="256" y="256"/></Size>
         <Layers>
             <!-- The dead-target skull in the panel's portrait ring (ref LootFramePortraitOverlay,
-                 l.73-85): STATIC Interface\TargetingFrame\TargetDead, 58×58 at the window TOPLEFT
+                 l.73-85): Interface\TargetingFrame\TargetDead, 58×58 at the window TOPLEFT
                  +(10,-8). BORDER (below the ARTWORK panel) so it shows through the panel's ring cut-out.
-                 The real client's fishing-loot swap to FishingLoot-Icon is omitted (no fishing feed). -->
+                 OnShow resets it to the skull and swaps a fishing loot to FishingLoot-Icon
+                 (decision 1086), exactly as the ref's OnShow does (l.133-140). -->
             <Layer level="BORDER">
                 <Texture name="BenillaLootPortraitOverlay" file="Interface\TargetingFrame\TargetDead">
                     <Size><AbsDimension x="58" y="58"/></Size>

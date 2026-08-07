@@ -65,6 +65,10 @@ pub struct LootRow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LootState {
     pub rows: Vec<LootRow>,
+    /// Whether this loot came from fishing (`IsFishingLoot()` — the wire `SMSG_LOOT_RESPONSE`
+    /// `loot_type == 3`, decision 1086). `LootFrame_OnShow` keys the "FISHING REEL IN" sound and
+    /// the FishingLoot portrait overlay on it (`LootFrame.lua:137-140`).
+    pub fishing: bool,
 }
 
 impl super::UiScript {
@@ -188,6 +192,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // IsFishingLoot() → whether the open loot came from fishing (false when none is open).
+    // `LootFrame_OnShow` keys the reel-in sound + the fishing portrait overlay on it
+    // (`LootFrame.lua:137-140`; decision 1086).
+    g.set(
+        "IsFishingLoot",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(model.loot.as_ref().is_some_and(|l| l.fishing))
+        })?,
+    )?;
+
     // LootSlot(slot) — queue the 1-based row pick; the app maps it to the coin or the item wire slot.
     g.set(
         "LootSlot",
@@ -252,6 +267,7 @@ mod tests {
                     link: None,
                 },
             ],
+            fishing: false,
         }
     }
 
@@ -299,6 +315,15 @@ mod tests {
         );
         assert!(s.eval::<bool>("return GetLootSlotLink(1) == nil").unwrap());
         assert!(s.eval::<bool>("return GetLootSlotLink(3) == nil").unwrap());
+
+        // IsFishingLoot: false on an ordinary loot, true when the snapshot says fishing, false
+        // again with no loot open (decision 1086).
+        assert!(s.eval::<bool>("return not IsFishingLoot()").unwrap());
+        let mut fished = loot();
+        fished.fishing = true;
+        s.set_loot(Some(fished));
+        assert!(s.eval::<bool>("return IsFishingLoot()").unwrap());
+        s.set_loot(Some(loot()));
 
         // Out of range → nil.
         assert!(s.eval::<bool>("return GetLootSlotInfo(9) == nil").unwrap());

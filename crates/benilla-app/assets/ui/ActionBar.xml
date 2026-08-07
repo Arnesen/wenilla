@@ -648,13 +648,54 @@
             BenillaExhaustionTick.timer = nil
         end
 
+        -- ── The max-level rail (ref-ReputationFrame.lua, the max-level slice) ─────────────────
+        -- ref l.14: the constant lives in ReputationFrame.lua, which isn't built yet — it moves
+        -- there with the reputation system.
+        MAX_PLAYER_LEVEL = 60
+
+        function BenillaMaxLevelBar_OnLoad(bar)
+            bar:RegisterEvent("PLAYER_ENTERING_WORLD")
+            bar:RegisterEvent("PLAYER_LEVEL_UP")
+        end
+
+        -- ref ReputationWatchBar_Update's else arm (ref-ReputationFrame.lua l.161-166 +
+        -- l.236-244), the no-watched-faction branch only — the reputation branches wait for the
+        -- reputation system: at MAX_PLAYER_LEVEL the XP strip gives way to the rail and the
+        -- tick goes with it. Login seam: the ref initializes off UPDATE_FACTION (its OnEvent's
+        -- else arm; the faction list lands at every login), an event benilla doesn't carry yet,
+        -- so the rail listens to PLAYER_ENTERING_WORLD instead — same moment, same values.
+        function BenillaMaxLevelBar_Update(newLevel)
+            if not newLevel then
+                newLevel = UnitLevel("player")
+            end
+            if newLevel == MAX_PLAYER_LEVEL then
+                BenillaExpBar:Hide()
+                BenillaMaxLevelBar:Show()
+                BenillaExhaustionTick:Hide()
+            else
+                BenillaExpBar:Show()
+                BenillaMaxLevelBar:Hide()
+            end
+        end
+
+        -- The ref's event fan (ref-ReputationFrame.xml l.1002-1016): PLAYER_LEVEL_UP passes
+        -- arg1 (the new level — the level FIELD may not have landed yet), everything else
+        -- re-reads UnitLevel.
+        function BenillaMaxLevelBar_OnEvent()
+            if event == "PLAYER_LEVEL_UP" then
+                BenillaMaxLevelBar_Update(arg1)
+            else
+                BenillaMaxLevelBar_Update()
+            end
+        end
+
         -- ── The exhaustion tick (ref-MainMenuBar.lua ExhaustionTick_*) ────────────────────────
         -- The round marker riding the XP bar at the point where rested XP runs out, plus the
-        -- pale fill between the bar's value and that point. Two transcription cuts, named:
-        -- the ref's MainMenuBarMaxLevelBar / ReputationWatchBar guards reference max-level bar
-        -- art and the faction watch bar, neither built — each is its own slice, and until then
-        -- the guards' frames can't be shown, so the cuts are unreachable-code cuts, not behavior
-        -- cuts. (A level-60 body simply keeps its inert XP bar for now.)
+        -- pale fill between the bar's value and that point. One transcription cut left, named:
+        -- the ref's two ReputationWatchBar guards (the max-level+rep tick hide, l.51-54, and
+        -- the rep-bar-replaced-the-xp-bar hide, l.69-71) reference the faction watch bar, not
+        -- built — its frame can't be shown, so the cut is an unreachable-code cut, not a
+        -- behavior cut. The MainMenuBarMaxLevelBar guard is live since 1094 (the rail below).
         function BenillaExhaustionTick_OnLoad(tick)
             tick:RegisterEvent("PLAYER_ENTERING_WORLD")
             tick:RegisterEvent("PLAYER_XP_UPDATE")
@@ -683,7 +724,8 @@
                     local exhaustionTickSet = max(((playerCurrXP + exhaustionThreshold)
                         / playerMaxXP) * BenillaExpBar:GetWidth(), 0)
                     tick:ClearAllPoints()
-                    if exhaustionTickSet > BenillaExpBar:GetWidth() then
+                    if exhaustionTickSet > BenillaExpBar:GetWidth()
+                        or BenillaMaxLevelBar:IsShown() then
                         tick:Hide()
                         BenillaExhaustionLevelFillBar:Hide()
                     else
@@ -1048,6 +1090,58 @@
                 <NormalTexture name="BenillaExhaustionTickNormal" file="Interface\MainMenuBar\UI-ExhaustionTickNormal"/>
                 <HighlightTexture name="BenillaExhaustionTickHighlight" file="Interface\MainMenuBar\UI-ExhaustionTickHighlight" alphaMode="ADD"/>
             </Button>
+
+            <!--
+                The max-level rail (ref-MainMenuBar.xml l.161-225 MainMenuBarMaxLevelBar): the
+                flat brass rail that replaces the XP strip at MAX_PLAYER_LEVEL — four 256×7
+                quarters of UI-MainMenuBar-MaxLevel, riding just above the frame's own 7 px rect
+                (each quarter's BOTTOM sits on the frame's TOP, the ref's own geometry).
+                Shown/hidden by BenillaMaxLevelBar_Update (decision 1094). The ref's OnShow/
+                OnHide call UIParent_ManageFramePositions, which benilla doesn't build
+                (DurabilityFrame.xml's note) — a named cut.
+            -->
+            <Frame name="BenillaMaxLevelBar" enableMouse="true" hidden="true">
+                <Size><AbsDimension x="1024" y="7"/></Size>
+                <Anchors>
+                    <Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-11"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BenillaMaxLevelBar0" file="Interface\MainMenuBar\UI-MainMenuBar-MaxLevel">
+                            <Size><AbsDimension x="256" y="7"/></Size>
+                            <Anchors>
+                                <Anchor point="BOTTOM" relativePoint="TOP"><Offset><AbsDimension x="-384" y="0"/></Offset></Anchor>
+                            </Anchors>
+                            <TexCoords left="0" right="1.0" top="0" bottom="0.21875"/>
+                        </Texture>
+                        <Texture name="BenillaMaxLevelBar1" file="Interface\MainMenuBar\UI-MainMenuBar-MaxLevel">
+                            <Size><AbsDimension x="256" y="7"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="BenillaMaxLevelBar0" relativePoint="RIGHT"/>
+                            </Anchors>
+                            <TexCoords left="0" right="1.0" top="0.25" bottom="0.46875"/>
+                        </Texture>
+                        <Texture name="BenillaMaxLevelBar2" file="Interface\MainMenuBar\UI-MainMenuBar-MaxLevel">
+                            <Size><AbsDimension x="256" y="7"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="BenillaMaxLevelBar1" relativePoint="RIGHT"/>
+                            </Anchors>
+                            <TexCoords left="0" right="1.0" top="0.5" bottom="0.71875"/>
+                        </Texture>
+                        <Texture name="BenillaMaxLevelBar3" file="Interface\MainMenuBar\UI-MainMenuBar-MaxLevel">
+                            <Size><AbsDimension x="256" y="7"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="BenillaMaxLevelBar2" relativePoint="RIGHT"/>
+                            </Anchors>
+                            <TexCoords left="0" right="1.0" top="0.75" bottom="0.96875"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaMaxLevelBar_OnLoad(self)</OnLoad>
+                    <OnEvent>BenillaMaxLevelBar_OnEvent()</OnEvent>
+                </Scripts>
+            </Frame>
 
             <!--
                 The art frame: fills the bar (ref-MainMenuBar.xml l.225-229). Carries the 4 dwarf

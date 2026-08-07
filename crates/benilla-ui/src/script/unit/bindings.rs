@@ -540,46 +540,57 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The rest-state trio (decision 1082) — player-level globals over the app's rest feed
+    // The rest-state trio (decisions 1082/1087) — player-level globals over the app's rest feed
     // ([`UiScript::set_rest_state`]), the MainMenuBar exhaustion tick's and the player frame's
-    // whole wire. INTERIM pending the dispatched wow-re verdict on `GetRestState 0x48d350` /
-    // `GetXPExhaustion 0x48d3f0` / `IsResting 0x516ea0`; each claim below is flagged at its site.
+    // whole wire. Byte-VERIFIED, wow-re `system/ui/scratch/rested-xp-bindings.md` (a §5 pair +
+    // orchestrator arbitration): the surface is Exhaustion.dbc DATA, not client constants — the
+    // rows live in the model ([`UiScript::set_exhaustion_rows`]; shipped-table fallback).
     //
-    // GetRestState() → (stateID, stateName, multiplier). The id IS the wire byte
-    // (`PLAYER_BYTES_2` byte 3): 1 = Rested (earn 200% of base kill XP), 2 = Normal (100%) — the
-    // only two the live server ever writes (vmangos `SetRestBonus`; the beta tired/exhausted
-    // tiers 3..5 survive as dead FrameXML branches). 0-before-feed reads as Normal. The names are
-    // the live client's own returns (INTERIM: enUS spellings, source string table unverified);
-    // the multiplier is what `EXHAUST_TOOLTIP1` renders ×100 ("200% of normal experience").
+    // GetRestState() → (stateID, stateName, multiplier) — `0x48d350`: the raw `PLAYER_BYTES_2`
+    // byte 3 indexes Exhaustion.dbc DIRECTLY (the `[0xc0dd78]` ID→row array) and the triple is
+    // `(row.ID, row.name[locale], row.factor)`: 1 → (1, "Rested", 2.0), 2 → (2, "Normal", 1.0),
+    // and FrameXML's dead 3..5 branches map to the real beta rows (XXXTired 1.0/0.5,
+    // XXXExhausted 0.25). Every failure — byte 0 (pre-feed), byte past the table, no row —
+    // returns (nil, nil, nil), the binary's own fail path. The multiplier is what
+    // `EXHAUST_TOOLTIP1` renders ×100 ("200% of normal experience").
     g.set(
         "GetRestState",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.rest_state == 1 {
-                (1i64, "Rested", 2.0f64)
-            } else {
-                (2i64, "Normal", 1.0f64)
+            Ok(match model.exhaustion.get(&model.rest_state) {
+                Some((name, factor)) => (
+                    Value::Number(f64::from(model.rest_state)),
+                    Value::String(lua.create_string(name)?),
+                    Value::Number(*factor),
+                ),
+                None => (Value::Nil, Value::Nil, Value::Nil),
             })
         })?,
     )?;
-    // GetXPExhaustion() → the rested span in BAR-XP units, or nil once the pool is dry — the tick
-    // parks at `currXP + this` and the fill bar spans up to it (`ExhaustionTick_Update`). ×2 of
-    // the wire pool: the server drains `PLAYER_REST_STATE_EXPERIENCE` 1:1 against BASE kill XP
-    // while granting +100% (vmangos `GetXPRestBonus`), so the bar advances two for every one the
-    // pool loses (INTERIM: the ×2-in-client and the nil-when-zero shape are the dispatch's C1).
+    // GetXPExhaustion() → the rested span in BAR-XP units — `0x48d3f0`: the u32 pool × the f32
+    // factor of **Exhaustion.dbc row ID 1, hard-coded** (`[[0xc0dd78]+4]`, whatever the current
+    // state) — 2.0 in the shipped data, which is the whole "rested XP is double" law: the server
+    // drains the pool 1:1 against BASE kill XP while granting +100% (vmangos `GetXPRestBonus`),
+    // and the client scales by exactly this row's factor. **nil is decided by the rest-state
+    // byte, never by the pool** (`0x48d43b dec/jne`): byte ≠ 1 → nil whatever the pool holds
+    // (vmangos's 0 < bonus ≤ 10 hysteresis window sends byte 2 with a nonzero pool — nil there),
+    // and a rested byte with pool 0 → the NUMBER 0. The tick parks at `currXP + this`
+    // (`ExhaustionTick_Update`).
     g.set(
         "GetXPExhaustion",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(if model.rest_pool == 0 {
+            Ok(if model.rest_state != 1 {
                 Value::Nil
             } else {
-                Value::Integer(i64::from(model.rest_pool) * 2)
+                let factor = model.exhaustion.get(&1).map_or(2.0, |(_, f)| *f);
+                Value::Number(f64::from(model.rest_pool) * factor)
             })
         })?,
     )?;
-    // IsResting() → 1/nil: inside a rest area (inn/city) right now — `PLAYER_FLAGS_RESTING
-    // (0x20)`. The player frame's flashing zzz reads exactly this.
+    // IsResting() → 1/nil: inside a rest area (inn/city) right now — `0x516ea0`, byte-VERIFIED:
+    // PLAYER_FLAGS `shr 5; test 1` = bit 0x20, pushed as the NUMBER 1.0 or nil (the Lua-vanilla
+    // predicate shape, not a boolean). The player frame's flashing zzz reads exactly this.
     g.set(
         "IsResting",
         lua.create_function(|lua, ()| {
@@ -591,10 +602,8 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
-    // GetTimeToWellRested() → nil, always: nothing on the 1.12 wire carries a time-to-full
-    // estimate, and `ExhaustionToolTipText` nil-guards the call (its EXHAUST_TOOLTIP4 line simply
-    // never renders). INTERIM: the dispatch's Q5 — if the binary computes one client-side, this
-    // grows the real formula.
+    // GetTimeToWellRested() → nil, always — `0x48d4b0`, byte-VERIFIED: the whole binding is 11
+    // bytes, `pushnil; return 1`. FrameXML's EXHAUST_TOOLTIP4 countdown branch is dead in 5875.
     g.set(
         "GetTimeToWellRested",
         lua.create_function(|_, ()| Ok(Value::Nil))?,

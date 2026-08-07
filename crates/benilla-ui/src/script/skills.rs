@@ -9,32 +9,47 @@
 //! id doing double duty as both the row's identity and the group key (here the GROUP key is the
 //! category, the row's identity is the skill id).
 //!
-//! ## The engine grouping law (INTERIM — the 0437 §5 dispatch resolved (decision 0446), but never
-//! adjudicated this law; it stays unpinned, its own follow-up named in decision 0530)
+//! ## The engine grouping law (PINNED at the bytes — decision 1091; wow-re
+//! `system/tradeskill/scratch/skillframe-display-list.md`, the list build `0x4d2cb0` + its
+//! comparator `0x4d3070`. The 0530 follow-up this once carried is closed.)
 //!
 //! Groups ordered by `category_order` ascending (`category_id` breaks a tie, for determinism);
-//! one header row per non-empty group (text = `category_name`); entries within a group sorted by
-//! name ascending (the trainer's own [`collate`] — case-insensitive, raw-byte tie-break). Every
-//! group starts EXPANDED (the trainer's own default-expanded rule). Visible rows are headers
-//! always, plus the entries of expanded groups; every index the Lua API takes/returns is 1-based
-//! into that visible list.
+//! one header row per non-empty group (text = `category_name`); within a group, **untrained lines
+//! (rank 0) sink below trained ones**, then name ascending ([`collate`] — case-insensitive,
+//! raw-byte tie-break; the client's own `stricmp`). Every group starts EXPANDED and is **re-expanded
+//! on every push** ([`UiScript::set_skills`] — the client's own `expandedMask = 0xFFFFFFFF`).
+//! Visible rows are headers always, plus the entries of expanded groups; every index the Lua API
+//! takes/returns is 1-based into that visible list.
+//!
+//! **Which lines reach the engine at all is the app's half** of the same law (`ui_char.rs`'s
+//! `feed_skills`): the client's list build drops a line with no `SkillLine`/`SkillRaceClassInfo`/
+//! `SkillLineCategory` row, one whose `SkillRaceClassInfo.flags` carries `0x2`, and an untrained
+//! one that no flag admits. The engine sorts what survives.
 //!
 //! ## The Era API shape (matched to the real `SkillFrame.lua`, transcribed onto this engine)
 //!
-//! `GetNumSkillLines()` → the visible row count. `GetSkillLineInfo(i)` → the ref's own 13-tuple
+//! `GetNumSkillLines()` → the visible row count. `GetSkillLineInfo(i)` → the ref's own tuple
 //! (`name, isHeader, isExpanded, skillRank, numTempPoints, skillModifier, skillMaxRank,
-//! isAbandonable, stepCost, rankCost, minLevel, skillCostType, skillDescription`): a header row
-//! shapes `(category_name, 1, expanded, 0, 0, 0, 0, nil, 0, 0, 0, nil, nil)`, an entry row shapes
-//! `(name, nil, nil, value, 0, modifier, max, abandonable, 0, 0, 0, nil, description)`.
-//! `numTempPoints` is always `0` (1.12 training points are dead data — `PLAYER_SKILL_INFO`
-//! carries no temp/perm split the client would animate through a "buy a rank" flow);
-//! `skillDescription` is REAL (`SkillLine.dbc` col 12 through the app feed — the detail pane's
-//! body text); `isAbandonable` is REAL too ([`SkillEntry::abandonable`], the unlearn button's
-//! gate — and `AbandonSkill(i)` is its outbound half, a VISIBLE index queued out by skill id for
-//! the app's `CMSG_UNLEARN_SKILL`, [`UiScript::take_skill_abandons`]); the remaining
-//! `stepCost`/`rankCost`/`minLevel`/`skillCostType` are vestigial stubs backing the ref's
-//! *training-up* branches (a trainer-taught skill step), which never apply to a line that only
-//! ever changes as a server descriptor delta.
+//! isAbandonable, stepCost, rankCost, minLevel, skillCostType, skillDescription`) — **13 values on
+//! a skill row, 12 on a header** (`0x4d3a20` vs `0x4d3768`; a header stops after `skillCostType`
+//! and carries no description slot at all). A header shapes
+//! `(category_name, 1, expanded, 0, 0, 0, 0, nil, nil, nil, 0, 0)`, an entry
+//! `(name, nil, nil, rank, 0, tempBonus, max, abandonable, nil, nil, minLevel, costIndex+1,
+//! description)`, with `rank`/`max` computed by [`displayed_ranks`] — the permanent bonus folded
+//! in, then `max` forced to `1` on a **single-rank** line whatever the server said
+//! ([`SkillEntry::mono`]; the pane's proficiency gate is `skillMaxRank == 1`).
+//!
+//! `numTempPoints` is always `0`: its only writer in the real client is `AddSkillUp`, wired solely
+//! to the training-up arrow this pane doesn't ship. `stepCost`/`rankCost` are always **nil** —
+//! for DATA reasons, not code ones (`SkillLine.skillCostsID` is 0 in all 123 rows, and the
+//! step-cost gate's flag bits are set on no line a player can hold) — and nil, not `0`, is what
+//! the ref's `if (stepCost)` / `elseif (rankCost or …)` branches read, since `0` is truthy in Lua.
+//! `minLevel` and `skillCostType` are REAL numbers off the `SkillRaceClassInfo` row (visually inert
+//! on this build: every branch they colour is repainted by the normal-skill/proficiency branches
+//! after it). `skillDescription` is REAL (`SkillLine.dbc` col 12 through the app feed — the detail
+//! pane's body text); `isAbandonable` is REAL too ([`SkillEntry::abandonable`], the unlearn
+//! button's gate — and `AbandonSkill(i)` is its outbound half, a VISIBLE index queued out by skill
+//! id for the app's `CMSG_UNLEARN_SKILL`, [`UiScript::take_skill_abandons`]).
 //!
 //! `ExpandSkillHeader(i)`/`CollapseSkillHeader(i)` take a header's VISIBLE index (`0` = all
 //! groups, the trainer's own collapse-all shape). `SetSelectedSkill(i)`/`GetSelectedSkill()` are a
@@ -50,7 +65,7 @@
 //! sites nothing in [`SkillFrame.xml`] ever reaches. (The `UNLEARN_SKILL` popup, once in that
 //! list, ships for real now — the abandon slice above.)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -63,12 +78,38 @@ pub struct SkillEntry {
     pub skill_id: u32,
     /// `SkillLine.dbc` name ("First Aid").
     pub name: String,
-    /// Current rank.
+    /// Current rank, raw off the descriptor. `0` = **untrained**, which is a sort key of its own
+    /// (untrained lines sink under their category's trained ones — the client's comparator
+    /// `0x4d3070`).
     pub value: u32,
-    /// Max rank (a 1.12 proficiency line can be `0/0` — render barless, the ref's own shape).
+    /// Max rank, as the server's own `PLAYER_SKILL_INFO` descriptor holds it — see [`Self::mono`]
+    /// for the DBC override the API return goes through.
     pub max: u32,
-    /// Temp+perm bonus (the green "+n"; negative possible).
-    pub modifier: i32,
+    /// `SkillRaceClassInfo.flags & 0x400` (`SKILL_FLAG_MONO_VALUE`) for the player's race/class:
+    /// a **single-rank** line. The real client's `GetSkillLineInfo` overrides `skillMaxRank` to
+    /// `1` for these, whatever the descriptor says (wow-re
+    /// `system/tradeskill/scratch/skillframe-seed-abandon.md`: `0x4d3610`, `4d38b1 test ah,0x4`) —
+    /// so a hunter's `Beast Mastery`, which vmangos happily reports as `300/300`, reads as a
+    /// proficiency and `SkillFrame.lua`'s `skillMaxRank == 1` branch draws it gray with no rank
+    /// text. The raw [`Self::max`] stays untouched here; the override lives at the API return,
+    /// exactly where the binary puts it.
+    pub mono: bool,
+    /// The **temporary** bonus (auras/consumables/enchants; negative possible) — and only that:
+    /// `GetSkillLineInfo`'s `skillModifier` is a signed read of the descriptor's temp half alone
+    /// (`+0x850`), the green "+n" in the rank text. The permanent half is [`Self::perm_bonus`],
+    /// which the client folds into the numbers instead.
+    pub temp_bonus: i32,
+    /// The **permanent** bonus (talents; `+0x852`, negative possible). Not a return of its own:
+    /// the client adds it into BOTH `skillRank` and `skillMaxRank` before the mono override
+    /// (`0x4d380c`/`0x4d385d`), and only when the raw value is nonzero — so a line the player
+    /// doesn't have stays at a flat `0`, never `0 + bonus`.
+    pub perm_bonus: i32,
+    /// `SkillRaceClassInfo.reqLevel` — `GetSkillLineInfo`'s 11th return, pushed as a real number
+    /// (`0x4d39ef`; nonzero in practice: Mail 40, Dual Wield 20).
+    pub min_level: u32,
+    /// `SkillRaceClassInfo.skillCostID` — `GetSkillLineInfo`'s 12th return is this **plus one**
+    /// (`0x4d3a06`), which is why the engine adds the 1, not the feed.
+    pub cost_index: u32,
     /// `SkillLine.dbc` categoryId.
     pub category_id: u32,
     /// Resolved category name ("Professions") — the header text.
@@ -80,9 +121,10 @@ pub struct SkillEntry {
     /// format renders it verbatim).
     pub description: String,
     /// Whether the line can be unlearned — `GetSkillLineInfo`'s 8th return (`isAbandonable`), the
-    /// detail pane's unlearn-button gate. App-resolved from `SkillRaceClassInfo.flags & 0x20`
+    /// detail pane's unlearn-button gate. App-resolved, and a **conjunction**: the descriptor's
+    /// skill **step** must be nonzero AND `SkillRaceClassInfo.flags & 0x20` must be set
     /// (`SKILL_FLAG_UNLEARNABLE` — the server's own `CMSG_UNLEARN_SKILL` gate, vmangos
-    /// `SkillHandler.cpp`).
+    /// `SkillHandler.cpp`). Both halves are the client's (`0x4d3953`–`0x4d3975`).
     pub abandonable: bool,
 }
 
@@ -110,15 +152,18 @@ pub(crate) struct SkillGroup {
 
 impl super::UiScript {
     /// Replace the skills snapshot (0437 phase 4). Builds the display tree ([`build_groups`]) from
-    /// the flat entries, prunes the collapsed set to categories that still exist in the new push
-    /// (the trainer's own collapse-survives-an-update rule, [`super::trainer::UiScript::set_trainer`]),
-    /// and re-anchors the selection to the SAME skill id if it's still present — else clears it
-    /// (the tradeskill's own by-spell-id selection-persistence precedent).
+    /// the flat entries, **re-expands every group**, and re-anchors the selection to the SAME
+    /// skill id if it's still present — else clears it (the tradeskill's own by-spell-id
+    /// selection-persistence precedent).
+    ///
+    /// The re-expand is the client's, not a convenience: its list rebuild writes
+    /// `expandedMask = 0xFFFFFFFF` unconditionally (`0x4d2cb0`, store at `0x4d2ce2`), so a fold
+    /// survives only until the next skill-field change — the trainer's collapse-survives-an-update
+    /// rule this pane once borrowed is simply a different window's law (decision 1091).
     pub fn set_skills(&mut self, state: SkillsState) {
         let mut model = self.model_mut();
         let groups = build_groups(&state.entries);
-        let live: HashSet<u32> = groups.iter().map(|g| g.category_id).collect();
-        model.skills_collapsed.retain(|c| live.contains(c));
+        model.skills_collapsed.clear();
         if let Some(sid) = model.skills_selected {
             if !state.entries.iter().any(|e| e.skill_id == sid) {
                 model.skills_selected = None;
@@ -171,8 +216,14 @@ fn build_groups(entries: &[SkillEntry]) -> Vec<SkillGroup> {
     }
     let mut groups: Vec<SkillGroup> = map.into_values().collect();
     for g in &mut groups {
-        g.entries
-            .sort_by(|&a, &b| collate(&entries[a].name, &entries[b].name));
+        // Within a category the client sorts UNTRAINED (rank 0) lines below trained ones, then by
+        // name (`0x4d3070`: the `untrained` byte set at build time, `0x4d2e19 sete`, compared
+        // before the `stricmp` at `0x4d318d`).
+        g.entries.sort_by(|&a, &b| {
+            (entries[a].value == 0)
+                .cmp(&(entries[b].value == 0))
+                .then_with(|| collate(&entries[a].name, &entries[b].name))
+        });
     }
     groups.sort_by(|a, b| {
         a.order
@@ -261,6 +312,35 @@ fn selected_index(model: &Model) -> u32 {
         .map_or(0, |p| (p + 1) as u32)
 }
 
+/// `GetSkillLineInfo`'s `(skillRank, skillMaxRank)` pair for one entry — the client's own
+/// arithmetic, in its own order (`0x4d380c`–`0x4d38cb`):
+///
+/// ```text
+/// skillRank    = rank > 0 ? rank + permBonus : rank        // a line at 0 stays flat 0
+/// skillMaxRank = max  > 0 ? max  + permBonus : max
+/// if mono { skillMaxRank = 1; if skillRank > 1 { skillRank = 1 } }   // override, then a MIN
+/// ```
+///
+/// The mono arm is an unconditional **override** of the max (not a clamp) and a **min** on the
+/// rank — the asymmetry is the binary's, and it is what makes a `300/300` class line read as the
+/// `1/1` proficiency `SkillFrame.lua` draws gray. Saturating at 0 keeps a negative permanent
+/// malus from wrapping the unsigned descriptor values.
+fn displayed_ranks(e: &SkillEntry) -> (i64, i64) {
+    let fold = |v: u32| {
+        if v > 0 {
+            (i64::from(v) + i64::from(e.perm_bonus)).max(0)
+        } else {
+            0
+        }
+    };
+    let (mut rank, mut max) = (fold(e.value), fold(e.max));
+    if e.mono {
+        max = 1;
+        rank = rank.min(1);
+    }
+    (rank, max)
+}
+
 /// A `bool` as the Era `1`/`nil` shape (the trainer/tradeskill's own helper, duplicated per the
 /// established per-module convention).
 fn era_bool(b: bool) -> Value {
@@ -284,8 +364,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetSkillLineInfo(index) → the ref's own 13-tuple (module doc). `index` 1-based into the
-    // visible tree; out of range → a single nil.
+    // GetSkillLineInfo(index) → the ref's own tuple (module doc): 13 values on a skill row
+    // (`0x4d3a20`), 12 on a header (`0x4d3768`). `index` 1-based into the visible tree; out of
+    // range → a single nil.
     g.set(
         "GetSkillLineInfo",
         lua.create_function(|lua, index: usize| {
@@ -309,28 +390,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         Value::Integer(0), // skillModifier
                         Value::Integer(0), // skillMaxRank
                         Value::Nil,        // isAbandonable
-                        Value::Integer(0), // stepCost
-                        Value::Integer(0), // rankCost
+                        Value::Nil,        // stepCost
+                        Value::Nil,        // rankCost
                         Value::Integer(0), // minLevel
-                        Value::Nil,        // skillCostType
-                        Value::Nil,        // skillDescription
+                        Value::Integer(0), // skillCostType — the 12th and LAST header return
                     ]))
                 }
                 Row::Entry(ei) => {
                     let e = &model.skills.entries[ei];
+                    let (rank, max) = displayed_ranks(e);
                     Ok(MultiValue::from_vec(vec![
                         Value::String(lua.create_string(&e.name)?),
                         Value::Nil, // isHeader
                         Value::Nil, // isExpanded
-                        Value::Integer(i64::from(e.value)),
+                        Value::Integer(rank),
                         Value::Integer(0), // numTempPoints — always 0 (module doc)
-                        Value::Integer(i64::from(e.modifier)),
-                        Value::Integer(i64::from(e.max)),
+                        Value::Integer(i64::from(e.temp_bonus)), // skillModifier — TEMP only
+                        Value::Integer(max),
                         era_bool(e.abandonable), // isAbandonable
-                        Value::Integer(0),       // stepCost
-                        Value::Integer(0),       // rankCost
-                        Value::Integer(0),       // minLevel
-                        Value::Nil,              // skillCostType
+                        // stepCost/rankCost are nil on this build for DATA reasons, not code
+                        // ones (module doc) — and nil is load-bearing: `0` is truthy in Lua, so
+                        // returning it would send SkillFrame.lua down its "learnable skill"
+                        // branch on every row.
+                        Value::Nil,
+                        Value::Nil,
+                        Value::Integer(i64::from(e.min_level)), // minLevel — a real number
+                        // skillCostType — SkillCostIndex + 1, the client's own `0x4d3a06`.
+                        Value::Integer(i64::from(e.cost_index) + 1),
                         Value::String(lua.create_string(&e.description)?), // skillDescription
                     ]))
                 }
@@ -412,7 +498,7 @@ mod tests {
         name: &str,
         value: u32,
         max: u32,
-        modifier: i32,
+        temp_bonus: i32,
         category_id: u32,
         category_name: &str,
         category_order: u32,
@@ -422,7 +508,10 @@ mod tests {
             name: name.into(),
             value,
             max,
-            modifier,
+            temp_bonus,
+            perm_bonus: 0,
+            min_level: 0,
+            cost_index: 0,
             category_id,
             category_name: category_name.into(),
             category_order,
@@ -430,6 +519,9 @@ mod tests {
             // Fixture rule: the Professions category (id 2) is abandonable, weapons are not —
             // the real SkillRaceClassInfo 0x20 split's shape.
             abandonable: category_id == 2,
+            // Fixture rule: the Class Skills category (id 3) is single-rank, the real 0x400
+            // split's shape (a hunter's Beast Mastery).
+            mono: category_id == 3,
         }
     }
 
@@ -541,8 +633,10 @@ mod tests {
         assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 6);
     }
 
+    /// A re-push keeps the SELECTION (by skill id) but throws every fold away — the client's list
+    /// rebuild re-expands unconditionally (`expandedMask = 0xFFFFFFFF`, decision 1091).
     #[test]
-    fn selection_and_expansion_persist_across_a_repush() {
+    fn a_repush_keeps_the_selection_and_re_expands_every_group() {
         let mut s = UiScript::new().unwrap();
         s.set_skills(state());
 
@@ -556,12 +650,12 @@ mod tests {
         s.run("CollapseSkillHeader(4)").unwrap();
         assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 4);
 
-        // A re-push (values ticked up) keeps BOTH the fold and the selection's skill identity —
-        // Swords is still row 3, Professions is still collapsed.
+        // A re-push (values ticked up): the fold is GONE — all 6 rows are back — while the
+        // selection still points at Swords, which is still row 3.
         let mut ticked = state();
         ticked.entries[0].value = 201; // Swords
         s.set_skills(ticked);
-        assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 4);
+        assert_eq!(s.eval::<i64>("return GetNumSkillLines()").unwrap(), 6);
         assert_eq!(s.eval::<i64>("return GetSelectedSkill()").unwrap(), 3);
         let (name, rank) = s
             .eval::<(String, i64)>("local n,_,_,r = GetSkillLineInfo(3) return n,r")
@@ -580,7 +674,8 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_skills(state());
 
-        // Header row 1 ("Weapon Skills"): (name, 1, expanded, 0, 0, 0, 0, nil, 0, 0, 0, nil, nil).
+        // Header row 1 ("Weapon Skills"): 12 values — (name, 1, expanded, 0, 0, 0, 0, nil, nil,
+        // nil, 0, 0), and NO 13th (the client's header path pushes 12, `0x4d3768`).
         let (name, is_header, is_expanded, rank, temp, modifier, max) = s
             .eval::<(String, i64, Option<i64>, i64, i64, i64, i64)>(
                 "local n,h,e,r,t,m,mx = GetSkillLineInfo(1) return n,h,e,r,t,m,mx",
@@ -598,19 +693,22 @@ mod tests {
             ),
             ("Weapon Skills", 1, Some(1), 0, 0, 0, 0)
         );
-        let (abandon_nil, step, rank_cost, min_level, cost_type_nil, desc_nil) = s
-            .eval::<(bool, i64, i64, i64, bool, bool)>(
-                "local _,_,_,_,_,_,_,a,st,rc,ml,ct,d = GetSkillLineInfo(1) \
-                 return a==nil, st, rc, ml, ct==nil, d==nil",
+        let (abandon_nil, step_nil, rank_cost_nil, min_level, cost_type, count) = s
+            .eval::<(bool, bool, bool, i64, i64, i64)>(
+                "local a,st,rc,ml,ct = select(8, GetSkillLineInfo(1)) \
+                 return a==nil, st==nil, rc==nil, ml, ct, select('#', GetSkillLineInfo(1))",
             )
             .unwrap();
         assert!(abandon_nil);
-        assert_eq!((step, rank_cost, min_level), (0, 0, 0));
-        assert!(cost_type_nil);
-        assert!(desc_nil);
+        assert!(
+            step_nil && rank_cost_nil,
+            "stepCost/rankCost are nil, not 0"
+        );
+        assert_eq!((min_level, cost_type), (0, 0));
+        assert_eq!(count, 12, "a header row returns 12 values, not 13");
 
-        // Entry row 2 ("Defense", value 180, max 300, modifier +5): (name, nil, nil, 180, 0, 5,
-        // 300, nil, 0, 0, 0, nil, nil).
+        // Entry row 2 ("Defense", value 180, max 300, temp bonus +5): (name, nil, nil, 180, 0, 5,
+        // 300, nil, nil, nil, 0, 1, description) — 13 values.
         let (name, is_header, is_expanded, rank, temp, modifier, max) = s
             .eval::<(String, Option<i64>, Option<i64>, i64, i64, i64, i64)>(
                 "local n,h,e,r,t,m,mx = GetSkillLineInfo(2) return n,h,e,r,t,m,mx",
@@ -628,12 +726,103 @@ mod tests {
             ),
             ("Defense", None, None, 180, 0, 5, 300)
         );
-        // The 13th return is the REAL description now (SkillLine.dbc col 12 through the feed) —
-        // a string on an entry row, still nil on a header (asserted above).
+        // The 13th return is the REAL description (SkillLine.dbc col 12 through the feed) — an
+        // entry row's alone: a header stops at 12 (asserted above).
+        let (count, desc) = s
+            .eval::<(i64, String)>(
+                "return select('#', GetSkillLineInfo(2)), select(13, GetSkillLineInfo(2))",
+            )
+            .unwrap();
+        assert_eq!((count, desc.as_str()), (13, "About Defense."));
+        // minLevel and skillCostType are real NUMBERS on an entry — and the cost type is the
+        // row's index PLUS ONE (the client's own `0x4d3a06`), so a fixture at index 0 reads 1.
+        let (min_level, cost_type) = s
+            .eval::<(i64, i64)>("local ml,ct = select(11, GetSkillLineInfo(2)) return ml,ct")
+            .unwrap();
+        assert_eq!((min_level, cost_type), (0, 1));
+    }
+
+    /// The permanent bonus folds into BOTH numbers, the temporary one is the `skillModifier`
+    /// return on its own, and a line at 0 stays flat 0 (the client's `rank > 0 ?` guard).
+    #[test]
+    fn the_permanent_bonus_folds_into_the_numbers_and_the_temporary_one_does_not() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        st.entries[1].perm_bonus = 10; // Defense 180/300, temp +5
+        st.entries
+            .push(entry(182, "Herbalism", 0, 0, 0, 2, "Professions", 2));
+        st.entries.last_mut().unwrap().perm_bonus = 10;
+        s.set_skills(st);
+
+        // Defense (row 2): 190/310, modifier still the temp +5 alone.
+        let (rank, modifier, max) = s
+            .eval::<(i64, i64, i64)>("local _,_,_,r,_,m,mx = GetSkillLineInfo(2) return r,m,mx")
+            .unwrap();
+        assert_eq!((rank, modifier, max), (190, 5, 310));
+
+        // Herbalism 0/0 (row 7, an untrained line sorted under the trained ones): a flat 0/0 —
+        // the bonus is not added to a zero.
+        let (name, rank, max) = s
+            .eval::<(String, i64, i64)>("local n,_,_,r,_,_,mx = GetSkillLineInfo(7) return n,r,mx")
+            .unwrap();
+        assert_eq!((name.as_str(), rank, max), ("Herbalism", 0, 0));
+    }
+
+    /// Within a category, untrained (rank 0) lines sink below the trained ones, whatever their
+    /// name — the client's comparator (`0x4d3070`), which tests `untrained` before `stricmp`.
+    #[test]
+    fn untrained_lines_sort_under_the_trained_ones_of_their_category() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        // "Alchemy" would sort first in Professions by name; at rank 0 it goes last.
+        st.entries
+            .push(entry(171, "Alchemy", 0, 300, 0, 2, "Professions", 2));
+        s.set_skills(st);
+        let names: Vec<String> = (5..=7)
+            .map(|i| {
+                s.eval::<String>(&format!("return (GetSkillLineInfo({i}))"))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(names, ["First Aid", "Fishing", "Alchemy"]);
+    }
+
+    /// A single-rank line reports `1/1` however high the server's descriptor is (the client's own
+    /// `SkillRaceClassInfo.flags & 0x400` arm: an override on the max, a min on the rank) — the
+    /// pane's proficiency gate. A normal line is unaffected.
+    #[test]
+    fn a_mono_line_reports_max_rank_one_whatever_the_server_said() {
+        let mut s = UiScript::new().unwrap();
+        let mut st = state();
+        // Beast Mastery: category 3 ⇒ mono by the fixture rule, server-side 300/300.
+        st.entries.push(entry(
+            50,
+            "Beast Mastery",
+            300,
+            300,
+            0,
+            3,
+            "Class Skills",
+            0,
+        ));
+        s.set_skills(st);
+
+        // Row 1/2 = the Class Skills header + its single entry (category_order 0 sorts first).
+        let (name, rank, modifier, max) = s
+            .eval::<(String, i64, i64, i64)>(
+                "local n,_,_,r,_,m,mx = GetSkillLineInfo(2) return n,r,m,mx",
+            )
+            .unwrap();
         assert_eq!(
-            s.eval::<String>("return select(13, GetSkillLineInfo(2))")
+            (name.as_str(), rank, modifier, max),
+            ("Beast Mastery", 1, 0, 1),
+            "the descriptor's 300/300 reads 1/1 — max overridden, rank clamped under it"
+        );
+        // Defense (a weapon line, not mono) still reports its real 300.
+        assert_eq!(
+            s.eval::<i64>("return (select(7, GetSkillLineInfo(4)))")
                 .unwrap(),
-            "About Defense."
+            300
         );
     }
 

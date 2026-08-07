@@ -97,6 +97,23 @@ const UNDERCITY: Site = Site {
     uid: 239598,
 };
 
+/// Ironforge — B65's site: the lava chasm under the Great Forge walkways. The walkable metal
+/// grates at lava level (world z≈421, e.g. `.go xyz -4845 -995 421 0`) live in cavern group g89
+/// (one portal, p114→g91); a camera over a grate/bed column seeds that group and the scene draws,
+/// while a column with nothing walkable below (the shaft-mouth sliver, the moat's bed gaps) reads
+/// "outside" and blanks the interior — which decision 1096 pins as the CLIENT'S OWN behaviour
+/// (wow-re `wmo-downray-liquid-audit.md`: no liquid leg, no fallback; the asset's patchy beds are
+/// the only thing keeping retail drawn over lava). The 2026-08-07 pins: `WOW_PIN_EYE=-4990,-960,470`
+/// reproduces a faithful blank column; `WOW_PIN_EYE=-4830,-1090,480` seeds g91 and draws; the
+/// still-open half of B65 (partial grate loss from seeded rim poses) is 1096's "NOT settled" leaf.
+#[allow(dead_code)] // pinned for `WOW_PIN_*` runs: the B65 repro coordinates live here
+const IRONFORGE: Site = Site {
+    wmo: r"world\wmo\khazmodan\cities\ironforge\ironforge.wmo",
+    map: "Azeroth",
+    tile: (34, 41),
+    uid: 7706,
+};
+
 /// Eye height above a floor point for both the standing player and the seated camera samples.
 const EYE_HEIGHT: f32 = 1.7;
 
@@ -182,10 +199,14 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
     let mut walk_pos = Vec::new();
     let mut walk_idx = Vec::new();
     let mut names = vec![String::new(); n];
+    let mut group_liquids: Vec<Option<benilla_formats::LiquidMesh>> = vec![None; n];
     for gi in 0..n {
         let Ok(gbytes) = chain.read(&format!("{stem}_{gi:03}.wmo")) else {
             continue;
         };
+        // The group's MLIQ surface, exactly as the asset loader stores it — the down-ray's liquid
+        // leg (B65) needs it, so the pin probe must carry it too or an over-lava eye can't replay.
+        group_liquids[gi] = benilla_formats::wmo_group_liquid_mesh(&gbytes);
         group_footprints[gi] = wmo_group_footprint_tris(&gbytes);
         if let (Some(h), Some(nav)) = (wmo_group_header(&gbytes), group_nav.get_mut(gi)) {
             nav.flags = h.flags;
@@ -260,7 +281,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_footprint_grids: benilla_assets::footprint_tri_grids(&group_footprints),
         group_footprints,
         group_light_refs: Vec::new(),
-        group_liquids: Vec::new(),
+        group_liquids,
         doodad_base: Vec::new(),
         doodad_owner: Vec::new(),
         doodad_groups: Vec::new(),

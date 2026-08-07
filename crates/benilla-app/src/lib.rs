@@ -55,6 +55,7 @@ mod entities;
 mod entity_shade;
 mod exterior_cull;
 mod ffx_glow;
+mod fishing_line;
 mod footprints;
 mod glue;
 mod glue_strings;
@@ -177,6 +178,7 @@ use debug_panel::DebugPanelPlugin;
 use doodad_anim::DoodadAnimPlugin;
 use entities::EntitiesPlugin;
 use entity_shade::EntityShadePlugin;
+use fishing_line::FishingLinePlugin;
 use footprints::FootprintsPlugin;
 use interact::InteractPlugin;
 use interior::InteriorPlugin;
@@ -523,6 +525,7 @@ pub fn run(build: BuildId) -> AppExit {
     // state kit's CharProc-1 colour, uploaded to its own region of the shared light buffer.
     .add_plugins(instance_tint::plugin)
     .add_plugins(BowstringPlugin)
+    .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)
     // Frame-time HUD + diagnostics — the performance standard.
     // After DebugPanelPlugin so the egui plugin/context it sets up already exists. Toggle: P.

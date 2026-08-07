@@ -126,13 +126,15 @@ pub(crate) enum MinimapBlipHover {
 /// The blip layer's system inputs, tupled so `emit_minimap` stays under Bevy's 16-param
 /// ceiling: the quest-status store, the guid→entity index + unit positions, the cursor's
 /// window, the hover-out slot, the party state, and the tracking-dot inputs (candidates,
-/// our own descriptor's masks, the creature/GO template caches, `Lock.dbc`).
+/// our own descriptor's masks, the creature/GO template caches, `Lock.dbc`), plus the
+/// `uiScale` dial the tooltip's cursor seat converts through.
 pub(super) type BlipInputs<'w, 's> = (
     Res<'w, crate::ui_quest::QuestGiver>,
     Res<'w, GuidIndex>,
     Query<'w, 's, &'static GlobalTransform, With<NetEntity>>,
     Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     ResMut<'w, MinimapBlipHover>,
+    Res<'w, crate::ui_script::UiScaleCvar>,
     Res<'w, crate::ui_party::GroupState>,
     TrackedCandidates<'w, 's>,
     Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
