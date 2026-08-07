@@ -149,10 +149,25 @@ fn measure_line_width(
 /// index degrades to the char's start and char-boundary lookups are exact. Single-line is the
 /// EditBox law; a `\n`-bearing (multiLine) string accumulates per line via the run's line index
 /// (x resets never — the table stays monotonic, which is all the hit-test needs).
+///
+/// **Indexed by the box's RAW byte, measured over what is DRAWN** (decision 1075). The box stores
+/// the escaped string and draws only the visible one, so every `|c…`/`|r`/`|H…|h`/`|T…|t` byte
+/// costs zero width: [`crate::ui_text::markup::visible_map`] carries each drawn byte back to its
+/// raw offset, and the forward-fill below hands every escape byte the previous boundary's width.
+/// Measuring the raw string instead is what parked the caret half a chat bar right of a
+/// shift-clicked item link.
+///
+/// **Stated approximation:** the drawn string is shaped as ONE buffer, while the draw shapes each
+/// color run separately — so kerning across a color boundary can differ by a fraction of a pixel.
+/// (This predates 1075: the raw string was shaped as one buffer too.)
 pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec) -> Vec<f32> {
     let mut cum = vec![0.0f32; text.len() + 1];
     if text.is_empty() {
         return cum;
+    }
+    let (drawn, bounds) = crate::ui_text::markup::visible_map(text);
+    if drawn.is_empty() {
+        return cum; // pure markup draws nothing — every boundary sits at x = 0
     }
     let family = font
         .path
@@ -163,9 +178,10 @@ pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec)
     let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let scale = atlas.scale;
     let step_extra = step_extra_of(font.outline);
-    // Byte offset of each buffer line ('\n'-split) — glyph cluster ranges are line-relative.
+    // Byte offset of each buffer line ('\n'-split) within the DRAWN string — glyph cluster ranges
+    // are line-relative, and the map below is indexed in drawn bytes.
     let mut line_starts = vec![0usize];
-    for (i, b) in text.bytes().enumerate() {
+    for (i, b) in drawn.bytes().enumerate() {
         if b == b'\n' {
             line_starts.push(i + 1);
         }
@@ -177,7 +193,7 @@ pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec)
         let font_system = &mut atlas.font_system;
         let mut buffer = Buffer::new(font_system, Metrics::new(phys, phys));
         buffer.set_wrap(font_system, Wrap::None);
-        buffer.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+        buffer.set_text(font_system, &drawn, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(font_system, false);
         let mut x = 0.0f32;
         for run in buffer.layout_runs() {
@@ -186,7 +202,8 @@ pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec)
                 let key: GlyphKey = (g.font_id, g.glyph_id, font_size.to_bits(), 0);
                 let adv = atlas.glyphs.get(&key).map(|i| i.advance).unwrap_or(g.w);
                 x += client_step(adv, step_extra, scale);
-                let end = (base + g.end).min(text.len());
+                // The glyph's end boundary in DRAWN bytes → the RAW boundary it sits on.
+                let end = bounds[(base + g.end).min(drawn.len())];
                 cum[end] = x;
                 written[end] = true;
             }
@@ -233,9 +250,9 @@ fn drawn_k(font_height: Option<f32>, font_size: f32) -> f32 {
 /// pitch (the snapped font em, the same `N·S` block law [`measure_text`] heights with). Row
 /// starts are reconstructed by walking the source string past each wrapped row's verbatim text
 /// and the separator the break swallowed (wrap keeps inter-word whitespace verbatim and drops
-/// only the trailing separator, so the walk is exact). Assumes markup-free text — the EditBox
-/// display string, whose draw treats `|c` codes as literal metrics anyway. Never empty (`[0]`
-/// for empty text).
+/// only the trailing separator, so the walk is exact) — in DRAWN bytes, mapped back to RAW ones,
+/// since the rows index the same raw buffer [`line_advances`] does (decision 1075). Never empty
+/// (`[0]` for empty text).
 pub(crate) fn line_rows(
     atlas: &mut UiFontAtlas,
     text: &str,
@@ -297,10 +314,14 @@ fn segment_row_starts(seg: &str, sub: &[Vec<ColorRun>], base: usize, rows: &mut 
         rows.push(base);
         return;
     }
-    let mut p = 0usize; // byte cursor within `seg`
+    // A wrapped row is made of DRAWN text (the markup is gone by then) while a row start must be a
+    // RAW byte — the offset space the box's cursor and [`line_advances`] both live in. So the walk
+    // runs in drawn bytes and maps each start back (decision 1075).
+    let (drawn, bounds) = crate::ui_text::markup::visible_map(seg);
+    let mut p = 0usize; // byte cursor within `drawn`
     for (j, line) in sub.iter().enumerate() {
         if j > 0 {
-            while let Some(c) = seg[p..].chars().next() {
+            while let Some(c) = drawn[p.min(drawn.len())..].chars().next() {
                 if c.is_whitespace() {
                     p += c.len_utf8();
                 } else {
@@ -308,7 +329,7 @@ fn segment_row_starts(seg: &str, sub: &[Vec<ColorRun>], base: usize, rows: &mut 
                 }
             }
         }
-        rows.push(base + p);
+        rows.push(base + bounds[p.min(drawn.len())]);
         p += line.iter().map(|r| r.text.len()).sum::<usize>();
     }
 }

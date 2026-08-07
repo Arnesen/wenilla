@@ -413,6 +413,51 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
         "the diet icon is shown for a hunter pet"
     );
 
+    // …and it is actually PAINTED, not merely a mouse-enabled hole. The director's 2026-08-06
+    // report was exactly that split — the tooltip answered while nothing was on screen — so the
+    // hover assertion below is not sufficient on its own: pin the art too, with its size and its
+    // reference TexCoords (the icon is the pet's DIET affordance, so its coords are static).
+    s.resolve();
+    let quads = s.extract();
+    let icon = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                if p.contains("UI-PetHappiness"))
+        })
+        .expect("the diet icon's UI-PetHappiness quad is in the render list");
+    let rect = icon.rect.expect("…with a resolved rect");
+    assert!(
+        (rect.right - rect.left - 24.0).abs() < 0.5 && (rect.top - rect.bottom - 23.0).abs() < 0.5,
+        "24x23 (ref PetPaperDollPetInfo), got {}x{}",
+        rect.right - rect.left,
+        rect.top - rect.bottom
+    );
+    // …and it draws ON TOP of the model pane it sits inside — the actual regression. The pane's
+    // booth quad is OPAQUE and the icon's rect is wholly within it, so being in the render list is
+    // not the same as being seen. The pane rides BACKGROUND for exactly this reason (decision
+    // 1070): at ARTWORK the draw layer, which is bucket-wide and outranks the frame (0884), buried
+    // the icon no matter which frame was declared later.
+    let pane = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path, .. }
+                if path.as_deref().unwrap_or_default().is_empty())
+                && q.rect.is_some_and(|r| {
+                    r.left <= rect.left
+                        && r.right >= rect.right
+                        && r.bottom <= rect.bottom
+                        && r.top >= rect.top
+                })
+        })
+        .expect("the pet model pane's booth quad covers the icon's rect");
+    assert!(
+        icon.z > pane.z,
+        "the diet icon must paint over the pane it sits in (icon z={:#x}, pane z={:#x})",
+        icon.z,
+        pane.z
+    );
+
     s.run(
         "local f = BenillaPetPaperDollPetInfo \
          f:GetScript(\"OnEnter\")(f)",

@@ -425,6 +425,7 @@ pub(super) fn spawn_glue_booth(
             // flag: the glue booth is live from the moment a screen shows, before any bake.
             live: false,
             pending: Vec::new(),
+            aspect: 1.0,
         },
     );
     // The background scene's own root (the character root above yaws; the scene never does).
@@ -950,7 +951,10 @@ pub(super) fn sync_glue_booth(
         // body-frame transform with an aspect-aware projection, because the booth target is
         // window-sized now (the square-true `WowPortraitProjection` would stretch on it). While a
         // scene shows, `sync_glue_scene` re-aims onto the authored camera the same frame.
-        let (t, _) = body_frame(&anchors);
+        // Aspect 1.0 into `body_frame`: only its TRANSFORM is kept here — the projection
+        // beside it is the window-sized one this booth needs (decision 1069's aspect rides on
+        // the discarded half).
+        let (t, _) = body_frame(&anchors, 1.0);
         aim(
             &mut cams,
             GLUE_SLOT,

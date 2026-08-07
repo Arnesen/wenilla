@@ -24,9 +24,13 @@
           player" and "put the player's own gear back on it" are the same effect.
         - The ref's `scale="2.0"` on the model widget is a 3D-widget zoom with no meaning for a
           baked pane — the booth frames the body from its own bounds (`framing::body_frame`), the
-          same law the paper doll is framed by.
-        - The pane animates in the ref (a live widget playing Stand); ours is the frozen bake the
-          paper doll beside it is (decision 0822 — the same look call, taken the same way).
+          same law the paper doll is framed by. The bake is framed at THIS pane's 316×351 aspect,
+          not square, or the UI's stretch would leave every character 11% too tall (decision 1069).
+        - The pane ANIMATES, as the ref's live widget does — Stand looping (decision 1069; the look
+          call 0822 §5 left open, made by the director). Its booth is TRANSPARENT for the same
+          reason a widget is: the dark room behind the character is the `DressUpBackground-<Race>`
+          art below, and Reset/Close sit on that art *inside* this pane's rect (both anchor sets
+          transcribed byte-identically from the ref, which is why the overlap is the ref's too).
     -->
     <Script><![CDATA[
         -- GlobalStrings this window uses (ref-GlobalStrings.lua, cited per line; the
@@ -245,7 +249,13 @@
                 <Size><AbsDimension x="316" y="351"/></Size>
                 <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-11" y="85"/></Offset></Anchor></Anchors>
                 <Layers>
-                    <Layer level="ARTWORK">
+                    <!-- BACKGROUND, not ARTWORK — the booth quad is an OPAQUE stand-in for a widget
+                         the reference renders outside the layer batches, so it must sit as low as a
+                         region goes or it swallows same-level siblings (decision 1070; the pet
+                         page's diet icon is where that bit). This window is the one where the
+                         change is visible: the CLOSE/RESET buttons are declared BEFORE the pane and
+                         overlap its lower edge, so at ARTWORK the pane was painting over them. -->
+                    <Layer level="BACKGROUND">
                         <Texture name="$parentTexture">
                             <Size><AbsDimension x="316" y="351"/></Size>
                             <Anchors><Anchor point="TOPLEFT"/></Anchors>

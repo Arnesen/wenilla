@@ -196,11 +196,15 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok((ins[0], ins[1], ins[2], ins[3]))
         })?,
     )?;
-    // GetNumLetters: the CHARACTER count (not bytes) — `0x7992c0` walks the class array.
+    // GetNumLetters: the LETTER count — `0x7992c0` walks the class array (`0x77bc80`), which
+    // counts classes 2, 3 and 6 only, so escapes are free and a 43-byte item link reports 9
+    // (decision 1077). Not bytes, and not chars either.
     m.set(
         "GetNumLetters",
         lua.create_function(|lua, this: Table| {
-            with_editbox(lua, &this, |eb| eb.text.chars().count() as i64)
+            with_editbox(lua, &this, |eb| {
+                crate::markup::ClassMap::new(&eb.text).num_letters() as i64
+            })
         })?,
     )?;
 

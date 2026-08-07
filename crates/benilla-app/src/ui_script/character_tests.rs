@@ -941,3 +941,106 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     s.mouse_button(rx, ry, "LeftButton", false);
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
+
+/// **The keybind and the tab row must agree** (the director's 2026-08-06 report: *"go on skills tab
+/// and press c, it goes back to char tab but without switching the actual tab ui below properly,
+/// then if I click on char tab, it closes the whole window"*).
+///
+/// The cause was a dropped line: the reference selects the tab inside `ToggleCharacter` itself
+/// (`PanelTemplates_SetTab(CharacterFrame, subFrame:GetID())`, ref `CharacterFrame.lua:11`), on
+/// EVERY path. Ours only did it in the tab button's own `OnClick`, so the two entry points into the
+/// window diverged: a keybind switched the page and left the row selecting the old tab, and the
+/// next click on the *now-showing* page's tab hit `ToggleCharacter`'s "this page is already
+/// visible" branch and shut the window instead of switching back.
+///
+/// Driven through the same entry point the `C` / `SHIFT-P` bindings use — a bare
+/// `ToggleCharacter(page)` call, never the button — because that is precisely the path the row used
+/// to miss.
+#[test]
+fn a_keybind_page_switch_moves_the_tab_row_with_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    load_xml(&s, "PetPaperDollFrame.xml");
+    load_xml(&s, "SkillFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+
+    // THE INVARIANT the fix rests on: a page's `id=` is its slot in this window's own tab row, and
+    // `BENILLA_CHARACTERFRAME_SUBFRAMES` is the same 1:1 mapping written the other way round. The
+    // reference's numbers are NOT ours — its Skills page is id 4 behind a Reputation tab we have
+    // not built — so this is the check that makes the divergence loud the day Reputation lands
+    // between them, instead of silently selecting the wrong tab.
+    for i in 1..=3 {
+        let id: i64 = s
+            .eval(&format!(
+                "return getglobal(BENILLA_CHARACTERFRAME_SUBFRAMES[{i}]):GetID()"
+            ))
+            .unwrap();
+        assert_eq!(
+            id, i,
+            "page {i} of BENILLA_CHARACTERFRAME_SUBFRAMES must carry id={i}"
+        );
+    }
+
+    let selected = |s: &mut UiScript| {
+        s.eval::<i64>("return PanelTemplates_GetSelectedTab(BenillaCharacterFrame)")
+            .unwrap()
+    };
+    // A tab wears its "Active" (=Disabled) art exactly when it is the selected one — the visible
+    // half of the same fact, so a SetTab that updated the number without repainting fails here too.
+    let wearing_active_art = |s: &mut UiScript, tab: u32| {
+        s.eval::<bool>(&format!(
+            "return BenillaCharacterFrameTab{tab}MiddleDisabled:IsVisible()"
+        ))
+        .unwrap()
+    };
+    let shown = |s: &mut UiScript, name: &str| {
+        s.eval::<bool>(&format!("return {name}:IsVisible()"))
+            .unwrap()
+    };
+
+    // Open on Character (the `C` binding), then move to Skills the same way.
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert_eq!(selected(&mut s), 1);
+    s.run(r#"ToggleCharacter("BenillaSkillFrame")"#).unwrap();
+    assert!(shown(&mut s, "BenillaSkillFrame"));
+    assert_eq!(selected(&mut s), 3, "the row follows a keybind to Skills");
+    assert!(wearing_active_art(&mut s, 3));
+    assert!(!wearing_active_art(&mut s, 1));
+
+    // THE REPORT: `C` from the Skills page. The page goes back to Character — and so must the row.
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert!(shown(&mut s, "BenillaPaperDollFrame"));
+    assert!(!shown(&mut s, "BenillaSkillFrame"));
+    assert_eq!(
+        selected(&mut s),
+        1,
+        "the tab row followed the keybind back to Character"
+    );
+    assert!(wearing_active_art(&mut s, 1));
+    assert!(!wearing_active_art(&mut s, 3));
+
+    // …and the second half of the report — *"then if I click on char tab, it closes the whole
+    // window"* — falls out of the same fix rather than needing its own. `PanelTemplates_SelectTab`
+    // DISABLES the tab it selects (a selected tab is not re-clickable), so with the row in step the
+    // Character tab is inert while the Character page is up. The window only closed because the row
+    // still said Skills: tab 1 was left enabled, the click reached `ToggleCharacter`, and the page
+    // it named was already visible — the HideUIPanel arm.
+    s.run("BenillaCharacterFrameTab1:Click()").unwrap();
+    assert!(
+        shown(&mut s, "BenillaCharacterFrame"),
+        "the selected tab is disabled — clicking it cannot close the window"
+    );
+    assert!(
+        shown(&mut s, "BenillaPaperDollFrame"),
+        "…or change the page"
+    );
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}

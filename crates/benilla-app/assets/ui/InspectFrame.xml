@@ -477,7 +477,11 @@
                         <Size><AbsDimension x="233" y="300"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-78"/></Offset></Anchor></Anchors>
                         <Layers>
-                            <Layer level="ARTWORK">
+                            <!-- BACKGROUND, not ARTWORK — the booth quad is an OPAQUE stand-in for a
+                                 widget the reference renders outside the layer batches, so it must
+                                 sit as low as a region goes or it swallows same-level siblings
+                                 (decision 1070; the pet page's diet icon is where that bit). -->
+                            <Layer level="BACKGROUND">
                                 <Texture name="$parentTexture">
                                     <Size><AbsDimension x="233" y="300"/></Size>
                                     <Anchors><Anchor point="TOPLEFT"/></Anchors>

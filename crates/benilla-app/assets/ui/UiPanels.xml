@@ -685,14 +685,14 @@
         --     OnHide(data), OnAccept(data, data2) (truthy return = keep open — RECOVER_CORPSE
         --     waits for the server, XP_LOSS's first Accept re-asks), OnCancel(data, reason)
         --     (reason ∈ "clicked"|"timeout"|"override"), OnUpdate(elapsed, dialog), timeout,
-        --     StartDelay, delayText, sound, whileDead, hideOnEscape, cancels.
+        --     StartDelay, delayText, sound, whileDead, hideOnEscape, cancels, showAlert (the
+        --     420 widen + DialogAlertIcon, decision 1068).
         --   · hasEditBox + maxLetters + EditBoxOnEnterPressed are live (decision 0668's
         --     ADD_FRIEND/ADD_IGNORE are the first customers): the box shows, caps its length,
         --     opens empty, and re-anchors the buttons under itself.
-        --   · Accepted but v1-inert: exclusive, showAlert (no alert icon/420-width yet),
-        --     interruptCinematic (cinematics are acked instantly — 0196), notClosableByLogout,
-        --     preferredIndex, hasWideEditBox (guild MOTD/notes — the guild arc), and the money
-        --     variant.
+        --   · Accepted but v1-inert: exclusive, interruptCinematic (cinematics are acked
+        --     instantly — 0196), notClosableByLogout, preferredIndex, hasWideEditBox (guild
+        --     MOTD/notes — the guild arc), and the money variant.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -835,6 +835,17 @@
                 dialog.text_arg2 = text_arg2
             else
                 text:SetText(format(info.text, text_arg1, text_arg2))
+            end
+
+            -- The alert dress (ref l.1579-1589): every Show resets width 320 / icon hidden, then
+            -- a showAlert entry widens to 420 and shows the icon. The ref's neighbouring arms —
+            -- the guild-MOTD 420 widen and HELP_TICKET's 350 — wait for their dialogs.
+            local alertIcon = getglobal(dialog:GetName() .. "AlertIcon")
+            alertIcon:Hide()
+            dialog:SetWidth(320)
+            if info.showAlert then
+                dialog:SetWidth(420)
+                alertIcon:Show()
             end
 
             -- The edit box (ref l.1599-1624): shown only for a hasEditBox entry, capped at the
@@ -1062,7 +1073,8 @@
 
         -- Ref StaticPopup.lua l.659-679, verbatim — its own OnUpdate poll (cursor emptied by any
         -- other path → hide) replaces the old bespoke `deleteItemFlow` CURSOR_UPDATE driver.
-        -- showAlert/exclusive are v1-inert (engine header note).
+        -- exclusive is v1-inert (engine header note); showAlert is live since 1068 — the ref's
+        -- own "display the error image" case is this very dialog.
         StaticPopupDialogs["DELETE_ITEM"] = {
             text = DELETE_ITEM_TEXT,
             button1 = YES_TEXT,
@@ -1580,6 +1592,14 @@
                     <Size><AbsDimension x="290" y="0"/></Size>
                     <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-16"/></Offset></Anchor></Anchors>
                 </FontString>
+                <!-- The showAlert icon (ref template l.58-67 verbatim: 64x64 DialogAlertIcon at
+                     LEFT +12). Show resets it hidden and shows it only for a showAlert entry —
+                     the ref keeps the text 290 wide and centered even at the 420 width, so the
+                     icon owning the left margin IS the reference look, not an overlap bug. -->
+                <Texture name="$parentAlertIcon" file="Interface\DialogFrame\DialogAlertIcon">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
             </Layer>
         </Layers>
         <Frames>

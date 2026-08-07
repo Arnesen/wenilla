@@ -198,19 +198,18 @@ pub(crate) fn spell_usable(
     (true, false)
 }
 
-/// Whether the caster can afford `d`'s power cost — the shared availability-vs-cost compare
-/// behind BOTH the usable walk's leg 12 (`0x6e3fba`) and the press-path power gate
-/// (`0x6094f0` @ `0x60962c`, decision 0948): raw `UNIT_FIELD_POWER[type]` — ANY negative
-/// PowerType reads `UNIT_FIELD_HEALTH` instead (the ref's `jl` at `0x609631`; Bloodrage's −2) —
-/// signed-compared against the computed cost. Percent costs scale from base mana (mana spells)
-/// / max power (the vmangos CalculatePowerCost basis).
-pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
+/// The RESOLVED power cost — `GetPowerCost 0x6e31b0`'s data terms: the flat `manaCost`, the
+/// per-level term `(level − spellLevel) · manaCostPerlevel` (signed delta, the vmangos
+/// `CalculatePowerCost` shape, clamped at 0 on the way out; every nonzero row is a creature
+/// spell, so the clamp choice is dormant for players), and `ManaCostPercentage` of the pool
+/// 0948 chose per type (base mana for mana spells — the vmangos basis — max pool otherwise,
+/// health included for negative types). One law, every consumer: the usable walk's leg 12, the
+/// press-path power gate (0948), and the tooltip's cost cell (1074) — mirroring the byte fn's
+/// own caller set (`0x609657`/`0x60968d`/`0x4e5201`/`0x6e3fdb`/`0x52e8ad`/`0x507de3`). The
+/// reference's per-school unit mods and spell-mods (talent cost cuts) are not modeled — 0948's
+/// standing gap, now stated once here.
+pub(crate) fn power_cost(d: &SpellDisplay, store: &ObjectStore) -> u32 {
     let power_type = d.power_type as i32;
-    let avail = if power_type < 0 {
-        store.0.unit_health().unwrap_or(0)
-    } else {
-        store.0.unit_power(power_type as u8).unwrap_or(0)
-    };
     let base = if d.mana_cost_pct == 0 {
         0
     } else if d.power_type == 0 {
@@ -220,8 +219,26 @@ pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
     } else {
         store.0.unit_max_power(power_type as u8).unwrap_or(0)
     };
-    let cost = d.mana_cost + base * d.mana_cost_pct / 100;
-    avail >= cost
+    let level_delta = i64::from(store.0.unit_level().unwrap_or(0)) - i64::from(d.spell_level);
+    let cost = i64::from(d.mana_cost)
+        + level_delta * i64::from(d.mana_cost_per_level)
+        + i64::from(base) * i64::from(d.mana_cost_pct) / 100;
+    u32::try_from(cost).unwrap_or(0)
+}
+
+/// Whether the caster can afford `d`'s power cost — the shared availability-vs-cost compare
+/// behind BOTH the usable walk's leg 12 (`0x6e3fba`) and the press-path power gate
+/// (`0x6094f0` @ `0x60962c`, decision 0948): raw `UNIT_FIELD_POWER[type]` — ANY negative
+/// PowerType reads `UNIT_FIELD_HEALTH` instead (the ref's `jl` at `0x609631`; Bloodrage's −2) —
+/// signed-compared against [`power_cost`]'s number.
+pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
+    let power_type = d.power_type as i32;
+    let avail = if power_type < 0 {
+        store.0.unit_health().unwrap_or(0)
+    } else {
+        store.0.unit_power(power_type as u8).unwrap_or(0)
+    };
+    avail >= power_cost(d, store)
 }
 
 #[cfg(test)]

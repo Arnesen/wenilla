@@ -65,7 +65,12 @@ pub(super) fn char_input(lua: &Lua, text: &str) -> bool {
         highlight_text(lua, h, 0, -1);
     } else if text.chars().any(|c| (c as u32) >= 0x20) {
         // A printable char (or string); pure control input is consumed but not inserted.
-        insert(lua, h, text, true);
+        //
+        // A typed `|` goes in as `||` — OnChar `0x77c200` pushes the literal at `0x879cac`, which
+        // is `"||"` (decision 1077). That is why real markup can only enter a box through
+        // `SetText`, `Insert`, a paste or the C++ link-insert path: you cannot type an escape, and
+        // the doubled form draws as one `|` and counts as one letter.
+        insert(lua, h, &text.replace('|', "||"), true);
     }
     true
 }

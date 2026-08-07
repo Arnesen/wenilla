@@ -183,14 +183,23 @@ pub(super) fn emit(
     // actually draws, which is what a truncation report needs to show.
     let probe = std::env::var("WOW_TEXT_PROBE").as_deref() == Ok("1");
     if probe {
+        // For the focused edit box, also the two numbers that must agree: where the engine puts the
+        // caret (`caret=`, advance-table-derived) and how wide the text this pass actually draws is
+        // (`ink=`). They diverge by the width of the markup when the advance table is measured over
+        // the raw buffer — the caret-out-in-space report (decision 1075) as a pair of numbers.
+        let ebox_geom = ebox.map(|ui| {
+            let ink = crate::ui_text::measure_text(atlas, draw_text, None, spec).0;
+            format!(" caret={:.1} ink={ink:.1}", ui.caret_x * host.scale)
+        });
         info!(
-            "text probe: [{:.0},{:.0} {:.0}x{:.0}] h={:?} {:?}",
+            "text probe: [{:.0},{:.0} {:.0}x{:.0}] h={:?}{} {:?}",
             draw_rect.min.x,
             draw_rect.min.y,
             host.rect.width(),
             host.rect.height(),
             style.font_height,
-            &draw_text[..draw_text.len().min(30)]
+            ebox_geom.unwrap_or_default(),
+            &draw_text[..draw_text.len().min(60)]
         );
     }
     // The drop shadow (font object `<Shadow>` — MasterFont's (1,-1) black covers the whole

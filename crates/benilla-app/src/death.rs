@@ -70,6 +70,10 @@ pub(crate) struct DeathNet {
     /// The spirit healer whose confirm (`SMSG_SPIRIT_HEALER_CONFIRM`) is awaiting the XP_LOSS
     /// two-step; its Accept sends `CMSG_SPIRIT_HEALER_ACTIVATE` with this guid.
     pub(crate) spirit_healer: Option<u64>,
+    /// Bumped on every `SMSG_SPIRIT_HEALER_CONFIRM` — the confirm announces per MESSAGE, not per
+    /// Some-edge (decision 1068): a Cancel sends nothing and clears nothing, so only a fresh
+    /// message can re-show the dialog, and the healer re-sends one on every gossip ask.
+    pub(crate) confirm_generation: u32,
     /// Water-walking is granted on our mover (the ghost's walk-on-water). Mirrored for the swim
     /// arc's future mover regime (0308 defers the actual water-surface walk); the ack itself is
     /// the controller's.
@@ -99,8 +103,12 @@ struct DeathFeedState {
     /// The pending resurrect offer has been announced to the UI (`RESURRECT_REQUEST` fired) —
     /// held back while a player-caster's name is still resolving through the name cache.
     offer_announced: bool,
-    /// The spirit-healer confirm has been announced (`CONFIRM_XP_LOSS` fired).
-    confirm_announced: bool,
+    /// The [`DeathNet::confirm_generation`] this latch last announced — a fresh
+    /// `SMSG_SPIRIT_HEALER_CONFIRM` re-fires `CONFIRM_XP_LOSS` through the latch (decision 1068;
+    /// the reclaim-latch pattern above). The old Some-edge latch here was B80's deadlock: it
+    /// reset only when `spirit_healer` went `None`, which nothing but Accept ever does, so one
+    /// Cancel swallowed every later confirm.
+    confirm_generation: u32,
 }
 
 /// The three corpse-range verdicts the reference's events distinguish (RECOVER_CORPSE /
@@ -245,13 +253,12 @@ fn feed_death(
         None => feed.offer_announced = false,
         _ => {}
     }
-    match death_net.spirit_healer {
-        Some(_) if !feed.confirm_announced => {
-            feed.confirm_announced = true;
-            script.fire_event("CONFIRM_XP_LOSS", vec![]);
-        }
-        None => feed.confirm_announced = false,
-        _ => {}
+    // The confirm is message-fired, not state-edged (decision 1068): each SMSG bumps the
+    // generation, so asking the healer again after a Cancel brings the dialog back.
+    if death_net.spirit_healer.is_some() && feed.confirm_generation != death_net.confirm_generation
+    {
+        feed.confirm_generation = death_net.confirm_generation;
+        script.fire_event("CONFIRM_XP_LOSS", vec![]);
     }
 
     // ── The corpse-run range gate (0308 §5): fires the reference's range events on the edges. ──

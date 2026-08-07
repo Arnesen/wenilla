@@ -968,3 +968,130 @@ fn caret_blinks_on_tick_and_resets_on_edit() {
     answer_advances(&mut s);
     assert!(s.focused_editbox_text_ui().unwrap().caret_on);
 }
+
+// ── A hyperlink is ONE keypress (RF-0087 §6, decision 1077) ──────────────────────────────────
+//
+// The engine-level law lives in `markup`; these drive it the way a player does — through the
+// focused box's public keyboard API — because that is the level the reported defect lived at:
+// backspacing a shift-clicked item link chewed it one invisible byte at a time, and the byte that
+// went first was the `r` of its trailing `|r`, which turned everything typed afterwards the item's
+// colour.
+
+/// An epic link exactly as the client's own builder formats one (`0x52adb0`).
+const LINK: &str = "|cffa335ee|Hitem:11684:0:0:0|h[Ironfoe]|h|r";
+
+fn box_with_link(suffix: &str) -> UiScript {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E"); E:SetFocus()"#)
+        .unwrap();
+    s.run(&format!("E:Insert(\"{LINK}{suffix}\")")).unwrap();
+    s
+}
+
+fn text_of(s: &UiScript) -> String {
+    s.eval::<String>("return E:GetText()").unwrap()
+}
+
+#[test]
+fn one_backspace_deletes_a_whole_item_link() {
+    let mut s = box_with_link("");
+    assert!(s.editbox_action(EditAction::Delete {
+        unit: EditUnit::Char,
+        back: true
+    }));
+    assert_eq!(text_of(&s), "", "colour prefix and trailing |r go with it");
+
+    // And from the far side of following text: the link survives until the text is gone, then goes
+    // whole — never half-eaten, which is what left a dangling `|c` colouring the rest of the line.
+    let mut s = box_with_link("ab");
+    for expected in ["|cffa335ee|Hitem:11684:0:0:0|h[Ironfoe]|h|ra", LINK, ""] {
+        s.editbox_action(EditAction::Delete {
+            unit: EditUnit::Char,
+            back: true,
+        });
+        assert_eq!(text_of(&s), expected);
+    }
+}
+
+#[test]
+fn one_arrow_crosses_a_whole_item_link() {
+    let mut s = box_with_link("");
+    let cursor = |s: &mut UiScript| {
+        s.editbox_action(EditAction::Move {
+            unit: EditUnit::Edge,
+            back: true,
+            extend: false,
+        });
+        s.editbox_action(EditAction::Move {
+            unit: EditUnit::Char,
+            back: false,
+            extend: false,
+        });
+    };
+    cursor(&mut s);
+    // One RIGHT from the start lands past the entire link — so typing there appends, and does not
+    // land between the `]` and its `|h`.
+    s.char_input("x");
+    assert_eq!(text_of(&s), format!("{LINK}x"));
+}
+
+#[test]
+fn shift_arrow_selects_the_whole_link_and_typing_replaces_it() {
+    let mut s = box_with_link("");
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Char,
+        back: true,
+        extend: true,
+    });
+    assert_eq!(
+        s.editbox_copy().as_deref(),
+        Some(LINK),
+        "one Shift+LEFT takes the whole unit"
+    );
+    s.char_input("x");
+    assert_eq!(text_of(&s), "x");
+}
+
+#[test]
+fn typing_strictly_inside_a_link_is_refused() {
+    // Only the mouse can put the caret there, so place it the way a click would.
+    let mut s = box_with_link("");
+    s.run("E:HighlightText(35, 35)").unwrap(); // mid-"Ironfoe"
+    s.char_input("x");
+    assert_eq!(
+        text_of(&s),
+        LINK,
+        "the client swallows it rather than splitting the link"
+    );
+    // The same keystroke at the link's leading edge is allowed — the guard tests the PREVIOUS
+    // token too, which is what keeps the boundary usable.
+    s.run("E:HighlightText(0, 0)").unwrap();
+    s.char_input("x");
+    assert_eq!(text_of(&s), format!("x{LINK}"));
+}
+
+#[test]
+fn a_typed_pipe_is_doubled_and_costs_one_letter() {
+    let mut s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E"); E:SetFocus()"#)
+        .unwrap();
+    s.char_input("|");
+    assert_eq!(
+        text_of(&s),
+        "||",
+        "OnChar 0x77c200 inserts the literal at 0x879cac"
+    );
+    assert_eq!(s.eval::<i64>("return E:GetNumLetters()").unwrap(), 1);
+}
+
+#[test]
+fn max_letters_counts_visible_letters_not_escape_bytes() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E"); E:SetFocus(); E:SetMaxLetters(20)"#)
+        .unwrap();
+    s.run(&format!("E:Insert(\"{LINK}\")")).unwrap();
+    // 43 bytes, but "[Ironfoe]" is 9 letters — comfortably under a 20-letter cap that a raw char
+    // count would have blown through, trimming the link's own tail off.
+    assert_eq!(text_of(&s), LINK);
+    assert_eq!(s.eval::<i64>("return E:GetNumLetters()").unwrap(), 9);
+}

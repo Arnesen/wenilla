@@ -182,6 +182,17 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "F" => KeyCode::KeyF,
         "Ctrl" => KeyCode::ControlLeft,
         "Shift" => KeyCode::ShiftLeft,
+        // The text-editing keys. Added for decision 1077's hyperlink-atomicity law, whose whole
+        // observable — "one BACKSPACE removes a whole item link" — is a keypress no chat command
+        // and no Lua chunk can reach (`EditBox` has no Lua deletion API; the law lives behind the
+        // host's chord table). Without these a caret/deletion defect could only be reproduced by
+        // asking the director to type, which is the asymmetry probes exist to remove.
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Left" => KeyCode::ArrowLeft,
+        "Right" => KeyCode::ArrowRight,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
         _ => return None,
     })
 }

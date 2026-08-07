@@ -99,8 +99,8 @@ pub(crate) struct DressUpBake {
 }
 
 /// Stand the dressing-room booth up beside the two body panes (called from [`super::setup_booths`]).
-/// Same off-screen pipeline as those — [`PAPERDOLL_SIZE`]² target, near-black backdrop, decode but
-/// no glow (decision 0638) — on its own layer, framed per-bake.
+/// Same off-screen pipeline as those — [`PAPERDOLL_SIZE`]² target, decode but no glow (decision
+/// 0638) — on its own layer, framed per-bake, and **transparent** (see the clear below).
 pub(super) fn spawn_dressup_booth(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -120,7 +120,19 @@ pub(super) fn spawn_dressup_booth(
         super::booth_view_shape(),
         Camera {
             order: -100 + DRESSUP_LAYER as isize,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.055, 0.045, 0.04)),
+            // **Transparent**, unlike the paper doll's opaque near-black slab (decision 1069). The
+            // reference's `<DressUpModel>` is a widget that draws only its model: the dark room
+            // behind the character is the window's own `DressUpBackground-<Race>` art, and an
+            // opaque bake hid it completely — the pane's rect covers all but a 32 px strip of it.
+            //
+            // 1070 lowered this quad to BACKGROUND, which is what un-covered the Reset/Close
+            // buttons; it cannot un-cover the race art, because that art is on the WINDOW (level 0)
+            // and the level term outranks the layer (0884). Only compositing can. The glue booth
+            // has done exactly this since 0818 — FfxGlow's combine carries the scene alpha through.
+            //
+            // The other three panes keep their opaque near-black: nothing is behind them to reveal,
+            // and their look is the director's approved one.
+            clear_color: ClearColorConfig::Custom(Color::NONE),
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
@@ -146,6 +158,7 @@ pub(super) fn spawn_dressup_booth(
             wake: 0,
             live: false,
             pending: Vec::new(),
+            aspect: 1.0,
         },
     );
 }
@@ -163,6 +176,7 @@ pub(super) fn sync_dressup_booth(
     preview: Res<DressUpPreview>,
     bake: Res<DressUpBake>,
     mut booths: ResMut<Booths>,
+    panes: Res<super::BoothPanes>,
     mut booth_light: ResMut<BoothLight>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     creatures: Option<Res<Creatures>>,
@@ -182,11 +196,15 @@ pub(super) fn sync_dressup_booth(
     let Some(booth) = booths.0.get_mut(DRESSUP_SLOT) else {
         return;
     };
+    // The destination pane's aspect, latched while it is on screen (decision 1069) — the dressing
+    // room's is 316×351, so baking square made every character 11% too tall.
+    let aspect = panes.0.get(DRESSUP_SLOT).copied().unwrap_or(booth.aspect);
     let (last_rev, last_yaw) = last.unwrap_or((u64::MAX, f32::NAN));
-    let rebake = last_rev != bake.revision;
+    let rebake = last_rev != bake.revision || booth.aspect != aspect;
     if !rebake && last_yaw == preview.yaw {
         return;
     }
+    booth.aspect = aspect;
 
     if rebake {
         // Nothing to show (the window is closed, or the assembly cleared) → empty the stage and
@@ -269,9 +287,9 @@ pub(super) fn sync_dressup_booth(
                 .as_ref()
                 .map(|ibp| (rig.skeleton, ibp, rig.animations)),
             anim_data.as_deref().map(|a| &a.0),
-            // Frozen at Stand, like the paper doll beside it — matching the reference widget's live
-            // animation is the same look call there and here (decision 0822).
-            BoothMotion::Frozen,
+            // Stand LOOPING, like the paper doll beside it — the reference's `<DressUpModel>` is a
+            // live-rendering widget (0822 §4) and the director called the pose (decision 1069).
+            BoothMotion::Loop,
             bake.grip,
             &booth_billboards,
         );
@@ -290,15 +308,17 @@ pub(super) fn sync_dressup_booth(
                 })
                 .collect::<Vec<_>>(),
         );
-        booth.live = fx_emitters > 0;
+        // The bake animates, so its camera can't sleep — `gate_booth_cameras` runs it every frame
+        // the window is drawing this pane, and none once it closes.
+        booth.live = true;
         *staged = true;
-        aim(&mut cams, DRESSUP_SLOT, &body_frame(&anchors));
+        aim(&mut cams, DRESSUP_SLOT, &body_frame(&anchors, aspect));
         // `WOW_BOOTH_LOG=1` — one line per committed bake, the same instrument the mirrored booths
         // carry (`super::log_bake`, whose signature is the mirrored part types'). It is what
         // separates "the pane is black because nothing baked" from "…because the camera is wrong".
         if super::booth_log() {
             eprintln!(
-                "[booth] dressup bake parts={} riders={} billboards={} fx={} rev={}",
+                "[booth] dressup bake parts={} riders={} billboards={} fx={} rev={} aspect={aspect:.3}",
                 booth_parts.len(),
                 booth_riders.len(),
                 booth_billboards.len(),

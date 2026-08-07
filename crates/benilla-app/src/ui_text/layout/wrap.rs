@@ -18,17 +18,86 @@ use crate::ui_text::markup::ColorRun;
 /// (a glyph step is ≥3px) and far above the seam dust (≤1e-3).
 const WIDTH_EPS: f32 = 0.25;
 
-/// One word carried through wrapping with the color it inherits from its source [`ColorRun`] and the
-/// exact whitespace (`lead`) that separated it from the previous word — empty for a line's first word.
-/// Preserving the verbatim separator (rather than collapsing it to one space) is what keeps Blizzard's
+/// A hyperlink handle, shared by every run/piece the link's visible text splits into.
+type Link = Option<std::sync::Arc<crate::ui_text::markup::LinkInfo>>;
+
+/// Two handles name the same link (pointer identity — [`crate::ui_text::markup`] shares one `Arc`
+/// across a link's runs for exactly this test).
+fn same_link(a: &Link, b: &Link) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// One word carried through wrapping — the wrap's atomic **break unit** — plus the exact whitespace
+/// (`lead`) that separated it from the previous word (empty for a line's first word). Preserving the
+/// verbatim separator (rather than collapsing it to one space) is what keeps Blizzard's
 /// double-space-after-period intact through the wrap.
+///
+/// A word carries **pieces**, not one color, because a color/link boundary can fall *inside* a word.
+/// `|cff9d9d9d|Hitem:7092:0:0:0|h[Chipped Claw]|h|rx2.` has no space between `]` and `x`, so
+/// `[Chipped Claw]x2.` is one break unit whose two halves must keep their own colors and their own
+/// link membership. Latching a single color per word (the pre-1075 model, taken from the run the
+/// word's FIRST char sat in) painted the whole unit in that run's color and inside its clickable
+/// span — every character typed straight after a chat link came out in the item's quality colour
+/// (director, 2026-08-06; decision 1075).
 pub(super) struct WrapWord {
-    text: String,
-    color: [f32; 4],
+    /// The word's styled pieces, in source order — one for the common case, more across an interior
+    /// color/link boundary. Never empty, and never holds an empty piece.
+    pieces: Vec<ColorRun>,
     lead: String,
-    /// The hyperlink the word's source run sat inside (shared Arc) — carried through the wrap so
-    /// a link split across lines still spans every one of its words.
-    link: Option<std::sync::Arc<crate::ui_text::markup::LinkInfo>>,
+}
+
+impl WrapWord {
+    /// The word's visible text (its pieces joined) — what the packer measures and force-breaks.
+    fn text(&self) -> String {
+        self.pieces.iter().map(|p| p.text.as_str()).collect()
+    }
+}
+
+/// Append `ch` to a piece list under `run`'s style, extending the last piece when the style is
+/// unchanged — the one place a new piece is opened, so a piece is never empty.
+fn push_char(pieces: &mut Vec<ColorRun>, ch: char, run: &ColorRun) {
+    match pieces.last_mut() {
+        Some(last) if last.color == run.color && same_link(&last.link, &run.link) => {
+            last.text.push(ch);
+        }
+        _ => pieces.push(ColorRun {
+            text: ch.to_string(),
+            color: run.color,
+            link: run.link.clone(),
+        }),
+    }
+}
+
+/// Split a word's pieces at byte offset `at` of its joined text (the force-break point). `at` is a
+/// char boundary of the joined text, and a piece is a whole substring of it, so the per-piece cut
+/// lands on a char boundary too.
+fn split_pieces(pieces: &[ColorRun], at: usize) -> (Vec<ColorRun>, Vec<ColorRun>) {
+    let (mut head, mut tail) = (Vec::new(), Vec::new());
+    let mut off = 0usize;
+    for p in pieces {
+        let end = off + p.text.len();
+        if end <= at {
+            head.push(p.clone());
+        } else if off >= at {
+            tail.push(p.clone());
+        } else {
+            let cut = at - off;
+            head.push(ColorRun {
+                text: p.text[..cut].to_string(),
+                ..p.clone()
+            });
+            tail.push(ColorRun {
+                text: p.text[cut..].to_string(),
+                ..p.clone()
+            });
+        }
+        off = end;
+    }
+    (head, tail)
 }
 
 /// Split a markup line's color runs into [`WrapWord`]s, each carrying the verbatim whitespace that
@@ -37,40 +106,31 @@ pub(super) struct WrapWord {
 /// straddles a color boundary just rides along (whitespace draws no ink, so its color is immaterial).
 /// A leading run of whitespace on the line attaches to the first word's `lead` and is dropped at emit
 /// (like the pre-existing `split_whitespace`), so lines never gain a phantom indent.
+///
+/// Only whitespace ends a word: a color/link boundary splits the word into [pieces](WrapWord::pieces)
+/// but is **not** a break opportunity (the client's opportunity classes are whitespace — see
+/// [`super::wrap_line`]), so `[Chipped Claw]x2.` can never wrap between the `]` and the `x`.
 pub(super) fn tokenize_words(line: &[ColorRun]) -> Vec<WrapWord> {
     let mut words: Vec<WrapWord> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_color = [0.0f32; 4];
-    let mut cur_link: Option<std::sync::Arc<crate::ui_text::markup::LinkInfo>> = None;
+    let mut cur: Vec<ColorRun> = Vec::new();
     let mut lead = String::new();
     for run in line {
         for ch in run.text.chars() {
             if ch.is_whitespace() {
                 if !cur.is_empty() {
                     words.push(WrapWord {
-                        text: std::mem::take(&mut cur),
-                        color: cur_color,
+                        pieces: std::mem::take(&mut cur),
                         lead: std::mem::take(&mut lead),
-                        link: cur_link.take(),
                     });
                 }
                 lead.push(ch);
             } else {
-                if cur.is_empty() {
-                    cur_color = run.color;
-                    cur_link = run.link.clone();
-                }
-                cur.push(ch);
+                push_char(&mut cur, ch, run);
             }
         }
     }
     if !cur.is_empty() {
-        words.push(WrapWord {
-            text: cur,
-            color: cur_color,
-            lead,
-            link: cur_link,
-        });
+        words.push(WrapWord { pieces: cur, lead });
     }
     words
 }
@@ -99,7 +159,7 @@ pub(super) fn greedy_pack<F: FnMut(&str) -> f32>(
     let mut cur: Vec<WrapWord> = Vec::new();
     let mut cur_w = 0.0f32;
     for word in words {
-        let ww = measure(&word.text);
+        let ww = measure(&word.text());
         if !cur.is_empty() {
             let candidate = cur_w + measure(&word.lead) + ww;
             if candidate <= max_width {
@@ -111,25 +171,24 @@ pub(super) fn greedy_pack<F: FnMut(&str) -> f32>(
             out.push(std::mem::take(&mut cur));
         }
         // The word opens a fresh line. If it exceeds the width alone, force-break it: each full
-        // line becomes a chunk, the remainder keeps packing.
+        // line becomes a chunk, the remainder keeps packing. A multi-piece word splits its pieces
+        // with it, so each chunk keeps exactly the colors that fell inside it.
         let mut word = word;
         let mut ww = ww;
         while ww > max_width {
-            let Some((head, rest)) =
-                split_at_last_fitting_glyph(&word.text, max_width, &mut measure)
-            else {
+            let text = word.text();
+            let Some(at) = split_at_last_fitting_glyph(&text, max_width, &mut measure) else {
                 // First glyph exceeds: no progress — bail this source line (the client's builder
                 // bail; the remainder is dropped).
                 return finish_pack(out, cur);
             };
+            let (head, rest) = split_pieces(&word.pieces, at);
             out.push(vec![WrapWord {
-                text: head,
-                color: word.color,
+                pieces: head,
                 lead: std::mem::take(&mut word.lead),
-                link: word.link.clone(),
             }]);
-            word.text = rest;
-            ww = measure(&word.text);
+            word.pieces = rest;
+            ww = measure(&word.text());
         }
         cur_w = ww;
         cur.push(word);
@@ -145,8 +204,8 @@ fn finish_pack(mut out: Vec<Vec<WrapWord>>, cur: Vec<WrapWord>) -> Vec<Vec<Color
     out.iter().map(|ws| words_to_runs(ws)).collect()
 }
 
-/// The force-break point: split `text` after the longest glyph prefix that measures within
-/// `max_width`. `None` when not even the first glyph fits (the no-progress case). The walk
+/// The force-break point: the byte offset just past the longest glyph prefix of `text` that measures
+/// within `max_width`. `None` when not even the first glyph fits (the no-progress case). The walk
 /// re-measures the whole prefix per glyph rather than summing per-glyph steps — the step law is
 /// additive, so the results agree, and force-broken words are rare and short enough that the
 /// simpler exact-agreement-with-`measure` walk wins.
@@ -154,7 +213,7 @@ fn split_at_last_fitting_glyph<F: FnMut(&str) -> f32>(
     text: &str,
     max_width: f32,
     measure: &mut F,
-) -> Option<(String, String)> {
+) -> Option<usize> {
     let mut fit_end = 0usize;
     for (i, c) in text.char_indices() {
         let end = i + c.len_utf8();
@@ -163,23 +222,14 @@ fn split_at_last_fitting_glyph<F: FnMut(&str) -> f32>(
         }
         fit_end = end;
     }
-    (fit_end > 0).then(|| (text[..fit_end].to_string(), text[fit_end..].to_string()))
+    (fit_end > 0).then_some(fit_end)
 }
 
-/// Rejoin wrapped words into color runs: consecutive words with the same color AND the same link
-/// (pointer identity) merge into one run; the verbatim whitespace between words (`lead`) attaches
-/// to the preceding run (invisible, so its color is immaterial). The first word on a line drops
-/// its `lead` — the trailing separator at a break.
+/// Rejoin a wrapped line's words into color runs: consecutive **pieces** with the same color AND the
+/// same link (pointer identity) merge into one run — across a word boundary like within one — and the
+/// verbatim whitespace between words (`lead`) attaches to the preceding run (invisible, so its color
+/// is immaterial). The first word on a line drops its `lead` — the trailing separator at a break.
 fn words_to_runs(words: &[WrapWord]) -> Vec<ColorRun> {
-    let same_link =
-        |a: &Option<std::sync::Arc<crate::ui_text::markup::LinkInfo>>,
-         b: &Option<std::sync::Arc<crate::ui_text::markup::LinkInfo>>| {
-            match (a, b) {
-                (None, None) => true,
-                (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
-                _ => false,
-            }
-        };
     let mut runs: Vec<ColorRun> = Vec::new();
     for (i, word) in words.iter().enumerate() {
         if i > 0 {
@@ -187,15 +237,13 @@ fn words_to_runs(words: &[WrapWord]) -> Vec<ColorRun> {
                 last.text.push_str(&word.lead);
             }
         }
-        match runs.last_mut() {
-            Some(last) if last.color == word.color && same_link(&last.link, &word.link) => {
-                last.text.push_str(&word.text);
+        for piece in &word.pieces {
+            match runs.last_mut() {
+                Some(last) if last.color == piece.color && same_link(&last.link, &piece.link) => {
+                    last.text.push_str(&piece.text);
+                }
+                _ => runs.push(piece.clone()),
             }
-            _ => runs.push(ColorRun {
-                text: word.text.clone(),
-                color: word.color,
-                link: word.link.clone(),
-            }),
         }
     }
     runs
@@ -214,17 +262,21 @@ mod wrap_tests {
         s.chars().count() as f32
     }
 
+    /// One single-piece word (the common case) with the given separator.
+    fn word(text: &str, color: [f32; 4], lead: &str) -> WrapWord {
+        WrapWord {
+            pieces: vec![ColorRun {
+                text: text.to_string(),
+                color,
+                link: None,
+            }],
+            lead: lead.to_string(),
+        }
+    }
+
     fn words(pairs: &[(&str, [f32; 4])]) -> Vec<WrapWord> {
         // The single-space separator these tests assume; the first word's `lead` is ignored on emit.
-        pairs
-            .iter()
-            .map(|(t, c)| WrapWord {
-                text: (*t).to_string(),
-                color: *c,
-                lead: " ".to_string(),
-                link: None,
-            })
-            .collect()
+        pairs.iter().map(|(t, c)| word(t, *c, " ")).collect()
     }
 
     /// Flatten a wrapped line's runs back to plain text (dropping color) for assertions.
@@ -294,24 +346,14 @@ mod wrap_tests {
     fn content_exact_width_with_float_dust_does_not_break() {
         // One "word" of two 5.5-unit glyphs (11.0 total) in a box 15 ulps shy of 11.0.
         let measure = |s: &str| s.chars().count() as f32 * 5.5;
-        let w = vec![WrapWord {
-            text: "34".into(),
-            color: WHITE,
-            lead: "".into(),
-            link: None,
-        }];
+        let w = vec![word("34", WHITE, "")];
         let lines = greedy_pack(w, 11.0 - 0.000015, measure);
         assert_eq!(lines.len(), 1, "float dust must not split the digits");
         assert_eq!(line_text(&lines[0]), "34");
 
         // A genuinely narrow box (one glyph short) still force-breaks — the epsilon is far below
         // any real break decision.
-        let w2 = vec![WrapWord {
-            text: "34".into(),
-            color: WHITE,
-            lead: "".into(),
-            link: None,
-        }];
+        let w2 = vec![word("34", WHITE, "")];
         let lines2 = greedy_pack(w2, 5.5, measure);
         assert_eq!(lines2.len(), 2, "a real overflow still breaks");
     }
@@ -335,11 +377,11 @@ mod wrap_tests {
         }];
         let ws = tokenize_words(&line);
         assert_eq!(ws.len(), 3);
-        assert_eq!(ws[0].text, "Hello.");
+        assert_eq!(ws[0].text(), "Hello.");
         assert_eq!(ws[0].lead, "", "first word has no separator");
-        assert_eq!(ws[1].text, "World");
+        assert_eq!(ws[1].text(), "World");
         assert_eq!(ws[1].lead, "  ", "the double space is kept verbatim");
-        assert_eq!(ws[2].text, "again");
+        assert_eq!(ws[2].text(), "again");
         assert_eq!(ws[2].lead, " ");
     }
 
@@ -347,40 +389,14 @@ mod wrap_tests {
     fn wrap_preserves_double_space_between_words() {
         // On one line, the joined run text keeps the double space (the greedy join uses each word's
         // verbatim `lead`, not a collapsed single space).
-        let w = vec![
-            WrapWord {
-                text: "Hello.".into(),
-                color: WHITE,
-                lead: "".into(),
-                link: None,
-            },
-            WrapWord {
-                text: "World".into(),
-                color: WHITE,
-                lead: "  ".into(),
-                link: None,
-            },
-        ];
+        let w = vec![word("Hello.", WHITE, ""), word("World", WHITE, "  ")];
         let lines = greedy_pack(w, 100.0, char_measure);
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "Hello.  World");
 
         // At a break the trailing separator drops (standard): a width that fits "Hello." (6) but not
         // "Hello." + "  World" splits, and neither produced line carries stray spaces.
-        let w2 = vec![
-            WrapWord {
-                text: "Hello.".into(),
-                color: WHITE,
-                lead: "".into(),
-                link: None,
-            },
-            WrapWord {
-                text: "World".into(),
-                color: WHITE,
-                lead: "  ".into(),
-                link: None,
-            },
-        ];
+        let w2 = vec![word("Hello.", WHITE, ""), word("World", WHITE, "  ")];
         let lines2 = greedy_pack(w2, 6.0, char_measure);
         assert_eq!(lines2.len(), 2);
         assert_eq!(line_text(&lines2[0]), "Hello.");
@@ -400,6 +416,79 @@ mod wrap_tests {
         assert_eq!(runs[0].color, WHITE);
         assert_eq!(runs[1].text, "cc");
         assert_eq!(runs[1].color, RED);
+    }
+
+    /// The director's report (2026-08-06, decision 1075): a chat item link with text typed straight
+    /// after it, no space between. `Bearer]` and the typed text are ONE word — one break unit — and
+    /// the wrap must keep them two differently-styled pieces. Before 1075 the word latched the color
+    /// AND the link of the run its first char sat in, so everything typed after a link came out in
+    /// the item's quality colour and inside its clickable span.
+    #[test]
+    fn a_word_straddling_a_color_boundary_keeps_both_colors() {
+        let link = std::sync::Arc::new(crate::ui_text::markup::LinkInfo {
+            link: "item:13984:0:0:0".into(),
+            markup: "|Hitem:13984:0:0:0|h[The Plague Bearer]|h".into(),
+        });
+        let line = vec![
+            ColorRun {
+                text: "[The Plague Bearer]".into(),
+                color: RED,
+                link: Some(link.clone()),
+            },
+            ColorRun {
+                text: "dsfsdfsd".into(),
+                color: WHITE,
+                link: None,
+            },
+        ];
+        // The color boundary is NOT a break opportunity: the last word runs from "Bearer]" straight
+        // through the typed text…
+        let ws = tokenize_words(&line);
+        assert_eq!(ws.len(), 3, "three whitespace-delimited break units");
+        assert_eq!(ws[2].text(), "Bearer]dsfsdfsd");
+        // …carrying two pieces, each with its own color and link membership.
+        assert_eq!(ws[2].pieces.len(), 2);
+
+        let lines = greedy_pack(ws, 100.0, char_measure);
+        assert_eq!(lines.len(), 1);
+        let runs = &lines[0];
+        assert_eq!(runs.len(), 2, "the color boundary survives the round trip");
+        assert_eq!(runs[0].text, "[The Plague Bearer]");
+        assert_eq!(runs[0].color, RED);
+        assert!(runs[0].link.is_some(), "the name stays clickable");
+        assert_eq!(runs[1].text, "dsfsdfsd");
+        assert_eq!(runs[1].color, WHITE, "typed text keeps the base color");
+        assert!(runs[1].link.is_none(), "typed text is not part of the link");
+    }
+
+    /// The same unit, force-broken: a color boundary inside an over-wide word splits with it, so
+    /// neither chunk inherits the other's color.
+    #[test]
+    fn a_force_break_splits_a_words_pieces_with_it() {
+        let line = vec![
+            ColorRun {
+                text: "[Claw]".into(),
+                color: RED,
+                link: None,
+            },
+            ColorRun {
+                text: "x2.".into(),
+                color: WHITE,
+                link: None,
+            },
+        ];
+        // Width 4: "[Cla" | "w]x2" | "." — the color boundary falls inside the middle chunk.
+        let lines = greedy_pack(tokenize_words(&line), 4.0, char_measure);
+        assert_eq!(line_text(&lines[0]), "[Cla");
+        assert_eq!(lines[0][0].color, RED);
+        assert_eq!(line_text(&lines[1]), "w]x2");
+        assert_eq!(lines[1].len(), 2, "the chunk carries both colors");
+        assert_eq!(lines[1][0].text, "w]");
+        assert_eq!(lines[1][0].color, RED);
+        assert_eq!(lines[1][1].text, "x2");
+        assert_eq!(lines[1][1].color, WHITE);
+        assert_eq!(line_text(&lines[2]), ".");
+        assert_eq!(lines[2][0].color, WHITE);
     }
 
     #[test]

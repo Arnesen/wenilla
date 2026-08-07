@@ -231,7 +231,8 @@ fn bake_test(
             [false, false], // the paper-doll still sheaths its weapons — no in-hand grip
             &[],            // eye-glow in the paper doll is the same follow-up (see above)
         );
-        aim(cams, PAPERDOLL_SLOT, &body_frame(&anchors));
+        // The eyeball harness has no live UI publishing a pane, so it bakes square.
+        aim(cams, PAPERDOLL_SLOT, &body_frame(&anchors, 1.0));
         commands
             .entity(booth.root)
             .insert(Transform::from_rotation(Quat::from_rotation_y(

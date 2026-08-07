@@ -276,6 +276,17 @@
                 return
             end
             local frame = getglobal("BenillaCharacterFrame")
+            -- ref CharacterFrame.lua:11, and the line whose absence desynced this window: the tab
+            -- row is selected HERE, from the page's own id, on EVERY path — including the one that
+            -- closes the window. Having it only on the tab-button OnClick meant a KEYBIND
+            -- (`C`/`SHIFT-P`, which call straight in here) switched the page and left the row
+            -- selecting the old tab; clicking that old tab then took the "already visible" branch
+            -- and shut the window instead of switching back (director, 2026-08-06). The id is the
+            -- page's own `id=` attribute — the loader really does apply it (loader/geometry.rs
+            -- SetID) — and `character_tests.rs` pins every page's id against its slot in
+            -- BENILLA_CHARACTERFRAME_SUBFRAMES, which is what keeps the two in step the day
+            -- Reputation lands between them.
+            PanelTemplates_SetTab(frame, subFrame:GetID())
             if frame:IsVisible() then
                 if subFrame:IsVisible() then
                     HideUIPanel(frame)
@@ -292,15 +303,14 @@
         -- The tab row's own OnClick (ref CharacterFrameTab_OnClick, l.35-48), now id-based (decision
         -- 0437 phase 4 grows the row to 2) — the MerchantFrame.xml Merchant/Buyback pair's own shape
         -- for a >1-tab window: `id` indexes BOTH the tab button and BENILLA_CHARACTERFRAME_SUBFRAMES
-        -- 1:1. PanelTemplates_SetTab visually selects the clicked tab (the ref's own
-        -- PanelTemplates_SetTab(this, subFrame:GetID()) call, dropped by the original phase-1a
-        -- single-tab comment above — restored now that a second tab exists to disagree with the
-        -- first). l.47's trailing PlaySound is the ref's OWN redundant second igCharacterInfoTab —
-        -- ToggleCharacter already plays it on the "switch to this tab" path, so this second call only
-        -- matters when the window is ALREADY open on this same tab, i.e. the HideUIPanel branch —
-        -- transcribed verbatim rather than "fixed" since it's the ref's own behavior, not a bug of ours.
+        -- 1:1. It does NOT select the tab itself — the ref's own tab OnClick doesn't either, because
+        -- ToggleCharacter is the single place that does it (above), so the click path and the
+        -- keybind path cannot disagree. l.47's trailing PlaySound is the ref's OWN redundant second
+        -- igCharacterInfoTab — ToggleCharacter already plays it on the "switch to this tab" path, so
+        -- this second call only matters when the window is ALREADY open on this same tab, i.e. the
+        -- HideUIPanel branch — transcribed verbatim rather than "fixed" since it's the ref's own
+        -- behavior, not a bug of ours.
         function BenillaCharacterFrameTab_OnClick(id)
-            PanelTemplates_SetTab(getglobal("BenillaCharacterFrame"), id)
             ToggleCharacter(BENILLA_CHARACTERFRAME_SUBFRAMES[id])
             PlaySound("igCharacterInfoTab")
         end
@@ -1369,7 +1379,7 @@
                  exactly fill the parent instead of the ref's setAllPoints="true" — the same effect
                  (see this file's header: frame-level setAllPoints was a no-op when this was written
                  and is wired now; the explicit size is equivalent, so it stays). -->
-            <Frame name="BenillaPaperDollFrame">
+            <Frame name="BenillaPaperDollFrame" id="1">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
@@ -1409,7 +1419,11 @@
                         <Size><AbsDimension x="233" y="224"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-78"/></Offset></Anchor></Anchors>
                         <Layers>
-                            <Layer level="ARTWORK">
+                            <!-- BACKGROUND, not ARTWORK — the booth quad is an OPAQUE stand-in for a
+                                 widget the reference renders outside the layer batches, so it must
+                                 sit as low as a region goes or it swallows same-level siblings
+                                 (decision 1070; the pet page's diet icon is where that bit). -->
+                            <Layer level="BACKGROUND">
                                 <Texture name="$parentTexture">
                                     <Size><AbsDimension x="233" y="224"/></Size>
                                     <Anchors><Anchor point="TOPLEFT"/></Anchors>

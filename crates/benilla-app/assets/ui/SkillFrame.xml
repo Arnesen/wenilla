@@ -432,7 +432,12 @@
         <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
     </Button>
 
-    <Frame name="BenillaSkillFrame" enableMouse="true" parent="BenillaCharacterFrame" hidden="true" id="4">
+    <!-- id=3, NOT the ref's 4: a page's id is the slot it occupies in the WINDOW'S OWN tab row, and
+         ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11). Ours is 3rd because
+         Reputation (the ref's 3) is not built — the same deviation CharacterFrame.xml's tab row
+         already flags. `character_tests.rs` pins every page's id against its slot in
+         BENILLA_CHARACTERFRAME_SUBFRAMES, so the day Reputation lands this is loud, not silent. -->
+    <Frame name="BenillaSkillFrame" enableMouse="true" parent="BenillaCharacterFrame" hidden="true" id="3">
         <!-- The real 384×512 page. No <Anchors relativeTo> substitute for true parenting exists
              (this file's header comment) — pinned to BenillaCharacterFrame's own TOPLEFT by name. -->
         <Size><AbsDimension x="384" y="512"/></Size>

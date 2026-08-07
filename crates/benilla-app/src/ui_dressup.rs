@@ -15,8 +15,12 @@
 //!   in chat by someone else.
 //! - **Compose the look.** The player's own body + appearance + their `PLAYER_VISIBLE_ITEM_*`
 //!   displays, with each resolved substitution written into the slot its `InventoryType` maps to
-//!   (the shared [`equip_slot`] table — the same one the glue/select preview dresses by, so a
-//!   robe lands on the chest and a wand in the ranged hand here exactly as it does there).
+//!   (the shared [`equip_slot`] table — the same one the glue/select preview dresses by, so a robe
+//!   lands on the chest here exactly as it does there). The **held** triple then goes through
+//!   [`held_lanes`], which is where the two previews stop agreeing: the character-select mannequin
+//!   drops the ranged slot and this window puts it in a hand (decision 1076). 1060's own record
+//!   claimed "a wand in the ranged hand here exactly as it does there" — that was wrong in the
+//!   second half, and the ranged slot was silently discarded until 1076.
 //!
 //! **What is NOT here:** any notion of *fit*. The reference's dressing room previews whatever it is
 //! handed — a plate helm on a mage, a mail chest on a rogue — because it is a look, not an equip:
@@ -37,6 +41,91 @@ use crate::ui_script::UiInput;
 /// (`EQUIPMENT_SLOT_*`), which is exactly the set [`equip_slot`] can map an item into.
 const LOOK_SLOTS: [u8; 14] = [0, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16, 17, 18];
 
+/// The three **held** equipment slots — main hand · off hand · ranged. The widget keeps only *two*
+/// lanes for them, which is the whole reason [`held_lanes`] exists.
+const HELD_SLOTS: [usize; 3] = [15, 16, 17];
+
+/// **The dress-up widget has two held lanes, and a ranged weapon takes one of them** (decision
+/// 1076; wow-re `ui/scratch/dressup-model-equipment.md`).
+///
+/// `DressUpModel::TryOn 0x504d90` installs into lane `0x0f` (→ HandRight) or lane `0x10` (→
+/// HandLeft, or the Shield point for a shield) — never a third. `INVTYPE_RANGED` (15, bows) lands
+/// in the **off** lane; gun/crossbow/wand (26) and thrown (25) land in the **main** one, matching
+/// the world's own drawn-ranged split exactly.
+///
+/// Before installing, `0x504bc0(mainInvType, offInvType, dualWield)` asks whether the two lanes may
+/// coexist; if not, the incoming item **evicts** the other. `0x0f` appears on neither side of that
+/// test, so a ranged weapon coexists with nothing: a bow always clears the main hand and overwrites
+/// the off one, a crossbow always clears the off hand and overwrites the main one. Never both.
+///
+/// The base the try-ons land on is the player's **melee** pair only. `Dress()` / `SetUnit` do not
+/// install gear slot-by-slot at all — `0x5059a0` duplicates the unit's live `CM2Model` and
+/// deep-copies its attachment tree (`0x70ea00`) — so the base is literally what the player is
+/// showing in the world, where a ranged weapon renders only while ranged-drawn and our booth is
+/// frozen melee-drawn (0465 / 1060). A *worn* bow therefore does not appear until it is tried on,
+/// which is also the behaviour that shipped, and is why the ranged slot of a dressing-room look is
+/// only ever filled by a substitution.
+fn held_lanes(equipment: &mut [CharEnumItem; 19], room: &DressUpRoom) {
+    // The player's own melee pair — anything the room substituted is replayed below instead.
+    let base = |slot: usize| {
+        (room.worn[slot].is_none() && equipment[slot].display_id != 0).then_some(equipment[slot])
+    };
+    let (mut main, mut off) = (base(15), base(16));
+
+    for &slot in &room.held_order {
+        let Some(item) = room.worn[slot] else {
+            continue;
+        };
+        // Which lane the item installs into. A bow is the one ranged type that goes LEFT.
+        let to_off = slot == 16 || (slot == 17 && item.inventory_type == 15);
+        let (mine, other) = if to_off {
+            (&mut off, &mut main)
+        } else {
+            (&mut main, &mut off)
+        };
+        if let Some(evicted) = *other {
+            let (m, o) = if to_off {
+                (evicted.inventory_type, item.inventory_type)
+            } else {
+                (item.inventory_type, evicted.inventory_type)
+            };
+            if !lanes_coexist(m, o) {
+                *other = None;
+            }
+        }
+        *mine = Some(item);
+    }
+
+    // Back into the enum array, each item at the slot its own inventory type names — so a bow that
+    // won the off lane still renders through the ranged arm (`placement`'s HandLeft), which is what
+    // the widget installs it as.
+    for slot in HELD_SLOTS {
+        equipment[slot] = CharEnumItem::default();
+    }
+    for item in [main, off].into_iter().flatten() {
+        if let Some(slot) = equip_slot(item.inventory_type) {
+            equipment[slot] = item;
+        }
+    }
+}
+
+/// `0x504bc0(mainInvType, offInvType, dualWield)` — may these two held lanes coexist?
+///
+/// TRUE only for a one-hand main (`WEAPON` 13 / `WEAPONMAINHAND` 21) beside a `SHIELD` (14) or
+/// `HOLDABLE` (23), plus the dual-wield arm for a `WEAPON` (13) / `WEAPONOFFHAND` (22) off-hand.
+/// Everything else — a two-hander beside anything, and **any** ranged type on either side —
+/// evicts.
+///
+/// **The dual-wield arm is taken as permitted, and that is a stated assumption.** The binary gates
+/// it on a global (`0xc4d770`) whose source wow-re could not identify, and we have no dual-wield
+/// capability streamed to read. Permitted is the conservative direction here: it evicts strictly
+/// less than the alternative, so it can only ever leave the pre-1076 behaviour in place for a
+/// melee pair — while the ranged evictions this record is actually about are unconditional in the
+/// binary and unaffected by the global either way.
+fn lanes_coexist(main: u8, off: u8) -> bool {
+    matches!(main, 13 | 21) && matches!(off, 13 | 14 | 22 | 23)
+}
+
 /// What the room is currently showing: the substitutions applied on top of the player's own gear,
 /// and the ones still waiting on a template answer.
 #[derive(Resource, Default)]
@@ -46,6 +135,12 @@ pub(crate) struct DressUpRoom {
     /// Resolved substitutions by equipment slot — `(display id, inventory type)`, the same pair the
     /// enum-shaped array carries.
     worn: [Option<CharEnumItem>; 19],
+    /// The **held** substitutions in the order they landed, most recent last (slots 15/16/17 only).
+    ///
+    /// The widget installs each try-on on top of the model it is already showing, and a held item
+    /// can *evict* the opposite lane, so which one arrived last decides what survives — a fact the
+    /// per-slot array above cannot express on its own. See [`held_lanes`] (decision 1076).
+    held_order: Vec<usize>,
     /// Item ids whose template has not answered yet, oldest first. Retried every frame; a
     /// substitution only becomes visible once its display id is known.
     pending: Vec<u32>,
@@ -58,6 +153,7 @@ impl DressUpRoom {
             DressUpIntent::Dress => {
                 self.open = true;
                 self.worn = Default::default();
+                self.held_order.clear();
                 self.pending.clear();
             }
             DressUpIntent::TryOn(item) => {
@@ -67,6 +163,7 @@ impl DressUpRoom {
             DressUpIntent::Close => {
                 self.open = false;
                 self.worn = Default::default();
+                self.held_order.clear();
                 self.pending.clear();
             }
         }
@@ -87,6 +184,11 @@ impl DressUpRoom {
                     display_id,
                     inventory_type,
                 });
+                // Held slots also record *when* they landed — the eviction law reads the order.
+                if HELD_SLOTS.contains(&slot) {
+                    self.held_order.retain(|&s| s != slot);
+                    self.held_order.push(slot);
+                }
             }
             // A non-worn item (a potion, a bag) resolves to no slot and simply previews nothing —
             // the reference's `TryOn` is equally happy to be handed one.
@@ -164,6 +266,8 @@ fn player_look(
             };
         }
     }
+    // …and then the widget's own two-lane law over the held triple (decision 1076).
+    held_lanes(&mut equipment, room);
     Some(DressUpLook {
         display_id: net.display_id?,
         race: s.unit_race()?,
@@ -346,5 +450,115 @@ mod tests {
         room.resolve_pending(&mut items, &cmds);
         assert!(room.pending.is_empty(), "resolved, just not worn anywhere");
         assert!(room.worn.iter().all(Option::is_none));
+    }
+
+    /// The director's report (2026-08-06): *"when I ctrl click a bow or cross bow I still see only
+    /// the swords no bow"*. Decision 1076 — the widget installs a tried-on ranged weapon at a hand,
+    /// and it coexists with neither melee lane, so the sword and shield go.
+    ///
+    /// Both ranged directions in one test because they evict *opposite* lanes in the binary and a
+    /// single-sided implementation would still pass one half: a bow takes the off lane (clearing
+    /// the main), a crossbow takes the main (clearing the off).
+    #[test]
+    fn a_tried_on_ranged_weapon_takes_a_hand_and_clears_the_melee_pair() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(1500, Some(worn("Worn Sword", 5500, 21))); // WEAPONMAINHAND
+        items.insert_template(1600, Some(worn("Worn Shield", 5600, 14))); // SHIELD
+        items.insert_template(2500, Some(worn("Short Bow", 8500, 15))); // RANGED
+        items.insert_template(2600, Some(worn("Crossbow", 8600, 26))); // RANGEDRIGHT
+        let store = player(&[(15, 1500), (16, 1600)]);
+
+        for (item, display, what) in [(2500u32, 8500u32, "bow"), (2600, 8600, "crossbow")] {
+            let mut room = DressUpRoom::default();
+            room.apply(DressUpIntent::Dress);
+            room.apply(DressUpIntent::TryOn(item));
+            room.resolve_pending(&mut items, &cmds);
+
+            let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+            assert_eq!(
+                look.equipment[17].display_id, display,
+                "the {what} is in the ranged slot, which is what puts it in a hand"
+            );
+            assert_eq!(
+                (look.equipment[15].display_id, look.equipment[16].display_id),
+                (0, 0),
+                "…and a ranged weapon coexists with neither melee lane (0x504bc0)"
+            );
+        }
+    }
+
+    /// The other half of the same law, and the reason the fix is not "always render slot 17": a
+    /// **worn** bow stays invisible. `Dress()`/`SetUnit` clone the live world model rather than
+    /// installing gear per slot, and there a ranged weapon shows only while ranged-drawn — our
+    /// booth is frozen melee-drawn. So the hunter standing in the room holds their sword.
+    #[test]
+    fn a_worn_ranged_weapon_is_not_shown_until_it_is_tried_on() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(1500, Some(worn("Worn Sword", 5500, 21)));
+        items.insert_template(1700, Some(worn("Worn Bow", 5700, 15)));
+        let store = player(&[(15, 1500), (17, 1700)]);
+
+        let mut room = DressUpRoom::default();
+        room.apply(DressUpIntent::Dress);
+        let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+        assert_eq!(
+            look.equipment[17].display_id, 0,
+            "the worn bow stays stowed"
+        );
+        assert_eq!(look.equipment[15].display_id, 5500, "the sword is in hand");
+    }
+
+    /// Eviction runs **both ways, in try-on order** — the half a "hide the melee pair whenever the
+    /// ranged slot is filled" shortcut would get wrong. Try on a bow, then a two-hander: the
+    /// two-hander takes the main lane and the bow, which can coexist with nothing, goes.
+    #[test]
+    fn a_later_melee_try_on_evicts_the_ranged_one() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(2500, Some(worn("Short Bow", 8500, 15)));
+        items.insert_template(2700, Some(worn("Great Axe", 8700, 17))); // TWOHAND
+        let store = player(&[]);
+
+        let mut room = DressUpRoom::default();
+        room.apply(DressUpIntent::Dress);
+        room.apply(DressUpIntent::TryOn(2500));
+        room.resolve_pending(&mut items, &cmds);
+        room.apply(DressUpIntent::TryOn(2700));
+        room.resolve_pending(&mut items, &cmds);
+
+        let look = player_look(&store, &net(), &room, &mut items, &cmds).expect("a look");
+        assert_eq!(look.equipment[15].display_id, 8700, "the axe is in hand");
+        assert_eq!(look.equipment[17].display_id, 0, "…and the bow is gone");
+    }
+
+    /// The lanes that DO coexist are left alone — a one-hander beside a shield is the ordinary case
+    /// and 1076 must not start evicting there. (A two-hander beside a shield is a different matter,
+    /// and the reference evicts that one; it is asserted in the same breath so the coexistence set
+    /// is pinned rather than merely "nothing changed".)
+    #[test]
+    fn a_shield_coexists_with_a_one_hander_but_not_with_a_two_hander() {
+        let (cmds, _rx) = commands();
+        let mut items = Items::default();
+        items.insert_template(1500, Some(worn("Worn Sword", 5500, 21)));
+        items.insert_template(1550, Some(worn("Worn Axe", 5550, 17))); // TWOHAND
+        items.insert_template(1600, Some(worn("Bright Shield", 5600, 14)));
+
+        let mut room = DressUpRoom::default();
+        room.apply(DressUpIntent::Dress);
+        room.apply(DressUpIntent::TryOn(1600));
+        room.resolve_pending(&mut items, &cmds);
+
+        let look = player_look(&player(&[(15, 1500)]), &net(), &room, &mut items, &cmds).unwrap();
+        assert_eq!(look.equipment[15].display_id, 5500, "the one-hander stays");
+        assert_eq!(look.equipment[16].display_id, 5600, "…beside the shield");
+
+        let look = player_look(&player(&[(15, 1550)]), &net(), &room, &mut items, &cmds).unwrap();
+        assert_eq!(
+            look.equipment[15].display_id, 0,
+            "the two-hander is evicted"
+        );
+        assert_eq!(look.equipment[16].display_id, 5600);
     }
 }

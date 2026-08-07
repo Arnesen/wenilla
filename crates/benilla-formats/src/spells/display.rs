@@ -102,13 +102,25 @@ pub struct SpellDisplay {
     pub start_recovery_category: u32,
     /// `StartRecoveryTime` ms (column 158) — the GCD duration (1500 for ordinary spells; 0 = no GCD).
     pub start_recovery_ms: u32,
-    /// `powerType` (column 31) — 0 mana, 1 rage, 3 energy (vmangos `Powers`).
+    /// `powerType` (column 31) — 0 mana, 1 rage, 3 energy (vmangos `Powers`); **health is the
+    /// signed −2 stored as `0xFFFFFFFE`** (Life Tap, Bloodrage, Health Funnel), which is why every
+    /// consumer treats "negative or ≥ 5" as the health lane (the ref's own fallback fork, 1074).
     pub power_type: u32,
     /// `manaCost` (column 32) — the flat cast cost in `power_type`'s unit.
     pub mana_cost: u32,
     /// `ManaCostPercentage` (column 156) — percent of base mana added to the flat cost (Judgement
     /// and kin); 0 for most spells.
     pub mana_cost_pct: u32,
+    /// `manaCostPerlevel` (column 33) — the per-level cost term (`0x6e31b0`'s
+    /// `(level − spellLevel) · perLevel`; 1074). 72 nonzero rows in the 5875 file, every one a
+    /// creature-cast spell (Dark Offering's health lane among them) — dormant for player
+    /// tooltips, modeled because the law and the data both carry it.
+    pub mana_cost_per_level: u32,
+    /// `manaPerSecond` (column 34) — the per-second maintenance component; the tooltip cost
+    /// cell's `_PER_TIME` composite ("11 Health, plus 5 per sec" — Health Funnel; 1074). The
+    /// sibling `manaPerSecondPerLevel` (35) is all-zero across the whole 5875 file
+    /// ([`catalog_tests`]'s column scan — a verified negative) and stays unparsed.
+    pub mana_per_second: u32,
     /// `rangeIndex` (column 36) — the `SpellRange.dbc` row ([`SpellRangeCatalog`]).
     pub range_index: u32,
     /// `Targets` (column 13, [`COL_TARGETS`]) — the `TARGET_FLAG_*` seed mask of the cast-arm's
@@ -263,6 +275,8 @@ impl Default for SpellDisplay {
             power_type: 0,
             mana_cost: 0,
             mana_cost_pct: 0,
+            mana_cost_per_level: 0,
+            mana_per_second: 0,
             range_index: 0,
             targets: 0,
             implicit_target_a1: 0,
@@ -507,6 +521,21 @@ impl SpellDisplay {
     /// test exactly these bits.
     pub fn on_next_swing(&self) -> bool {
         self.attributes & ATTR_ON_NEXT_SWING != 0
+    }
+
+    /// The tooltip cast cell's "Attack speed" arm — `Attributes & 0x2` ALONE (the byte test at
+    /// `0x52ec1c`: `test al,0x2`; 1074), NOT [`Self::ranged_attack`]'s or-pair: Throw carries
+    /// only `0x2` and still reads "Attack speed" in its cell.
+    pub fn tooltip_on_next_ranged(&self) -> bool {
+        self.attributes & ATTR_RANGED != 0
+    }
+
+    /// The tooltip cast cell's "Channeled" arm — `AttributesEx & 0x44` (`SPELL_ATTR_EX_CHANNELED`
+    /// both variants), the byte test at `0x52ec27` (`test [rec+0x1c],0x44`; wow-re
+    /// `tooltip-content-law.md` §3.4, folded as 1074). Distinct from
+    /// [`Self::channel_interrupt_flags`], which is the *running* channel's break mask.
+    pub fn tooltip_channeled(&self) -> bool {
+        self.attributes_ex & ATTR_EX_CHANNELED != 0
     }
 
     /// Whether *casting* this spell turns on the melee auto-attack **at the send** —

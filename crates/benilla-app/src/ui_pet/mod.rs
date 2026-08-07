@@ -149,8 +149,18 @@ impl Plugin for UiPetPlugin {
                 pet_stop_on_old_target_clear
                     .in_set(UnitFeed)
                     .before(feed_pet_bar),
-                feed_pet_bar.in_set(UnitFeed).before(UiInput),
-                feed_pet_unit.in_set(UnitFeed).before(UiInput),
+                // …and both event-firing feeds run AFTER the pet snapshot (decision 1073). Their
+                // events reach Lua synchronously, and the handlers read `HasPetUI()` — which is
+                // `crate::ui_pet_stats`'s push, not ours. Unordered, a cold summon fired both
+                // edges against last frame's answer and the Pet tab never came up.
+                feed_pet_bar
+                    .in_set(UnitFeed)
+                    .after(crate::ui_pet_stats::PetSnapshot)
+                    .before(UiInput),
+                feed_pet_unit
+                    .in_set(UnitFeed)
+                    .after(crate::ui_pet_stats::PetSnapshot)
+                    .before(UiInput),
                 feed_pet_menu.in_set(UnitFeed).before(UiInput),
                 drain_pet_actions.after(UiInput),
                 drain_pet_menu.after(UiInput),

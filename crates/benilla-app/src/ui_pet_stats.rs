@@ -67,13 +67,39 @@ pub(crate) struct PetFamilyTables {
     pub(crate) foods: benilla_formats::PetFoodNames,
 }
 
+/// **The pet snapshot must be pushed before anything fires an event whose handlers read it**
+/// (decision 1073). `fire_event` dispatches the Lua handlers *synchronously*, so a system that
+/// fires while this frame's `set_pet_stats` is still pending hands the VM last frame's answer —
+/// the codebase's own "push before firing" rule (`crate::ui_unit`), which held *inside* every
+/// feed but not *between* them.
+///
+/// It cost the Pet tab. `BenillaPetTab_Update` is edge-driven off `UNIT_PET` / `PET_BAR_UPDATE`
+/// and its whole predicate is `HasPetUI()`, which is this snapshot. With the three pet feeds
+/// merely unordered inside [`UnitFeed`], a cold first summon fired both edges while `HasPetUI()`
+/// still answered "no pet"; the push landed after, and since neither edge repeats, the tab stayed
+/// down for the rest of the session. Measured live, frame by frame: both events on frame 440 with
+/// `HasPetUI()=(nil,nil)`, the flip to `(1,nil)` on 441, and the tab still hidden 48 s later —
+/// while calling `BenillaPetTab_Update()` by hand raised it instantly.
+///
+/// A set rather than a pair of `.before()` calls because the constraint belongs to the *snapshot*,
+/// not to today's two consumers: anything that later fires a pet event inherits it by ordering
+/// after this, and does not have to rediscover why.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PetSnapshot;
+
 pub(crate) struct UiPetStatsPlugin;
 
 impl Plugin for UiPetStatsPlugin {
     fn build(&self, app: &mut App) {
         // Rides the unit feed beside the pet bar's own, and before the VM ticks — the pet frame
         // repaints out of the same pass that pushes its health.
-        app.add_systems(Update, feed_pet_stats.in_set(UnitFeed).before(UiInput));
+        app.add_systems(
+            Update,
+            feed_pet_stats
+                .in_set(UnitFeed)
+                .in_set(PetSnapshot)
+                .before(UiInput),
+        );
     }
 }
 
@@ -651,5 +677,78 @@ mod tests {
         let (_, s) = stats_for(None, Some(&hunter()), None, (Some("Imp".into()), vec![]));
         assert_eq!(s.family, None);
         assert!(s.food_types.is_empty());
+    }
+
+    /// **The schedule invariant, not the function's** (decision 1073): by the time `UNIT_PET`
+    /// reaches a Lua handler, `HasPetUI()` must already answer for the pet that event announces.
+    ///
+    /// This is the Pet-tab bug in its smallest reproducible form, and it is only visible from a
+    /// real `App`: every unit test above calls `stats_for` directly and passes whatever the
+    /// ordering does. Driven through **one** `app.update()` on a cold pet — the exact live shape,
+    /// where `feed_pet_unit` sees the guid appear and fires while `feed_pet_stats` has or has not
+    /// yet pushed. A handler that reads `HasPetUI()` at that instant is what the shipped
+    /// `BenillaPetTab_Update` is, minus the frames.
+    #[test]
+    fn unit_pet_reaches_lua_with_has_pet_ui_already_true() {
+        use crate::char_select::ClientState;
+        use crate::net::GuidIndex;
+        use crate::ui_pet::UiPetPlugin;
+
+        const PET_GUID: u64 = 0xf140_0000_0000_002a;
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::InWorld)
+            .init_resource::<NameCache>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<crate::target::Selection>()
+            .init_resource::<crate::net::SelfGuid>()
+            .init_resource::<crate::ui_script::UiClock>()
+            .init_resource::<crate::ui_action::UiErrorKeys>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_cast::QueuedMeleeSpell>()
+            .init_resource::<crate::ui_action::AutoRepeatActive>()
+            .add_message::<crate::creature_anim::SheathRequest>()
+            .insert_resource(NetCommands(tx))
+            .add_plugins((UiPetStatsPlugin, UiPetPlugin));
+
+        // The pet is already in the world when the bar's guid lands — the cold-summon shape.
+        let pet = app.world_mut().spawn(boar()).id();
+        app.world_mut()
+            .resource_mut::<GuidIndex>()
+            .0
+            .insert(PET_GUID, pet);
+        app.world_mut().resource_mut::<PetBar>().spells.pet_guid = PET_GUID;
+
+        // A bare frame standing in for the pet page: it records what `HasPetUI()` answered at the
+        // moment the event was dispatched, which is the only thing under test.
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                BENILLA_SAW = "never fired"
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("UNIT_PET")
+                f:SetScript("OnEvent", function()
+                    BENILLA_SAW = HasPetUI() and "has pet UI" or "no pet UI"
+                end)
+                "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+
+        app.update();
+
+        let saw: String = app
+            .world_mut()
+            .non_send_resource::<UiScript>()
+            .eval("return BENILLA_SAW")
+            .unwrap();
+        assert_eq!(
+            saw, "has pet UI",
+            "UNIT_PET must not reach Lua ahead of the snapshot its handlers read — unordered, \
+             this answered \"no pet UI\" and the Pet tab stayed down for the session"
+        );
     }
 }

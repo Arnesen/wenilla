@@ -279,18 +279,18 @@ impl EditBoxState {
     /// [`Self::index_at_x`] restricted to the boundary range `[start, end]` of `display` —
     /// the per-row walk of the 2-D law ([`Self::index_at_pos`]). `x` is measured from
     /// `advances[start]`.
+    ///
+    /// The candidates are the **reachable cursor stops**, not every char boundary: the client's
+    /// hit-test converts its glyph index through the same token walk everything else uses, with
+    /// `atomicLinks = 0` (`0x77d0d0`, `6a 00` @`0x77d2f6`), so a click stops on each visible
+    /// character of a link's text but can never land inside an escape (decision 1077).
     fn index_at_x_in(&self, x: f32, start: usize, end: usize, display: &str) -> usize {
         if self.advances.len() != display.len() + 1 {
             return end;
         }
         let origin = self.advances[start];
         let mut prev = start;
-        for b in display[start..end]
-            .char_indices()
-            .map(|(b, _)| start + b)
-            .skip(1)
-            .chain([end])
-        {
+        for b in self.stops_in(start, end, display) {
             if self.advances[b] - origin >= x {
                 // x lies between boundaries `prev` and `b` — pick the nearer.
                 return if x - (self.advances[prev] - origin) <= (self.advances[b] - origin) - x {
@@ -302,6 +302,26 @@ impl EditBoxState {
             prev = b;
         }
         end
+    }
+
+    /// The cursor stops strictly inside `(start, end]` of `display`, in order — the mouse-path walk
+    /// of [`crate::markup::ClassMap::advance`] (`atomic_links = false`). Always ends at `end`.
+    fn stops_in(&self, start: usize, end: usize, display: &str) -> Vec<usize> {
+        let map = crate::markup::ClassMap::new(display);
+        let mut stops = Vec::new();
+        let mut at = start;
+        loop {
+            let next = map.advance(at, 1, false).min(end);
+            if next <= at {
+                break;
+            }
+            stops.push(next);
+            at = next;
+        }
+        if stops.last() != Some(&end) {
+            stops.push(end);
+        }
+        stops
     }
 
     /// The wrapped row index containing DISPLAY byte `b` — the last row whose start is ≤ `b`
@@ -511,6 +531,13 @@ impl EditBoxState {
         if self.numeric && !ins.chars().all(|c| c.is_ascii_digit()) {
             return EditOutcome::default();
         }
+        // Refused outright with the caret strictly inside a hyperlink — the opening guard of
+        // `0x77bee0` (decision 1077). Only the mouse can put the caret there (the keyboard treats a
+        // link as one unit), and the client then silently swallows the typing rather than letting
+        // it split `|Hitem:…|h[Name]|h` into something unclickable.
+        if !crate::markup::ClassMap::new(&self.text).insert_allowed(self.cursor) {
+            return EditOutcome::default();
+        }
         self.end_history_browse(); // a typed edit turns a recalled line into an ordinary draft
         self.delete_selection();
         self.text.insert_str(self.cursor, ins);
@@ -603,17 +630,16 @@ impl EditBoxState {
                 self.delete_selection();
                 break 'del true;
             }
-            if forward {
-                if self.cursor < self.text.len() {
-                    let end = next_boundary(&self.text, self.cursor);
-                    self.text.replace_range(self.cursor..end, "");
-                    break 'del true;
-                }
-            } else if self.cursor > 0 {
-                let start = prev_boundary(&self.text, self.cursor);
-                self.text.replace_range(start..self.cursor, "");
-                self.cursor = start;
-                self.collapse();
+            // One ATOMIC token step, then the endpoint snap — `0x77c280(±1)` passes
+            // `atomicLinks = 1` (`6a 01` @`0x77c2a3`) and hands the span to `0x77c510`, so one
+            // BACKSPACE takes a whole item link, escapes and trailing `|r` included (1077).
+            let target = crate::markup::ClassMap::new(&self.text).advance(
+                self.cursor,
+                if forward { 1 } else { -1 },
+                true,
+            );
+            if target != self.cursor {
+                self.delete_span(target.min(self.cursor)..target.max(self.cursor));
                 break 'del true;
             }
             false
@@ -636,9 +662,7 @@ impl EditBoxState {
             if a == b {
                 false
             } else {
-                self.text.replace_range(a..b, "");
-                self.cursor = a;
-                self.collapse();
+                self.delete_span(a..b);
                 true
             }
         };
@@ -651,12 +675,12 @@ impl EditBoxState {
     /// LEFT/RIGHT one char: `extend` drags the selection from its fixed anchor; otherwise the caret
     /// collapses onto the selection edge (when there is one) or steps one char.
     pub fn move_by_char(&mut self, right: bool, extend: bool) {
+        // One TOKEN step, links atomic — `0x77bb30(±1, atomicLinks = 1)`, which every arrow path
+        // reaches (`6a 01` @`0x77c6d2`). So one press crosses a whole `|cff…|Hitem:…|h[Name]|h|r`
+        // rather than stepping into the middle of an escape, and Shift+arrow selects all of it
+        // (decision 1077). Not a char step: an escape byte is not a cursor position.
         let step = |s: &str, i: usize| {
-            if right {
-                next_boundary(s, i)
-            } else {
-                prev_boundary(s, i)
-            }
+            crate::markup::ClassMap::new(s).advance(i, if right { 1 } else { -1 }, true)
         };
         if extend {
             let anchor = self.selection_anchor();
@@ -672,9 +696,27 @@ impl EditBoxState {
         self.reset_blink();
     }
 
-    /// Ctrl/Option+arrow: the caret to the next [`word_boundary`](Self::word_boundary).
+    /// Ctrl/Option+arrow: the caret to the next [`word_boundary`](Self::word_boundary) — reached as
+    /// a **loop of single atomic steps** (`0x77c8c0`/`0x77c7a0` loop `0x77c6b0`), so the landing
+    /// place is always a reachable stop even when the word target falls inside an escape or
+    /// part-way through a link (decision 1077).
     pub fn move_by_word(&mut self, right: bool, extend: bool) {
-        let target = self.word_boundary(right);
+        let word = self.word_boundary(right);
+        let mut target = self.cursor;
+        loop {
+            let next = crate::markup::ClassMap::new(&self.text).advance(
+                target,
+                if right { 1 } else { -1 },
+                true,
+            );
+            if next == target || (right && next > word) || (!right && next < word) {
+                break;
+            }
+            target = next;
+            if target == word {
+                break;
+            }
+        }
         self.move_caret_to(target, extend);
     }
 
@@ -708,8 +750,17 @@ impl EditBoxState {
             self.sel_start.min(self.sel_end),
             self.sel_start.max(self.sel_end),
         );
-        self.text.replace_range(a..b, "");
-        self.cursor = a;
+        self.delete_span(a..b);
+    }
+
+    /// Remove a byte span, first widening it out of any hyperlink it cuts — `0x77c510` (decision
+    /// 1077), the second guarantee under the atomic walk: a mouse-drag selection that clips half an
+    /// item link still deletes the whole `|c…|H…|h[text]|h|r` unit rather than leaving orphaned
+    /// escape bytes. The caret collapses to the widened span's left edge.
+    fn delete_span(&mut self, span: std::ops::Range<usize>) {
+        let span = crate::markup::ClassMap::new(&self.text).snap_delete_range(span);
+        self.cursor = span.start;
+        self.text.replace_range(span, "");
         self.collapse();
     }
 
@@ -744,8 +795,25 @@ impl EditBoxState {
             }
         }
         if self.max_letters > 0 {
-            while self.text.chars().count() > self.max_letters {
-                self.text.pop();
+            // LETTERS, not chars: `0x77bc80` counts classes 2, 3 and 6 only, so a 48-byte item link
+            // costs 14 against `maxLetters` — its visible `[Chipped Claw]` and nothing more
+            // (decision 1077). Counting raw chars made a 255-letter chat line fill up three times
+            // too fast once it held links.
+            //
+            // The trim pops through `0x77c280(-1)` — the BACKSPACE primitive, `atomicLinks = 1` —
+            // re-counting the whole buffer after every pop (`0x77c0e4`). So an over-long buffer
+            // sheds a whole hyperlink in one bite, exactly as a keypress would, and can never shear
+            // an escape in half.
+            loop {
+                let map = crate::markup::ClassMap::new(&self.text);
+                if map.num_letters() <= self.max_letters {
+                    break;
+                }
+                let cut = map.advance(self.text.len(), -1, true);
+                if cut >= self.text.len() {
+                    break;
+                }
+                self.text.truncate(cut);
             }
         }
         let len = self.text.len();
@@ -762,30 +830,6 @@ fn snap_down(s: &str, i: usize) -> usize {
         i -= 1;
     }
     i
-}
-
-/// The next char boundary strictly after `i` (clamped to `len`).
-fn next_boundary(s: &str, i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    let mut j = i + 1;
-    while j < s.len() && !s.is_char_boundary(j) {
-        j += 1;
-    }
-    j
-}
-
-/// The char boundary strictly before `i` (clamped to `0`).
-fn prev_boundary(s: &str, i: usize) -> usize {
-    if i == 0 {
-        return 0;
-    }
-    let mut j = i - 1;
-    while j > 0 && !s.is_char_boundary(j) {
-        j -= 1;
-    }
-    j
 }
 
 #[cfg(test)]

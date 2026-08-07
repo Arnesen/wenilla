@@ -243,6 +243,62 @@ fn xp_loss_two_step_confirm_then_range_hide() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// A cancelled confirm comes back on the next ask (decision 1068, B80): every CONFIRM_XP_LOSS
+/// fire re-shows the dialog — the feed fires per SMSG, and this guards the Lua half of that
+/// contract. And the XP_LOSS dialogs carry the ref's alert dress (StaticPopup.lua l.1579-1589):
+/// width 420 with the AlertIcon shown, reset to 320/hidden for a non-alert entry on the same
+/// instance.
+#[test]
+fn xp_loss_cancel_then_reconfirm_reshows_with_the_alert_dress() {
+    let mut s = setup();
+    s.set_death(DeathUiState {
+        sickness_duration: Some("8 minutes".into()),
+        spirit_healer_in_range: true,
+        ..Default::default()
+    });
+    s.fire_event("CONFIRM_XP_LOSS", vec![]);
+    assert!(s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    assert_eq!(
+        s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
+        420.0,
+        "showAlert widens the dialog to the ref's 420"
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup1AlertIcon:IsShown()")
+            .unwrap(),
+        "showAlert shows the DialogAlertIcon"
+    );
+    // Cancel: nothing queues, nothing on the wire — the dialog just hides.
+    s.run("this = StaticPopup1Button2 StaticPopup_OnClick(StaticPopup1, 2) this = nil")
+        .unwrap();
+    assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
+    assert!(s.take_death_actions().is_empty());
+    // Asking the healer again = a fresh SMSG = the feed fires again: the confirm is back.
+    s.fire_event("CONFIRM_XP_LOSS", vec![]);
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "a fresh confirm re-shows after a Cancel (B80's deadlock)"
+    );
+    s.run("StaticPopup_Hide(\"XP_LOSS\")").unwrap();
+    // A non-alert entry on the same instance resets the dress — Show's unconditional reset.
+    s.run(concat!(
+        "StaticPopupDialogs[\"TEST_PLAIN\"] = { text = \"x\", button1 = \"OK\", timeout = 0, ",
+        "whileDead = 1 } StaticPopup_Show(\"TEST_PLAIN\")"
+    ))
+    .unwrap();
+    assert_eq!(
+        s.eval::<f64>("return StaticPopup1:GetWidth()").unwrap(),
+        320.0,
+        "a non-alert Show resets the width"
+    );
+    assert!(
+        !s.eval::<bool>("return StaticPopup1AlertIcon:IsShown()")
+            .unwrap(),
+        "a non-alert Show hides the icon"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// UnitIsGhost/UnitIsDeadOrGhost — the trio's ghost legs (a ghost has health 1, so UnitIsDead is
 /// false for it; decision 0308 §1).
 #[test]

@@ -16,9 +16,9 @@ pub(super) const PORTRAIT_FOV: f32 = 0.5;
 
 /// `1/√(aspect²+1)` at the diagonal-FOV convention's aspect 4/3 = 3/5 exactly — the record-fov →
 /// vertical-half-angle factor (the community's "fov × 0.6" legend, emergent not prescaled). The
-/// 4/3 enters ONLY this crop factor now: the projection matrix itself runs aspect 1.0 (square-true
-/// proportions — the director's ref A/B falsified the on-screen anamorphic squeeze; wow-re §4
-/// reconciliation dispatched).
+/// 4/3 enters ONLY this crop factor: the projection matrix itself carries no anamorphic squeeze
+/// (the director's ref A/B falsified it on screen; wow-re §4 reconciliation dispatched) — its
+/// `aspect` is the DESTINATION PANE's, and exists purely to cancel the UI's stretch (1069).
 pub(super) const DIAG_TO_VERT: f32 = 0.6;
 
 /// The real client's portrait **projection** (wow-re portrait-render §4, corrected `aa186e79`):
@@ -30,7 +30,7 @@ pub(super) const DIAG_TO_VERT: f32 = 0.6;
 ///
 /// Carried as a custom [`CameraProjection`] rather than a `PerspectiveProjection` because the
 /// camera system re-derives `aspect_ratio` from the (square) render target on every projection
-/// write — it would stomp the 4/3. `update` is a deliberate no-op: the ref mapping is
+/// write — it would stomp ours. `update` is a deliberate no-op: the ref mapping is
 /// target-size-independent too (its 64×64 surface is forced by a hardcoded scissor).
 #[derive(Debug, Clone)]
 pub(super) struct WowPortraitProjection {
@@ -38,6 +38,18 @@ pub(super) struct WowPortraitProjection {
     pub(super) fov: f32,
     pub(super) near: f32,
     pub(super) far: f32,
+    /// The **destination pane's** width ÷ height.
+    ///
+    /// A booth renders into a *square* target that the UI then stretches to fill whatever rect the
+    /// sampling region resolves to (`extract`'s `UvRect::FULL`). So the on-screen proportions are
+    /// only true when the projection runs at the **pane's** aspect: the projection squeezes by
+    /// `1/aspect` horizontally, the stretch undoes it exactly, and a sphere lands round. Rendering
+    /// at 1.0 into a 316×351 pane is what made every dressing-room character 11% too tall
+    /// (director report, 2026-08-06 — decision 1069).
+    ///
+    /// 1.0 for a round portrait: its region is square by construction (the circular mask is
+    /// inscribed in it), so there is nothing to cancel.
+    pub(super) aspect: f32,
 }
 
 impl WowPortraitProjection {
@@ -49,14 +61,16 @@ impl WowPortraitProjection {
 
 impl CameraProjection for WowPortraitProjection {
     fn get_clip_from_view(&self) -> Mat4 {
-        // Aspect 1.0 — square-true proportions. The 4/3 anamorphic squeeze wow-re's §4 verdict
-        // prescribed rendered visibly TALLER faces than the reference's on-screen portrait (the
-        // director's A/B, 2026-07-06) — the director's capture is ground truth, so the squeeze is
-        // out pending wow-re's reconciliation (their first reading WAS aspect ≈ 1; the display
-        // path may also compensate). The 0.6 diag→vert factor stays: the crop tightness matched
-        // refs and is aspect-derivation-independent on screen. Bevy-native reverse-z infinite
-        // depth (the record far — 27.8 — never clips a model-local portrait).
-        Mat4::perspective_infinite_reverse_rh(self.fovy(), 1.0, self.near)
+        // No anamorphic squeeze — square-true proportions ON SCREEN, which is what `aspect` (the
+        // destination pane's, not the render target's) buys: it cancels the UI's stretch rather
+        // than adding a distortion of its own. The 4/3 squeeze wow-re's §4 verdict prescribed
+        // rendered visibly TALLER faces than the reference's on-screen portrait (the director's
+        // A/B, 2026-07-06) — the director's capture is ground truth, so the squeeze is out pending
+        // wow-re's reconciliation (their first reading WAS aspect ≈ 1; the display path may also
+        // compensate). The 0.6 diag→vert factor stays: the crop tightness matched refs and is
+        // aspect-derivation-independent on screen. Bevy-native reverse-z infinite depth (the
+        // record far — 27.8 — never clips a model-local portrait).
+        Mat4::perspective_infinite_reverse_rh(self.fovy(), self.aspect, self.near)
     }
 
     fn get_clip_from_view_for_sub(&self, _sub_view: &SubCameraView) -> Mat4 {
@@ -70,19 +84,22 @@ impl CameraProjection for WowPortraitProjection {
     }
 
     fn get_frustum_corners(&self, z_near: f32, z_far: f32) -> [Vec3A; 8] {
-        // Mirrors PerspectiveProjection's corner layout at our fovy + fixed 4/3 aspect.
+        // Mirrors PerspectiveProjection's corner layout at our fovy, widened by `aspect` in x
+        // exactly as the matrix is — a corner set that disagreed with the matrix would cull models
+        // that do render (and vice versa).
         let tan_half_fovy = (self.fovy() * 0.5).tan();
         let a = z_near.abs() * tan_half_fovy;
         let b = z_far.abs() * tan_half_fovy;
+        let (ax, bx) = (a * self.aspect, b * self.aspect);
         [
-            Vec3A::new(a, -a, z_near),  // bottom right
-            Vec3A::new(a, a, z_near),   // top right
-            Vec3A::new(-a, a, z_near),  // top left
-            Vec3A::new(-a, -a, z_near), // bottom left
-            Vec3A::new(b, -b, z_far),   // bottom right
-            Vec3A::new(b, b, z_far),    // top right
-            Vec3A::new(-b, b, z_far),   // top left
-            Vec3A::new(-b, -b, z_far),  // bottom left
+            Vec3A::new(ax, -a, z_near),  // bottom right
+            Vec3A::new(ax, a, z_near),   // top right
+            Vec3A::new(-ax, a, z_near),  // top left
+            Vec3A::new(-ax, -a, z_near), // bottom left
+            Vec3A::new(bx, -b, z_far),   // bottom right
+            Vec3A::new(bx, b, z_far),    // top right
+            Vec3A::new(-bx, b, z_far),   // top left
+            Vec3A::new(-bx, -b, z_far),  // bottom left
         ]
     }
 }
@@ -180,6 +197,9 @@ pub(super) fn frame(a: &PortraitAnchors) -> (Transform, Projection) {
                 fov: cam.fov,
                 near: cam.near,
                 far: cam.far,
+                // A round portrait's sampling region is square by construction (the mask is the
+                // inscribed circle) — nothing to cancel.
+                aspect: 1.0,
             }),
         );
     }
@@ -244,7 +264,11 @@ const BODY_WIDTH_MARGIN: f32 = 1.15;
 /// through [`WowPortraitProjection`]'s vertical opening (half-angle `0.3·BODY_FOV`, computed the
 /// same way here so the fit is exact), looking at the span's centre. Projection reused from the
 /// portrait path for module consistency — square-true, no anamorphic squeeze (decision 0116).
-pub(super) fn body_frame(a: &PortraitAnchors) -> (Transform, Projection) {
+///
+/// `aspect` is the **destination pane's** width ÷ height ([`WowPortraitProjection::aspect`]): it
+/// widens the horizontal opening, so the figure keeps its proportions once the UI stretches the
+/// square bake into a non-square pane (decision 1069).
+pub(super) fn body_frame(a: &PortraitAnchors, aspect: f32) -> (Transform, Projection) {
     // Head/neck height signal (feet at Y=0). The neck pivot (attach-17.z, every character carries
     // it), the authored bust camera's look target, and the head-bone anchor all land near the
     // throat/face — take the tallest, floored off zero for a hypothetical bounds-less display.
@@ -255,10 +279,10 @@ pub(super) fn body_frame(a: &PortraitAnchors) -> (Transform, Projection) {
         .max(0.1);
     let top = BODY_HEADROOM * head_signal;
     let bottom = -BODY_FOOTROOM * head_signal;
-    // The square target renders aspect 1.0 (WowPortraitProjection), so the horizontal opening equals
-    // the vertical — floor the fitted height by the footprint width so a wide model can't out-reach
-    // the sides.
-    let window = (top - bottom).max(2.0 * BODY_WIDTH_MARGIN * a.ground_radius);
+    // The horizontal opening is `aspect ×` the vertical, so a width that must fit costs
+    // `width / aspect` of vertical window — floor the fitted height by it, so a wide model can't
+    // out-reach the sides (and a *narrow* pane, aspect < 1, gets the extra room it needs).
+    let window = (top - bottom).max(2.0 * BODY_WIDTH_MARGIN * a.ground_radius / aspect.max(1e-3));
     let center_y = 0.5 * (top + bottom);
 
     // Distance that exactly fits `window` through the projection's vertical opening. Half-angle is
@@ -274,6 +298,7 @@ pub(super) fn body_frame(a: &PortraitAnchors) -> (Transform, Projection) {
             fov: BODY_FOV,
             near: 0.02,
             far: 100.0,
+            aspect,
         }),
     )
 }
@@ -282,11 +307,15 @@ pub(super) fn body_frame(a: &PortraitAnchors) -> (Transform, Projection) {
 mod tests {
     use super::*;
 
-    /// Perspective-divided clip-space Y of a model-local point through a `body_frame` rig — the value
-    /// the rasteriser clips against (inside the frame ⇔ `|ndc_y| < 1`).
-    fn ndc_y(transform: &Transform, proj: &WowPortraitProjection, p: Vec3) -> f32 {
+    /// Perspective-divided clip-space XY of a model-local point through a `body_frame` rig — the
+    /// values the rasteriser clips against (inside the frame ⇔ both `|ndc| < 1`).
+    fn ndc(transform: &Transform, proj: &WowPortraitProjection, p: Vec3) -> Vec2 {
         let clip = proj.get_clip_from_view() * transform.to_matrix().inverse() * p.extend(1.0);
-        clip.y / clip.w
+        Vec2::new(clip.x / clip.w, clip.y / clip.w)
+    }
+
+    fn ndc_y(transform: &Transform, proj: &WowPortraitProjection, p: Vec3) -> f32 {
+        ndc(transform, proj, p).y
     }
 
     /// The bounds→camera fit must keep both **feet and crown** inside the frame with air to spare,
@@ -294,40 +323,81 @@ mod tests {
     /// and the distance math against a regression (a flipped axis or a wrong half-angle would crop).
     #[test]
     fn body_frame_never_crops_feet_or_crown() {
-        for &signal in &[0.88_f32, 1.90, 2.60] {
+        // Every pane aspect the shipped windows use: the paper doll's 233×224, the dressing room's
+        // 316×351, and the square default a booth runs at before its pane has been seen.
+        for &aspect in &[1.0_f32, 233.0 / 224.0, 316.0 / 351.0] {
+            for &signal in &[0.88_f32, 1.90, 2.60] {
+                let anchors = PortraitAnchors {
+                    camera: None,
+                    head: None,
+                    pivot_height: signal,
+                    ground_radius: 0.35,
+                };
+                let (transform, projection) = body_frame(&anchors, aspect);
+                let proj = WowPortraitProjection {
+                    fov: BODY_FOV,
+                    near: 0.02,
+                    far: 100.0,
+                    aspect,
+                };
+                // Feet at the origin; a conservatively-high crown estimate (throat/face signal is
+                // ~0.9 of standing height, so the crown sits a little above `signal`).
+                let feet = ndc_y(&transform, &proj, Vec3::ZERO);
+                let crown = ndc_y(&transform, &proj, Vec3::new(0.0, 1.12 * signal, 0.0));
+                assert!(
+                    feet < 0.0,
+                    "feet should sit below frame centre, got ndc_y {feet}"
+                );
+                assert!(
+                    crown > 0.0,
+                    "crown should sit above frame centre, got ndc_y {crown}"
+                );
+                assert!(
+                    feet.abs() < 0.95,
+                    "feet cropped / no ground room (ndc_y {feet}) at signal {signal}, aspect {aspect}"
+                );
+                assert!(
+                    crown < 0.95,
+                    "crown cropped / no headroom (ndc_y {crown}) at signal {signal}, aspect {aspect}"
+                );
+                let _ = projection; // the rig carries the same projection the test rebuilds
+            }
+        }
+    }
+
+    /// **The 1069 defect, pinned.** A booth bakes into a *square* target that the UI stretches into
+    /// the pane's rect, so a figure only keeps its proportions when the projection runs at the
+    /// pane's aspect. Measured the way the eye does: screen pixels per model yard, sideways vs
+    /// upward, at the framed figure's own centre. Before 1069 the dressing room's 316×351 pane read
+    /// 1.111 — an 11% vertical stretch, which is exactly what the director saw.
+    #[test]
+    fn a_pane_shows_the_figure_unstretched_at_any_aspect() {
+        for &(w, h) in &[(316.0_f32, 351.0_f32), (233.0, 224.0), (512.0, 512.0)] {
+            let aspect = w / h;
             let anchors = PortraitAnchors {
                 camera: None,
                 head: None,
-                pivot_height: signal,
+                pivot_height: 1.90,
                 ground_radius: 0.35,
             };
-            let (transform, projection) = body_frame(&anchors);
+            let (transform, _) = body_frame(&anchors, aspect);
             let proj = WowPortraitProjection {
                 fov: BODY_FOV,
                 near: 0.02,
                 far: 100.0,
+                aspect,
             };
-            // Feet at the origin; a conservatively-high crown estimate (throat/face signal is ~0.9 of
-            // standing height, so the crown sits a little above `signal`).
-            let feet = ndc_y(&transform, &proj, Vec3::ZERO);
-            let crown = ndc_y(&transform, &proj, Vec3::new(0.0, 1.12 * signal, 0.0));
+            // A small cross at the framing centre — the on-screen size of each arm, in pane pixels.
+            let mid = Vec3::new(0.0, transform.translation.y, 0.0);
+            let step = 0.05_f32;
+            let o = ndc(&transform, &proj, mid);
+            let px_x = (ndc(&transform, &proj, mid + Vec3::X * step).x - o.x).abs() * 0.5 * w;
+            let px_y = (ndc(&transform, &proj, mid + Vec3::Y * step).y - o.y).abs() * 0.5 * h;
+            let stretch = px_y / px_x;
             assert!(
-                feet < 0.0,
-                "feet should sit below frame centre, got ndc_y {feet}"
+                (stretch - 1.0).abs() < 0.005,
+                "a {w}×{h} pane stretches the figure by {stretch} (1.0 = round)"
             );
-            assert!(
-                crown > 0.0,
-                "crown should sit above frame centre, got ndc_y {crown}"
-            );
-            assert!(
-                feet.abs() < 0.95,
-                "feet cropped / no ground room (ndc_y {feet}) at signal {signal}"
-            );
-            assert!(
-                crown < 0.95,
-                "crown cropped / no headroom (ndc_y {crown}) at signal {signal}"
-            );
-            let _ = projection; // the rig carries the same projection the test rebuilds
         }
     }
 }

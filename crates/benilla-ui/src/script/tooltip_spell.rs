@@ -45,12 +45,14 @@ pub struct SpellTooltipView {
     /// flag, so an undispellable aura (Stealth) carries `None`. Rendered GOLD, like the aura name
     /// it shares its line with — not the spell variant's gray.
     pub dispel_type: Option<String>,
-    /// "35 Mana" / "20 Rage" / "Next melee" — the cost cell.
+    /// "35 Mana" / "20 Rage" / "20 Health" / "11 Health, plus 5 per sec" — the cost cell: the
+    /// RESOLVED cost through the power-type key array with the health fallback (1074).
     pub cost: Option<String>,
     /// "30 yd range" — the range cell.
     pub range: Option<String>,
-    /// "1.5 sec cast" / "Instant cast" / "Instant" — `None` = a passive spell: the whole
-    /// casttime|cooldown line is omitted (the verified law; never a "Passive" text line).
+    /// "1.5 sec cast" / "Instant cast" / "Instant" / "Next melee" / "Attack speed" /
+    /// "Channeled" — `None` = a passive spell: the whole casttime|cooldown line is omitted
+    /// (the verified law; never a "Passive" text line).
     pub cast_time: Option<String>,
     /// "15 sec cooldown" — the cooldown cell: `max(RecoveryTime, CategoryRecoveryTime)` (the
     /// 0276 line law §3.4 — Charge's 15 s lives in the CATEGORY column).

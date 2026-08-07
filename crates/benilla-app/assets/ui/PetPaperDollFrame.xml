@@ -401,7 +401,18 @@
                 <Size><AbsDimension x="318" y="224"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="25" y="-78"/></Offset></Anchor></Anchors>
                 <Layers>
-                    <Layer level="ARTWORK">
+                    <!-- BACKGROUND, not ARTWORK — see decision 1070. The booth quad stands in for a
+                         <PlayerModel> WIDGET, whose 3D content the reference renders outside the
+                         layer batches entirely and with a transparent background; ours is one
+                         OPAQUE texture inside them. The draw layer is BUCKET-WIDE and outranks the
+                         frame (0884), so at ARTWORK this quad painted over every same-level sibling
+                         region below OVERLAY — which is exactly how the diet icon two frames down
+                         (BACKGROUND, the reference's own layer for it) became a mouse-enabled hole
+                         with a working tooltip and nothing drawn (director, 2026-08-06). Sitting at
+                         BACKGROUND, the pane's single region ties with such siblings and the link
+                         stamp decides, restoring the reference's declaration order. A pane can only
+                         ever stop covering things this way, never start. -->
+                    <Layer level="BACKGROUND">
                         <Texture name="$parentTexture">
                             <Size><AbsDimension x="318" y="224"/></Size>
                             <Anchors><Anchor point="TOPLEFT"/></Anchors>

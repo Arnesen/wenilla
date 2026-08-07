@@ -340,8 +340,10 @@ const GO_TYPE_FISHINGHOLE: i32 = 25;
 /// CURSOR (and, via it, the click) only — the mouseover tooltip is *not* coupled to it
 /// (§5-VERIFIED, wow-re 2026-07-20): the pick registers every GO regardless of highlightable and
 /// the publisher dispatches the tooltip by kind, so a GENERIC(5) signpost tooltips (0349's
-/// reference close-up) while showing no cursor.
-fn go_highlightable(store: &ObjectStore, reaction: Option<u8>) -> bool {
+/// reference close-up) while showing no cursor. Also the GO pick's **pass-2 priority** (decision
+/// 1071): the reference's classify `0x480c90` ranks a highlightable GameObject `1` (via
+/// `0x5f8800`, this same strategy `+0x14` predicate), else `0`.
+pub(super) fn go_highlightable(store: &ObjectStore, reaction: Option<u8>) -> bool {
     highlightable_flags(
         store.0.gameobject_type_id(),
         store.0.gameobject_flags(),

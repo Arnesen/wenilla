@@ -1013,3 +1013,106 @@ fn gcd_wildcard_and_shape_corners_hold_on_the_real_data() {
         (133, 0)
     );
 }
+
+/// The cost columns on the REAL 5875 data (decision 1074, B192): the health power type
+/// (−2 as `0xFFFFFFFE`), Bloodrage's pct-only shape, Health Funnel's `manaPerSecond`, the cast
+/// cell's attr rows, and the verified NEGATIVE that keeps columns 33/35 unparsed. Skips without
+/// client data.
+#[test]
+fn real_spell_catalog_cost_columns() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+
+    // Life Tap, EVERY rank: health type and NO cost columns at all — the client's own file,
+    // against the folk memory of a printed health cost (that is 2.x's change; 1.12 carries the
+    // trade in the description text). The cost cell stays EMPTY, which is the reference render.
+    for id in [1454u32, 1455, 1456, 11687, 11688, 11689] {
+        let d = cat.get(id).unwrap();
+        assert_eq!(
+            (
+                d.power_type,
+                d.mana_cost,
+                d.mana_cost_pct,
+                d.mana_per_second
+            ),
+            (0xFFFF_FFFE, 0, 0, 0),
+            "Life Tap {id}"
+        );
+    }
+    // Bloodrage: pct-ONLY health cost — the resolved-cost law's health-pool lane (B192).
+    let bloodrage = cat.get(2687).unwrap();
+    assert_eq!(
+        (
+            bloodrage.power_type,
+            bloodrage.mana_cost,
+            bloodrage.mana_cost_pct
+        ),
+        (0xFFFF_FFFE, 0, 20)
+    );
+    // Health Funnel: flat health + per-second — the `_PER_TIME` composite's live customer — and
+    // channeled, so its cast cell reads "Channeled".
+    let funnel = cat.get(755).unwrap();
+    assert_eq!(
+        (funnel.power_type, funnel.mana_cost, funnel.mana_per_second),
+        (0xFFFF_FFFE, 11, 5)
+    );
+    assert!(funnel.tooltip_channeled());
+    // The cast cell's attr arms at their pinned rows: Heroic Strike (next melee, rage 150 wire =
+    // "15 Rage" displayed), Auto Shot and Throw (the ranged bit ALONE — Throw is not
+    // auto-repeat and still reads "Attack speed"), Mind Flay (channeled mana), Judgement
+    // (pct-only mana — the resolved flat number, never a percentage line).
+    let hs = cat.get(78).unwrap();
+    assert_eq!((hs.power_type, hs.mana_cost), (1, 150));
+    assert!(hs.on_next_swing());
+    assert!(cat.get(75).unwrap().tooltip_on_next_ranged(), "Auto Shot");
+    assert!(cat.get(2764).unwrap().tooltip_on_next_ranged(), "Throw");
+    let mf = cat.get(15407).unwrap();
+    assert!(mf.tooltip_channeled());
+    assert_eq!((mf.power_type, mf.mana_cost), (0, 45));
+    let judgement = cat.get(20271).unwrap();
+    assert_eq!(
+        (
+            judgement.power_type,
+            judgement.mana_cost,
+            judgement.mana_cost_pct
+        ),
+        (0, 0, 6)
+    );
+
+    // The column scan, both verdicts pinned: `manaPerSecondPerLevel` (35) is all-zero across
+    // the whole file — the verified negative that keeps it unparsed — while `manaCostPerlevel`
+    // (33) is real: exactly 72 nonzero rows, all creature-cast spells (Dark Offering's is even
+    // in the health lane), which is why the per-level term is modeled in `power_cost` but
+    // dormant for player tooltips. (1074)
+    let bytes = chain.read_file(super::SPELL).expect("reading Spell.dbc");
+    let rs = super::parse(&bytes, super::spell_schema(), "Spell.dbc").expect("Spell.dbc");
+    let mut per_level_rows = 0u32;
+    for r in rs.records() {
+        let id = super::u32_at(r, 0).unwrap_or(0);
+        if super::u32_at(r, 33).unwrap_or(0) > 0 {
+            per_level_rows += 1;
+        }
+        assert_eq!(
+            super::u32_at(r, 35).unwrap_or(0),
+            0,
+            "manaPerSecondPerLevel on {id}"
+        );
+    }
+    assert_eq!(per_level_rows, 72, "the manaCostPerlevel population");
+    let dark_offering = cat.get(7154).unwrap();
+    assert_eq!(
+        (
+            dark_offering.power_type,
+            dark_offering.mana_cost,
+            dark_offering.mana_cost_per_level,
+            dark_offering.spell_level
+        ),
+        (0xFFFF_FFFE, 180, 9, 24),
+        "Dark Offering: the per-level term's health-lane row"
+    );
+}

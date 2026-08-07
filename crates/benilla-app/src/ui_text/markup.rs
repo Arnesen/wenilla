@@ -2,15 +2,6 @@
 // Markup — ported verbatim from probes/text-glyph/src/markup.rs
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// WoW's inline FrameXML text markup: `|cAARRGGBB ... |r` color escapes, `\n` newlines, and `|T...|t`
-/// inline textures (stripped — see the module doc's v1 simplifications).
-///
-/// `|c` is followed by exactly 8 hex digits in **AARRGGBB** order (alpha first — verified against
-/// FrameXML usage across the client's own strings, e.g. quality-color prefixes like `|cff1eff00` for
-/// uncommon-green). `|r` resets to the string's base color. Unterminated/malformed escapes are left
-/// literal rather than dropped, so a typo'd markup string degrades to visible garbage instead of
-/// silently eating text — the same posture real FrameXML rendering takes.
-///
 /// A `|H<link>|h<text>|h` hyperlink a run sits inside: the link payload (`item:2000:0:0:0`,
 /// `player:Bob`) and the reconstructed link markup (`|H…|h[Name]|h` — the `OnHyperlinkClick`
 /// `arg2`, what shift-click inserts into the edit box). Shared by every run the link's visible
@@ -31,61 +22,64 @@ pub(super) struct ColorRun {
     pub(super) link: Option<std::sync::Arc<LinkInfo>>,
 }
 
-/// Split `input` into lines (on `\n`) and, within each line, into [`ColorRun`]s by resolving
-/// `|cAARRGGBB` / `|r` and `|H…|h…|h` hyperlinks. `|T...|t` inline-texture escapes are stripped
-/// entirely (their content is never a color/text run).
+/// Resolve `input`'s inline markup into lines of [`ColorRun`]s — the render side of the grammar
+/// [`benilla_ui::markup`] owns (decision 1077).
+///
+/// The grammar itself is **not** this module's: `benilla-ui` holds it because the EditBox's cursor
+/// model needs the identical token boundaries, and two copies of an escape grammar is a drift bug
+/// waiting to happen. This function only decides what each token *draws*:
+///
+/// | token | drawn |
+/// |---|---|
+/// | `\|cAARRGGBB` | nothing — switches the color, at **this string's** alpha (the escape's own `AA` is parsed and thrown away, `0x5c2ab2`; the emitter substitutes `[edi+0x2f]` at `0x5cceb0`) |
+/// | `\|r` | nothing — back to `base_color` |
+/// | `\n` · `\r` · `\r\n` · `\|n` | a line break |
+/// | `\|\|` | one literal `\|` |
+/// | `\|H…\|h` / `\|h` | nothing — opens/closes the link every run inside it shares |
+/// | anything else | itself |
+///
+/// **Stated divergence:** the client gates `|n` off for a single-line box (`K & 0x200`, set by
+/// `SetMultiLine`'s single-line leg at `0x77a5e2`) while its *cursor* model parses it regardless —
+/// a disagreement wow-re records as an anomaly, not a design. We have no flags word here and draw
+/// `|n` as a break everywhere; nothing in our FrameXML emits one, and a user cannot type one
+/// (`0x77c200` turns a typed `|` into `||`).
 pub(super) fn parse_markup(input: &str, base_color: [f32; 4]) -> Vec<Vec<ColorRun>> {
-    input
-        .split('\n')
-        .map(|line| parse_line(line, base_color))
-        .collect()
-}
+    use benilla_ui::markup::TokenKind as T;
 
-fn parse_line(line: &str, base_color: [f32; 4]) -> Vec<ColorRun> {
-    let chars: Vec<char> = line.chars().collect();
-    let mut runs = Vec::new();
+    let mut lines: Vec<Vec<ColorRun>> = Vec::new();
+    let mut runs: Vec<ColorRun> = Vec::new();
     let mut color = base_color;
     let mut cur = String::new();
     // The open hyperlink, if any: (payload, visible-text accumulator, indices of runs already
     // flushed under it). The Arc is built at the closing `|h` and back-patched onto those runs.
     let mut link: Option<(String, String, Vec<usize>)> = None;
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '|' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                'c' | 'C' => {
-                    if let Some(argb) = parse_color_escape(&chars, i) {
-                        flush(&mut runs, &mut cur, color, &mut link);
-                        color = argb;
-                        i += 10; // "|c" + 8 hex digits
-                        continue;
-                    }
-                }
-                'r' | 'R' => {
-                    flush(&mut runs, &mut cur, color, &mut link);
-                    color = base_color;
-                    i += 2;
-                    continue;
-                }
-                'T' | 't' if link.is_none() => {
-                    if let Some(end) = find_texture_close(&chars, i) {
-                        i = end; // drop everything from |T through the matching |t
-                        continue;
-                    }
-                }
-                // `|H<link>|h` opens a hyperlink (no nesting — Blizzard's own strings never nest).
-                'H' if link.is_none() => {
-                    if let Some((payload, after)) = parse_link_open(&chars, i) {
-                        flush(&mut runs, &mut cur, color, &mut link);
-                        link = Some((payload, String::new(), Vec::new()));
-                        i = after;
-                        continue;
-                    }
-                }
-                // The closing `|h` of an open hyperlink.
-                'h' | 'H' if link.is_some() => {
-                    flush(&mut runs, &mut cur, color, &mut link);
-                    let (payload, visible, idxs) = link.take().expect("open link");
+
+    for (_, token) in benilla_ui::markup::tokens(input) {
+        match token.kind {
+            T::Color(rgba) => {
+                flush(&mut runs, &mut cur, color, &mut link);
+                // At the STRING's alpha, not opaque: the decoder discards the escape's `AA` and the
+                // emitter patches the FontString's own alpha over it (`0x5cceb0`). A fading chat
+                // line's item link fades with it.
+                color = rgba.to_f32_at(base_color[3]);
+            }
+            T::ColorReset => {
+                flush(&mut runs, &mut cur, color, &mut link);
+                color = base_color;
+            }
+            T::LineBreak => {
+                flush(&mut runs, &mut cur, color, &mut link);
+                lines.push(std::mem::take(&mut runs));
+            }
+            T::EscapedPipe => push_visible('|', &mut cur, &mut link),
+            T::LinkOpen { payload } => {
+                flush(&mut runs, &mut cur, color, &mut link);
+                link = Some((payload.to_string(), String::new(), Vec::new()));
+            }
+            T::LinkClose => {
+                flush(&mut runs, &mut cur, color, &mut link);
+                // A close with no open is a stray token: nothing to back-patch, nothing drawn.
+                if let Some((payload, visible, idxs)) = link.take() {
                     let info = std::sync::Arc::new(LinkInfo {
                         markup: format!("|H{payload}|h{visible}|h"),
                         link: payload,
@@ -93,22 +87,24 @@ fn parse_line(line: &str, base_color: [f32; 4]) -> Vec<ColorRun> {
                     for idx in idxs {
                         runs[idx].link = Some(info.clone());
                     }
-                    i += 2;
-                    continue;
                 }
-                _ => {}
             }
+            T::Char(c) => push_visible(c, &mut cur, &mut link),
         }
-        if let Some((_, visible, _)) = &mut link {
-            visible.push(chars[i]);
-        }
-        cur.push(chars[i]);
-        i += 1;
     }
-    // An unterminated link degrades gracefully: its runs stay plain text (no span), matching the
-    // "degrade to visible garbage" posture — the |H opener was consumed, the text still shows.
+    // An unterminated link degrades gracefully: its runs stay plain text (no span) — the `|H` was
+    // consumed, the text still shows.
     flush(&mut runs, &mut cur, color, &mut link);
-    runs
+    lines.push(runs);
+    lines
+}
+
+/// Accumulate one drawn char into the current run, and into the open link's visible text.
+fn push_visible(c: char, cur: &mut String, link: &mut Option<(String, String, Vec<usize>)>) {
+    if let Some((_, visible, _)) = link {
+        visible.push(c);
+    }
+    cur.push(c);
 }
 
 fn flush(
@@ -129,51 +125,47 @@ fn flush(
     }
 }
 
-/// `chars[i]` is `'|'`, `chars[i+1]` is `'H'` (opening a hyperlink). Scans for the payload
-/// delimiter `|h` and returns `(payload, index-just-past-the-delimiter)`. `None` if unterminated
-/// (left as literal text by the caller).
-fn parse_link_open(chars: &[char], i: usize) -> Option<(String, usize)> {
-    let mut j = i + 2;
-    while j + 1 < chars.len() {
-        if chars[j] == '|' && (chars[j + 1] == 'h' || chars[j + 1] == 'H') {
-            let payload: String = chars[i + 2..j].iter().collect();
-            return Some((payload, j + 2));
-        }
-        j += 1;
-    }
-    None
-}
+/// `input`'s **drawn** text — what [`parse_markup`] would put on screen, markup resolved — paired
+/// with the RAW byte offset of every boundary in it: `bounds.len() == drawn.len() + 1`, and
+/// `bounds[k]` is the raw offset of the boundary *before* drawn byte `k`.
+///
+/// This is the raw↔drawn map the EditBox metrics ride on (decision 1075). The box **stores and
+/// edits** the raw string (`|cffa335ee|Hitem:11684:0:0:0|h[Ironfoe]|h|r`) and **draws** only
+/// `[Ironfoe]`, so an advance table indexed by raw byte has to charge every escape byte zero width.
+/// Measuring the raw string instead put the caret 180 px — twice the drawn text's own width — to the
+/// right of the text it was supposed to follow (director, 2026-08-06).
+///
+/// A **boundary** map rather than a per-byte one, because that is the question the metrics actually
+/// ask: a glyph ending at drawn byte `e` files its width at raw `bounds[e]`, which is the raw byte
+/// just past that glyph and *before* whatever escape follows it. The per-byte reading (raw offset of
+/// drawn byte `e`, i.e. where the NEXT visible char starts) lands past the escape and leaves the
+/// caret position immediately after that glyph reading the previous glyph's width — one glyph short,
+/// at every escape in the string. It is also the only reading that survives `||`, whose one drawn
+/// byte spans two raw ones.
+pub(super) fn visible_map(input: &str) -> (String, Vec<usize>) {
+    use benilla_ui::markup::TokenKind as T;
 
-/// `chars[i]` is `'|'`, `chars[i+1]` is `'c'`/`'C'`. Parses the 8 following hex digits as
-/// **AARRGGBB** and returns the normalized `[r, g, b, a]`. `None` if fewer than 8 hex digits follow
-/// (malformed escape — left as literal text by the caller).
-fn parse_color_escape(chars: &[char], i: usize) -> Option<[f32; 4]> {
-    let start = i + 2;
-    let end = start + 8;
-    if end > chars.len() {
-        return None;
+    let mut drawn = String::new();
+    let mut bounds: Vec<usize> = Vec::new();
+    let mut last_end = 0usize;
+    for (at, token) in benilla_ui::markup::tokens(input) {
+        let c = match token.kind {
+            T::Char(c) => c,
+            T::EscapedPipe => '|',
+            T::LineBreak => '\n',
+            // Zero-width: no drawn byte, so no boundary of its own.
+            T::Color(_) | T::ColorReset | T::LinkOpen { .. } | T::LinkClose => continue,
+        };
+        // The boundary before this char is wherever the previous drawn token ENDED — not this
+        // token's raw start, which would sit past any escape in between. A multi-byte char's
+        // interior boundaries are its own raw bytes (never caret positions, but kept coherent).
+        bounds.push(last_end);
+        bounds.extend((1..c.len_utf8()).map(|k| at + k));
+        last_end = at + token.byte_len;
+        drawn.push(c);
     }
-    let hex: String = chars[start..end].iter().collect();
-    let argb = u32::from_str_radix(&hex, 16).ok()?;
-    let a = ((argb >> 24) & 0xFF) as f32 / 255.0;
-    let r = ((argb >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((argb >> 8) & 0xFF) as f32 / 255.0;
-    let b = (argb & 0xFF) as f32 / 255.0;
-    Some([r, g, b, a])
-}
-
-/// `chars[i]` is `'|'`, `chars[i+1]` is `'T'`/`'t'` (opening an inline-texture escape). Scans forward
-/// for the matching `|t`/`|T` close and returns the index just past it. `None` if unterminated (left
-/// as literal text by the caller, matching the "degrade to visible garbage" posture above).
-fn find_texture_close(chars: &[char], i: usize) -> Option<usize> {
-    let mut j = i + 2;
-    while j + 1 < chars.len() {
-        if chars[j] == '|' && (chars[j + 1] == 't' || chars[j + 1] == 'T') {
-            return Some(j + 2);
-        }
-        j += 1;
-    }
-    None
+    bounds.push(last_end);
+    (drawn, bounds)
 }
 
 #[cfg(test)]
@@ -239,11 +231,14 @@ mod markup_tests {
         assert_eq!(lines[1][0].text, "two");
     }
 
+    /// There is no inline-texture escape in build 5875 — the remap table at `0x5c2b10` sends every
+    /// `|`-lead but C/H/N/R to the ordinary-character arm (wow-re RF-0087 §1.1). Our renderer used
+    /// to strip `|T…|t`, a later-expansion feature we had invented; it now draws, like the client's.
     #[test]
-    fn inline_texture_is_stripped() {
+    fn there_is_no_inline_texture_escape() {
         let lines = parse_markup("a|TInterface\\Icons\\Foo:16:16|tb", WHITE);
         assert_eq!(lines[0].len(), 1);
-        assert_eq!(lines[0][0].text, "ab");
+        assert_eq!(lines[0][0].text, "a|TInterface\\Icons\\Foo:16:16|tb");
     }
 
     #[test]
@@ -273,6 +268,115 @@ mod markup_tests {
         }
         assert_eq!(first.link, "player:Bob");
         assert_eq!(first.markup, "|Hplayer:Bob|h[Bob]|h");
+    }
+
+    // ── visible_map: the raw↔drawn boundary map the EditBox metrics ride on (1075/1077) ───────
+
+    /// `visible_map`'s invariants, checked together: the drawn text is exactly what `parse_markup`
+    /// would draw, and the boundary map is monotonic, `drawn.len() + 1` long, and lands only on raw
+    /// char boundaries.
+    fn check_map(raw: &str, expect_drawn: &str) -> Vec<usize> {
+        let (drawn, bounds) = visible_map(raw);
+        assert_eq!(drawn, expect_drawn, "drawn text of {raw:?}");
+        let from_runs: String = parse_markup(raw, WHITE)
+            .iter()
+            .map(|l| l.iter().map(|r| r.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(drawn, from_runs, "visible_map agrees with parse_markup");
+        assert_eq!(
+            bounds.len(),
+            drawn.len() + 1,
+            "one boundary per drawn byte, plus the end"
+        );
+        for w in bounds.windows(2) {
+            assert!(w[0] <= w[1], "monotonic: {bounds:?}");
+        }
+        for &b in &bounds {
+            assert!(
+                raw.is_char_boundary(b),
+                "boundary {b} of {raw:?} is mid-char"
+            );
+        }
+        bounds
+    }
+
+    /// The director's exact case (2026-08-06): a shift-clicked item link in the chat edit box. The
+    /// end-of-buffer caret must land on the drawn text's full width, so the last boundary is the
+    /// byte just past the `]` — with `|h|r` still to come — and not the raw length.
+    #[test]
+    fn an_item_link_maps_its_drawn_boundaries_onto_the_raw_buffer() {
+        let raw = "|cffa335ee|Hitem:13984:0:0:0|h[The Plague Bearer]|h|r";
+        let bounds = check_map(raw, "[The Plague Bearer]");
+        // The boundary before the first drawn byte is 0 — before the leading escapes, which is
+        // where the reachable cursor set puts it (`|c`/`|H` absorb forward).
+        assert_eq!(bounds[0], 0);
+        // The `]` glyph ends at drawn byte 19; its raw boundary is just past the `]`.
+        let end = bounds[19];
+        assert_eq!(&raw[end - 1..end], "]");
+        assert_eq!(&raw[end..], "|h|r");
+    }
+
+    /// The case the boundary reading exists for: an escape sitting *between* two visible chars. The
+    /// boundary after `b` must be 2, not 12 — the per-byte reading (where the next visible char
+    /// begins) lands past the escape and leaves the caret right after `b` reading `a`'s width.
+    #[test]
+    fn a_boundary_stops_before_a_following_escape() {
+        assert_eq!(check_map("ab|cffff0000cd", "abcd"), vec![0, 1, 2, 13, 14]);
+    }
+
+    /// Text typed straight after the link — the buffer the director was looking at. The typed bytes
+    /// sit past the trailing `|r`, so their advances land after the drawn name, not after 53
+    /// invisible characters.
+    #[test]
+    fn text_after_a_links_reset_maps_past_the_escape() {
+        let raw = "|cffa335ee|Hitem:13984:0:0:0|h[The Plague Bearer]|h|rds";
+        let bounds = check_map(raw, "[The Plague Bearer]ds");
+        assert_eq!(&raw[bounds[19]..], "|h|rds");
+        assert_eq!(bounds[bounds.len() - 1], raw.len());
+    }
+
+    #[test]
+    fn visible_map_handles_plain_text_and_newlines() {
+        assert_eq!(check_map("hello", "hello"), vec![0, 1, 2, 3, 4, 5]);
+        // A newline draws as its own byte, and the map keeps crossing it.
+        assert_eq!(
+            check_map("ab\n|cffff0000cd|r", "ab\ncd"),
+            vec![0, 1, 2, 3, 14, 15]
+        );
+        // A string that draws nothing has its one boundary at the start — there is no glyph for it
+        // to sit after, and every raw offset forward-fills to x = 0 either way.
+        assert_eq!(visible_map("|cffff0000|r"), (String::new(), vec![0]));
+        assert_eq!(visible_map(""), (String::new(), vec![0]));
+    }
+
+    /// The three tokens 1075 could not see, now that the grammar is the engine's (1077): `||` draws
+    /// ONE `|` out of two raw bytes — the case a per-byte map cannot represent at all — `|n` and
+    /// `\r\n` are line breaks, and there is no `|T…|t` texture escape in 1.12.1, so it draws
+    /// literally instead of being swallowed.
+    #[test]
+    fn the_tokens_the_engine_grammar_added() {
+        // `a||b`: the drawn `|` spans raw 1..3, so the boundary after it is 3.
+        assert_eq!(check_map("a||b", "a|b"), vec![0, 1, 3, 4]);
+        assert_eq!(parse_markup("a||b", WHITE)[0][0].text, "a|b");
+        // `|n` and `\r\n` both break the line.
+        assert_eq!(parse_markup("a|nb", WHITE).len(), 2);
+        assert_eq!(parse_markup("a\r\nb", WHITE).len(), 2);
+        assert_eq!(check_map("a\r\nb", "a\nb"), vec![0, 1, 3, 4]);
+        // No inline-texture escape exists in this build: it draws as text.
+        let (drawn, _) = visible_map("a|Tfoo|tb");
+        assert_eq!(drawn, "a|Tfoo|tb");
+    }
+
+    /// A malformed escape is literal text to the draw, so it must be literal to the map too —
+    /// otherwise the metrics would charge zero width for bytes the user can see.
+    #[test]
+    fn a_malformed_escape_stays_visible_in_the_map() {
+        check_map("a|cffzzb", "a|cffzzb");
+        // Here the `|H…|h` OPEN is well formed — it is the closing `|h` that never comes, so the
+        // link degrades (no clickable span) while its visible text still draws. Contrast the three
+        // cases in `the_tokens_the_engine_grammar_added`, where the OPEN itself degrades.
+        check_map("|Hitem:1|h[Broken", "[Broken");
     }
 
     #[test]

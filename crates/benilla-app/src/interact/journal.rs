@@ -277,7 +277,7 @@ pub(super) fn journal_ui(
                         }
                         // The same confirmation the card gives, per row.
                         if copied.is_some_and(|(at, t)| {
-                            at == r.at && time.elapsed_secs() - t < super::COPY_FLASH_SECS
+                            at == r.at && time.elapsed_secs() - t < super::inspect::COPY_FLASH_SECS
                         }) {
                             ui.label(
                                 egui::RichText::new("copied to clipboard")

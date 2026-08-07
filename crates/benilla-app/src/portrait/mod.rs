@@ -410,15 +410,20 @@ struct Booth {
     /// empty, framing/yaw write); 0 with `pending` drained = the camera sleeps and the target
     /// keeps the last render — a still costs nothing per frame.
     wake: u32,
-    /// The bake standing in this booth contains **live** content — particle emitters
-    /// ([`booth::spawn_booth_effects`]) — so its camera never sleeps: a still of a cloud mid-birth
-    /// is not what the pane shows. The generalization of the glue booth's own always-on rule
-    /// (`live_scene` below, decision 0540); only the body panes can set it (decision 0822).
+    /// The bake standing in this booth is a **live widget**, not a still: its Stand loops and its
+    /// item emitters run ([`booth::spawn_booth_effects`]), so it must re-render every frame — but
+    /// only while something is drawing it, which [`BoothPanes`] answers (decision 1069). The
+    /// generalization of the glue booth's own always-on rule (`live_scene` below, decision 0540);
+    /// only the body panes set it (decision 0822 §4 — the round portraits are a one-shot bake).
     live: bool,
     /// Textures the last bake referenced that were not yet resident: the camera stays awake
     /// until each lands (an `mpq://` image arriving after the bake would otherwise be frozen
     /// OUT of the still forever), then renders one final resident frame.
     pending: Vec<Handle<Image>>,
+    /// The **destination pane's** aspect this booth's camera is currently framed for
+    /// ([`framing::WowPortraitProjection::aspect`], decision 1069) — 1.0 until the UI has drawn the
+    /// pane once, then sticky: a hidden window must not re-frame the bake back to square.
+    aspect: f32,
 }
 
 /// How many frames a content edge keeps a booth camera rendering ([`Booth::wake`]): covers the
@@ -525,6 +530,40 @@ fn wake_booth<'a>(
 #[derive(Resource, Default)]
 struct Booths(HashMap<String, Booth>);
 
+/// Where each booth's bake is actually being **sampled on screen this frame**: slot token → the
+/// destination region's aspect (width ÷ height). Published by the UI extract for every
+/// `BenillaSetBoothTexture` binding it emits — the *square* portrait binding (decision 0208 §5); a
+/// round `SetPortraitTexture` unit portrait is not a pane and never appears here.
+///
+/// Two things need it, and neither can be a constant (decision 1069):
+///
+/// - **Shape.** A booth renders into a square target that the UI stretches to fill the pane's rect
+///   (`extract`'s `UvRect::FULL`), so the projection has to run at the *pane's* aspect for the
+///   stretch to cancel. Rendering at 1.0 into the dressing room's 316×351 pane made every
+///   character 11% too tall (director report, 2026-08-06).
+/// - **Liveness.** A body pane's bake *animates* ([`BoothMotion::Loop`] — the reference's
+///   `<PlayerModel>` widgets render live, decision 0822 §4), so its camera renders every frame it
+///   is on screen — and, now that this resource can say so, **none** when it is not. That last
+///   half is also a strict win for the pre-1069 emitter case, which used to render forever behind
+///   a closed window.
+///
+/// One frame stale by construction (the extract runs after the booth syncs), which is why the
+/// aspect is latched into [`Booth::aspect`] rather than read fresh: a window that closes must not
+/// re-frame the bake it left standing.
+#[derive(Resource, Default)]
+pub(crate) struct BoothPanes(pub(crate) HashMap<String, f32>);
+
+/// Both directions of the booth↔UI bridge in one system param: the bake a bound region **samples**
+/// ([`PortraitImages`]) and the pane geometry the extract **publishes** back ([`BoothPanes`]).
+///
+/// They travel together because they are the same seam, and because `drive_script` had already
+/// reached Bevy's 16-parameter ceiling — two more `Res`es there is one too many.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BoothBridge<'w> {
+    pub(crate) images: Res<'w, PortraitImages>,
+    pub(crate) panes: ResMut<'w, BoothPanes>,
+}
+
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
 /// (`BoothCam`, not `PortraitCamera` — that name is the authored M2 rig, `benilla_assets::PortraitCamera`.)
 /// (`pub(crate)` for the particle census, which reports draws per booth token — decision 0775.)
@@ -545,6 +584,7 @@ impl Plugin for PortraitPlugin {
             .init_resource::<dressup::DressUpPreview>()
             .init_resource::<dressup::DressUpBake>()
             .init_resource::<Booths>()
+            .init_resource::<BoothPanes>()
             .init_resource::<BoothLight>()
             .init_resource::<crate::ui_session::InteractNpc>()
             .add_systems(Startup, setup_booths)
@@ -671,6 +711,8 @@ pub(crate) fn spawn_warm_booth(
                 fov: framing::BODY_FOV,
                 near: 0.02,
                 far: 100.0,
+                // The warm pass compiles PIPELINES, which the aspect does not key.
+                aspect: 1.0,
             }),
             layer.clone(),
         ))
@@ -775,6 +817,7 @@ fn setup_booths(
                 wake: 0,
                 live: false,
                 pending: Vec::new(),
+                aspect: 1.0,
             },
         );
     }
@@ -838,6 +881,7 @@ fn setup_booths(
                 wake: 0,
                 live: false,
                 pending: Vec::new(),
+                aspect: 1.0,
             },
         );
     }
@@ -1150,9 +1194,8 @@ fn sync_portraits(
 ///
 /// **What re-bakes.** A parts-key change respawns the posed instance and re-aims the (yaw-
 /// independent) camera; a bare yaw change only re-rotates the root — neither happens on an unchanged
-/// frame. Like the portrait slots, the booth renders *unconditionally* once the player model exists
-/// (no draw-gating on whether the pane is sampled) — one continuous 512² pass; gating it on window
-/// visibility is a noted follow-up, not done here to match the existing slots' simplicity.
+/// frame. The bake stands ready whether or not the window is open, but the 512² *pass* only runs
+/// while the pane is being drawn ([`BoothPanes`], decision 1069).
 #[allow(clippy::too_many_arguments)]
 fn sync_paperdoll(
     mut commands: Commands,
@@ -1169,6 +1212,7 @@ fn sync_paperdoll(
     mut env_cache: Local<Option<bool>>,
     mut last_yaw: Local<Option<f32>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    panes: Res<BoothPanes>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1190,6 +1234,7 @@ fn sync_paperdoll(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
+        &panes,
     );
 }
 
@@ -1210,6 +1255,7 @@ fn sync_inspect_booth(
     mut env_cache: Local<Option<bool>>,
     mut last_yaw: Local<Option<f32>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    panes: Res<BoothPanes>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1231,6 +1277,7 @@ fn sync_inspect_booth(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
+        &panes,
     );
 }
 
@@ -1251,6 +1298,7 @@ fn sync_petdoll_booth(
     mut env_cache: Local<Option<bool>>,
     mut last_yaw: Local<Option<f32>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    panes: Res<BoothPanes>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
 ) {
     if test_mode(&mut env_cache) {
@@ -1272,6 +1320,7 @@ fn sync_petdoll_booth(
         &mut wow_mats,
         &mut cams,
         anim_data.as_deref(),
+        &panes,
     );
 }
 
@@ -1295,10 +1344,15 @@ fn sync_body_booth(
     wow_mats: &mut Assets<WowModelMaterial>,
     cams: &mut Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<&crate::creature_anim::AnimData>,
+    panes: &BoothPanes,
 ) {
     let Some(booth) = booths.0.get_mut(slot) else {
         return;
     };
+    // Latch the pane's aspect while it is on screen (decision 1069). Sticky: a closed window
+    // publishes nothing, and re-framing the standing bake back to square on the way out would be a
+    // visible pop on the way back in.
+    let aspect = panes.0.get(slot).copied().unwrap_or(booth.aspect);
     // There is no 2D stand-in for a body pane — the bridge always points at the live target (an
     // empty booth just renders the dark backdrop until the unit's model attaches).
     let live = PortraitSource::Live(booth.target.clone());
@@ -1328,8 +1382,11 @@ fn sync_body_booth(
     }
     let unit = unit.expect("unit present — parts came from its descendants");
     let key = LookKey::build(&parts, &riders, &billboards, &effects);
-    let parts_changed = booth.baked.as_ref() != Some(&key);
+    // A changed pane aspect re-runs the same path: the fit and the projection both depend on it,
+    // and it only ever moves once — the first frame the window is drawn.
+    let parts_changed = booth.baked.as_ref() != Some(&key) || booth.aspect != aspect;
     if parts_changed {
+        booth.aspect = aspect;
         let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
         // Anchors first, before any teardown — a still-loading display must not be framed from
         // fabricated zero bounds (see the portrait site, and `booth_anchors`).
@@ -1405,27 +1462,31 @@ fn sync_body_booth(
                     .map(|ibp| (r.skeleton, ibp, r.animations))
             }),
             anim_data.map(|a| &a.0),
-            BoothMotion::Frozen,
-            [false, false], // a still portrait sheaths its weapons — no in-hand grip
+            // The pane ANIMATES: Stand loops and the global-sequence bones run, which is what the
+            // reference's `<PlayerModel>` widget does (decision 0822 §4 read it as live-rendering
+            // and left the pose as a look call; the director made that call — decision 1069).
+            BoothMotion::Loop,
+            [false, false], // the pane sheaths its weapons — no in-hand grip
             &booth_billboards,
         );
         // The item effects go up on the posed skeleton's joints — the body pane is the lane that gets
         // them (the reference's `<PlayerModel>` widget renders live; the round portraits are a
-        // one-shot cached bake — [`spawn_booth_effects`]). A booth holding emitters is LIVE: its
-        // camera must not sleep on a cloud mid-birth, so `wake` alone can't gate it. The body itself
-        // stays `Frozen` — matching the ref's animating widget is its own look call (decision 0822).
-        let (fx_emitters, _) = spawn_booth_effects(
+        // one-shot cached bake — [`spawn_booth_effects`]).
+        spawn_booth_effects(
             commands,
             &joints,
             &booth.layer,
             booth_light.pane.buffer.as_ref(),
             &booth_effects,
         );
-        booth.live = fx_emitters > 0;
-        // Body framing from the display's bounds — the full standing figure, feet-to-crown.
-        // Resolved before the teardown above; see the portrait site for why it cannot be faked.
-        log_frame(slot, &anchors, &body_frame(&anchors).0);
-        aim(cams, slot, &body_frame(&anchors));
+        // So the whole bake is live, emitters or not — `wake` can't gate a looping animation.
+        // `gate_booth_cameras` renders it every frame its pane is on screen, and none when it isn't.
+        booth.live = true;
+        // Body framing from the display's bounds — the full standing figure, feet-to-crown, at the
+        // destination pane's aspect. Resolved before the teardown above; see the portrait site for
+        // why it cannot be faked.
+        log_frame(slot, &anchors, &body_frame(&anchors, aspect).0);
+        aim(cams, slot, &body_frame(&anchors, aspect));
         log_bake(slot, "bake", &parts, &riders, &billboards, &effects);
         wake_booth(
             booth,
@@ -1455,17 +1516,23 @@ fn sync_body_booth(
 /// something new to show — [`Booth::wake`] frames after a content edge, or a bake texture still
 /// in flight ([`Booth::pending`]) — except the booths whose content is **live**, which render
 /// continuously: the glue booth, whose whole scene is animated (looping sequences, global-sequence
-/// bones, particle emitters) while a glue screen shows, and any booth whose bake spawned particle
-/// emitters ([`Booth::live`] — a body pane wearing an effect item, decision 0822). A sleeping camera
+/// bones, particle emitters) while a glue screen shows, and a **body pane**, whose bake is a live
+/// `<PlayerModel>` widget ([`Booth::live`], decisions 0822 §4 + 1069). A sleeping camera
 /// skips its whole pass (clear + model + FFXGlow chain); its target keeps the last render — exactly
 /// right for a still (the 0105 bake, frozen at Stand).
+///
+/// A live pane renders **only while it is on screen** ([`BoothPanes`], decision 1069): a character
+/// window nobody opened costs nothing, which is the follow-up [`sync_paperdoll`] named and 0822's
+/// unconditional `live` never had.
 /// With `WOW_PORTRAIT_TEST` set the gate stands down (the eyeball harness wants live cameras).
 /// The pipeline warm pass is demand too (decision 0938): its menagerie duplicates rigs onto a
 /// booth layer so the booths' `Msaa::Off` pipeline twins compile behind the entry cover — which
 /// only works if the booth cameras render during the warm window.
+#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource/query
 fn gate_booth_cameras(
     mut booths: ResMut<Booths>,
     preview: Res<GluePreview>,
+    panes: Res<BoothPanes>,
     images: Res<Assets<Image>>,
     warm: Res<crate::pipe_warm::WarmPass>,
     time: Res<Time<bevy::time::Real>>,
@@ -1487,10 +1554,14 @@ fn gate_booth_cameras(
             booth.wake = booth.wake.max(1);
         }
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
+        // A live bake renders every frame — but only while the UI is actually drawing its pane.
+        // (The glue screens sample their booth outside the FrameXML extract, so they publish no
+        // pane and stay on `live_scene`.)
+        let live_pane = booth.live && panes.0.contains_key(token.as_str());
         let active = test
             || warming
             || live_scene
-            || booth.live
+            || live_pane
             || booth.wake > 0
             || !booth.pending.is_empty();
         // `WOW_BOOTH_LOG=1`: the gate's timeline — every activity flip and every armed frame,

@@ -301,12 +301,26 @@ pub(super) fn update_hover(
 
 /// Recompute the **GameObject** under the cursor each frame into [`HoveredObject`] (decision 0236):
 /// a mesh-accurate ray pick against GameObject parts *only*, reusing the inspector's picker
-/// ([`crate::interact::pick_at_cursor`] — the resident-geometry caster of decision 0857, which hits
-/// the colliderless props a physics ray misses and the `RENDER_WORLD`-only static forms Bevy's
-/// `MeshRayCast` lost at 0834). Kept separate from [`update_hover`]'s unit pick because a GameObject is
-/// usable-but-not-*selected*: this drives the Interact cursor and the right-click USE, never
-/// selection. Inert while mouse-looking (cursor hidden) or over the dev UI, exactly like the unit
-/// pick. Cheap — only the handful of GO parts on screen are in the pick set.
+/// (the resident-geometry caster of decision 0857, which hits the colliderless props a physics ray
+/// misses and the `RENDER_WORLD`-only static forms Bevy's `MeshRayCast` lost at 0834). Kept
+/// separate from [`update_hover`]'s unit pick because a GameObject is usable-but-not-*selected*:
+/// this drives the Interact cursor and the right-click USE, never selection. Inert while
+/// mouse-looking (cursor hidden) or over the dev UI, exactly like the unit pick. Cheap — only the
+/// handful of GO parts on screen are in the pick set.
+///
+/// **Two passes, like the unit pick** (decision 1071 — GameObjects are the same type-1 candidates
+/// as units in the reference's resolve `0x7089c0`, wow-re object-layer mouse-pick): **pass 1** =
+/// the exact resident mesh, pure nearest-wins; **pass 2, only when pass 1 hit nothing anywhere**
+/// (the mouse pick's generous retry): the same geometry with every vertex displaced +1 model-unit
+/// along its authored normal — a ~1-yd halo, which is what makes a wispy herb clickable *around*
+/// its leaves instead of only pixel-on-texture. "Nothing anywhere" spans the unit pick too (one
+/// resolve in the reference): a frame where [`Hovered`] holds any unit — exact hit or its own
+/// halo — never opens the GO halo, because the pass-2 accept ladder ranks every unit (alive 3 /
+/// dead 2) above every GameObject (highlightable 1 / else 0). Within the GO halo the same ladder
+/// applies: last frame's pick sticks (anti-flicker), else higher priority wins even when farther,
+/// ties by distance. Both passes stay world-occlusion-clamped. (Residual, same slice as the
+/// eligibility note below: the reference's sticky slot is cross-type, so a stuck GO pick can
+/// outrank a unit's halo there; our split picks give the unit that frame instead.)
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_hovered_object(
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
@@ -314,6 +328,9 @@ pub(super) fn update_hovered_object(
     rig: Res<CameraControl>,
     pointer_over_ui: Res<PointerOverUi>,
     occlusion: Res<PickOcclusion>,
+    // The unit pick's verdict — [`update_hover`] runs earlier in the target chain. Any unit hover
+    // means pass 1 + the unit halo already own the mouseover, so the GO pass 2 stays shut.
+    unit_hovered: Res<Hovered>,
     mut hovered: ResMut<HoveredObject>,
     // Every pickable GameObject part carries `WorldObject { kind: GameObject }` (units/doodads/WMOs
     // carry other kinds and are excluded — units have their own posed-mesh pick).
@@ -327,11 +344,15 @@ pub(super) fn update_hovered_object(
     factions: Option<Res<super::ring::Factions>>,
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     parts: PickParts,
+    // Last frame's GO pick, for pass 2's sticky-hover (the reference's anti-flicker cache, by net
+    // entity — the same rung the unit picker keeps).
+    mut last_pick: Local<Option<Entity>>,
 ) {
     hovered.target = None;
     hovered.guid = None;
     hovered.distance = f32::MAX;
     if rig.is_looking() || pointer_over_ui.0 {
+        *last_pick = None;
         return;
     }
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
@@ -340,7 +361,7 @@ pub(super) fn update_hovered_object(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    // `pick_at_cursor` takes bevy's `HashSet` (not the `std` one this module uses elsewhere).
+    // The caster takes bevy's `HashSet` (not the `std` one this module uses elsewhere).
     // A transport-family GO (TRANSPORT 11 / MAP_OBJECT 14 / MO_TRANSPORT 15) never joins the pick
     // set: in the reference it has no pick geometry at all — the GO model resolver `0x5f80e0`
     // returns 0 for these three types (they render via the WMO/spline path, not an M2) and their
@@ -359,25 +380,74 @@ pub(super) fn update_hovered_object(
         .map(|(e, _)| e)
         .collect();
     if pickable.is_empty() {
+        *last_pick = None;
         return;
     }
-    let Some((hit, _point, distance)) =
-        crate::interact::pick_at_cursor(cursor, camera, cam_tf, &pickable, &parts)
-    else {
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
-    // The occlusion verdict (`0x480df0` @ `0x480eb4`): discard the GO hit iff the world hit is
-    // STRICTLY nearer — a tie keeps the object. (Monotonic: any other GO hit is farther still.)
-    if occlusion.distance < distance {
-        return;
-    }
     // The hit is a mesh part; its GameObject net entity (which carries the `Guid`) is one `ChildOf`
     // hop up — the attach convention (the same one `update_hover`'s fallback walks). Guard the rare
     // case the pickable itself is the guid-bearing entity.
-    let net_entity = if guids.contains(hit) {
-        hit
-    } else {
-        child_of.get(hit).map_or(hit, |c| c.parent())
+    let resolve_net = |e: Entity| {
+        if guids.contains(e) {
+            e
+        } else {
+            child_of.get(e).map_or(e, |c| c.parent())
+        }
+    };
+    let self_store = self_q.single().ok();
+
+    // Pass 1 — the exact resident geometry, pure nearest-wins (priority-independent).
+    let mut best: Option<(f32, Entity)> =
+        crate::interact::cast_pick_ray(ray, &pickable, &parts, false)
+            .into_iter()
+            .next()
+            .map(|(e, h)| (h.distance, e));
+
+    // Pass 2 — nothing exactly hit anywhere (no GO, and no unit either — the doc above): the
+    // generous retry over the normal-inflated geometry, accepted by the priority ladder.
+    if best.is_none() {
+        if unit_hovered.target.is_some() {
+            *last_pick = None;
+            return;
+        }
+        let mut best2: Option<(f32, u32, Entity)> = None;
+        for (part, hit) in crate::interact::cast_pick_ray_inflated(ray, &pickable, &parts) {
+            let net = resolve_net(part);
+            let prio = if *last_pick == Some(net) {
+                u32::MAX // the sticky-hover cache outranks everything
+            } else {
+                // The classify priority (`0x480c90`): highlightable GameObject 1, else 0. A store
+                // that hasn't streamed reads highlightable — the eligibility gate's own
+                // permissive default, so a fresh spawn isn't a dead zone for its first frames.
+                stores.get(net).map_or(1, |s| {
+                    let reaction = crate::target::cursor_mode::go_reaction(
+                        factions.as_deref(),
+                        s.0.gameobject_faction(),
+                        self_store,
+                    );
+                    u32::from(crate::target::cursor_mode::go_highlightable(s, reaction))
+                })
+            };
+            let wins =
+                best2.is_none_or(|(bt, bp, _)| prio > bp || (prio == bp && hit.distance < bt));
+            if wins {
+                best2 = Some((hit.distance, prio, part));
+            }
+        }
+        best = best2.map(|(t, _, e)| (t, e));
+    }
+
+    // The occlusion verdict (`0x480df0` @ `0x480eb4`): discard the GO hit iff the world hit is
+    // STRICTLY nearer — a tie keeps the object.
+    if best.is_some_and(|(t, _)| occlusion.distance < t) {
+        best = None;
+    }
+    let picked = best.map(|(t, e)| (t, resolve_net(e)));
+    *last_pick = picked.map(|(_, net)| net);
+    let Some((distance, net_entity)) = picked else {
+        return;
     };
     let Ok(guid) = guids.get(net_entity) else {
         return;
@@ -398,7 +468,7 @@ pub(super) fn update_hovered_object(
         let reaction = crate::target::cursor_mode::go_reaction(
             factions.as_deref(),
             store.0.gameobject_faction(),
-            self_q.single().ok(),
+            self_store,
         );
         if !crate::target::cursor_mode::mouseover_eligible(
             store.0.gameobject_type_id(),

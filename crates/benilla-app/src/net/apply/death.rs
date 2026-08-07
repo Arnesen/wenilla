@@ -78,9 +78,13 @@ pub(super) fn resurrect_request(
     });
 }
 
-/// `SMSG_SPIRIT_HEALER_CONFIRM` — the healer awaiting the XP-loss two-step's Accept.
+/// `SMSG_SPIRIT_HEALER_CONFIRM` — the healer awaiting the XP-loss two-step's Accept. The message
+/// IS the announce (decision 1068): the healer's gossip re-sends it on every ask, and the
+/// reference fires `CONFIRM_XP_LOSS` per arrival — so the generation bump is what re-shows a
+/// cancelled confirm, exactly the `SMSG_CORPSE_RECLAIM_DELAY` re-fire pattern above.
 pub(super) fn spirit_healer_confirm(npc: u64, death_net: &mut DeathNet) {
     death_net.spirit_healer = Some(npc);
+    death_net.confirm_generation = death_net.confirm_generation.wrapping_add(1);
 }
 
 /// `SMSG_DURABILITY_DAMAGE_DEATH` — the red line, verbatim GlobalStrings `DURABILITYDAMAGE_DEATH`

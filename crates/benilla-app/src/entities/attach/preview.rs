@@ -108,6 +108,20 @@ pub(in crate::entities) struct PreviewSpec {
     pub(in crate::entities) equipment: [CharEnumItem; 19],
     /// `CHARACTER_FLAG_*` bits; only hide-helm / hide-cloak are read here.
     pub(in crate::entities) flags: u32,
+    /// **Whose held law this look follows** (decision 1076) — the one place the two previews
+    /// genuinely differ, and a *verified* difference rather than a convenience.
+    ///
+    /// `false` — the **character-select mannequin** (`0x472950`), whose equipment loop skips
+    /// `EQUIPMENT_SLOT_RANGED` outright (`0x472bfe cmp esi,0x11; je`) and forces SheatheType 0.
+    ///
+    /// `true` — the **dressing room** (`DressUpModel::TryOn 0x504d90`), which does not skip it: its
+    /// remap table (`0x504b7c` → `0x504b44`) sends `INVTYPE_RANGED` down the same held arm as a
+    /// weapon, and `sheathFlag = 0` is pushed literally at `0x504adc`, so a tried-on ranged weapon
+    /// is installed **at a hand and never at a sheath point, whatever its SheatheType** — by the
+    /// world's own split (bow → HandLeft, gun/crossbow/wand/thrown → HandRight). Which is exactly
+    /// why this rides [`placement`]'s existing, already-verified ranged arm rather than growing a
+    /// second copy of that mapping.
+    pub(in crate::entities) ranged_in_hand: bool,
 }
 
 /// What one [`assemble`] produced — the content half of a preview bake, in the booth's own shape.
@@ -240,6 +254,8 @@ pub(in crate::entities) fn build_glue_preview(
         facial_hair,
         equipment,
         flags,
+        // The mannequin's own law: the select build skips EQUIPMENT_SLOT_RANGED (0x472bfe).
+        ranged_in_hand: false,
     };
     let Some(a) = assemble(
         &spec,
@@ -350,6 +366,11 @@ pub(in crate::entities) fn build_dressup_preview(
         // The world path honours no hide-helm/hide-cloak flag for a live player either (the helm
         // comes straight off the visible-item slot), so the preview of that player carries none.
         flags: 0,
+        // The widget's law, not the mannequin's (decision 1076). Unconditional, because the ranged
+        // slot of a dressing-room look is only ever filled by a TRY-ON: `crate::ui_dressup` leaves
+        // a worn ranged weapon out, since the reference's Dress()/SetUnit clones the live world
+        // model and a ranged weapon shows there only while ranged-drawn.
+        ranged_in_hand: true,
     };
     let Some(a) = assemble(
         &spec,
@@ -432,7 +453,7 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx) -> Option<Assembled> {
     } else {
         equipment[ENUM_HELM].display_id
     };
-    let mut held = held_wants(&equipment, helm, race, sex);
+    let mut held = held_wants(&equipment, helm, race, sex, spec.ranged_in_hand);
     // Per-hand grip `[right, left]`: a hand whose attach point holds a weapon curls into `HandsClosed`
     // (wow-re `hand-grip-mechanism.md` — the ref's paperdoll rule `0x5059a0`: attach-point occupancy, per
     // hand). Resolved here because the flat rider list drops each held item's attach id. A shield sits on
@@ -692,7 +713,18 @@ struct HeldWant {
 /// (its ranged arm only yields while ranged-drawn). A held off-hand frill (INVTYPE_HOLDABLE)
 /// rides the same hand law — the verdict enumerates weapons/shields only, and the world's held
 /// placement is the natural reading for the rest.
-fn held_wants(equipment: &[CharEnumItem; 19], helm: u32, race: u8, sex: u8) -> Vec<HeldWant> {
+///
+/// **`ranged_in_hand` is the dressing room's departure from that** (decision 1076): the dress-up
+/// widget does *not* skip the ranged slot, and installs it at a hand. That is the same mapping
+/// [`placement`]'s **ranged-drawn** arm already carries, so the flag simply chooses which sheath
+/// state the ranged slot is asked with — the melee pair is always asked drawn.
+fn held_wants(
+    equipment: &[CharEnumItem; 19],
+    helm: u32,
+    race: u8,
+    sex: u8,
+    ranged_in_hand: bool,
+) -> Vec<HeldWant> {
     let mut wants = Vec::new();
     if helm != 0 {
         wants.push(HeldWant {
@@ -721,7 +753,16 @@ fn held_wants(equipment: &[CharEnumItem; 19], helm: u32, race: u8, sex: u8) -> V
         if item.display_id == 0 {
             continue;
         }
-        let Some(attach) = placement(held_slot, item.inventory_type as u32, 0, 1) else {
+        // Per-slot, because the two arms want opposite sheath states: the melee pair yields while
+        // melee-drawn (1), the ranged slot only while ranged-drawn (2). The mannequin asks every
+        // slot drawn-melee, which is its own ranged skip; the dressing room asks the ranged slot
+        // drawn-ranged, which is the widget's hand install (decision 1076).
+        let unit_sheath = if held_slot == 2 && ranged_in_hand {
+            2
+        } else {
+            1
+        };
+        let Some(attach) = placement(held_slot, item.inventory_type as u32, 0, unit_sheath) else {
             continue;
         };
         let kind = if item.inventory_type == 14 {
@@ -811,6 +852,67 @@ mod tests {
             if let Some(slot) = equip_slot(inv) {
                 assert!(slot < 19, "inv {inv} → slot {slot} out of range");
             }
+        }
+    }
+
+    /// **The two held laws, side by side** (decision 1076). The character-select mannequin skips
+    /// `EQUIPMENT_SLOT_RANGED` outright (`0x472bfe`); the dressing-room widget installs it at a
+    /// hand, by the world's own split — bow (INVTYPE_RANGED 15) to HandLeft, gun/crossbow/wand
+    /// (26) and thrown (25) to HandRight.
+    ///
+    /// Asserted per inventory type rather than once, because a one-sided implementation — placing
+    /// every ranged type at the same hand — is the plausible wrong answer and it still shows *a*
+    /// bow, which is all the report asked for.
+    #[test]
+    fn the_dressing_room_hands_a_ranged_weapon_where_the_mannequin_drops_it() {
+        let ranged = |inv: u8| {
+            let mut e = [CharEnumItem::default(); 19];
+            e[ENUM_HELD[2]] = CharEnumItem {
+                display_id: 8500,
+                inventory_type: inv,
+            };
+            e
+        };
+        for (inv, hand, what) in [
+            (15u8, attach_id::HAND_LEFT, "bow"),
+            (26, attach_id::HAND_RIGHT, "gun/crossbow/wand"),
+            (25, attach_id::HAND_RIGHT, "thrown"),
+        ] {
+            let e = ranged(inv);
+            assert!(
+                held_wants(&e, 0, 1, 0, false).is_empty(),
+                "the select mannequin skips the ranged slot ({what})"
+            );
+            let wants = held_wants(&e, 0, 1, 0, true);
+            assert_eq!(wants.len(), 1, "the dressing room holds the {what}");
+            assert_eq!(wants[0].attach, hand, "{what} rides the right hand point");
+            assert_eq!(wants[0].display, 8500);
+        }
+    }
+
+    /// …and the flag touches ONLY the ranged slot: the melee pair is asked drawn either way, so a
+    /// dressing-room look still hands a sword to HandRight and a shield to the Shield point.
+    #[test]
+    fn the_ranged_flag_leaves_the_melee_pair_alone() {
+        let mut e = [CharEnumItem::default(); 19];
+        e[ENUM_HELD[0]] = CharEnumItem {
+            display_id: 5500,
+            inventory_type: 21, // WEAPONMAINHAND
+        };
+        e[ENUM_HELD[1]] = CharEnumItem {
+            display_id: 5600,
+            inventory_type: 14, // SHIELD
+        };
+        for ranged_in_hand in [false, true] {
+            let wants = held_wants(&e, 0, 1, 0, ranged_in_hand);
+            let at = |display: u32| {
+                wants
+                    .iter()
+                    .find(|w| w.display == display)
+                    .map(|w| w.attach)
+            };
+            assert_eq!(at(5500), Some(attach_id::HAND_RIGHT));
+            assert_eq!(at(5600), Some(attach_id::SHIELD));
         }
     }
 }
