@@ -167,6 +167,18 @@ pub struct WmoPortalInstance {
     /// PVS. Seeded all-`true` (everything shows until the first compute, and forever for portal-less
     /// props).
     pub visible: Vec<bool>,
+    /// Per-group **ever-visited** latch — the client's render-record persistence (wow-re
+    /// `wmo-record-persistence.md`, landed wow-re main @`00a766f6`): the visit callback `0x685d70`
+    /// creates a per-(instance,group) record the first time the flood visits a group, the record
+    /// pools are cleared only at world init/teardown, and a recorded MLIQ group's **liquid surface
+    /// draws every frame with no portal/frustum re-check** (`0xc7cb04` list, walk `0x684cd0 →
+    /// 0x6b62e0`). So liquid is gated on *ever seen*, not on this frame's PVS — the Great Forge's
+    /// walkway-level pool must not vanish when its group drops out of the flood. Latched by
+    /// [`compute_wmo_pvs`] from `visible`; starts all-`false` (a never-visited group's liquid is
+    /// genuinely absent in the reference until first visit). Lifetime is the placement's residency,
+    /// not the world session — a restreamed placement re-latches from the first flood, a small
+    /// divergence from the client's global pools noted in the B65 decision record.
+    pub liquid_visited: Vec<bool>,
     /// Per-group **whole-group submersion** (indexed by absolute group index), from the group's
     /// MOGP `groupLiquid` override: `Some(kind)` means standing anywhere inside this group is
     /// standing under liquid — at every Z, with no surface grid involved at all.
@@ -275,8 +287,23 @@ fn compute_wmo_pvs(
     // The terrain leg of the seed's down-ray, sampled once for the camera's column: the client casts the
     // same segment at the ground and drops the WMO hit when the ground is nearer (`FUN_006821f0`).
     let terrain = terrain_height_under(&streamer, &adt_tiles, eye_world);
-    let dump = std::mem::take(&mut probe.dump_requested);
-    let mut dump_text = dump.then(|| format!("eye world: {eye_world:?}\n"));
+    // `WOW_CULLDUMP=1` re-requests the dump every frame (last writer wins): a headless capture has
+    // no panel button, and the first frames race asset residency, so a one-shot request from
+    // startup would photograph an empty world.
+    static ENV_DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let dump = std::mem::take(&mut probe.dump_requested)
+        || *ENV_DUMP.get_or_init(|| std::env::var_os("WOW_CULLDUMP").is_some());
+    // The camera pose IN FULL: replaying a dump in the pin probe needs forward + fov + aspect, not
+    // just the eye — B65's first dump recorded only the eye and the replay had to reconstruct the
+    // look from the player's position.
+    let mut dump_text = dump.then(|| {
+        let fwd = cam_t.forward();
+        let (fovy, aspect) = match proj {
+            Projection::Perspective(p) => (p.fov, p.aspect_ratio),
+            _ => (f32::NAN, f32::NAN),
+        };
+        format!("eye world: {eye_world:?}\nforward: {fwd:?} fovy {fovy:.4} aspect {aspect:.4}\n")
+    });
 
     // The camera's MFOG fog target + interior claim — resolved from the same down-ray seed the
     // flood runs anyway (see [`fog`]); the first placement whose seed claims a TRUE INTERIOR
@@ -368,6 +395,18 @@ fn compute_wmo_pvs(
                         );
                     }
                 }
+            }
+        }
+        // The render-record persistence latch (`liquid_visited` — the client's per-(instance,group)
+        // visit records): a group entering the PVS this frame stays "visited" for the rest of this
+        // placement's residency, and the visibility authority draws its MLIQ surface off THIS latch,
+        // never off the per-frame `visible`.
+        if inst.liquid_visited.len() != groups {
+            inst.liquid_visited = vec![false; groups];
+        }
+        for g in 0..groups {
+            if inst.visible.get(g).copied().unwrap_or(false) {
+                inst.liquid_visited[g] = true;
             }
         }
     }
@@ -730,6 +769,7 @@ mod tests {
             world_from_local: Affine3A::IDENTITY,
             name_set: 0,
             visible: vec![false, true, false],
+            liquid_visited: vec![false; 3],
             flooded: vec![None; 3],
         };
         let key = |groups: &[u16]| WmoGroupVis {

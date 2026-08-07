@@ -107,6 +107,43 @@ pub struct TrainerAbilityReq {
     pub met: bool,
 }
 
+/// What `GameTooltip:SetTrainerService` describes for one row — the pre-resolved output of the
+/// **app-side** tooltip law (`ui_trainer::service_tooltip`, transcribing `SetTrainerService
+/// 0x5338b0`). The engine holds no DBC, so the app decides the subject and the engine only picks a
+/// renderer; the binding in the real client does exactly that too — it emits no line of its own and
+/// is a three-way selector into the shared spell builder `0x52e610` or item builder `0x52b650`.
+///
+/// This is deliberately **not** derivable from [`TrainerService::texture`]: the tooltip and the icon
+/// disagree, by design and in both directions (wow-re `ui/scratch/trainer-service-tooltip-law.md`
+/// §6 — the icon needs a trainer-type gate the tooltip does not have, and the icon pins the *wire*
+/// wrapper where the tooltip hops to the *taught* spell). On ~806 of the shipped corpus's trainer
+/// services the reference client visibly shows one spell's icon above another spell's tooltip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrainerTooltip {
+    /// The ITEM builder, on this item id — the taught spell carries `SPELL_ATTR_IS_TRADESKILL`.
+    /// `0` (or a template still in flight) renders an EMPTY tooltip, which is the client's own
+    /// behaviour: the builder early-outs on a cache miss and the query is enqueued.
+    Item(u32),
+    /// The SPELL builder, on the taught spell — or on the wire spell itself when no learn-wrapper
+    /// slot resolved, the only path that describes the wrapper.
+    Spell {
+        spell_id: u32,
+        /// `param5` altCaster — ONE gate suppressing BOTH the totems and the reagents lines
+        /// (byte-verified at `0x52ed43` and `0x52f393`). Set exactly when the matched wrapper slot
+        /// was `SPELL_EFFECT_LEARN_PET_SPELL`.
+        alt_caster: bool,
+    },
+}
+
+impl Default for TrainerTooltip {
+    fn default() -> Self {
+        TrainerTooltip::Spell {
+            spell_id: 0,
+            alt_caster: false,
+        }
+    }
+}
+
 /// One trainer service row, resolved by the app from the wire `TrainerSpell` (decision 0237). Plain
 /// data — position in [`TrainerState::services`] is the *unsorted* wire order; the 1-based index the
 /// Lua uses is a position in the visible display tree ([`rows`], built from [`TrainerState::groups`]).
@@ -145,6 +182,9 @@ pub struct TrainerService {
     pub skill_line: u32,
     /// The skill line's localized display name (`SkillLine.dbc`) — the header row's text.
     pub skill_line_name: String,
+    /// What the detail-icon hover describes ([`TrainerTooltip`]) — resolved app-side, because the
+    /// law reads `Spell.dbc` fields the engine cannot see. Independent of [`Self::texture`].
+    pub tooltip: TrainerTooltip,
 }
 
 /// One skill-line group in the display tree (decision 0247): the header's skill line + name and the
@@ -293,8 +333,10 @@ fn rows(model: &Model) -> Vec<Row> {
 }
 
 /// The service at a 1-based visible index, or `None` when that row is a **header** (or OOB / no
-/// trainer) — so the getters/buy that read a service safely no-op on a header row.
-fn service(model: &Model, index: usize) -> Option<&TrainerService> {
+/// trainer) — so the getters/buy that read a service safely no-op on a header row. `pub(super)`:
+/// `GameTooltip:SetTrainerService` lives in the tooltip channel and must resolve its index through
+/// the same VISIBLE mapping, never a raw `services[]` position.
+pub(super) fn service(model: &Model, index: usize) -> Option<&TrainerService> {
     let n = index.checked_sub(1)?;
     match rows(model).get(n)? {
         Row::Service(si) => model.trainer.as_ref()?.services.get(*si),
@@ -675,6 +717,12 @@ mod tests {
     ) -> TrainerService {
         TrainerService {
             spell_id,
+            // The fixture's default subject: the wire spell, no hop (the "no learn wrapper"
+            // fallback); the tooltip tests set the arm they mean explicitly.
+            tooltip: TrainerTooltip::Spell {
+                spell_id,
+                alt_caster: false,
+            },
             name: Some(name.into()),
             subtext: Some("Rank 1".into()),
             texture: Some(format!("Interface\\Icons\\Spell_{spell_id}")),

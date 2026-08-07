@@ -304,6 +304,7 @@ pub(super) fn spawn_loaded_placements(
                                 world_from_local: p.transform.compute_affine(),
                                 name_set: p.name_set,
                                 visible: vec![true; m.group_nav.len()],
+                                liquid_visited: vec![false; m.group_nav.len()],
                                 // The MOGP `groupLiquid` override, resolved once at spawn: 13
                                 // groups in the whole archive declare "this room is wholly
                                 // submerged" in place of carrying a liquid grid, and 5 of them are

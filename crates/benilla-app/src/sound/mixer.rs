@@ -132,8 +132,15 @@ impl Mixer {
     /// Open the default audio device. Fails cleanly when there is none (headless/CI) — the caller
     /// runs silent with `None` (mirrors the client's `-nosound` gate).
     pub(crate) fn new() -> Result<Self> {
+        let (backend_settings, sample_rate) = backend_settings();
         let settings = AudioManagerSettings::<DefaultBackend> {
-            backend_settings: backend_settings(),
+            backend_settings,
+            // The mix tap (decision 1112, `$WOW_MIX_TAP`) rides the main track as an effect —
+            // a no-op builder unless the env var names a capture path.
+            main_track_builder: super::mix_tap::install(
+                kira::track::MainTrackBuilder::new(),
+                sample_rate,
+            ),
             ..Default::default()
         };
         let mut manager = AudioManager::<DefaultBackend>::new(settings)
@@ -301,30 +308,37 @@ impl Mixer {
 /// conferencing tool) can drag it down under us and we would never know. Naming it puts a floor
 /// under the callback's deadline instead of inheriting someone else's.
 ///
-/// 1024 frames is ~21 ms at 48 kHz. Latency that size is inaudible for WoW — nothing here is
-/// rhythm-critical, the shortest UI click is an order of magnitude longer — and it buys ~4× the
-/// deadline of a 256-frame buffer for the mix to finish in.
-const TARGET_BUFFER_FRAMES: u32 = 1024;
+/// 2048 frames is ~43 ms at 48 kHz. Latency that size is inaudible for WoW — nothing here is
+/// rhythm-critical, the shortest UI click is an order of magnitude longer. The size is set by
+/// the *HAL's* deadline, not ours: a confirmed crackle (decision 1115) was the OS missing the
+/// device IO-cycle deadline under system pressure while our mix ran clean, and the buffer size
+/// is the cycle length — fewer, longer cycles mean twice the slack per cycle for the HAL. Our
+/// own mix cost was never the constraint at 1024 (~21 ms, decision 1026) and is even less so
+/// here.
+const TARGET_BUFFER_FRAMES: u32 = 2048;
 
-/// Build the cpal backend settings: kira's default device, our explicit buffer size.
+/// Build the cpal backend settings: kira's default device, our explicit buffer size. Also
+/// reports the negotiated sample rate (the mix tap's WAV header must match the renderer);
+/// `None` when the device/config could not be probed — those paths run on kira defaults.
 ///
 /// `device` stays `None` on purpose — that keeps kira's own default-device selection *and* its
 /// disconnect/restart handling (`custom_device = false`). We override only the config. Every
 /// failure path falls back to kira's defaults, so a machine we can't probe still opens the device
 /// exactly as before; [`Mixer::new`]'s caller already tolerates no-device.
-fn backend_settings() -> CpalBackendSettings {
+fn backend_settings() -> (CpalBackendSettings, Option<u32>) {
     let fallback = CpalBackendSettings::default();
     let Some(device) = cpal::default_host().default_output_device() else {
-        return fallback;
+        return (fallback, None);
     };
     let Ok(supported) = device.default_output_config() else {
-        return fallback;
+        return (fallback, None);
     };
     // Clamp into what the device will actually accept; `Unknown` means cpal can't tell us the
     // range, and asking for a size outside it fails the stream build — so leave those alone.
     let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size() else {
         info!("audio: device reports no buffer-size range — leaving it to the driver");
-        return fallback;
+        let rate = supported.config().sample_rate;
+        return (fallback, Some(rate));
     };
     let frames = TARGET_BUFFER_FRAMES.clamp(*min, *max);
     let mut config = supported.config();
@@ -335,10 +349,14 @@ fn backend_settings() -> CpalBackendSettings {
         config.channels,
         f64::from(frames) / f64::from(config.sample_rate) * 1000.0,
     );
-    CpalBackendSettings {
-        config: Some(config),
-        ..fallback
-    }
+    let rate = config.sample_rate;
+    (
+        CpalBackendSettings {
+            config: Some(config),
+            ..fallback
+        },
+        Some(rate),
+    )
 }
 
 /// The mix-health counters — what a crackle actually *is*, in numbers (decision 1026).
@@ -436,9 +454,162 @@ pub(crate) fn loop_from_bytes(bytes: Vec<u8>) -> Result<StaticSoundData> {
     Ok(sfx_from_bytes(bytes)?.loop_region(..))
 }
 
-/// Wrap compressed audio bytes for decode-streaming (music/ambience).
+/// Wrap compressed audio bytes for decode-streaming (music/ambience). The bytes go in behind
+/// [`PromotingSource`] — the decode-thread QoS fix (decision 1109) — never a bare cursor.
 pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<FromFileError>> {
-    StreamingSoundData::from_cursor(std::io::Cursor::new(bytes)).context("opening stream")
+    StreamingSoundData::from_media_source(PromotingSource(std::io::Cursor::new(bytes)))
+        .context("opening stream")
+}
+
+/// Compressed-audio source whose reads promote the calling thread — the stream-decode QoS fix
+/// (decision 1109).
+///
+/// kira decodes each streaming sound on a thread of its own (`decode_scheduler.rs`, a bare
+/// `std::thread::spawn`) feeding a 16 384-frame ring buffer (~0.37 s at 44.1 kHz); when that
+/// buffer runs dry mid-play the sound zero-fills whole callback blocks (`streaming/sound.rs`,
+/// the `slots() < 2` branch) — hard amplitude steps, i.e. a crackle, and one that registers on
+/// **neither** [`MixHealth`] meter: the mix met its deadline and no stream error fired. A bare
+/// spawn lands at *default* QoS — macOS does not inherit the spawner's class
+/// (`thread_qos::tests` pins this) — which is below everything the world-entry burst runs: the
+/// compute pool at user-interactive, eight IO workers at user-initiated. First login is the
+/// guaranteed collision: the glue theme is mid-fade (a live stream) exactly while every core
+/// saturates, so its decoder starves and the loading screen crackles.
+///
+/// The only place our code runs on that thread is the decoder's reads from the byte source, so
+/// the source itself promotes: first touch per thread raises it to user-interactive. The class
+/// is justified — the mix's input has the hardest deadline in the app, and the thread sleeps
+/// ~99% of its life (MP3 decodes at ~100× real time), so the promotion costs nothing. The latch
+/// is thread-local; the open/probe calls kira makes on the *main* thread re-assert that
+/// thread's existing class, harmlessly.
+struct PromotingSource(std::io::Cursor<Vec<u8>>);
+
+/// Once-per-thread promotion latch for [`PromotingSource`].
+fn promote_decode_thread() {
+    std::thread_local! {
+        static PROMOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    PROMOTED.with(|p| {
+        if !p.get() {
+            crate::thread_qos::promote_current_thread(crate::thread_qos::QosClass::UserInteractive);
+            debug!(
+                "audio: stream decode thread {:?} promoted",
+                std::thread::current().id()
+            );
+            p.set(true);
+        }
+    });
+}
+
+impl std::io::Read for PromotingSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        promote_decode_thread();
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Seek for PromotingSource {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        promote_decode_thread();
+        self.0.seek(pos)
+    }
+}
+
+impl symphonia::core::io::MediaSource for PromotingSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.0.get_ref().len() as u64)
+    }
+}
+
+/// How much audible time may go missing per watch window before [`StreamWatch`] reports —
+/// over two zero-filled ~43 ms callback blocks: past the ±1-block quantization of the shared
+/// position and the sample-clock/wall-clock drift, and far under any real starvation burst
+/// (hundreds of ms).
+const STREAM_STARVED_MIN_SECS: f64 = 0.1;
+/// The accounting window [`StreamWatch`] compares over.
+const STREAM_WATCH_WINDOW_SECS: f64 = 1.0;
+
+/// Position-freeze watch over a live stream — the starvation meter [`MixHealth`] lacks (decision
+/// 1109; `poll_mix_health`'s docs name this exact blind spot).
+///
+/// A starved stream is *audible* — kira zero-fills the callback block — but the mix made its
+/// deadline, so nothing else measures it. What does move is the stream's shared position: it
+/// freezes while the state stays audible. Fed once per frame from the held handle; over each
+/// ~[`STREAM_WATCH_WINDOW_SECS`] window it compares wall time elapsed against position advanced
+/// and WARNs when more than [`STREAM_STARVED_MIN_SECS`] went missing. Playback rate is always
+/// 1.0 here (WoW pitches no music), so the two clocks agree to drift well under the threshold.
+///
+/// **Known blind spot (1112, deliberate):** the watch samples on the main thread, so a stream
+/// that starves *during a main-thread stall* and reaches `Stopped` before the next frame is
+/// never accounted — the window is discarded by the reset. Reconstructing it from the stop
+/// deadline would trade false positives for coverage; the mix tap (`$WOW_MIX_TAP`) owns that
+/// class instead, because the tap records on the audio thread and doesn't care what the main
+/// thread was doing.
+pub(crate) struct StreamWatch {
+    label: &'static str,
+    last_pos: Option<f64>,
+    expected: f64,
+    advanced: f64,
+}
+
+impl StreamWatch {
+    pub(crate) fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            last_pos: None,
+            expected: 0.0,
+            advanced: 0.0,
+        }
+    }
+
+    /// Per-frame feed from the held handle. Call every frame the handle exists.
+    pub(crate) fn feed(&mut self, handle: &StreamingSoundHandle<FromFileError>, dt: f64) {
+        use kira::sound::PlaybackState as S;
+        let audible = matches!(handle.state(), S::Playing | S::Stopping);
+        if let Some(lost) = self.observe(audible, handle.position(), dt) {
+            warn!(
+                "audio: {} stream starved — ~{:.0} ms of injected silence in the last \
+                 {STREAM_WATCH_WINDOW_SECS:.0} s (decode thread outrun) — this is what a \
+                 crackle sounds like",
+                self.label,
+                lost * 1000.0,
+            );
+        }
+    }
+
+    /// Drop the baseline — call when the watched handle is dropped/replaced, so the next
+    /// stream's position (starting at 0, i.e. *behind* the old one's) can't read as a freeze.
+    pub(crate) fn reset(&mut self) {
+        self.last_pos = None;
+        self.expected = 0.0;
+        self.advanced = 0.0;
+    }
+
+    /// The accounting core, pure so the tests below can drive it without a device. Returns
+    /// `Some(lost_secs)` when a window closes starved.
+    fn observe(&mut self, audible: bool, pos: f64, dt: f64) -> Option<f64> {
+        // Non-audible states (stopped, paused) drop the baseline: position legitimately holds.
+        if !audible {
+            self.reset();
+            return None;
+        }
+        let Some(last) = self.last_pos.replace(pos) else {
+            return None; // first audible frame — baseline only
+        };
+        self.expected += dt;
+        // `max(0.0)`: a track replaced on the slot mid-window jumps backwards once (the new
+        // stream starts at 0); count it as no advance for that one frame, not as negative.
+        self.advanced += (pos - last).max(0.0);
+        if self.expected < STREAM_WATCH_WINDOW_SECS {
+            return None;
+        }
+        let lost = self.expected - self.advanced;
+        self.expected = 0.0;
+        self.advanced = 0.0;
+        (lost > STREAM_STARVED_MIN_SECS).then_some(lost)
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +701,71 @@ mod tests {
             stream.duration().as_secs() > 30,
             "zone music should be minutes long"
         );
+    }
+
+    /// The starvation accounting (decision 1109): a stream that advances in lockstep with wall
+    /// time stays quiet; one whose position freezes mid-window (kira's zero-fill) reports the
+    /// missing time; a slot swap's one-frame backward jump never reads as a freeze; and going
+    /// non-audible drops the baseline so a later stream starts clean.
+    #[test]
+    fn stream_watch_accounts_freezes_not_swaps() {
+        let dt = 1.0 / 60.0;
+
+        // Healthy: position tracks wall time exactly — a full window closes clean.
+        let mut w = StreamWatch::new("test");
+        let mut pos = 0.0;
+        for _ in 0..90 {
+            assert_eq!(w.observe(true, pos, dt), None, "healthy stream reported");
+            pos += dt;
+        }
+
+        // Starved: 18 frames (~0.3 s) frozen inside the window → that window reports ~0.3 s.
+        let mut w = StreamWatch::new("test");
+        let mut pos = 0.0;
+        let mut reports = Vec::new();
+        for i in 0..90 {
+            if !(30..48).contains(&i) {
+                pos += dt;
+            }
+            if let Some(lost) = w.observe(true, pos, dt) {
+                reports.push(lost);
+            }
+        }
+        assert_eq!(reports.len(), 1, "one starved window: {reports:?}");
+        assert!(
+            (reports[0] - 0.3).abs() < 0.05,
+            "lost ≈ 0.3 s, got {reports:?}"
+        );
+
+        // Slot swap: position jumps backwards once (new track starts at 0) — no report.
+        let mut w = StreamWatch::new("test");
+        let mut pos = 40.0;
+        for i in 0..90 {
+            if i == 30 {
+                pos = 0.0;
+            }
+            assert_eq!(
+                w.observe(true, pos, dt),
+                None,
+                "slot swap reported as freeze"
+            );
+            pos += dt;
+        }
+
+        // Non-audible resets the baseline: a stopped-then-restarted stream (position far behind
+        // the old one's) opens a fresh window instead of inheriting a phantom freeze.
+        let mut w = StreamWatch::new("test");
+        let mut pos = 70.0;
+        for _ in 0..30 {
+            assert_eq!(w.observe(true, pos, dt), None);
+            pos += dt;
+        }
+        assert_eq!(w.observe(false, pos, dt), None);
+        let mut pos = 0.0;
+        for _ in 0..90 {
+            assert_eq!(w.observe(true, pos, dt), None, "restart read as freeze");
+            pos += dt;
+        }
     }
 
     /// The fade contract every transition rests on: `stop(tween)` fades the channel to silence

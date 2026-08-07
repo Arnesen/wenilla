@@ -23,7 +23,22 @@ pub enum QosClass {
     UserInteractive = 0x21,
     /// Work the frame is waiting on soon but not this frame (asset IO, async compute, net IO).
     UserInitiated = 0x19,
+    /// Darwin's unspecified/default class — where a *thread that will block for seconds* belongs.
+    /// Apple's duration table calls user-interactive "virtually instantaneous" and user-initiated
+    /// "a few seconds or less"; a multi-second shader-compile burst is neither. Metal's compiler
+    /// runs the compile at the **calling thread's** QoS, and Apple's own prescription for
+    /// pipeline prewarming is exactly this class (WWDC25 "Explore Metal 4 games":
+    /// "Set QoS class to default for pipeline prewarming and streaming", with sample code using
+    /// `QOS_CLASS_DEFAULT`). Decision 1117.
+    Default = 0x15,
 }
+
+/// Set while the *covered* pipeline-warm burst runs (decision 1117): the render thread spends
+/// that window blocked inside Metal pipeline compilation, and there is no frame to protect —
+/// the loading cover is a still image. Published by `pipe_warm`, applied by
+/// [`promote_render_thread`] on the render thread itself, which is the only thread that can set
+/// its own QoS.
+pub static COMPILE_BURST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Promote the calling thread to `class`. Safe to call repeatedly; logs once on failure.
 pub fn promote_current_thread(class: QosClass) {
@@ -74,17 +89,24 @@ fn current_thread_qos() -> Option<u32> {
 }
 
 fn promote_render_thread(_world: &mut World) {
+    // The class this thread should be in *right now*: its normal frame-critical band, or the
+    // default band while it is the shader compiler's caller under a cover (1117).
+    let want = if COMPILE_BURST.load(std::sync::atomic::Ordering::Relaxed) {
+        QosClass::Default
+    } else {
+        QosClass::UserInteractive
+    };
     std::thread_local! {
-        static PROMOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static APPLIED: std::cell::Cell<Option<QosClass>> = const { std::cell::Cell::new(None) };
     }
-    PROMOTED.with(|p| {
-        if !p.get() {
-            promote_current_thread(QosClass::UserInteractive);
+    APPLIED.with(|p| {
+        if p.get() != Some(want) {
+            promote_current_thread(want);
             debug!(
-                "thread QoS: promoted render-schedule thread {:?}",
+                "thread QoS: render-schedule thread {:?} → {want:?}",
                 std::thread::current().name().unwrap_or("<unnamed>")
             );
-            p.set(true);
+            p.set(Some(want));
         }
     });
 }
@@ -108,5 +130,23 @@ mod tests {
             assert_eq!(observed.0, Some(0x15), "spawned thread not default-QoS");
             assert_eq!(observed.1, Some(class as u32), "promotion did not apply");
         }
+    }
+
+    /// A spawned thread does NOT inherit its spawner's QoS class — it lands at default even when
+    /// the spawner is user-interactive. This is the load-bearing fact of decision 1109: kira
+    /// spawns its per-stream decode threads from the (promoted) main thread, and without
+    /// inheritance those threads sit *below* the promoted worker pools and starve under the
+    /// world-entry burst — hence `sound::mixer::PromotingSource` promoting from inside.
+    #[test]
+    fn qos_is_not_inherited_by_spawned_threads() {
+        let (parent, child) = std::thread::spawn(|| {
+            promote_current_thread(QosClass::UserInteractive);
+            let child = std::thread::spawn(current_thread_qos).join().unwrap();
+            (current_thread_qos(), child)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(parent, Some(QosClass::UserInteractive as u32));
+        assert_eq!(child, Some(0x15), "QoS inherited — 1109's premise changed");
     }
 }

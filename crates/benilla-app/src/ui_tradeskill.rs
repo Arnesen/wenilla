@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
-use benilla_formats::{SpellFocusCatalog, SPELL_EFFECT_CREATE_ITEM};
+use benilla_formats::{SpellFocusCatalog, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM};
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_ui::script::{
     TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
@@ -380,7 +380,7 @@ fn feed_trade_skill(
                 spells
                     .catalog
                     .get(s)
-                    .is_some_and(|d| d.attributes & ATTR_IS_TRADESKILL != 0)
+                    .is_some_and(|d| d.attributes & SPELL_ATTR_IS_TRADESKILL != 0)
                     && skill_lines.catalog.spell_to_line(s) == Some(line)
             })
             .filter_map(|&s| {
@@ -440,10 +440,6 @@ fn feed_trade_skill(
     }
     *last = fresh;
 }
-
-/// `SPELL_ATTR_IS_TRADESKILL` — the recipe marker (0227's add-gate bit; the book divert the
-/// spellbook applies is the same bit that ADMITS a spell here).
-const ATTR_IS_TRADESKILL: u32 = 0x20;
 
 /// Drain the Lua intents and run the repeat machine: `DoTradeSkill` latches the count and casts
 /// through the ONE cast-send path (0216 §8); our own GO for the latched spell re-casts until dry;

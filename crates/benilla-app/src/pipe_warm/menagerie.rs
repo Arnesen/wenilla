@@ -549,6 +549,10 @@ fn spawn_model_rig(
         Transform::from_xyz(0.0, 0.0, -0.5).with_scale(Vec3::splat(0.01)),
         tag,
         WarmRig,
+        // Hidden at spawn: a hidden rig is never extracted, so it queues no pipeline. The pass
+        // reveals rigs a slice at a time (`super::reveal_slice`) — that is what paces the
+        // compile burst instead of paying all 1480 in one blocking frame (decision 1116).
+        Visibility::Hidden,
         ChildOf(cam),
     ));
     if let Some(aabb) = aabb {
@@ -575,6 +579,8 @@ fn spawn_lane_rig<M: Material>(
         MeshMaterial3d(mat),
         Transform::from_xyz(0.0, 0.0, -0.5).with_scale(Vec3::splat(0.01)),
         WarmRig,
+        // Hidden at spawn — revealed a slice at a time; see `spawn_model_rig`.
+        Visibility::Hidden,
         ChildOf(cam),
     ));
     if let Some(aabb) = aabb {

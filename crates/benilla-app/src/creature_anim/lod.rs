@@ -562,6 +562,7 @@ mod tests {
                 world_from_local: bevy::math::Affine3A::IDENTITY,
                 name_set: 0,
                 visible: vec![false, false],
+                liquid_visited: vec![false, false],
                 flooded: vec![None, None],
             })
             .id();

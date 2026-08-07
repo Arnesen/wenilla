@@ -498,3 +498,234 @@ fn action_hover_delegates_by_kind() {
     assert_eq!(s.take_spell_tooltip_asks(), vec![5143], "the miss asked");
     assert!(s.take_errors().is_empty());
 }
+
+/// The tooltip's left-column texts in order.
+fn left_lines(s: &mut UiScript) -> Vec<String> {
+    let n: i64 = s.eval("return TT:NumLines()").unwrap();
+    (1..=n)
+        .map(|i| {
+            s.eval::<String>(&format!(
+                "return getglobal('TTTextLeft{i}'):GetText() or ''"
+            ))
+            .unwrap()
+        })
+        .collect()
+}
+
+/// One trainer service fixture with an explicit tooltip subject.
+fn trainer_service(spell_id: u32, name: &str, tooltip: TrainerTooltip) -> TrainerService {
+    TrainerService {
+        spell_id,
+        tooltip,
+        name: Some(name.into()),
+        texture: Some("Interface\\Icons\\Temp".into()),
+        category: TrainerServiceCategory::Available,
+        skill_line: 26,
+        skill_line_name: "Arms".into(),
+        ..Default::default()
+    }
+}
+
+/// `SetTrainerService` is a SELECTOR: it renders no line of its own and routes to whichever shared
+/// builder the app-side law picked. All three arms are pinned here — the item arm, the spell arm
+/// (with `altCaster` suppressing the reagents block), and a header row, which is a no-op.
+///
+/// The index is a VISIBLE row index, so row 1 is the "Arms" header and the services start at 2 —
+/// the same interleave `SetTradeSkillItem` has, and the same way to get it wrong.
+#[test]
+fn set_trainer_service_selects_the_builder_and_never_renders_its_own_line() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        2847,
+        ItemTemplateView {
+            name: "Copper Shortsword".into(),
+            quality: 1,
+            class: 2,
+            subclass: 7,
+            ..Default::default()
+        },
+    );
+    s.set_spell_tooltip(
+        200,
+        SpellTooltipView {
+            name: "Heroic Strike".into(),
+            cost: Some("15 Rage".into()),
+            reagents: Some("Reagents: Linen Cloth".into()),
+            description: "A strong attack.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_trainer(Some(TrainerState {
+        services: vec![
+            trainer_service(2756, "Copper Shortsword", TrainerTooltip::Item(2847)),
+            trainer_service(
+                100,
+                "Heroic Strike",
+                TrainerTooltip::Spell {
+                    spell_id: 200,
+                    alt_caster: false,
+                },
+            ),
+            trainer_service(
+                101,
+                "Train Growl",
+                TrainerTooltip::Spell {
+                    spell_id: 200,
+                    alt_caster: true,
+                },
+            ),
+        ],
+        ..Default::default()
+    }));
+
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "AB1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        CreateFrame("GameTooltip", "TT")
+
+        -- Row 1 is the "Arms" header: a no-op, not a shifted hit onto a neighbouring service.
+        TT:SetOwner(a, "ANCHOR_RIGHT")
+        TT:SetTrainerService(1)
+        assert(TT:NumLines() == 0, "a header row renders nothing")
+
+        -- Row 2: the recipe -> the ITEM builder, full item tooltip (not the spell's name).
+        TT:SetOwner(a, "ANCHOR_RIGHT")
+        TT:SetTrainerService(2)
+        assert(TTTextLeft1:GetText() == "Copper Shortsword", "the item arm renders the item")
+        assert(TT:NumLines() > 1, "the ITEM builder, not a one-line stub")
+    "#,
+    )
+    .unwrap();
+
+    // Row 3: the class-trainer service -> the SPELL builder on the TAUGHT spell, reagents shown.
+    s.run(
+        r#"
+        TT:SetOwner(AB1, "ANCHOR_RIGHT")
+        TT:SetTrainerService(3)
+    "#,
+    )
+    .unwrap();
+    let texts = left_lines(&mut s);
+    assert_eq!(
+        texts[0], "Heroic Strike",
+        "the spell arm hops to the taught"
+    );
+    assert!(
+        texts.iter().any(|t| t == "Reagents: Linen Cloth"),
+        "altCaster clear -> the reagents block renders: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "A strong attack."),
+        "the gold description is part of the shared builder's law: {texts:?}"
+    );
+
+    // Row 4: the same view, altCaster set -> the reagents block is gone, everything else stays.
+    s.run(
+        r#"
+        TT:SetOwner(AB1, "ANCHOR_RIGHT")
+        TT:SetTrainerService(4)
+    "#,
+    )
+    .unwrap();
+    let texts = left_lines(&mut s);
+    assert!(
+        !texts.iter().any(|t| t == "Reagents: Linen Cloth"),
+        "altCaster gates the reagents block: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "A strong attack."),
+        "and gates ONLY that block: {texts:?}"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// `SetCraftSpell` is `SetTrainerService`'s structural twin: a selector, not the two-line
+/// name/description stub it used to be. Both arms are pinned, and the assertion that matters most
+/// is the negative one — a rod recipe's hover shows the ROD's item tooltip while the same row's
+/// ICON is the spell's (Law D, decision 1107). Icon and tooltip disagreeing on one row is the
+/// verified shape, not a bug to reconcile.
+#[test]
+fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_item_template(
+        6218,
+        ItemTemplateView {
+            name: "Runed Copper Rod".into(),
+            quality: 1,
+            ..Default::default()
+        },
+    );
+    s.set_spell_tooltip(
+        7420,
+        SpellTooltipView {
+            name: "Enchant Bracer - Minor Health".into(),
+            cast_time: Some("Instant cast".into()),
+            description: "Permanently enchant bracers.".into(),
+            ..Default::default()
+        },
+    );
+    let recipe = |spell_id: u32, name: &str, tooltip: CraftTooltip| CraftRecipe {
+        spell_id,
+        tooltip,
+        name: name.into(),
+        sub_name: String::new(),
+        difficulty: TradeSkillDifficulty::Optimal,
+        num_available: 1,
+        icon: Some("Interface\\Icons\\Spell_Holy_Heal".into()),
+        description: Some("the OLD two-line stub's second line".into()),
+        needs_item_target: false,
+        reagents: vec![],
+        tools: vec![],
+    };
+    s.set_craft(Some(CraftState {
+        name: "Enchanting".into(),
+        rank: 100,
+        max_rank: 150,
+        recipes: vec![
+            recipe(
+                7420,
+                "Enchant Bracer - Minor Health",
+                CraftTooltip::Spell(7420),
+            ),
+            recipe(7421, "Runed Copper Rod", CraftTooltip::Item(6218)),
+        ],
+    }));
+
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "AB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        CreateFrame("GameTooltip", "TT")
+        TT:SetOwner(a, "ANCHOR_RIGHT")
+        TT:SetCraftSpell(1)
+    "#,
+    )
+    .unwrap();
+    let texts = left_lines(&mut s);
+    assert_eq!(texts[0], "Enchant Bracer - Minor Health");
+    assert!(
+        texts.iter().any(|t| t == "Instant cast"),
+        "the SHARED spell builder's law, not a two-line stub: {texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t == "the OLD two-line stub's second line"),
+        "the row's own `description` field is no longer the tooltip's source: {texts:?}"
+    );
+
+    s.run(
+        r#"
+        TT:SetOwner(AB2, "ANCHOR_RIGHT")
+        TT:SetCraftSpell(2)
+    "#,
+    )
+    .unwrap();
+    let texts = left_lines(&mut s);
+    assert_eq!(
+        texts[0], "Runed Copper Rod",
+        "a CREATE_ITEM recipe hovers the ITEM, though its icon is the spell's: {texts:?}"
+    );
+    assert!(s.take_errors().is_empty());
+}

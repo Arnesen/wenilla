@@ -42,7 +42,7 @@ use super::{ItemTemplateView, Model};
 mod names;
 mod render;
 
-use names::{quality_color, GOLD, GRAY, WHITE};
+use names::{quality_color, GRAY, WHITE};
 use render::render_view;
 
 /// Look up the store; a miss records the ask (the app sends `CMSG_ITEM_QUERY` and pushes back —
@@ -639,45 +639,6 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 render_by_id(lua, &this, item_id, fb_name, None)
             },
         )?,
-    )?;
-
-    // GameTooltip:SetCraftSpell(craftIndex) — the craft window's detail-icon hover (decision 0437
-    // phase 3, ref `CraftIcon`'s OnEnter, `Blizzard_CraftUI.xml:566`): a plain two-line render
-    // (name white, description gold) straight off THIS recipe's own pre-resolved fields, v1's
-    // deliberate choice over a second ask-once round trip through super::tooltip_spell's
-    // SpellTooltipView store (craft.rs's own module doc, "The tooltip channels") — CraftRecipe
-    // already carries the app-resolved description, so a second store keyed the same spell id
-    // under a different channel would just double the app's push traffic for the same string. An
-    // out-of-range craft index is a no-op.
-    m.set(
-        "SetCraftSpell",
-        lua.create_function(|lua, (this, craft_index): (Table, usize)| {
-            let found = {
-                let model = lua.app_data_ref::<Model>().expect("model app_data");
-                let Some(c) = &model.craft else {
-                    return Ok(());
-                };
-                craft_index
-                    .checked_sub(1)
-                    .and_then(|i| c.recipes.get(i))
-                    .map(|r| (r.name.clone(), r.description.clone()))
-            };
-            let Some((name, description)) = found else {
-                return Ok(());
-            };
-            let h = frame_handle_of(lua, &this)?;
-            {
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                clear_content(&mut model, h);
-            }
-            fire_cleared(lua, h);
-            append_line(lua, &this, (name, WHITE), None, false)?;
-            if let Some(desc) = description {
-                append_line(lua, &this, (desc, GOLD), None, true)?;
-            }
-            show_or_hide_empty(lua, h);
-            Ok(())
-        })?,
     )?;
 
     Ok(())

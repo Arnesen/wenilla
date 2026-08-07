@@ -21,11 +21,13 @@ pub(crate) mod footsteps;
 mod gameobject;
 mod glue;
 mod greeting;
+mod hal_overload;
 pub(crate) mod interior;
 mod kit;
 mod liquid_loop;
 mod math;
 mod missile;
+mod mix_tap;
 mod mixer;
 mod money;
 mod mount;
@@ -197,6 +199,7 @@ impl Plugin for SoundPlugin {
         })
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
+        .add_systems(Startup, hal_overload::setup)
         .add_systems(
             Update,
             (
@@ -206,6 +209,7 @@ impl Plugin for SoundPlugin {
                 toggle_mute,
                 apply_master_volume.after(toggle_mute),
                 poll_mix_health,
+                hal_overload::poll,
             ),
         );
         kit::plugin(app);
@@ -308,10 +312,15 @@ const MIX_HEALTH_REPORT: std::time::Duration = std::time::Duration::from_secs(5)
 /// A miss is not a maybe: `load >= 1.0` means the mix did not finish before the driver needed it,
 /// and the driver played whatever was in the buffer. If this line is quiet during a crackle, the
 /// crackle is *not* an underrun and the next suspect is upstream (a stepped parameter, a starved
-/// stream decoder) — which is exactly the disambiguation we could not make before.
+/// stream decoder) — which is exactly the disambiguation we could not make before. The starved
+/// stream decoder has its own meter now — [`mixer::StreamWatch`], fed by the music-stream
+/// holders (decision 1109; it registers on *neither* counter here) — and when every meter is
+/// quiet while the ear still hears something, `$WOW_MIX_TAP` records the waveform itself
+/// (decision 1112: a crackle can live purely in the mix's *content*).
 fn poll_mix_health(
     mut out: NonSendMut<SoundOutput>,
     time: Res<Time>,
+    mut exit: MessageReader<bevy::app::AppExit>,
     mut since_report: Local<std::time::Duration>,
     mut last_overruns: Local<u64>,
 ) {
@@ -320,7 +329,12 @@ fn poll_mix_health(
     };
     let health = mixer.poll_health();
     *since_report += time.delta();
-    if *since_report < MIX_HEALTH_REPORT {
+    // App exit forces the report out NOW: a session that quits shortly after the interesting
+    // moment (log in, hear the crackle, close the window) used to silently lose every miss
+    // since the last 5 s boundary — the 1112 hunt found the director's entire post-reveal
+    // window unmetered exactly this way.
+    let exiting = exit.read().next().is_some();
+    if *since_report < MIX_HEALTH_REPORT && !exiting {
         return;
     }
     *since_report = std::time::Duration::ZERO;

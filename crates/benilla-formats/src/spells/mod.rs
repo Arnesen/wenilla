@@ -371,7 +371,13 @@ const ATTR_DO_NOT_DISPLAY: u32 = 0x80;
 /// `Attributes` bit `0x20` — `SPELL_ATTR_IS_TRADESKILL` (cmangos `SpellDefines.h`): profession /
 /// recipe spells the client diverts to a name-only path, never a book slot (decision 0227). See
 /// [`SpellDisplay::in_spellbook`].
-const ATTR_IS_TRADESKILL: u32 = 0x20;
+///
+/// Public because four separate surfaces test this one bit and each had grown its own copy of the
+/// literal: the spellbook's add-gate here, the TradeSkill and Craft admission filters, and — since
+/// the trainer TOOLTIP law landed — the gate that decides whether a trainer service renders an ITEM
+/// tooltip instead of a spell one (`SetTrainerService 0x5338b0` at `0x533a1b`, and again inside the
+/// spell builder's own redirect at `0x52e6d2`).
+pub const SPELL_ATTR_IS_TRADESKILL: u32 = 0x20;
 /// `AttributesEx` bit `0x10000000` — vmangos `SPELL_ATTR_EX_NO_AURA_ICON` ("Client doesn't display
 /// these spells in aura bar"): the other display-filter bit. All three warrior stances carry it
 /// (extracted 5875 `Spell.dbc`: 2457 `AttributesEx 0x90000000`, 71/2458 `0x10000000`).

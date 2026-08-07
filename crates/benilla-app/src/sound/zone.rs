@@ -150,6 +150,9 @@ pub(super) struct ZoneAudio {
     zone_music: u32,
     /// The playing music stream (a zone track, an intro, or a server-pushed event track).
     music: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
+    /// Starvation watch over the music slot (decision 1109) — a streamed track whose decode
+    /// thread is outrun zero-fills the mix, which no other meter sees.
+    music_watch: mixer::StreamWatch,
     /// The SoundEntries kit on the music slot (0 = never started one) — the "what is playing" a
     /// repeat `SMSG_PLAY_MUSIC` is compared against ([`slot_holds`]).
     music_kit: u32,
@@ -186,6 +189,7 @@ impl Default for ZoneAudio {
         Self {
             zone_music: 0,
             music: None,
+            music_watch: mixer::StreamWatch::new("zone music"),
             music_kit: 0,
             music_kit_vol: 1.0,
             next_track_at: None,
@@ -431,6 +435,12 @@ fn zone_audio(
             mixer::amp_to_db(config.category_amp(SoundCategory::Music) * zone.music_kit_vol),
             mixer::glide(),
         );
+    }
+    // The starvation watch (1109) over the playing track. A track fading out on a dropped handle
+    // isn't watched — under the load bursts that starve a decoder, the *playing* slot's watch is
+    // the indicator either way (every stream decoder shares the same scheduling class).
+    if let Some(h) = &zone.music {
+        zone.music_watch.feed(h, f64::from(time.delta_secs()));
     }
     // Ambience runs the incoming leg of its 5.0 s crossfade as a per-frame fade-in envelope (the
     // per-frame feed would otherwise stomp a handle-level ramp to full); it clears itself at full.
@@ -680,6 +690,9 @@ fn leave_world(mut zone: NonSendMut<ZoneAudio>) {
     if let Some(mut h) = zone.music.take() {
         h.stop(mixer::fade(WORLD_TEARDOWN_FADE_MS));
     }
+    // The next login's first track starts at position 0, far behind this one's baseline — a
+    // stale watch would read that as a freeze (1109).
+    zone.music_watch.reset();
     if let Some(mut h) = zone.ambience.take() {
         h.stop(mixer::fade(WORLD_TEARDOWN_FADE_MS));
     }

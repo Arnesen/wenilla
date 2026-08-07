@@ -76,6 +76,16 @@ fontdb = "0.23"
 # cpal types, so this must stay the exact version kira resolves — one cpal in the graph.
 cpal = "0.17"
 kira = { version = "0.12", default-features = false, features = ["cpal", "mp3", "wav", "pcm", "adpcm"] }
+# kira's own decoder, named directly for one trait: the mixer feeds streams through its own
+# `MediaSource` so kira's per-stream decode thread runs OUR code and can promote its QoS (decision
+# 1109 — a bare-spawned decode thread starves under the world-entry burst and zero-fills the mix).
+# No codecs of its own (kira's features enable those); must stay the version kira resolves — one
+# symphonia in the graph, or the trait impl won't line up.
+symphonia = { version = "0.5", default-features = false }
+# The mix tap's audio-thread → writer-thread ring (decision 1112): the tap effect must never
+# block or allocate on the render path. kira's own SPSC ring crate; kept on the version kira
+# resolves so the graph carries one rtrb.
+rtrb = "0.3"
 mint = "0.5"
 # The gossip greeting is a weighted random DRAW per menu-open, not a fixed pick (wow-re
 # `gossip-npctext-law.md` — the reference re-rolls in its gossip handler), so the app needs a uniform

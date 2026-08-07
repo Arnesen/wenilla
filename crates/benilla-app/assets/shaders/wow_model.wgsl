@@ -45,6 +45,7 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    pbr_bindings,
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::view,
     mesh_functions,
@@ -545,14 +546,26 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // horizon). Disabled (no-op) for normal models where `clutter_fade.w == 0`. This is a draw-distance
     // concern, not lighting, so it survives the Phase-0 strip.
     var base_color = pbr_input.material.base_color;
-    // Interior WMO batches carry LIGHTING data in the MOCV ALPHA — TRANS (tint.w == 2) the
-    // lit↔bake lerp factor, INT (tint.w == 1) the ×4 self-illumination mask. Bevy pre-folds
-    // ATTRIBUTE_COLOR (rgba) into base_color, so un-fold the alpha before any cutout test —
-    // coverage stays the texel alpha, exactly the reference's interior pixel shader
-    // (its output alpha is tex.a; MOCV.a never reaches coverage).
+    // WMO batches carry LIGHTING data in the MOCV ALPHA — TRANS (tint.w == 2) the lit↔bake lerp
+    // factor, INT (tint.w == 1) the ×4 self-illumination mask. Bevy pre-folds ATTRIBUTE_COLOR
+    // (rgba) into base_color, but coverage must stay the texel alpha, exactly the reference's
+    // WMO pixel path (its output alpha is tex.a; MOCV.a never reaches coverage —
+    // wow-re models.md). Re-sampling the texture here (same UV, same implicit derivatives — the
+    // texture cache makes it free) replaces the old divide-the-fold-back-out reconstruction,
+    // which was numerically annihilated where MOCV.a ≈ 0: `tex.a × ε ÷ max(ε, 1/255)` collapses
+    // to 0 at ε = 0 and to 4-bit rubble near it — B65's Great Forge chasm deck, whose
+    // self-illumination mask is authored 0, alpha-eroded into "missing floor" exactly there.
 #ifdef VERTEX_COLORS
-    if (m.model_flags.x > 0.5 && m.tint.w > 0.5) {
-        base_color.a = base_color.a / max(in.color.a, 1.0 / 255.0);
+    if (m.model_flags.x > 0.5) {
+#ifdef VERTEX_UVS_A
+        base_color.a = textureSample(
+            pbr_bindings::base_color_texture,
+            pbr_bindings::base_color_sampler,
+            vo.uv,
+        ).a;
+#else
+        base_color.a = 1.0;
+#endif
     }
 #endif
     // Ground-clutter distance fade: multiply the cutout alpha by the camera-distance ramp BEFORE the

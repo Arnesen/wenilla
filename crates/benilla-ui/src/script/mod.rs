@@ -113,7 +113,7 @@ pub use char_stats::{
     SKILL_DEFENSE, SKILL_UNARMED,
 };
 pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
-pub use craft::{CraftReagent, CraftRecipe, CraftState};
+pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
     CursorAction, CursorItem, CursorMacro, CursorPayload, CursorPetAction, CursorSpell,
     EnchantConfirm, WorldPick, EQUIPMENT_BAG,
@@ -151,7 +151,7 @@ pub use trade::{TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
-    TrainerState,
+    TrainerState, TrainerTooltip,
 };
 pub use types::{
     EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,

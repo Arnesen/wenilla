@@ -242,14 +242,21 @@ pub(super) fn apply_model_visibility(
         },
     );
 
-    // The group-only audience: portal cull and nothing else. Serial — a building has a handful of
+    // The group-only audience — a building's MLIQ surfaces. Serial: a building has a handful of
     // liquid surfaces, not the ~100k submeshes above — and change-gated like every write here.
+    //
+    // The gate is the **ever-visited latch**, not this frame's PVS: the client's render-record
+    // persistence (wow-re `wmo-record-persistence.md` @`00a766f6`) draws a visited MLIQ group's
+    // liquid every frame with no portal re-check for the rest of the world session — the Great
+    // Forge's walkway-level pool stays put when its group drops out of the flood (B65). An index
+    // past the latch fails OPEN (portal-less props never latch and must always draw).
     for (gv, mut vis, xf, aabb, exterior) in &mut group_only {
         let portal_ok = !m.portal_cull
-            || instances
-                .get(gv.instance)
-                .ok()
-                .is_none_or(|inst| gv.drawn_by(inst));
+            || instances.get(gv.instance).ok().is_none_or(|inst| {
+                gv.groups
+                    .iter()
+                    .any(|&g| inst.liquid_visited.get(g as usize).copied().unwrap_or(true))
+            });
         // …and the same exterior-window term as the submesh walk: another building's canal is
         // exterior content, the canal of the building you are standing in is not.
         let exterior_ok = !exterior || Some(gv.instance) == own_instance || gate.admits(xf, aabb);

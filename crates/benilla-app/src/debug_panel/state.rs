@@ -114,7 +114,9 @@ impl Default for ModelDebug {
         Self {
             kind_visible: [true; 4],
             blend_visible: [true; 5],
-            portal_cull: true,
+            // `WOW_NOPORTALCULL=1` presets the panel's A/B switch off, so a headless capture can
+            // shoot the same viewpoint with and without the cull (the B65 diff loop).
+            portal_cull: std::env::var("WOW_NOPORTALCULL").is_err(),
         }
     }
 }

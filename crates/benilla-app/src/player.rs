@@ -1399,6 +1399,33 @@ fn control(
             }
         }
 
+        // `WOW_CAM_DUMP`: the per-frame INPUT signal beside `seat_camera`'s realized-pose `[cam]`
+        // line — wall clock, frame dt, this frame's accumulated mouse delta, the active look mode,
+        // and the yaw/pos the frame produced. A turn-feel question ("keyboard turn smooth, mouse
+        // turn jittery") needs the input cadence and the output cadence on the same timeline: a
+        // bursty `dx` under a steady `dt` convicts event delivery; a steady `dx` with an uneven
+        // realized pose convicts everything downstream.
+        if std::env::var_os("WOW_CAM_DUMP").is_some() {
+            eprintln!(
+                "[turn] t={:.6} dt={:.6} dx={:.3} dy={:.3} look={} face={:.6} model={:.6} \
+                 pos [{:.4},{:.4},{:.4}]",
+                time.elapsed_secs_f64(),
+                dt,
+                mouse_motion.delta.x,
+                mouse_motion.delta.y,
+                match rig.look {
+                    Some(LookButton::Right) => "R",
+                    Some(LookButton::Left) => "L",
+                    None => "-",
+                },
+                player.face_yaw,
+                player.model_yaw,
+                player.pos.x,
+                player.pos.y,
+                player.pos.z,
+            );
+        }
+
         // The camera-collision sweep is rooted at the *head* (capsule top hemisphere centre), not the
         // framing pivot — see `seat_camera`'s doc for why. Computed here (not in `camera`) because it
         // depends on the avatar's own capsule constants, which are a movement concern.

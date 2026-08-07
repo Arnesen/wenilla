@@ -430,7 +430,7 @@ impl SpellDisplay {
     /// are hidden. Passive-but-shown spells exist (a passive is NOT itself a book gate); only the
     /// three bits above hide a spell.
     pub fn in_spellbook(&self) -> bool {
-        self.attributes & (ATTR_DO_NOT_DISPLAY | ATTR_IS_TRADESKILL) == 0 && self.cast_ui == 0
+        self.attributes & (ATTR_DO_NOT_DISPLAY | SPELL_ATTR_IS_TRADESKILL) == 0 && self.cast_ui == 0
     }
 
     /// Whether this spell appears in the **pet's** book — a *different* add-gate from

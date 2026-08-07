@@ -60,10 +60,13 @@
 //!
 //! ## The tooltip channels
 //!
-//! `GameTooltip:SetCraftItem(craftIndex, reagentIndex)` / `GameTooltip:SetCraftSpell(craftIndex)` are
-//! registered in [`super::tooltip_item`], beside `SetTradeSkillItem` — see that module's doc for the
-//! v1 SetCraftSpell call (a plain two-line render off this module's own `name`/`description`, not a
-//! second ask-once round trip through [`super::tooltip_spell`]).
+//! `GameTooltip:SetCraftItem(craftIndex, reagentIndex)` is registered in [`super::tooltip_item`],
+//! beside `SetTradeSkillItem`. `GameTooltip:SetCraftSpell(craftIndex)` lives in
+//! [`super::tooltip_spell`] beside `SetTrainerService`, its structural twin: both are SELECTORS
+//! into the shared spell/item builders rather than renderers of their own. The v1 two-line
+//! "name white, description gold" render is gone — `SetCraftSpell 0x533e90` funnels into the same
+//! `0x52e610`/`0x52b650` pair every other content binding does, so two lines were eight-plus short
+//! (wow-re `ui/scratch/trainer-service-tooltip-law.md` §4.1).
 
 use mlua::{Lua, MultiValue, Value, Variadic};
 
@@ -85,6 +88,26 @@ pub struct CraftReagent {
     pub need: u32,
     /// How many the player's bags currently hold (`count_of`, decision 0269).
     pub have: u32,
+}
+
+/// What `GameTooltip:SetCraftSpell` describes for one row — the pre-resolved output of the
+/// app-side law (`ui_craft::craft_tooltip`, transcribing `SetCraftSpell 0x533e90`).
+/// [`super::TrainerTooltip`]'s twin in shape and its opposite in law: this one tests the recipe's
+/// **own** `Effect[i]` (24 `CREATE_ITEM` → the item, 36 `LEARN_SPELL` → the taught spell), never
+/// `57`, never sets `altCaster`, and does **not** validate that the hop resolves before taking it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CraftTooltip {
+    /// The ITEM builder, on `EffectItemType[i]` of the matched `CREATE_ITEM` slot.
+    Item(u32),
+    /// The SPELL builder, on `EffectTriggerSpell[i]` of the matched `LEARN_SPELL` slot — or on the
+    /// recipe spell itself when no slot matched, which is every enchant.
+    Spell(u32),
+}
+
+impl Default for CraftTooltip {
+    fn default() -> Self {
+        CraftTooltip::Spell(0)
+    }
 }
 
 /// One recipe row (`GetCraftInfo` + its detail-pane getters): a known spell carrying attr
@@ -127,6 +150,9 @@ pub struct CraftRecipe {
     /// exposed to Lua as `GetCraftSpellFocus`'s alternating multivalue
     /// ([`super::tradeskill::TradeSkillRecipe::tools`]'s twin).
     pub tools: Vec<(String, bool)>,
+    /// What the detail-icon hover describes ([`CraftTooltip`]) — resolved app-side, because the law
+    /// reads `Spell.dbc` effect columns the engine cannot see.
+    pub tooltip: CraftTooltip,
 }
 
 /// One open craft window: the skill line's name/rank and its (app-presorted) recipe list. Pushed whole
@@ -441,6 +467,9 @@ mod tests {
     ) -> CraftRecipe {
         CraftRecipe {
             spell_id,
+            // The fixture's default subject: the recipe itself (the enchant case — no matching
+            // effect slot), so a test that cares about the item arm sets it explicitly.
+            tooltip: CraftTooltip::Spell(spell_id),
             name: name.into(),
             sub_name: String::new(),
             difficulty,

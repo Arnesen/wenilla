@@ -25,7 +25,7 @@ use mlua::{Lua, Table, Value};
 
 use super::object::frame_handle_of;
 use super::tooltip::{append_line, clear_content, fire_cleared};
-use super::Model;
+use super::{CraftTooltip, Model, TrainerTooltip};
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The rank column's gray — byte-verified `0xff808080` (0276).
@@ -136,15 +136,38 @@ const RED: [f32; 4] = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
 /// Render one spell view — the verified law (module doc). `aura` renders the aura variant:
 /// white description, plus the caller-supplied duration-remaining line (`SetPlayerBuff` only).
 /// `talent` interleaves the talent lines ([`TalentLines`] doc).
+/// The builder's parameter vector, named as the byte law names it (`0x52e610`'s param3..param8 —
+/// wow-re `ui/scratch/tooltip-content-law.md` §3). These were three positional `bool`s at a
+/// 7-argument call site, which is exactly the shape that gets silently transposed; `Default` is the
+/// plain spell hover every caller but two wants.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SpellRenderOpts {
+    /// Render through the AURA builder (`0x52f880`) rather than the spell builder: gold name, white
+    /// description, the dispel-class right column.
+    pub(super) aura: bool,
+    /// `param6` showRank — the gray "Rank N" right column. `SetSpell` passes 0 (the spellbook hover
+    /// never shows it), `SetAction` passes 1.
+    pub(super) show_rank: bool,
+    /// `param5` altCaster — **one** gate suppressing **both** the totems and the reagents lines
+    /// (byte-verified at the two branch sites `0x52ed43` and `0x52f393`). Set only by
+    /// `SetTrainerService`, and only when the matched learn-wrapper slot was `LEARN_PET_SPELL`: a
+    /// pet-training service shows neither block.
+    pub(super) alt_caster: bool,
+}
+
 fn render_spell(
     lua: &Lua,
     this: &Table,
     v: &SpellTooltipView,
-    aura: bool,
-    show_rank: bool,
+    opts: SpellRenderOpts,
     remaining: Option<String>,
     talent: Option<&TalentLines>,
 ) -> mlua::Result<()> {
+    let SpellRenderOpts {
+        aura,
+        show_rank,
+        alt_caster,
+    } = opts;
     // The name colour splits by BUILDER, byte-verified: the spell builder `0x52e610` writes its
     // name line through `0x530270` (white), the aura builder `0x52f880` through `0x530380` — the
     // GOLD wrapper (wow-re tooltip-content-law §3 line 1 vs §3-BUFF). SetTrackingSpell's gold,
@@ -206,7 +229,9 @@ fn render_spell(
             append_line(lua, this, (req.clone(), color), None, false)?;
         }
         // Reagents (law §3.8): white + wrapped, the missing entries inline-red inside the text.
-        if let Some(reagents) = &v.reagents {
+        // Suppressed wholesale by altCaster — the same gate that hides the totems block, which we
+        // have no feed for yet, so this is the only half of it that is observable here.
+        if let Some(reagents) = v.reagents.as_ref().filter(|_| !alt_caster) {
             append_line(lua, this, (reagents.clone(), WHITE), None, true)?;
         }
         // Chance to dodge/parry/block/crit (law line 10, §3-CHANCE) — white, NOT wrapped, and it
@@ -266,7 +291,14 @@ pub(super) fn set_spell_with_talent(
         super::talent::ask_next_rank(lua, talent.next_spell);
     }
     match spell_view_of(lua, spell_id) {
-        Some(v) => render_spell(lua, this, &v, false, false, None, Some(&talent))?,
+        Some(v) => render_spell(
+            lua,
+            this,
+            &v,
+            SpellRenderOpts::default(),
+            None,
+            Some(&talent),
+        )?,
         None => {
             // The view hasn't landed: show the talent head alone (the ask is recorded; the
             // hover's re-enter repaints complete) — the spell channel's own fallback shape.
@@ -284,8 +316,7 @@ fn set_spell_by_id(
     this: &Table,
     spell_id: u32,
     fallback_name: Option<String>,
-    aura: bool,
-    show_rank: bool,
+    opts: SpellRenderOpts,
     remaining: Option<String>,
 ) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
@@ -295,7 +326,7 @@ fn set_spell_by_id(
     }
     fire_cleared(lua, h);
     match spell_view_of(lua, spell_id) {
-        Some(v) => render_spell(lua, this, &v, aura, show_rank, remaining, None)?,
+        Some(v) => render_spell(lua, this, &v, opts, remaining, None)?,
         None => {
             if let Some(name) = fallback_name {
                 append_line(lua, this, (name, WHITE), None, false)?;
@@ -337,7 +368,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None => return Ok(()),
                 }
             };
-            set_spell_by_id(lua, &this, spell_id, name, false, false, None)
+            set_spell_by_id(lua, &this, spell_id, name, SpellRenderOpts::default(), None)
         })?,
     )?;
     // GameTooltip:SetShapeshift(index) — the stance-bar hover (the form's own spell tooltip).
@@ -351,7 +382,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None => return Ok(()),
                 }
             };
-            set_spell_by_id(lua, &this, spell_id, name, false, false, None)
+            set_spell_by_id(lua, &this, spell_id, name, SpellRenderOpts::default(), None)
         })?,
     )?;
     // GameTooltip:SetPetAction(index) — the pet-bar hover (decision 0982). Only ever reached for a
@@ -377,7 +408,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None => return Ok(()),
                 }
             };
-            set_spell_by_id(lua, &this, spell_id, name, false, false, None)
+            set_spell_by_id(lua, &this, spell_id, name, SpellRenderOpts::default(), None)
         })?,
     )?;
     // GameTooltip:SetPlayerBuff(index [, filter]) — the buff-bar hover: the aura variant (white
@@ -420,7 +451,17 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None => return Ok(()),
                 }
             };
-            set_spell_by_id(lua, &this, spell_id, name, true, false, remaining)
+            set_spell_by_id(
+                lua,
+                &this,
+                spell_id,
+                name,
+                SpellRenderOpts {
+                    aura: true,
+                    ..Default::default()
+                },
+                remaining,
+            )
         })?,
     )?;
     // GameTooltip:SetUnitBuff(unit, index) / SetUnitDebuff(unit, index) — the target frame's aura
@@ -445,7 +486,17 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // entry with spell id 0: content clears and the empty plate hides — never a
                 // stale previous tooltip left showing. Id 0 records no ask.
                 let (spell_id, name) = hit.unwrap_or((0, None));
-                set_spell_by_id(lua, &this, spell_id, name, true, false, None)
+                set_spell_by_id(
+                    lua,
+                    &this,
+                    spell_id,
+                    name,
+                    SpellRenderOpts {
+                        aura: true,
+                        ..Default::default()
+                    },
+                    None,
+                )
             })?,
         )?;
     }
@@ -509,13 +560,107 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             let Some(a) = action else { return Ok(()) };
             match a.kind {
-                0x00 => set_spell_by_id(lua, &this, a.action, None, false, true, None),
+                0x00 => set_spell_by_id(
+                    lua,
+                    &this,
+                    a.action,
+                    None,
+                    SpellRenderOpts {
+                        show_rank: true,
+                        ..Default::default()
+                    },
+                    None,
+                ),
                 0x80 => {
                     // Route through the shared item renderer (the id-keyed entry).
                     let f: mlua::Function = this.get("SetItemById")?;
                     f.call::<()>((this.clone(), a.action))
                 }
                 _ => Ok(()),
+            }
+        })?,
+    )?;
+
+    // GameTooltip:SetTrainerService(index) — the trainer detail-icon hover (ref
+    // `Blizzard_TrainerUI.xml:452`, whose OnEnter is SetOwner(this,"ANCHOR_RIGHT") +
+    // SetTrainerService(ClassTrainerFrame.selectedService) + Show(); the LIST ROWS carry no tooltip
+    // at all). Byte-verified whole in wow-re `ui/scratch/trainer-service-tooltip-law.md`.
+    //
+    // The binding is a **selector, not a renderer**: `0x5338b0` emits no line of its own (verified
+    // negative — none of the four AddLine helpers appears in its extent) and hands one of the two
+    // shared builders a subject. The subject is decided app-side, because the law reads `Spell.dbc`
+    // fields the engine cannot see, and arrives pre-resolved as `TrainerService::tooltip`. All this
+    // does is pick the renderer — which is exactly what the reference binding does.
+    //
+    // `index` is a **VISIBLE** row index (headers interleave), resolved through the same mapping
+    // every other trainer getter uses; a header row is a no-op.
+    m.set(
+        "SetTrainerService",
+        lua.create_function(|lua, (this, index): (Table, usize)| {
+            let subject = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                match super::trainer::service(&model, index) {
+                    Some(s) => s.tooltip.clone(),
+                    None => return Ok(()),
+                }
+            };
+            match subject {
+                // Route through the shared item renderer, the way the reference routes into
+                // `0x52b650`. No fallback name: an item id of 0 or a template still in flight
+                // renders an EMPTY tooltip, which is the builder's own early-out.
+                TrainerTooltip::Item(item_id) => {
+                    let f: mlua::Function = this.get("SetItemById")?;
+                    f.call::<()>((this.clone(), item_id))
+                }
+                TrainerTooltip::Spell {
+                    spell_id,
+                    alt_caster,
+                } => set_spell_by_id(
+                    lua,
+                    &this,
+                    spell_id,
+                    None,
+                    SpellRenderOpts {
+                        alt_caster,
+                        ..Default::default()
+                    },
+                    None,
+                ),
+            }
+        })?,
+    )?;
+    // GameTooltip:SetCraftSpell(craftIndex) — the Craft window's detail-icon hover (ref
+    // `CraftIcon`'s OnEnter, `Blizzard_CraftUI.xml:566`). `SetTrainerService`'s structural twin and
+    // its law's opposite (wow-re `ui/scratch/trainer-service-tooltip-law.md` §4.1): a selector into
+    // the same two shared builders, deciding on the RECIPE's own effect columns rather than a
+    // taught spell's attributes. The subject arrives pre-resolved as `CraftRecipe::tooltip`.
+    //
+    // This replaced a v1 two-line "name white, description gold" render. That was wrong in both
+    // halves: `0x533e90` funnels into `0x52e610`/`0x52b650` like every other content binding, so
+    // two lines were eight-plus short, and on a `LEARN_SPELL` or `CREATE_ITEM` recipe it was
+    // describing the wrong subject entirely. `craft_index` is a raw recipe position — the Craft
+    // window is FLAT, with no headers to interleave (unlike the tradeskill list).
+    m.set(
+        "SetCraftSpell",
+        lua.create_function(|lua, (this, craft_index): (Table, usize)| {
+            let subject = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                let Some(c) = &model.craft else {
+                    return Ok(());
+                };
+                match craft_index.checked_sub(1).and_then(|i| c.recipes.get(i)) {
+                    Some(r) => r.tooltip.clone(),
+                    None => return Ok(()),
+                }
+            };
+            match subject {
+                CraftTooltip::Item(item_id) => {
+                    let f: mlua::Function = this.get("SetItemById")?;
+                    f.call::<()>((this.clone(), item_id))
+                }
+                CraftTooltip::Spell(spell_id) => {
+                    set_spell_by_id(lua, &this, spell_id, None, SpellRenderOpts::default(), None)
+                }
             }
         })?,
     )?;

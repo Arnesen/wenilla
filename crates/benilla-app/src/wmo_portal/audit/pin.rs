@@ -261,7 +261,19 @@ fn wmo_pin_probe() {
     // the real placement transform, so portal projection sees what the runtime sees.
     let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
     let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
-    let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0)
+    // The app's real projection by default (`CAM_FOVY`; near/far don't matter — the flood clips
+    // against the 4 side planes only). `WOW_PIN_FOVY`/`WOW_PIN_ASPECT` override both to replay a
+    // dump header's recorded values exactly (a window is rarely 16:9).
+    let scalar = |var: &str, default: f32| {
+        std::env::var(var).map_or(default, |s| {
+            s.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{var} wants a number; got {s:?}"))
+        })
+    };
+    let fovy = scalar("WOW_PIN_FOVY", crate::player::CAM_FOVY);
+    let aspect = scalar("WOW_PIN_ASPECT", 16.0 / 9.0);
+    let clip = Mat4::perspective_rh(fovy, aspect, 0.1, 1000.0)
         * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
 
     let model = &subject.model;

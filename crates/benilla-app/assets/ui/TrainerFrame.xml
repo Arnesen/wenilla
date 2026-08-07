@@ -729,13 +729,29 @@
             </Frame>
 
             <!-- The detail spell icon (ref ClassTrainerSkillIcon): a 37×37 button over a 64×64 UI-EmptySlot
-                 ring, at the detail area's top-left. Icon via SetNormalTexture; Hide()n when unselected. -->
+                 ring, at the detail area's top-left. Icon via SetNormalTexture; Hide()n when unselected.
+
+                 The hover is the ref's own, verbatim (Blizzard_TrainerUI.xml:452-459): owner is the icon
+                 button, anchor ANCHOR_RIGHT, subject `ClassTrainerFrame.selectedService` — the SELECTED
+                 row, which is why the tooltip describes the selection no matter which row the mouse
+                 passed over on its way here. GetTrainerSelectionIndex() is our engine-held equivalent of
+                 that field; it reads 0 with nothing selected, and SetTrainerService no-ops on 0. This is
+                 the ONLY SetTrainerService call site in the shipped client — the list rows carry no
+                 tooltip of their own (their template's OnEnter only recolours the subtext). -->
             <Button name="BenillaTrainerSkillIcon" hidden="true">
                 <Size><AbsDimension x="37" y="37"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="26" y="-291"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="BACKGROUND">
                     <Texture file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="64" y="64"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor></Anchors></Texture>
                 </Layer></Layers>
+                <Scripts>
+                    <OnEnter>
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetTrainerService(GetTrainerSelectionIndex())
+                        GameTooltip:Show()
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
             </Button>
 
             <!-- The detail cost coins (ref ClassTrainerDetailMoneyFrame), left-to-right off the "Cost:"

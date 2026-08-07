@@ -103,6 +103,10 @@ fn service(
 ) -> TrainerService {
     TrainerService {
         spell_id,
+        tooltip: benilla_ui::script::TrainerTooltip::Spell {
+            spell_id,
+            alt_caster: false,
+        },
         name: Some(name.into()),
         subtext: None,
         texture: Some("Interface\\Icons\\INV_Sword_04".into()),

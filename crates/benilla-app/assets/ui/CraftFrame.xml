@@ -444,7 +444,10 @@
 
         -- ── The detail icon (ref CraftIcon OnEnter, l.564-568 — the Ctrl/Shift dressing-room branches
         -- dropped, deviation 3): SetCraftSpell, NOT SetCraftItem — Craft has no product-item concept
-        -- (craft.rs's own module doc). ───────────────────────────────────────────────────────────────
+        -- (craft.rs's own module doc). The binding behind it is a SELECTOR into the shared spell/item
+        -- builders (`SetCraftSpell 0x533e90`); a CREATE_ITEM recipe therefore renders the product's
+        -- full ITEM tooltip here even though the row's ICON is the spell's (Law D) — the two are
+        -- different laws on the same row, byte-verified. ─────────────────────────────────────────────
         function BenillaCraftIcon_OnEnter(button)
             if GetCraftSelectionIndex() ~= 0 then
                 GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
