@@ -51,6 +51,8 @@ mod probe_look;
 mod server_ride;
 mod setup;
 mod state;
+/// The step-up diagnostic probe — the blocked-frame report behind the `stup` trace tag.
+pub(crate) mod step_probe;
 mod swim;
 mod wire_in;
 
@@ -70,9 +72,10 @@ pub(crate) use follow::{FollowRequest, FollowState};
 // what lets this module and the concern modules beside it keep naming them `super::X` unchanged.
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, CAPSULE_RADIUS, FALL_FAR_DROP, FALL_FAR_TIME,
-    GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
-    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
-    TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    FOOT_CONE_HEIGHT, GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP,
+    RUN_BACK_RATIO, SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK,
+    STEP_UP_ADVANCE, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
+    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 // `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
@@ -340,17 +343,20 @@ fn control(
         (With<SelfPlayer>, Without<FlyCam>),
     >,
     window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-    // Clean clicks (press+release, no drag) go out here — left for the target picker, right for the
-    // context action (attack) — while *drags* engage the camera looks below instead; the third is
-    // the right button's raw DOWN edge (targeting's cancel, decision 0792). The locals hold
-    // each button's accumulated drag distance while a press is being classified (`None` = no press
-    // pending).
+    // Clicks go out here — left for the target picker, right for the context action (attack) — and
+    // the third is the right button's raw DOWN edge (targeting's cancel, decision 0792). A press
+    // engages its camera look *and* arms a click test; the release settles that test on the
+    // reference's time/travel predicate, so one gesture can orbit and select both (decision 1122).
+    // The locals hold each button's pending [`camera::PressGesture`] (`None` = no press pending).
     mut world_clicks: (
         MessageWriter<WorldClick>,
         MessageWriter<WorldRightClick>,
         MessageWriter<WorldRightPress>,
     ),
-    mut click_test: (Local<Option<f32>>, Local<Option<f32>>),
+    mut click_test: (
+        Local<Option<camera::PressGesture>>,
+        Local<Option<camera::PressGesture>>,
+    ),
     // World context for the mover, bundled into one param (16-param limit): the loaded water
     // surfaces (swim mode + the buoyant float, see [`swim`]), the armed transports (the
     // platform-frame carry/attach — decision 0438 phase 2; `Without`s only disjoint the borrows),
@@ -473,6 +479,7 @@ fn control(
         left_click,
         right_click,
         invert_pitch,
+        time.elapsed_secs(),
     );
     // A stun freezes the BODY, not the view. The look session has already moved `cam.yaw` (and, on
     // a right-drag, coupled `face_yaw = cam.yaw`); putting the aim back leaves the camera orbiting

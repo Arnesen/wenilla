@@ -20,10 +20,71 @@ use crate::model_fade::{
 use crate::net::SelfPlayer;
 use crate::terrain::WowModelMaterial;
 
-/// Accumulated cursor motion (logical px) past which a held mouse button becomes a **drag** (camera
-/// orbit / character turn) rather than a **click** (left: target select; right: the context attack).
-/// Small — a click has near-zero jitter; any real drag crosses it in a frame or two.
-const CLICK_DRAG_THRESHOLD: f32 = 4.0;
+/// The reference's up-edge click predicate, in **camera degrees and milliseconds** — the whole
+/// orbit-vs-select law (decision 1122; wow-re `world-click-drag-arbitration.md`, §5 fan-out
+/// 2026-08-08). Verbatim, from `0x514ae0`, which returns 1 = suppress / 0 = dispatch:
+///
+/// ```text
+/// isClick = elapsed < 200ms
+///        || (elapsed < 800ms && yaw_travel < 2.25° && pitch_travel < 2.0°)
+/// ```
+///
+/// **A press under 200 ms selects however far the mouse swept.** That arm is the entire bug report
+/// (ledger B226): flick the cursor across a mob and click on arrival with the hand still moving, and
+/// the reference targets it — the camera has been orbiting since the first motion sample and selects
+/// anyway. The two mechanisms are independent and share only the button state.
+///
+/// **The orbit has no threshold at all** — it engages on the *down* edge (`0x51491f`, guarded only by
+/// the 0→1 held transition) and the first motion sample already turns the camera. benilla deferred it
+/// behind 4 px of travel and, worse, *destroyed* the pending click on crossing; there is no such
+/// thing in the reference. The travel numbers below gate the **click**, never the orbit.
+///
+/// The literals in the binary are 8.0 event-units per axis against `Σ|0.8·Δx|` / `Σ|0.6·Δy|` of raw
+/// device counts. Copying those would bind us to the reference's device scaling, which is itself
+/// only INFERRED ("1 unit = 1 mouse count" is not established). So we copy the **angle** they mean,
+/// which is exact and device-independent: 8.0 event-units is `Σ|Δx| = 10.0` raw ⇒
+/// `cameraYawMoveSpeed·10/800` = **2.25°** of yaw at the shipped default 180; and `Σ|Δy| = 13.333`
+/// raw ⇒ `cameraPitchMoveSpeed·13.333/600` = **2.0°** of pitch at the default 90.
+///
+/// Per axis, independently, and **accumulated absolute travel** — not net displacement from the
+/// press point (`0x514400`: `fabs; fadd; fstp`, no subtraction and no stored origin). A shake that
+/// returns to where it started still spends the budget.
+const CLICK_HOLD_CEILING: f32 = 0.800;
+const CLICK_FREE_WINDOW: f32 = 0.200;
+const CLICK_YAW_TRAVEL: f32 = 2.25 * std::f32::consts::PI / 180.0;
+const CLICK_PITCH_TRAVEL: f32 = 2.0 * std::f32::consts::PI / 180.0;
+
+/// A primary button's press, while it is still undecided — the reference's world-input state
+/// (`[0xbe1148]`): press instant `+0x14`, and the two independent motion accumulators zeroed at
+/// `0x514910`/`0x514913`. Our accumulators are in **radians of camera rotation** rather than device
+/// counts, for the reason in [`CLICK_HOLD_CEILING`]'s note.
+#[derive(Clone, Copy)]
+pub(super) struct PressGesture {
+    /// Seconds on the app clock when the button went down.
+    at: f32,
+    /// Accumulated |Δyaw| and |Δpitch| this press has asked the camera for, radians.
+    yaw_travel: f32,
+    pitch_travel: f32,
+}
+
+impl PressGesture {
+    fn new(now: f32) -> Self {
+        Self {
+            at: now,
+            yaw_travel: 0.0,
+            pitch_travel: 0.0,
+        }
+    }
+
+    /// `0x514ae0`, minimised: the free window first, then the bounded-travel window.
+    fn is_click(&self, now: f32) -> bool {
+        let elapsed = now - self.at;
+        elapsed < CLICK_FREE_WINDOW
+            || (elapsed < CLICK_HOLD_CEILING
+                && self.yaw_travel < CLICK_YAW_TRAVEL
+                && self.pitch_travel < CLICK_PITCH_TRAVEL)
+    }
+}
 
 /// Third-person orbit-distance limits (yards). **VERIFIED from `WoW.exe` 5875** (`FUN_005112d0` +
 /// the camera CVars, wow-re `follow-camera`): max orbit = `cameraDistanceMax × cameraDistanceMaxFactor`,
@@ -206,10 +267,16 @@ pub(crate) struct CameraPivot {
 }
 
 /// Mouse-look session state machine — start/stop/hand-off between the two look buttons, cursor
-/// grab/stash/restore, and the left/right click-vs-drag tests that emit [`WorldClick`]/
-/// [`WorldRightClick`]. Also applies this frame's accumulated motion as look rotation while a button is
-/// held (right-drag syncs the character facing too). Called once per frame from [`super::control`];
-/// `both_buttons` is vanilla's both-button run (steers like a right-drag without its own click test).
+/// grab/stash/restore, and the two click tests that emit [`WorldClick`]/[`WorldRightClick`]. Also
+/// applies this frame's accumulated motion as look rotation while a button is held (right-drag syncs
+/// the character facing too). Called once per frame from [`super::control`]; `both_buttons` is
+/// vanilla's both-button run (steers like a right-drag without its own click test).
+///
+/// **Orbit and select are independent** (decision 1122): every primary press engages its look
+/// session immediately and *also* arms a click test, and the release decides the click on
+/// [`PressGesture::is_click`] alone. There is no "promotion" and nothing cancels the click for
+/// having moved — the pending click used to be destroyed the moment the cursor crossed a 4 px
+/// threshold, which is why a drag could never select (ledger B226).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_look_session(
     buttons: &ButtonInput<MouseButton>,
@@ -224,15 +291,17 @@ pub(super) fn run_look_session(
     pointer_over_ui: bool,
     inspect_enabled: bool,
     // A left press this frame the UI already consumed as a cursor-payload world drop (0216 §3) —
-    // the left click-vs-drag test below must yield to it exactly as it yields to a UI hover, so
-    // dropping a held item never also starts a camera orbit.
+    // the left click test must yield to it exactly as it yields to a UI hover, so dropping a held
+    // item never also selects.
     click_consumed: bool,
     world_click: &mut MessageWriter<WorldClick>,
     world_right_click: &mut MessageWriter<WorldRightClick>,
     world_right_press: &mut MessageWriter<WorldRightPress>,
-    left_click: &mut Option<f32>,
-    right_click: &mut Option<f32>,
+    left_click: &mut Option<PressGesture>,
+    right_click: &mut Option<PressGesture>,
     invert_pitch: bool,
+    // Seconds on the app clock — the press predicate's two time gates are measured against it.
+    now: f32,
 ) {
     // The right button's DOWN edge, before any click-vs-drag classification — the reference's
     // WorldFrame OnMouseDown fires at the press whether it becomes a click or a turn. It belongs
@@ -244,37 +313,48 @@ pub(super) fn run_look_session(
     {
         world_right_press.write(WorldRightPress);
     }
-    // A left+right gesture is a both-button run / camera turn — never a target select. Cancel any
-    // pending left click-vs-drag test the instant the right button joins in, so releasing out of a
-    // both-button move never fires a spurious selection click.
-    if buttons.pressed(MouseButton::Right) {
+    // A chord — both primaries down — is a both-button run, never a select. The reference kills the
+    // pending click on the *second* press and refuses to arm a new one while another primary is held
+    // (`0x514ac1`, `0x51481a`), so neither release of a chord can dispatch. Cancel both tests.
+    if buttons.pressed(MouseButton::Left) && buttons.pressed(MouseButton::Right) {
         *left_click = None;
+        *right_click = None;
     }
-    // The right button's own click-vs-drag test (vanilla's context click — attack): unlike left, the
-    // right *look* engages instantly on press (turn must feel immediate), so the test just rides the
-    // session, accumulating motion; the release decides click vs turn below. A left join (both-button
-    // run) is never a click.
-    if let Some(moved) = right_click.as_mut() {
-        *moved += mouse_motion.delta.length();
-        if buttons.pressed(MouseButton::Left) {
-            *right_click = None;
-        }
+    // Both tests just ride their session, accumulating the camera rotation the press has asked for;
+    // the release decides. The travel is charged from the *input* delta, before the pitch clamp —
+    // the reference accumulates raw device motion, so a drag pinned at the pitch limit still spends
+    // its budget.
+    let dyaw = (mouse_motion.delta.x * LOOK_SENSITIVITY).abs();
+    let dpitch = (mouse_motion.delta.y * LOOK_SENSITIVITY).abs();
+    for test in [&mut *left_click, &mut *right_click].into_iter().flatten() {
+        test.yaw_travel += dyaw;
+        test.pitch_travel += dpitch;
     }
 
-    // Mouse-look start/stop + cursor grab. Right-drag turns the character (press-triggered); left-drag
-    // orbits the camera (deferred — a left *click* selects a target instead, so the orbit only engages
-    // once the cursor drags past a threshold). Either hides + locks the cursor in place (so it can't
-    // drift out of the window while we turn) and restores it where it was on release. A press that
-    // begins over the debug panel is egui's, not ours.
+    // Mouse-look start/stop + cursor grab. **Both** buttons engage their look session on the DOWN
+    // edge — the reference has no deferral and no engage threshold (`0x51491f`), and the first
+    // motion sample already turns the camera. The click test is a separate rider decided at the
+    // release, which is exactly what lets one gesture orbit *and* select. Either button hides +
+    // locks the cursor in place (so it can't drift out of the window while we turn) and restores it
+    // where it was on release. A press that begins over the debug panel is egui's, not ours.
     if let Some(active) = rig.look {
         if !buttons.pressed(active.button()) {
-            // A right press+release that never turned is vanilla's context *click* (attack the unit
-            // under the cursor) — emit it as the session ends. A handoff release (left still held)
-            // never fires: the left join already cancelled the test above.
-            if active == LookButton::Right {
-                if let Some(moved) = right_click.take() {
-                    if moved < CLICK_DRAG_THRESHOLD {
-                        world_right_click.write(WorldRightClick);
+            // The session's button went up: settle its click test against the reference predicate.
+            // A handoff release (the other button still held) never fires — the chord already
+            // cancelled both tests above.
+            let test = match active {
+                LookButton::Left => left_click.take(),
+                LookButton::Right => right_click.take(),
+            };
+            if let Some(test) = test {
+                if test.is_click(now) {
+                    match active {
+                        LookButton::Left => {
+                            world_click.write(WorldClick);
+                        }
+                        LookButton::Right => {
+                            world_right_click.write(WorldRightClick);
+                        }
                     }
                 }
             }
@@ -301,41 +381,28 @@ pub(super) fn run_look_session(
         // A press over the egui dev UI (the overlaid debug panel, the perf pill) or outside the world
         // viewport is not ours — this keeps a slider-drag from grabbing the cursor into mouse-look.
         let world_press = cursor_in_viewport(window, camera) && !pointer_over_ui;
+        // Right-drag turn. Arms its context-click test too; not armed when left is already down (a
+        // chord is never a click).
         if buttons.just_pressed(MouseButton::Right) && world_press {
-            // Right-drag turn: engage immediately on press, as before — while also arming the
-            // click-vs-drag test (a clean release becomes the context attack click). Not armed when
-            // left is already down (a both-button run is never a click).
             rig.look = Some(LookButton::Right);
             rig.cursor_stash = window.cursor_position();
             cursor_opts.grab_mode = CursorGrabMode::Locked;
             cursor_opts.visible = false;
-            *right_click = (!buttons.pressed(MouseButton::Left)).then_some(0.0);
-        } else if !inspect_enabled {
-            // Left is deferred into a click-vs-drag test so a clean left *click* can select a target
-            // (vanilla left-click). A left press begins the test; it engages the camera orbit only once
-            // the accumulated cursor motion crosses `CLICK_DRAG_THRESHOLD`, and a press+release with no
-            // drag emits a `WorldClick` for the target picker. While the inspector is armed, left belongs
-            // to it (its own copy-on-click handler), so the test is skipped and left never orbits.
-            if buttons.just_pressed(MouseButton::Left) && world_press && !click_consumed {
-                *left_click = Some(0.0);
-            }
-            if let Some(moved) = left_click.as_mut() {
-                *moved += mouse_motion.delta.length();
-                if !buttons.pressed(MouseButton::Left) {
-                    // Released with no drag → a click (the hover pick already knows what's under it).
-                    if *moved < CLICK_DRAG_THRESHOLD {
-                        world_click.write(WorldClick);
-                    }
-                    *left_click = None;
-                } else if *moved >= CLICK_DRAG_THRESHOLD {
-                    // Dragged past the threshold → promote to the left-orbit look session.
-                    rig.look = Some(LookButton::Left);
-                    rig.cursor_stash = window.cursor_position();
-                    cursor_opts.grab_mode = CursorGrabMode::Locked;
-                    cursor_opts.visible = false;
-                    *left_click = None;
-                }
-            }
+            *right_click = (!buttons.pressed(MouseButton::Left)).then(|| PressGesture::new(now));
+        } else if buttons.just_pressed(MouseButton::Left) && world_press && !inspect_enabled {
+            // Left-drag orbit — engaged on the press, exactly like right, because the reference
+            // engages on the press (`0x51491f`). The select is not deferred behind it; it rides
+            // along and settles at the release. While the inspector is armed left belongs to it
+            // (its own copy-on-click handler), so neither the orbit nor the test starts.
+            rig.look = Some(LookButton::Left);
+            rig.cursor_stash = window.cursor_position();
+            cursor_opts.grab_mode = CursorGrabMode::Locked;
+            cursor_opts.visible = false;
+            // A press the UI already consumed as a cursor-payload world drop (0216 §3) still orbits
+            // — the reference's orbit is unconditional on the down edge — but must not also select.
+            *right_click = None;
+            *left_click = (!click_consumed && !buttons.pressed(MouseButton::Right))
+                .then(|| PressGesture::new(now));
         }
     }
 
@@ -806,6 +873,66 @@ mod tests {
 
     use crate::billboard::BillboardCard;
     use crate::mesh_tag::alpha_bits;
+
+    /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.
+    fn press(yaw_deg: f32, pitch_deg: f32) -> PressGesture {
+        PressGesture {
+            at: 0.0,
+            yaw_travel: yaw_deg.to_radians(),
+            pitch_travel: pitch_deg.to_radians(),
+        }
+    }
+
+    /// The report this whole change exists for (ledger B226, decision 1122): **a fast click
+    /// selects however far the mouse swept.** Under 200 ms the reference asks nothing about
+    /// motion at all (`0x514ae0`'s first arm, `0x514b24`) — which is the gesture people actually
+    /// make, flicking the cursor at a mob and clicking on arrival with the hand still moving.
+    /// benilla used to destroy the pending click after 4 px of travel, so this case never fired.
+    #[test]
+    fn a_fast_click_selects_however_far_the_mouse_swept() {
+        // A whole screen's worth of sweep — orders of magnitude past the travel gate.
+        let swept = press(90.0, 45.0);
+        assert!(
+            swept.is_click(0.199),
+            "under 200 ms, travel is not consulted"
+        );
+        // And the camera is expected to have orbited through all of it: the two are independent,
+        // which is the half that makes the reference's gesture possible at all.
+    }
+
+    /// The second arm: between 200 and 800 ms the travel gate applies, per axis and independently
+    /// (`0x514ae0`'s `both accums < 8.0` arm). The thresholds are the reference's 2.25° of yaw and
+    /// 2.0° of pitch — see [`CLICK_HOLD_CEILING`] for why we hold the angle, not the raw literal.
+    #[test]
+    fn between_the_windows_a_steady_hand_still_clicks_but_a_drag_does_not() {
+        assert!(press(2.0, 1.5).is_click(0.5), "inside both travel gates");
+        assert!(
+            !press(2.3, 1.5).is_click(0.5),
+            "yaw alone spends the budget"
+        );
+        assert!(!press(2.0, 2.1).is_click(0.5), "pitch alone spends it too");
+        // Exactly at a threshold is a drag: the reference's compare is `< 8.0`, not `<=`.
+        assert!(!press(2.25, 0.0).is_click(0.5), "the yaw gate is exclusive");
+        assert!(
+            !press(0.0, 2.0).is_click(0.5),
+            "the pitch gate is exclusive"
+        );
+    }
+
+    /// The 800 ms ceiling (`0x514aeb lea eax,[edx-0x320]`) is absolute — a long hold is never a
+    /// click, however still the hand was. This is the arm that keeps a deliberate camera orbit from
+    /// re-targeting whatever it started on, and it is the reason the fix could not simply be
+    /// "always select on release".
+    #[test]
+    fn a_long_hold_is_never_a_click_however_still() {
+        let motionless = press(0.0, 0.0);
+        assert!(motionless.is_click(0.799), "just inside the ceiling");
+        assert!(!motionless.is_click(0.8), "the ceiling is exclusive");
+        assert!(
+            !motionless.is_click(5.0),
+            "a long motionless hold is a drag"
+        );
+    }
 
     /// The self-avatar's zoom-to-first-person fade reaches its BILLBOARD cards — the night-elf eye
     /// glow (ledger B71: two additive quads left burning in mid-air after the body was hidden).

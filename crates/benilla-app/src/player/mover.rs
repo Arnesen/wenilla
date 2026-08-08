@@ -16,8 +16,12 @@
 //!   - a walkable slope never slows or deflects the walk: the real client's walk is
 //!     two-dimensional (speed·dt of *horizontal* distance), so an opposing walkable plane rides
 //!     instead of clipping ([`walkable_ride_velocity`]) — full 2D speed on every ≤50° surface;
-//!   - a steep face in the way runs the atomic step-up ([`step_up`]): rise–advance–settle onto
-//!     a walkable floor, committed whole within the frame or not at all (decision 0209);
+//!   - a steep face in the way is first *certified* by the atomic step-up ([`step_up`]):
+//!     rise–advance–settle onto a walkable floor, or nothing (decision 0209). What a certified
+//!     obstacle then costs is the reference's two-regime law (decision 1123): a rise inside the
+//!     foot cone ([`FOOT_CONE_HEIGHT`]) is **ridden** up the cone's 61.6° skirt over the frames the
+//!     gait needs ([`foot_cone_ride`]) — a kerb takes three at a run; only a rise above the cone is
+//!     the instant pop, committed whole within the frame. Uncertified, nothing rises at all;
 //!   - a steep face never *lifts* the mover: when the slide's clip would convert a push into
 //!     upward motion, the face clips as a vertical wall instead ([`steep_wall_plane`]) — you
 //!     rub along trunks and steep banks, never up them;
@@ -34,10 +38,10 @@ use bevy::prelude::*;
 use crate::collision::player_query_filter;
 
 use super::{
-    move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY,
-    GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH,
-    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL,
-    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY,
+    FOOT_CONE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT,
+    JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_ADVANCE,
+    STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
 /// What the step decided — read by the move-flags / wire logic that follows it in `control`.
@@ -141,7 +145,13 @@ pub(super) fn step(
     // can begin under a root by any path. (wow-re `moveflag-family.md` §1/§5.3,
     // `step-vs-fall-election.md`.)
     let anchored = !held && player.modes.rooted;
-    let on_floor = !held && on_walkable && player.vel_y <= 0.0;
+    // A body part-way up a foot cone is standing (decision 1123). The probe above looks straight
+    // down and finds only the steep riser it is riding, so on its own it would call a mid-ride frame
+    // airborne — gravity would then undo the climb and the body would dwell on the face, the exact
+    // failure 0209's atomic commit was built to make impossible. The ride is re-earned from the
+    // certification every frame it continues, so this can hold nothing up that has not just proved
+    // it can be climbed.
+    let on_floor = !held && (on_walkable || player.cone_riding) && player.vel_y <= 0.0;
 
     // The wedged rest (decision 0211) stands until real ground takes over or the support
     // vanishes — we walked off the funnel wall into open air, which resumes a normal fresh fall.
@@ -165,6 +175,7 @@ pub(super) fn step(
         if want_jump {
             player.vel_y = JUMP_SPEED;
             player.wedged = false;
+            player.cone_riding = false;
             jumped = true;
         }
     } else {
@@ -212,9 +223,23 @@ pub(super) fn step(
             time.delta(),
             hover_offset,
         );
+        // The step-up probe (this is the LOCAL mover; a remote's dead-reckon is not a report
+        // anyone is looking at): a walk frame that went nowhere writes the `stup` deep report —
+        // the surface profile ahead, the advance ladder, the candidate faces.
+        super::step_probe::watch(
+            ms,
+            capsule,
+            &filter,
+            center,
+            g.center,
+            player.horiz_vel,
+            dt,
+            time.elapsed_secs(),
+        );
         center = g.center;
         climb = g.climb;
         snap_probe = g.snap;
+        player.cone_riding = g.cone_riding;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
         }
@@ -229,6 +254,8 @@ pub(super) fn step(
         // The airborne slide is the OTHER shared resolve ([`airborne_step`]) — the same code a
         // remote mover's arc runs, so a jump meets our walls whoever is jumping (decision 0627).
         center = airborne_step(ms, capsule, &filter, center, velocity, time.delta());
+        // Nothing here can be riding a cone: this arm is the arc, the hold and the anchor.
+        player.cone_riding = false;
     }
     // Wedge-rest detection (decisions 0211/0212): airborne, already falling fast, yet the
     // descent achieved is a sliver of what gravity intended — [`WEDGE_STILL_FRAMES`] in a row
@@ -332,8 +359,13 @@ pub(crate) struct GroundedStep {
     /// `None` means "keep whatever the caller already believed" — a step-up commit and a missed
     /// snap both leave the support unchanged.
     pub(crate) ground: Option<Entity>,
-    /// The atomic step-up's committed height gain (yd), when the maneuver ran.
+    /// The height gain (yd) this frame's climb achieved — the atomic step-up's committed rise, or
+    /// the distance a foot-cone ride carried the body up its skirt.
     pub(crate) climb: Option<f32>,
+    /// The body is part-way up a **foot-cone ride** and is *supported by the edge it is riding*,
+    /// not standing on a floor — so the caller must keep treating it as grounded until a walkable
+    /// floor takes over (decision 1123). Always `false` for a frame that did not ride.
+    pub(crate) cone_riding: bool,
     /// The election snap's `(probe reach, what it found)` — trace fodder, `None` when the step-up
     /// took the frame instead. The inner pair is `(hit distance, hit normal.y)`.
     pub(crate) snap: Option<(f32, Option<(f32, f32)>)>,
@@ -377,21 +409,81 @@ pub(crate) fn grounded_step(
     // every stuck/bounce report of the step-up era was that dwelling). Grazing a face nets
     // back onto the same floor (reads as sliding); a square push onto a low step lands on its
     // top; anything taller than [`STEP_UP_HEIGHT`] never commits.
-    let stepped = if speed > 1.0e-6 {
-        step_up(&cast, center, horiz_vel / speed, speed * dt.as_secs_f32())
+    let attempt = if speed > 1.0e-6 {
+        let travel = speed * dt.as_secs_f32();
+        // The look-ahead is this frame's travel — "is there a steep face in my way *now*" is a
+        // question about this frame. The **advance** is not: how far forward the maneuver must
+        // reach to see the tread it would stand on is a property of the body, so it is at least
+        // [`STEP_UP_ADVANCE`] whatever the frame rate or the gait (decision 1121). Travel still
+        // wins when it is longer, so a very low frame rate never steps you less far than you asked
+        // to walk.
+        step_up(
+            &cast,
+            center,
+            horiz_vel / speed,
+            travel,
+            travel.max(STEP_UP_ADVANCE),
+        )
     } else {
-        None
+        StepAttempt {
+            contact: None,
+            verdict: StepVerdict::NoFace,
+        }
     };
-    if let Some(landed) = stepped {
-        // The committed maneuver IS this frame's motion — already settled on a walkable floor,
-        // so the slide and the snap below are skipped.
-        return GroundedStep {
-            center: landed,
-            ground: None,
-            climb: Some(landed.y - center.y),
-            snap: None,
-        };
+    // The certify trace (`WOW_MOVE_TRACE`, tag `step`): one line per attempt with every probe
+    // number and the world-space contact, so a feel report pins to the exact placement and probe —
+    // the instrument that broke the fence/tree cases, which reasoning alone could not. (The
+    // *blocked-frame* deep report — the advance ladder and the surface profile — is the `stup` tag
+    // in [`super::step_probe`], which the local mover fires when a walk frame goes nowhere.)
+    if let Some((point, n)) = attempt.contact {
+        if crate::dbg_trace::enabled_for("step") {
+            let feet_y = center.y - CAPSULE_HEIGHT * 0.5;
+            crate::dbg_trace::line(
+                "step",
+                &format!(
+                    "hit ({:8.2},{:7.2},{:8.2}) h={:+.2} n=({:+.2},{:+.2},{:+.2}) {}",
+                    point.x,
+                    point.y,
+                    point.z,
+                    point.y - feet_y,
+                    n.x,
+                    n.y,
+                    n.z,
+                    attempt.verdict
+                ),
+            );
+        }
     }
+    // **Which regime** (decision 1123, wow-re `climb-vs-slide.md` §2/§4/§6). The certification above
+    // settles *whether* the obstacle can be cleared; its committed rise settles *how*. The real
+    // client's solid is a cone below [`FOOT_CONE_HEIGHT`] and a vertical box above it, so a low edge
+    // never meets a wall to be lifted over — it meets the slanted skirt, and the ordinary slide
+    // carries the body up it. Only an edge that clears the cone meets the box square, and that
+    // square meeting is the instant step-up. One law, two outcomes, selected by the rise:
+    //   - `dy ≤ FOOT_CONE_HEIGHT` ⇒ **ride** the skirt at atan 1.8494 ≈ 61.6°, over as many frames
+    //     as the gait needs (a kerb takes two at a run) — smooth, and never a teleport;
+    //   - `dy > FOOT_CONE_HEIGHT` ⇒ the atomic pop of 0209, unchanged;
+    //   - no certification at all ⇒ neither: the plain slide, and the body never rises. (This is
+    //     the gate that keeps the ride honest — a tall wall's contact point sits *inside* the cone
+    //     band too, so height alone would ride it. Only the certification distinguishes them.)
+    let ride_to = match attempt.verdict {
+        StepVerdict::Commit { landed, dy, .. } if dy <= FOOT_CONE_HEIGHT => Some(landed.y),
+        _ => None,
+    };
+    if ride_to.is_none() {
+        if let Some(landed) = attempt.verdict.landed() {
+            // The committed maneuver IS this frame's motion — already settled on a walkable floor,
+            // so the slide and the snap below are skipped.
+            return GroundedStep {
+                center: landed,
+                ground: None,
+                climb: Some(landed.y - center.y),
+                snap: None,
+                cone_riding: false,
+            };
+        }
+    }
+    let mut rode = false;
     let out = crate::collision::one_sided::move_and_slide(
         ms,
         capsule,
@@ -404,6 +496,18 @@ pub(crate) fn grounded_step(
             if let Some(ride) = walkable_ride_velocity(**hit.normal, *hit.velocity) {
                 *hit.velocity = ride;
                 return MoveAndSlideHitResponse::Accept;
+            }
+            // The foot cone's skirt, on a certified low edge only. The ceiling is the
+            // certification's own landing: once the body is that high the obstacle is cleared, so
+            // the skirt has nothing left to ride and any further contact is an ordinary wall. Any
+            // overshoot inside a sub-step is taken back out by the election snap below, which only
+            // ever descends onto a walkable floor.
+            if ride_to.is_some_and(|ceiling| hit.position.y < ceiling) {
+                if let Some(up) = foot_cone_ride(**hit.normal, *hit.velocity) {
+                    *hit.velocity = up;
+                    rode = true;
+                    return MoveAndSlideHitResponse::Accept;
+                }
             }
             if let Some(wall) = steep_wall_plane(**hit.normal, *hit.velocity) {
                 if let Ok(wall) = Dir::new(wall) {
@@ -450,8 +554,14 @@ pub(crate) fn grounded_step(
     }
     GroundedStep {
         center: slid,
+        // A ride is a climb too — the trace reads the same whichever regime moved the body.
+        climb: rode.then_some(slid.y - center.y),
+        // Mid-ride the body is held up by the edge under its skirt, and the frame-start ground
+        // probe can only see the steep riser there. Say so, so the caller keeps it standing
+        // instead of letting gravity undo the climb. A snap onto a walkable floor ends the ride:
+        // the tread is under the feet and ordinary grounding takes over from here.
+        cone_riding: rode && ground.is_none(),
         ground,
-        climb: None,
         snap,
     }
 }
@@ -519,6 +629,40 @@ fn walkable_ride_velocity(n: Vec3, v: Vec3) -> Option<Vec3> {
     Some(Vec3::new(v.x, -(v.x * n.x + v.z * n.z) / n.y, v.z))
 }
 
+/// **The foot cone's ride** — the smooth half of the reference's climb law (decision 1123).
+///
+/// The real client's movement solid is a **cone below the waist**: the k-DOP build at `0x631440`
+/// emits four bevels running from a point at the foot out to the full radius at
+/// `foot + radius·1.8493990`, and only above that height is it a vertical box (wow-re
+/// `climb-vs-slide.md` §2 — the `n.z < 0` sign on those planes is the tell that the cone narrows
+/// *downward*, so it is a foot cone and not a top-rim chamfer). A low edge therefore never presents
+/// the mover a wall to be lifted over: it presents the slanted skirt, and the resolver's own slide
+/// runs the body up it.
+///
+/// The gain is the note's `T` at §4 — `1.8494 · cosθ · len`, where `θ` is how squarely the approach
+/// meets the face — and that is exactly this projection: the closing horizontal speed (the dot
+/// product supplies `cosθ`) times [`STEP_SLOPE_RATIO`], the cone's own surface slope. Horizontal
+/// speed is untouched, as it is on every walkable ride ([`walkable_ride_velocity`]); the grounded
+/// mover owns no vertical of its own, so this *sets* the vertical rather than adding to it.
+///
+/// Only steep, non-overhanging, opposing faces ride — a walkable face already had its ride, and an
+/// overhang is a ceiling. **The caller owns the real gate:** this says only "here is what the skirt
+/// would do", never "the body may climb". Whether the obstacle can be cleared at all is the
+/// certification's call in [`grounded_step`], because a tall wall's contact point sits inside the
+/// cone band too and height alone cannot tell the two apart.
+fn foot_cone_ride(n: Vec3, v: Vec3) -> Option<Vec3> {
+    if !(0.0..GROUND_COS).contains(&n.y) {
+        return None;
+    }
+    // Steepness bounds the horizontal part below by sin 50°, so the normalize is safe.
+    let h = Vec3::new(n.x, 0.0, n.z).normalize();
+    let into = -(v.x * h.x + v.z * h.z);
+    if into <= 0.0 {
+        return None;
+    }
+    Some(Vec3::new(v.x, into * STEP_SLOPE_RATIO, v.z))
+}
+
 /// The steep-face wall rule: a steep (non-walkable, non-overhanging) face must never *lift*
 /// the mover. Collide-and-slide clips velocity onto each contact plane, and on a tilted plane
 /// that clip manufactures upward motion out of a horizontal push (`v'.y − v.y = −(v·n)·n.y`,
@@ -546,15 +690,99 @@ fn steep_wall_plane(n: Vec3, v: Vec3) -> Option<Vec3> {
     Some(Vec3::new(n.x, 0.0, n.z).normalize())
 }
 
+/// What one atomic step-up attempt decided — the structured form of the `step` trace line.
+///
+/// Structured rather than logged-and-forgotten because the diagnostic probe
+/// ([`super::step_probe`]) re-runs the *same* maneuver at a ladder of forward advances and reads
+/// the reason back off every rung. "Why did this step fail, and what would have made it succeed"
+/// is then one table in the trace, not a text parse of six different format strings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StepVerdict {
+    /// Nothing steep and opposing within the look-ahead — not a step-up frame at all.
+    NoFace,
+    /// The rise found no headroom above the capsule.
+    NoHeadroom,
+    /// The settle probe found no floor at all under the advanced point.
+    NoFloor { up: f32, fwd: f32 },
+    /// The settle found a floor, but one too steep to stand on (`ny` under [`GROUND_COS`]).
+    SteepFloor {
+        up: f32,
+        fwd: f32,
+        dist: f32,
+        ny: f32,
+    },
+    /// The maneuver gained no height — a graze, a too-tall wall, or a pinch's gap floor. The plain
+    /// slide owns the frame.
+    NetZero {
+        up: f32,
+        fwd: f32,
+        dist: f32,
+        ny: f32,
+        dy: f32,
+    },
+    /// Committed: this landing **is** the frame's motion.
+    Commit {
+        landed: Vec3,
+        up: f32,
+        fwd: f32,
+        dy: f32,
+    },
+}
+
+impl StepVerdict {
+    /// The committed capsule centre, if this attempt took the frame.
+    pub(crate) fn landed(self) -> Option<Vec3> {
+        match self {
+            StepVerdict::Commit { landed, .. } => Some(landed),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StepVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            StepVerdict::NoFace => write!(f, "no opposing face"),
+            StepVerdict::NoHeadroom => write!(f, "up=0.00 NO-HEADROOM -> slide"),
+            StepVerdict::NoFloor { up, fwd } => {
+                write!(f, "up={up:.2} fwd={fwd:.2} down=miss NO-FLOOR -> slide")
+            }
+            StepVerdict::SteepFloor { up, fwd, dist, ny } => write!(
+                f,
+                "up={up:.2} fwd={fwd:.2} down=(d={dist:.2} ny={ny:+.2}) STEEP-FLOOR -> slide"
+            ),
+            StepVerdict::NetZero {
+                up,
+                fwd,
+                dist,
+                ny,
+                dy,
+            } => write!(
+                f,
+                "up={up:.2} fwd={fwd:.2} down=(d={dist:.2} ny={ny:+.2}) dy={dy:+.3} NET-ZERO -> slide"
+            ),
+            StepVerdict::Commit { up, fwd, dy, .. } => {
+                write!(f, "up={up:.2} fwd={fwd:.2} dy={dy:+.3} -> COMMIT")
+            }
+        }
+    }
+}
+
+/// One step-up attempt: the opposing face that triggered it (world contact point + its authored
+/// normal), and what the maneuver decided about it.
+pub(crate) struct StepAttempt {
+    /// `None` when no steep opposing face was within the look-ahead — there was nothing to step.
+    pub(crate) contact: Option<(Vec3, Vec3)>,
+    pub(crate) verdict: StepVerdict,
+}
+
 /// The atomic step-up (decision 0209) — the standard kinematic-controller maneuver, *not* the
-/// reference resolver's (that direction is closed, 0207): a steep opposing face within this
-/// frame's travel triggers **rise → advance → settle**, committed whole inside this one frame,
-/// or nothing.
+/// reference resolver's (that direction is closed, 0207): a steep opposing face within `look`
+/// triggers **rise → advance → settle**, committed whole inside this one frame, or nothing.
 ///
 /// - **Rise** by the free headroom, at most [`STEP_UP_HEIGHT`] — the deliberately low ceiling
 ///   that scopes this to stairs/doorsteps/low rocks and keeps fences and walls slide-only.
-/// - **Advance** this frame's own travel along the *input* direction at the raised height —
-///   never a probe-length lunge.
+/// - **Advance** by `advance` along the *input* direction at the raised height.
 /// - **Settle** back down by the walk election's own reach; commit **only onto a walkable
 ///   floor that is actually higher**.
 ///
@@ -564,91 +792,334 @@ fn steep_wall_plane(n: Vec3, v: Vec3) -> Option<Vec3> {
 /// the origin floor ⇒ slide; a pinch between two tree trunks offers only steep landings ⇒
 /// **no commit, ever** — the wedge/bounce class of 0191–0195 is impossible by construction,
 /// because there is no intermediate mid-climb state to be caught in.
-fn step_up(
+///
+/// **`look` and `advance` are separate parameters only so the maneuver is measurable.** The live
+/// mover passes this frame's own travel for both (0209's design — never a probe-length lunge);
+/// the diagnostic probe ([`super::step_probe`]) sweeps `advance` to find the offset at which the
+/// settle probe would have cleared the obstacle's lip, which is the number a "it won't step up
+/// this curb" report is actually about.
+pub(crate) fn step_up(
     cast: &impl Fn(Vec3, Vec3) -> Option<MoveHitData>,
     center: Vec3,
     dir_h: Vec3,
-    travel: f32,
-) -> Option<Vec3> {
-    // A steep, non-overhanging face opposing the motion, within this frame's travel (+skin).
+    look: f32,
+    advance: f32,
+) -> StepAttempt {
+    let none = |verdict| StepAttempt {
+        contact: None,
+        verdict,
+    };
+    // A steep, non-overhanging face opposing the motion, within `look` (+skin).
     // No incidence gate — the verified ref has none; grazing nets zero through the settle.
-    let ahead = cast(center, dir_h * travel)?;
+    let Some(ahead) = cast(center, dir_h * look) else {
+        return none(StepVerdict::NoFace);
+    };
     let n = ahead.normal1;
     if n.y >= GROUND_COS || n.y < 0.0 || n.dot(dir_h) >= 0.0 {
-        return None;
+        return none(StepVerdict::NoFace);
     }
-    // The certify trace (`WOW_MOVE_TRACE`): one `step` line per attempt with every probe number
-    // and the world-space contact, so a feel report pins to the exact placement and probe —
-    // the instrument that broke the fence/tree cases, which reasoning alone could not.
-    let feet_y = center.y - CAPSULE_HEIGHT * 0.5;
-    let hit = ahead.point1;
-    let log = |verdict: &str| {
-        if crate::dbg_trace::enabled() {
-            crate::dbg_trace::line(
-                "step",
-                &format!(
-                    "hit ({:8.2},{:7.2},{:8.2}) h={:+.2} n=({:+.2},{:+.2},{:+.2}) {}",
-                    hit.x,
-                    hit.y,
-                    hit.z,
-                    hit.y - feet_y,
-                    n.x,
-                    n.y,
-                    n.z,
-                    verdict
-                ),
-            );
-        }
+    let at = |verdict| StepAttempt {
+        contact: Some((ahead.point1, n)),
+        verdict,
     };
 
     // Rise: the free headroom, at most H.
-    let up_t = cast(center, Vec3::Y * STEP_UP_HEIGHT).map_or(STEP_UP_HEIGHT, |h| h.distance);
-    if up_t < 1e-3 {
-        log("up=0.00 NO-HEADROOM -> slide");
-        return None;
+    let up = cast(center, Vec3::Y * STEP_UP_HEIGHT).map_or(STEP_UP_HEIGHT, |h| h.distance);
+    if up < 1e-3 {
+        return at(StepVerdict::NoHeadroom);
     }
-    // Advance: this frame's travel along the input dir, swept at the raised height.
-    let raised = center + Vec3::Y * up_t;
-    let fwd_t = cast(raised, dir_h * travel).map_or(travel, |h| h.distance);
-    let over = raised + dir_h * fwd_t;
+    // Advance: along the input dir, swept at the raised height.
+    let raised = center + Vec3::Y * up;
+    let fwd = cast(raised, dir_h * advance).map_or(advance, |h| h.distance);
+    let over = raised + dir_h * fwd;
     // Settle: the walk election's reach below the advanced point — the rise undone, plus the
     // travel-scaled step-down allowance (decisions 0182/0190) — onto a WALKABLE floor only.
-    let reach = up_t + travel * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+    let reach = up + advance * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
     let Some(down) = cast(over, Vec3::NEG_Y * reach) else {
-        log(&format!(
-            "up={up_t:.2} fwd={fwd_t:.2} down=miss NO-FLOOR -> slide"
-        ));
-        return None;
+        return at(StepVerdict::NoFloor { up, fwd });
     };
-    if down.normal1.y < GROUND_COS {
-        log(&format!(
-            "up={up_t:.2} fwd={fwd_t:.2} down=(d={:.2} ny={:+.2}) STEEP-FLOOR -> slide",
-            down.distance, down.normal1.y
-        ));
-        return None;
+    let (dist, ny) = (down.distance, down.normal1.y);
+    if ny < GROUND_COS {
+        return at(StepVerdict::SteepFloor { up, fwd, dist, ny });
     }
-    let landed = over + Vec3::NEG_Y * down.distance;
+    let landed = over + Vec3::NEG_Y * dist;
     let dy = landed.y - center.y;
     // Commit only a landing that actually gained a floor. A net-zero maneuver (grazing a face,
     // pushing a too-tall wall, the tree pinch's gap grass) belongs to the plain slide — its
     // deflection is what "sliding along the fence" is; committing here would dead-stop it.
     if dy <= 0.05 {
-        log(&format!(
-            "up={up_t:.2} fwd={fwd_t:.2} down=(d={:.2} ny={:+.2}) dy={dy:+.3} NET-ZERO -> slide",
-            down.distance, down.normal1.y
-        ));
-        return None;
+        return at(StepVerdict::NetZero {
+            up,
+            fwd,
+            dist,
+            ny,
+            dy,
+        });
     }
-    log(&format!(
-        "up={up_t:.2} fwd={fwd_t:.2} down=(d={:.2} ny={:+.2}) dy={dy:+.3} -> COMMIT",
-        down.distance, down.normal1.y
-    ));
-    Some(landed)
+    at(StepVerdict::Commit {
+        landed,
+        up,
+        fwd,
+        dy,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::CAPSULE_RADIUS;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A headless physics world holding **the kerb the director's capture measured** — Stormwind
+    /// Trade District, decision 1121: a 0.28 yd sidewalk whose riser is a ~61° bevel, not a
+    /// vertical face. Profiled from the `stup` down-ray scan at the real spot (street out to
+    /// +0.20, the bevel's face normal `ny=+0.49`, flat tread `ny=+0.99` from +0.50 on), so the
+    /// fixture is the geometry, not an idea of it.
+    ///
+    /// The profile is a `(x, y)` polyline extruded across `z`, wound so every face's **authored**
+    /// normal points up and back at the approaching body — the one-sided law (0970) is live in
+    /// these casts, so a mis-wound fixture would silently be a hole to fall through.
+    fn world_with_kerb() -> App {
+        const PROFILE: [(f32, f32); 4] = [(-2.0, 0.0), (0.29, 0.0), (0.446, 0.28), (3.0, 0.28)];
+        const W: f32 = 3.0;
+        let mut app = App::new();
+        // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even in a meshless
+        // world, so the headless asset/scene plugins ride along.
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        let (mut verts, mut tris) = (Vec::new(), Vec::new());
+        for w in PROFILE.windows(2) {
+            let (&(x0, y0), &(x1, y1)) = (&w[0], &w[1]);
+            let b = verts.len() as u32;
+            verts.extend([
+                Vec3::new(x0, y0, -W),
+                Vec3::new(x1, y1, -W),
+                Vec3::new(x1, y1, W),
+                Vec3::new(x0, y0, W),
+            ]);
+            // (a, c, b) / (a, d, c): normal = (-dy, dx, 0) — up for the flats, up-and-back for
+            // the riser. The reverse winding is a backface and blocks nothing at all.
+            tris.extend([[b, b + 2, b + 1], [b, b + 3, b + 2]]);
+        }
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::trimesh(verts, tris),
+            Transform::default(),
+        ));
+        app.update(); // one frame builds Position/Rotation and the spatial-query trees
+        app
+    }
+
+    fn player_capsule() -> Collider {
+        Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT - 2.0 * CAPSULE_RADIUS)
+    }
+
+    /// Walk the capsule into the kerb exactly as the mover does, then run one step-up attempt at
+    /// `advance`. Returns the verdict from where the slide actually left the body — not from a
+    /// hand-placed pose, which is how a fixture ends up testing a spot the mover never reaches.
+    fn step_at(advance: f32) -> StepVerdict {
+        world_with_kerb()
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let cast = |from: Vec3, disp: Vec3| {
+                    crate::collision::one_sided::cast_move(
+                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
+                    )
+                };
+                // Approach from 1 yd back along +X at street level and stop where the kerb stops us.
+                let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
+                let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
+                let center = start + Vec3::X * run;
+                step_up(&cast, center, Vec3::X, TRAVEL_60FPS, advance).verdict
+            })
+            .unwrap()
+    }
+
+    /// One frame's travel at a run (7.0 yd/s) and 60 fps — 0209's advance, and the number the
+    /// capture caught failing.
+    const TRAVEL_60FPS: f32 = 7.0 / 60.0;
+
+    /// Walk the capsule into the kerb and run `frames` consecutive **whole** grounded steps from
+    /// wherever the last one left it — the mover's own loop, so what these assert is the behaviour
+    /// on screen and not a single probe in isolation.
+    fn walk_kerb(start_y: f32, frames: usize) -> Vec<(f32, Option<f32>, bool)> {
+        world_with_kerb()
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let cast = |from: Vec3, disp: Vec3| {
+                    crate::collision::one_sided::cast_move(
+                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
+                    )
+                };
+                let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 + start_y, 0.0);
+                let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
+                let mut center = start + Vec3::X * run;
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                (0..frames)
+                    .map(|_| {
+                        let g =
+                            grounded_step(&ms, &capsule, &filter, center, Vec3::X * 7.0, dt, 0.0);
+                        center = g.center;
+                        // Feet height relative to the street, the climb, and the ride latch.
+                        (center.y - CAPSULE_HEIGHT * 0.5, g.climb, g.cone_riding)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_kerb_is_ridden_up_its_skirt_never_popped() {
+        // Decision 1123, the whole point: a 0.28 yd kerb is inside the foot cone
+        // ([`FOOT_CONE_HEIGHT`] ≈ 0.62), so the certified obstacle is *ridden* — a smooth diagonal
+        // over the frames the gait needs — instead of the body being teleported onto the tread in
+        // one frame. Both halves are asserted, because either alone is satisfiable by a bug: it
+        // must arrive on the tread, AND no single frame may deliver the whole rise.
+        let frames = walk_kerb(0.0, 4);
+        let arrived = frames
+            .iter()
+            .position(|&(y, _, _)| (y - 0.28).abs() < 0.03)
+            .expect("the ride should put the feet on the 0.28 yd tread");
+        assert!(
+            arrived > 0,
+            "arriving on the very first frame is the pop, not a ride: {frames:?}"
+        );
+        assert!(
+            frames[0].2,
+            "the first frame is mid-ride and must report itself grounded: {frames:?}"
+        );
+        assert!(
+            frames[0].0 > 0.0 && frames[0].0 < 0.28,
+            "the first frame should be part-way up the skirt, got {:+.3}",
+            frames[0].0
+        );
+    }
+
+    #[test]
+    fn a_wall_is_never_ridden() {
+        // The certification is the gate, not the height (a tall wall's contact point sits inside
+        // the cone band too). Read the same geometry from a full kerb below — a 2.3 yd wall — and
+        // nothing may rise: no ride, no climb, no lift, just the slide. This is the check that
+        // stops the ride becoming a ladder up every cliff in the world.
+        for (y, climb, riding) in walk_kerb(-2.0, 4) {
+            assert!(!riding, "a wall must never start a cone ride");
+            assert!(climb.is_none(), "a wall must never register a climb");
+            assert!(
+                y < -2.0 + 0.05,
+                "the body must not rise against a wall, feet at {y:+.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cone_ride_gains_the_reference_slope() {
+        // wow-re `climb-vs-slide.md` §4: `T = 1.8494 · cosθ · len`. Head-on, the gain is the cone's
+        // own surface slope times the speed…
+        let head_on = foot_cone_ride(Vec3::new(-1.0, 0.0, 0.0), Vec3::X * 7.0).unwrap();
+        assert!(
+            (head_on.y - 7.0 * STEP_SLOPE_RATIO).abs() < 1e-4,
+            "{head_on:?}"
+        );
+        assert_eq!(
+            head_on.x, 7.0,
+            "horizontal speed is never touched by a ride"
+        );
+        // …and meeting the same face at 60° gains exactly cos60° of it, which is the `cosθ` term
+        // falling out of the closing-speed projection rather than being applied by hand.
+        let oblique = foot_cone_ride(
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(7.0 * 0.5, 0.0, 7.0 * 0.866_025_4),
+        )
+        .unwrap();
+        assert!(
+            (oblique.y - 7.0 * 0.5 * STEP_SLOPE_RATIO).abs() < 1e-3,
+            "{oblique:?}"
+        );
+    }
+
+    #[test]
+    fn the_cone_ride_declines_what_is_not_its_business() {
+        let v = Vec3::X * 7.0;
+        // A walkable face already had its ride ([`walkable_ride_velocity`])…
+        assert!(foot_cone_ride(Vec3::new(-0.5, 0.866, 0.0).normalize(), v).is_none());
+        // …an overhang is a ceiling, not a skirt…
+        assert!(foot_cone_ride(Vec3::new(-0.5, -0.866, 0.0).normalize(), v).is_none());
+        // …and a face we are moving away from is not in the way at all.
+        assert!(foot_cone_ride(Vec3::new(1.0, 0.0, 0.0), v).is_none());
+    }
+
+    #[test]
+    fn the_kerb_is_out_of_reach_of_one_frames_travel() {
+        // The defect the capture pinned (decision 1121): the settle probe is still over the bevel
+        // at 0.117 yd, so it lands on a 61° face and the walkable gate — correctly — refuses it.
+        // The step-up is not wrong about the face; it never looked far enough to see the tread.
+        let v = step_at(TRAVEL_60FPS);
+        assert!(
+            matches!(v, StepVerdict::SteepFloor { .. }),
+            "one frame's travel should still be over the bevel, got {v}"
+        );
+    }
+
+    #[test]
+    fn a_body_scaled_advance_climbs_the_kerb() {
+        // …and a body radius ahead, the same probe is over the tread and commits onto it. `dy` is
+        // the kerb's real height, so this pins that we land ON the sidewalk, not part-way up its
+        // bevel.
+        let v = step_at(STEP_UP_ADVANCE);
+        let StepVerdict::Commit { dy, .. } = v else {
+            panic!("a body-radius advance should reach the tread, got {v}");
+        };
+        assert!(
+            (dy - 0.28).abs() < 0.03,
+            "should land on the 0.28 yd tread, gained {dy:+.3}"
+        );
+    }
+
+    #[test]
+    fn the_advance_never_climbs_past_the_rise_ceiling() {
+        // The reach grew; what may be climbed did not (decision 1121). A wall taller than
+        // [`STEP_UP_HEIGHT`] clips the elevated sweep, so the settle falls back to the origin
+        // floor and the plain slide keeps the frame — the fence/trunk behaviour 0209 was built
+        // for, asserted at the advance that made the kerb work.
+        let v = world_with_kerb()
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let cast = |from: Vec3, disp: Vec3| {
+                    crate::collision::one_sided::cast_move(
+                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
+                    )
+                };
+                // Stand the body a full kerb below the tread — the same geometry read as a 2.3 yd
+                // wall by dropping the approach to y = −2.0, where the tread is far overhead.
+                let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 - 2.0, 0.0);
+                let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
+                step_up(
+                    &cast,
+                    start + Vec3::X * run,
+                    Vec3::X,
+                    TRAVEL_60FPS,
+                    STEP_UP_ADVANCE,
+                )
+                .verdict
+            })
+            .unwrap();
+        assert!(
+            v.landed().is_none(),
+            "a face above the rise ceiling must never commit, got {v}"
+        );
+    }
 
     /// Outward normal of a face rising toward +x, tilted `deg` from horizontal.
     fn face(deg: f32) -> Vec3 {

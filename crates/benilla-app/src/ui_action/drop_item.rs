@@ -73,7 +73,7 @@ pub(crate) fn drop_item_on_unit(
     index: Res<crate::net::GuidIndex>,
     pet_bar: Res<crate::ui_pet::PetBar>,
     learned: Res<super::LearnedAbilities>,
-    hovered: Res<crate::target::Hovered>,
+    press: Res<crate::target::PressPick>,
     mut clicks: MessageReader<crate::interact::WorldClick>,
     mut ladder: super::CastLadder,
 ) {
@@ -81,9 +81,11 @@ pub(crate) fn drop_item_on_unit(
         clicks.clear();
         return;
     };
+    let hovered = press.hovered;
     let mut tokens = script.take_drop_item_on_unit();
-    // The world entry: a left click whose pick IS the pet. `Hovered` is the same nearest-object
-    // pick the click itself selects from, so cursor and click agree by construction.
+    // The world entry: a left click whose pick IS the pet. The click's own press latch is the same
+    // nearest-object pick it selects from, so cursor and click agree by construction (1122: the
+    // *live* hover no longer does, since a click can end a gesture that orbited).
     let clicked_pet = clicks.read().count() > 0
         && pet_bar.spells.pet_guid != 0
         && hovered.guid == Some(pet_bar.spells.pet_guid);

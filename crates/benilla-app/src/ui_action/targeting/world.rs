@@ -22,7 +22,9 @@ use bevy::prelude::*;
 use benilla_assets::coords::bevy_to_wow;
 
 use crate::interact::WorldClick;
-use crate::target::{go_is_nearest, Hovered, HoveredObject, PickOcclusion};
+use crate::target::go_is_nearest;
+#[cfg(test)]
+use crate::target::{Hovered, HoveredObject};
 use crate::ui_action::cast_send::TargetedBind;
 
 use super::TargetingWants;
@@ -41,9 +43,12 @@ use super::TargetingWants;
 /// so the commit that clears it must come later in the same frame.
 pub(crate) fn commit_ground_cast_on_click(
     mut clicks: MessageReader<WorldClick>,
-    occlusion: Res<PickOcclusion>,
+    // The point the PRESS ray hit, not this frame's — the reference's `+0x360`, written by the one
+    // down-edge pick and read unchanged at the release (decision 1122).
+    press: Res<crate::target::PressPick>,
     mut ladder: crate::ui_action::CastLadder,
 ) {
+    let occlusion = press.occlusion;
     if !ladder.ground.active() {
         // Keep the reader current so a click buffered while idle can never replay as a commit
         // the frame the mode turns on.
@@ -106,10 +111,12 @@ pub(crate) fn commit_ground_cast_on_click(
 /// Runs AFTER `select_on_click`, like the terrain commit and for the same reason.
 pub(crate) fn commit_object_cast_on_click(
     mut clicks: MessageReader<WorldClick>,
-    hovered: Res<Hovered>,
-    hovered_object: Res<HoveredObject>,
+    // The press's pick, as in the terrain leg — the object a gesture binds is the one it started
+    // on, whatever the mouse did after (decision 1122).
+    press: Res<crate::target::PressPick>,
     mut ladder: crate::ui_action::CastLadder,
 ) {
+    let (hovered, hovered_object) = (press.hovered, press.object);
     if !ladder.ground.active() {
         // Reader hygiene, as in the terrain leg: a click buffered while idle must not replay as a
         // commit the frame the mode turns on.
@@ -168,9 +175,8 @@ mod tests {
         world.init_resource::<super::super::SpellTargeting>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<WorldClick>>();
-        world.init_resource::<Hovered>();
-        world.init_resource::<HoveredObject>();
-        world.init_resource::<PickOcclusion>();
+        // The commit legs read the PRESS latch now (decision 1122), not the live hover.
+        world.init_resource::<crate::target::PressPick>();
         // REGISTERED, not `run_system_once`: this seam's reader hygiene is a property of state
         // that survives between frames, and a fresh system per call would start every read at
         // cursor 0 and hide exactly the bug the drain exists to prevent.
@@ -178,13 +184,14 @@ mod tests {
         (world, rx, id)
     }
 
-    /// Put a GameObject under the cursor at `distance`, nearer than any unit.
+    /// Put a GameObject under the cursor at `distance`, nearer than any unit — in the press latch,
+    /// which is where a click's subject lives.
     fn hover_go(world: &mut World, distance: f32) {
-        world.insert_resource(HoveredObject {
+        world.resource_mut::<crate::target::PressPick>().object = HoveredObject {
             target: Some(Entity::from_raw_u32(1).unwrap()),
             guid: Some(CHEST),
             distance,
-        });
+        };
     }
 
     fn click(world: &mut World, id: SystemId) {
@@ -273,11 +280,11 @@ mod tests {
             .resource_mut::<super::super::SpellTargeting>()
             .enter(OPENING, commit, LOCK_WORD);
         hover_go(&mut world, 9.0);
-        world.insert_resource(Hovered {
+        world.resource_mut::<crate::target::PressPick>().hovered = Hovered {
             target: Some(Entity::from_raw_u32(2).unwrap()),
             guid: Some(0x1234),
             distance: 4.0,
-        });
+        };
         click(&mut world, id);
         assert!(rx.try_recv().is_err(), "a unit in front of the chest wins");
         assert!(world.resource::<super::super::SpellTargeting>().active());

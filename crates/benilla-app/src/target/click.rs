@@ -43,27 +43,32 @@ pub(super) fn world_right_click_payload(
     script.clear_cursor_payload();
 }
 
-/// On a clean left-click (a [`WorldClick`], never a drag), select whatever unit is [`Hovered`] and
-/// inform the server; a click on empty ground / a non-unit clears the target — except a click on
-/// NOTHING (sky — no occlusion-ray hit) while a payload is held: the reference's nothing-leg
-/// deselect is no-payload-gated (`0x492d30`'s local flag test), while the terrain leg deselects
-/// regardless of a surviving spell/action payload (`0x5e03bb` — decisions 0571 + 0574). Skipped
-/// while the inspector is armed (left-click is its copy affordance).
+/// On a [`WorldClick`], select the unit the **press** was over ([`PressPick`]) and inform the
+/// server; a click on empty ground / a non-unit clears the target — except a click on NOTHING (sky
+/// — no occlusion-ray hit) while a payload is held: the reference's nothing-leg deselect is
+/// no-payload-gated (`0x492d30`'s local flag test), while the terrain leg deselects regardless of a
+/// surviving spell/action payload (`0x5e03bb` — decisions 0571 + 0574). Skipped while the inspector
+/// is armed (left-click is its copy affordance).
+///
+/// **The press pick, not the live hover** (decision 1122). A click may now arrive at the end of a
+/// gesture that orbited the camera, and the live hover is empty by then — `update_hover` clears it
+/// for the whole look session, as the reference suppresses its own hover during freelook. Reading
+/// the live hover here would take the `_ =>` arm below and *clear* the player's target on every
+/// drag. The reference picks once, on the down edge, and this consumes that same latch.
 #[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn select_on_click(
     mut clicks: MessageReader<WorldClick>,
     inspect: Res<InspectMode>,
-    hovered: Res<Hovered>,
-    cursor: Res<WorldCursor>,
+    press: Res<PressPick>,
     mut selection: ResMut<Selection>,
     mut seam: crate::creature_anim::AttackSeam,
     self_q: Query<(&Guid, Has<Engaged>), With<SelfPlayer>>,
     payload_held: Res<crate::ui_script::CursorPayloadHeld>,
-    occlusion: Res<PickOcclusion>,
     mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
     ground: Res<crate::ui_action::SpellTargeting>,
     click_cfg: Res<ClickConfig>,
 ) {
+    let (hovered, occlusion) = (press.hovered, press.occlusion);
     // Drain the frame's clicks; act only if there was one and the inspector isn't holding left-click.
     let clicked = clicks.read().last().is_some();
     if !clicked || inspect.enabled {
@@ -100,7 +105,7 @@ pub(super) fn select_on_click(
                 guid,
                 engaged,
                 self_guid,
-                cursor.kind == cursor_mode::CursorKind::Attack,
+                press.attack,
             );
         }
         // Clicked nothing targetable → deselect (only sends the clear if we actually had a

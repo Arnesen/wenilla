@@ -57,16 +57,25 @@ pub struct WorldObject {
     pub detail: String,
 }
 
-/// A clean left-*click* in the world — a press + release with no drag. Emitted by
-/// [`crate::player::control`], which is the single arbiter of click-vs-drag because it owns the
-/// left-drag camera orbit: a left *drag* engages the orbit and emits nothing, a left *click* emits this.
-/// World-interaction consumers (target selection) read it instead of re-deciding the gesture; *where*
-/// the cursor is is already tracked continuously (the hover pick), so this carries no position.
+/// A left *select* gesture in the world. Emitted by [`crate::player::control`] on the button's
+/// **release**, when the press satisfied the reference's click predicate — under 200 ms whatever the
+/// mouse did, or under 800 ms having turned the camera less than 2.25° of yaw / 2.0° of pitch
+/// ([`crate::player::camera::PressGesture`], decision 1122).
+///
+/// **A drag emits this too.** Orbit and select are independent in the reference: the press engages
+/// the camera look immediately and arms this test alongside it, so a fast flick-and-click orbits the
+/// camera *and* selects. This doc comment used to assert the opposite as design — *"a left drag
+/// engages the orbit and emits nothing"* — and a reporter quoted it back at us with an A/B against
+/// the real client proving it wrong (ledger B226).
+///
+/// It carries no position because the *pick* is latched separately, at the press
+/// ([`crate::target::PressPick`]) — never the live hover, which is blank by the time a dragged
+/// click lands.
 #[derive(Message, Clone, Copy)]
 pub struct WorldClick;
 
-/// A clean right-*click* in the world — same arbiter and drag test as [`WorldClick`], for the right
-/// button (whose *drag* is the character turn). Vanilla's context action: attack a hostile under the
+/// The right button's context gesture — same arbiter and same predicate as [`WorldClick`], for the
+/// button whose drag is the character turn. Vanilla's context action: attack a hostile under the
 /// cursor (later: interact/gossip on a friendly).
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightClick;

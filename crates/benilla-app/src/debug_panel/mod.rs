@@ -668,6 +668,40 @@ fn debug_panel_ui(
                                 }
                             }
                         });
+                    // The step-up probe's last blocked-frame report (`crate::player::step_probe`).
+                    // On the panel *because a capture has to be steerable*: the director walks into
+                    // the kerb that will not climb and watches the `t=` stamp tick and the ladder
+                    // fill in, instead of finding out afterwards that the probe never fired at the
+                    // spot they meant (method §6 — prove the run before reading the result).
+                    egui::CollapsingHeader::new("Step-up")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let (report, at) = crate::player::step_probe::latest();
+                            if report.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "no blocked walk frame yet — walk square into the thing \
+                                         that will not step up",
+                                    )
+                                    .color(OVERLAY_TEXT_DIM),
+                                );
+                                return;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("last fired t={at:.1}s"))
+                                    .small()
+                                    .color(OVERLAY_TEXT_DIM),
+                            );
+                            egui::ScrollArea::horizontal()
+                                .id_salt("stepup_report")
+                                .show(ui, |ui| {
+                                    for line in report {
+                                        ui.label(
+                                            egui::RichText::new(line).small().monospace(),
+                                        );
+                                    }
+                                });
+                        });
                     // Future sections add their own CollapsingHeader here.
                 });
 

@@ -507,6 +507,84 @@ fn aabb_to_local(aabb: ColliderAabb, pos: Vec3, inv_rot: Quat) -> ParryAabb {
     ParryAabb::new(mins, maxs)
 }
 
+/// One collision triangle near a point, as the **movement law** sees it — the geometry readout
+/// behind the step-up probe ([`crate::player::step_probe`]).
+pub(crate) struct FaceProbe {
+    /// The collider it belongs to (a WMO walk bake, a terrain tile, a doodad hull…).
+    pub(crate) entity: Entity,
+    /// World-space normal at the **authored winding** — the vector [`cast_move`]'s gate tests.
+    pub(crate) normal: Vec3,
+    /// World-space vertices.
+    pub(crate) verts: [Vec3; 3],
+}
+
+impl FaceProbe {
+    /// Whether this face may block a sweep heading `dir` — [`cast_move`]'s gate, exactly.
+    pub(crate) fn blocks(&self, dir: Vec3) -> bool {
+        self.normal.dot(dir) <= FACING_EPS
+    }
+
+    /// World centroid — what "how far ahead is this face" is measured from.
+    pub(crate) fn centroid(&self) -> Vec3 {
+        (self.verts[0] + self.verts[1] + self.verts[2]) / 3.0
+    }
+}
+
+/// Every trimesh face inside the box `at ± half` that `filter` can reach, nearest centroid first.
+///
+/// **Diagnostic only, and deliberately UNGATED**: it reports the faces the one-sided law *rejects*
+/// alongside the ones it keeps, which is the entire point of having it. "The kerb top is authored
+/// downward-facing, so our settle probe passes straight through it" and "the advance was too short
+/// to reach the tread" produce the same silent non-step from the outside, and opposite readings
+/// here. Convex (non-trimesh) colliders have no per-face winding to report and are skipped — the
+/// law leaves them whole-shape too.
+pub(crate) fn faces_near(
+    ms: &MoveAndSlide<'_, '_>,
+    at: Vec3,
+    half: Vec3,
+    filter: &SpatialQueryFilter,
+    limit: usize,
+) -> Vec<FaceProbe> {
+    let box_aabb = ColliderAabb {
+        min: at - half,
+        max: at + half,
+    };
+    let mut out = Vec::new();
+    for entity in ms.spatial_query.aabb_intersections_with_aabb(box_aabb) {
+        let Ok((collider, pos, rot, layers)) = ms.colliders.get(entity) else {
+            continue;
+        };
+        if !filter.test(entity, layers.copied().unwrap_or_default()) {
+            continue;
+        }
+        let Some(trimesh) = collider.shape_scaled().as_trimesh() else {
+            continue;
+        };
+        let inv_rot = rot.0.inverse();
+        for tri_id in trimesh
+            .bvh()
+            .intersect_aabb(&aabb_to_local(box_aabb, pos.0, inv_rot))
+        {
+            let tri = trimesh.triangle(tri_id);
+            let Some(n) = tri.normal() else {
+                continue;
+            };
+            out.push(FaceProbe {
+                entity,
+                normal: rot.0 * n,
+                verts: [tri.a, tri.b, tri.c].map(|v| pos.0 + rot.0 * v),
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        a.centroid()
+            .distance_squared(at)
+            .total_cmp(&b.centroid().distance_squared(at))
+    });
+    out.truncate(limit);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
