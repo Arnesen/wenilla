@@ -126,3 +126,66 @@ fn minimap_indoor_and_outdoor_zoom_indices_are_independent() {
         "the outdoor index survived an indoor zoom"
     );
 }
+
+/// **The level persists** (decision 1131). `SetZoom` writes the live index *and* the matching CVar
+/// — `minimapInsideZoom` while inside a WMO, `minimapZoom` outside — the client's own `set_zoom` →
+/// `CVar::Set` pair, which is the whole reason a zoom survives a restart. The host push in the
+/// other direction (the seed) does *not* echo back as a change.
+#[test]
+fn setzoom_persists_the_level_through_the_cvar_it_belongs_to() {
+    let mut s = script();
+    s.register_cvars([("minimapZoom", "3"), ("minimapInsideZoom", "3")]);
+    s.run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+        .unwrap();
+
+    // The seed is a HOST write: it moves both live indices and queues nothing (the host is the
+    // one that just read them off disk — an echo would re-dirty the file it loaded).
+    s.set_minimap_zoom(1, 4);
+    assert_eq!(s.eval::<u8>("return m:GetZoom()").unwrap(), 1);
+    assert!(s.take_cvar_changes().is_empty(), "the seed must not echo");
+
+    // Outdoors, a zoom writes the outdoor CVar and only that one.
+    s.run("m:SetZoom(5)").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("minimapZoom".to_string(), "5".to_string())]
+    );
+    assert_eq!(s.cvar("minimapInsideZoom").as_deref(), Some("3"));
+
+    // Indoors it writes the indoor one — the two levels persist separately, like the indices.
+    s.set_minimap_inside(true);
+    s.run("m:SetZoom(0)").unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("minimapInsideZoom".to_string(), "0".to_string())]
+    );
+    assert_eq!(s.cvar("minimapZoom").as_deref(), Some("5"));
+
+    // A no-op zoom queues nothing: quiet frames stay quiet, and the config stays clean.
+    s.run("m:SetZoom(0)").unwrap();
+    assert!(s.take_cvar_changes().is_empty());
+
+    // The seed clamps like `set_zoom` does, so a hand-edited config.toml cannot seed out of range.
+    s.set_minimap_zoom(99, 99);
+    s.set_minimap_inside(false);
+    assert_eq!(
+        s.eval::<u8>("return m:GetZoom()").unwrap(),
+        MINIMAP_ZOOM_LEVELS - 1
+    );
+}
+
+/// A VM whose host registered nothing (a bare test harness, a glue-only run) still zooms — the
+/// engine-side CVar write is a silent no-op there, not a warning: engine writes are code, not UI
+/// content, so a miss means this build's host does not back the var.
+#[test]
+fn zooming_without_a_registered_cvar_table_is_silent() {
+    let mut s = script();
+    s.run(r#"m = CreateFrame("Minimap", "TestMinimap") m:SetZoom(4)"#)
+        .unwrap();
+    assert_eq!(s.eval::<u8>("return m:GetZoom()").unwrap(), 4);
+    assert!(s.take_cvar_changes().is_empty());
+    assert!(
+        s.take_warnings().is_empty(),
+        "no warning for an engine write"
+    );
+}

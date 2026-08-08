@@ -412,3 +412,24 @@ fn the_font_registry_alone_covers_the_whole_bake_plan() {
         registry_only.len()
     );
 }
+
+/// The whole shipped UI survives `VARIABLES_LOADED` (decision 1128) — the event the saved-variables
+/// load fires at every launch, and which nothing fired before this arc existed.
+///
+/// Today no shipped file registers it, so this asserts a clean no-op; the moment one does (the
+/// combat-text option family and `TwentyFourHourTime` are next on 1128's list) this is what catches a
+/// handler that errors on the one event that runs before any window has been shown.
+#[test]
+fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "loader errors: {failures:?}");
+    let _ = s.errors(); // drain anything the load itself logged; this test is about the event
+    s.fire_event("VARIABLES_LOADED", vec![]);
+    assert!(
+        s.errors().is_empty(),
+        "VARIABLES_LOADED script errors: {:?}",
+        s.errors()
+    );
+}

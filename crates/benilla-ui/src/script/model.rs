@@ -215,6 +215,10 @@ pub(crate) struct Model {
     /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
     pub(crate) cvars_warned: HashSet<String>,
 
+    /// The globals `RegisterForSave` declared, in registration order — the saved-variables set the
+    /// host writes out at logout/exit and re-executes at load (decision 1128, [`super::saved`]).
+    pub(crate) saved_names: Vec<String>,
+
     /// The key-binding table (decision 0997, [`super::keybind`]) — the chord→command store the
     /// Key Bindings window edits, plus its stored account/character sets. The CVar table's twin:
     /// host-registered commands, Lua reads/writes synchronously, the app re-derives dispatch when
@@ -868,6 +872,7 @@ impl Model {
             cvars: HashMap::new(),
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
+            saved_names: Vec::new(),
             keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),

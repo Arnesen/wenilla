@@ -93,6 +93,28 @@ impl super::UiScript {
     }
 }
 
+/// An **engine-side** write: a value the engine owns moved, and the CVar table mirrors it. The
+/// minimap's zoom is the case that needs it — the client's `set_zoom` (`0x6da8e0`) writes the live
+/// index *and* `CVar::Set`s `minimapZoom`/`minimapInsideZoom` in the same breath, which is exactly
+/// why the level survives a restart. So this queues the change like a Lua `SetCVar` would (the host
+/// must hear it and dirty the config file), unlike [`super::UiScript::set_cvar_host`], whose whole
+/// point is *not* to echo the value it just loaded.
+///
+/// A name the host never registered is a **silent** no-op here, not a warning: engine writes are
+/// code, not UI content, so a miss means this build's host doesn't back the var (a bare test VM) —
+/// and the registered set is welded to the code truths by `crate::cvars`'s own test.
+pub(super) fn set_from_engine(model: &mut Model, name: &str, value: String) {
+    let Some(slot) = model.cvars.get_mut(&name.to_ascii_lowercase()) else {
+        return;
+    };
+    if slot.value == value {
+        return;
+    }
+    slot.value = value.clone();
+    let registered = slot.name.clone();
+    model.cvar_changes.push((registered, value));
+}
+
 /// Push the warn-once for an unknown CVar name into the model's warning stream.
 fn warn_unknown(model: &mut Model, name: &str) {
     let key = name.to_ascii_lowercase();

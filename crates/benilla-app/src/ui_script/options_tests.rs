@@ -542,6 +542,32 @@ fn audio_harness() -> UiScript {
     s
 }
 
+/// The Combat page's harness (decision 1134): the **real** `CombatText.xml` loaded ahead of the
+/// window, in the manifest's own order (it is file 59, OptionsFrame.xml file 281), so the rows
+/// capture the same file-scope defaults and the same `applyFunc` they capture in the client —
+/// nothing about the family is restated here. `UIParent.xml` comes first because CombatText's
+/// strings anchor to it.
+fn combat_harness() -> UiScript {
+    let mut s = audio_harness();
+    s.set_screen_size(1024.0, 768.0);
+    for file in ["UIParent.xml", "CombatText.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(
+            report.errors.is_empty(),
+            "{file}: loader errors: {:?}",
+            report.errors
+        );
+    }
+    harness_on(s)
+}
+
 /// Selecting Audio shows the page body, arms Defaults, and every row reads the CVar table:
 /// sliders take the stored value with the era rounded-percent readout, checkboxes take the flag.
 /// Leaving the page hides it and puts Defaults back to sleep.
@@ -1578,7 +1604,8 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 14, "every row but one carries a live 1.12 key");
+    // 14 CVar rows + the Combat page's 14 saved-variable rows (decision 1134).
+    assert_eq!(checked, 28, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1618,7 +1645,7 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
 
     let mut raised = 0;
-    for page in ["Controls", "Audio", "Graphics", "Nameplates"] {
+    for page in ["Controls", "Audio", "Graphics", "Nameplates", "Combat"] {
         s.run(&format!("OptionsFrameCategoryListRow{page}:Click()"))
             .unwrap();
         let rows: String = s
@@ -1658,5 +1685,241 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    assert_eq!(raised, 14, "14 of the 15 rows have a 1.12 description");
+    // 14 of the 15 CVar rows, plus all 14 of the Combat page's saved-variable rows (1134).
+    assert_eq!(raised, 28, "every row but Auto Loot has a 1.12 description");
+}
+
+/// The **Combat page** (decision 1134) — the first rows in this window whose store is a
+/// saved-variable GLOBAL rather than a CVar, and so the first thing that can change any of the
+/// stock globals 1128 ported. The page is 1.12's AdvancedOptionsCombatText box: it reads the
+/// globals on select, a click writes the global (and *nothing* reaches the CVar table), and each
+/// write runs the family's `applyFunc` — `CombatText_UpdateDisplayedMessages`, whose visible
+/// effect is the per-type `show` flag and the scroll function.
+#[test]
+fn the_combat_page_writes_saved_variable_globals_and_applies_them() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyCombat:IsVisible()")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .unwrap());
+
+    // Read: each box shows its global, at CombatText.xml's own file-scope value.
+    for (row, checked) in [
+        ("RowCombatText", true),
+        ("RowAuras", true),
+        ("RowAuraFade", false),
+        ("RowDodgeParryMiss", false),
+    ] {
+        assert_eq!(
+            s.eval::<bool>(&format!(
+                "return OptionsFrameContainerBodyCombat{row}Check:GetChecked() and true or false"
+            ))
+            .unwrap(),
+            checked,
+            "{row} reads its global"
+        );
+    }
+    // The dropdown capsule reads COMBAT_TEXT_FLOAT_MODE = "1" as its named stop.
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Scroll Up"
+    );
+
+    // Write: the global moves, the CVar table is untouched, and the applyFunc lands.
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyCombatRowDodgeParryMissCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
+            .unwrap(),
+        "1"
+    );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a uvar row must not touch the CVar table"
+    );
+    assert_eq!(
+        s.eval::<i64>("return COMBAT_TEXT_TYPE_INFO[\"MISS\"].show or 0")
+            .unwrap(),
+        1,
+        "applyFunc ran: the message type is live now"
+    );
+
+    // The dropdown writes its global and applies too (the scroll function follows the mode).
+    s.run(
+        "OptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
+         DropDownList1Button2:Click()",
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_FLOAT_MODE").unwrap(),
+        "2"
+    );
+    assert!(
+        s.eval::<bool>("return COMBAT_TEXT_SCROLL_FUNCTION == CombatText_StandardScroll")
+            .unwrap(),
+        "mode 2 keeps the standard scroll with a downward step (CombatText.xml's own arm)"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The master's dependency rule, 1.12's verbatim: `SHOW_COMBAT_TEXT` off greys **every** other
+/// row on the page including the dropdown, and back on wakes them — except Combo Points, which
+/// carries the reference's second gate and stays greyed for anyone who is not a rogue or druid.
+#[test]
+fn the_combat_master_greys_the_family_and_combo_points_is_class_gated() {
+    let mut s = combat_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+
+    let enabled = |s: &mut UiScript, row: &str, control: &str| -> bool {
+        s.eval::<bool>(&format!(
+            "return OptionsFrameContainerBodyCombat{row}{control}:IsEnabled() and true or false"
+        ))
+        .unwrap()
+    };
+    // No player class in this VM, so Combo Points is greyed from the start while its siblings
+    // are live — the two gates are independent.
+    assert!(enabled(&mut s, "RowAuras", "Check"));
+    assert!(!enabled(&mut s, "RowComboPoints", "Check"));
+    assert!(enabled(&mut s, "RowFloatMode", "DropdownButton"));
+
+    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert_eq!(s.eval::<String>("return SHOW_COMBAT_TEXT").unwrap(), "0");
+    assert!(
+        !enabled(&mut s, "RowAuras", "Check"),
+        "the master off greys every sub-toggle"
+    );
+    assert!(
+        !enabled(&mut s, "RowFloatMode", "DropdownButton"),
+        "…and the scroll dropdown, so its list cannot even open"
+    );
+    assert!(
+        enabled(&mut s, "RowCombatText", "Check"),
+        "the master itself stays live — it is the way back"
+    );
+
+    s.run("OptionsFrameContainerBodyCombatRowCombatTextCheck:Click()")
+        .unwrap();
+    assert!(enabled(&mut s, "RowAuras", "Check"));
+    assert!(enabled(&mut s, "RowFloatMode", "DropdownButton"));
+    assert!(
+        !enabled(&mut s, "RowComboPoints", "Check"),
+        "the class gate outlives the master's return"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Defaults on a saved-variable page restores each global to **the value its own XML assigned at
+/// file scope** — captured at the row's OnLoad, which the load order guarantees runs before the
+/// saved chunk (1128). The panel restates no defaults of its own, so it cannot drift from
+/// CombatText.xml the way the reference's hand-copied `default` field can.
+#[test]
+fn defaults_resets_the_combat_page_to_the_shipped_assignments() {
+    let s = combat_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    // Move three of them off their shipped values, in both directions and both flavors.
+    s.run(
+        "OptionsFrameContainerBodyCombatRowAurasCheck:Click() \
+         OptionsFrameContainerBodyCombatRowReputationCheck:Click() \
+         OptionsFrameContainerBodyCombatRowFloatModeDropdownButton:Click() \
+         DropDownList1Button3:Click()",
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_SHOW_AURAS").unwrap(),
+        "0"
+    );
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_SHOW_REPUTATION")
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_FLOAT_MODE").unwrap(),
+        "3"
+    );
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_SHOW_AURAS").unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_SHOW_REPUTATION")
+            .unwrap(),
+        "0"
+    );
+    assert_eq!(
+        s.eval::<String>("return COMBAT_TEXT_FLOAT_MODE").unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyCombatRowFloatModeDropdownText:GetText()"
+        )
+        .unwrap(),
+        "Scroll Up",
+        "the capsule follows the reset"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The point of the whole page: what it writes is **remembered**. A toggle lands in the
+/// saved-variables text (1128's serializer) under its own name, and a fresh VM that executes that
+/// text comes up with the player's choice rather than CombatText.xml's shipped default.
+#[test]
+fn what_the_combat_page_writes_survives_a_restart() {
+    let s = combat_harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowCombat:Click()").unwrap();
+    s.run("OptionsFrameContainerBodyCombatRowHonorGainedCheck:Click()")
+        .unwrap();
+
+    let saved = s.saved_variables_text();
+    assert!(
+        saved.contains("COMBAT_TEXT_SHOW_HONOR_GAINED = \"0\""),
+        "the toggle is in the saved text:\n{saved}"
+    );
+
+    // The restart: a fresh tree at its shipped defaults, then the saved chunk over the top.
+    let fresh = combat_harness();
+    assert_eq!(
+        fresh
+            .eval::<String>("return COMBAT_TEXT_SHOW_HONOR_GAINED")
+            .unwrap(),
+        "1"
+    );
+    fresh.run(&saved).unwrap();
+    assert_eq!(
+        fresh
+            .eval::<String>("return COMBAT_TEXT_SHOW_HONOR_GAINED")
+            .unwrap(),
+        "0",
+        "the saved value wins over the file-scope default"
+    );
+    // And the page paints the restored value the next time it is opened.
+    fresh.run("ShowUIPanel(OptionsFrame)").unwrap();
+    fresh
+        .run("OptionsFrameCategoryListRowCombat:Click()")
+        .unwrap();
+    assert!(!fresh
+        .eval::<bool>(
+            "return OptionsFrameContainerBodyCombatRowHonorGainedCheck:GetChecked() and true or false"
+        )
+        .unwrap());
+    assert!(
+        fresh.errors().is_empty(),
+        "script errors: {:?}",
+        fresh.errors()
+    );
 }

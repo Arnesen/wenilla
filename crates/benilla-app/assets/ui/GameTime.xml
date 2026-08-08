@@ -22,9 +22,11 @@
       macro; CharacterFrame.xml's note).
     - TwentyFourHourTime = 1 is SET here: the reference sets it in Localization.lua's
       LocalizeFrames() — this install is enGB, and enGB is a 24-hour locale — called at
-      VARIABLES_LOADED, which benilla doesn't fire yet (no saved-variables arc; BagFrame.xml's
-      precedent). So the tooltip reads "21:07" exactly as the reference client on this install
-      does; the 12-hour AM/PM branches stay verbatim below for the day a locale/CVar drives it.
+      VARIABLES_LOADED. benilla fires that event since decision 1128 and could carry this as a saved
+      variable (it is on 1128's follow-on list), but the value here is a LOCALE fact, not a player
+      toggle: this install is enGB and enGB is a 24-hour locale. So the tooltip reads "21:07" exactly
+      as the reference client on this install does; the 12-hour AM/PM branches stay verbatim below
+      for the day a locale/CVar drives it.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[

@@ -42,22 +42,41 @@
         COMBAT_TEXT_LOCATIONS = {}
 
         -- The option family's saved-variables (ref UIOptionsFrame.lua l.125-152), at the ref
-        -- defaults except the master (see the header). No options panel binds them yet — flip in
-        -- Lua when wanted.
+        -- defaults except the master (see the header). Each is assigned AT FILE SCOPE and
+        -- registered on the line under it — the reference's own load order (decision 1128):
+        -- defaults first, the saved chunk over the top, consumers third; reverse any two and a
+        -- saved value can never win. The Options window's Combat page drives all fourteen
+        -- (decision 1134) and takes its Defaults values from these very assignments, read at the
+        -- row's OnLoad — which runs before the saved chunk — so each default lives in one place,
+        -- here, and the panel cannot drift from it.
         SHOW_COMBAT_TEXT = "1"
+        RegisterForSave("SHOW_COMBAT_TEXT")
         COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_LOW_HEALTH_MANA")
         COMBAT_TEXT_SHOW_AURAS = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_AURAS")
         COMBAT_TEXT_SHOW_AURA_FADE = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_AURA_FADE")
         COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_COMBAT_STATE")
         COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
         COMBAT_TEXT_SHOW_RESISTANCES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_RESISTANCES")
         COMBAT_TEXT_SHOW_REPUTATION = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_REPUTATION")
         COMBAT_TEXT_SHOW_REACTIVES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_REACTIVES")
         COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_FRIENDLY_NAMES")
         COMBAT_TEXT_SHOW_COMBO_POINTS = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_COMBO_POINTS")
         COMBAT_TEXT_SHOW_MANA = "0"
+        RegisterForSave("COMBAT_TEXT_SHOW_MANA")
         COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
+        RegisterForSave("COMBAT_TEXT_SHOW_HONOR_GAINED")
         COMBAT_TEXT_FLOAT_MODE = "1"
+        RegisterForSave("COMBAT_TEXT_FLOAT_MODE")
 
         -- The message words (shipped enUS GlobalStrings values, hardcoded like the rest of our
         -- enUS-only data; or-guarded so an earlier definition wins).

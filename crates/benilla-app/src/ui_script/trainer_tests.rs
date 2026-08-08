@@ -34,6 +34,10 @@ fn load_xml(s: &UiScript, file: &str) -> usize {
 
 /// Load the trainer window + all its deps into a fresh script, screen sized, with every state filter
 /// ON (the XML defaults "Already Known" off — the tests want the full tree, deterministic indices).
+///
+/// The filter's source of truth is the three **saved globals** (decision 1128), which the window
+/// pushes into the engine on every show — so a test that wants the full tree sets those, not the
+/// engine's own `SetTrainerServiceTypeFilter`, which the next `TRAINER_SHOW` would overwrite.
 fn trainer_script() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -45,9 +49,8 @@ fn trainer_script() -> UiScript {
     load_xml(&s, "MerchantFrame.xml"); // BenillaMoney_Set/_Clear/_SetColor live here
     load_xml(&s, "TrainerFrame.xml");
     s.run(
-        "SetTrainerServiceTypeFilter('available',1) \
-         SetTrainerServiceTypeFilter('unavailable',1) \
-         SetTrainerServiceTypeFilter('used',1)",
+        "TRAINER_FILTER_AVAILABLE = 1 TRAINER_FILTER_UNAVAILABLE = 1 TRAINER_FILTER_USED = 1 \
+         BenillaTrainerFrame_ApplyFilter()",
     )
     .unwrap();
     s
@@ -599,4 +602,116 @@ fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
     click(&mut s, "Up");
     assert_eq!(offset(&mut s), 0, "and stops at the top, never past it");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The filter is remembered across a restart** (decision 1128) — the whole persistence path, in
+/// one test: the shipped XML declares its three globals for saving at file scope, a dropdown toggle
+/// writes the *global* (not only the engine mask), the serialized file carries it, and a fresh VM
+/// that loads the same XML and then executes that file comes up with the toggled filter applied.
+///
+/// It also pins the two halves that are easy to "simplify" apart and silently break: writing only
+/// the engine mask in the click handler would lose the choice at the next list packet (the reference
+/// rebuilds that mask on every one), and applying the globals only in `<OnShow>` would leave the
+/// first painted frame under the reset.
+#[test]
+fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
+    let mut s = trainer_script();
+    s.set_money(50);
+    s.set_trainer(Some(menu()));
+    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
+
+    // The XML declared exactly the reference's three globals, in its order.
+    assert_eq!(
+        s.saved_variable_names(),
+        vec![
+            "TRAINER_FILTER_AVAILABLE",
+            "TRAINER_FILTER_UNAVAILABLE",
+            "TRAINER_FILTER_USED",
+        ]
+    );
+
+    // Toggle "Unavailable" off through the dropdown row's own handler (pre-click state on `this`).
+    s.run("this = { value = 'unavailable', checked = 1 }; BenillaTrainerFilterDropDown_OnClick()")
+        .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<i64>("return TRAINER_FILTER_UNAVAILABLE").unwrap(),
+        0,
+        "the click must write the SAVED global, not just the engine mask"
+    );
+    let text = s.saved_variables_text();
+    assert!(
+        text.contains("TRAINER_FILTER_UNAVAILABLE = 0"),
+        "the file carries the toggle: {text}"
+    );
+
+    // The restart: a fresh VM with the same XML (file-scope defaults stand), then the saved file
+    // executed over them, then a trainer opens.
+    let mut fresh = trainer_script();
+    fresh.run(&text).unwrap();
+    fresh.set_money(50);
+    fresh.set_trainer(Some(menu()));
+    fresh.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    assert!(
+        !fresh
+            .eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
+            .unwrap(),
+        "the remembered filter reached the engine"
+    );
+    assert_eq!(
+        fresh.eval::<i64>("return GetNumTrainerServices()").unwrap(),
+        5,
+        "Cleave (the unavailable service) is hidden on the very first paint after the restart"
+    );
+    assert!(
+        fresh.errors().is_empty(),
+        "script errors: {:?}",
+        fresh.errors()
+    );
+}
+
+/// A **new list packet resets the engine's filter mask** to the builder's own default — mask 3 at a
+/// class/tradeskill/pet trainer, mask 5 (available|used) at a mount trainer — and clears the collapse
+/// set, byte-verified (decision 1128). This is the engine half of the pair above: the reset is why
+/// the window re-pushes its saved globals on every show.
+#[test]
+fn a_new_list_packet_resets_the_filter_mask_and_the_collapse_set() {
+    let mut s = trainer_script();
+    s.set_trainer(Some(menu()));
+    s.run("BenillaTrainerFrame_ApplyFilter()").unwrap();
+    // Collapse a group, and turn a state off directly (no global) — both are engine-side state.
+    s.run("CollapseTrainerSkillLine(1) SetTrainerServiceTypeFilter('used', 1)")
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
+        .unwrap());
+    assert!(s.eval::<i64>("return GetNumTrainerServices()").unwrap() < 6);
+
+    s.reset_trainer_filter(0);
+    assert!(
+        !s.eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
+            .unwrap(),
+        "mask 3: available|unavailable, already-known OFF"
+    );
+    assert!(s
+        .eval::<bool>("return GetTrainerServiceTypeFilter('available') == 1")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
+        .unwrap());
+    assert_eq!(
+        s.eval::<i64>("return GetNumTrainerServices()").unwrap(),
+        5,
+        "nothing collapsed any more (6 rows less the already-known service the mask now hides)"
+    );
+
+    // A mount trainer wants available|used instead — what makes a known mount visible at all.
+    s.reset_trainer_filter(1);
+    assert!(s
+        .eval::<bool>("return GetTrainerServiceTypeFilter('used') == 1")
+        .unwrap());
+    assert!(!s
+        .eval::<bool>("return GetTrainerServiceTypeFilter('unavailable') == 1")
+        .unwrap());
 }

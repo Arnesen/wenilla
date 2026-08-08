@@ -614,6 +614,15 @@
             },
             Graphics = { "RowUiScale", "RowWorldDetail" },
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
+            -- The floating-combat-text family (decision 1134), in the reference's own on-screen
+            -- order — its AdvancedOptionsCombatText box's anchor chain, master → scroll mode →
+            -- the twelve, NOT its check-button index order (which jumps 58→60→63…59→69).
+            Combat = {
+                "RowCombatText", "RowFloatMode", "RowLowHealthMana", "RowAuras", "RowAuraFade",
+                "RowCombatState", "RowDodgeParryMiss", "RowResistances", "RowReputation",
+                "RowReactives", "RowFriendlyNames", "RowComboPoints", "RowEnergyGains",
+                "RowHonorGained",
+            },
         }
 
         -- `tip` is the GlobalStrings KEY of the row's description (B223, decision 1054) — the key,
@@ -627,6 +636,9 @@
             -- (SettingControls.lua l.773 AddSearchTags(name)), uppercased at registration
             -- (Blizzard_Settings.lua l.60).
             row.searchTag = string.upper(label)
+            -- Kept, not just applied: the disabled-state font (OptionsRow_SetEnabled) has to pick
+            -- the SAME size the indent chose, or greying a child row also promotes it.
+            row.child = child
             local l = getglobal(row:GetName() .. "Label")
             l:SetText(label)
             if child then
@@ -637,6 +649,52 @@
                 l:SetPoint("LEFT", row:GetName(), "LEFT", 52, 0)
                 l:SetPoint("RIGHT", row:GetName(), "CENTER", -85, 0)
             end
+        end
+
+        -- ── The row's STORE: a CVar, or a saved-variable global (decision 1134) ────────────
+        -- 1.12's own Interface panel has TWO stores, not one: each UIOptionsFrameCheckButtons
+        -- entry carries either `cvar = "name"` (an engine knob) or `uvar = "GLOBAL"` (a
+        -- RegisterForSave'd Lua global), and UIOptionsFrame_Load/_Save fork on exactly that field
+        -- (UIOptionsFrame.lua l.230-377). Values are strings either way — "1"/"0" for a toggle —
+        -- so only the accessor differs, and every row in this file now reads and writes through
+        -- this trio instead of calling Get/SetCVar directly.
+        function OptionsRow_Get(row)
+            if row.uvar then return getglobal(row.uvar) end
+            return GetCVar(row.cvar)
+        end
+
+        -- The write. A global's consumers are Lua and do not poll, so a uvar row also runs its
+        -- `applyFunc` — the reference's own per-uvar side effects (SIMPLE_CHAT → FCF_Set_*,
+        -- HIDE_PARTY_INTERFACE → RaidOptionsFrame_UpdatePartyFrames, the combat-text family →
+        -- CombatText_UpdateDisplayedMessages), moved from its batched Okay to our live write
+        -- because this window commits on the click (0961's grammar), not on a Save button.
+        function OptionsRow_Set(row, value)
+            if row.uvar then
+                setglobal(row.uvar, value)
+                if row.applyFunc then row.applyFunc() end
+                return
+            end
+            SetCVar(row.cvar, value)
+        end
+
+        -- The registered default — GetCVarDefault's counterpart for a global. `udefault` is the
+        -- value the defining XML assigned at FILE SCOPE, captured at this row's OnLoad: the whole
+        -- UI's XML loads before the saved-variables chunk executes over it (decision 1128's load
+        -- order), so at OnLoad the global still holds its shipped default. That makes the
+        -- assignment the single source of the default — the panel restates nothing and so cannot
+        -- drift from it, where the reference's table carries a second hand-written copy.
+        function OptionsRow_Default(row)
+            if row.uvar then return row.udefault end
+            return GetCVarDefault(row.cvar)
+        end
+
+        -- A row whose store is a saved-variable global rather than a CVar. Same signature as
+        -- OptionsRow_OnLoad with the global's name in the cvar seat; the caller adds `applyFunc`
+        -- afterwards when the setting needs one.
+        function OptionsGlobalRow_OnLoad(row, uvar, label, tip, child)
+            OptionsRow_OnLoad(row, nil, label, tip, child)
+            row.uvar = uvar
+            row.udefault = getglobal(uvar)
         end
 
         -- A slider row's own range and readout, when the template's 0..1 / 5% / percent (the
@@ -688,7 +746,7 @@
         function OptionsDropdownEntry_OnClick()
             local dd = UIDropDownMenu_GetCurrentDropDown()
             local row = dd:GetParent()
-            SetCVar(row.cvar, this.value)
+            OptionsRow_Set(row, this.value)
             OptionsDropdown_ShowValue(row)
         end
 
@@ -702,7 +760,7 @@
         -- actually picks an entry. (A non-numeric stray shows raw and checks nothing.)
         function OptionsDropdown_ShowValue(row)
             local dd = getglobal(row:GetName() .. "Dropdown")
-            local v = GetCVar(row.cvar)
+            local v = OptionsRow_Get(row)
             local match
             for _, e in ipairs(row.entries) do
                 if e.value == v then match = e end
@@ -800,9 +858,9 @@
             local on = checked
             if row.invert then on = not on end
             if on then
-                SetCVar(row.cvar, 1)
+                OptionsRow_Set(row, "1")
             else
-                SetCVar(row.cvar, 0)
+                OptionsRow_Set(row, "0")
             end
             OptionsPage_UpdateDependencies(OptionsFrame.selectedCategory)
         end
@@ -828,7 +886,7 @@
                 end
             end
             getglobal(control:GetName() .. "Value"):SetText(OptionsRow_FormatValue(row, value))
-            if row.cvar and not row.refreshing then
+            if (row.cvar or row.uvar) and not row.refreshing then
                 -- Two decimals cover every page's grid (the 5% volumes, uiScale's 0.01, whole
                 -- yards); trailing zeros stripped so a value at the registered default
                 -- compares equal to it as a STRING and stays out of the config file ("0.40"
@@ -841,14 +899,14 @@
                     -- slider that rescales itself mid-drag is exactly what this flag
                     -- exists to prevent. Dragging back onto the committed value clears the
                     -- pending (era's IsModified: a pending EQUAL to current isn't one).
-                    if str == GetCVar(row.cvar) then
+                    if str == OptionsRow_Get(row) then
                         row.pending = nil
                     else
                         row.pending = str
                     end
                     OptionsApply_Update()
                 else
-                    SetCVar(row.cvar, str)
+                    OptionsRow_Set(row, str)
                 end
             end
         end
@@ -865,10 +923,10 @@
                     -- GAMEFIELD_DESELECT arm (`checked = 1` when the CVar reads "0").
                     if row.invert then
                         local checked
-                        if GetCVar(row.cvar) == "0" then checked = 1 end
+                        if OptionsRow_Get(row) == "0" then checked = 1 end
                         box:SetChecked(checked)
                     else
-                        box:SetChecked(GetCVar(row.cvar))
+                        box:SetChecked(OptionsRow_Get(row))
                     end
                 elseif row.entries then
                     OptionsDropdown_ShowValue(row)
@@ -877,7 +935,7 @@
                     row.refreshing = 1
                     -- Pending first (era GetValue returns the pendingValue while one is
                     -- staged): coming back to a page with an un-applied edit shows the edit.
-                    slider:SetValue(tonumber(row.pending or GetCVar(row.cvar) or "0") or 0)
+                    slider:SetValue(tonumber(row.pending or OptionsRow_Get(row) or "0") or 0)
                     row.refreshing = nil
                     -- SetValue fires only on a CHANGE — write the readout unconditionally,
                     -- from the slider's OWN value: in range that IS the CVar (SetValue stores
@@ -896,6 +954,25 @@
         -- (SoundOptionsFrame_UpdateDependencies disables buttons 2 and 4, Ambience and Error
         -- Speech; Enable Music stays live, the panel's own quirk).
         function OptionsPage_UpdateDependencies(key)
+            if key == "Combat" then
+                -- The 1.12 rule, verbatim (UIOptionsFrame_UpdateDependencies' "Additional combat
+                -- text dependancies" block): the master off greys EVERY sub-toggle and the scroll
+                -- dropdown. Combo Points carries the reference's second gate too — it is disabled
+                -- for anyone who is not a rogue or a druid, since nobody else has combo points.
+                local on = SHOW_COMBAT_TEXT ~= "0"
+                local _, class = UnitClass("player")
+                class = class and string.upper(class)
+                local combo = class == "ROGUE" or class == "DRUID"
+                for _, rkey in ipairs(OPTIONS_PAGE_ROWS.Combat) do
+                    if rkey ~= "RowCombatText" then
+                        local live = on
+                        if rkey == "RowComboPoints" and not combo then live = nil end
+                        OptionsRow_SetEnabled(
+                            getglobal("OptionsFrameContainerBodyCombat" .. rkey), live)
+                    end
+                end
+                return
+            end
             if key ~= "Audio" then return end
             local on = GetCVar("MasterSoundEffects") ~= "0"
             local box = OptionsFrameContainerBodyAudioRowEnableAmbienceCheck
@@ -909,6 +986,36 @@
             end
         end
 
+        -- Grey or wake one row, whichever control it wears (the Audio rule above predates this and
+        -- reaches its one checkbox by name). A dropdown row greys the way 1.12's own
+        -- OptionsFrame_DisableDropDown does — the capsule's toggle BUTTON disabled so the list
+        -- cannot open, and its text in GRAY_FONT_COLOR — since our kit's
+        -- UIDropDownMenu_DisableButton addresses a LIST row (level, id), not the capsule.
+        function OptionsRow_SetEnabled(row, on)
+            local name = row:GetName()
+            local box = getglobal(name .. "Check")
+            local dd = getglobal(name .. "Dropdown")
+            if box then
+                if on then box:Enable() else box:Disable() end
+            elseif dd then
+                local text = getglobal(dd:GetName() .. "Text")
+                if on then
+                    getglobal(dd:GetName() .. "Button"):Enable()
+                    text:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g,
+                        HIGHLIGHT_FONT_COLOR.b)
+                else
+                    getglobal(dd:GetName() .. "Button"):Disable()
+                    text:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+                end
+            end
+            local label = getglobal(name .. "Label")
+            if on then
+                label:SetFontObject(row.child and "GameFontNormalSmall" or "GameFontNormal")
+            else
+                label:SetFontObject(row.child and "GameFontDisableSmall" or "GameFontDisable")
+            end
+        end
+
         -- Defaults, live on any page with rows: every row's CVar back to its registered
         -- default (era resets per-setting the same way; the era all-pages confirm dialog is
         -- not modeled — Defaults resets the VISIBLE page). A pending edit dies with it — the
@@ -918,7 +1025,7 @@
             for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
                 local row = getglobal(base .. rkey)
                 row.pending = nil
-                SetCVar(row.cvar, GetCVarDefault(row.cvar))
+                OptionsRow_Set(row, OptionsRow_Default(row))
             end
             OptionsPage_Refresh(key)
         end
@@ -956,7 +1063,7 @@
                 for _, rkey in ipairs(rows) do
                     local row = getglobal(base .. rkey)
                     if row.pending then
-                        SetCVar(row.cvar, row.pending)
+                        OptionsRow_Set(row, row.pending)
                         row.pending = nil
                     end
                 end
@@ -1868,6 +1975,214 @@
                                         </Frame>
                                     </Frames>
                                 </Frame>
+                                <!-- The COMBAT page (decision 1134) — the first page whose rows
+                                     write saved-variable GLOBALS rather than CVars, and the first
+                                     thing that can change any of the ~20 stock globals 1128
+                                     ported. It is 1.12's AdvancedOptionsCombatText box, whole: the
+                                     master, the scroll-mode dropdown, and the twelve sub-toggles,
+                                     in the reference box's own anchor-chain order, with its
+                                     GlobalStrings labels and OPTION_TOOLTIP_* keys verbatim and
+                                     each sub-toggle at the reference's default (the assignment in
+                                     CombatText.xml, which is also where the Defaults button reads
+                                     from). Every row runs CombatText_UpdateDisplayedMessages as
+                                     its applyFunc — the reference's own post-Save call, moved to
+                                     the click because this window writes live (0961). -->
+                                <Frame name="$parentCombat" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowCombatText" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "SHOW_COMBAT_TEXT",
+                                                    "Enable Floating Combat Text", "OPTION_TOOLTIP_SHOW_COMBAT_TEXT")
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The scroll mode. 1.12's own dropdown, values and all
+                                             (UIOptionsFrameCombatTextDropDown_Initialize: "1" up,
+                                             "2" down, "3" arc), worn as an era dropdown row. -->
+                                        <Frame name="$parentRowFloatMode" inherits="OptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowCombatText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowCombatText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_FLOAT_MODE",
+                                                    "Combat Text Float Mode", "OPTION_TOOLTIP_COMBAT_TEXT_MODE", 1)
+                                                OptionsDropdownRow_Setup(self, {
+                                                    { text = "Scroll Up", value = "1" },
+                                                    { text = "Scroll Down", value = "2" },
+                                                    { text = "Arc", value = "3" },
+                                                })
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowLowHealthMana" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFloatMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFloatMode" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA",
+                                                    "Show Low Mana and Health",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_LOW_HEALTH_MANA", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAuras" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLowHealthMana" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLowHealthMana" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURAS",
+                                                    "Show Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURAS", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAuraFade" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAuras" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAuras" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_AURA_FADE",
+                                                    "Show Fading Auras", "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_AURA_FADE", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowCombatState" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAuraFade" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAuraFade" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_COMBAT_STATE",
+                                                    "Show Combat State",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBAT_STATE", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowDodgeParryMiss" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowCombatState" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowCombatState" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS",
+                                                    "Show Dodge/Parries/Misses",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowResistances" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDodgeParryMiss" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDodgeParryMiss" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_RESISTANCES",
+                                                    "Show Damage Reduction",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_RESISTANCES", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowReputation" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowResistances" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowResistances" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_REPUTATION",
+                                                    "Show Reputation",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REPUTATION", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowReactives" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowReputation" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowReputation" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_REACTIVES",
+                                                    "Show Reactive Spells and Abilities",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_REACTIVES", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowFriendlyNames" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowReactives" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowReactives" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_FRIENDLY_NAMES",
+                                                    "Show Friendly Healer Names",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_FRIENDLY_NAMES", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- Combo Points carries the reference's SECOND gate: greyed
+                                             for anyone who is not a rogue or a druid — see
+                                             OptionsPage_UpdateDependencies. -->
+                                        <Frame name="$parentRowComboPoints" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFriendlyNames" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFriendlyNames" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_COMBO_POINTS",
+                                                    "Show Combo Points",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_COMBO_POINTS", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowEnergyGains" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowComboPoints" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowComboPoints" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_MANA",
+                                                    "Show Energy Gains",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_MANA", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowHonorGained" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowEnergyGains" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowEnergyGains" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "COMBAT_TEXT_SHOW_HONOR_GAINED",
+                                                    "Show Honor Gained",
+                                                    "OPTION_TOOLTIP_COMBAT_TEXT_SHOW_HONOR_GAINED", 1)
+                                                self.parentRow = "RowCombatText"
+                                                self.applyFunc = CombatText_UpdateDisplayedMessages
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
                                 <!-- The Nameplates page (0992 — the page 0952 promised when the
                                      category row joined): the three 1.12 UnitName* checkboxes over
                                      the overhead-name gates (nameplates.rs NameConfig), rows in
@@ -2159,6 +2474,12 @@
                                     <Scripts><OnLoad>
                                         self.categoryKey = "Graphics"
                                         getglobal(self:GetName() .. "Label"):SetText("Graphics")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadCombat" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Combat"
+                                        getglobal(self:GetName() .. "Label"):SetText("Combat")
                                     </OnLoad></Scripts>
                                 </Button>
                                 <Button name="$parentSearchHeadNameplates" inherits="OptionsSearchHeadTemplate">

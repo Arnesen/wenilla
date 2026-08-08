@@ -42,6 +42,8 @@ use benilla_formats::{tile_to_world, world_to_tile, AreaPoiCatalog, MinimapTrans
 
 use interior::{interior_group_selection, wmo_minimap_stem};
 
+use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
+
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads};
@@ -130,6 +132,32 @@ fn load_tile(asset_server: &AssetServer) -> impl Fn(&str) -> Handle<Image> + '_ 
 /// `QuadContent::Minimap` arm) — `None` when no Minimap widget is visible (cluster hidden, no XML).
 #[derive(Resource, Default)]
 pub(crate) struct MinimapWidget(pub(crate) Option<MinimapSlot>);
+
+/// The **persisted** half of the minimap zoom (decision 1131) — the client's two CVar objects
+/// `minimapZoom` / `minimapInsideZoom`, whose registered default is `"3"` in both cases (wow-re,
+/// VERIFIED at the `RegisterCVar 0x63db90` argument slot). The *live* indices are the widget's
+/// ([`benilla_ui::widget::MinimapState`]); this is the durable knob [`crate::cvars`] loads out of
+/// `config.toml` and saves back into it. It is **read once** — when the in-game UI materializes and
+/// the fresh widget is seeded from it (`UiScript::set_minimap_zoom`) — and written whenever
+/// `Minimap:SetZoom` reports a new level, which is exactly the client's own split: `set_zoom` writes
+/// the live index *and* the CVar, and the minimap reset path re-seeds the index from the CVar.
+#[derive(Resource)]
+pub(crate) struct MinimapZoom {
+    /// `minimapZoom` — the outdoor index (the chunk table's).
+    pub(crate) outdoor: u8,
+    /// `minimapInsideZoom` — the indoor index (the radius table's), persisted separately so zooming
+    /// indoors never disturbs the outdoor level.
+    pub(crate) inside: u8,
+}
+
+impl Default for MinimapZoom {
+    fn default() -> Self {
+        Self {
+            outdoor: MINIMAP_DEFAULT_ZOOM,
+            inside: MINIMAP_DEFAULT_ZOOM,
+        }
+    }
+}
 
 /// One extracted Minimap widget: where it sits on screen (y-down logical px), its paint key, and
 /// its live widget state.
@@ -736,6 +764,7 @@ pub(crate) struct MinimapPlugin;
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MinimapWidget>()
+            .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
             .init_resource::<blips::MinimapBlipHover>()
             .add_systems(Startup, setup_minimap.after(AssetSet::Open))

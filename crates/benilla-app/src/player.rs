@@ -32,6 +32,9 @@ use crate::ui_script::PointerOverUi;
 
 mod arc;
 pub(crate) mod camera;
+// The remembered camera pose (decision 1131) — it lives inside `player/` so it can read the rig's
+// own `pub(super)` fields instead of widening them for a module outside.
+mod camera_saved;
 mod drunk;
 mod follow;
 
@@ -136,6 +139,7 @@ impl Plugin for PlayerPlugin {
             app.insert_resource(cam);
         }
         follow::plugin(app);
+        camera_saved::plugin(app);
         app.init_resource::<camera::LookConfig>();
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,

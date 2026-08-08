@@ -8,6 +8,14 @@
 //! (decision 0203). The model attrs (`minimapPlayerModel=`/`minimapArrowModel=`) are not
 //! modeled yet — deferred with phase 3's blips.
 //!
+//! **The level persists** (decision 1131). The client keeps two halves: the live indices
+//! (`0x86f698` outdoor / `0x86f69c` indoor — our [`MinimapState`]) and the two CVar objects
+//! `minimapZoom`/`minimapInsideZoom` (both registered default `"3"`), which are what `Config.wtf`
+//! actually stores. `set_zoom` writes *both*; the minimap reset path (`0x6d9008`–`0x6d901f`)
+//! re-seeds the live index from the CVar's parsed int. benilla runs the same two halves at the same
+//! seam: `SetZoom` below writes the index and the CVar, and the app seeds the widget from the CVar
+//! table once, when the in-game UI materializes ([`super::UiScript::set_minimap_zoom`]).
+//!
 //! The methods live in their own registry table, consulted by the frame `__index` dispatcher only
 //! for Minimap frames — the same duck-typing posture as StatusBar's.
 
@@ -57,7 +65,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // inside flag selects, so the +/- buttons zoom the map you're actually looking at and
             // each mode keeps its own level.
             let clamped = (zoom.max(0.0) as u8).min(MINIMAP_ZOOM_LEVELS - 1);
-            with_minimap(lua, &this, |m| m.set_active_zoom(clamped))
+            let inside = with_minimap(lua, &this, |m| {
+                m.set_active_zoom(clamped);
+                m.inside
+            })?;
+            // …and it persists the level in the same breath: `set_zoom` writes the live index AND
+            // `CVar::Set`s the matching CVar (`minimapInsideZoom` indoors, `minimapZoom` out), which
+            // is the whole reason a zoom level survives a restart. The borrow above is released
+            // before this one — both reach the same `Model` app_data.
+            super::cvars::set_from_engine(
+                &mut lua.app_data_mut::<Model>().expect("model app_data"),
+                if inside {
+                    "minimapInsideZoom"
+                } else {
+                    "minimapZoom"
+                },
+                clamped.to_string(),
+            );
+            Ok(())
         })?,
     )?;
     m.set(

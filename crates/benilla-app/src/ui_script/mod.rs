@@ -304,11 +304,23 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
     if world.resource::<IngameUiLoaded>().0 || !ui_wanted(world) {
         return;
     }
-    let Some(script) = world.remove_non_send_resource::<UiScript>() else {
+    let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
     let _ = load_ingame_ui(&script);
+    // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
+    // zoom indices from the persisted CVars now, before anything reads them — the reference's own
+    // minimap reset path copying each CVar object's int into its live index (decision 1131). Once
+    // only: from here the widget's index is the live truth and `Minimap:SetZoom` writes the CVar
+    // back. Startup always precedes this state edge (1038), so the knob is already loaded.
+    let zoom = world.resource::<crate::minimap::MinimapZoom>();
+    script.set_minimap_zoom(zoom.outdoor, zoom.inside);
+    // The saved-variables chunk runs HERE — after the XML assigned its file-scope defaults, before
+    // any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own load order
+    // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
+    // always win and nothing can ever be remembered.
+    crate::ui_saved::load_saved_variables(&mut script);
     world.insert_non_send_resource(script);
     world.resource_mut::<IngameUiLoaded>().0 = true;
 }

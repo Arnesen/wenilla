@@ -279,6 +279,31 @@ impl super::UiScript {
         }
     }
 
+    /// **Reset the state filter and the collapse set — one `SMSG_TRAINER_LIST` arriving.**
+    ///
+    /// Byte-verified (wow-re `system/ui/scratch/trainer-service-suppression.md`, decision 1128): the
+    /// list builder writes the filter mask itself on every packet — `0x4d75d9 mov ds:0xb73a1c,3`
+    /// (available|unavailable, "already known" OFF), or `5` (available|used) when `trainerType == 1`
+    /// — alongside `ds:0xb73a20 = ds:0xb73a24 = 0xffffffff`, which is "no group collapsed". So the
+    /// player's filter choice does NOT live in the engine across trainer visits in the reference: it
+    /// lives in the saved variable `TRAINER_FILTER_*`, and the window's show handler pushes it back
+    /// over this reset (decision 1128; `TrainerFrame.xml`'s `BenillaTrainerFrame_ApplyFilter`).
+    ///
+    /// This is the **packet** edge, not the content edge — [`Self::set_trainer`] runs on every
+    /// snapshot change (an item template landing, a name resolving), and the reference's repaint path
+    /// `0x4d7d40` does not touch either mask. Reset there and a filter would evaporate mid-window.
+    pub fn reset_trainer_filter(&mut self, trainer_type: u32) {
+        let mut model = self.model_mut();
+        // Mask 5 at a mount/"talent" trainer: available + already-known, which is what makes a
+        // known mount visible under its "My Talents" header at all (decision 1124's group -1).
+        model.trainer_filter = if trainer_type == TRAINER_TYPE_MOUNT {
+            [true, false, true]
+        } else {
+            [true, true, false]
+        };
+        model.trainer_collapsed.clear();
+    }
+
     /// Drain the **spell ids** `BuyTrainerService` queued since the last call (the engine resolves each
     /// clicked filtered row to its service's spell id, so the app sends `CMSG_TRAINER_BUY_SPELL`
     /// without needing to know the filter/index mapping).

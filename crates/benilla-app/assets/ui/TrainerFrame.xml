@@ -26,8 +26,11 @@
             renders each row by type; a header click folds its group, a service click selects it.
           - THE FILTER IS A DROPDOWN. BenillaTrainerFilterDropDown (over UIDropDownMenu.xml's kit) with
             three keepShownOnClick check rows (Available/Unavailable/Already Known) driving the engine's
-            state-visibility filter — replacing the three inline sort checkboxes. "Already Known" starts
-            OFF (the backport's TRAINER_FILTER_USED default), set once in OnLoad.
+            state-visibility filter — replacing the three inline sort checkboxes. Its three states are
+            SAVED VARIABLES (decision 1128): defaults 1/1/0 at file scope — "Already Known" starts OFF,
+            the shipped 1.12.1 Blizzard_TrainerUI.lua:6-9's own values — restored from
+            benilla/saved-variables.lua at load, and pushed into the engine on show because the list
+            builder resets its mask on every packet.
           - THE SCROLL BAR IS REAL. BenillaTrainerListScrollFrame (BenillaFauxScrollFrameTemplate): a
             draggable Slider bar + up/down step arrows over the fixed 11 rows (the faux-scroll re-binds
             rows to a moving offset — it never really scrolls a child). The wheel still lives on the
@@ -72,6 +75,21 @@
         local TRAINER_REQ_SKILL_RANK_RED = "%s (|cffff2020%d|r)"         -- TRAINER_REQ_SKILL_RANK_RED (3742)
         local TRAINER_REQ_ABILITY        = "|cffffffff%s|r"             -- TRAINER_REQ_ABILITY (3737)
         local TRAINER_REQ_ABILITY_RED    = "|cffff2020%s|r"             -- TRAINER_REQ_ABILITY_RED (3738)
+        -- ── The state filter's three SAVED VARIABLES (decision 1128) ─────────────────────────────────
+        -- The reference's own globals, values and mechanism: Blizzard_TrainerUI.lua:6-9 assigns these
+        -- at FILE SCOPE and its `.toc` declares them `## SavedVariables`; the client executes the
+        -- saved file over them AFTER this file loads and BEFORE the load event, so a remembered value
+        -- wins over the default. benilla's ported UI is one FrameXML tree rather than addons, so the
+        -- declaration rides `RegisterForSave` (FrameXML's own API for its 38 globals) and the same
+        -- ordering is the app's load seam. File scope is load-bearing: assign these in OnLoad and the
+        -- default would clobber the restored value every launch.
+        TRAINER_FILTER_AVAILABLE   = 1
+        TRAINER_FILTER_UNAVAILABLE = 1
+        TRAINER_FILTER_USED        = 0
+        RegisterForSave("TRAINER_FILTER_AVAILABLE")
+        RegisterForSave("TRAINER_FILTER_UNAVAILABLE")
+        RegisterForSave("TRAINER_FILTER_USED")
+
         local LABEL_AVAILABLE   = "Available"               -- AVAILABLE (84)
         local LABEL_UNAVAILABLE = "Unavailable"             -- UNAVAILABLE (3840)
         local LABEL_USED        = "Already Known"           -- USED (3868)
@@ -417,11 +435,16 @@
         -- appeared to move, and because `this.checked` then read stale-true forever, a filter switched
         -- off could never be switched back on.
         function BenillaTrainerFilterDropDown_OnClick()
-            if this.checked then
-                SetTrainerServiceTypeFilter(this.value, 0)
-            else
-                SetTrainerServiceTypeFilter(this.value, 1)
+            -- The engine filter AND the saved global, together: the global is what survives the
+            -- restart and what BenillaTrainerFrame_ApplyFilter pushes back after the per-packet
+            -- reset, so writing only the engine would lose the toggle at the next list (the ref's
+            -- own setglobal pair, Blizzard_TrainerUI.lua:526-530).
+            local on = 0
+            if not this.checked then
+                on = 1
             end
+            setglobal("TRAINER_FILTER_" .. strupper(this.value), on)
+            SetTrainerServiceTypeFilter(this.value, on)
             BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
             BenillaTrainerFrame_Update()
         end
@@ -453,11 +476,18 @@
             frame:RegisterEvent("PLAYER_MONEY")
             -- The faux-scroll frame repaints the list through this window's Update.
             getglobal("BenillaTrainerListScrollFrame").updateFunc = BenillaTrainerFrame_Update
-            -- The backport's default state filter: Available + Unavailable on, Already Known OFF
-            -- (TRAINER_FILTER_USED = 0). Set once; the engine persists a user's later toggles.
-            SetTrainerServiceTypeFilter("available", 1)
-            SetTrainerServiceTypeFilter("unavailable", 1)
-            SetTrainerServiceTypeFilter("used", 0)
+        end
+
+        -- Push the three saved globals into the engine — the ref's ClassTrainerFrame <OnShow>
+        -- (Blizzard_TrainerUI.xml:531-533), and it is NOT redundant: the list builder rewrites the
+        -- engine's filter mask to its own default on every SMSG_TRAINER_LIST (byte-verified,
+        -- `0x4d75d9 mov ds:0xb73a1c,3`; decision 1128), so this is what puts the player's remembered
+        -- choice back. Called on show and at the top of TRAINER_SHOW — our repaint runs before
+        -- ShowUIPanel, so applying it only in OnShow would leave one frame painted under the reset.
+        function BenillaTrainerFrame_ApplyFilter()
+            SetTrainerServiceTypeFilter("available", TRAINER_FILTER_AVAILABLE)
+            SetTrainerServiceTypeFilter("unavailable", TRAINER_FILTER_UNAVAILABLE)
+            SetTrainerServiceTypeFilter("used", TRAINER_FILTER_USED)
         end
 
         function BenillaTrainerFrame_SetTitle(name)
@@ -471,6 +501,7 @@
         function BenillaTrainerFrame_OnEvent(frame)
             if event == "TRAINER_SHOW" then
                 -- Fresh session: top of the list, a first selection (ref ClassTrainerFrame_Show).
+                BenillaTrainerFrame_ApplyFilter()
                 BenillaTrainerFrame_SetTitle(arg1)
                 BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
                 if GetTrainerSelectionIndex() == 0 then
@@ -803,7 +834,7 @@
             <OnLoad>BenillaTrainerFrame_OnLoad(self)</OnLoad>
             <OnEvent>BenillaTrainerFrame_OnEvent(self)</OnEvent>
             <OnMouseWheel>BenillaTrainerFrame_OnMouseWheel(arg1)</OnMouseWheel>
-            <OnShow>PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnShow>BenillaTrainerFrame_ApplyFilter(); PlaySound("igCharacterInfoOpen")</OnShow>
             <OnHide>CloseTrainer(); PlaySound("igCharacterInfoClose")</OnHide>
         </Scripts>
     </Frame>

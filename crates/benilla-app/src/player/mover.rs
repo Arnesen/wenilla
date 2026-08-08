@@ -507,24 +507,43 @@ pub(crate) fn grounded_step(
         }
         _ => None,
     };
-    if ride_to.is_none() {
-        if let Some(landed) = attempt.verdict.landed() {
-            // The committed maneuver IS this frame's motion — already settled on a walkable floor,
-            // so the slide and the snap below are skipped.
-            return GroundedStep {
-                center: landed,
-                ground: None,
-                climb: Some(landed.y - center.y),
-                snap: None,
-                steep_support: false,
-            };
-        }
+    // **The pop is a RISE, not a jump forward** (decision 1130). 0209 committed the whole maneuver as
+    // one position — rise, advance the probe's full [`STEP_UP_ADVANCE`], and land on the floor the
+    // probe found — which put a **1.19 yd horizontal teleport** in every step-up: ten frames' worth
+    // of travel in one frame, at ten times walking speed. That lurch, not the height, is what the
+    // director reported as Goldshire's tables feeling teleporty.
+    //
+    // The reference does none of it (wow-re `ret2-commit-law.md`, a §5 trio):
+    //   - `max(H·tan50°, r+1/720)` = 1.1917536 is **only ever a sweep distance**. `ebx` @`0x636193`
+    //     has exactly two uses, both the length argument to `0x632ba0`. It is never added to `pos`.
+    //   - the resolver holds `L / t_remaining` invariant across hits, deflections and misses, so the
+    //     frame's **total horizontal is bounded by its own substep budget** — `dx = 1.19` where a
+    //     walking frame is 0.117 cannot arise on this path at all;
+    //   - all seven position writes in `[0x6367b0, 0x637140)` are **relative**. There is no absolute
+    //     snap anywhere in the walk resolver, so landing the body *on* a probe's floor was wrong in
+    //     kind and not merely in magnitude;
+    //   - what the certified arm commits is a free vertical segment of `H` (`0x635d5b` — the response
+    //     is always `(0,0,s)`), after which `0x63694d` restores **the caller's own heading** with the
+    //     budget that is left.
+    //
+    // So: rise in place, then let the ordinary slide and the ordinary settle below own the frame,
+    // exactly as they do on flat ground. The settle cannot strand the body up there — the reference
+    // sets `0x4000000` *before* computing the settle's reach and only clears it *after*
+    // (`0x636edf`, inside the settle), so the probe is always at least `H + 1/36` and always reaches
+    // back past the height just gained: it finds the obstacle's top, or the ground we left.
+    let popped = match attempt.verdict {
+        StepVerdict::Commit { up, .. } if ride_to.is_none() => Some(up),
+        _ => None,
+    };
+    if popped.is_some() {
+        eprintln!("POPFIRE");
     }
+    let start = center + Vec3::Y * popped.unwrap_or(0.0);
     let mut rode = false;
     let out = crate::collision::one_sided::move_and_slide(
         ms,
         capsule,
-        center,
+        start,
         horiz_vel,
         dt,
         &MoveAndSlideConfig::default(),
@@ -587,10 +606,14 @@ pub(crate) fn grounded_step(
     // step-down reach by the same yard (`0x633e35`) so the float still follows the ground down.
     // Both halves are here: the reach grows by the offset, and the snap stops that far short of the
     // floor. Zero for everyone not hovering, which is the ordinary case and unchanged.
-    let d = slid - center;
+    let d = slid - start;
     let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO
         + STEP_SNAP_SLACK
-        + if support.steep { STEP_UP_HEIGHT } else { 0.0 }
+        + if support.steep || popped.is_some() {
+            STEP_UP_HEIGHT
+        } else {
+            0.0
+        }
         + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
     let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
@@ -612,7 +635,7 @@ pub(crate) fn grounded_step(
     // the ground being left behind, and it gets no say.
     // The height this frame's ride earned, read before the snap can spend any of it. (The two snap
     // arms below are mutually exclusive — walkable or steep — so one value serves both.)
-    let ride_rise = (slid.y - center.y).max(0.0);
+    let ride_rise = (slid.y - start.y).max(0.0);
     // **The step-down follows the surface; it does not leave it** (decision 1127). The reference's
     // finalize writes `pos.z -= min(clearance, d_h·1.8493990)` *before* it classifies anything, and a
     // steep landing is answered by the multipass rather than by a fall — a `ret 2` continues,
@@ -625,60 +648,74 @@ pub(crate) fn grounded_step(
     // `dy=+0.000 dx=0.118` with the surface 0.162 below, then eighteen airborne frames landing 2.1 yd
     // downrange. That is the dive.
     //
-    // **The descent is unconditional, it is bounded by the probe itself, and only the *support* is
-    // conditional.** Byte-exact (`0x636e45`–`0x636e52`, wow-re `step-off-recourse.md` §1): the
-    // finalize sweeps down by `L` and writes `pos.z -= achieved`, where `achieved` is the sweep's own
-    // output — the clearance when something is under us, and the **whole of `L`** when nothing is —
-    // and only *then* does it classify what it found. So the cap and the reach are the same number,
-    // and there is no second, smaller bound: `L` is how far the body may fall to stay with its
-    // surface this frame, whatever the surface turns out to be.
+    // **The reach is how far we can SEE; the descent is how far we may GO — and for a capsule those
+    // are not the same number** (decision 1132). Byte-exact the finalize is one line
+    // (`0x636e45`–`0x636e52`, wow-re `step-off-recourse.md` §1): sweep down by `L`, write
+    // `pos.z -= achieved`, *then* classify. `achieved` is the sweep's own output, so on the reference
+    // the descent is bounded only by `L` — no second, smaller cap exists anywhere on that path.
     //
-    // 1127 shipped a separate `min(drop, d_h·1.8494 + 1/36)` cap because at the time `reach` also
-    // carried the bogus flat 2.028 and could not be used as the bound. With the reach corrected
-    // above, the two are one quantity again — and the difference is exactly what closes the last of
-    // the dive: on a face **steeper than the cone** the old cap could never keep up (walking off the
-    // 0.91 yd step, whose face is 66°, the surface drops 0.256 in a frame the cone allowed 0.242, so
-    // every frame leaked its remainder into a small fall). Once the first frame latches the
-    // steep-support bit, `L` grows by `H` and the following frames can take the whole clearance.
-    if let Some(h) = hit.as_ref().filter(|h| h.normal1.y < GROUND_COS) {
+    // 1129 read that literally and dropped 1127's separate cone cap. The director's eye caught what
+    // the reading missed: *"the pop down seems too instant while the ref seems more smoothed … the
+    // ref is def not diving forward of the fence, it's still stepping down."*
+    //
+    // **The reason is the shape, and it is 1123's divergence on the down side.** The reference's
+    // mover is a cone at the foot, so stepping off a fence its **skirt stays in contact with the
+    // edge** the whole way down — its `achieved` is never large, because something is always just
+    // beneath it. The descent comes out at the cone's own slope, `d_h·1.8494` a frame, without any
+    // cap being needed: the geometry is the cap. Our capsule touches the edge side-on and then hangs
+    // clear, so the identical instruction sees the entire remaining drop and spends it at once. Same
+    // law, different body, opposite look.
+    //
+    // So we port the cone's *effect*, which is what 1123 said we would do for the solid we do not
+    // have: **one cone's worth of descent per frame.** The deeper reach stays exactly as 1129 left
+    // it — it is what lets us see the ground and stay grounded on a face steeper than the cone,
+    // which is what keeps the dive gone. Seeing further and falling further are different questions,
+    // and only the second one is the director's "instant".
+    let cone_reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+    if let Some(h) = hit {
         let drop = (h.distance - surface_offset).max(0.0);
-        slid.y -= drop;
-        // **Support is earned by descending, not by touching.** A bound alone reads a body *resting*
-        // on a steep face as supported — standing still the reach collapses to the slack, the resting
-        // clearance is ~0, and any "is it within reach" test passes — which perches a motionless body
-        // on a 60° bank forever instead of letting it slide off. That is 1121's named "standing on
-        // >50° faces" hazard, and it is a worse defect than the dive this recourse exists to fix.
-        //
-        // Requiring real downward progress states the actual condition: this is a step-*down* in
-        // progress, not a resting state. A body standing on a bank, or traversing one across the
-        // slope, makes no progress and gets nothing. (The reference reaches the same place by a
-        // different road — its `0x4000000` is set only by a multipass `ret 2`, a full rise-step-settle
-        // certification that a body with nowhere to descend to cannot pass.)
-        steep_support = drop > STEP_SNAP_SLACK;
-    }
-    // **Nothing under us: descend the whole probe anyway, then let the fall elect.** The same
-    // `pos.z -= achieved` runs on the no-hit leg with `achieved == L` — wow-re `step-off-recourse.md`
-    // §1, "no committed record: `pos.z` has ALREADY dropped by the full `L`" — so the frame that
-    // leaves a ledge starts its fall a probe's-worth lower instead of flat. A ride is exempt: mid-ride
-    // the body legitimately hangs clear of everything below, and this would spend the climb.
-    if hit.is_none() && !rode {
-        slid.y -= (reach - surface_offset).max(0.0);
-    }
-    if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
-        // `max(…, 0)` is the reference's, and it is the difference between a float and a pop: the
-        // snap **only ever descends** (`0x636e8d`–`0x636e9e` skips the write when `L − 1.0 < 0`), so
-        // a hovering body that is already within its clearance is left where it is rather than
-        // yanked up to it. The rise to clearance is a separate rate-limited climb — see [`step`].
-        let drop = (h.distance - surface_offset).max(0.0);
-        if !(rode && drop >= ride_rise) {
-            slid.y -= drop;
-            ground = Some(h.entity);
+        let walkable = h.normal1.y >= GROUND_COS;
+        // A ride's height is earned (above): only a floor higher than the ride began on may end it.
+        if !(rode && walkable && drop >= ride_rise) {
+            slid.y -= drop.min(cone_reach);
+            if drop > cone_reach {
+                // **Further down than the cone could rest, but in sight.** This is a step-down still
+                // in progress — the reference's `0x4000000` case exactly — so we stay grounded and
+                // keep the deep reach open, and the next frames finish it a cone's worth at a time.
+                // Without this the body would be left hanging and the fall would elect, which is the
+                // dive coming back through the cap.
+                steep_support = true;
+            } else if walkable {
+                ground = Some(h.entity);
+            } else {
+                // **Support is earned by descending, not by touching.** Resting *on* a steep face
+                // gives a clearance of ~0, and standing still the bound is the slack alone — so a
+                // "within reach" test alone would perch a motionless body on a 60° bank forever
+                // instead of letting it slide off (1121's named hazard, and worse than the dive).
+                // Real downward progress states the actual condition: descending, not resting.
+                steep_support = drop > STEP_SNAP_SLACK;
+            }
         }
+    } else if !rode {
+        // **Nothing in sight: descend, then let the fall elect** — the same `pos.z -= achieved` runs
+        // on the no-hit leg with `achieved == L` ("no committed record: `pos.z` has ALREADY dropped
+        // by the full `L`"), so the frame that leaves a ledge starts its fall lower instead of flat.
+        // A ride is exempt: mid-ride the body legitimately hangs clear of everything below, and this
+        // would spend the climb.
+        //
+        // **And it takes the same cone cap as the hit legs, for the same reason.** Left uncapped it
+        // was harmless only while the reach was a cone's worth anyway — once the steep-support bit
+        // opens the deep reach, "descend the full `L`" is a 1.25 yd drop in one frame. That is what
+        // the director was still feeling after 1132 capped the other two legs: their fence
+        // step-downs came through *this* branch, `snap miss (reach 1.25) dy=-1.250`, five of them in
+        // one capture. The cap is a property of our body, not of which leg found the floor.
+        slid.y -= (reach - surface_offset).max(0.0).min(cone_reach);
     }
     GroundedStep {
         center: slid,
-        // A ride is a climb too — the trace reads the same whichever regime moved the body.
-        climb: rode.then_some(slid.y - center.y),
+        // A ride is a climb too, and so is a pop — the trace reads the same whichever regime
+        // moved the body, and all three are measured from the frame's entry height.
+        climb: (rode || popped.is_some()).then_some(slid.y - center.y),
         // **Supported by a certified steep contact** — the reference's `0x4000000`, whose meaning
         // decision 1125 settled. Two ways to earn it and one meaning: mid-ride the body is held up
         // by the edge under its skirt (climbing), and mid-step-down it is resting on the surface it
@@ -686,7 +723,7 @@ pub(crate) fn grounded_step(
         // straight down and sees only a steep face, so without this the frame reads as airborne and
         // gravity takes the body off the surface — the climb undone on the way up, the dive on the
         // way down. A walkable floor ends it: ordinary grounding takes over from there.
-        steep_support: (rode && ground.is_none()) || steep_support,
+        steep_support: ((rode || popped.is_some()) && ground.is_none()) || steep_support,
         ground,
         snap,
     }
@@ -865,23 +902,16 @@ pub(crate) enum StepVerdict {
         ny: f32,
         dy: f32,
     },
-    /// Committed: this landing **is** the frame's motion.
+    /// Certified: the obstacle can be cleared. What the frame then *does* is
+    /// [`grounded_step`]'s — a foot-cone ride or a pop of `up`, never this probe's own advance
+    /// (decision 1130). `landed` is where the probe's settle found floor, kept for the trace: it is
+    /// a **diagnostic**, one full [`STEP_UP_ADVANCE`] downrange, and committing it was the teleport.
     Commit {
         landed: Vec3,
         up: f32,
         fwd: f32,
         dy: f32,
     },
-}
-
-impl StepVerdict {
-    /// The committed capsule centre, if this attempt took the frame.
-    pub(crate) fn landed(self) -> Option<Vec3> {
-        match self {
-            StepVerdict::Commit { landed, .. } => Some(landed),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for StepVerdict {
@@ -1344,6 +1374,168 @@ mod tests {
     }
 
     #[test]
+    fn a_step_up_never_outruns_the_frame_it_happens_in() {
+        // **The pin on decision 1130.** The reference holds `L / t_remaining` invariant across every
+        // hit, deflection and miss in the walk resolver, so a frame's total horizontal displacement
+        // is bounded by its own substep budget — `dx = 1.19` where a walking frame is 0.117 "cannot
+        // arise from this path" (wow-re `ret2-commit-law.md`, claim 2). 0209 committed the probe's
+        // full advance as motion, which put exactly that lurch in every single step-up.
+        //
+        // **A Goldshire table, profiled from the director's own capture** — the shape they reported
+        // as teleporty. The capture's pop reads `step hit h=+0.73 n=(-0.04,+0.00,+1.00) up=1.00
+        // fwd=1.19 dy=+0.737 -> COMMIT`, and the frame it produced was `dy=+0.737 dx=1.191`.
+        //
+        // The `h=+0.73` is the whole point and it is why this fixture is a **table and not a step**:
+        // against a capsule a plain vertical riser reports its contact at the hemisphere centre,
+        // ≈0.33 up, which is inside the foot cone and rides. Only a face whose *lowest* collidable
+        // part is already above the band contacts high — a top slab overhanging recessed legs, which
+        // is exactly what a tavern table is. Before this test **no fixture in the suite reached the
+        // pop regime at all**, which is how 0209's teleport survived every green run for a year.
+        //
+        //      0.737 ┌──────────────  table top
+        //      0.62  ├──┐             slab front face  ← the contact, above the cone (0.617)
+        //            ┆  └──┐          underside
+        //      0.0   ┆     │────────  leg, recessed by more than a body radius
+        //           0.60  0.95
+        const P: [(f32, f32); 6] = [
+            (-2.0, 0.0),
+            (0.95, 0.0),
+            (0.95, 0.62),
+            (0.60, 0.62),
+            (0.60, 0.737),
+            (3.0, 0.737),
+        ];
+        let track = world_from_profile(&P)
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                let mut center = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
+                let mut support = Support::default();
+                let mut rows = Vec::new();
+                for _ in 0..24 {
+                    let g =
+                        grounded_step(&ms, &capsule, &filter, center, Vec3::X * 7.0, dt, support);
+                    rows.push((g.center.x - center.x, g.center.y - CAPSULE_HEIGHT * 0.5));
+                    center = g.center;
+                    support.steep = g.steep_support;
+                }
+                rows
+            })
+            .unwrap();
+        let worst = track.iter().map(|r| r.0).fold(0.0_f32, f32::max);
+        assert!(
+            worst <= TRAVEL_60FPS + 1.0e-3,
+            "no frame may travel further than the {TRAVEL_60FPS:.3} yd it asked to walk; worst \
+             was {worst:.3}\n{track:#?}"
+        );
+        let top = track.last().expect("frames").1;
+        assert!(
+            top > 0.70,
+            "and it still has to get onto the 0.737 yd table: ended at {top:.3}\n{track:#?}"
+        );
+    }
+
+    #[test]
+    fn stepping_off_a_fence_hugs_the_edge_down_instead_of_dropping_at_once() {
+        // **The pin on decision 1132**, and the director's report: *"the pop down seems too instant
+        // while the ref seems more smoothed … the ref is def not diving forward of the fence, it's
+        // still stepping down."*
+        //
+        // A 0.72 yd fence with a ~53° chamfered lip — the geometry their Goldshire capture measured
+        // (`snap ny=0.628 STEEP` on the lip frame, then the drop). The reference's foot cone keeps
+        // its skirt on that edge the whole way down and descends at the cone's own slope; our capsule
+        // hangs clear and, uncapped, spends the entire remaining drop in one frame (0.644 in the
+        // capture, `reach 1.24`).
+        //
+        // Two things must hold together, and only together: **no frame gives up more than a cone's
+        // worth**, and **the body never leaves the ground on the way down** — a cap alone would just
+        // be the dive again, one frame later.
+        const P: [(f32, f32); 5] = [
+            (-2.0, 0.72),
+            (0.60, 0.72),
+            (0.69, 0.60),
+            (0.692, 0.0),
+            (3.0, 0.0),
+        ];
+        let frames = walk_from(
+            world_from_profile(&P),
+            Vec3::new(-1.0, 0.72, 0.0),
+            Vec3::X,
+            14,
+        );
+        let cone = TRAVEL_60FPS * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+        let worst = frames
+            .windows(2)
+            .map(|w| w[0].0 - w[1].0)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst <= cone + 1.0e-3,
+            "the step-down must take at most a cone's worth ({cone:.3}) a frame; worst was \
+             {worst:.3}\n{frames:#?}"
+        );
+        let air = frames
+            .iter()
+            .position(|&(_, _, steep, walk)| !steep && !walk);
+        assert!(
+            air.is_none(),
+            "and it must stay on the surface the whole way down, not fall the rest: first \
+             unsupported frame {air:?}\n{frames:#?}"
+        );
+        let bottom = frames.last().expect("frames").0;
+        assert!(
+            bottom < 0.05,
+            "and it does have to get all the way down: ended at {bottom:.3}\n{frames:#?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_finds_nothing_still_spends_only_one_cone() {
+        // **The branch 1132's first cut missed.** When the probe finds nothing the reference still
+        // writes `pos.z -= achieved` with `achieved == L` — harmless while `L` is a cone's worth, and
+        // a **1.25 yd teleport** once the steep-support bit opens the deep reach. That is what the
+        // director was still feeling after the two hit legs were capped: their fence step-downs came
+        // through here, `snap miss (reach 1.25) dy=-1.250`, five of them in one capture.
+        //
+        // Stated at the branch rather than through a fixture, because reproducing the *miss* needs
+        // the body clear of the wall it just left, and a profiled fence puts its riser directly under
+        // the capsule (it hugs that riser down instead — which is `stepping_off_a_fence_hugs_the_edge
+        // _down…`, the case that does have geometry). Here: carrying the bit, moving, with the floor
+        // beyond even the deep reach, so the probe cannot hit anything.
+        const P: [(f32, f32); 2] = [(-2.0, 0.0), (3.0, 0.0)];
+        let dy = world_from_profile(&P)
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                let center = Vec3::new(0.0, CAPSULE_HEIGHT * 0.5 + 1.6, 0.0);
+                let g = grounded_step(
+                    &ms,
+                    &capsule,
+                    &filter,
+                    center,
+                    Vec3::X * 7.0,
+                    dt,
+                    Support {
+                        offset: 0.0,
+                        steep: true,
+                    },
+                );
+                g.center.y - center.y
+            })
+            .unwrap();
+        let cone = TRAVEL_60FPS * STEP_SLOPE_RATIO + STEP_SNAP_SLACK;
+        assert!(
+            -dy <= cone + 1.0e-3,
+            "a frame that found nothing may still spend only a cone's worth ({cone:.3}); it spent \
+             {:.3}",
+            -dy
+        );
+    }
+
+    #[test]
     fn a_motionless_body_is_never_perched_on_a_steep_slope() {
         // A 60° bank. Walk onto it, then STOP. Standing still the cone bound collapses to the slack,
         // so does the steep support quietly keep a motionless body perched on it?
@@ -1528,8 +1720,8 @@ mod tests {
             })
             .unwrap();
         assert!(
-            v.landed().is_none(),
-            "a face above the rise ceiling must never commit, got {v}"
+            !matches!(v, StepVerdict::Commit { .. }),
+            "a face above the rise ceiling must never certify, got {v}"
         );
     }
 

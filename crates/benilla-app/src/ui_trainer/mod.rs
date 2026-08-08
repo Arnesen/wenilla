@@ -66,6 +66,11 @@ pub(crate) struct TrainerOpen {
     pub(crate) trainer_type: u32,
     /// The trainer's greeting line (`SMSG_TRAINER_LIST`'s trailing string).
     pub(crate) greeting: String,
+    /// A `SMSG_TRAINER_LIST` has landed and the feed has not yet handed it to the engine. Drives the
+    /// engine's **per-packet** filter/collapse reset ([`UiScript::reset_trainer_filter`]) — the
+    /// reference's builder rewrites both masks on every list packet, and only on a packet (decision
+    /// 1128). It is not the same edge as a snapshot change: those re-push the same list.
+    pub(crate) fresh_list: bool,
 }
 
 impl TrainerOpen {
@@ -81,6 +86,7 @@ impl TrainerOpen {
         self.trainer_type = trainer_type;
         self.services = services;
         self.greeting = greeting;
+        self.fresh_list = true;
     }
 
     /// Close the open window (a client-side close). Keeps nothing — a re-open re-lists.
@@ -89,6 +95,7 @@ impl TrainerOpen {
         self.services.clear();
         self.trainer_type = 0;
         self.greeting.clear();
+        self.fresh_list = false;
     }
 
     /// Disconnect: drop the open window (mirrors the gossip/merchant session clears).
@@ -300,7 +307,8 @@ fn snapshot(
 #[allow(clippy::too_many_arguments)]
 fn feed_trainer(
     script: Option<NonSendMut<UiScript>>,
-    open: Res<TrainerOpen>,
+    // ResMut only to consume the fresh-packet latch below — the feed never authors trainer content.
+    mut open: ResMut<TrainerOpen>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
@@ -336,6 +344,13 @@ fn feed_trainer(
     let Some(skill_lines) = skill_lines.as_deref() else {
         return;
     };
+    // A new list packet resets the state filter and the collapse set in the engine, exactly as the
+    // reference's builder does (decision 1128) — before the snapshot goes in, so `TRAINER_SHOW`
+    // finds the reset mask and the window's own show handler pushes the SAVED filter back over it.
+    if open.fresh_list {
+        script.reset_trainer_filter(open.trainer_type);
+        open.fresh_list = false;
+    }
     let fresh = snapshot(
         &open,
         &spells.catalog,

@@ -96,8 +96,8 @@ impl PressGesture {
 /// factor cap is inferred from the ref-client comparison, not byte-verified — the RE pinned the CVar
 /// *defaults* and the 50 hard cap, not the factor slider's own max.) Our starting zoom is 15 — pulled
 /// back a bit further than vanilla's own default for a wider view.
-const CAM_DIST_MIN: f32 = 0.0;
-const CAM_DIST_MAX: f32 = 30.0;
+pub(super) const CAM_DIST_MIN: f32 = 0.0;
+pub(super) const CAM_DIST_MAX: f32 = 30.0;
 pub(super) const CAM_DIST_DEFAULT: f32 = 15.0;
 /// Yards the wheel moves the target per notch — `CameraZoomIn`/`CameraZoomOut`'s default `amount`
 /// (VERIFIED 1.0 in `WoW.exe`).
@@ -120,7 +120,7 @@ pub(crate) struct LookConfig {
 /// Camera pitch clamp (radians) — **VERIFIED ±89.00°** (`WoW.exe` `0x8089d8`/`0x8089dc` =
 /// 1.5533430576 rad; the pitch integrate `FUN_00510120`, wow-re `follow-camera`). A single uniform
 /// clamp at every zoom level — the reference has **no** distinct first-person look-down limit.
-const CAM_PITCH_LIMIT: f32 = 89.0 * std::f32::consts::PI / 180.0;
+pub(super) const CAM_PITCH_LIMIT: f32 = 89.0 * std::f32::consts::PI / 180.0;
 /// Camera-collision probe radius (yd): a small sphere swept from the camera pivot toward the desired
 /// camera seat each frame. Its radius is the margin kept between the camera and the surface it stops
 /// at, so the near plane doesn't poke through the wall. Smaller than the player capsule — the camera

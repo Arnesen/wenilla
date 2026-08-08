@@ -79,6 +79,7 @@ mod pvp;
 mod quest;
 mod quest_log;
 mod region;
+mod saved;
 mod scrollframe;
 mod session;
 mod shapeshift;
@@ -278,6 +279,7 @@ impl UiScript {
         death::install(&lua)?;
         aura::install(&lua)?;
         cvars::install(&lua)?;
+        saved::install(&lua)?;
         keybind::install(&lua)?;
         sound::install(&lua)?;
         pointer::install(&lua)?;
@@ -371,6 +373,25 @@ impl UiScript {
         for (_, frame) in self.model_mut().arena.iter_frames_mut() {
             if let KindState::Minimap(m) = &mut frame.kind_state {
                 m.inside = inside;
+            }
+        }
+    }
+
+    /// Seed every Minimap widget's two zoom indices from the persisted levels — the client's
+    /// minimap reset path copying each CVar object's parsed int into its live index
+    /// (`[0x86f698] ← [[0xb4b410]+0x28]`, `[0x86f69c] ← [[0xb4d90c]+0x28]`; wow-re
+    /// `wmo-interior-minimap.md`, VERIFIED). Called **once**, when the in-game UI materializes and
+    /// the widget exists — not per frame: from then on the widget's index is the live truth and
+    /// `Minimap:SetZoom` keeps the CVar following it, so a repeated push would fight the +/- buttons.
+    /// Both indices clamp into `[0, MINIMAP_ZOOM_LEVELS)` exactly like `set_zoom`, so a hand-edited
+    /// `config.toml` cannot seed an out-of-range level (decision 1131).
+    pub fn set_minimap_zoom(&mut self, zoom: u8, inside_zoom: u8) {
+        let top = crate::widget::MINIMAP_ZOOM_LEVELS - 1;
+        let (zoom, inside_zoom) = (zoom.min(top), inside_zoom.min(top));
+        for (_, frame) in self.model_mut().arena.iter_frames_mut() {
+            if let KindState::Minimap(m) = &mut frame.kind_state {
+                m.zoom = zoom;
+                m.inside_zoom = inside_zoom;
             }
         }
     }

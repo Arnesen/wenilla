@@ -80,6 +80,24 @@ pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<Pa
     home().map(|h| h.join("bindings").join(format!("{key}.txt")))
 }
 
+/// `benilla/saved-variables.lua` — the Lua saved-variables file (decision 1128; the
+/// `WTF/Account/<ACC>/SavedVariables.lua` analog). Install-scoped, like the reference's account
+/// scope: written whole at logout/exit, executed as a chunk at UI load. One file, because our
+/// ported UI is one FrameXML tree rather than a set of addons — when third-party addons land they
+/// get `benilla/saved/<Addon>.lua`, the reference's per-addon shape.
+pub(crate) fn saved_variables_path() -> Option<PathBuf> {
+    home().map(|h| h.join("saved-variables.lua"))
+}
+
+/// `benilla/camera/<realm>-<character>.txt` — the third-person camera pose (decision 1131; the
+/// `<Char>/camera-settings.txt` analog, and character-scoped for the same reason it is there: a
+/// gnome rogue and a tauren warrior want different zooms). Two lines, the reference's own keys and
+/// order, so the file stays readable beside its ancestor.
+pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    let key = format!("{}-{}", file_token(realm), file_token(character));
+    home().map(|h| h.join("camera").join(format!("{key}.txt")))
+}
+
 /// Make an arbitrary realm/character name safe as one path component: anything outside
 /// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.
@@ -165,6 +183,11 @@ mod tests {
             macros_account_path(),
             Some(tmp.join("benilla/macros/account.txt"))
         );
+        // The saved-variables resident (decision 1128) — one install-scoped file.
+        assert_eq!(
+            saved_variables_path(),
+            Some(tmp.join("benilla/saved-variables.lua"))
+        );
         assert_eq!(
             macros_character_path("Hydraxian Waterlords", "Probeone"),
             Some(tmp.join("benilla/macros/Hydraxian_Waterlords-Probeone.txt"))
@@ -173,6 +196,11 @@ mod tests {
             macros_character_path("../evil", "a/b"),
             Some(tmp.join("benilla/macros/___evil-a_b.txt")),
             "no name can escape the folder"
+        );
+        // The camera-pose resident (decision 1131) — character-scoped, same key shape.
+        assert_eq!(
+            camera_character_path("Hydraxian Waterlords", "Probeone"),
+            Some(tmp.join("benilla/camera/Hydraxian_Waterlords-Probeone.txt"))
         );
 
         // 1 · the explicit override wins over the install root.

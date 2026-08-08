@@ -139,6 +139,7 @@ mod ui_pet_doll;
 mod ui_pet_stats;
 mod ui_quest;
 mod ui_quest_log;
+mod ui_saved;
 mod ui_script;
 mod ui_session;
 mod ui_shapeshift;
@@ -228,6 +229,7 @@ use ui_pet_doll::UiPetDollPlugin;
 use ui_pet_stats::UiPetStatsPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
+use ui_saved::UiSavedPlugin;
 use ui_script::UiScriptPlugin;
 use ui_shapeshift::UiShapeshiftPlugin;
 use ui_social::UiSocialPlugin;
@@ -782,6 +784,7 @@ pub fn run(build: BuildId) -> AppExit {
     // The item-text reader (ItemTextFrame.xml): right-clicked bag letters (mail-made permanent
     // copies) read in the reference reader window over the shared ask-once item-text cache.
     .add_plugins(UiItemTextPlugin)
+    .add_plugins(UiSavedPlugin)
     .add_plugins(UiTrainerPlugin)
     // The taxi map (decision 0484 phases 1-2): the SMSG_SHOWTAXINODES-fed TaxiState resource, the
     // NPC-session range guard, and the TaxiFrame.xml window feed/drain (catalogs, node
