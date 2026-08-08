@@ -144,6 +144,24 @@
             local textureFrameLevel = getglobal(tf):GetFrameLevel()
             frame.healthBar:SetFrameLevel(textureFrameLevel - 1)
             frame.powerBar:SetFrameLevel(textureFrameLevel - 1)
+            -- The on-bar numerals (TextStatusBar.xml, decision 1082; the switch that shows them
+            -- is 1140's Status Bar Text). Wiring is unconditional — a frame with no text regions
+            -- gets a no-op, since SetTextStatusBarText drops a nil text and UpdateTextString skips
+            -- a bar with no TextString — so the target frame is one FontString pair away from
+            -- having them the day its hover lands. `textLockable` is the REFERENCE's own split
+            -- and the only conditional here: 1.12 sets it on the player's two bars, the pet's two
+            -- and the XP bar, and on nothing else, which is exactly why Status Bar Text pins your
+            -- own numbers and your pet's but never the target's (decision 1143).
+            if TextStatusBar_Initialize then -- engine tests load file subsets
+                TextStatusBar_Initialize(frame.healthBar)
+                TextStatusBar_Initialize(frame.powerBar)
+                SetTextStatusBarText(frame.healthBar, getglobal(tf .. "HealthBarText"))
+                SetTextStatusBarText(frame.powerBar, getglobal(tf .. "PowerBarText"))
+                if unit == "player" then
+                    frame.healthBar.textLockable = 1
+                    frame.powerBar.textLockable = 1
+                end
+            end
             frame.nameText  = getglobal(tf .. "NameText")
             frame.levelText = getglobal(tf .. "LevelText")
             frame.deadText  = getglobal(tf .. "DeadText")
@@ -917,6 +935,10 @@
                 </Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="1.0" b="0.0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPLEFT (106,-52), UI-StatusBar; color set at runtime (ref l.316-341). -->
             <StatusBar name="$parentPowerBar">
@@ -926,6 +948,10 @@
                 </Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="0.0" b="1.0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame). 232×100 fills the
                  parent; it draws over the bar edges because OnLoad pushes the bars one frame level
@@ -966,6 +992,31 @@
                         <FontString name="$parentLevelText" inherits="GameFontNormalSmall">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-63" y="-16"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                        <!-- The on-bar numerals, "value / max" (decision 1143). The reference's
+                             own seats are CENTER (50,4) and (50,-8) (ref-PlayerFrame.xml l.79-96);
+                             ours sit **1 px lower** — the director's call on the shipped result,
+                             2026-08-08, and the deviation is recorded rather than the literals
+                             (decision 1145). Why a digit string reads high at the ref's own offset:
+                             a FontString centres on its LINE BOX, ascent + descent, and digits
+                             occupy only the ascent — so the visible mass sits above the box centre
+                             and a numerals-only string looks lifted inside a 12 px bar. The nudge
+                             is optical, and it belongs on the seat rather than on the centring,
+                             which every other string in the UI shares.
+                             The LAYER is the reference's: BACKGROUND beside the name and level, not
+                             the OVERLAY the state badges sit in, for the reason spelled out above.
+                             They draw over the bar FILL because the whole TextureFrame outranks the
+                             bars by a frame level. Empty until Status Bar Text is on or (later) the
+                             bar is hovered — TextStatusBar.xml owns that decision, not this file. -->
+                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="3"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                        <FontString name="$parentPowerBarText" inherits="TextStatusBarText">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="50" y="-9"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
                     </Layer>
@@ -1172,6 +1223,10 @@
                 </Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="1.0" b="0.0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPRIGHT (-106,-52), UI-StatusBar; color set at runtime (ref l.274-292). -->
             <StatusBar name="$parentPowerBar">
@@ -1181,6 +1236,10 @@
                 </Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="0.0" b="1.0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame); it draws over the
                  bar edges because OnLoad pushes the bars one frame level BELOW it (the ref's
@@ -1387,6 +1446,15 @@
             local level = BenillaPetFrameTextureFrame:GetFrameLevel()
             frame.healthBar:SetFrameLevel(level - 1)
             frame.manaBar:SetFrameLevel(level - 1)
+            -- The pet's numerals, textLockable like the ref's (PetFrame.xml l.139/164; 1143).
+            if TextStatusBar_Initialize then -- engine tests load file subsets
+                TextStatusBar_Initialize(frame.healthBar)
+                TextStatusBar_Initialize(frame.manaBar)
+                SetTextStatusBarText(frame.healthBar, BenillaPetFrameTextureFrameHealthBarText)
+                SetTextStatusBarText(frame.manaBar, BenillaPetFrameTextureFrameManaBarText)
+                frame.healthBar.textLockable = 1
+                frame.manaBar.textLockable = 1
+            end
             frame.attackModeCounter = 0
             frame.attackModeSign = -1
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1653,12 +1721,20 @@
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-22"/></Offset></Anchor></Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0" g="1.0" b="0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <StatusBar name="$parentManaBar">
                 <Size><AbsDimension x="70" y="8"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-29"/></Offset></Anchor></Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0" g="0" b="1.0"/>
+                <Scripts>
+                    <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
+                    <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                </Scripts>
             </StatusBar>
             <Frame name="$parentTextureFrame">
                 <Size><AbsDimension x="128" y="53"/></Size>
@@ -1692,6 +1768,21 @@
                     <Layer level="OVERLAY">
                         <FontString name="$parentName" inherits="GameFontNormalSmall" justifyH="LEFT">
                             <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="50" y="33"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <!-- The pet's numerals (decision 1143), same font as the ref's
+                             (PetFrame.xml l.87-104). ONE divergence, and it is why these anchor to
+                             the bars instead of carrying the ref's literal offsets: the ref's are
+                             CENTER-from-TOPLEFT (82,-27)/(82,-38) against ITS small-frame bar
+                             seats, and ours sit at (47,-22)/(47,-29) — the same x=82 centre, a
+                             different pitch. Anchoring each string to its own bar lands it right by
+                             construction and cannot drift if the bars move again. The -1 is the
+                             same optical nudge the player's pair carries (1145), so the two frames
+                             agree about where a number sits in its bar. -->
+                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                            <Anchors><Anchor point="CENTER" relativeTo="BenillaPetFrameHealthBar" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="$parentManaBarText" inherits="TextStatusBarText">
+                            <Anchors><Anchor point="CENTER" relativeTo="BenillaPetFrameManaBar" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>
                 </Layers>

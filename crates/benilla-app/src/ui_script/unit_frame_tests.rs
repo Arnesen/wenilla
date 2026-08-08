@@ -23,6 +23,9 @@ fn load_xml(s: &UiScript, file: &str) {
 fn load_unit_frames(s: &UiScript) {
     load_xml(s, "Fonts.xml");
     load_xml(s, "UIParent.xml");
+    // The bars' numerals machinery (decision 1082), which the manifest loads immediately ahead of
+    // UnitFrames.xml and which every bar's OnLoad wires into since 1143.
+    load_xml(s, "TextStatusBar.xml");
     load_xml(s, "GameTooltip.xml");
     load_xml(s, "UIDropDownMenu.xml");
     load_xml(s, "UnitPopup.xml");
@@ -1442,6 +1445,93 @@ fn the_rest_badge_covers_the_level_number() {
         badge > level.z,
         "the badge must cover the level number (badge z={badge:#x}, level z={:#x})",
         level.z
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The on-bar numerals** (decision 1143) — the half 1140 promised and did not deliver. The Status
+/// Bar Text switch landed with only the XP bar wired to it, so turning it on changed nothing on the
+/// frames people actually watch (director report). Now the player's health and power bars carry
+/// "value / max", and the switch pins them.
+///
+/// Which bars it pins is the REFERENCE's own split, transcribed rather than chosen: 1.12 sets
+/// `textLockable` on the player's two bars, the pet's two and the XP bar, and on nothing else — so
+/// the target frame's numerals are hover-only there and stay blank here. The power bar is whatever
+/// the unit runs on; a rage unit reads "45 / 80" the same as a mana one.
+#[test]
+fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    let alive = |health: u32, power: u32, power_type: u8| UnitState {
+        exists: true,
+        name: Some("Somebody".into()),
+        health,
+        max_health: 100,
+        level: 12,
+        power_type,
+        power,
+        max_power: 80,
+        dead: false,
+        reaction: 4,
+        ..UnitState::default()
+    };
+    s.set_unit("player", Some(alive(72, 45, 1))); // power_type 1 = RAGE
+    s.set_unit("target", Some(alive(50, 20, 0)));
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+
+    let text = |s: &UiScript, name: &str| -> String {
+        s.eval::<String>(&format!("return tostring(({name}:GetText()) or \"\")"))
+            .unwrap()
+    };
+    let shown = |s: &UiScript, name: &str| -> bool {
+        s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap()
+    };
+
+    // Off (the shipped default): the strings carry the numbers, and nothing paints.
+    assert!(!shown(&s, "BenillaPlayerFrameTextureFrameHealthBarText"));
+    assert!(!shown(&s, "BenillaPlayerFrameTextureFramePowerBarText"));
+
+    // On, through the switch's own event — no repaint, no damage taken.
+    s.register_cvars([("statusBarText", "0")]);
+    s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
+        .unwrap();
+    s.tick(0.0);
+    assert!(
+        shown(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
+        "your own health numerals pin on"
+    );
+    assert_eq!(
+        text(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
+        "72 / 100"
+    );
+    assert_eq!(
+        text(&s, "BenillaPlayerFrameTextureFramePowerBarText"),
+        "45 / 80",
+        "the power bar reads its own resource — rage here"
+    );
+
+    // The target has no numerals to pin: 1.12 never makes its bars textLockable, so its numbers
+    // are hover-only there — and our bars have no hover yet, which is why the text regions are not
+    // declared at all rather than declared and permanently dark. The wiring is unconditional though (the
+    // shared OnLoad runs for the target too), so the day a hover lands they are one pair of
+    // FontStrings away.
+    assert!(
+        s.eval::<bool>(
+            "return BenillaTargetFrameTextureFrameHealthBarText == nil              and BenillaTargetFrameHealthBar.lockShow == 0"
+        )
+        .unwrap(),
+        "no target numerals, but the target's bars are wired for them"
+    );
+
+    // A health change repaints through the bar's own OnValueChanged, like the reference's.
+    s.set_unit("player", Some(alive(31, 45, 1)));
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
+    assert_eq!(
+        text(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
+        "31 / 100"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

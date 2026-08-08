@@ -19,7 +19,7 @@
 
 use mlua::{Lua, Value};
 
-use super::Model;
+use super::{Model, ScriptValue};
 
 /// One registered CVar: the host's spelling (for change events and the config file), the live
 /// value, and the registered default (`GetCVarDefault`, and the saver's "only write what moved").
@@ -176,6 +176,20 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(value) = value_to_string(v) else {
                 return Err(mlua::Error::runtime("Usage: SetCVar(\"name\", value)"));
             };
+            // The THIRD argument is the `CVAR_UPDATE` token, and it is the whole mechanism behind
+            // that event (decision 1140). 1.12's own callers are its two options panels —
+            // `SetCVar(value.cvar, value.value, index)` (UIOptionsFrame.lua l.335/343/345,
+            // OptionsFrame.lua l.192) — where `index` is the CheckButtons table's KEY, an
+            // uppercase display name like "STATUS_BAR_TEXT". The engine passes it straight through
+            // as arg1, which is why `UIOptionsFrame_OnEvent` can look the row up with
+            // `UIOptionsFrameCheckButtons[arg1]`, and why `TextStatusBar_OnEvent` compares against
+            // "STATUS_BAR_TEXT" rather than "statusBarText".
+            //
+            // A caller that omits it fires nothing — the event is opt-in per write, not a
+            // property of the variable. (Which means `ReputationFrame.xml`'s
+            // `arg1 == "statusBarText"` arm is dead code in shipped 1.12: nothing ever passes the
+            // CVar's own name as the token. Transcribed as found, not repaired.)
+            let token = it.next().and_then(value_to_string);
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let key = name.to_ascii_lowercase();
             match model.cvars.get_mut(&key) {
@@ -183,7 +197,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     if slot.value != value {
                         slot.value = value.clone();
                         let reg_name = slot.name.clone();
-                        model.cvar_changes.push((reg_name, value));
+                        model.cvar_changes.push((reg_name, value.clone()));
+                        if let Some(token) = token {
+                            model.pending_events.push((
+                                "CVAR_UPDATE".to_string(),
+                                vec![ScriptValue::Str(token), ScriptValue::Str(value)],
+                            ));
+                        }
                     }
                 }
                 None => warn_unknown(&mut model, &name),
@@ -229,6 +249,46 @@ mod tests {
         // A write to the same value queues nothing (quiet frames stay quiet).
         s.run(r#"SetCVar("MusicVolume", "0.7")"#).unwrap();
         assert!(s.take_cvar_changes().is_empty());
+    }
+
+    /// **`SetCVar`'s third argument is the `CVAR_UPDATE` token** (decision 1140) — the whole
+    /// mechanism behind that event. 1.12's options panels pass their CheckButtons table KEY
+    /// (`SetCVar(value.cvar, value.value, index)`), an uppercase display name, and the engine
+    /// hands it back verbatim as arg1 — which is what lets `UIOptionsFrame_OnEvent` do
+    /// `UIOptionsFrameCheckButtons[arg1]`. Omit it and nothing fires: the event is opt-in per
+    /// write. A write that changes nothing fires nothing either, like the change queue.
+    #[test]
+    fn the_third_argument_is_the_cvar_update_token() {
+        let mut s = script_with_volume();
+        s.run(
+            "SEEN = {} \
+             f = CreateFrame(\"Frame\") \
+             f:RegisterEvent(\"CVAR_UPDATE\") \
+             f:SetScript(\"OnEvent\", function() table.insert(SEEN, arg1 .. \"=\" .. arg2) end)",
+        )
+        .unwrap();
+
+        // No token: the value moves, the change queues, the event does not fire.
+        s.run(r#"SetCVar("MusicVolume", "0.5")"#).unwrap();
+        s.tick(0.0);
+        assert_eq!(s.eval::<f64>("return getn(SEEN)").unwrap(), 0.0);
+
+        // With one: arg1 is the token verbatim (the display name, NOT the CVar's own name),
+        // arg2 the new value.
+        s.run(r#"SetCVar("MusicVolume", "0.6", "MUSIC_VOLUME")"#)
+            .unwrap();
+        s.tick(0.0);
+        assert_eq!(
+            s.eval::<String>("return SEEN[1]").unwrap(),
+            "MUSIC_VOLUME=0.6"
+        );
+
+        // A no-op write is silent on both channels.
+        s.run(r#"SetCVar("MusicVolume", "0.6", "MUSIC_VOLUME")"#)
+            .unwrap();
+        s.tick(0.0);
+        assert_eq!(s.eval::<f64>("return getn(SEEN)").unwrap(), 1.0);
+        assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     }
 
     #[test]

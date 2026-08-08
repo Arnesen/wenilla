@@ -22,10 +22,10 @@
 //!     foot cone ([`FOOT_CONE_HEIGHT`]) is **ridden** up the cone's 61.6° skirt over the frames the
 //!     gait needs ([`foot_cone_ride`]) — a kerb takes three at a run; only a rise above the cone is
 //!     the instant pop, committed whole within the frame. Uncertified, nothing rises at all;
-//!   - a steep face never lifts the mover on a *push*: the horizontal held into the face is
-//!     stripped before the clip ([`steep_push_stripped`]), so what the face may do is carry the
-//!     body's own descent down itself — you rub along trunks and steep banks, never up them,
-//!     and a jump at a hillside costs the jump instead of banking its height;
+//!   - a steep face's response is **horizontal only** and the descent passes through it untouched
+//!     ([`steep_contact_shear`], the reference's own `0x635090`): the body follows the surface
+//!     down at full free-fall rate, no contact can manufacture lift at any angle, and a jump at a
+//!     hillside costs the jump instead of banking its height;
 //!   - airborne → gravity carries the arc, with a one-shot nudge to steer a standstill jump;
 //!   - a fall whose descent stalls (a capsule wedged between steep faces — the
 //!     tree-pinch funnel) *lands there*: standing, walking control live, instead of hanging in
@@ -562,8 +562,8 @@ pub(crate) fn grounded_step(
                     return MoveAndSlideHitResponse::Accept;
                 }
             }
-            if let Some(pushed) = steep_push_stripped(**hit.normal, *hit.velocity) {
-                *hit.velocity = pushed;
+            if let Some(followed) = steep_contact_shear(**hit.normal, *hit.velocity) {
+                *hit.velocity = followed;
             }
             MoveAndSlideHitResponse::Accept
         },
@@ -727,7 +727,7 @@ pub(crate) fn grounded_step(
 /// **One airborne step, resolved against the world** — the arc's slide and nothing else. No
 /// step-up and no election snap: the arc owns its own height (gravity carries it; the landing is
 /// next frame's ground probe to call), so the only thing the world may do here is *stop* it. Steep
-/// faces get [`steep_push_stripped`]'s treatment, exactly as they do on the ground.
+/// faces get [`steep_contact_shear`]'s treatment, exactly as they do on the ground.
 ///
 /// The airborne twin of [`grounded_step`], and shared for the same reason (0059's one controller,
 /// every mover): the local controller ([`step`]) calls it for its held/airborne frames, and a
@@ -752,8 +752,8 @@ pub(crate) fn airborne_step(
         &MoveAndSlideConfig::default(),
         filter,
         |hit| {
-            if let Some(pushed) = steep_push_stripped(**hit.normal, *hit.velocity) {
-                *hit.velocity = pushed;
+            if let Some(followed) = steep_contact_shear(**hit.normal, *hit.velocity) {
+                *hit.velocity = followed;
             }
             MoveAndSlideHitResponse::Accept
         },
@@ -791,7 +791,7 @@ fn is_steep_face(ny: f32) -> bool {
 /// with the vertical-lift projection: keep the horizontal velocity exactly, set the vertical so
 /// the motion rides along the plane (`v'·n = 0` — the plane's own clip then passes it
 /// untouched). Unreal's `bMaintainHorizontalGroundVelocity` is the same standard treatment.
-/// Steep faces stay with [`steep_push_stripped`], and any height the ride manufactures is
+/// Steep faces stay with [`steep_contact_shear`], and any height the ride manufactures is
 /// bounded by the end-of-frame snap, which only ever settles onto a walkable floor.
 fn walkable_ride_velocity(n: Vec3, v: Vec3) -> Option<Vec3> {
     if n.y < GROUND_COS || v.dot(n) >= 0.0 {
@@ -837,53 +837,61 @@ fn foot_cone_ride(n: Vec3, v: Vec3) -> Option<Vec3> {
     Some(Vec3::new(v.x, into * STEP_SLOPE_RATIO, v.z))
 }
 
-/// The steep-face law: **a steep (non-walkable, non-overhanging) face may convert the mover's
-/// own descent into a slide down itself; it may never convert the mover's *push* into lift.**
+/// The steep-contact response: **the descent is never touched, and the push-out is horizontal.**
 ///
-/// Collide-and-slide clips velocity onto each contact plane, and on a tilted plane that clip
-/// manufactures upward motion out of a horizontal push. Split the result and the two halves have
-/// different owners:
+/// VERIFIED against the reference (wow-re `system/collision/scratch/fall-steep-response.md`, the
+/// dispatch this decided): `0x635090` writes **exactly two floats** — an x/y push-out along the
+/// horizontal projection of the contact normal — and `0x635600` adds them to `Δx`/`Δy` only, while
+/// `Δz = dir.z · remaining` passes through **with no addend at all**. The normal's vertical is
+/// annihilated in the response's own denominator (`0x635166 fmul [0x7ffd74]`, and that constant is
+/// `0.0`). So the residual is placed **exactly in the contact plane** (`Δ'·A = 0`) but reaches it by
+/// moving *only horizontally*: the **vertical-shear** projection onto the plane, not the orthogonal
+/// one every collide-and-slide library ships.
 ///
 /// ```text
-/// v'.y = v.y·(1 − n.y²)   +   into·|n.xz|·n.y
-///        \_____________/       \______________/
-///         geometry's share       the push's lift
+/// v' = v − (v·n)/|n_h|² · n_h            n_h = (n.x, 0, n.z)
 /// ```
 ///
-/// The first term is the mover's own vertical, shortened because a body sliding down a face of
-/// pitch θ keeps `sin²θ` of its descent — that is the slide, and it must survive untouched. The
-/// second is manufactured out of the horizontal the player is holding into the hill, and is
-/// exactly what walked the capsule up 50–80° trunks and hillsides.
+/// Decomposing an approach as `a` into the face, `b` across it and `c` descending, against a face of
+/// pitch θ:
 ///
-/// So this **removes the into-face horizontal and leaves the true plane to clip what remains**,
-/// rather than choosing between two planes. A rise carries the body up on its own jump with the
-/// push spent against the face; a fall keeps `sin²θ` of its descent and slides *down* the hill.
+/// | component | what survives |
+/// |---|---|
+/// | downhill | `c · cotθ` — exactly what following the surface requires |
+/// | across   | `b` — preserved in full, never scaled |
+/// | vertical | `−c` — **untouched** |
 ///
-/// The predecessor rule swapped in the face's vertical-wall flatten whenever the clip would
-/// leave the mover moving *upward* (`v'.y > 0`), and kept the true plane otherwise — a test on
-/// the **sign** of a quantity whose problem is its **origin**. The director's Elwynn capture is
-/// what that misses: at 55° a run into the hill cancels 99% of a 4.9 yd/s descent without ever
-/// crossing zero, so the flatten declined, the descent stalled, and the wedge rest (decisions
-/// 0211/0212, which model a vertical-only fall) read the stall as a landing and stood the body up
-/// mid-face. Jump, bank ~1.2 yd, repeat: a climbing ratchet up terrain far too steep to walk.
+/// Three consequences, none of them a tuning choice:
 ///
-/// Grounded frames are unchanged in outcome — their velocity is horizontal, so stripping the
-/// into-face component leaves motion along the wall line, which is what the flatten produced.
-/// Walkable floors ride ([`walkable_ride_velocity`]) and overhangs (`n.y < 0`) are ceilings;
-/// neither belongs here. Penetration safety is untouched: the sweeps still stop at the real
-/// surface, this only shapes the deflection. (Unreal's `HandleSlopeBoosting` and Godot's
-/// `floor_block_on_wall` are the same treatment with the same sign-test blind spot.)
-fn steep_push_stripped(n: Vec3, v: Vec3) -> Option<Vec3> {
+/// - **No geometry can add upward motion, at any steepness or approach angle.** The predecessor
+///   rules here reconstructed that invariant twice — first by testing the *sign* of the clipped
+///   vertical (0970), then by stripping the into-face push before an orthogonal clip (1135). The
+///   reference gets it structurally, because the vertical is not an output.
+/// - **A fall against a steep face descends at the full free-fall rate**, so along-surface speed is
+///   `V/sinθ` — *faster* than free fall. This is the reference's slippery steep-slope slide. An
+///   orthogonal clip descends at `V·sin²θ` instead: the same path down the face, walked 1.2–1.7×
+///   slower, which is that much longer in contact and so that much further across (the director's
+///   *"we slide across it until we land … further than the ref"*, worst just past 50° — exactly
+///   where players engage slopes).
+/// - **How hard you press into the face leaves no trace in the residual** — the push-out cancels
+///   `a` exactly. It survives only through *where* the sweep stopped.
+///
+/// A **grounded** frame is unchanged by all of this: its velocity is horizontal, `c = 0`, and the
+/// formula collapses to "remove the into-face component" — which is what walking into a bank always
+/// did here. Walkable faces ride ([`walkable_ride_velocity`]) and overhangs are ceilings; neither
+/// reaches this. The reference's degeneracy guards (`|n_h|` under `2⁻²²`) cannot fire for us:
+/// [`is_steep_face`] bounds `|n_h|` below by `sin 50°`.
+fn steep_contact_shear(n: Vec3, v: Vec3) -> Option<Vec3> {
     if !is_steep_face(n.y) {
         return None;
     }
-    // Steepness bounds the horizontal part below by sin 50°, so the normalize is safe.
-    let h = Vec3::new(n.x, 0.0, n.z).normalize();
-    let into = -(v.x * h.x + v.z * h.z);
-    if into <= 0.0 {
+    let vn = v.dot(n);
+    // A contact the motion is leaving is not this response's business.
+    if vn >= 0.0 {
         return None;
     }
-    Some(v + h * into)
+    let h = Vec3::new(n.x, 0.0, n.z);
+    Some(v - (vn / h.length_squared()) * h)
 }
 
 /// What one atomic step-up attempt decided — the structured form of the `step` trace line.
@@ -1796,7 +1804,7 @@ mod tests {
         assert_eq!((ride.x, ride.z), (7.0, 0.0));
         assert!(ride.y <= 7.0 * 50.0_f32.to_radians().tan() + 1e-3);
         assert!(walkable_ride_velocity(face(50.1), v).is_none());
-        assert!(steep_push_stripped(face(50.1), v).is_some());
+        assert!(steep_contact_shear(face(50.1), v).is_some());
     }
 
     #[test]
@@ -1804,39 +1812,64 @@ mod tests {
         // The grounded case, unchanged in outcome by the strip: a run straight at a 60° face
         // keeps nothing pointing into it, and manufactures no vertical of its own.
         let v = Vec3::new(7.0, 0.0, 0.0);
-        let out = steep_push_stripped(face(60.0), v).expect("must strip");
+        let out = steep_contact_shear(face(60.0), v).expect("must strip");
         assert!(out.x.abs() < 1e-6 && out.y == 0.0);
     }
 
     #[test]
-    fn the_stall_window_is_stripped_not_judged_by_sign() {
-        // The window the sign test missed, and the ratchet's engine. Falling at 4.9 yd/s into a
-        // 55° face with a run held into it: the true-plane clip leaves the body descending — so
-        // the old `v'.y > 0` flatten declined — but at ~1% of what gravity intended, which the
-        // wedge rest reads as a landing. After the strip, geometry's share is all that is taken.
+    fn a_fall_against_a_face_keeps_the_whole_of_its_descent() {
+        // The ratchet's engine, and the slide's, in one place. Falling at 4.9 yd/s into a 55° face
+        // with a run held into it, an orthogonal clip leaves the body descending — so 0970's
+        // `v'.y > 0` flatten declined — at ~1% of what gravity intended, which the wedge rest reads
+        // as a landing. The reference never touches the vertical at all.
         let (n, v) = (face(55.0), Vec3::new(7.0, -4.9, 0.0));
-        let raw = v - v.dot(n) * n;
+        let orthogonal = v - v.dot(n) * n;
         assert!(
-            raw.y > -0.2,
-            "the clip must be the near-cancel it was: {:.3}",
-            raw.y
+            orthogonal.y > -0.2,
+            "the orthogonal clip must be the near-cancel it was: {:.3}",
+            orthogonal.y
         );
-        let stripped = steep_push_stripped(n, v).expect("must strip");
-        let slid = stripped - stripped.dot(n) * n;
-        let share = slid.y / v.y;
-        let sin2 = 55.0_f32.to_radians().sin().powi(2);
+        let out = steep_contact_shear(n, v).expect("a steep contact responds");
         assert!(
-            (share - sin2).abs() < 1e-3,
-            "a stripped fall keeps exactly sin²θ ({sin2:.3}) of its descent: {share:.3}"
+            (out.y - v.y).abs() < 1.0e-4,
+            "the descent passes through untouched: {:.3} vs {:.3}",
+            out.y,
+            v.y
         );
+        // …and the horizontal is exactly what following the surface costs: `cotθ` per unit of drop,
+        // downhill. The push held into the face leaves no trace (`a` cancels exactly).
+        let cot = 1.0 / 55.0_f32.to_radians().tan();
+        assert!(
+            (out.x - v.y * cot).abs() < 1.0e-3,
+            "downhill drift must be cot55° = {cot:.3} per unit of drop: {:.3}",
+            out.x
+        );
+        // The residual lies in the plane, so nothing further is clipped off it.
+        assert!(out.dot(n).abs() < 1.0e-4, "Δ'·A = 0: {:.5}", out.dot(n));
     }
 
     #[test]
-    fn a_real_fall_keeps_its_slide() {
-        // Nothing to strip when nothing pushes: a plumb fall against the face, and a fall whose
-        // horizontal runs *away* from it, both keep the true plane and slide naturally.
-        assert!(steep_push_stripped(face(60.0), Vec3::new(0.0, -10.0, 0.0)).is_none());
-        assert!(steep_push_stripped(face(60.0), Vec3::new(-7.0, -20.0, 0.0)).is_none());
+    fn a_plumb_fall_is_carried_down_the_face_at_full_speed() {
+        // A body dropping straight onto a steep face has no push to remove — and is still the
+        // response's business, because following the surface *is* horizontal motion. It keeps every
+        // bit of its 10 yd/s and gains the surface's own drift. (Under 1135's strip this returned
+        // `None`, and the orthogonal clip then slowed the descent instead — the same error seen
+        // from the other side.)
+        let out = steep_contact_shear(face(60.0), Vec3::new(0.0, -10.0, 0.0))
+            .expect("a plumb fall still follows the surface");
+        assert!(
+            (out.y + 10.0).abs() < 1.0e-4,
+            "full free-fall rate: {:.3}",
+            out.y
+        );
+        let cot = 1.0 / 60.0_f32.to_radians().tan();
+        assert!(
+            (out.x + 10.0 * cot).abs() < 1.0e-3,
+            "downhill: {:.3}",
+            out.x
+        );
+        // A contact the motion is leaving is not this response's: no push-out, no drift.
+        assert!(steep_contact_shear(face(60.0), Vec3::new(7.0, 20.0, 0.0)).is_none());
     }
 
     #[test]
@@ -1844,7 +1877,7 @@ mod tests {
         // A jump rising along the face: the strip spends the push against the hill and the
         // mover's own +vy passes through untouched — the face adds nothing to it.
         let v = Vec3::new(7.0, 8.0, 0.0);
-        let out = steep_push_stripped(face(60.0), v).expect("boost must strip");
+        let out = steep_contact_shear(face(60.0), v).expect("boost must strip");
         assert!((out.y - v.y).abs() < 1e-6);
         let n = face(60.0);
         // …and the true plane no longer opposes what is left, so nothing further is clipped.
@@ -1970,9 +2003,9 @@ mod tests {
             .map(|r| r.2)
             .fold(f32::MAX, f32::min);
         assert!(
-            worst > 0.5,
-            "a falling frame against the face must keep its descent (sin²55° = 0.67 of it is \
-             geometry's share): worst was {worst:.2} of intent"
+            worst > 0.98,
+            "a falling frame against the face keeps ALL of its descent — the reference's response \
+             is horizontal only: worst was {worst:.2} of intent"
         );
     }
 
@@ -1980,11 +2013,11 @@ mod tests {
     fn walkable_and_overhanging_faces_are_untouched() {
         let push = Vec3::new(7.0, 0.0, 0.0);
         // Walkable floor: the slide's ordinary uphill walk.
-        assert!(steep_push_stripped(face(40.0), push).is_none());
+        assert!(steep_contact_shear(face(40.0), push).is_none());
         // Overhang: the ceiling clip stands as-is.
-        assert!(steep_push_stripped(Vec3::new(-0.5, -0.7, 0.0).normalize(), push).is_none());
+        assert!(steep_contact_shear(Vec3::new(-0.5, -0.7, 0.0).normalize(), push).is_none());
         // A receding face never opposes the motion.
-        assert!(steep_push_stripped(face(60.0), -push).is_none());
+        assert!(steep_contact_shear(face(60.0), -push).is_none());
     }
 
     #[test]
@@ -1992,7 +2025,7 @@ mod tests {
         // A true vertical face manufactures no lift under either rule — the strip removes the
         // push, and there is no vertical left for the plane to take.
         let v = Vec3::new(7.0, -4.0, 0.0);
-        let out = steep_push_stripped(face(90.0), v).expect("must strip");
+        let out = steep_contact_shear(face(90.0), v).expect("must strip");
         assert!(out.x.abs() < 1e-6 && (out.y - v.y).abs() < 1e-6);
     }
 }

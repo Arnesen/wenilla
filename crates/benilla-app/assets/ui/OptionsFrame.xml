@@ -607,7 +607,10 @@
         -- benilla knob behind them (Enable Sound=Sound_EnableAllSound, Dialog, output device,
         -- channels…) do not ship — the 0950 honest-tree rule applied to settings.
         OPTIONS_PAGE_ROWS = {
-            Controls = { "RowStickyTarget", "RowAutoLoot", "RowInvertMouse" },
+            Controls = {
+                "RowStickyTarget", "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
+                "RowMaxCameraDistance",
+            },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience",
@@ -618,7 +621,8 @@
             -- (1136; Buff Durations 1139), in the reference's own on-screen order — its Basic
             -- Options anchor chain, Display block (CheckButton42 → 39 → 66) before Help (29).
             Interface = {
-                "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch", "RowNewbieTips",
+                "RowStatusText", "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch",
+                "RowNewbieTips",
             },
             -- The two chat-bubble switches (decision 1139), in the reference's relative order —
             -- its Advanced Options chat chain runs CheckButton37 → 46 (Loot Spam, no knob of ours)
@@ -683,13 +687,19 @@
         -- HIDE_PARTY_INTERFACE → RaidOptionsFrame_UpdatePartyFrames, the combat-text family →
         -- CombatText_UpdateDisplayedMessages), moved from its batched Okay to our live write
         -- because this window commits on the click (0961's grammar), not on a Save button.
+        -- `cvarEvent` is a CVar row's counterpart to a global row's `applyFunc`, and it is the
+        -- reference's own third SetCVar argument (decision 1140): the token the engine hands back
+        -- as `CVAR_UPDATE`'s arg1. 1.12 passes its CheckButtons table KEY there
+        -- (`SetCVar(value.cvar, value.value, index)`), so a consumer that wants to react the
+        -- INSTANT the switch moves — rather than on its next repaint — has something to listen
+        -- for. nil on a row nobody listens to, which is most of them: the host polls its knob.
         function OptionsRow_Set(row, value)
             if row.uvar then
                 setglobal(row.uvar, value)
                 if row.applyFunc then row.applyFunc() end
                 return
             end
-            SetCVar(row.cvar, value)
+            SetCVar(row.cvar, value, row.cvarEvent)
         end
 
         -- The registered default — GetCVarDefault's counterpart for a global. `udefault` is the
@@ -833,6 +843,12 @@
         function OptionsRow_FormatValue(row, value)
             if row.fmt == "raw" then
                 return string.format("%d", math.floor(value + 0.5))
+            end
+            -- A row whose stored value is a FACTOR but whose meaning is a distance: show the
+            -- distance (decision 1140 — cameraDistanceMaxFactor over the 15 yd base). The number
+            -- the player is choosing is "how far out the wheel stops", not "times 1.4".
+            if row.fmt == "yards" then
+                return string.format("%d yd", math.floor(value * 15 + 0.5))
             end
             return string.format("%d%%", math.floor(value * 100 + 0.5))
         end
@@ -1870,6 +1886,45 @@
                                             <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse",
                                                 "OPTION_TOOLTIP_INVERT_MOUSE")</OnLoad></Scripts>
                                         </Frame>
+                                        <!-- Mouse Sensitivity (decision 1140). Last because 1.12
+                                             puts its four sliders in their own box BELOW the
+                                             checkbox columns (UIOptionsFrameSliders), and this is
+                                             the only one of the four whose knob we have: the other
+                                             three drive auto-follow yaw speed, mouse-look yaw speed
+                                             and the max-follow-distance factor, none of which our
+                                             camera carries yet. Range and step are the reference's
+                                             own (0.5 .. 1.5 by 0.05); the percent readout is the
+                                             era's default and reads a multiplier exactly right. -->
+                                        <Frame name="$parentRowMouseSpeed" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowInvertMouse" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowInvertMouse" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "mousespeed", "Mouse Sensitivity",
+                                                    "OPTION_TOOLTIP_MOUSE_SENSITIVITY")
+                                                OptionsSliderRow_Setup(self, 0.5, 1.5, 0.05)
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- Max Camera Distance (decision 1140), the second of
+                                             1.12's four sliders whose knob we have. The stored
+                                             value is the FACTOR over `cameraDistanceMax`'s 15 yd
+                                             base — the reference's own arrangement, and the reason
+                                             the readout is raw yards here rather than a percent:
+                                             "22" means the wheel stops at 22 yards, which is the
+                                             thing being chosen. Our default is the factor fully
+                                             raised (30 yd), where 1.12 ships 1.0. -->
+                                        <Frame name="$parentRowMaxCameraDistance" inherits="OptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "cameraDistanceMaxFactor",
+                                                    "Max Camera Distance", "OPTION_TOOLTIP_MAX_FOLLOW_DIST")
+                                                OptionsSliderRow_Setup(self, 1.0, 2.0, 0.1, "yards")
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                     </Frames>
                                 </Frame>
                                 <!-- The Audio page. Row seats transcribe the era settings list
@@ -2276,10 +2331,28 @@
                                         <Anchor point="BOTTOMRIGHT"/>
                                     </Anchors>
                                     <Frames>
-                                        <Frame name="$parentRowInstantQuestText" inherits="OptionsCheckboxRowTemplate">
+                                        <!-- Status Bar Text (decision 1140). First because it is
+                                             first in the reference's file: its own Display column
+                                             runs CheckButton12 -> **2** -> 21, and 2 is declared
+                                             ahead of the 42 chain below it. The one row in this
+                                             window carrying a `cvarEvent`: TextStatusBar.xml has
+                                             had a CVAR_UPDATE watcher since 1082 and nothing to
+                                             wake it. -->
+                                        <Frame name="$parentRowStatusText" inherits="OptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "statusBarText",
+                                                    "Status Bar Text", "OPTION_TOOLTIP_STATUS_BAR")
+                                                self.cvarEvent = "STATUS_BAR_TEXT"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowInstantQuestText" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowStatusText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "QUEST_FADING_DISABLE",

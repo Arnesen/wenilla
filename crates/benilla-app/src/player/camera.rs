@@ -97,8 +97,46 @@ impl PressGesture {
 /// *defaults* and the 50 hard cap, not the factor slider's own max.) Our starting zoom is 15 — pulled
 /// back a bit further than vanilla's own default for a wider view.
 pub(super) const CAM_DIST_MIN: f32 = 0.0;
-pub(super) const CAM_DIST_MAX: f32 = 30.0;
+/// The reference's `cameraDistanceMax` — the BASE the factor multiplies (registrar default 15).
+/// Not exposed: 1.12's panel offers only the factor, so this stays the constant it is there.
+pub(super) const CAM_DIST_BASE_MAX: f32 = 15.0;
+/// `cameraDistanceMaxFactor`'s slider range — 1.12's own (MAX_FOLLOW_DIST: 1 … 2, step 0.1).
+pub(crate) const CAM_DIST_FACTOR_RANGE: std::ops::RangeInclusive<f32> = 1.0..=2.0;
+/// The shipped max orbit: the factor slider fully raised, which is where benilla has always sat.
+pub(super) const CAM_DIST_MAX: f32 = CAM_DIST_BASE_MAX * 2.0;
 pub(super) const CAM_DIST_DEFAULT: f32 = 15.0;
+
+/// The max-orbit knob (decision 1140) — 1.12's `cameraDistanceMaxFactor` over the base above.
+/// A fourth frozen constant made reachable: [`CAM_DIST_MAX`] was the only zoom ceiling there was.
+///
+/// **Our registered default is the factor at 2.0, the reference's registrar ships 1.0** — a named
+/// divergence, and the one this file has always carried in its own words ("pulled back a bit
+/// further than vanilla's own default for a wider view"). Lowering the slider re-clamps the live
+/// target on the next frame, so the view comes in rather than waiting for the next wheel notch.
+#[derive(Resource)]
+pub(crate) struct ZoomLimit {
+    /// Max orbit distance in yards — `CAM_DIST_BASE_MAX × factor`, hard-capped like the client's 50.
+    pub(crate) max: f32,
+}
+
+impl Default for ZoomLimit {
+    fn default() -> Self {
+        Self { max: CAM_DIST_MAX }
+    }
+}
+
+impl ZoomLimit {
+    /// Set from the CVar's factor, clamped to the reference's slider range first.
+    pub(crate) fn set_factor(&mut self, factor: f32) {
+        let f = factor.clamp(*CAM_DIST_FACTOR_RANGE.start(), *CAM_DIST_FACTOR_RANGE.end());
+        self.max = CAM_DIST_BASE_MAX * f;
+    }
+
+    /// The live factor — what the CVar table and the config file carry.
+    pub(crate) fn factor(&self) -> f32 {
+        self.max / CAM_DIST_BASE_MAX
+    }
+}
 /// Yards the wheel moves the target per notch — `CameraZoomIn`/`CameraZoomOut`'s default `amount`
 /// (VERIFIED 1.0 in `WoW.exe`).
 const CAM_ZOOM_STEP: f32 = 1.0;
@@ -106,16 +144,48 @@ const CAM_ZOOM_STEP: f32 = 1.0;
 /// glides the distance toward the wheel target at this *constant velocity* (linear, frame-delta-scaled
 /// — `FUN_005112d0` in `WoW.exe`), **not** an exponential ease.
 const CAM_MOVE_SPEED: f32 = 8.33;
-/// Mouse-look sensitivity, radians of camera rotation per pixel of mouse motion.
+/// Mouse-look sensitivity at the slider's neutral notch — radians of camera rotation per pixel of
+/// mouse motion. [`LookConfig::sensitivity`] scales it; this is the ×1.0 case, and it is what the
+/// client felt like before there was a slider at all (decision 1140).
 const LOOK_SENSITIVITY: f32 = 0.003;
+/// The `mousespeed` slider's range — 1.12's own (UIOptionsFrameSliders' MOUSE_SENSITIVITY row:
+/// 0.5 … 1.5, step 0.05). A multiplier over [`LOOK_SENSITIVITY`], so the registered default 1.0
+/// reproduces the shipped feel exactly.
+pub(crate) const MOUSE_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 
 /// The mouse-look player knobs (decision 0961): `mouseInvertPitch` is 1.12's own Interface
 /// Options checkbox (UIOptionsFrame.lua index 1, CVar-backed), settable from the Options
 /// window's Controls page through the CVar store (0954). Inverted, moving the mouse up pitches
 /// the camera down — the delta.y term flips sign at the one apply site, both drag styles alike.
-#[derive(Resource, Default)]
+///
+/// `sensitivity` is 1.12's `mousespeed` slider (1140), the same story one layer down: the rate was
+/// a frozen constant with no way to reach it. It multiplies [`LOOK_SENSITIVITY`] at BOTH apply
+/// sites — the rotation itself and the click-vs-drag travel budget — because the reference scales
+/// the device delta once, upstream of everything that reads it, and a budget measured in unscaled
+/// pixels would make a click's drag threshold drift as the slider moved.
+#[derive(Resource, Clone, Copy)]
 pub(crate) struct LookConfig {
     pub(crate) invert_pitch: bool,
+    pub(crate) sensitivity: f32,
+}
+
+impl Default for LookConfig {
+    fn default() -> Self {
+        Self {
+            invert_pitch: false,
+            sensitivity: 1.0,
+        }
+    }
+}
+
+impl LookConfig {
+    /// Radians of camera rotation per pixel of mouse motion, this session. ONE function because
+    /// both readers must agree: the look rotation itself and the click-vs-drag travel budget that
+    /// decides whether a press was a click. Splitting them would let the slider move the drag
+    /// threshold out from under the gesture (decision 1140).
+    pub(super) fn rate(self) -> f32 {
+        LOOK_SENSITIVITY * self.sensitivity
+    }
 }
 /// Camera pitch clamp (radians) — **VERIFIED ±89.00°** (`WoW.exe` `0x8089d8`/`0x8089dc` =
 /// 1.5533430576 rad; the pitch integrate `FUN_00510120`, wow-re `follow-camera`). A single uniform
@@ -299,7 +369,7 @@ pub(super) fn run_look_session(
     world_right_press: &mut MessageWriter<WorldRightPress>,
     left_click: &mut Option<PressGesture>,
     right_click: &mut Option<PressGesture>,
-    invert_pitch: bool,
+    look_cfg: LookConfig,
     // Seconds on the app clock — the press predicate's two time gates are measured against it.
     now: f32,
 ) {
@@ -324,8 +394,9 @@ pub(super) fn run_look_session(
     // the release decides. The travel is charged from the *input* delta, before the pitch clamp —
     // the reference accumulates raw device motion, so a drag pinned at the pitch limit still spends
     // its budget.
-    let dyaw = (mouse_motion.delta.x * LOOK_SENSITIVITY).abs();
-    let dpitch = (mouse_motion.delta.y * LOOK_SENSITIVITY).abs();
+    let rate = look_cfg.rate();
+    let dyaw = (mouse_motion.delta.x * rate).abs();
+    let dpitch = (mouse_motion.delta.y * rate).abs();
     for test in [&mut *left_click, &mut *right_click].into_iter().flatten() {
         test.yaw_travel += dyaw;
         test.pitch_travel += dpitch;
@@ -410,10 +481,14 @@ pub(super) fn run_look_session(
     // turns the character (its facing tracks the camera yaw); left-drag leaves the character facing.
     if let Some(active) = rig.look {
         let delta = mouse_motion.delta;
-        cam.yaw -= delta.x * LOOK_SENSITIVITY;
+        cam.yaw -= delta.x * rate;
         // `mouseInvertPitch` flips only the pitch axis (the 1.12 checkbox's whole meaning).
-        let dy = if invert_pitch { -delta.y } else { delta.y };
-        cam.pitch = (cam.pitch - dy * LOOK_SENSITIVITY).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+        let dy = if look_cfg.invert_pitch {
+            -delta.y
+        } else {
+            delta.y
+        };
+        cam.pitch = (cam.pitch - dy * rate).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
         if active == LookButton::Right || both_buttons {
             *face_yaw = cam.yaw;
         }
@@ -426,11 +501,15 @@ pub(super) fn run_look_session(
 /// mirroring the reference camera. `scroll` is this frame's net zoom-in amount (wheel notches in
 /// line-equivalents — the binding dispatch normalizes trackpad pixels — or the 1.12 key step of
 /// 1.0 per press; positive = closer), so a rebound zoom key feels exactly like a wheel notch.
-pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl) {
+pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl, max: f32) {
     if scroll != 0.0 {
         rig.target_distance =
-            (rig.target_distance - scroll * CAM_ZOOM_STEP).clamp(CAM_DIST_MIN, CAM_DIST_MAX);
+            (rig.target_distance - scroll * CAM_ZOOM_STEP).clamp(CAM_DIST_MIN, max);
     }
+    // Re-clamp every frame, not just on a notch: lowering the Max Camera Distance slider has to
+    // pull a camera already sitting past the new ceiling back in, and the glide below then eases
+    // it there at the same yd/s a wheel notch would.
+    rig.target_distance = rig.target_distance.min(max);
     // Glide the actual distance toward the wheel target at a constant `cameraDistanceMoveSpeed` yd/s,
     // stopping exactly there — the verified vanilla behavior (linear, frame-delta-scaled; not an ease).
     let max_step = CAM_MOVE_SPEED * dt;
@@ -898,6 +977,26 @@ mod tests {
         );
         // And the camera is expected to have orbited through all of it: the two are independent,
         // which is the half that makes the reference's gesture possible at all.
+    }
+
+    /// The `mousespeed` slider is a MULTIPLIER over the shipped per-pixel rate (decision 1140), and
+    /// the neutral notch has to reproduce the old constant exactly — the whole point of registering
+    /// the default at 1.0 is that nobody's feel changes until they move the slider. Both the look
+    /// rotation and the click-vs-drag travel budget read this one function, so the drag threshold
+    /// scales with the pointer instead of drifting away from it.
+    #[test]
+    fn the_sensitivity_slider_is_a_multiplier_over_the_shipped_rate() {
+        assert_eq!(LookConfig::default().rate(), LOOK_SENSITIVITY);
+        let fast = LookConfig {
+            sensitivity: 1.5,
+            ..Default::default()
+        };
+        assert_eq!(fast.rate(), LOOK_SENSITIVITY * 1.5);
+        let slow = LookConfig {
+            sensitivity: *MOUSE_SPEED_RANGE.start(),
+            ..Default::default()
+        };
+        assert_eq!(slow.rate(), LOOK_SENSITIVITY * 0.5);
     }
 
     /// The second arm: between 200 and 800 ms the travel gate applies, per axis and independently

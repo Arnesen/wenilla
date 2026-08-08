@@ -9,8 +9,10 @@
 //!
 //! Dispatch (the [`latch_and_dispatch`] system, ordered inside [`crate::ui_script::UiInput`]
 //! right after the UI key feed):
-//! - a press matches a chord only on the **exact** modifier set (0585, engine-wide now; Super
-//!   held matches nothing);
+//! - a press probes its **exact** chord and then, only on a miss, **once more** with its leftmost
+//!   modifier dropped ([`Chord::fallback`], decision 1142) — which is why `Shift`+`W` walks while
+//!   `SHIFT-W` is bound to nothing, and why a bound `SHIFT-TAB` still beats bare `TAB` (the exact
+//!   probe is always first). Super held matches nothing;
 //! - [`Kind::Held`] commands **latch** on the matching press and unlatch on the *base key's*
 //!   release — the reference's `runOnUp` movement law, which is why tapping Shift mid-run does
 //!   not stop you, and why a chat box taking focus stops movement (latches clear on the capture
@@ -48,12 +50,41 @@ use chord::{BindKey, Chord};
 pub(crate) use commands::cmd;
 use commands::{Cmd, Kind, SPECS};
 
-/// The derived chord→command map (exact-modifier law) — rebuilt whenever the engine table's
-/// generation moves.
+/// The derived chord→command map — rebuilt whenever the engine table's generation moves. Probed
+/// through [`BindingDispatch::resolve`], never directly: the lookup is two probes, not one.
 #[derive(Resource, Default)]
 struct BindingDispatch {
     map: std::collections::HashMap<Chord, Cmd>,
     seen_generation: Option<u64>,
+}
+
+impl BindingDispatch {
+    /// Resolve a press to its command — the reference's lookup (`CBindings::ExecuteBinding`
+    /// `0x4b7990`, decision 1142): the exact chord, then **one** retry with the leftmost modifier
+    /// dropped ([`Chord::fallback`]). The exact probe always runs first, so a bound specific chord
+    /// always beats the general one.
+    ///
+    /// `dev_plane` suppresses the **retry only**, and only on the keyboard path. `Ctrl`+`Shift` is
+    /// ours ([`crate::debug_panel::DEV_CHORD`]), and 0870 picked it on the argument that the plane
+    /// was empty — an argument that rested on the exact-match law 1142 corrects. It is
+    /// *nearly* empty anyway under the real law, because the single strip drops `CTRL` and leaves
+    /// `SHIFT-`*key*, never reaching the bare letter — but "nearly" is not a plane: `SHIFT-P` is a
+    /// live 1.12 default (`TOGGLECHARACTER3`, 1057), so `Ctrl`+`Shift`+`P` would open the pet
+    /// paper doll under the perf HUD. That is 0585's original bug, and this is the same fix it
+    /// made, now correctly scoped: an *exact* `CTRL-SHIFT-` binding still dispatches, so the
+    /// reference's own two (`CTRL-SHIFT-TAB`, `CTRL-SHIFT-PAGEDOWN`) and anything a player binds
+    /// there are untouched. Only the plane's fallback shadow is ours. Mouse and wheel are not
+    /// suppressed — every dev instrument is a letter, so a modified click is nobody's but the
+    /// game's.
+    fn resolve(&self, chord: Chord, dev_plane: bool) -> Option<Cmd> {
+        if let Some(&cmd) = self.map.get(&chord) {
+            return Some(cmd);
+        }
+        if dev_plane {
+            return None;
+        }
+        self.map.get(&chord.fallback()?).copied()
+    }
 }
 
 /// This frame's binding activity — what the engine-side consumers read instead of raw keys.
@@ -302,6 +333,10 @@ fn latch_and_dispatch(
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
+    // Exactly the dev overlays' plane (`debug_panel::dev_plane`, minus the Super arm the `sup`
+    // gate below already covers) — it costs the keyboard its fallback probe. See
+    // [`BindingDispatch::resolve`].
+    let dev_plane = ctrl && shift && !alt;
 
     let mut script = script;
     let armed = script.as_ref().is_some_and(|s| s.bind_capture_armed());
@@ -383,7 +418,7 @@ fn latch_and_dispatch(
                     shift,
                     key: BindKey::Key(key),
                 };
-                if let Some(&cmd) = dispatch.map.get(&chord) {
+                if let Some(cmd) = dispatch.resolve(chord, dev_plane) {
                     press(&mut state, &mut script, run_lua, cmd, BindKey::Key(key));
                 }
             }
@@ -414,7 +449,7 @@ fn latch_and_dispatch(
                 shift,
                 key: BindKey::Mouse(b),
             };
-            if let Some(&cmd) = dispatch.map.get(&chord) {
+            if let Some(cmd) = dispatch.resolve(chord, false) {
                 press(&mut state, &mut script, run_lua, cmd, BindKey::Mouse(b));
             }
         }
@@ -445,7 +480,7 @@ fn latch_and_dispatch(
             shift,
             key,
         };
-        if let Some(&cmd) = dispatch.map.get(&chord) {
+        if let Some(cmd) = dispatch.resolve(chord, false) {
             match &SPECS[cmd.0 as usize].kind {
                 Kind::Edge(lua) => run_lua(&mut script, lua, SPECS[cmd.0 as usize].name),
                 Kind::Host => {
@@ -627,9 +662,29 @@ mod tests {
         assert!(!state(&app).just_pressed(cmd::MOVE_FORWARD));
     }
 
+    /// **The two-probe lookup, table-wide** (decision 1142): the exact chord, then one retry with
+    /// the leftmost modifier dropped, and never a third. The bug that bought this test was a
+    /// modifier held over a movement key eating the movement — so the movement case leads.
     #[test]
-    fn the_exact_modifier_law_holds_table_wide() {
-        // Bare Z is the sheath toggle; ALT-Z is TOGGLEUI; CTRL-ALT-Z is nobody's.
+    fn a_press_probes_its_chord_then_falls_back_once() {
+        // The reported bug: Shift held, W pressed. `SHIFT-W` is nobody's, so the retry drops
+        // SHIFT and MOVEFORWARD latches — the reference's `strchr` step, `0x4b7990`.
+        let mut app = harness();
+        press_key(&mut app, KeyCode::ShiftLeft);
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(
+            state(&app).pressed(cmd::MOVE_FORWARD),
+            "SHIFT-W falls back to W — the whole point of 1142"
+        );
+        // And it unlatches on the base key with the modifier still down (the reference replays
+        // the press-time chord at key-up, `0x483bd0`; we latch the resolved command instead —
+        // same observable).
+        release_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
+        // Bare Z is the sheath toggle; ALT-Z is TOGGLEUI. The exact probe runs first, so the
+        // specific chord wins outright — a fallback never overrides a real entry.
         let mut app = harness();
         press_key(&mut app, KeyCode::KeyZ);
         app.update();
@@ -644,15 +699,18 @@ mod tests {
             "ALT-Z is TOGGLEUI (0870)"
         );
         assert!(!state(&app).fired(cmd::TOGGLE_SHEATH));
+        // CTRL-ALT-Z still fires nothing — but for the real reason, not 0585's. The single strip
+        // drops the LEFTMOST modifier (`ALT-CTRL-Z` → `CTRL-Z`, unbound) and stops: it never
+        // reaches ALT-Z, and never reaches bare Z. This is the assertion that pins "one retry".
         release_key(&mut app, KeyCode::KeyZ);
         press_key(&mut app, KeyCode::ControlLeft);
         press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(
             !state(&app).fired(cmd::TOGGLE_UI) && !state(&app).fired(cmd::TOGGLE_SHEATH),
-            "CTRL-ALT-Z matches neither entry (0585)"
+            "ALT-CTRL-Z probes CTRL-Z and stops — no second strip to ALT-Z or Z"
         );
-        // TAB vs SHIFT-TAB are two different commands now.
+        // TAB vs SHIFT-TAB: both bound, so both resolve exactly and neither borrows the other.
         let mut app = harness();
         press_key(&mut app, KeyCode::Tab);
         app.update();
@@ -663,12 +721,52 @@ mod tests {
         app.update();
         assert!(state(&app).fired(cmd::TARGET_PREVIOUS_ENEMY));
         assert!(!state(&app).fired(cmd::TARGET_NEAREST_ENEMY));
-        // Super/Cmd is never a binding modifier: a super-held press matches nothing.
+        // Super/Cmd is never a binding modifier: a super-held press builds no chord at all, so it
+        // has no fallback either.
         let mut app = harness();
         press_key(&mut app, KeyCode::SuperLeft);
         press_key(&mut app, KeyCode::KeyZ);
         app.update();
         assert!(!state(&app).fired(cmd::TOGGLE_SHEATH));
+    }
+
+    /// **The dev plane spends the keyboard's fallback probe, and nothing else** (1142). 0870 chose
+    /// `Ctrl`+`Shift` for the overlays because the plane looked empty under 0585's exact-match
+    /// law; under the real law it is *nearly* empty — the single strip lands on `SHIFT-`*key*, not
+    /// the bare letter — and `SHIFT-P` is exactly the entry that makes "nearly" insufficient.
+    ///
+    /// Asserted on [`BindingDispatch::resolve`] rather than through the event harness because the
+    /// colliding command is `Kind::Edge` — its whole effect is a Lua body, and the harness has no
+    /// VM, so an end-to-end assertion here could only ever be vacuously true.
+    #[test]
+    fn the_dev_plane_keeps_its_letters_without_stealing_bound_chords() {
+        let by_name =
+            |n: &str| Cmd(SPECS.iter().position(|s| s.name == n).expect("registered") as u16);
+        let pet_paper_doll = by_name("TOGGLECHARACTER3"); // SHIFT-P, decision 1057
+        let mut dispatch = BindingDispatch::test_defaults();
+        let plane_p = Chord::parse("CTRL-SHIFT-P").expect("parses");
+        // Ctrl+Shift+P is the perf HUD's. Off the plane it would fall back onto SHIFT-P — which
+        // is 0585's original "one key did two things" bug, reborn one strip further along...
+        assert_eq!(
+            dispatch.resolve(plane_p, false),
+            Some(pet_paper_doll),
+            "without the plane rule the retry does reach SHIFT-P — this is what is being blocked"
+        );
+        // ...so on the plane, the retry is what it costs.
+        assert_eq!(dispatch.resolve(plane_p, true), None);
+        // The suppression is the FALLBACK only — an exact CTRL-SHIFT- entry still resolves. No
+        // shipped default proves it (1.12's own two, CTRL-SHIFT-TAB and CTRL-SHIFT-PAGEDOWN,
+        // belong to commands the honest tree doesn't carry yet), so the entry is made here: this
+        // is the case a player creates the moment they bind anything on the plane.
+        dispatch.map.insert(plane_p, pet_paper_doll);
+        assert_eq!(
+            dispatch.resolve(plane_p, true),
+            Some(pet_paper_doll),
+            "the plane spends the retry, never the exact probe"
+        );
+        // And SHIFT-P itself is still the pet paper doll: the plane costs nothing outside itself.
+        let shift_p = Chord::parse("SHIFT-P").expect("parses");
+        assert_eq!(dispatch.resolve(shift_p, false), Some(pet_paper_doll));
     }
 
     /// **The pet lane routes on the CTRL digits, and the number row is untouched** (B218,

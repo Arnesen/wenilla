@@ -2,8 +2,9 @@
 //! (decision 0954). The engine holds the table and the Lua API ([`benilla_ui::script`]'s
 //! `GetCVar`/`SetCVar`); this module is everything host-side:
 //!
-//! - **The registered set** ([`REGISTERED`]): only vars backed by a real engine knob (the
-//!   honest-tree rule). Defaults are the code's own truths — the sound quartet is the client's
+//! - **The registered set** ([`REGISTERED`]): only vars something actually reads — a host knob,
+//!   or (since 1140) a live Lua consumer, which is the same rule seen from the UI side and the
+//!   only refinement the honest-tree law has needed. Defaults are the code's own truths — the sound quartet is the client's
 //!   verified CVar registration defaults (wow-re `benilla-pins.md` B10, quoted in
 //!   [`crate::sound::SoundConfig`]), `uiScale`/`farclip` are benilla's shipped defaults —
 //!   and a test welds each string to the constant it mirrors so they cannot drift.
@@ -31,7 +32,7 @@ use crate::chat_bubble::BubbleConfig;
 use crate::clutter::ClutterConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
-use crate::player::camera::LookConfig;
+use crate::player::camera::{LookConfig, ZoomLimit, MOUSE_SPEED_RANGE};
 use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
 use crate::ui_loot::LootConfig;
@@ -75,6 +76,21 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // the clutter-density knob — 0 is the client's bare frillDensity baseline (×1 = 16 visits),
     // each step +1×; the "2" default IS ClutterConfig's shipped ×3 (the reference's High).
     ("WorldDetail", "2"),
+    // Mouse Sensitivity (1140): 1.12's own `mousespeed` slider (UIOptionsFrameSliders, 0.5..1.5
+    // step 0.05), a MULTIPLIER over the camera's own per-pixel rate — which was a frozen constant
+    // until this row. Default "1" is the shipped feel exactly, welded to LookConfig::default().
+    ("mousespeed", "1"),
+    // Max Camera Distance (1140): 1.12's `cameraDistanceMaxFactor` (its MAX_FOLLOW_DIST slider,
+    // 1..2 step 0.1) over `cameraDistanceMax`'s 15 yd base. Registered "2" — the factor fully
+    // raised — because that IS benilla's shipped 30 yd ceiling, a knowing divergence from the
+    // reference's registrar "1" that camera.rs has carried in prose since it was written.
+    ("cameraDistanceMaxFactor", "2"),
+    // Status Text (1140): 1.12's `statusBarText`, the "always show value / max on a status bar"
+    // switch. **No host knob** — its consumer is Lua (TextStatusBar.xml, decision 1082, which was
+    // written waiting for this key and reads it on every repaint). Default "0": the reference's
+    // out-of-box look is hover-only numerals. That default is BEHAVIOUR-derived, not byte-read —
+    // 1.12's registrar value for this var is not pinned in wow-re yet.
+    ("statusBarText", "0"),
     // The two chat-bubble switches (1139): 1.12's own registrar CVars over the bubble gate,
     // which held them as `const bool` from 0598 until this window had a page for them.
     // `ChatBubbles` is the reference's registered "1"; `ChatBubblesParty` is ON where the binary
@@ -142,6 +158,7 @@ struct Knobs<'a> {
     clutter: &'a mut ClutterConfig,
     minimap: &'a mut MinimapZoom,
     bubbles: &'a mut BubbleConfig,
+    zoom: &'a mut ZoomLimit,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -164,10 +181,18 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
         "mouseinvertpitch" => knobs.look.invert_pitch = v != 0.0,
+        "cameradistancemaxfactor" => knobs.zoom.set_factor(v),
+        // The 1.12 slider's own range; an off-grid hand-edit rides between stops, like the others.
+        "mousespeed" => {
+            knobs.look.sensitivity = v.clamp(*MOUSE_SPEED_RANGE.start(), *MOUSE_SPEED_RANGE.end());
+        }
         "autolootdefault" => knobs.loot.auto_loot = v != 0.0,
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
+        // A CVar with no HOST knob, because its consumer is Lua (1140). Known — so the caller
+        // dirties the config and the value persists — with nothing to apply on this side.
+        "statusbartext" => {}
         // The two bubble switches (1139) — flags, like every other pair here.
         "chatbubbles" => knobs.bubbles.all = v != 0.0,
         "chatbubblesparty" => knobs.bubbles.party = v != 0.0,
@@ -207,6 +232,7 @@ fn load_config(
     mut clutter: ResMut<ClutterConfig>,
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
+    mut zoom: ResMut<ZoomLimit>,
 ) {
     let mut knobs = Knobs {
         sound: &mut sound,
@@ -219,6 +245,7 @@ fn load_config(
         clutter: &mut clutter,
         minimap: &mut minimap,
         bubbles: &mut bubbles,
+        zoom: &mut zoom,
     };
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
@@ -289,6 +316,7 @@ fn sync_cvars(
     mut clutter: ResMut<ClutterConfig>,
     mut minimap: ResMut<MinimapZoom>,
     mut bubbles: ResMut<BubbleConfig>,
+    mut zoom: ResMut<ZoomLimit>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -296,7 +324,7 @@ fn sync_cvars(
     if !persist.registered {
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 20] = [
+        let session: [(&str, String); 22] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -308,6 +336,8 @@ fn sync_cvars(
             ("farclip", view.farclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
             ("mouseInvertPitch", flag(look.invert_pitch)),
+            ("mousespeed", look.sensitivity.to_string()),
+            ("cameraDistanceMaxFactor", zoom.factor().to_string()),
             ("autoLootDefault", flag(loot.auto_loot)),
             ("UnitNamePlayer", flag(names.player)),
             ("UnitNameNPC", flag(names.npc)),
@@ -344,6 +374,7 @@ fn sync_cvars(
         clutter: &mut clutter,
         minimap: &mut minimap,
         bubbles: &mut bubbles,
+        zoom: &mut zoom,
     };
     for (name, value) in changes {
         if apply_to_knobs(&name, &value, &mut knobs) {
@@ -459,6 +490,8 @@ mod tests {
             d["mouseInvertPitch"] != 0.0,
             LookConfig::default().invert_pitch
         );
+        assert_eq!(d["mousespeed"], LookConfig::default().sensitivity);
+        assert_eq!(d["cameraDistanceMaxFactor"], ZoomLimit::default().factor());
         assert_eq!(d["autoLootDefault"] != 0.0, LootConfig::default().auto_loot);
         // The name trio (0992) welds to NameConfig's defaults the same way.
         let names = NameConfig::default();
@@ -499,6 +532,7 @@ mod tests {
         };
         let mut minimap = MinimapZoom::default();
         let mut bubbles = BubbleConfig::default();
+        let mut zoom = ZoomLimit::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -510,6 +544,7 @@ mod tests {
             clutter: &mut clutter,
             minimap: &mut minimap,
             bubbles: &mut bubbles,
+            zoom: &mut zoom,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -528,6 +563,16 @@ mod tests {
         assert!(!knobs.click.deselect_on_click);
         assert!(apply_to_knobs("MouseInvertPitch", "1", &mut knobs));
         assert!(knobs.look.invert_pitch);
+        // The sensitivity multiplier clamps to the 1.12 slider's range at the knob.
+        assert!(apply_to_knobs("mousespeed", "1.4", &mut knobs));
+        assert_eq!(knobs.look.sensitivity, 1.4);
+        assert!(apply_to_knobs("mousespeed", "9", &mut knobs));
+        assert_eq!(knobs.look.sensitivity, 1.5);
+        // The max-orbit factor lands as YARDS on the knob (base 15 x factor), clamped to 1..2.
+        assert!(apply_to_knobs("cameraDistanceMaxFactor", "1", &mut knobs));
+        assert_eq!(knobs.zoom.max, 15.0);
+        assert!(apply_to_knobs("cameradistancemaxfactor", "5", &mut knobs));
+        assert_eq!(knobs.zoom.max, 30.0);
         assert!(apply_to_knobs("autoLootDefault", "1", &mut knobs));
         assert!(knobs.loot.auto_loot);
         // The name trio lands on its gates (0992).
@@ -616,6 +661,7 @@ mod tests {
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
+            .init_resource::<ZoomLimit>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 
@@ -683,6 +729,7 @@ mod tests {
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
             .init_resource::<BubbleConfig>()
+            .init_resource::<ZoomLimit>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app.update();

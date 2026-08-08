@@ -1,13 +1,19 @@
 //! The chord codec (decision 0997): Bevy's physical input ↔ the reference's canonical binding
 //! strings — `[ALT-][CTRL-][SHIFT-]<TOKEN>`, where the token set is 1.12's own (`W`, `SPACE`,
 //! `NUMPAD0`, `BUTTON4`, `MOUSEWHEELUP`, the bare punctuation characters). These strings are what
-//! the table stores, the window displays (through the `KEY_*` GlobalStrings), and the files save —
-//! matched by string equality exactly as the client matches them (decision 0585's law).
+//! the table stores, the window displays (through the `KEY_*` GlobalStrings), and the files save.
+//!
+//! A press is matched against them by string equality — and then, on a miss, **once more** with
+//! its leftmost modifier dropped ([`Chord::fallback`], decision 1142; this is the half 0585 got
+//! wrong and 0997 carried).
 //!
 //! Prefix order is ALT-CTRL-SHIFT, verified from 1.12's own capture Lua (`Blizzard_BindingUI.lua`
-//! prepends SHIFT, then CTRL, then ALT) and its saved cache (`CTRL-SHIFT-PAGEDOWN`). The Super/Cmd
-//! key is **not** a 1.12 binding modifier: a chord never carries it, a super-modified press never
-//! matches (0585's `sup` addition), and a capture with Super held is ignored outright.
+//! prepends SHIFT, then CTRL, then ALT), its saved cache (`CTRL-SHIFT-PAGEDOWN`), and the engine's
+//! own emitter (`0x4b6630` walks the `{bitIndex,name}` table at `0x846bd0` downward). It is not
+//! only cosmetic: that order is what decides *which* modifier the fallback drops.
+//!
+//! The Super/Cmd key is **not** a 1.12 binding modifier: a chord never carries it, a super-modified
+//! press never matches (0585's `sup` addition), and a capture with Super held is ignored outright.
 
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::KeyCode;
@@ -21,8 +27,8 @@ pub(crate) enum BindKey {
     WheelDown,
 }
 
-/// One parsed binding chord: the exact modifier set + the base input. Equality is the whole
-/// matching law — a press matches iff its held modifiers equal the chord's exactly.
+/// One parsed binding chord: the modifier set + the base input. Equality is how a press is
+/// probed; [`Chord::fallback`] is the second and last probe when that misses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Chord {
     pub alt: bool,
@@ -58,6 +64,38 @@ impl Chord {
             shift,
             key: token_key(rest)?,
         })
+    }
+
+    /// The **one** retry the reference allows after an exact miss — drop the leftmost modifier
+    /// present, in the emitted prefix order ALT → CTRL → SHIFT. `None` once there is none left,
+    /// which is where the lookup ends (decision 1142).
+    ///
+    /// `CBindings::ExecuteBinding` (`0x4b7990`) does this by string surgery: on a miss it calls
+    /// `strchr(chord, '-')` (`0x4b7a2b`/`0x4b7a2d`) and re-probes the text after the **first**
+    /// `'-'` (`0x4b7a49 inc eax`). Both second-probe misses land on `0x4b7b41 xor eax,eax` —
+    /// there is no third probe and no loop, so `ALT-CTRL-Z` reaches `CTRL-Z` and stops without
+    /// ever seeing `ALT-Z` or bare `Z`. Hence `Option`, not an iterator: the chain is two long.
+    ///
+    /// Cutting at the first `'-'` *is* dropping the leftmost prefix, byte for byte — including
+    /// for the one token that contains a `'-'` of its own, the minus key. With a modifier held
+    /// the first `'-'` still terminates that prefix (`SHIFT--` → `-`); bare, the reference's
+    /// retry lands on the empty string and can only miss, which is exactly the `None` here.
+    pub(crate) fn fallback(self) -> Option<Chord> {
+        if self.alt {
+            Some(Chord { alt: false, ..self })
+        } else if self.ctrl {
+            Some(Chord {
+                ctrl: false,
+                ..self
+            })
+        } else if self.shift {
+            Some(Chord {
+                shift: false,
+                ..self
+            })
+        } else {
+            None
+        }
     }
 }
 

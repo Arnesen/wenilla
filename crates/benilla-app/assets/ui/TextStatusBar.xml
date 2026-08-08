@@ -7,15 +7,25 @@
     `statusBarText` cvar is "1" ("Status Text" in the options; our GetCVar returns nil for a cvar
     the engine doesn't carry, which reads as OFF — the 1.12 default).
 
-    First (and so far only) customer: the XP bar (ActionBar.xml). The unit-frame health/mana
-    numerals are the ref's other users of this file — UnitFrames.xml omits them deliberately (its
-    own header note) — so this is the seam they inherit when their slice lands.
+    Customers: the XP bar (ActionBar.xml) and, since decision 1143, the player and pet frames'
+    health/power bars (UnitFrames.xml). `textLockable` is what the statusBarText cvar pins, and
+    which bars carry it is the REFERENCE's own split, not an omission of ours: 1.12 sets it on the
+    player's two bars, the pet's two and the XP bar, and on nothing else. The target frame's bars
+    are deliberately not lockable there — its numerals are hover-only — so ours have the machinery
+    wired and no text regions yet; the hover half needs mouse-enabled bars we do not have.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
-        function TextStatusBar_Initialize()
-            this:RegisterEvent("CVAR_UPDATE")
-            this.lockShow = 0
+        -- `bar` is optional and falls back to `this`, the same shape TextStatusBar_UpdateTextString
+        -- below already has (and for the same reason): the ref calls this from a bar's own OnLoad,
+        -- where `this` is the bar, but our unit frames wire their children from ONE shared
+        -- BenillaUnitFrame_OnLoad that holds each bar as a value, not as `this` (decision 1143).
+        function TextStatusBar_Initialize(bar)
+            if not bar then
+                bar = this
+            end
+            bar:RegisterEvent("CVAR_UPDATE")
+            bar.lockShow = 0
         end
 
         function SetTextStatusBarText(bar, text)

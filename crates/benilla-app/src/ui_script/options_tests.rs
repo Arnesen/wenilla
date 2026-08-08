@@ -581,7 +581,8 @@ fn load_definers(s: &UiScript, files: &[&str]) {
 /// the kit `QuestFrame.xml` inherits from (the same chain `quest_tests`/`questlog_tests` load).
 /// `SHOW_BUFF_DURATIONS` arrives with the bar it re-anchors (1139), behind the two files
 /// `buff_tests` loads ahead of it — `Cooldown.xml` (every button's child) and `ActionBar.xml`
-/// (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`.
+/// (`BENILLA_FALLBACK_ICON`), themselves behind `UIParent.xml`. `TextStatusBar.xml` rides in
+/// ahead of them for the Status Bar Text row's consumer — the XP bar's numerals (1140).
 fn interface_harness() -> UiScript {
     let mut s = audio_harness();
     s.set_screen_size(1024.0, 768.0);
@@ -591,6 +592,7 @@ fn interface_harness() -> UiScript {
             "Fonts.xml",
             "UiPanels.xml",
             "UIParent.xml",
+            "TextStatusBar.xml",
             "Cooldown.xml",
             "ActionBar.xml",
             "ScrollTemplates.xml",
@@ -1649,10 +1651,10 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 16 CVar rows (the Social page's two bubble switches are 1139's) + the Combat page's 14
-    // saved-variable rows (1134) + the Interface page's 4 (3 from 1136, Buff Durations 1139) and
-    // the Action Bars page's 1 (1136).
-    assert_eq!(checked, 35, "every row but one carries a live 1.12 key");
+    // 19 CVar rows (Social's two bubble switches are 1139's; Status Bar Text, Mouse Sensitivity
+    // and Max Camera Distance 1140's) + the Combat page's 14 saved-variable rows (1134) + the Interface
+    // page's 4 (3 from 1136, Buff Durations 1139) and the Action Bars page's 1 (1136).
+    assert_eq!(checked, 38, "every row but one carries a live 1.12 key");
     assert_eq!(
         untipped,
         vec!["ControlsRowAutoLoot".to_string()],
@@ -1741,9 +1743,10 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // 16 of the 17 CVar rows (Social's two are 1139's), plus the Combat page's 14 saved-variable
-    // rows (1134), the Interface page's 4 (1136, + Buff Durations 1139) and Action Bars' 1 (1136).
-    assert_eq!(raised, 35, "every row but Auto Loot has a 1.12 description");
+    // 19 of the 20 CVar rows (Social's two are 1139's; Status Bar Text, Mouse Sensitivity and
+    // Max Camera Distance 1140's), plus the Combat page's 14 saved-variable rows (1134), the Interface page's 4
+    // (1136, + Buff Durations 1139) and Action Bars' 1 (1136).
+    assert_eq!(raised, 38, "every row but Auto Loot has a 1.12 description");
 }
 
 /// The **Combat page** (decision 1134) — the first rows in this window whose store is a
@@ -2401,5 +2404,163 @@ fn the_social_page_toggles_the_chat_bubble_cvars() {
     assert!(s
         .eval::<bool>("return OptionsFrameContainerBodySocialRowPartyChatBubblesCheck:GetChecked()")
         .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Status Bar Text** (decision 1140) — the row that finally reaches `TextStatusBar.xml`. That
+/// file has been transcribed whole since 1082, with a `CVAR_UPDATE` watcher and a `statusBarText`
+/// read on every repaint, and nothing in the client could move the variable: `GetCVar` answered nil
+/// for a key the host never registered, which reads as off. So the numerals were hover-only, with
+/// no way to pin them.
+///
+/// The row is also the only one in this window carrying a `cvarEvent`, and this is what that buys:
+/// the XP bar's numerals appear on the click, not on the next XP tick. The event is 1.12's own —
+/// `SetCVar(cvar, value, index)`'s third argument, handed back as arg1 — which is why the token
+/// here is the uppercase display name and not the CVar's own spelling.
+#[test]
+fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
+    let mut s = interface_harness();
+    // The bar needs a real span before it decides anything about its numerals (its update bails
+    // on valueMax == 0 and hides the strip instead).
+    s.set_player_xp(1000, 10000);
+    s.run("BenillaExpBar_Update(BenillaExpBar)").unwrap();
+    // Shipped default: off, so the numerals only show while hovered.
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"statusBarText\")")
+            .unwrap(),
+        "0"
+    );
+    assert!(!s
+        .eval::<bool>("return BenillaExpBarText:IsShown()")
+        .unwrap());
+
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyInterfaceRowStatusTextCheck:GetChecked()")
+        .unwrap());
+
+    s.run("OptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("statusBarText".to_string(), "1".to_string())]
+    );
+    // No repaint, no XP tick — only the CVAR_UPDATE the third argument queued.
+    s.tick(0.0);
+    assert!(
+        s.eval::<bool>("return BenillaExpBarText:IsShown()")
+            .unwrap(),
+        "the watcher woke on the click, not on the next value change"
+    );
+
+    // And back off again, the same way.
+    s.run("OptionsFrameContainerBodyInterfaceRowStatusTextCheck:Click()")
+        .unwrap();
+    s.tick(0.0);
+    assert!(!s
+        .eval::<bool>("return BenillaExpBarText:IsShown()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Mouse Sensitivity** (decision 1140) — the Controls page's first slider, and the third frozen
+/// constant this arc has unfrozen: the camera's radians-per-pixel rate was a `const` with no way
+/// to reach it. 1.12's own row (`UIOptionsFrameSliders`' MOUSE_SENSITIVITY): 0.5 … 1.5 by 0.05,
+/// a multiplier, so the registered default 1 is the shipped feel and the percent readout reads it
+/// straight. The slider snaps to the reference's step and writes the CVar the host drains onto
+/// `LookConfig::sensitivity`.
+#[test]
+fn the_mouse_sensitivity_slider_snaps_to_the_reference_step() {
+    let mut s = audio_harness();
+    s.set_cvar_host("mousespeed", "1.25");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+
+    // Read from the table on select, with the era's rounded-percent readout.
+    assert!(s
+        .eval::<bool>(
+            "return math.abs(OptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:GetValue() \
+             - 1.25) < 0.0001"
+        )
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
+        )
+        .unwrap(),
+        "125%"
+    );
+
+    // A user move snaps to 0.05 and writes once.
+    s.run("OptionsFrameContainerBodyControlsRowMouseSpeedControlSlider:SetValue(1.42)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("mousespeed".to_string(), "1.4".to_string())]
+    );
+
+    // Defaults walks it back to the neutral notch — the shipped feel, not the slider's floor.
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"mousespeed\")").unwrap(),
+        "1"
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMouseSpeedControlValue:GetText()"
+        )
+        .unwrap(),
+        "100%"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **Max Camera Distance** (decision 1140) — the fourth frozen constant, and the one with a wrinkle
+/// worth pinning: 1.12 stores a FACTOR over `cameraDistanceMax`'s 15 yd base, so the value that
+/// persists is `1.0 … 2.0` while the thing the player is choosing is a distance. The readout shows
+/// the distance; the CVar carries the factor. Our default is the factor fully raised — the 30 yd
+/// ceiling benilla has always had — where the reference's registrar ships 1.0.
+#[test]
+fn the_max_camera_distance_slider_stores_a_factor_and_reads_out_yards() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowControls:Click()")
+        .unwrap();
+
+    // The shipped ceiling, shown as what it buys.
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "30 yd"
+    );
+
+    // Down to the reference's own default: the factor is what persists, the yards are the label.
+    s.run("OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlSlider:SetValue(1.0)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("cameraDistanceMaxFactor".to_string(), "1".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyControlsRowMaxCameraDistanceControlValue:GetText()"
+        )
+        .unwrap(),
+        "15 yd",
+        "vanilla's own out-of-box ceiling"
+    );
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return GetCVar(\"cameraDistanceMaxFactor\")")
+            .unwrap(),
+        "2"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
