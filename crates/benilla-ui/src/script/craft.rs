@@ -46,8 +46,10 @@
 //!
 //! ## v1 is FLAT — no header rows (the law landed for TradeSkill; Craft is a named divergence)
 //!
-//! Exactly [`super::tradeskill`]'s own v1 law: [`CraftState::recipes`] renders in the app's pre-sorted
-//! order, one row per recipe, `index` 1-based straight into that list. `GetCraftInfo` therefore never
+//! Exactly [`super::tradeskill`]'s own v1 law: [`CraftState::recipes`] renders as one flat row per
+//! recipe, `index` 1-based straight into the list — though the ORDER of that list is now this
+//! module's, not the app's (decision 1124: [`recipe_order`], the craft type's own byte-verified
+//! comparator, applied in [`UiScript::set_craft`]). `GetCraftInfo` therefore never
 //! returns the `"header"` `craftType` the ref Lua also checks for (ref l.38/77/199/252/292). The
 //! header/grouping law itself is no longer pending — decision 0446 confirmed it byte-exact (wow-re
 //! `tradeskill` TU-B) and TradeSkill grew the real tree engine ([`super::tradeskill`]'s `build_groups`)
@@ -153,10 +155,14 @@ pub struct CraftRecipe {
     /// What the detail-icon hover describes ([`CraftTooltip`]) — resolved app-side, because the law
     /// reads `Spell.dbc` effect columns the engine cannot see.
     pub tooltip: CraftTooltip,
+    /// `Spell.dbc spellLevel` (`+0x74`) — the **rank-ordering key** of the Beast Training comparator
+    /// ([`recipe_order`]). Also what `GetCraftInfo`'s `requiredLevel` return is built from, though
+    /// that surface is still hardcoded `0` here (module doc).
+    pub spell_level: u32,
 }
 
-/// One open craft window: the skill line's name/rank and its (app-presorted) recipe list. Pushed whole
-/// by the app ([`UiScript::set_craft`]); `None` means the window is closed.
+/// One open craft window: the skill line's name/rank, the craft type, and its recipe list. Pushed
+/// whole by the app ([`UiScript::set_craft`]); `None` means the window is closed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CraftState {
     /// The window's title (`GetCraftName`) — e.g. `"Enchanting"`. Also the skill line's display name
@@ -165,18 +171,73 @@ pub struct CraftState {
     pub name: String,
     pub rank: u32,
     pub max_rank: u32,
-    /// The window's recipe rows, PRE-SORTED by the app — the engine renders this order verbatim (v1
-    /// ships no grouping, module doc); `index` is 1-based straight into this list.
+    /// The **craft type** — the opener spell's `EffectMiscValue[0]`, which the client stores at
+    /// `ds:0xbdcfb8` (1 Beast Training · 3 Enchanting). It is the comparator switch: `cmp
+    /// ds:0xbdcfb8,1` @ `0x4f6765` picks `0x4f6920` for Beast Training, `0x4f67a0` otherwise.
+    pub craft_type: u32,
+    /// The window's recipe rows in ANY order — [`UiScript::set_craft`] sorts them ([`recipe_order`]);
+    /// `index` is 1-based into the sorted list.
     pub recipes: Vec<CraftRecipe>,
+}
+
+/// The craft type whose comparator carries the extra `spellLevel` key ([`recipe_order`]) — the
+/// opener spell 5149 "Beast Training"'s `EffectMiscValue[0]`. The only other type this window ever
+/// opens with is Enchanting's **3**, which takes the shorter comparator `0x4f67a0`.
+const CRAFT_TYPE_BEAST_TRAINING: u32 = 1;
+
+/// The Craft window's **row order** — `0x4f6920` (craft type 1, Beast Training) / `0x4f67a0` (every
+/// other type, i.e. Enchanting), byte-verified in wow-re
+/// (`system/ui/scratch/trainer-craft-list-order.md`, decision 1124). Both are the same cascade and
+/// the Beast Training one has one extra key:
+///
+/// 1. the **difficulty tier** `[+0xc]` ascending ([`super::TradeSkillDifficulty::tier`]);
+/// 2. the localized **name** (collator `0x64a4c0`);
+/// 3. **`Spell.dbc spellLevel`** (`+0x74`) ascending — **only** in `0x4f6920`. This is the key that
+///    orders a pet ability's ranks, and the whole reason Beast Training needs its own comparator.
+///
+/// What benilla had instead was `SkillLineAbility.req_skill_value`, descending — a column the client
+/// never reads anywhere in its craft TU, and which is a constant `1` on every row of skill line 261
+/// *and* 333 in the shipped DBC. So the primary key was inert and the order collapsed to the name.
+///
+/// The trailing `spell_id` key is **ours, not the client's**: its cascade ends at `spellLevel`, so
+/// rows tying on everything above (Charge's six ranks all carry `spellLevel = 0`) fall through to its
+/// qsort's residue over an array benilla doesn't reproduce. Something must break that tie, and a
+/// deterministic key is the only honest choice — benilla's was a `HashSet`'s iteration order, which
+/// re-shuffled the pane between runs. Ascending spell id is also ascending rank across every 1.12
+/// pet-ability family, so it agrees with the reference wherever the reference is defined.
+fn recipe_order(a: &CraftRecipe, b: &CraftRecipe, craft_type: u32) -> std::cmp::Ordering {
+    a.difficulty
+        .tier()
+        .cmp(&b.difficulty.tier())
+        .then_with(|| collate(&a.name, &b.name))
+        .then_with(|| {
+            if craft_type == CRAFT_TYPE_BEAST_TRAINING {
+                a.spell_level.cmp(&b.spell_level)
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .then_with(|| a.spell_id.cmp(&b.spell_id))
+}
+
+/// The WoW enUS collator (`0x64a4c0` — the case-**insensitive** one the craft comparators use, unlike
+/// the trainer rows' `0x64a480`), approximated: case-insensitive alphabetical, with the raw bytes as
+/// a stable tie-break so equal-when-folded names keep a deterministic order.
+fn collate(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }
 
 impl super::UiScript {
     /// Push (or clear, with `None`) the open craft window's recipe snapshot. Snapshots re-push every
-    /// time a resolved field changes — no diffing happens here. On a push, the engine **preserves the
-    /// selection across the replace**: if the previously selected recipe's spell id still appears in
-    /// the new list, the selection follows it to its new index; otherwise it clears to `0`
-    /// ([`super::tradeskill::set_trade_skill`]'s own selection-survival law, verbatim). Clearing
-    /// (`None`) always resets the selection.
+    /// time a resolved field changes — no diffing happens here. On a push, the engine **sorts the
+    /// rows** into the craft type's own order ([`recipe_order`] — the ordering is the engine's, like
+    /// the trainer tree's and the tradeskill list's, so one binding's verified comparator lives in
+    /// exactly one place) and then **preserves the selection across the replace**: if the previously
+    /// selected recipe's spell id still appears in the new list, the selection follows it to its new
+    /// index; otherwise it clears to `0` ([`super::tradeskill::set_trade_skill`]'s own
+    /// selection-survival law, verbatim). Clearing (`None`) always resets the selection.
     pub fn set_craft(&mut self, state: Option<CraftState>) {
         let mut model = self.model_mut();
         match state {
@@ -184,7 +245,9 @@ impl super::UiScript {
                 model.craft_selection = 0;
                 model.craft = None;
             }
-            Some(s) => {
+            Some(mut s) => {
+                let craft_type = s.craft_type;
+                s.recipes.sort_by(|a, b| recipe_order(a, b, craft_type));
                 let prev_spell_id = model
                     .craft_selection
                     .checked_sub(1)
@@ -458,6 +521,9 @@ mod tests {
     use super::*;
     use crate::script::UiScript;
 
+    /// Enchanting's `EffectMiscValue[0]` — the craft type whose comparator has no `spellLevel` key.
+    const CRAFT_TYPE_ENCHANTING: u32 = 3;
+
     /// One recipe fixture — a single-reagent, single-tool row, distinct spell ids per name.
     fn recipe(
         spell_id: u32,
@@ -485,16 +551,20 @@ mod tests {
                 have: 3,
             }],
             tools: vec![("Runed Copper Rod".into(), true)],
+            spell_level: 0,
         }
     }
 
-    /// A two-recipe Enchanting window: Minor Beastslaying (trivial, craftable) then Minor Health
-    /// (optimal, out of reagents).
+    /// A two-recipe Enchanting window: Minor Beastslaying (trivial, craftable) and Minor Health
+    /// (optimal, out of reagents). Declared trivial-first on purpose — the engine sorts by
+    /// difficulty tier ascending ([`recipe_order`]), so the window renders **Minor Health at index 1**
+    /// and Beastslaying at 2, whatever order the app pushed.
     fn state() -> CraftState {
         CraftState {
             name: "Enchanting".into(),
             rank: 57,
             max_rank: 75,
+            craft_type: CRAFT_TYPE_ENCHANTING,
             recipes: vec![
                 recipe(
                     7418,
@@ -543,10 +613,10 @@ mod tests {
                 lvl
             ),
             (
-                "Enchant Weapon - Minor Beastslaying",
+                "Enchant Weapon - Minor Health",
                 "",
-                "trivial",
-                5,
+                "optimal",
+                0,
                 None,
                 0,
                 0
@@ -557,15 +627,15 @@ mod tests {
                 "local n,s,t,a,e,tp,l = GetCraftInfo(2) return n,s,t,a,e,tp,l",
             )
             .unwrap();
-        assert_eq!((kind2.as_str(), avail2), ("optimal", 0));
+        assert_eq!((kind2.as_str(), avail2), ("trivial", 5));
 
         assert_eq!(
             s.eval::<String>("return GetCraftIcon(1)").unwrap(),
-            "Interface\\Icons\\Spell_7418"
+            "Interface\\Icons\\Spell_683"
         );
         assert_eq!(
             s.eval::<String>("return GetCraftDescription(1)").unwrap(),
-            "Enchant Weapon - Minor Beastslaying description."
+            "Enchant Weapon - Minor Health description."
         );
         assert_eq!(s.eval::<i64>("return GetCraftNumReagents(1)").unwrap(), 1);
         let (rname, ricon, need, have) = s
@@ -598,16 +668,17 @@ mod tests {
     #[test]
     fn selection_persists_across_a_repush_by_spell_id() {
         let mut s = UiScript::new().unwrap();
-        // Minor Beastslaying (spell 7418) starts at index 2.
-        let mut first = state();
-        first.recipes.swap(0, 1);
-        s.set_craft(Some(first));
-
+        // Minor Beastslaying (spell 7418) sorts to index 2 (trivial, behind the optimal row).
+        s.set_craft(Some(state()));
         s.run("SelectCraft(2)").unwrap();
         assert_eq!(s.eval::<i64>("return GetCraftSelectionIndex()").unwrap(), 2);
 
-        // Re-push with 7418 back at index 1 (a reagent-count re-list) — the selection follows it.
-        s.set_craft(Some(state()));
+        // A re-list that turns 7418 optimal moves it to index 1 — the selection FOLLOWS the spell
+        // id, not the index (and this is the case the engine-side sort makes reachable).
+        let mut promoted = state();
+        promoted.recipes[0].difficulty = super::super::TradeSkillDifficulty::Optimal;
+        promoted.recipes[0].name = "Aaa Beastslaying".into();
+        s.set_craft(Some(promoted));
         assert_eq!(s.eval::<i64>("return GetCraftSelectionIndex()").unwrap(), 1);
 
         // A re-push that drops the selected recipe entirely clears the selection.
@@ -623,7 +694,11 @@ mod tests {
         s.set_craft(Some(state()));
 
         s.run("DoCraft(1) DoCraft(2)").unwrap();
-        assert_eq!(s.take_craft_dos(), vec![7418, 683]);
+        assert_eq!(
+            s.take_craft_dos(),
+            vec![683, 7418],
+            "display order, not push order"
+        );
         assert!(s.take_craft_dos().is_empty(), "drained");
 
         // An out-of-range index is ignored.
@@ -661,7 +736,8 @@ mod tests {
     fn get_craft_spell_focus_multivalue_shape() {
         let mut s = UiScript::new().unwrap();
         let mut c = state();
-        c.recipes[0].tools = vec![
+        // recipes[1] (Minor Health, optimal) is the row the sort puts at index 1.
+        c.recipes[1].tools = vec![
             ("Runed Copper Rod".into(), true),
             ("Arcanite Rod".into(), false),
         ];
@@ -679,7 +755,7 @@ mod tests {
 
         // A recipe with no tools returns an empty multivalue (select('#', ...) == 0).
         let mut c2 = state();
-        c2.recipes[0].tools.clear();
+        c2.recipes[1].tools.clear();
         s.set_craft(Some(c2));
         assert_eq!(
             s.eval::<i64>("return select('#', GetCraftSpellFocus(1))")
@@ -702,5 +778,95 @@ mod tests {
         s.set_craft(None);
         assert_eq!(s.eval::<i64>("return GetNumCrafts()").unwrap(), 0);
         assert_eq!(s.eval::<i64>("return GetCraftSelectionIndex()").unwrap(), 0);
+    }
+
+    /// **Beast Training's rank order** (decision 1124), pinned against wow-re's emulated run of the
+    /// real `0x4f6920` over real `Spell.dbc` values — and the regression for the director's report
+    /// that "Beast Training lists a skill's ranks out of ascending order" (ledger B229).
+    ///
+    /// The fixture is the reported pane: four Arcane Resistance ranks and four Fire Resistance
+    /// ranks, pushed **shuffled** (as a `HashSet`'s iteration order used to deliver them), all on
+    /// one difficulty tier because pet abilities carry no trivial ranks. Name groups them; the
+    /// `spellLevel` key — 20/30/40/50 per rank — is what orders the ranks inside a group, and it is
+    /// the key the old `req_skill_value`-descending sort did not have.
+    #[test]
+    fn beast_training_orders_ranks_by_spell_level() {
+        let rank = |spell_id: u32, name: &str, level: u32| CraftRecipe {
+            spell_id,
+            tooltip: CraftTooltip::Spell(spell_id),
+            name: name.into(),
+            sub_name: format!("Rank {}", level / 10 - 1),
+            difficulty: super::super::TradeSkillDifficulty::Trivial,
+            num_available: 0,
+            icon: None,
+            description: None,
+            needs_item_target: false,
+            reagents: vec![],
+            tools: vec![],
+            spell_level: level,
+        };
+        // Shuffled on purpose — the exact shape of the report (Arcane read 1, 4, 3, 5).
+        let recipes = vec![
+            rank(24508, "Arcane Resistance", 30),
+            rank(24441, "Fire Resistance", 30),
+            rank(24495, "Arcane Resistance", 20),
+            rank(24464, "Fire Resistance", 50),
+            rank(24510, "Arcane Resistance", 50),
+            rank(24440, "Fire Resistance", 20),
+            rank(24509, "Arcane Resistance", 40),
+            rank(24463, "Fire Resistance", 40),
+        ];
+        let mut s = UiScript::new().unwrap();
+        s.set_craft(Some(CraftState {
+            name: "Beast Training".into(),
+            rank: 0,
+            max_rank: 0,
+            craft_type: CRAFT_TYPE_BEAST_TRAINING,
+            recipes: recipes.clone(),
+        }));
+        let seen: Vec<(String, String)> = (1..=8)
+            .map(|i| {
+                s.eval::<(String, String)>(&format!("local n,sub = GetCraftInfo({i}) return n,sub"))
+                    .unwrap()
+            })
+            .collect();
+        let got: Vec<String> = seen.iter().map(|(n, sub)| format!("{n} ({sub})")).collect();
+        assert_eq!(
+            got,
+            [
+                "Arcane Resistance (Rank 1)",
+                "Arcane Resistance (Rank 2)",
+                "Arcane Resistance (Rank 3)",
+                "Arcane Resistance (Rank 4)",
+                "Fire Resistance (Rank 1)",
+                "Fire Resistance (Rank 2)",
+                "Fire Resistance (Rank 3)",
+                "Fire Resistance (Rank 4)",
+            ]
+        );
+
+        // The falsifiable control wow-re ran: the SAME rows at the Enchanting craft type select
+        // `0x4f67a0`, which has no `spellLevel` key — so the ranks fall to the trailing spell-id
+        // tie-break instead. That they still come out ascending here is benilla's determinism, not
+        // the reference's order; what matters is that the two types differ at all.
+        s.set_craft(Some(CraftState {
+            name: "Beast Training".into(),
+            rank: 0,
+            max_rank: 0,
+            craft_type: CRAFT_TYPE_ENCHANTING,
+            recipes,
+        }));
+        let ids: Vec<i64> = (1..=8)
+            .map(|i| {
+                s.eval::<i64>(&format!("DoCraft({i}) return 0")).unwrap();
+                0
+            })
+            .collect();
+        assert_eq!(ids.len(), 8);
+        assert_eq!(
+            s.take_craft_dos(),
+            vec![24495, 24508, 24509, 24510, 24440, 24441, 24463, 24464],
+            "no spellLevel key at type 3 — the order is name then the deterministic id tie-break"
+        );
     }
 }

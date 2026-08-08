@@ -43,10 +43,15 @@ use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession
 use crate::ui_spellbook::SkillLines;
 
 /// `SMSG_TRAINER_LIST`'s `trainer_type` for a tradeskill trainer (0 class · 1 mount · 2 tradeskill ·
-/// 3 pet). Used only to classify a service as tradeskill-vs-learn-spell for the Era
-/// `IsTrainerServiceTradeSkill` surface — a whole-trainer approximation (per-service typing from the
-/// spell's effects is a later refinement).
+/// 3 pet). Three separate laws fork on it here — the **icon** ([`service_icon`]), the **group key**
+/// ([`service_group`]), and the Era `IsTrainerServiceTradeSkill` flag, which remains a whole-trainer
+/// approximation (per-service typing from the spell's effects is a later refinement; the reference
+/// window's Lua never calls it).
 const TRAINER_TYPE_TRADESKILL: u32 = 2;
+/// `SMSG_TRAINER_LIST`'s `trainer_type` for a mount trainer — the type the client's own vocabulary
+/// calls "talent" (`IsTalentTrainer 0x4d8ed0`), and the one whose grouping folds already-known
+/// services into a "My Talents" bucket ([`service_group`], decision 1124).
+const TRAINER_TYPE_MOUNT: u32 = 1;
 
 /// The open trainer, filled by the net bridge ([`crate::net`]) and read by [`feed_trainer`]. Holds
 /// the trainer guid and its services exactly as the wire delivered them (`SMSG_TRAINER_LIST`), plus
@@ -150,12 +155,20 @@ fn resolve_service(
     items: &mut Items,
     commands: &NetCommands,
 ) -> TrainerService {
-    // The trainer offers a LEARN wrapper (decision 0247); the ability it teaches — with the skill
-    // line the tree groups by, and the real display name/icon — is the taught spell. Resolve it once
-    // for both. `wire.spell` (the wrapper) stays the buy id below (CMSG_TRAINER_BUY_SPELL names it).
-    // A spell that teaches nothing (a plain ability, or before Spell.dbc loads) resolves to itself.
+    // The trainer offers a LEARN wrapper (decision 0247); the ability it teaches is the taught
+    // spell, and the tree GROUPS by that hop (`0x4d7c60` → `[skillrec+4]`). It is the only thing
+    // that hops: the row's **displayed name and subtext are the WIRE spell's own** `Spell.dbc`
+    // columns — `GetTrainerServiceInfo` reads `row[+0]` for both returns (`0x4d8aa0` → `[+0x1e0]`,
+    // `0x4d8b50` → `[+0x204]`), with no `EffectTriggerSpell` deref anywhere in either body. 0247
+    // recorded the display as hopping too; decision 1124 refutes that at the bytes, and it is not a
+    // cosmetic difference: 1607 of the 4711 shipped learn wrappers (34.1 %) disagree with what they
+    // teach, and that set is *every profession-learn row* — spell 2020 is "Apprentice Blacksmith"
+    // with no subtext where the taught 2018 is "Blacksmithing"/"Apprentice". Pet rows agree on both
+    // columns, which is how the wrong hop survived this long.
+    // `wire.spell` (the wrapper) stays the buy id below (CMSG_TRAINER_BUY_SPELL names it); a spell
+    // that teaches nothing (a plain ability, or before Spell.dbc loads) resolves to itself.
     let taught = spells.learned_spell(wire.spell).unwrap_or(wire.spell);
-    let display = spells.get(taught);
+    let display = spells.get(wire.spell);
     let cat = category(wire.state);
     // The SKILL gate has no per-gate "met" bit on the 5875 wire, so approximate it from the service's
     // overall category (an unavailable service has some unmet gate). The real client computes the
@@ -200,36 +213,27 @@ fn resolve_service(
             }
         })
         .collect();
-    // The tree's grouping key (decision 0247): the TAUGHT spell's skill line (`SkillLineAbility.dbc`
-    // → `SkillLine.dbc` name) — the wire wrapper id itself is never in `SkillLineAbility`, so grouping
-    // MUST go through the hop above. `0` when unresolved — the engine drops such a service from the
-    // tree, matching the client. A resolved id with a missing name falls back to `Skill <id>`. We log
-    // a genuine miss (catalog present but no line) so DBC gaps surface rather than silently swallowing
-    // a service the server offered.
-    let skill_line = skill_lines
-        .and_then(|c| c.spell_to_line(taught))
-        .unwrap_or(0);
-    if skill_line == 0 && skill_lines.is_some() {
+    // The tree's grouping key — its own byte-verified law, and per trainer type ([`service_group`],
+    // decision 1124). Only the skill-line arm (types 0/1/3) can fail: the wire wrapper id itself is
+    // never in `SkillLineAbility`, so that arm MUST go through the taught-spell hop above, and an
+    // unresolved `0` drops the service from the tree exactly as the client's builder does. Log the
+    // genuine miss (catalog present but no line) so DBC gaps surface rather than silently swallowing
+    // a service the server offered. The tradeskill arm resolves no line at all and cannot miss.
+    let (group_key, group_name) =
+        service_group(wire.spell, taught, trainer_type, cat, spells, skill_lines);
+    if group_key == 0 && skill_lines.is_some() {
         debug!(
             "ui_trainer: trainer spell {} (teaches {taught}) has no skill line — dropped from the tree",
             wire.spell
         );
     }
-    let skill_line_name = if skill_line != 0 {
-        skill_lines
-            .and_then(|c| c.line(skill_line))
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| format!("Skill {skill_line}"))
-    } else {
-        String::new()
-    };
     TrainerService {
         spell_id: wire.spell,
         name: display.map(|d| d.name.clone()),
         subtext: display.and_then(|d| d.rank.clone()),
-        // The NAME/subtext hop through the taught spell stays (decisions 0247/0252 — the wrapper is
-        // not in SkillLineAbility, so grouping and display MUST hop). The ICON does not: it is its
-        // own byte-verified law over the WIRE spell ([`service_icon`]).
+        // The icon is its own byte-verified law over the WIRE spell ([`service_icon`]) — as, since
+        // 1124, are the name and subtext above. Only the GROUP key still hops to the taught spell,
+        // and only because the wrapper is not in `SkillLineAbility` at all.
         texture: service_icon(wire.spell, trainer_type, spells, icons, items, commands),
         // The detail pane's description body, left empty by design. The real
         // `GetTrainerServiceDescription` returns the spell's *tooltip* — `Spell.dbc`'s Description
@@ -245,8 +249,8 @@ fn resolve_service(
         skill_req,
         ability_reqs,
         is_trade_skill: trainer_type == TRAINER_TYPE_TRADESKILL,
-        skill_line,
-        skill_line_name,
+        group_key,
+        group_name,
         tooltip: service_tooltip(wire.spell, spells),
     }
 }
@@ -266,7 +270,7 @@ fn snapshot(
     open.trainer?;
     Some(TrainerState {
         greeting: open.greeting.clone(),
-        is_tradeskill: open.trainer_type == TRAINER_TYPE_TRADESKILL,
+        trainer_type: open.trainer_type,
         services: open
             .services
             .iter()
@@ -283,8 +287,8 @@ fn snapshot(
                 )
             })
             .collect(),
-        // The engine synthesizes the skill-line tree in `set_trainer` — the app pushes only the flat
-        // services (each carrying its resolved skill line above).
+        // The engine synthesizes the tree in `set_trainer` — the app pushes only the flat services
+        // (each carrying its resolved group key above).
         groups: Vec::new(),
     })
 }
@@ -422,7 +426,7 @@ fn drain_trainer(
 }
 
 mod law;
-use law::{category, service_icon, service_tooltip};
+use law::{category, service_group, service_icon, service_tooltip};
 
 #[cfg(test)]
 mod tests;

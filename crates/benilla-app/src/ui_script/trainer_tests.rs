@@ -118,8 +118,8 @@ fn service(
         skill_req,
         ability_reqs,
         is_trade_skill: false,
-        skill_line,
-        skill_line_name: line_name.into(),
+        group_key: skill_line,
+        group_name: line_name.into(),
     }
 }
 
@@ -130,7 +130,7 @@ fn service(
 fn menu() -> TrainerState {
     TrainerState {
         greeting: "Well met. Let me show you the way of the warrior.".into(),
-        is_tradeskill: false,
+        trainer_type: 0,
         groups: Vec::new(),
         services: vec![
             service(
@@ -443,7 +443,7 @@ fn filter_rows_toggle_through_the_dropdown_kit() {
 fn long_menu() -> TrainerState {
     TrainerState {
         greeting: "Much to learn.".into(),
-        is_tradeskill: false,
+        trainer_type: 0,
         groups: Vec::new(),
         services: (1..=15)
             .map(|i| {

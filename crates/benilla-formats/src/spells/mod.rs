@@ -267,6 +267,12 @@ pub const SPELL_EFFECT_LEARN_SPELL: u32 = 36;
 /// **display** hop deliberately stays 36-only — that is decision 0247's verified grouping hop, and
 /// widening it is a separate question nothing has asked.
 pub const SPELL_EFFECT_LEARN_PET_SPELL: u32 = 57;
+/// `SpellEffects` value `44` — `SPELL_EFFECT_SKILL_STEP`: the effect that raises a profession's
+/// *potential* (Apprentice → Journeyman → …). It is the whole of what a **tradeskill trainer's**
+/// display tree partitions on — the builder tests the WIRE spell's three effect slots for it and
+/// reads nothing else (`0x4d77b6`, decision 1124; benilla-app's `ui_trainer::law::service_group` is
+/// the transcription).
+pub const SPELL_EFFECT_SKILL_STEP: u32 = 44;
 
 /// `SpellEffects` value `SPELL_EFFECT_OPEN_LOCK` — the lock-opening effect the GameObject
 /// interact-cast matches (decision 0239; RE `cursor-system.md` §8, the client's

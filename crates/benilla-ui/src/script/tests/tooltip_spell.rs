@@ -520,8 +520,8 @@ fn trainer_service(spell_id: u32, name: &str, tooltip: TrainerTooltip) -> Traine
         name: Some(name.into()),
         texture: Some("Interface\\Icons\\Temp".into()),
         category: TrainerServiceCategory::Available,
-        skill_line: 26,
-        skill_line_name: "Arms".into(),
+        group_key: 26,
+        group_name: "Arms".into(),
         ..Default::default()
     }
 }
@@ -678,11 +678,13 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
         needs_item_target: false,
         reagents: vec![],
         tools: vec![],
+        spell_level: 0,
     };
     s.set_craft(Some(CraftState {
         name: "Enchanting".into(),
         rank: 100,
         max_rank: 150,
+        craft_type: 3,
         recipes: vec![
             recipe(
                 7420,

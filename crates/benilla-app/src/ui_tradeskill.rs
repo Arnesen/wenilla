@@ -142,14 +142,20 @@ fn open_trade_skill(
         // The routing key — byte-VERIFIED (wow-re `tradeskill` TU-A, `0x6e4bd7`): the opener's
         // `EffectMiscValue[0] != 0` routes to the CraftFrame (Enchanting 3, Beast Training 1);
         // zero routes to the TradeSkillFrame. NOT a skill-line test — 0437's line-333 INTERIM
-        // is corrected by this fold-back.
-        let to_craft = spells
+        // is corrected by this fold-back. The nonzero value is not merely a flag: it IS the craft
+        // type the client keeps at `ds:0xbdcfb8`, and the Craft window keys both its admission
+        // filter and its row comparator on it (decision 1124), so it rides along.
+        let craft_type = spells
             .as_deref()
             .and_then(|s| s.catalog.get(spell_id))
-            .is_some_and(|d| d.effect_misc_value[0] != 0);
-        if to_craft {
-            debug!("ui_tradeskill: opener {spell_id} opens the CraftFrame (line {line})");
+            .and_then(|d| u32::try_from(d.effect_misc_value[0]).ok())
+            .unwrap_or(0);
+        if craft_type != 0 {
+            debug!(
+                "ui_tradeskill: opener {spell_id} opens the CraftFrame (line {line}, craft type {craft_type})"
+            );
             craft_open.line = Some(line);
+            craft_open.craft_type = craft_type;
         } else {
             debug!("ui_tradeskill: opener {spell_id} opens skill line {line}");
             if open.line != Some(line) {

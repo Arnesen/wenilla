@@ -151,7 +151,7 @@ pub use trade::{TradeSideState, TradeSlotItem, TradeState, TRADE_SLOTS};
 pub use tradeskill::{TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState};
 pub use trainer::{
     TrainerAbilityReq, TrainerGroup, TrainerService, TrainerServiceCategory, TrainerSkillReq,
-    TrainerState, TrainerTooltip,
+    TrainerState, TrainerTooltip, TRAINER_GROUP_KNOWN,
 };
 pub use types::{
     EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,

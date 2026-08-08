@@ -45,7 +45,15 @@ pub(super) const STATIONARY_CHASE_RATE: f32 = 8.0;
 // fidelity targets. The mechanism is a thin kinematic controller over avian's `MoveAndSlide`; further
 // refinements (accel/decel curves, partial air control beyond the one-shot nudge) dial up from here.
 
-/// Player capsule radius (yd) — the vanilla box's ±1/3 half-width.
+/// Player capsule radius (yd) — the vanilla `CMovement` ctor's ±1/3 half-width, and a *tunable* per
+/// the block header above, not a fidelity target.
+///
+/// Known since to be the ctor **placeholder**, not the real mover's radius: `0x6174b0` overwrites
+/// `+0xb0`/`+0xb4` from `CreatureModelData` on every model build (`0x5fb880` → `0x5fb9dd` passes
+/// `force = 1`, which skips the only refusal path), so the live extents are per-model — human male
+/// radius **0.30555**, human female **0.20835** (VERIFIED, wow-re `mover-collision-scalars.md`;
+/// decision 1125). Adopting them is the same movement-fidelity question [`CAPSULE_HEIGHT`] describes
+/// below, and this radius is its other half.
 pub(super) const CAPSULE_RADIUS: f32 = 1.0 / 3.0;
 /// Player capsule total height (yd) — the **movement** capsule avian sweeps, deliberately a
 /// constant. Numerically the vanilla ctor-default collision height it was derived from
@@ -107,17 +115,34 @@ pub(super) const GROUND_PROBE: f32 = 0.2;
 /// probe reaches `d_h · ratio + slack + collision height` below the post-move position, where
 /// `d_h` is the frame's achieved horizontal travel. Scaling by the travel makes the absorbed
 /// *slope* the constant (atan 1.8494 ≈ 61.6°, comfortably above the 50° walkable limit),
-/// frame-rate independent; the collision-height term (our [`CAPSULE_HEIGHT`], the election's
-/// `0x4000000`-gated `+0x617430()` extension — decision 0182) is what absorbs a discrete ledge:
-/// a fence-height drop is a silent straight-down step, only a deeper floor becomes a fall.
+/// frame-rate independent; the collision-height term (our [`CAPSULE_HEIGHT`] — decision 0182) is
+/// what absorbs a discrete ledge: a fence-height drop is a silent straight-down step, only a deeper
+/// floor becomes a fall. That term is a **known deviation** on two counts — the reference's `H` is
+/// 1.0, not 2.028, and its extension is `0x4000000`-gated rather than always-on (decision 1125).
+///
+/// The ratio itself is confirmed to be one constant with two jobs, exactly as we use it: `0x80c740`
+/// has four references image-wide, and they are the foot cone's waist ring (`0x631c0b`) and this
+/// step-down term (`0x636dda`, inside `0x6367b0`) among them — the same 61.6° serving the climb and
+/// the descent (wow-re `mover-collision-scalars.md`).
 pub(super) const STEP_SLOPE_RATIO: f32 = 1.849_399;
 /// The election's fixed slack (yd) added to the travel-scaled snap reach — `[0x7ff9d0]` = 1/36 yd.
 pub(super) const STEP_SNAP_SLACK: f32 = 0.027_777_8;
-/// The step-up rise ceiling (yd): how tall an obstacle the atomic step-up can walk you onto
-/// (decision 0209). A plain tunable, deliberately modest — stairs, doorsteps, low rocks — and
-/// deliberately NOT the reference's ~2 yd body-height budget, so fences (collision tops
-/// 1.8–2.3 yd) always slide. One number to nudge if a real spot feels too restrictive.
-pub(super) const STEP_UP_HEIGHT: f32 = 0.7;
+/// The step-up **rise ceiling** (yd): how tall an obstacle the atomic step-up can walk you onto —
+/// the reference's own `H`, VERIFIED (decision 1126).
+///
+/// 0209 set this to 0.7 as a deliberately modest tunable, on the understanding that the reference's
+/// budget was a ~2 yd body height we did not want. That understanding was wrong on its central fact:
+/// `0x617430` returns `CMovement+0xb8`, which is **not a height** but the dimensionless ratio
+/// `max(SCALE_X / CreatureModelScale, 1)`, and a complete writer census puts it at **1.0** for a
+/// clean local player (decision 1125). The reference's rise budget was never 2 — it was 1.0, and the
+/// gap we were preserving was 0.7 vs 1.0, not 0.7 vs 2.
+///
+/// 0209's invariant is untouched by closing it: a fence's collision top is 1.8–2.3 yd, so fences,
+/// trunks and walls still slide at exactly the height they always did. What changes is the class
+/// 0209's note invited us to fix — "one number to nudge if a real spot feels too restrictive" —
+/// which the director's captures found twice: a 0.91 yd Stormwind step (`14282v1`, a 66° face onto a
+/// flat top) and 1121's deferred 1.04 yd ledge.
+pub(super) const STEP_UP_HEIGHT: f32 = 1.0;
 /// The step-up **certify advance** (yd): how far ahead the maneuver looks for the tread it would
 /// stand on. A property of the BODY, never of the frame (decision 1121).
 ///
@@ -129,16 +154,24 @@ pub(super) const STEP_UP_HEIGHT: f32 = 0.7;
 /// commit onto the tread, at every one of the seven captured contacts. Sidewalks 0.28 yd tall
 /// refused to be stepped onto because the probe never reached them.
 ///
-/// A body radius is the principled value: it is exactly the distance at which the capsule's
-/// footprint has cleared the lip it is standing against, and it is the same number whatever the
-/// frame rate or the gait. The frame's travel still wins when it is *longer* (a very low frame
-/// rate must not step you less far than you asked to walk), so this is a floor, not a fixed reach.
+/// A body radius was the principled *guess* — exactly the distance at which the capsule's footprint
+/// has cleared the lip it is standing against, and the same number whatever the frame rate or the
+/// gait. It is now superseded by the measured one (decision 1126): the reference steps
+/// `max(H·tan50°, radius + 1/720)` square into the certified face, which with the verified `H` of 1.0
+/// is **1.1918 yd** — three and a half times our radius. 1121 reached for a body-scaled number in the
+/// absence of this one and got the *shape* of the answer right; the magnitude was never ours to
+/// invent. The frame's travel still wins when it is longer, so this remains a floor, not a fixed
+/// reach.
 ///
-/// It does not widen what may be climbed: the rise ceiling is still [`STEP_UP_HEIGHT`], the settle
-/// must still find a *walkable* floor higher than the feet, and the elevated forward sweep is still
-/// clipped by anything in the way — so a fence, a trunk and a two-trunk pinch all still block at
-/// the same body height they did before, with a clipped advance and a net-zero settle.
-pub(super) const STEP_UP_ADVANCE: f32 = CAPSULE_RADIUS;
+/// It does not widen what may be climbed, and that argument is what makes the larger reach safe: the
+/// rise ceiling is still [`STEP_UP_HEIGHT`], the settle must still find a *walkable* floor higher
+/// than the feet, and — the load-bearing part — **the elevated forward sweep is clipped by anything
+/// in the way**, so the advance only ever reaches as far as there is clear air at the raised height.
+/// A fence, a trunk and a two-trunk pinch still block at the same body height, with a clipped advance
+/// and a net-zero settle. What the longer reach buys is the case the director's capture found: a step
+/// whose *face* is unwalkable for most of a yard before the flat top begins, where a probe that stops
+/// at one radius is still over the face and reads it as a steep floor.
+pub(super) const STEP_UP_ADVANCE: f32 = 1.191_753_6;
 /// The **foot cone's height** (yd): how far above the feet the reference's movement solid is still
 /// narrower than its full radius — and therefore the band within which a blocking edge is *ridden
 /// up* rather than stepped onto (decision 1123).
@@ -155,9 +188,15 @@ pub(super) const STEP_UP_ADVANCE: f32 = CAPSULE_RADIUS;
 /// the vertical box square, and that is the case the instant step-up ([`STEP_UP_HEIGHT`]) exists
 /// for. One solid, two behaviours, selected by the edge's height above the feet.
 ///
-/// Not a new tunable: it is our own two constants multiplied, and it reproduces the reference's
-/// ≈0.62 yd exactly, because [`CAPSULE_RADIUS`] is already the reference's own mover radius of 1/3
-/// (`climb-vs-slide.md` §2 names it).
+/// Not a new tunable: it is our own two constants multiplied, so it is *our* mover's cone — the band
+/// is a property of the body's radius, and ours is [`CAPSULE_RADIUS`].
+///
+/// It is **not** the real client's band, and the gap is recorded rather than papered over (decision
+/// 1125, correcting 1123's claim that it matched exactly). Because [`CAPSULE_RADIUS`] is the ctor
+/// placeholder, ours comes out at 0.616 against a live human male's **0.565** and a human female's
+/// **0.385** — ~9% and ~60% generous. It only decides ride-vs-pop for obstacles *between* the two
+/// bands, so the cost is a narrow slice of over-smooth rides on tall-ish steps; closing it properly
+/// means per-model mover extents, which moves far more than this constant.
 pub(super) const FOOT_CONE_HEIGHT: f32 = CAPSULE_RADIUS * STEP_SLOPE_RATIO;
 /// The landing probe (yd): while airborne, walk mode resumes only this close to the floor, so
 /// the arc ends where the slide actually contacts (skin scale) instead of [`GROUND_PROBE`]
@@ -508,13 +547,18 @@ pub(crate) struct Player {
     pub(super) wedged: bool,
     /// Consecutive stalled airborne frames (see [`WEDGE_STALL_RATIO`]).
     pub(super) wedge_still: u8,
-    /// Part-way up a **foot-cone ride** — the body is resting on the slanted skirt of a low edge it
-    /// has already certified it can clear, climbing it over the frames the gait needs (decision
-    /// 1123). Counts as standing: the frame-start ground probe sees only the steep riser under the
-    /// feet, so without this the mid-ride frame reads as airborne and gravity undoes the climb —
-    /// the mid-face dwelling 0209 was built to make impossible. Re-earned from the certification
-    /// every frame (no certification, no ride), and cleared the moment a walkable floor takes over.
-    pub(super) cone_riding: bool,
+    /// **Supported by a certified steep contact, not a walkable floor** — the reference's
+    /// `0x4000000`, whose meaning decision 1125 settled from the bytes. Two ways to earn it, one
+    /// meaning: climbing the slanted skirt of a low edge already certified clearable (the foot-cone
+    /// ride, 1123), or resting on the surface being followed down off a ledge (1127).
+    ///
+    /// Counts as standing. The frame-start ground probe looks straight down and sees only the steep
+    /// face, so without this the frame reads as airborne and gravity takes the body off the surface:
+    /// the climb undone into the mid-face dwelling 0209 exists to prevent, and on the way down the
+    /// dive past the edge the director reported. Re-earned every frame from the certification going
+    /// up and from the cone's descent bound coming down — neither can hold a body that has not just
+    /// proved it is on a surface — and cleared the moment a walkable floor takes over.
+    pub(super) steep_support: bool,
     /// The take-off vertical speed (yd/s, WoW +Z up) snapshotted when the airborne phase began — the
     /// client's `StartFalling` argument (`+0xa0`, constant per arc) and the `zspeed` we send in the
     /// jump tail: `JUMP_SPEED` for a jump, **exactly 0** for a step-off (the walk election calls

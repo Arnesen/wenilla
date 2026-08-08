@@ -129,8 +129,12 @@ impl TradeSkillDifficulty {
     }
 
     /// The byte tier a group sorts recipes by, ascending (wow-re `tradeskill` TU-B, VERIFIED):
-    /// Optimal < Medium < Easy < Trivial, 0..3.
-    fn tier(self) -> u8 {
+    /// Optimal < Medium < Easy < Trivial, 0..3. The **Craft** window's row comparators key on the
+    /// same tier byte first (`row[+0xc]`, decision 1124), which is why this is `pub(crate)` and not
+    /// private to this module: the client's two code tables are one vocabulary shifted by one
+    /// (Craft's `0` is a `"none"` tier benilla cannot produce), so the *relative* order is identical
+    /// and the shift is invisible to a comparator.
+    pub(crate) fn tier(self) -> u8 {
         match self {
             TradeSkillDifficulty::Optimal => 0,
             TradeSkillDifficulty::Medium => 1,

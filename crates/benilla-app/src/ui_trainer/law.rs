@@ -1,30 +1,33 @@
-//! The trainer window's two **byte-transcribed laws** — the icon and the tooltip.
+//! The trainer window's **byte-transcribed laws** — the icon, the tooltip, and the group key.
 //!
-//! They live together because they are the same *kind* of thing (a direct transcription of one Lua
-//! binding each, with the binary's addresses in the doc), and apart from the feed because they are
-//! the part that must never drift toward "what seems consistent". The whole point of both records
-//! is that they **disagree with each other** on the same row: the icon needs a trainer-type gate the
-//! tooltip does not have, and the icon pins the *wire* wrapper where the tooltip hops to the
-//! *taught* spell. On ~806 of the shipped corpus's trainer services the reference client visibly
-//! shows one spell's icon above another spell's tooltip. Putting them side by side makes that
-//! deliberate, and makes a future "unification" obviously wrong rather than obviously tidy.
+//! They live together because they are the same *kind* of thing (a direct transcription of one
+//! binding or builder branch each, with the binary's addresses in the doc), and apart from the feed
+//! because they are the part that must never drift toward "what seems consistent". The whole point
+//! of putting them side by side is that they **disagree with each other on the same row**, on
+//! purpose: the icon needs a trainer-type gate the tooltip does not have; the icon pins the *wire*
+//! wrapper where the tooltip hops to the *taught* spell; the group key hops at three trainer types
+//! and resolves nothing at the fourth. On ~806 of the shipped corpus's trainer services the
+//! reference client visibly shows one spell's icon above another spell's tooltip. Keeping them
+//! adjacent makes that deliberate, and makes a future "unification" obviously wrong rather than
+//! obviously tidy — decision 1124 is the second time a plausible unification (the display name,
+//! assumed to hop like the group key) turned out to be refuted at the bytes.
 //!
-//! Sources: wow-re `system/ui/scratch/spell-icon-substitution-law.md` §1 (the icon) and
-//! `system/ui/scratch/trainer-service-tooltip-law.md` (the tooltip).
+//! Sources: wow-re `system/ui/scratch/spell-icon-substitution-law.md` §1 (the icon),
+//! `trainer-service-tooltip-law.md` (the tooltip) and `trainer-craft-list-order.md` (the group key).
 
 use benilla_formats::{
-    SpellCatalog, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_LEARN_PET_SPELL,
-    SPELL_EFFECT_LEARN_SPELL,
+    SkillLineCatalog, SpellCatalog, SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM,
+    SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL, SPELL_EFFECT_SKILL_STEP,
 };
 use benilla_protocol::messages::trainer_spell_state;
-use benilla_ui::script::{TrainerServiceCategory, TrainerTooltip};
+use benilla_ui::script::{TrainerServiceCategory, TrainerTooltip, TRAINER_GROUP_KNOWN};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::NetCommands;
 use crate::ui_items::item_icon;
 
-use super::TRAINER_TYPE_TRADESKILL;
+use super::{TRAINER_TYPE_MOUNT, TRAINER_TYPE_TRADESKILL};
 
 /// The trainer's **icon law** — `GetTrainerServiceIcon 0x4d8f50`, byte-verified whole in wow-re
 /// (`system/ui/scratch/spell-icon-substitution-law.md` §1; the binding is not a marshal, the entire
@@ -147,6 +150,62 @@ pub(super) fn service_tooltip(wire_spell: u32, spells: &SpellCatalog) -> Trainer
         };
     }
     wire_only
+}
+
+/// The **group-key law** — the builder `0x4d7560`'s per-trainer-type branch at `0x4d7786`
+/// (byte-verified, decision 1124; wow-re `system/ui/scratch/trainer-craft-list-order.md`). It is the
+/// third law on this page that forks on the same dword the other two do, and the one that decides
+/// what the director actually sees at the top of a profession trainer's list.
+///
+/// **Type 2 (tradeskill) does not resolve a skill line at all.** The key defaults to `2` and becomes
+/// `1` iff the **WIRE** spell's own `Spell.dbc Effect[0..2]` contains `44 SKILL_STEP` (`0x4d77b6`) —
+/// no `EffectTriggerSpell` deref, no `SkillLineAbility` lookup. Two consequences that a skill-line
+/// implementation gets wrong even when its ordering is right: the partition is **total**, so no row
+/// is ever dropped at a tradeskill trainer; and the header vocabulary is the client's own label table
+/// (`0x807520 + key * 0x40`), whose two entries are the global strings `TRADESKILL_SERVICE_STEP`
+/// ("Development Skills") and `TRADESKILL_SERVICE_LEARN` ("Recipes") — 1.12.1 enUS `GlobalStrings.lua`,
+/// the same inlining [`super::train_error_text`] does for `ERR_NOT_ENOUGH_MONEY`.
+///
+/// **Type 1** (mount — the client's "talent") is a *hybrid*, not a third predicate: an
+/// already-known service (`state == 2`) goes to the signed **`-1`** group (`0x4d77e8`) under the
+/// `KNOWN_TALENTS_HEADER` global string ("My Talents"); everything else takes the same skill-line
+/// path as types 0/3.
+///
+/// **Types 0/3 (and type 1's remainder)** key on the **TAUGHT** spell's `SkillLine`
+/// (`0x4d7c60`→`0x60c920`, decision 0247 — the one hop in this file that survived 1124's audit); an
+/// unresolved `0` drops the service (`0x4d7807`). Pet (3) is not special-cased anywhere.
+pub(super) fn service_group(
+    wire_spell: u32,
+    taught: u32,
+    trainer_type: u32,
+    category: TrainerServiceCategory,
+    spells: &SpellCatalog,
+    skill_lines: Option<&SkillLineCatalog>,
+) -> (u32, String) {
+    if trainer_type == TRAINER_TYPE_TRADESKILL {
+        let step = spells
+            .get(wire_spell)
+            .is_some_and(|d| d.effects.contains(&SPELL_EFFECT_SKILL_STEP));
+        return if step {
+            (1, "Development Skills".to_string())
+        } else {
+            (2, "Recipes".to_string())
+        };
+    }
+    if trainer_type == TRAINER_TYPE_MOUNT && category == TrainerServiceCategory::Used {
+        return (TRAINER_GROUP_KNOWN, "My Talents".to_string());
+    }
+    let line = skill_lines
+        .and_then(|c| c.spell_to_line(taught))
+        .unwrap_or(0);
+    if line == 0 {
+        return (0, String::new());
+    }
+    let name = skill_lines
+        .and_then(|c| c.line(line))
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| format!("Skill {line}"));
+    (line, name)
 }
 
 /// The green/red/gray colour a wire `state` byte maps to (decision 0237): GRAY → known, GREEN →

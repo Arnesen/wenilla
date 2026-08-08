@@ -26,6 +26,13 @@ pub(super) struct Frame {
     pub y_in: f32,
     /// Feet height leaving the step (yd) — after the slide *and* the step-down snap.
     pub y_out: f32,
+    /// Horizontal distance covered this frame (yd). Paired with the vertical it gives the frame's
+    /// **descent slope**, which is the whole question behind "we dive over the edge instead of
+    /// stepping down it": the reference bounds a step-down to the foot cone's own
+    /// [`super::STEP_SLOPE_RATIO`] per unit of horizontal travel (wow-re `step-off-recourse.md`), so
+    /// a walk-off that reads far steeper — or worse, flat-then-plummet across two frames — is the
+    /// mover leaving the surface instead of following it down.
+    pub dx: f32,
     pub grounded: bool,
     pub on_walkable: bool,
     pub vel_y: f32,
@@ -158,19 +165,57 @@ pub(super) fn frame(f: Frame) {
             }
         ),
     };
+    // The descent slope, printed only while actually going down and moving: `>cone` marks a frame
+    // steeper than the foot cone allows, which is the signature of a dive rather than a step-down.
+    let slope = if dy < -1.0e-4 && f.dx > 1.0e-4 {
+        let s = -dy / f.dx;
+        format!(
+            " dx={:.3} slope={s:.2}{}",
+            f.dx,
+            if s > super::STEP_SLOPE_RATIO {
+                " >cone"
+            } else {
+                ""
+            }
+        )
+    } else {
+        format!(" dx={:.3}", f.dx)
+    };
+    // The dive's real signature, and it is not steepness — it is the *absence* of descent. A body
+    // that leaves the surface travels forward with `dy≈0` while the probe reports a steep face right
+    // beneath it; everything after that is a ballistic arc, and by the time the fall looks steep the
+    // frame that caused it is long gone. `>cone` was the first guess and the director's capture
+    // showed it never fires: the arc starts at slope 0.05 and only reaches 0.83. This is the marker
+    // that would have named it on the first read.
+    let left = f
+        .snap
+        .and_then(|(_, hit)| hit)
+        .is_some_and(|(_, ny)| ny < super::GROUND_COS)
+        // **Flat is the signature — not "anything that isn't descending".** A dive frame is one that
+        // travels forward and goes *nowhere* vertically while a steep surface sits below it. Written
+        // as `dy > -eps` this also swallows every frame that is climbing, where not descending is
+        // exactly right: first the atomic step-ups, then — once those were excluded — the ordinary
+        // walk up a hill, which rises through the slope ride and carries no `climb` at all. Three
+        // false-positive classes on three consecutive captures, the second of which buried nine real
+        // takeoffs under fifty-five phantoms. A window around zero admits none of them.
+        && dy.abs() < 1.0e-3
+        && f.dx > 1.0e-4;
+    let left = if left { " LEFT-SURFACE" } else { "" };
     let climb = f.climb.map_or(String::new(), |t| format!(" climb={t:+.3}"));
     let anchored = if f.anchored { " ROOTED" } else { "" };
     dbg_trace::line(
         "move",
         &format!(
-            "y {:9.3} -> {:9.3} dy={:+.3} grounded={} walk={} vy={:+7.2} {}{}{}",
+            "y {:9.3} -> {:9.3} dy={:+.3}{} grounded={} walk={} vy={:+7.2} {}{}{}{}",
             f.y_in,
             f.y_out,
             dy,
+            slope,
             f.grounded as u8,
             f.on_walkable as u8,
             f.vel_y,
             snap,
+            left,
             climb,
             anchored
         ),

@@ -42,13 +42,15 @@ use crate::ui_unit::UnitFeed;
 // leg). INTERIM admission pending a wow-re detail pass: a known spell joins the craft list when its
 // SLA line matches AND (`castUI != 0` OR the tradeskill bit) and it is not an opener.
 
-/// The open Craft window: the skill line whose recipes it lists (`None` = closed). Routed here
-/// by the opener's `EffectMiscValue[0] != 0` (byte-VERIFIED — wow-re `tradeskill` TU-A); a Beast
-/// Training opener also routes here and simply lists nothing (its pet-ability content is its own
-/// arc, 0437 out-of-scope). Client-local state, no wire.
+/// The open Craft window: the skill line whose recipes it lists (`None` = closed) and the **craft
+/// type** that opened it. Routed here by the opener's `EffectMiscValue[0] != 0` (byte-VERIFIED —
+/// wow-re `tradeskill` TU-A); that same misc value *is* the craft type (1 Beast Training ·
+/// 3 Enchanting), which the client keeps at `ds:0xbdcfb8` and reads for both the window's admission
+/// filter and its row comparator (decision 1124). Client-local state, no wire.
 #[derive(Resource, Default)]
 pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
+    pub(crate) craft_type: u32,
 }
 
 pub(crate) struct UiCraftPlugin;
@@ -148,6 +150,7 @@ fn feed_craft(
     };
     let fresh = (|| -> Option<CraftState> {
         let line = open.line?;
+        let craft_type = open.craft_type;
         let spells = spells.as_deref()?;
         let skill_lines = skill_lines.as_deref()?;
         let store = self_store.single().ok()?;
@@ -164,14 +167,24 @@ fn feed_craft(
             lookup: &|id| spells.catalog.get(id),
             home_area: None,
         };
-        let mut recipes: Vec<CraftRecipe> = actions
+        // The **admission law** — `0x5e9c20`, byte-verified (decision 1124): the player knows the
+        // spell, it is not hidden (`Attributes & 0x20`), and its `castUI` **equals this window's
+        // craft type**. It is not a skill-line join: the client walks its own per-type list at
+        // `CGPlayer_C + 0x1cd0 + 0x10*type` and never consults `SkillLineAbility` for membership. On
+        // the shipped `Spell.dbc` the two agree on every spell a player can know (castUI 1 → 110 of
+        // the 111 line-261 rows, the exception being the opener 5149 itself, which castUI 0 excludes
+        // where the old `effects[0] != TRADE_SKILL` clause used to; castUI 3 → every line-333
+        // recipe), so this is a law correction, not a content change. What it also does is keep the
+        // `spellLevel = 0` **trainer-wrapper tier** of every pet ability (24519-24522 and friends,
+        // castUI 1 but never known) out of the list — the tier whose presence would flatten the
+        // sort's rank key even with the right comparator.
+        let recipes: Vec<CraftRecipe> = actions
             .spells
             .iter()
             .filter(|&&s| {
                 spells.catalog.get(s).is_some_and(|d| {
-                    (d.cast_ui != 0 || d.attributes & SPELL_ATTR_IS_TRADESKILL != 0)
-                        && d.effects[0] != benilla_formats::SPELL_EFFECT_TRADE_SKILL
-                }) && skill_lines.catalog.spell_to_line(s) == Some(line)
+                    d.cast_ui == craft_type && d.attributes & SPELL_ATTR_IS_TRADESKILL == 0
+                })
             })
             .filter_map(|&s| {
                 let d = spells.catalog.get(s)?;
@@ -241,23 +254,20 @@ fn feed_craft(
                     reagents,
                     tools,
                     tooltip: craft_tooltip(s, d),
+                    spell_level: d.spell_level,
                 })
             })
             .collect();
-        recipes.sort_by(|a, b| {
-            let req = |r: &CraftRecipe| {
-                skill_lines
-                    .catalog
-                    .ability(r.spell_id)
-                    .map(|x| x.req_skill_value)
-                    .unwrap_or(0)
-            };
-            req(b).cmp(&req(a)).then_with(|| a.name.cmp(&b.name))
-        });
+        // No app-side sort: the ROW ORDER is the engine's, transcribing this craft type's own
+        // comparator (`benilla_ui::script::craft::recipe_order`, decision 1124) — the same seam the
+        // trainer tree and the TradeSkill list already sit behind. What used to be here was a
+        // `req_skill_value`-descending sort keyed on a DBC column the client never reads, over rows
+        // whose iteration order was a `HashSet`'s.
         Some(CraftState {
             name,
             rank,
             max_rank,
+            craft_type,
             recipes,
         })
     })();

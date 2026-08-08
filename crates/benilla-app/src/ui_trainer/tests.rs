@@ -318,15 +318,64 @@ fn resolve_hops_the_learn_wrapper_to_the_taught_ability() {
     );
     assert_eq!(svc.spell_id, 1605, "the buy id stays the wire wrapper");
     assert_eq!(
-        svc.skill_line, 26,
+        svc.group_key, 26,
         "grouped under the taught ability's Arms line"
     );
-    assert_eq!(svc.skill_line_name, "Arms");
+    assert_eq!(svc.group_name, "Arms");
     assert_eq!(
         svc.name.as_deref(),
         Some("Heroic Strike"),
-        "display resolves through the taught spell"
+        "the WIRE spell's own name — which here happens to match the taught one"
     );
+}
+
+/// The **display name is the WIRE spell's**, not the taught spell's (decision 1124, refuting 0247's
+/// display half). 1605/78 above cannot tell the two laws apart — both are "Heroic Strike", as are
+/// 65.9 % of the shipped learn wrappers, which is how the wrong hop survived. The profession-learn
+/// wrappers are the visible 34.1 %: on real 5875 data spell **2020 is "Apprentice Blacksmith" with
+/// no rank**, where the spell it teaches (2018) is "Blacksmithing"/"Apprentice" — so this is the row
+/// the director watches change. Skips without client data.
+#[test]
+fn display_name_is_the_wire_spell_not_the_taught_one() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
+    let skills = benilla_formats::load_skill_line_catalog(&mut chain).expect("load skill lines");
+
+    // Dane Lindgren's learn row, exactly as the wire carries it (reqLevel 5, no skill gate).
+    let svc = resolve_service(
+        &wire(2020, trainer_spell_state::GREEN, 9, 5, 0),
+        TRAINER_TYPE_TRADESKILL,
+        &spells,
+        Some(&skills),
+        &HashSet::new(),
+    );
+    assert_eq!(svc.name.as_deref(), Some("Apprentice Blacksmith"));
+    assert_eq!(svc.subtext.as_deref(), None);
+    assert_ne!(
+        spells.get(2020).map(|d| d.name.as_str()),
+        spells.get(2018).map(|d| d.name.as_str()),
+        "the two names really do differ on the shipped data — the test is not vacuous"
+    );
+
+    // And the group law that puts it first: 2020 carries Effect 44 SKILL_STEP where a recipe
+    // wrapper does not. Both read off the real `Spell.dbc` rather than a fixture.
+    assert_eq!(svc.group_key, 1);
+    assert_eq!(svc.group_name, "Development Skills");
+    let recipe = resolve_service(
+        &wire(2743, trainer_spell_state::RED, 50, 0, 164),
+        TRAINER_TYPE_TRADESKILL,
+        &spells,
+        Some(&skills),
+        &HashSet::new(),
+    );
+    assert_eq!(recipe.group_key, 2);
+    assert_eq!(recipe.group_name, "Recipes");
+    assert_eq!(recipe.name.as_deref(), Some("Copper Chain Pants"));
 }
 
 #[test]
@@ -381,9 +430,11 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
     );
     assert!(svc.is_trade_skill, "trainer_type 2 → tradeskill");
     assert!(svc.prof_first_rank == w.is_primary_prof_first_rank);
-    // No skill-line catalog → skill_line 0 (the engine drops it from the tree) and an empty name.
-    assert_eq!(svc.skill_line, 0);
-    assert_eq!(svc.skill_line_name, "");
+    // No spell catalog at a TRADESKILL trainer → the SKILL_STEP predicate reads false and the row
+    // falls to the "Recipes" group. Nothing is ever dropped at type 2 (the partition is total), so
+    // the "unresolved → 0" arm belongs to the skill-line types, not this one.
+    assert_eq!(svc.group_key, 2);
+    assert_eq!(svc.group_name, "Recipes");
     // No skill gate when req_skill is 0.
     let plain = resolve_service(
         &wire(78, trainer_spell_state::GREEN, 50, 5, 0),

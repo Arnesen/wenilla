@@ -17,16 +17,35 @@
 //! `"header"` (a skill-line group header, with `isExpanded` set) or the service's colour state
 //! `"available"`/`"unavailable"`/`"used"` (green/red/gray, `isExpanded` nil).
 //!
-//! ## The tree (decision 0247 — the byte-verified grouping/sort model)
+//! ## The tree (decisions 0247 + 1124 — the byte-verified grouping/sort model, **per trainer type**)
 //!
 //! The 1.12 wire (`SMSG_TRAINER_LIST`) is a **flat** service list; the client builds a **collapsible
-//! skill-line tree** on top of it, and `index` is **1-based into that visible tree**, not the wire
-//! order. [`UiScript::set_trainer`] takes the flat services (each already carrying its resolved
-//! [`TrainerService::skill_line`]/name, resolved app-side from `SkillLineAbility.dbc`) and synthesizes
-//! the tree: one **header row per distinct skill line** (headers sorted by name), then that line's
-//! services sorted by the within-group keys (required level → required-skill value → localized name →
-//! localized rank — keys 4–7 of the verified comparator `0x4d85c0`). State is a per-row **colour**, not
-//! the grouping key. A service whose skill line is `0` (unresolved) is dropped, matching the client.
+//! tree** on top of it, and `index` is **1-based into that visible tree**, not the wire order.
+//! [`UiScript::set_trainer`] takes the flat services (each already carrying its app-resolved
+//! [`TrainerService::group_key`]/[`TrainerService::group_name`]) and synthesizes the tree: one
+//! **header row per distinct group key**, then that group's services in the group's own order. State
+//! is a per-row **colour**, never the grouping key.
+//!
+//! **The `trainerType` selects everything** — the list finalizer `0x4d8410` picks the row comparator
+//! by `ds:0xb73a08` (`dec eax; je` chain @ `0x4d8561`) and the builder `0x4d7560` picks both the
+//! group key and the header comparator by the same dword (`0x4d7786`, `0x4d79eb`). Neither the group
+//! key nor the sort is one law with a "later refinement" — they are four laws, and 1124 is where
+//! benilla stopped applying the class one to all of them:
+//!
+//! | type | rows | headers | group key |
+//! |---|---|---|---|
+//! | 0 class, 3 pet | `0x4d85c0` — level → skill value → name → rank | `0x4d7b90`, by name | taught spell's `SkillLine` |
+//! | 1 mount ("talent") | `0x4d8850` — **state byte → name** | `0x4d7b90`, `-1` first then by name | `-1` when the service is `used`, else the `SkillLine` |
+//! | 2 tradeskill | `0x4d8760` — **skill value → name**, no level key, no rank key | `0x4d7c30`, by **raw key asc** | **1 or 2**, see below |
+//!
+//! At type 2 the group key is **not a skill line and never resolves one**: the builder defaults it
+//! to 2 and sets it to 1 iff the **wire** spell's own `Spell.dbc Effect[0..2]` contains `44`
+//! `SKILL_STEP` (`0x4d77b6`), which makes exactly two groups — `TRADESKILL_SERVICE_STEP` ("Development
+//! Skills", the profession-learn services) and `TRADESKILL_SERVICE_LEARN` ("Recipes") — and means
+//! **no row is ever dropped at a tradeskill trainer**. That partition, not a level key, is what puts
+//! "Apprentice Blacksmith" at the top of a blacksmithing trainer: `reqLevel` is inert at type 2.
+//! At the other types a service whose group key is `0` (unresolved skill line) is still dropped,
+//! matching the client.
 //!
 //! `GetNumTrainerServices`/every getter index the **visible** rows: headers always show, but a
 //! service hides when its state fails the dropdown filter ([`Model::trainer_filter`]) or its group is
@@ -36,12 +55,17 @@
 //!
 //! ## Faithful stubs (no wire data yet — kept so the ported XML runs)
 //!
-//! `GetTrainerServiceStepReq` returns nil (no tradeskill-step data on the wire), `IsTalentTrainer` is
-//! always false (benilla drives no talent trainer), and per-requirement `hasReq`/`met` flags are
-//! derived from the service's overall `category` (an unavailable service has an unmet gate) rather
-//! than a per-gate wire bit, which 5875 does not send. The within-group sort uses the **class**
-//! comparator (`0x4d85c0`) for every trainer; the talent/tradeskill comparator variants (`0x4d8850`/
-//! `0x4d8760`, documented in 0247) are a later refinement — the director's window is the class trainer.
+//! `GetTrainerServiceStepReq` returns nil (no tradeskill-step data on the wire), and per-requirement
+//! `hasReq`/`met` flags are derived from the service's overall `category` (an unavailable service has
+//! an unmet gate) rather than a per-gate wire bit, which 5875 does not send.
+//!
+//! One thing the client does that this engine does not, named rather than left to be discovered: a
+//! group whose row counters go to zero **vanishes entirely, header included** (`0x4d8460`,
+//! `0x4d8528`–`0x4d8549`) — which is how a type-1 trainer whose every service is `used` shows one
+//! "My Talents" header and no skill-line headers at all. benilla always keeps a header. The case
+//! that is *reachable* here (does the state-filter dropdown emptying a group also take its header?)
+//! is an open question with wow-re; the build-time case above cannot arise, because benilla builds
+//! a group only from services that exist.
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -72,6 +96,18 @@ impl TrainerServiceCategory {
 
     /// The filter-flag slot this category occupies ([`Model::trainer_filter`]).
     fn filter_slot(self) -> usize {
+        match self {
+            TrainerServiceCategory::Available => 0,
+            TrainerServiceCategory::Unavailable => 1,
+            TrainerServiceCategory::Used => 2,
+        }
+    }
+
+    /// The row's **state byte** `[+0x30]` — the value `0x4d8ba0` maps to the colour string (`0` →
+    /// available, `2` → used, anything else → unavailable). It is a colour on every trainer type but
+    /// one: at type 1 it is also the third sort key ([`talent_order`]), which is why this exists
+    /// separately from the filter slot it numerically coincides with.
+    fn state_key(self) -> u8 {
         match self {
             TrainerServiceCategory::Available => 0,
             TrainerServiceCategory::Unavailable => 1,
@@ -176,41 +212,45 @@ pub struct TrainerService {
     pub ability_reqs: Vec<TrainerAbilityReq>,
     /// A tradeskill step (`IsTrainerServiceTradeSkill`) vs. a plain learn-spell.
     pub is_trade_skill: bool,
-    /// The taught spell's skill line (`SkillLineAbility.dbc` → `SkillLine.dbc`), resolved app-side —
-    /// the tree's grouping key (decision 0247). `0` = unresolved: the service is **dropped** from the
-    /// tree (the client's `skillLine == 0 → drop`).
-    pub skill_line: u32,
-    /// The skill line's localized display name (`SkillLine.dbc`) — the header row's text.
-    pub skill_line_name: String,
+    /// The tree's grouping key, resolved app-side by the **trainer type's own** builder law
+    /// (module doc, decision 1124): the taught spell's `SkillLine` at types 0/1/3, or the
+    /// `SKILL_STEP` partition's `1`/`2` at type 2. `0` = unresolved: the service is **dropped** from
+    /// the tree (the client's `skillLine == 0 → drop`) — reachable only at types 0/1/3.
+    pub group_key: u32,
+    /// The group's localized display name — the header row's text. `SkillLine.dbc`'s name at types
+    /// 0/1/3; the `TRADESKILL_SERVICE_STEP`/`_LEARN` global strings at type 2.
+    pub group_name: String,
     /// What the detail-icon hover describes ([`TrainerTooltip`]) — resolved app-side, because the
     /// law reads `Spell.dbc` fields the engine cannot see. Independent of [`Self::texture`].
     pub tooltip: TrainerTooltip,
 }
 
-/// One skill-line group in the display tree (decision 0247): the header's skill line + name and the
-/// positions (into [`TrainerState::services`]) of the line's services, pre-sorted by the within-group
-/// keys. Synthesized by [`UiScript::set_trainer`] — the app pushes only the flat services.
+/// One group in the display tree (decisions 0247/1124): the header's key + name and the positions
+/// (into [`TrainerState::services`]) of the group's services, pre-sorted by the trainer type's
+/// within-group comparator. Synthesized by [`UiScript::set_trainer`] — the app pushes only the flat
+/// services.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrainerGroup {
-    /// The skill-line id (the collapse key).
-    pub skill_line: u32,
+    /// The group key (also the collapse key).
+    pub key: u32,
     /// The header's display name.
     pub name: String,
-    /// The line's services, as positions into [`TrainerState::services`], sorted (level → skill-value
-    /// → name → rank).
+    /// The group's services, as positions into [`TrainerState::services`], in display order.
     pub services: Vec<usize>,
 }
 
-/// One open trainer window: the services, the greeting line, and whether the trainer is a tradeskill
-/// trainer (`IsTradeskillTrainer` — drives the real window's tradeskill-vs-class layout switch).
-/// Pushed whole by the app; `None` means no trainer is open (the window is closed).
+/// One open trainer window: the services, the greeting line, and the wire trainer type. Pushed whole
+/// by the app; `None` means no trainer is open (the window is closed).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrainerState {
     pub services: Vec<TrainerService>,
     /// The trainer's greeting/title line (`SMSG_TRAINER_LIST`'s trailing string).
     pub greeting: String,
-    /// `IsTradeskillTrainer()` — the whole-trainer kind (`trainer_type == 2`).
-    pub is_tradeskill: bool,
+    /// `SMSG_TRAINER_LIST`'s `trainerType` (`ds:0xb73a08`), verbatim — **the** switch: it selects the
+    /// row comparator, the header comparator and the group-key law (module doc), and it is what the
+    /// two whole-trainer predicates test (`IsTradeskillTrainer 0x4d8ea0`: `== 2`; `IsTalentTrainer
+    /// 0x4d8ed0`: `== 1`). 0 class · 1 mount · 2 tradeskill · 3 pet.
+    pub trainer_type: u32,
     /// The sorted skill-line groups over `services` — **built by [`UiScript::set_trainer`]**, not
     /// pushed by the app (default-empty on a bare `TrainerState`). The display tree walks these.
     pub groups: Vec<TrainerGroup>,
@@ -231,9 +271,8 @@ impl super::UiScript {
                 model.trainer = None;
             }
             Some(mut s) => {
-                s.groups = build_groups(&s.services);
-                let live: std::collections::HashSet<u32> =
-                    s.groups.iter().map(|g| g.skill_line).collect();
+                s.groups = build_groups(&s.services, s.trainer_type);
+                let live: std::collections::HashSet<u32> = s.groups.iter().map(|g| g.key).collect();
                 model.trainer_collapsed.retain(|sl| live.contains(sl));
                 model.trainer = Some(s);
             }
@@ -270,64 +309,152 @@ fn collate(a: &str, b: &str) -> std::cmp::Ordering {
         .then_with(|| a.cmp(b))
 }
 
-/// The within-group service comparator — keys 4–7 of the verified class comparator (`0x4d85c0`,
-/// decision 0247): required level → required-skill value → localized name → localized rank/subtext.
-fn service_order(a: &TrainerService, b: &TrainerService) -> std::cmp::Ordering {
-    let skillval = |s: &TrainerService| s.skill_req.as_ref().map_or(0, |r| r.rank);
+/// `SMSG_TRAINER_LIST`'s tradeskill `trainerType` (module doc's table).
+const TRAINER_TYPE_TRADESKILL: u32 = 2;
+/// `SMSG_TRAINER_LIST`'s mount `trainerType` — the one the client's own vocabulary calls "talent"
+/// (`IsTalentTrainer 0x4d8ed0` tests it).
+const TRAINER_TYPE_MOUNT: u32 = 1;
+
+/// The already-known group a **type 1** trainer buckets its `used` services into — the client's
+/// signed `-1` group key (`0x4d77e8`), whose header takes the `KNOWN_TALENTS_HEADER` global string
+/// ("My Talents", 1.12.1 enUS). Modelled as `u32::MAX` because the key is otherwise a skill-line id;
+/// the header comparator `0x4d7b90` tests for it explicitly and sorts it **first**, ahead of the
+/// name ordering that ranks every other header.
+pub const TRAINER_GROUP_KNOWN: u32 = u32::MAX;
+
+/// A service's required-skill value (`[+0x1c]`, the wire's `reqSkillValue`) — `0` when the service
+/// carries no skill gate.
+fn skill_value(s: &TrainerService) -> u32 {
+    s.skill_req.as_ref().map_or(0, |r| r.rank)
+}
+
+/// The within-group comparator for a **class** (type 0) or **pet** (type 3) trainer — keys ④–⑦ of
+/// the verified `0x4d85c0`: required level (`[+0x14]` byte) → required-skill value (`[+0x1c]` u32) →
+/// localized name → localized rank/subtext, all ascending. Pet is not special-cased anywhere in the
+/// selection chain at `0x4d8561`; it lands here with class.
+fn class_order(a: &TrainerService, b: &TrainerService) -> std::cmp::Ordering {
     let name = |s: &TrainerService| s.name.clone().unwrap_or_default();
     let rank = |s: &TrainerService| s.subtext.clone().unwrap_or_default();
     a.level_req
         .cmp(&b.level_req)
-        .then_with(|| skillval(a).cmp(&skillval(b)))
+        .then_with(|| skill_value(a).cmp(&skill_value(b)))
         .then_with(|| collate(&name(a), &name(b)))
         .then_with(|| collate(&rank(a), &rank(b)))
 }
 
-/// Build the display tree from the flat services (decision 0247): group by skill line (dropping the
-/// unresolved `skill_line == 0`), sort each group's services by [`service_order`], and sort the groups
-/// by localized name (skill-line id breaks a name tie). The service positions index back into the
-/// unchanged `services` slice, so every getter still resolves a row to its full service data.
-fn build_groups(services: &[TrainerService]) -> Vec<TrainerGroup> {
+/// The within-group comparator for a **tradeskill** trainer (type 2) — the whole of `0x4d8760`'s
+/// row half: required-skill value **ascending** (`0x4d87d9`/`0x4d8801`), then the localized name.
+///
+/// The two keys it pointedly does *not* have are the interesting ones, and both were in benilla's
+/// output until 1124: there is **no `[+0x14]` required-level key** (which is what used to sink the
+/// profession-learn row — the only row with a level — to the bottom of every profession trainer),
+/// and **no `[+0x204]` rank tie-break**.
+fn tradeskill_order(a: &TrainerService, b: &TrainerService) -> std::cmp::Ordering {
+    let name = |s: &TrainerService| s.name.clone().unwrap_or_default();
+    skill_value(a)
+        .cmp(&skill_value(b))
+        .then_with(|| collate(&name(a), &name(b)))
+}
+
+/// The within-group comparator for a **mount** trainer (type 1, the client's "talent") — the whole
+/// of `0x4d8850`'s row half: the **state byte** `[+0x30]` ascending (`0x4d88f1`, so available →
+/// unavailable → used), then the localized name. The one comparator on which the green/red/gray is a
+/// sort key rather than only a colour; like the tradeskill one it has no level, skill-value or rank
+/// key.
+fn talent_order(a: &TrainerService, b: &TrainerService) -> std::cmp::Ordering {
+    let name = |s: &TrainerService| s.name.clone().unwrap_or_default();
+    a.category
+        .state_key()
+        .cmp(&b.category.state_key())
+        .then_with(|| collate(&name(a), &name(b)))
+}
+
+/// Build the display tree from the flat services (decisions 0247/1124), by the trainer type's own
+/// three laws:
+///
+/// * **group** on the app-resolved [`TrainerService::group_key`], dropping the unresolved `0` (which
+///   a type-2 list never produces — its partition is total);
+/// * **order each group's services** with that type's row comparator;
+/// * **order the headers** by raw key ascending at type 2 (`0x4d7c30`: one key, no name, no
+///   tie-break), else by localized name with the key breaking a name tie (`0x4d7b90`).
+///
+/// The service positions index back into the unchanged `services` slice, so every getter still
+/// resolves a row to its full service data.
+fn build_groups(services: &[TrainerService], trainer_type: u32) -> Vec<TrainerGroup> {
     let mut map: std::collections::HashMap<u32, TrainerGroup> = std::collections::HashMap::new();
     for (i, s) in services.iter().enumerate() {
-        if s.skill_line == 0 {
+        if s.group_key == 0 {
             continue;
         }
-        map.entry(s.skill_line)
+        map.entry(s.group_key)
             .or_insert_with(|| TrainerGroup {
-                skill_line: s.skill_line,
-                name: s.skill_line_name.clone(),
+                key: s.group_key,
+                name: s.group_name.clone(),
                 services: Vec::new(),
             })
             .services
             .push(i);
     }
     let mut groups: Vec<TrainerGroup> = map.into_values().collect();
+    let order = match trainer_type {
+        TRAINER_TYPE_TRADESKILL => tradeskill_order,
+        TRAINER_TYPE_MOUNT => talent_order,
+        _ => class_order,
+    };
     for g in &mut groups {
         g.services
-            .sort_by(|&a, &b| service_order(&services[a], &services[b]));
+            .sort_by(|&a, &b| order(&services[a], &services[b]));
     }
-    groups.sort_by(|a, b| collate(&a.name, &b.name).then(a.skill_line.cmp(&b.skill_line)));
+    if trainer_type == TRAINER_TYPE_TRADESKILL {
+        groups.sort_by_key(|g| g.key);
+    } else {
+        // `0x4d7b90`: the `-1` (already-known) group first, then localized name. Its second key —
+        // `hdr[+0x24] == 0` first, between those two — is uncarved and unreachable here: benilla's
+        // headers are one per distinct skill line, so nothing ties on the name that it would break.
+        groups.sort_by(|a, b| {
+            (a.key != TRAINER_GROUP_KNOWN)
+                .cmp(&(b.key != TRAINER_GROUP_KNOWN))
+                .then_with(|| collate(&a.name, &b.name))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+    }
     groups
 }
 
-/// The visible rows in display order (decision 0247): each group's header (always shown), then — when
-/// the group is not collapsed — its services that pass the state filter. The Lua's 1-based `index` is
-/// a position in *this* list.
+/// The visible rows in display order (decisions 0247/1124). Per group, in order: the header — **only
+/// if at least one of the group's services passes the state filter** — then, when the group is not
+/// collapsed, those services. The Lua's 1-based `index` is a position in *this* list.
+///
+/// **The filter and the collapse are deliberately asymmetric**, and that asymmetry is structural in
+/// the client rather than incidental. The finalizer builds a per-group flag `hdr[+0x1c]` by walking
+/// the group's per-state member counts through the **live** state mask `ds:0xb73a1c` (`0x4d8431`,
+/// `0x4d8447`), and the hide it drives at `0x4d8535` has **no header-row exemption** — so a group
+/// every one of whose rows the dropdown hides disappears entirely, header included, and unchecking
+/// every box empties the window (`GetNumTrainerServices() == 0`). The collapse test three
+/// instructions later (`0x4d8541`) *does* exempt headers (`0x4d853d`) and reads a different field
+/// (`hdr[+0x20]`), so a collapsed group keeps its header — which is what makes it re-expandable.
+/// benilla had both cases keeping the header, with a test asserting it; 1124 inverted the filter
+/// half.
 fn rows(model: &Model) -> Vec<Row> {
     let Some(t) = model.trainer.as_ref() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for (gi, g) in t.groups.iter().enumerate() {
-        out.push(Row::Header(gi));
-        if !model.trainer_collapsed.contains(&g.skill_line) {
-            for &si in &g.services {
-                if model.trainer_filter[t.services[si].category.filter_slot()] {
-                    out.push(Row::Service(si));
-                }
-            }
+        let mut shown = g
+            .services
+            .iter()
+            .copied()
+            .filter(|&si| model.trainer_filter[t.services[si].category.filter_slot()])
+            .peekable();
+        if shown.peek().is_none() {
+            continue;
         }
+        out.push(Row::Header(gi));
+        if model.trainer_collapsed.contains(&g.key) {
+            continue;
+        }
+        out.extend(shown.map(Row::Service));
     }
     out
 }
@@ -362,7 +489,7 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
         model
             .trainer
             .as_ref()
-            .map(|t| t.groups.iter().map(|g| g.skill_line).collect())
+            .map(|t| t.groups.iter().map(|g| g.key).collect())
             .unwrap_or_default()
     } else {
         match rows(model).get(id - 1) {
@@ -370,7 +497,7 @@ fn set_collapsed(model: &mut Model, id: usize, collapse: bool) {
                 .trainer
                 .as_ref()
                 .and_then(|t| t.groups.get(*gi))
-                .map(|g| g.skill_line)
+                .map(|g| g.key)
                 .into_iter()
                 .collect(),
             _ => Vec::new(),
@@ -435,7 +562,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             match row {
                 Row::Header(gi) => {
                     let g = &t.groups[gi];
-                    let expanded = !model.trainer_collapsed.contains(&g.skill_line);
+                    let expanded = !model.trainer_collapsed.contains(&g.key);
                     Ok(MultiValue::from_vec(vec![
                         Value::String(lua.create_string(&g.name)?),
                         Value::Nil,
@@ -573,22 +700,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // IsTradeskillTrainer() → 1/nil for the whole trainer (drives the tradeskill-vs-class layout).
+    // IsTradeskillTrainer() → 1/nil for the whole trainer (drives the tradeskill-vs-class layout):
+    // `0x4d8ea0` tests trainerType == 2.
     g.set(
         "IsTradeskillTrainer",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(era_bool(
-                model.trainer.as_ref().is_some_and(|t| t.is_tradeskill),
-            ))
+            Ok(era_bool(model.trainer.as_ref().is_some_and(|t| {
+                t.trainer_type == TRAINER_TYPE_TRADESKILL
+            })))
         })?,
     )?;
 
-    // IsTalentTrainer() → always nil (benilla drives no talent trainer; the ref window's talent hacks
-    // guard on this).
+    // IsTalentTrainer() → 1/nil: `0x4d8ed0` tests trainerType == 1 — vmangos's MOUNT trainers, which
+    // the client's own vocabulary calls "talent" (decision 1124). It used to return a hardcoded nil
+    // on the belief that benilla drives no such trainer; the shipped world has 23 of them.
     g.set(
         "IsTalentTrainer",
-        lua.create_function(|_, ()| Ok(Value::Nil))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(era_bool(
+                model.trainer.as_ref().is_some_and(|t| t.trainer_type == 1),
+            ))
+        })?,
     )?;
 
     // GetTrainerGreetingText() → the trainer's greeting line ("" when no trainer is open).
@@ -702,339 +836,5 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     Ok(())
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::script::UiScript;
-
-    fn svc(
-        spell_id: u32,
-        name: &str,
-        cat: TrainerServiceCategory,
-        skill_line: u32,
-        line_name: &str,
-    ) -> TrainerService {
-        TrainerService {
-            spell_id,
-            // The fixture's default subject: the wire spell, no hop (the "no learn wrapper"
-            // fallback); the tooltip tests set the arm they mean explicitly.
-            tooltip: TrainerTooltip::Spell {
-                spell_id,
-                alt_caster: false,
-            },
-            name: Some(name.into()),
-            subtext: Some("Rank 1".into()),
-            texture: Some(format!("Interface\\Icons\\Spell_{spell_id}")),
-            description: format!("Teaches {name}."),
-            cost: 100,
-            prof_first_rank: false,
-            category: cat,
-            level_req: 10,
-            skill_req: None,
-            ability_reqs: vec![],
-            is_trade_skill: false,
-            skill_line,
-            skill_line_name: line_name.into(),
-        }
-    }
-
-    /// A two-line warrior trainer. Groups sort by name (Arms < Fury); within Arms, the level keys
-    /// order Heroic Strike (level 1) before Cleave (level 20). The default-expanded tree is thus:
-    /// `[H:Arms, Heroic Strike(avail), Cleave(used), H:Fury, Bloodrage(unavail)]` — a 5-row list whose
-    /// service rows sit at indices 2, 3, 5.
-    fn trainer() -> TrainerState {
-        let mut hs = svc(
-            78,
-            "Heroic Strike",
-            TrainerServiceCategory::Available,
-            26,
-            "Arms",
-        );
-        hs.level_req = 1;
-        let mut cl = svc(284, "Cleave", TrainerServiceCategory::Used, 26, "Arms");
-        cl.level_req = 20;
-        let br = svc(
-            285,
-            "Bloodrage",
-            TrainerServiceCategory::Unavailable,
-            256,
-            "Fury",
-        );
-        TrainerState {
-            greeting: "What would you like to learn?".into(),
-            is_tradeskill: false,
-            groups: Vec::new(),
-            services: vec![hs, cl, br],
-        }
-    }
-
-    #[test]
-    fn tree_interleaves_headers_and_ordered_services() {
-        let mut s = UiScript::new().unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 0);
-        assert!(s
-            .eval::<bool>("return GetTrainerServiceInfo(1) == nil")
-            .unwrap());
-
-        s.set_trainer(Some(trainer()));
-        // 2 headers + 3 services = 5 visible rows.
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-
-        // Row 1 is the "Arms" header: name, nil subtext, "header", isExpanded=1.
-        let (hn, hsub, ht, hexp) = s
-            .eval::<(String, Option<String>, String, Option<i64>)>(
-                "local n,s,t,e = GetTrainerServiceInfo(1) return n,s,t,e",
-            )
-            .unwrap();
-        assert_eq!((hn.as_str(), ht.as_str()), ("Arms", "header"));
-        assert_eq!((hsub, hexp), (None, Some(1)));
-
-        // Rows 2..5: services (name/state) then the Fury header then its service — the sorted tree.
-        let info = |s: &mut UiScript, i: i64| {
-            s.eval::<(String, String)>(&format!(
-                "local n,_,t = GetTrainerServiceInfo({i}) return n,t"
-            ))
-            .unwrap()
-        };
-        assert_eq!(
-            info(&mut s, 2),
-            ("Heroic Strike".into(), "available".into())
-        );
-        assert_eq!(info(&mut s, 3), ("Cleave".into(), "used".into()));
-        assert_eq!(info(&mut s, 4), ("Fury".into(), "header".into()));
-        assert_eq!(info(&mut s, 5), ("Bloodrage".into(), "unavailable".into()));
-    }
-
-    #[test]
-    fn service_getters_read_the_row_at_a_visible_index() {
-        let mut s = UiScript::new().unwrap();
-        let mut t = trainer();
-        // Heroic Strike (services[0], the row at index 2) carries a full gate set.
-        t.services[0].skill_req = Some(TrainerSkillReq {
-            name: "Blacksmithing".into(),
-            rank: 100,
-            met: true,
-        });
-        t.services[0].ability_reqs = vec![TrainerAbilityReq {
-            name: "Apprentice".into(),
-            met: false,
-        }];
-        s.set_trainer(Some(t));
-
-        // Cost/level/desc/reqs all resolve at the SERVICE index 2 (not the header at 1).
-        assert_eq!(
-            s.eval::<(i64, i64, i64)>("return GetTrainerServiceCost(2)")
-                .unwrap(),
-            (100, 0, 0)
-        );
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerServiceLevelReq(2)")
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            s.eval::<String>("return GetTrainerServiceDescription(2)")
-                .unwrap(),
-            "Teaches Heroic Strike."
-        );
-        let (skill, rank, has) = s
-            .eval::<(String, i64, i64)>("return GetTrainerServiceSkillReq(2)")
-            .unwrap();
-        assert_eq!((skill.as_str(), rank, has), ("Blacksmithing", 100, 1));
-        assert!(s
-            .eval::<bool>(
-                "local n,h = GetTrainerServiceAbilityReq(2,1) return n=='Apprentice' and h==nil"
-            )
-            .unwrap());
-        assert!(s
-            .eval::<bool>("local l,p = IsTrainerServiceLearnSpell(2) return l==1 and p==nil")
-            .unwrap());
-
-        // A HEADER row (index 1) has no service data — the getters no-op to defaults.
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerServiceLevelReq(1)")
-                .unwrap(),
-            0
-        );
-        assert!(s
-            .eval::<bool>("return GetTrainerServiceIcon(1) == nil")
-            .unwrap());
-        assert!(s
-            .eval::<bool>("return GetTrainerServiceSkillReq(1) == nil")
-            .unwrap());
-    }
-
-    #[test]
-    fn state_filter_hides_services_not_headers() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-
-        // Hide "used": Cleave drops (5 → 4), but BOTH headers stay — a state filter culls services
-        // only. Row 3 is now the Fury header (Cleave was there).
-        s.run("SetTrainerServiceTypeFilter('used', 0)").unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 4);
-        let types: Vec<String> = (1..=4)
-            .map(|i| {
-                s.eval::<String>(&format!(
-                    "local _,_,t = GetTrainerServiceInfo({i}) return t"
-                ))
-                .unwrap()
-            })
-            .collect();
-        assert_eq!(types, ["header", "available", "header", "unavailable"]);
-
-        // Hide ALL states: the two headers remain (each group keeps its header even with no services).
-        s.run("SetTrainerServiceTypeFilter('available', 0)")
-            .unwrap();
-        s.run("SetTrainerServiceTypeFilter('unavailable', 0)")
-            .unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 2);
-        assert!(s
-            .eval::<bool>(
-                "local _,_,t1 = GetTrainerServiceInfo(1) \
-                 local _,_,t2 = GetTrainerServiceInfo(2) \
-                 return t1=='header' and t2=='header'"
-            )
-            .unwrap());
-    }
-
-    #[test]
-    fn collapse_by_header_index_and_collapse_all() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-
-        // Collapse the Arms group by its header's display index (1): its two services vanish, the
-        // header stays and now reports isExpanded=nil. 5 → 3 (H:Arms, H:Fury, Bloodrage).
-        s.run("CollapseTrainerSkillLine(1)").unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 3);
-        assert!(s
-            .eval::<bool>("local _,_,t,e = GetTrainerServiceInfo(1) return t=='header' and e==nil")
-            .unwrap());
-        assert_eq!(
-            s.eval::<String>("local n = GetTrainerServiceInfo(2) return n")
-                .unwrap(),
-            "Fury",
-            "Arms' services are folded; Fury's header is now row 2"
-        );
-
-        // Expand it back by the same header index.
-        s.run("ExpandTrainerSkillLine(1)").unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-
-        // Collapse-all (id 0): both groups fold → just the two headers.
-        s.run("CollapseTrainerSkillLine(0)").unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 2);
-        // Expand-all (id 0): back to the full tree.
-        s.run("ExpandTrainerSkillLine(0)").unwrap();
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-    }
-
-    #[test]
-    fn collapse_survives_a_content_update_and_resets_on_close() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-        s.run("CollapseTrainerSkillLine(1)").unwrap(); // fold Arms
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 3);
-
-        // A re-list (same skill lines) keeps the fold — a buy re-lists and the tree shouldn't jump open.
-        s.set_trainer(Some(trainer()));
-        assert_eq!(
-            s.eval::<i64>("return GetNumTrainerServices()").unwrap(),
-            3,
-            "Arms stays collapsed across a content update"
-        );
-
-        // Close → the collapse set resets; a re-open is fully expanded.
-        s.set_trainer(None);
-        s.set_trainer(Some(trainer()));
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-    }
-
-    #[test]
-    fn buy_queues_the_selected_services_spell_id_headers_no_op() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-        // Row 5 is Bloodrage (spell 285). Buying it queues its spell id, not its index.
-        s.run("BuyTrainerService(5)").unwrap();
-        assert_eq!(s.take_trainer_buys(), vec![285]);
-        assert!(s.take_trainer_buys().is_empty(), "drained");
-
-        // Buying a HEADER row (index 1) queues nothing.
-        s.run("BuyTrainerService(1)").unwrap();
-        assert!(s.take_trainer_buys().is_empty(), "a header is not buyable");
-    }
-
-    #[test]
-    fn selection_and_close_intents() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
-            0
-        );
-        s.run("SelectTrainerService(2)").unwrap();
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
-            2
-        );
-        s.run("SelectTrainerService(9)").unwrap(); // OOB (past the 5 rows) clears
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
-            0
-        );
-
-        assert!(!s.take_trainer_close());
-        s.run("CloseTrainer()").unwrap();
-        assert!(s.take_trainer_close());
-        assert!(!s.take_trainer_close(), "drained");
-    }
-
-    #[test]
-    fn tradeskill_and_talent_flags() {
-        let mut s = UiScript::new().unwrap();
-        assert!(s
-            .eval::<bool>("return IsTradeskillTrainer() == nil")
-            .unwrap());
-        let mut t = trainer();
-        t.is_tradeskill = true;
-        t.services[0].is_trade_skill = true; // Heroic Strike → the row at index 2
-        s.set_trainer(Some(t));
-        assert!(s.eval::<bool>("return IsTradeskillTrainer() == 1").unwrap());
-        assert!(s
-            .eval::<bool>("return IsTrainerServiceTradeSkill(2) == 1")
-            .unwrap());
-        assert!(s.eval::<bool>("return IsTalentTrainer() == nil").unwrap());
-    }
-
-    #[test]
-    fn unresolved_skill_line_is_dropped() {
-        let mut s = UiScript::new().unwrap();
-        let mut t = trainer();
-        // A service whose skill line didn't resolve (0) is dropped from the tree entirely.
-        t.services.push(svc(
-            999,
-            "Orphan Spell",
-            TrainerServiceCategory::Available,
-            0,
-            "",
-        ));
-        s.set_trainer(Some(t));
-        // Still 5 rows — the orphan contributes neither a header nor a service row.
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 5);
-    }
-
-    #[test]
-    fn clearing_empties_and_resets_selection() {
-        let mut s = UiScript::new().unwrap();
-        s.set_trainer(Some(trainer()));
-        s.run("SelectTrainerService(2)").unwrap();
-        s.set_trainer(None);
-        assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 0);
-        assert_eq!(
-            s.eval::<i64>("return GetTrainerSelectionIndex()").unwrap(),
-            0
-        );
-    }
-}
+mod tests;

@@ -510,11 +510,15 @@ pub(in crate::net) fn extrapolate_remote_units(
                     from,
                     vel,
                     time.delta(),
-                    // No hover offset: a remote's own granted modes are not modelled yet — decision
-                    // 0866 builds the family for our own mover. A hovering *observed* player draws
-                    // a yard low until the relayed `MSG_MOVE_HOVER` is read into per-unit mode
-                    // state; the same shape as every other unmodelled remote mode.
-                    0.0,
+                    // Default support: **no hover offset**, because a remote's own granted modes
+                    // are not modelled yet — decision 0866 builds the family for our own mover. A
+                    // hovering *observed* player draws a yard low until the relayed
+                    // `MSG_MOVE_HOVER` is read into per-unit mode state; the same shape as every
+                    // other unmodelled remote mode. And **no carried steep-support bit** (1129):
+                    // it is per-frame state the dead-reckon does not keep between packets, so a
+                    // watched player descending a steep face gets the ordinary cone reach, and the
+                    // next packet's wire Z corrects whatever that misses.
+                    crate::player::mover::Support::default(),
                 )
                 .center
             };

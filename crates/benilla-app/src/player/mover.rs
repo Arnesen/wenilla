@@ -151,7 +151,7 @@ pub(super) fn step(
     // failure 0209's atomic commit was built to make impossible. The ride is re-earned from the
     // certification every frame it continues, so this can hold nothing up that has not just proved
     // it can be climbed.
-    let on_floor = !held && (on_walkable || player.cone_riding) && player.vel_y <= 0.0;
+    let on_floor = !held && (on_walkable || player.steep_support) && player.vel_y <= 0.0;
 
     // The wedged rest (decision 0211) stands until real ground takes over or the support
     // vanishes — we walked off the funnel wall into open air, which resumes a normal fresh fall.
@@ -175,7 +175,7 @@ pub(super) fn step(
         if want_jump {
             player.vel_y = JUMP_SPEED;
             player.wedged = false;
-            player.cone_riding = false;
+            player.steep_support = false;
             jumped = true;
         }
     } else {
@@ -221,7 +221,10 @@ pub(super) fn step(
             center,
             player.horiz_vel,
             time.delta(),
-            hover_offset,
+            Support {
+                offset: hover_offset,
+                steep: player.steep_support,
+            },
         );
         // The step-up probe (this is the LOCAL mover; a remote's dead-reckon is not a report
         // anyone is looking at): a walk frame that went nowhere writes the `stup` deep report —
@@ -239,7 +242,7 @@ pub(super) fn step(
         center = g.center;
         climb = g.climb;
         snap_probe = g.snap;
-        player.cone_riding = g.cone_riding;
+        player.steep_support = g.steep_support;
         if let Some(e) = g.ground {
             ground_entity = Some(e);
         }
@@ -255,7 +258,7 @@ pub(super) fn step(
         // remote mover's arc runs, so a jump meets our walls whoever is jumping (decision 0627).
         center = airborne_step(ms, capsule, &filter, center, velocity, time.delta());
         // Nothing here can be riding a cone: this arm is the arc, the hold and the anchor.
-        player.cone_riding = false;
+        player.steep_support = false;
     }
     // Wedge-rest detection (decisions 0211/0212): airborne, already falling fast, yet the
     // descent achieved is a sliver of what gravity intended — [`WEDGE_STILL_FRAMES`] in a row
@@ -330,6 +333,7 @@ pub(super) fn step(
     move_trace::frame(move_trace::Frame {
         y_in: pre_move.y - half_h.y,
         y_out: player.pos.y,
+        dx: (center - pre_move).xz().length(),
         grounded,
         on_walkable,
         vel_y: player.vel_y,
@@ -351,6 +355,23 @@ pub(super) fn step(
     }
 }
 
+/// **What already holds the body up, entering the frame** — the two facts [`grounded_step`] cannot
+/// work out for itself, because both are carried from the *previous* frame's resolve.
+///
+/// They travel together because they are the same question asked twice: how far below the feet does
+/// "the ground" start, and does the thing under us count as a floor at all.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Support {
+    /// The body rests this far **above** the surface — HOVER's float (decision 0866),
+    /// [`super::HOVER_HEIGHT`] while the mode is up and `0.0` for everyone else, which is the
+    /// ordinary case.
+    pub(crate) offset: f32,
+    /// The support entering the frame is a **certified steep contact**, not a walkable floor — the
+    /// reference's `0x4000000` (decision 1125). It is the sole gate on the step-down probe's deep
+    /// reach; see the reach in [`grounded_step`].
+    pub(crate) steep: bool,
+}
+
 /// What one grounded walk step resolved against the world came out as ([`grounded_step`]).
 pub(crate) struct GroundedStep {
     /// The resolved capsule centre.
@@ -362,10 +383,11 @@ pub(crate) struct GroundedStep {
     /// The height gain (yd) this frame's climb achieved — the atomic step-up's committed rise, or
     /// the distance a foot-cone ride carried the body up its skirt.
     pub(crate) climb: Option<f32>,
-    /// The body is part-way up a **foot-cone ride** and is *supported by the edge it is riding*,
-    /// not standing on a floor — so the caller must keep treating it as grounded until a walkable
-    /// floor takes over (decision 1123). Always `false` for a frame that did not ride.
-    pub(crate) cone_riding: bool,
+    /// The body is **supported by a certified steep contact** rather than standing on a walkable
+    /// floor — climbing a foot-cone ride (1123) or following a surface down off a ledge (1127) —
+    /// so the caller must keep treating it as grounded until a walkable floor takes over. This is
+    /// the reference's `0x4000000` (decision 1125). `false` for an ordinary frame.
+    pub(crate) steep_support: bool,
     /// The election snap's `(probe reach, what it found)` — trace fodder, `None` when the step-up
     /// took the frame instead. The inner pair is `(hit distance, hit normal.y)`.
     pub(crate) snap: Option<(f32, Option<(f32, f32)>)>,
@@ -396,8 +418,9 @@ pub(crate) fn grounded_step(
     center: Vec3,
     horiz_vel: Vec3,
     dt: std::time::Duration,
-    surface_offset: f32,
+    support: Support,
 ) -> GroundedStep {
+    let surface_offset = support.offset;
     let cast = |from: Vec3, disp: Vec3| {
         crate::collision::one_sided::cast_move(ms, capsule, from, disp, SKIN_WIDTH, filter)
     };
@@ -454,20 +477,34 @@ pub(crate) fn grounded_step(
             );
         }
     }
-    // **Which regime** (decision 1123, wow-re `climb-vs-slide.md` §2/§4/§6). The certification above
-    // settles *whether* the obstacle can be cleared; its committed rise settles *how*. The real
+    // **Which regime** (decisions 1123/1126, wow-re `climb-vs-slide.md` §2/§4/§6). The certification
+    // above settles *whether* the obstacle can be cleared; the height of the **blocking edge** — the
+    // face the look-ahead is pressed against, measured from the feet — settles *how*. The real
     // client's solid is a cone below [`FOOT_CONE_HEIGHT`] and a vertical box above it, so a low edge
-    // never meets a wall to be lifted over — it meets the slanted skirt, and the ordinary slide
-    // carries the body up it. Only an edge that clears the cone meets the box square, and that
-    // square meeting is the instant step-up. One law, two outcomes, selected by the rise:
-    //   - `dy ≤ FOOT_CONE_HEIGHT` ⇒ **ride** the skirt at atan 1.8494 ≈ 61.6°, over as many frames
-    //     as the gait needs (a kerb takes two at a run) — smooth, and never a teleport;
-    //   - `dy > FOOT_CONE_HEIGHT` ⇒ the atomic pop of 0209, unchanged;
-    //   - no certification at all ⇒ neither: the plain slide, and the body never rises. (This is
-    //     the gate that keeps the ride honest — a tall wall's contact point sits *inside* the cone
-    //     band too, so height alone would ride it. Only the certification distinguishes them.)
-    let ride_to = match attempt.verdict {
-        StepVerdict::Commit { landed, dy, .. } if dy <= FOOT_CONE_HEIGHT => Some(landed.y),
+    // never meets a wall to be lifted over: it meets the slanted skirt, and the ordinary slide
+    // carries the body up it. Only an edge that clears the cone meets the box square, and that square
+    // meeting is the instant step-up. One law, two outcomes:
+    //   - edge inside the cone ⇒ **ride** the skirt at atan 1.8494 ≈ 61.6°, over as many frames as
+    //     the gait needs — smooth, and never a teleport;
+    //   - edge above the cone ⇒ the atomic pop of 0209, unchanged;
+    //   - no certification at all ⇒ neither: the plain slide, and the body never rises.
+    //
+    // **The certification is the gate, not the height** — a tall wall's contact against a *capsule*
+    // sits at the hemisphere centre, ≈0.33 yd up and squarely inside the band, so height alone would
+    // ride a cliff. Only "the settle found a walkable floor" separates the two.
+    //
+    // 1123 selected on the certified *rise* instead, which was indistinguishable while the advance was
+    // one body radius and became wrong the moment 1126 lengthened it: the rise then measures how high
+    // the ground is a yard further on, not how tall the thing in front of you is. Booty Bay's 0.40 yd
+    // step onto a rising ramp reads as a 0.755 yd obstacle under that rule and teleports; its blocking
+    // edge is 0.40 and rides. The edge is the quantity the reference's own cone band tests, and unlike
+    // the rise it does not move when the probe reaches further.
+    let ride_to = match (attempt.verdict, attempt.contact) {
+        (StepVerdict::Commit { landed, .. }, Some((p, _)))
+            if p.y - (center.y - CAPSULE_HEIGHT * 0.5) <= FOOT_CONE_HEIGHT =>
+        {
+            Some(landed.y)
+        }
         _ => None,
     };
     if ride_to.is_none() {
@@ -479,7 +516,7 @@ pub(crate) fn grounded_step(
                 ground: None,
                 climb: Some(landed.y - center.y),
                 snap: None,
-                cone_riding: false,
+                steep_support: false,
             };
         }
     }
@@ -520,47 +557,136 @@ pub(crate) fn grounded_step(
     let mut slid = out.position;
     // Snap onto the surface so we follow downhill slopes + steps down — the client's step-vs-fall
     // election (`0x6367b0`, wow-re `step-vs-fall-election.md`): the probe reaches
-    // [`STEP_SLOPE_RATIO`]·travel + [`STEP_SNAP_SLACK`] + the unit's collision height (`0x617430` =
-    // `[unit+0xb8]`, our [`CAPSULE_HEIGHT`]; the election's `0x4000000`-gated extension — decision
-    // 0182) and snaps only onto a *walkable* floor (≤50°, the election's own `cos50°` =
-    // [`GROUND_COS`]). A deeper or steeper floor is NOT absorbed: no snap, the next frame's ground
-    // probe misses, and the gap becomes a fall (the client's `StartFalling(0)` election) — a short
-    // ledge drop reads as a quick, continuous, steep descent, which is what the director's eye
-    // confirmed against the reference (decision 0190; 0189's instant absorbed step read as a
-    // teleport and was reverted).
+    // [`STEP_SLOPE_RATIO`]·travel + [`STEP_SNAP_SLACK`], and snaps only onto a *walkable* floor
+    // (≤50°, the election's own `cos50°` = [`GROUND_COS`]).
     //
-    // Standing still the reach is slack + the collision height, which is what re-grounds an
-    // *idle* body every frame: the small float a raw wire Z leaves a watched player standing on
-    // our terrain is taken out here, the same way [`crate::net::motion::ground_clamp_creatures`]
-    // takes it out of an idle NPC.
-    // `surface_offset` is HOVER (decision 0866): the reference's WALK resolver `0x6367b0` adds
+    // **The reach is the cone's own slope, and nothing else, on an ordinary walking frame**
+    // (decision 1129). It used to carry a flat `+`[`CAPSULE_HEIGHT`] — 2.028 yd of unconditional
+    // extra depth — on the reading that `0x617430` returned a collision height. Both halves of that
+    // were wrong (decision 1125, wow-re `mover-collision-scalars.md` + `step-off-recourse.md`):
+    // `0x617430` is `[unit+0xb8]`, the dimensionless scale ratio `max(SCALE_X / CreatureModelScale,
+    // 1)`, so `H` is **1.0** for a player and not 2.028; and the reference adds it only while
+    // `0x4000000` is set — "the current support is a certified STEEP contact, not a walkable
+    // floor", which is [`Support::steep`]. So the deep reach belongs to the step-down *recourse*,
+    // where a body already following a steep face down needs to see the walkable ground waiting at
+    // its foot; the ordinary walking frame reaches exactly as far as the foot cone could rest.
+    //
+    // What that costs is real and intended: a drop deeper than the cone is NOT absorbed. No snap,
+    // the next frame's ground probe misses, and the gap becomes a fall (the client's
+    // `StartFalling(0)` election) — a short ledge drop reads as a quick, continuous, steep descent,
+    // which is what the director's eye confirmed against the reference (decision 0190; 0189's
+    // instant absorbed step read as a teleport and was reverted). At 2.028 yd we were absorbing
+    // nearly two body-heights of ledge in one frame, which is the same teleport by another route.
+    //
+    // Standing still the reach collapses to the slack alone, so an idle body is re-grounded only
+    // when it is genuinely resting on the floor; a body left floating above one falls the float and
+    // lands, rather than being pulled down through up to two yards of air.
+    //
+    // [`Support::offset`] is HOVER (decision 0866): the reference's WALK resolver `0x6367b0` adds
     // `[0x7ff9d8]` = 1.0 to this same surface offset while `MOVEFLAG_HOVER` is set, and widens the
     // step-down reach by the same yard (`0x633e35`) so the float still follows the ground down.
     // Both halves are here: the reach grows by the offset, and the snap stops that far short of the
     // floor. Zero for everyone not hovering, which is the ordinary case and unchanged.
     let d = slid - center;
-    let reach =
-        d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT + surface_offset;
+    let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO
+        + STEP_SNAP_SLACK
+        + if support.steep { STEP_UP_HEIGHT } else { 0.0 }
+        + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
     let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
     let mut ground = None;
+    let mut steep_support = false;
+    // **A ride's height is earned; the snap follows ground *down*, it never undoes a climb.**
+    //
+    // This is where our capsule and the reference's cone part company, and it has to be said out
+    // loud or the ride only works on bevels. Mid-ride the real client's foot cone is *resting on
+    // the very edge it is climbing* — its skirt is in contact, so its down-probe is blocked at zero
+    // and there is nothing to settle to. A capsule against a **vertical** riser touches it side-on
+    // and hangs clear of everything below, so the same down-probe sees the floor it is climbing
+    // away from, a full ride's height beneath it, and yanks it straight back down — every frame,
+    // forever. Booty Bay's 0.40 yd step is exactly that: certified `COMMIT dy=+0.439` on every
+    // frame, and stalled at +0.020.
+    //
+    // So while a ride is in progress the only floor that may end it is one **higher than the ride
+    // began on** — the tread it is certified to be climbing to. A floor at or below the start is
+    // the ground being left behind, and it gets no say.
+    // The height this frame's ride earned, read before the snap can spend any of it. (The two snap
+    // arms below are mutually exclusive — walkable or steep — so one value serves both.)
+    let ride_rise = (slid.y - center.y).max(0.0);
+    // **The step-down follows the surface; it does not leave it** (decision 1127). The reference's
+    // finalize writes `pos.z -= min(clearance, d_h·1.8493990)` *before* it classifies anything, and a
+    // steep landing is answered by the multipass rather than by a fall — a `ret 2` continues,
+    // grounded, with the "my support is a certified steep contact" bit set (wow-re
+    // `step-off-recourse.md`; the bit's meaning is decision 1125's).
+    //
+    // We refused every hit under 50° outright, so walking off a kerb the probe found only the ~61°
+    // riser, declined it, and the body kept its full height while its forward speed carried it out
+    // past the edge — then gravity took over. The director's capture is unambiguous: one frame of
+    // `dy=+0.000 dx=0.118` with the surface 0.162 below, then eighteen airborne frames landing 2.1 yd
+    // downrange. That is the dive.
+    //
+    // **The descent is unconditional, it is bounded by the probe itself, and only the *support* is
+    // conditional.** Byte-exact (`0x636e45`–`0x636e52`, wow-re `step-off-recourse.md` §1): the
+    // finalize sweeps down by `L` and writes `pos.z -= achieved`, where `achieved` is the sweep's own
+    // output — the clearance when something is under us, and the **whole of `L`** when nothing is —
+    // and only *then* does it classify what it found. So the cap and the reach are the same number,
+    // and there is no second, smaller bound: `L` is how far the body may fall to stay with its
+    // surface this frame, whatever the surface turns out to be.
+    //
+    // 1127 shipped a separate `min(drop, d_h·1.8494 + 1/36)` cap because at the time `reach` also
+    // carried the bogus flat 2.028 and could not be used as the bound. With the reach corrected
+    // above, the two are one quantity again — and the difference is exactly what closes the last of
+    // the dive: on a face **steeper than the cone** the old cap could never keep up (walking off the
+    // 0.91 yd step, whose face is 66°, the surface drops 0.256 in a frame the cone allowed 0.242, so
+    // every frame leaked its remainder into a small fall). Once the first frame latches the
+    // steep-support bit, `L` grows by `H` and the following frames can take the whole clearance.
+    if let Some(h) = hit.as_ref().filter(|h| h.normal1.y < GROUND_COS) {
+        let drop = (h.distance - surface_offset).max(0.0);
+        slid.y -= drop;
+        // **Support is earned by descending, not by touching.** A bound alone reads a body *resting*
+        // on a steep face as supported — standing still the reach collapses to the slack, the resting
+        // clearance is ~0, and any "is it within reach" test passes — which perches a motionless body
+        // on a 60° bank forever instead of letting it slide off. That is 1121's named "standing on
+        // >50° faces" hazard, and it is a worse defect than the dive this recourse exists to fix.
+        //
+        // Requiring real downward progress states the actual condition: this is a step-*down* in
+        // progress, not a resting state. A body standing on a bank, or traversing one across the
+        // slope, makes no progress and gets nothing. (The reference reaches the same place by a
+        // different road — its `0x4000000` is set only by a multipass `ret 2`, a full rise-step-settle
+        // certification that a body with nowhere to descend to cannot pass.)
+        steep_support = drop > STEP_SNAP_SLACK;
+    }
+    // **Nothing under us: descend the whole probe anyway, then let the fall elect.** The same
+    // `pos.z -= achieved` runs on the no-hit leg with `achieved == L` — wow-re `step-off-recourse.md`
+    // §1, "no committed record: `pos.z` has ALREADY dropped by the full `L`" — so the frame that
+    // leaves a ledge starts its fall a probe's-worth lower instead of flat. A ride is exempt: mid-ride
+    // the body legitimately hangs clear of everything below, and this would spend the climb.
+    if hit.is_none() && !rode {
+        slid.y -= (reach - surface_offset).max(0.0);
+    }
     if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
         // `max(…, 0)` is the reference's, and it is the difference between a float and a pop: the
         // snap **only ever descends** (`0x636e8d`–`0x636e9e` skips the write when `L − 1.0 < 0`), so
         // a hovering body that is already within its clearance is left where it is rather than
         // yanked up to it. The rise to clearance is a separate rate-limited climb — see [`step`].
-        slid.y -= (h.distance - surface_offset).max(0.0);
-        ground = Some(h.entity);
+        let drop = (h.distance - surface_offset).max(0.0);
+        if !(rode && drop >= ride_rise) {
+            slid.y -= drop;
+            ground = Some(h.entity);
+        }
     }
     GroundedStep {
         center: slid,
         // A ride is a climb too — the trace reads the same whichever regime moved the body.
         climb: rode.then_some(slid.y - center.y),
-        // Mid-ride the body is held up by the edge under its skirt, and the frame-start ground
-        // probe can only see the steep riser there. Say so, so the caller keeps it standing
-        // instead of letting gravity undo the climb. A snap onto a walkable floor ends the ride:
-        // the tread is under the feet and ordinary grounding takes over from here.
-        cone_riding: rode && ground.is_none(),
+        // **Supported by a certified steep contact** — the reference's `0x4000000`, whose meaning
+        // decision 1125 settled. Two ways to earn it and one meaning: mid-ride the body is held up
+        // by the edge under its skirt (climbing), and mid-step-down it is resting on the surface it
+        // is following off a ledge (descending). Either way the frame-start ground probe looks
+        // straight down and sees only a steep face, so without this the frame reads as airborne and
+        // gravity takes the body off the surface — the climb undone on the way up, the dive on the
+        // way down. A walkable floor ends it: ordinary grounding takes over from there.
+        steep_support: (rode && ground.is_none()) || steep_support,
         ground,
         snap,
     }
@@ -603,6 +729,25 @@ pub(crate) fn airborne_step(
         },
     )
     .position
+}
+
+/// **The overhang line is a tolerance, not zero** — and it has to be, or half the world's vertical
+/// walls behave differently from the other half for no physical reason.
+///
+/// Every "is this face steep-but-not-overhanging" test here is a range whose floor used to be `0.0`.
+/// An axis-aligned authored quad — a doorstep, a crate, a dock plank, most of Booty Bay — computes a
+/// normal whose `y` is `±0` decided by nothing but which way the cross product's rounding fell. The
+/// director's capture caught both halves of that coin on the *same* step: `n.y = −4.08e-5` refused to
+/// certify and refused to ride, where `+0.009` on the same geometry did both. A real overhang is a
+/// ceiling, nowhere near this line, so widening the floor by a ten-thousandth costs nothing and
+/// makes a vertical wall a vertical wall whichever way the rounding goes.
+const OVERHANG_EPS: f32 = -1.0e-4;
+
+/// A face the mover meets side-on: too steep to stand on, not a ceiling. The shared gate behind the
+/// step-up's certification, the foot-cone ride and the wall flatten — one line, so the three can
+/// never disagree about what a vertical wall is (see [`OVERHANG_EPS`]).
+fn is_steep_face(ny: f32) -> bool {
+    (OVERHANG_EPS..GROUND_COS).contains(&ny)
 }
 
 /// The even-speed ramp ride: a walkable slope never slows or deflects the grounded walk. The
@@ -651,7 +796,7 @@ fn walkable_ride_velocity(n: Vec3, v: Vec3) -> Option<Vec3> {
 /// certification's call in [`grounded_step`], because a tall wall's contact point sits inside the
 /// cone band too and height alone cannot tell the two apart.
 fn foot_cone_ride(n: Vec3, v: Vec3) -> Option<Vec3> {
-    if !(0.0..GROUND_COS).contains(&n.y) {
+    if !is_steep_face(n.y) {
         return None;
     }
     // Steepness bounds the horizontal part below by sin 50°, so the normalize is safe.
@@ -679,7 +824,7 @@ fn foot_cone_ride(n: Vec3, v: Vec3) -> Option<Vec3> {
 /// `floor_block_on_wall`); penetration safety is untouched — the slide's sweeps still stop at
 /// the real surface, the plane only shapes the deflection.
 fn steep_wall_plane(n: Vec3, v: Vec3) -> Option<Vec3> {
-    if !(0.0..GROUND_COS).contains(&n.y) {
+    if !is_steep_face(n.y) {
         return None;
     }
     let vn = v.dot(n);
@@ -815,7 +960,7 @@ pub(crate) fn step_up(
         return none(StepVerdict::NoFace);
     };
     let n = ahead.normal1;
-    if n.y >= GROUND_COS || n.y < 0.0 || n.dot(dir_h) >= 0.0 {
+    if n.y >= GROUND_COS || n.y < OVERHANG_EPS || n.dot(dir_h) >= 0.0 {
         return none(StepVerdict::NoFace);
     }
     let at = |verdict| StepAttempt {
@@ -881,6 +1026,12 @@ mod tests {
     /// these casts, so a mis-wound fixture would silently be a hole to fall through.
     fn world_with_kerb() -> App {
         const PROFILE: [(f32, f32); 4] = [(-2.0, 0.0), (0.29, 0.0), (0.446, 0.28), (3.0, 0.28)];
+        world_from_profile(&PROFILE)
+    }
+
+    /// The fixture builder behind every profiled world here: a `(x, y)` polyline extruded across
+    /// `z`, wound so every face's **authored** normal points up and back at the approaching body.
+    fn world_from_profile(profile: &[(f32, f32)]) -> App {
         const W: f32 = 3.0;
         let mut app = App::new();
         // avian's collider backend reads `Assets<Mesh>` and `SceneSpawner` even in a meshless
@@ -894,7 +1045,7 @@ mod tests {
         ));
         app.init_asset::<Mesh>();
         let (mut verts, mut tris) = (Vec::new(), Vec::new());
-        for w in PROFILE.windows(2) {
+        for w in profile.windows(2) {
             let (&(x0, y0), &(x1, y1)) = (&w[0], &w[1]);
             let b = verts.len() as u32;
             verts.extend([
@@ -950,8 +1101,24 @@ mod tests {
     /// Walk the capsule into the kerb and run `frames` consecutive **whole** grounded steps from
     /// wherever the last one left it — the mover's own loop, so what these assert is the behaviour
     /// on screen and not a single probe in isolation.
-    fn walk_kerb(start_y: f32, frames: usize) -> Vec<(f32, Option<f32>, bool)> {
-        world_with_kerb()
+    fn walk_kerb(start_y: f32, frames: usize) -> Vec<Row> {
+        walk_profile(world_with_kerb(), start_y, frames)
+    }
+
+    /// One frame of a walked fixture: `(feet height, climb, steep support, walkable ground)`.
+    type Row = (f32, Option<f32>, bool, bool);
+
+    /// Walk the capsule into `world` and run `frames` consecutive **whole** grounded steps from
+    /// wherever the last one left it — the mover's own loop, so what these assert is the behaviour
+    /// on screen and not a single probe in isolation. Rows are `(feet height, climb, ride latch)`.
+    fn walk_profile(world: App, start_y: f32, frames: usize) -> Vec<Row> {
+        walk_from(world, Vec3::new(-1.0, start_y, 0.0), Vec3::X, frames)
+    }
+
+    /// The general walker: place the **feet** at `start`, push in `dir`, and run `frames` whole
+    /// grounded steps from wherever the last one left the body.
+    fn walk_from(mut world: App, start: Vec3, dir: Vec3, frames: usize) -> Vec<Row> {
+        world
             .world_mut()
             .run_system_once(move |ms: MoveAndSlide| {
                 let capsule = player_capsule();
@@ -961,21 +1128,266 @@ mod tests {
                         &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
                     )
                 };
-                let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 + start_y, 0.0);
-                let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
-                let mut center = start + Vec3::X * run;
+                let start = start + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
+                let run = cast(start, dir).map_or(1.0, |h| h.distance);
+                let mut center = start + dir * run;
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                // The steep-support bit is carried frame to frame exactly as the driver carries it
+                // (`Player::steep_support`), so the deep step-down reach is gated here the way it is
+                // on screen — a fixture that reset it every frame would test a mover we do not ship.
+                let mut support = Support::default();
                 (0..frames)
                     .map(|_| {
                         let g =
-                            grounded_step(&ms, &capsule, &filter, center, Vec3::X * 7.0, dt, 0.0);
+                            grounded_step(&ms, &capsule, &filter, center, dir * 7.0, dt, support);
                         center = g.center;
-                        // Feet height relative to the street, the climb, and the ride latch.
-                        (center.y - CAPSULE_HEIGHT * 0.5, g.climb, g.cone_riding)
+                        support.steep = g.steep_support;
+                        (
+                            center.y - CAPSULE_HEIGHT * 0.5,
+                            g.climb,
+                            g.steep_support,
+                            g.ground.is_some(),
+                        )
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap()
+    }
+
+    /// **Booty Bay's step** — a 0.40 yd *vertical* riser onto a ~22° ramp, profiled from the
+    /// director's steered capture at WoW `(-14314.3, 466.2, 18.5)`, collider `54046v0`: the wall
+    /// probe reads `n=(-0.96,+0.00,-0.27)` with the blocking edge `h=+0.40` above the feet, and the
+    /// surface ahead runs `+0.35:+0.40/+0.93` … `+1.40:+0.82/+0.93`.
+    ///
+    /// The riser is tilted by 0.002 yd across its 0.40 of rise for one reason: a *perfectly* axis-
+    /// aligned quad computes a normal whose `y` is ±0 on a float coin flip, and this fixture must
+    /// pin the ride, not that coin flip. `an_exactly_vertical_riser_still_certifies` owns the flip.
+    fn world_with_vertical_step() -> App {
+        const PROFILE: [(f32, f32); 4] = [(-2.0, 0.0), (0.30, 0.0), (0.302, 0.40), (3.0, 1.48)];
+        world_from_profile(&PROFILE)
+    }
+
+    #[test]
+    fn a_vertical_step_is_climbed_not_stalled() {
+        // The 1123 regression the capture caught. A 0.40 yd rise is inside [`FOOT_CONE_HEIGHT`], so
+        // it rides — and against a *vertical* riser a capsule hangs clear of everything below, so
+        // the election snap saw the street a full ride beneath it and pulled the body back down
+        // every frame. Certified `COMMIT dy=+0.439` on every one, and stalled at +0.020 forever.
+        let frames = walk_profile(world_with_vertical_step(), 0.0, 6);
+        let top = frames.last().unwrap().0;
+        assert!(
+            top > 0.40,
+            "the body must finish on the step, not stalled below it: {frames:?}"
+        );
+        // Monotone: a ride that is undone and re-earned reads as a judder, which is what the
+        // director would see even if the body eventually arrived.
+        for w in frames.windows(2) {
+            assert!(
+                w[1].0 >= w[0].0 - 1.0e-3,
+                "the climb must never go backwards: {frames:?}"
+            );
+        }
+        assert!(
+            frames[0].0 < 0.40,
+            "…and it is still a ride, not a one-frame pop: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn a_tall_step_behind_an_unwalkable_face_is_climbed() {
+        // Stormwind, WoW `(-8427.4, 607.4, 95.1)`, collider `14282v1` — the director's second
+        // capture. A 0.91 yd step whose face is a 66° bevel for most of a yard before the flat top
+        // begins, so it defeated **both** of the old budgets at once: the top is above 0209's 0.7
+        // rise ceiling, and 1121's one-radius advance put the settle probe still over the bevel,
+        // where the walkable gate correctly refused it. The captured ladder is unanimous —
+        // `STEEP fwd0.31 ny+0.41` at every rung out to 1.20.
+        const P: [(f32, f32); 4] = [(-2.0, -0.02), (0.28, -0.02), (0.694, 0.91), (3.0, 0.91)];
+        let frames = walk_profile(world_from_profile(&P), -0.02, 8);
+        assert!(
+            frames.last().unwrap().0 > 0.88,
+            "the body must finish on the 0.91 yd top: {frames:?}"
+        );
+        for w in frames.windows(2) {
+            assert!(
+                w[1].0 >= w[0].0 - 1.0e-3,
+                "the climb must never go backwards: {frames:?}"
+            );
+        }
+        // The blocking edge is low on the bevel, inside the cone, so this rides — six frames of
+        // smooth diagonal rather than a yard-high teleport.
+        assert!(
+            frames[0].0 < 0.3,
+            "a 0.91 yd gain in one frame is the teleport 1126 exists to avoid: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn stepping_off_a_kerb_follows_the_surface_down() {
+        // Decision 1127, and the exact frame the director's capture caught: walking *off* the same
+        // Stormwind kerb the down-probe finds only its ~61° riser, and refusing that outright left
+        // the body at full height while its forward speed carried it past the edge — one frame of
+        // `dy=+0.000 dx=0.118` with the surface 0.162 below, then eighteen airborne frames landing
+        // 2.1 yd downrange. The dive.
+        //
+        // **Support** is the thing to assert, because losing it *is* the dive: the caller turns an
+        // unsupported frame into gravity, and everything after that is an arc no snap can undo.
+        let frames = walk_from(world_with_kerb(), Vec3::new(1.6, 0.28, 0.0), Vec3::NEG_X, 8);
+        for (i, f) in frames.iter().enumerate() {
+            assert!(
+                f.2 || f.3,
+                "frame {i} left the surface entirely — that is the dive: {frames:?}"
+            );
+        }
+        assert!(
+            frames.last().unwrap().0 < 0.05,
+            "the walk-off must reach the street: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn a_face_steeper_than_the_cone_still_descends_what_it_can() {
+        // The "only sometimes" case. A face steeper than the cone cannot be followed exactly, and the
+        // question is what the mover does with the part it *can* follow. The reference descends
+        // `min(clearance, cap)` unconditionally and only then decides it is falling; the first cut of
+        // 1127 descended the clearance **or nothing**, so a surface a hair steeper than the cone
+        // dived — eight takeoffs in one capture, each missing the bound by 0.001–0.019.
+        //
+        // 66° face (`ny ≈ 0.41`, the captured value), walked off at a run: the first frame past the
+        // lip must give up most of a cone's worth of height, not hold its own.
+        const P: [(f32, f32); 4] = [(-2.0, 0.0), (0.60, 0.0), (1.0, -0.91), (3.0, -0.91)];
+        // (`walk_from`'s approach cast falls back to a yard when nothing blocks — there is no wall
+        // to stop against here — so the start is placed a yard short of the lip on purpose.)
+        let frames = walk_from(
+            world_from_profile(&P),
+            Vec3::new(-0.6, 0.0, 0.0),
+            Vec3::X,
+            5,
+        );
+        let cone = TRAVEL_60FPS * STEP_SLOPE_RATIO;
+        let biggest = frames
+            .windows(2)
+            .map(|w| w[0].0 - w[1].0)
+            .fold(frames[0].0.abs(), f32::max);
+        assert!(
+            biggest > cone * 0.5,
+            "some frame past the lip must follow the face down rather than hold height: \
+             {frames:?} (best drop {biggest:.3}, a cone's worth is {cone:.3})"
+        );
+    }
+
+    #[test]
+    fn a_ledge_deeper_than_the_probe_is_a_fall_not_an_absorbed_step() {
+        // **The pin on decision 1129's reach.** A 1.2 yd sheer drop — deeper than the step-down probe
+        // can see, shallower than the 2.028 yd of flat extra depth the probe used to carry. Under the
+        // old reach the snap found the lower floor from the top of the ledge and absorbed the whole
+        // drop in ONE frame, still walkably grounded the entire way: a downward teleport, and the
+        // step-up teleport's exact mirror.
+        //
+        // What must happen instead is what the reference does: the body leaves the ground before it
+        // reaches the bottom, and the gap is a fall. So — **an airborne frame must come first.**
+        // (This test fails on the pre-1129 reach, which is the only reason it is worth having.)
+        const P: [(f32, f32); 4] = [(-2.0, 0.0), (0.60, 0.0), (0.62, -1.20), (3.0, -1.20)];
+        let frames = walk_from(
+            world_from_profile(&P),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::X,
+            12,
+        );
+        // The measurable form: **no single frame may give up an unbounded amount of height.** A
+        // frame's descent is the slide's own drop plus the step-down snap's, each bounded by what
+        // the foot cone could rest on over one frame's travel — so two cone-reaches is a generous
+        // ceiling. The corrected mover clears it easily (its worst frame here gives up 0.257); the
+        // old reach blows straight through, holding height to the lip and then taking the remaining
+        // **1.126 yd in a single frame**, walkably grounded at both ends of it.
+        let bound = 2.0 * (TRAVEL_60FPS * STEP_SLOPE_RATIO + STEP_SNAP_SLACK);
+        let worst = frames
+            .windows(2)
+            .map(|w| w[0].0 - w[1].0)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst <= bound,
+            "no frame may drop more than {bound:.3} yd; worst was {worst:.3}\n{frames:#?}"
+        );
+    }
+
+    #[test]
+    fn an_idle_body_is_not_pulled_down_through_open_air() {
+        // The other half of the same reach. A motionless body a yard above flat ground: standing
+        // still the probe is the slack and nothing more, so it must find nothing, keep its height,
+        // and be handed to gravity. The old reach was `slack + 2.028` even at a dead stop — it found
+        // the floor a yard down and yanked the body onto it, one frame, no fall.
+        const P: [(f32, f32); 2] = [(-2.0, 0.0), (3.0, 0.0)];
+        let (dy, ground) = world_from_profile(&P)
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                let center = Vec3::new(0.0, CAPSULE_HEIGHT * 0.5 + 1.0, 0.0);
+                let g = grounded_step(
+                    &ms,
+                    &capsule,
+                    &filter,
+                    center,
+                    Vec3::ZERO,
+                    dt,
+                    Support::default(),
+                );
+                (g.center.y - center.y, g.ground.is_some())
+            })
+            .unwrap();
+        assert!(!ground, "a body a yard up is standing on nothing");
+        assert!(
+            dy.abs() <= STEP_SNAP_SLACK * 2.0,
+            "it must keep its height and fall, not be snapped a yard down: dy={dy:+.3}"
+        );
+    }
+
+    #[test]
+    fn a_motionless_body_is_never_perched_on_a_steep_slope() {
+        // A 60° bank. Walk onto it, then STOP. Standing still the cone bound collapses to the slack,
+        // so does the steep support quietly keep a motionless body perched on it?
+        const P: [(f32, f32); 3] = [(-2.0, 0.0), (0.0, 0.0), (3.0, -5.196)];
+        let out = world_from_profile(&P)
+            .world_mut()
+            .run_system_once(move |ms: MoveAndSlide| {
+                let capsule = player_capsule();
+                let filter = SpatialQueryFilter::default();
+                let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
+                let mut center = Vec3::new(0.6, CAPSULE_HEIGHT * 0.5 - 1.039, 0.0);
+                let mut rows = Vec::new();
+                let mut support = Support::default();
+                for i in 0..4 {
+                    // Two frames walking, then two standing perfectly still.
+                    let v = if i < 2 { Vec3::X * 7.0 } else { Vec3::ZERO };
+                    let g = grounded_step(&ms, &capsule, &filter, center, v, dt, support);
+                    center = g.center;
+                    support.steep = g.steep_support;
+                    rows.push((v.length() > 0.0, g.steep_support));
+                }
+                rows
+            })
+            .unwrap();
+        for (moving, supported) in out {
+            assert!(
+                moving || !supported,
+                "a motionless body must never hold a steep face — it slides off"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exactly_vertical_riser_still_certifies() {
+        // The other half of the same capture. An axis-aligned riser's normal has `y = ±0` depending
+        // on nothing but the cross product's rounding, and an overhang guard written as `n.y < 0.0`
+        // refuses the negative half — reading a plain vertical step as a ceiling. Half the world's
+        // risers, decided by a float sign.
+        const PROFILE: [(f32, f32); 4] = [(-2.0, 0.0), (0.30, 0.0), (0.30, 0.40), (3.0, 1.48)];
+        let frames = walk_profile(world_from_profile(&PROFILE), 0.0, 6);
+        assert!(
+            frames.last().unwrap().0 > 0.40,
+            "an exactly-vertical riser must climb exactly like a tilted one: {frames:?}"
+        );
     }
 
     #[test]
@@ -988,7 +1400,7 @@ mod tests {
         let frames = walk_kerb(0.0, 4);
         let arrived = frames
             .iter()
-            .position(|&(y, _, _)| (y - 0.28).abs() < 0.03)
+            .position(|&(y, _, _, _)| (y - 0.28).abs() < 0.03)
             .expect("the ride should put the feet on the 0.28 yd tread");
         assert!(
             arrived > 0,
@@ -1011,7 +1423,7 @@ mod tests {
         // the cone band too). Read the same geometry from a full kerb below — a 2.3 yd wall — and
         // nothing may rise: no ride, no climb, no lift, just the slide. This is the check that
         // stops the ride becoming a ladder up every cliff in the world.
-        for (y, climb, riding) in walk_kerb(-2.0, 4) {
+        for (y, climb, riding, _) in walk_kerb(-2.0, 4) {
             assert!(!riding, "a wall must never start a cone ride");
             assert!(climb.is_none(), "a wall must never register a climb");
             assert!(
