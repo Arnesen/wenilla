@@ -621,9 +621,17 @@ fn the_state_filter_survives_a_restart_through_the_saved_variables_file() {
     s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
     assert_eq!(s.eval::<i64>("return GetNumTrainerServices()").unwrap(), 6);
 
-    // The XML declared exactly the reference's three globals, in its order.
+    // This XML declared exactly the reference's three globals, in its order. Filtered to the
+    // trainer's own prefix because the registry belongs to the whole UI: every file the harness
+    // loads adds its own (GameTooltip.xml's SHOW_NEWBIE_TIPS since 1136), and what the OTHER files
+    // register is not this test's business.
+    let declared: Vec<String> = s
+        .saved_variable_names()
+        .into_iter()
+        .filter(|n| n.starts_with("TRAINER_"))
+        .collect();
     assert_eq!(
-        s.saved_variable_names(),
+        declared,
         vec![
             "TRAINER_FILTER_AVAILABLE",
             "TRAINER_FILTER_UNAVAILABLE",

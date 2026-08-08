@@ -10,8 +10,13 @@
 //! cameraPitch 13.449968
 //! ```
 //!
-//! Two keys, LF, six decimals, trailing newline; **no yaw** and none of the `SaveView(2..5)` custom
-//! views. benilla writes the same two keys in the same order to
+//! Two keys, LF, six decimals, trailing newline — VERIFIED at the writer (`0x50c4d0`) and reader
+//! (`0x50c5a0`), decision 1138. **No yaw**: the live heading is never persisted anywhere. (The
+//! `SaveView(2..5)` custom views *are* persisted, but as archived `config.wtf` CVars —
+//! `cameraYaw`/`cameraYawA..D` and their Distance/Pitch — not in this file. 1131 §3 said otherwise;
+//! 1138 corrects it. benilla has no `SaveView`, so nothing is owed here yet.)
+//!
+//! benilla writes the same two keys in the same order to
 //! `benilla/camera/<realm>-<character>.txt` ([`crate::local_state::camera_character_path`]) — a file
 //! that stays readable beside its ancestor.
 //!
@@ -23,7 +28,11 @@
 //! **Written at the session edges** — `OnExit(InWorld)` (a `/logout`, a disconnect) and `AppExit`
 //! (quit) — the same two edges the saved variables use ([`crate::ui_saved`]), and the same posture
 //! the reference has for its caches: no autosave, no dirty bit. A camera pose is a thing you settle
-//! into once and leave; there is nothing an intermediate write would preserve.
+//! into once and leave; there is nothing an intermediate write would preserve. The reference's write
+//! set is the UI-shutdown root set at `0x490bd0`, which is *wider* than ours — it also fires on
+//! `/reload`, `/console reloadUI` and a UI-scale change, each of which then reads the file straight
+//! back (1138). benilla has no UI reload, so there is no edge here to miss; when one lands it joins
+//! this list.
 //!
 //! **Read once**, when the roster names the character we are entering the world as — the macro/
 //! binding load's own seam ([`crate::ui_macro::identity`]). Absent file = the shipped defaults, which
@@ -54,18 +63,17 @@ pub(super) struct CameraPoseFile {
 
 /// The persisted `cameraPitch` → the live [`FlyCam::pitch`].
 ///
-/// The file's unit is **degrees**, and its sign is the camera's *elevation above the character*:
-/// positive = the camera sits high and looks down, which is the ordinary over-the-shoulder view.
-/// [`FlyCam::pitch`] is radians on the client's *internal* convention, where **negative = looking
-/// down** (wow-re `follow-camera`, VERIFIED at the pitch integrate `0x510120` and the ±89.00° clamp
-/// `0x8089d8`) — so the two are negatives of each other.
+/// **Both halves VERIFIED** at the bytes (decision 1138; 1131 §2.1 had the right conversion for the
+/// wrong reason). The file is **degrees**, and the client's own reader is a pure unit conversion
+/// with **no sign flip**: `deg × 0.01745329238474369` at `0x50c6f9` on load, `× 57.295780181884766`
+/// at `0x50c54f` on save. The client's internal pitch is itself **positive = looking down** — its
+/// forward is `(cos y·cos p, sin y·cos p, −sin p)` with `eye = pivot − dist·forward`, so `p > 0`
+/// puts the eye above the pivot.
 ///
-/// **Unit and sign are INFERRED** (decision 1131), from the reference's own 26-character `WTF`
-/// tree: its saved pitches run ≈ −4.7 … +27.6, overwhelmingly positive, and the view those players
-/// left behind is the normal one — slightly *above* the character, looking *down*. Under the
-/// internal sign that distribution would mean two dozen players all left the camera pointing at the
-/// sky. A wow-re cross-check of the file's reader/writer is dispatched; if it corrects this, these
-/// two functions are the whole of the change.
+/// The negation below is therefore ours, not the file's: **[`FlyCam::pitch`] is positive = looking
+/// UP.** Our forward is `Quat::from_euler(YXZ, yaw, pitch, 0)` applied to `−Z`, whose Y component is
+/// `+sin(pitch)`, and `camera::control` seats the camera at `pivot − forward·distance`. Two opposite
+/// conventions meeting, which is exactly what these two functions exist to bridge.
 fn pitch_from_file(degrees: f32) -> f32 {
     (-degrees.to_radians()).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT)
 }
@@ -86,8 +94,16 @@ fn render(distance: f32, pitch_radians: f32) -> String {
 
 /// Parse the two keys out of the file, each independently optional — a file with only one line
 /// restores only that half, and an unknown key is skipped rather than failing the parse (a later
-/// build's third key must not cost this build its zoom). Returns `(distance, pitch_radians)`, both
-/// already clamped into the ranges the live camera enforces, so a hand edit lands somewhere legal.
+/// build's third key must not cost this build its zoom). Returns `(distance, pitch_radians)`.
+///
+/// Permissive in the same three ways the reference's reader is (`0x50c5a0`, VERIFIED 1138): keys
+/// match **case-insensitively** (`SStrCmpI 0x64a4c0`), either line ending is fine (its tokenizer
+/// splits on `"\r\n"`; `str::lines` strips the `\r`), and an unrecognised key is silently skipped.
+///
+/// One deliberate divergence: **we clamp, the client does not.** Its load path writes the parsed
+/// float straight into the camera with no bound, so a hand-edited `cameraPitch 400` survives there
+/// until the next mouse-look re-clamps it. Ours lands somewhere legal instead — a file is not a
+/// gesture, and there is nothing to be faithful *to* in an unreachable pose.
 fn parse(text: &str) -> (Option<f32>, Option<f32>) {
     let (mut distance, mut pitch) = (None, None);
     for line in text.lines() {
@@ -102,10 +118,10 @@ fn parse(text: &str) -> (Option<f32>, Option<f32>) {
         if !v.is_finite() {
             continue;
         }
-        match key {
-            KEY_DISTANCE => distance = Some(v.clamp(CAM_DIST_MIN, CAM_DIST_MAX)),
-            KEY_PITCH => pitch = Some(pitch_from_file(v)),
-            _ => {}
+        if key.eq_ignore_ascii_case(KEY_DISTANCE) {
+            distance = Some(v.clamp(CAM_DIST_MIN, CAM_DIST_MAX));
+        } else if key.eq_ignore_ascii_case(KEY_PITCH) {
+            pitch = Some(pitch_from_file(v));
         }
     }
     (distance, pitch)
@@ -231,10 +247,13 @@ mod tests {
     }
 
     /// Round trip: what we write parses back to what we had, through the sign flip and both clamps.
+    ///
+    /// The first assertion is the one 1138 settled: the file's positive pitch is the client's
+    /// *looking down*, and OUR pitch is positive-up, so the stored sign must invert on the way in.
     #[test]
     fn the_pose_round_trips() {
         let pitch = pitch_from_file(24.2);
-        assert!(pitch < 0.0, "a positive saved pitch looks DOWN internally");
+        assert!(pitch < 0.0, "a positive saved pitch looks DOWN for us");
         let (d, p) = parse(&render(17.509_666, pitch));
         assert_eq!(d, Some(17.509_666));
         assert!((p.unwrap() - pitch).abs() < 1e-4, "{p:?} vs {pitch}");
@@ -258,5 +277,15 @@ mod tests {
         );
         let (d, p) = parse("cameraDistance banana\nfutureKey 1\n\ncameraPitch nan\n");
         assert_eq!((d, p), (None, None), "junk and unknown keys are skipped");
+    }
+
+    /// The reference's reader is case-insensitive on the key (`SStrCmpI`) and takes either line
+    /// ending (1138). Only a hand edit can produce either — our own writer is exact — but matching
+    /// it costs nothing and a file we refuse to read is a pose silently lost.
+    #[test]
+    fn a_hand_written_file_may_shout_its_keys_and_use_crlf() {
+        let (d, p) = parse("CAMERADISTANCE 12.5\r\ncamerapitch 10.0\r\n");
+        assert_eq!(d, Some(12.5));
+        assert!((p.unwrap() - pitch_from_file(10.0)).abs() < 1e-6);
     }
 }

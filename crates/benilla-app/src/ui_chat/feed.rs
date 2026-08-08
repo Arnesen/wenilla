@@ -278,6 +278,7 @@ pub(super) fn feed_chat(
     mut channels: ResMut<ChannelState>,
     mut names: ResMut<NameCache>,
     mut bubbles: ResMut<crate::chat_bubble::BubbleQueue>,
+    bubble_cfg: Res<crate::chat_bubble::BubbleConfig>,
     commands: Res<NetCommands>,
     time: Res<Time>,
     // The `$`-macro subject seam: monster/BG lines expand against the guid the line is ADDRESSED to,
@@ -442,7 +443,7 @@ pub(super) fn feed_chat(
                     // The bubble shows the same expanded line the feed does — the reference's
                     // bubble spawn sits inside this same SMSG display path, downstream of the
                     // expander, so a `$n` must never survive into it either.
-                    bubbles.push(msg.sender_guid, kind, &text);
+                    bubbles.push(&bubble_cfg, msg.sender_guid, kind, &text);
                 }
             }
             Pending::Notice {

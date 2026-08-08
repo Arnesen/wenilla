@@ -8,14 +8,21 @@
         engine exposes the one Era aura function instead (decision 0068), so the handlers here read
         UnitBuff/UnitDebuff and the countdown rides GetTime(), exactly as the cast bar does.
 
-        SCOPE (decision 0255): the LOCAL PLAYER only, durations always visible. The reference's
-        temporary-weapon-enchant frame (TemporaryEnchantFrame / TempEnchant1-2) and the
-        SHOW_BUFF_DURATIONS CVar toggle are deliberately out — there is no weapon-enchant wire yet,
-        and the director's call is "durations visible, no setting". So the bar is hard-anchored to the
-        reference's *durations-shown, no-enchant* steady state: 16 buff buttons (two rows of 8) above 8
-        debuff buttons, rows 45px apart (30px icon + a 15px duration gutter), right-aligned under the
-        minimap at UIParent TOPRIGHT (-175,-13) — the point the reference's BuffFrame snaps to when no
-        temp enchant is present (BuffFrame_Enchant_OnUpdate's no-enchant branch).
+        SCOPE (decision 0255): the LOCAL PLAYER only. The reference's temporary-weapon-enchant frame
+        (TemporaryEnchantFrame / TempEnchant1-2) is deliberately out — there is no weapon-enchant wire
+        yet — so the bar is anchored to the reference's *no-enchant* steady state: 16 buff buttons
+        (two rows of 8) above 8 debuff buttons, right-aligned under the minimap at UIParent TOPRIGHT
+        (-175,-13), the point the reference's BuffFrame snaps to when no temp enchant is present
+        (BuffFrame_Enchant_OnUpdate's no-enchant branch).
+
+        DURATIONS ARE A SETTING NOW (decision 1139). 0255 shipped the durations-shown geometry
+        unconditionally — the director's call, and there was no panel to hang a switch on — and said
+        in as many words that "if a CVar system later arrives, the geometry is already the branch it
+        would select". It arrived, as the saved-variable store rather than a CVar (1134): the store
+        below is SHOW_BUFF_DURATIONS, the Interface page's Buff Durations row drives it, and BOTH of
+        the reference's geometries are live again — rows at y = 0/−45/−90 with timers, 0/−35/−70
+        without (BenillaBuffButtons_UpdatePositions). Our default is "1", the reference's "0": the
+        director's look is what the bar comes up wearing, and what Defaults walks it back to.
 
         ORDER IS STATE. The list UnitBuff/UnitDebuff enumerate is the app's insertion-ordered display
         cache (crate::ui_aura, decision 0257): a new aura appends at the end, a dropped one repacks —
@@ -40,11 +47,20 @@
         wire's cancelable bit didn't allow, so a debuff right-click is a silent no-op, as in 1.12.
 
         DEVIATIONS from the reference .lua (noted, not bugs):
-        - The count and duration FontStrings are BLANKED ("") rather than hidden — an empty string
-          draws nothing, same look. A site that predates region Show/Hide (region.rs has the real
-          pair now, and the loader honours hidden= on regions); equivalent either way.
+        - The count FontString is BLANKED ("") rather than hidden — an empty string draws nothing,
+          same look. A site that predates region Show/Hide; equivalent either way. (The DURATION
+          strings used the same shortcut until 1139 and no longer do: a hidden setting has to hide
+          a region, not write an empty string into a visible one.)
     -->
     <Script><![CDATA[
+        -- The timer switch (ref uvar, UIOptionsFrame.lua l.21/104 — its `default = "0"`). This
+        -- assignment is the ONLY statement of our default: the saved chunk executes over it at load
+        -- (1128) and the Interface page's row captures it as its Defaults value at OnLoad, which
+        -- runs first. "1" because the director asked for visible timers (0255) — the divergence is
+        -- written down once, here, and Defaults honours it rather than the reference's table.
+        SHOW_BUFF_DURATIONS = "1"
+        RegisterForSave("SHOW_BUFF_DURATIONS")
+
         -- The reference's flash cadence + thresholds (BuffFrame.lua l.1-14). An aura in its last 31s
         -- pulses between full and BUFF_MIN_ALPHA; its duration text turns highlight-white under 60s.
         BUFF_FLASH_TIME_ON = 0.75
@@ -93,6 +109,26 @@
             for i = 0, 23 do
                 getglobal("BuffButton" .. i .. "Duration"):SetPoint("TOP", "BuffButton" .. i, "BOTTOM", 0, 0)
             end
+            BenillaBuffButtons_UpdatePositions()
+        end
+
+        -- BuffButtons_UpdatePositions (BuffFrame.lua l.152-160): the ROW PITCH depends on whether a
+        -- timer sits under each icon. Shown, the three rows land at y = 0/−45/−90 (a 30px icon + a
+        -- 15px gutter); hidden, at 0/−35/−70 — the icons close up to the same 5px the columns use.
+        -- The reference reaches those two geometries by re-anchoring through its TempEnchant chain,
+        -- which we do not have; same two numbers, our own anchors, and SetPoint on a point already
+        -- held overwrites it (layout.rs — the client's own SetPoint law).
+        --
+        -- This is the Buff Durations row's `applyFunc`, and the ONLY thing the setting needs applied:
+        -- the timer text itself is re-decided every frame by the poll below, so a click changes what
+        -- the next frame draws without anyone telling it. Geometry is the part that is stated once.
+        function BenillaBuffButtons_UpdatePositions()
+            local gutter = -5
+            if SHOW_BUFF_DURATIONS == "1" then
+                gutter = -15
+            end
+            BuffButton8:SetPoint("TOP", "BuffButton0", "BOTTOM", 0, gutter)
+            BuffButton16:SetPoint("TOPRIGHT", "BuffButton8", "BOTTOMRIGHT", 0, gutter)
         end
 
         function BenillaBuffFrame_OnUpdate(elapsed)
@@ -149,13 +185,31 @@
         -- tint. Those are what the aura-change event exists for. The countdown is NOT cached here —
         -- see BenillaBuffButton_OnUpdate. No aura ⇒ hide the button (which hides its icon/border
         -- with it) and blank its duration string.
+        -- BuffFrame_UpdateDuration (BuffFrame.lua l.247-259), gate and all: the timer draws only when
+        -- the setting is on AND there is a live one. `timeLeft` nil covers both of the other cases —
+        -- no aura in this slot, and a permanent aura (no duration on the wire). Hidden, not blanked:
+        -- see the header's deviation note.
+        function BenillaBuffButton_SetDuration(button, timeLeft)
+            local durationText = getglobal(button:GetName() .. "Duration")
+            if SHOW_BUFF_DURATIONS ~= "1" or not timeLeft then
+                durationText:Hide()
+                return
+            end
+            durationText:SetText(SecondsToTimeAbbrev(timeLeft))
+            if timeLeft < BUFF_DURATION_WARNING_TIME then
+                durationText:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            else
+                durationText:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+            end
+            durationText:Show()
+        end
+
         function BenillaBuffButton_Update(button)
             local name, icon, count, debuffType = BenillaBuffButton_Aura(button)
 
-            local durationText = getglobal(button:GetName() .. "Duration")
             if not name then
                 button:Hide()
-                durationText:SetText("")
+                BenillaBuffButton_SetDuration(button, nil)
                 return
             end
             button:SetAlpha(1.0)
@@ -195,11 +249,10 @@
         -- its icon did. Both were live defects; the poll is what makes them unrepresentable
         -- (decision 0846).
         function BenillaBuffButton_OnUpdate(button)
-            local durationText = getglobal(button:GetName() .. "Duration")
             local name, _, _, _, _, expirationTime = BenillaBuffButton_Aura(button)
             if not name or not expirationTime or expirationTime <= 0 then
                 button:SetAlpha(1.0)
-                durationText:SetText("")
+                BenillaBuffButton_SetDuration(button, nil)
                 return
             end
 
@@ -207,18 +260,15 @@
             if timeLeft < 0 then
                 timeLeft = 0
             end
+            -- The flash is NOT gated on the setting: the reference pulses a button in its last 31s
+            -- from BuffButton_OnUpdate, whether or not a timer is drawn under it (l.128-138), and
+            -- with the timers off it is the only thing left saying "about to drop".
             if timeLeft < BUFF_WARNING_TIME then
                 button:SetAlpha(BUFF_ALPHA_VALUE)
             else
                 button:SetAlpha(1.0)
             end
-
-            durationText:SetText(SecondsToTimeAbbrev(timeLeft))
-            if timeLeft < BUFF_DURATION_WARNING_TIME then
-                durationText:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
-            else
-                durationText:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-            end
+            BenillaBuffButton_SetDuration(button, timeLeft)
         end
 
         -- Right-click cancels (BuffButton_OnClick → CancelPlayerBuff). Resolve within the button's own

@@ -767,6 +767,11 @@ pub(crate) struct AnimDriver {
     /// airborne frame — the MSG_MOVE_JUMP-vs-StartFalling distinction the real client carries as
     /// an event, read off the launch velocity in our flag-collapsed machine. Stale on the ground.
     jump_arc: bool,
+    /// Vertical speed as of last frame — the **launch** detector behind [`Self::jump_arc`]. A jump
+    /// out of a one-frame micro-detachment never toggles the FALLING bit (land and relaunch inside
+    /// one frame), so the bit's edge cannot be the only place the arc is classified; a rise past
+    /// `JUMP_ARC_MIN_UP` from below is the launch itself, and nothing but a jump produces one.
+    last_vertical_speed: f32,
     /// FALLING was set last frame — marks the arc edges: takeoff (decide [`Self::jump_arc`]) and
     /// the landing of a bracket-less step-off fall (which must still run the `0x602c60` land pick
     /// even though no Special drove the arc).
@@ -903,6 +908,7 @@ impl Default for AnimDriver {
             overlay_fade: None,
             wound: None,
             jump_arc: false,
+            last_vertical_speed: 0.0,
             was_falling: false,
             deferred: None,
             loop_window: None,

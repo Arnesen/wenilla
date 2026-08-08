@@ -85,18 +85,19 @@ pub(crate) mod cmd {
     pub(crate) const OPEN_CHAT: Cmd = Cmd(12);
     pub(crate) const OPEN_CHAT_SLASH: Cmd = Cmd(13);
     pub(crate) const REPLY: Cmd = Cmd(17);
-    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = Cmd(50);
-    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = Cmd(51);
-    pub(crate) const NAMEPLATES: Cmd = Cmd(62);
-    pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(63);
-    pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(64);
-    pub(crate) const ATTACK_TARGET: Cmd = Cmd(65);
+    pub(crate) const TARGET_NEAREST_ENEMY: Cmd = Cmd(51);
+    pub(crate) const TARGET_PREVIOUS_ENEMY: Cmd = Cmd(52);
+    pub(crate) const NAMEPLATES: Cmd = Cmd(63);
+    pub(crate) const FRIEND_NAMEPLATES: Cmd = Cmd(64);
+    pub(crate) const ALL_NAMEPLATES: Cmd = Cmd(65);
+    pub(crate) const ATTACK_TARGET: Cmd = Cmd(66);
     // These three shift whenever a row lands ahead of them in SPECS (1057's `TOGGLECHARACTER3`
-    // moved them 86/87/88 → 87/88/89). `the_cmd_handles_index_their_rows` is what makes that
-    // loud and cheap instead of silent: it names the handle and the row it actually points at.
-    pub(crate) const TOGGLE_UI: Cmd = Cmd(87);
-    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(88);
-    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(89);
+    // moved them 86/87/88 → 87/88/89; 1136's `TOGGLEACTIONBARLOCK` → 88/89/90).
+    // `the_cmd_handles_index_their_rows` is what makes that loud and cheap instead of silent: it
+    // names the handle and the row it actually points at.
+    pub(crate) const TOGGLE_UI: Cmd = Cmd(88);
+    pub(crate) const CAMERA_ZOOM_IN: Cmd = Cmd(89);
+    pub(crate) const CAMERA_ZOOM_OUT: Cmd = Cmd(90);
 }
 
 /// The registry, 1.12 `Bindings.xml` order. Sub-tables (action buttons, shapeshift, raid
@@ -443,6 +444,22 @@ pub(crate) static SPECS: &[Spec] = &[
             "BenillaPetActionButtonUp(10)"
         ),
         Some("CTRL-0"),
+        None
+    ),
+    // The action-bar lock (decision 1136), the ref's own binding body verbatim (Bindings.xml:433-
+    // 439) — it flips the `LOCK_ACTIONBAR` uvar `ActionBar.xml` declares, the same global the
+    // Options window's Action Bars row writes. It sits here because the reference files it under
+    // this header (l.433 carries no `header=`, so it inherits l.121's ACTIONBAR), and it ships
+    // **unbound**: no `TOGGLEACTIONBARLOCK` line in any of the install's three
+    // `bindings-cache.wtf` files, which is also what the option's own tooltip implies ("can be
+    // bound to a function key in the keybindings interface").
+    spec!(
+        "TOGGLEACTIONBARLOCK",
+        ACTIONBAR,
+        Kind::Edge(
+            r#"if LOCK_ACTIONBAR == "1" then LOCK_ACTIONBAR = "0" else LOCK_ACTIONBAR = "1" end"#
+        ),
+        None,
         None
     ),
     // ── Targeting (BINDING_HEADER_TARGETING) ────────────────────────────────────────────

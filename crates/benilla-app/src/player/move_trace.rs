@@ -190,7 +190,12 @@ pub(super) fn frame(f: Frame) {
     let left = f
         .snap
         .and_then(|(_, hit)| hit)
-        .is_some_and(|(_, ny)| ny < super::GROUND_COS)
+        // **A face the body is touching is not a face it left.** The steep hit must be at a
+        // *distance* — `d = 0.000` is the body resting flush against a bank, sliding along it, which
+        // is the ordinary rub the mover is built to do and which reads identically on every other
+        // term here (`dy = 0`, forward travel, a steep normal below). Eighteen of those in one
+        // hillside capture buried the one real signature this marker exists to name.
+        .is_some_and(|(dist, ny)| ny < super::GROUND_COS && dist > 1.0e-3)
         // **Flat is the signature — not "anything that isn't descending".** A dive frame is one that
         // travels forward and goes *nowhere* vertically while a steep surface sits below it. Written
         // as `dy > -eps` this also swallows every frame that is climbing, where not descending is

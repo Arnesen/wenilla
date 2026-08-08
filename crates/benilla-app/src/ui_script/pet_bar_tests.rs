@@ -483,6 +483,57 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
     assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
 }
 
+/// The pet bar honours **Lock ActionBars** too (decision 1136) — the reference's second consumer of
+/// the same uvar (`PetActionBarFrame.lua:270/278`), reading the global `ActionBar.xml` declares.
+/// Both drag ends refuse while locked; the shift-click pick-up above stays live, exactly as the
+/// reference leaves it (l.253-255).
+#[test]
+fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+
+    s.run(r#"LOCK_ACTIONBAR = "1""#).unwrap();
+    s.run("BenillaPetActionButton_OnDragStart(BenillaPetActionButton4)")
+        .unwrap();
+    assert!(
+        s.take_pet_set_actions().is_empty(),
+        "a locked bar sends nothing — the slot was never picked up"
+    );
+    assert!(s.eval::<bool>("return GetCursorInfo() == nil").unwrap());
+
+    // Shift-click is still the way through, and then the drop is refused too while locked.
+    s.set_modifiers(true, false, false);
+    s.run("BenillaPetActionButton_OnClick(BenillaPetActionButton4, \"LeftButton\")")
+        .unwrap();
+    s.set_modifiers(false, false, false);
+    assert_eq!(
+        s.take_pet_set_actions(),
+        vec![vec![(3, CLAW_WORD & 0xFFFF_0000)]],
+        "shift-click picked it up despite the lock"
+    );
+    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+        .unwrap();
+    assert!(
+        s.take_pet_set_actions().is_empty(),
+        "…and a locked slot will not take the drop"
+    );
+
+    s.run(r#"LOCK_ACTIONBAR = "0""#).unwrap();
+    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+        .unwrap();
+    assert_eq!(
+        s.take_pet_set_actions(),
+        vec![vec![(4, CLAW_WORD)]],
+        "unlocked, the same drop lands"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// A shift-click is the same pick-up, whichever mouse button carried it — the reference's own fork
 /// puts shift above the left/right split, so it never toggles autocast by accident.
 #[test]

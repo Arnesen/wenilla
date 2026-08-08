@@ -206,11 +206,11 @@ fn a_timed_aura_counts_down_and_a_permanent_one_shows_no_timer() {
     );
     frame(&mut s, 0.1);
 
-    assert_eq!(
-        text(&s, "BuffButton0Duration"),
-        "",
+    assert!(
+        !shown(&s, "BuffButton0Duration"),
         "a permanent aura shows no timer (our 'until cancelled')"
     );
+    assert!(shown(&s, "BuffButton1Duration"));
     assert_eq!(
         text(&s, "BuffButton1Duration"),
         "2 m",
@@ -315,11 +315,13 @@ fn an_emptied_bar_hides_every_button() {
     frame(&mut s, 0.1);
     assert!(shown(&s, "BuffButton0"), "shown while the aura is up");
 
-    // The aura drops: the feed pushes an empty list and re-fires. The button hides, timer blanks.
+    // The aura drops: the feed pushes an empty list and re-fires. The button hides, and so does its
+    // timer — a HIDDEN region since 1139, where it used to be blanked, so the text it last drew is
+    // stale and beside the point; what the bar promises is that nothing paints.
     push(&mut s, vec![]);
     frame(&mut s, 0.1);
     assert!(!shown(&s, "BuffButton0"), "hidden once the aura is gone");
-    assert_eq!(text(&s, "BuffButton0Duration"), "");
+    assert!(!shown(&s, "BuffButton0Duration"));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -374,7 +376,7 @@ fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
     // where the duration packet's stamp lands a frame later than the descriptor delta.
     s.set_auras("player", Some(vec![mark(0.0)])); // icon up, no duration joined yet
     frame(&mut s, 0.1);
-    assert_eq!(text(&s, "BuffButton0Duration"), "", "no timer yet");
+    assert!(!shown(&s, "BuffButton0Duration"), "no timer yet");
     s.set_auras("player", Some(vec![mark(60.0)])); // the stamp joins, still no event
     frame(&mut s, 0.1);
     assert_eq!(
@@ -382,5 +384,61 @@ fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
         "59 s",
         "a duration that lands after the icon still reaches the bar"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **`SHOW_BUFF_DURATIONS`** (decision 1139) — 0255 shipped the durations-shown geometry with no
+/// switch because there was no panel to hang one on, and said the other branch was already there
+/// waiting. This is it: the global (ours "1", the reference's "0") hides the timer text and closes
+/// the 15px gutter each row leaves for it, down to the 5px the columns use. What it does NOT touch
+/// is the warning flash — with the numbers gone, the pulse is the only thing left saying an aura is
+/// about to drop, and the reference pulses from `BuffButton_OnUpdate` regardless of the setting.
+#[test]
+fn the_duration_switch_hides_the_timers_and_closes_their_gutter() {
+    let mut s = harness();
+    push(
+        &mut s,
+        vec![aura(
+            1126,
+            "Mark of the Wild",
+            "Interface\\Icons\\Spell_Nature_Regeneration",
+            true,
+            1,
+            None,
+            20.0, // inside the 31s warning window, so the flash is live either way
+            true,
+        )],
+    );
+    frame(&mut s, 0.1);
+    assert!(shown(&s, "BuffButton0Duration"), "timers on by default");
+    assert_eq!(text(&s, "BuffButton0Duration"), "19 s");
+    s.resolve();
+    let shown_gap = s
+        .eval::<f64>("return BuffButton0:GetBottom() - BuffButton8:GetTop()")
+        .unwrap();
+    assert!((shown_gap - 15.0).abs() < 1e-3, "gutter: {shown_gap}");
+
+    // The switch, applied the way the options row applies it.
+    s.run("SHOW_BUFF_DURATIONS = \"0\"; BenillaBuffButtons_UpdatePositions()")
+        .unwrap();
+    frame(&mut s, 0.1);
+    assert!(!shown(&s, "BuffButton0Duration"), "no timer drawn");
+    assert!(shown(&s, "BuffButton0"), "the icon stays");
+    s.resolve();
+    let hidden_gap = s
+        .eval::<f64>("return BuffButton0:GetBottom() - BuffButton8:GetTop()")
+        .unwrap();
+    assert!((hidden_gap - 5.0).abs() < 1e-3, "gutter: {hidden_gap}");
+    assert!(
+        alpha(&s, "BuffButton0") < 1.0,
+        "the last-31s pulse is not gated on the timers"
+    );
+
+    // And back: the text is re-written from the poll, not from anything it kept.
+    s.run("SHOW_BUFF_DURATIONS = \"1\"; BenillaBuffButtons_UpdatePositions()")
+        .unwrap();
+    frame(&mut s, 0.1);
+    assert!(shown(&s, "BuffButton0Duration"));
+    assert_eq!(text(&s, "BuffButton0Duration"), "19 s");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

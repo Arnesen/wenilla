@@ -1331,6 +1331,72 @@ fn jumper(app: &mut App) -> Entity {
         .id()
 }
 
+/// **The director's hillside jump** (decision 1137): a run across broken ground micro-detaches for
+/// a frame, and the jump pressed in that window lands and relaunches inside one frame — FALLING
+/// never drops, so the old FALLING-edge sample never re-ran and the arc kept the detachment's
+/// `jump_arc = false`. The body sailed upward playing the run gait.
+#[test]
+fn a_jump_out_of_a_micro_detachment_still_enters_the_jump_bracket() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update(); // settle: Stand
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    // One frame of detachment while running: FALLING with a *downward* speed is a step-off arc —
+    // no bracket, the gait freezes, which is correct on its own (decision 0868).
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING | move_flags::FORWARD,
+        speed: 7.0,
+        vertical_speed: -0.65,
+        ..Default::default()
+    });
+    app.update();
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Gait,
+        "a downward launch is a step-off: the gait holds"
+    );
+    // The jump fires out of that frame: the body lands and relaunches within the frame, so FALLING
+    // is set on this frame too and the bit never toggled. The launch is still a launch.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING | move_flags::FORWARD,
+        speed: 7.0,
+        vertical_speed: 7.96,
+        ..Default::default()
+    });
+    app.update();
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Entering(super::super::select::Special::Jump),
+        "the jump bracket enters even though FALLING never dropped"
+    );
+}
+
+/// The control on the launch rule: a step-off fall must stay a step-off fall for its whole arc.
+/// The gait freeze is the §5-verified behaviour (decision 0868) and the new edge must not reach
+/// into it — only a rise *past* the threshold is a launch, and a fall only ever accelerates
+/// downward.
+#[test]
+fn a_deepening_step_off_fall_never_becomes_a_jump() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    for vz in [-0.65_f32, -3.0, -7.4, -12.0] {
+        app.world_mut().entity_mut(unit).insert(MovementState {
+            flags: move_flags::FALLING | move_flags::FORWARD,
+            speed: 7.0,
+            vertical_speed: vz,
+            ..Default::default()
+        });
+        app.update();
+        assert_eq!(
+            mode(&app),
+            super::super::select::Mode::Gait,
+            "a step-off fall keeps its frozen gait at vz={vz}"
+        );
+    }
+}
+
 /// The ref's jump-in-place cast (decision 0864 — the report this pins): a cast id is CLASS_A
 /// but NOT COMBAT, so the airborne route test doesn't mask it — with no move bits it routes
 /// FULL-BODY and REPLACES the jump hang on bone 0 (the client's one-slot last-writer-wins; the

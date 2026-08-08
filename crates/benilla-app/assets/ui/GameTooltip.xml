@@ -32,10 +32,12 @@
         --     SHOW_NEWBIE_TIPS = "1"; RegisterForSave("SHOW_NEWBIE_TIPS");
         -- It is a FrameXML *uvar*, not a CVar, and 1.12 ships it ON — so the detailed second line
         -- IS the default reference tooltip, not an opt-in. (An earlier note in this corpus had this
-        -- backwards; decision 0661.) We ship no UIOptionsFrame and no saved variables, so the ref's
-        -- initial value is the whole story; the options panel takes ownership of this line the day
-        -- it lands.
+        -- backwards; decision 0661.) The options window's Interface page drives it now
+        -- (decision 1136), and the assignment below is the ONLY statement of the default: the saved
+        -- chunk executes over it at load (1128) and the row captures it as its Defaults value at
+        -- OnLoad — which runs first — so "1" is written down in exactly one place, here.
         SHOW_NEWBIE_TIPS = "1"
+        RegisterForSave("SHOW_NEWBIE_TIPS")
 
         -- The bracketed name out of an item hyperlink "|cff…|Hitem:117|h[Tough Jerky]|h|r"; if the
         -- string has no bracket it is already a plain name (the merchant/loot rows hand plain names).

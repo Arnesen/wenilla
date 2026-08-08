@@ -538,7 +538,22 @@ pub(super) fn drive_animations(
         // unlatched landing is a full no-op: the gait keeps rolling — decision 0187).
         let falling = mv.flags & move_flags::FALLING != 0;
         let was_falling = std::mem::replace(&mut drv.was_falling, falling);
-        if falling && !was_falling {
+        // **The edge is the LAUNCH, not the FALLING bit** (decision 1137). The bit's rising edge is
+        // the arc's start only when the body was on the ground the frame before, and on broken
+        // ground it often is not: a run across a hillside micro-detaches for a frame or two, and a
+        // jump pressed in that window lands and relaunches inside a single frame, with FALLING set
+        // continuously across the seam. The bit never toggles, the sample never runs, and the arc
+        // inherits `jump_arc = false` from the detachment — so a real jump plays the step-off
+        // freeze and the body sails upward still running. Seven of the nineteen jumps in the
+        // director's hillside capture took exactly that path (`grounded=0 vy=-0.65`, then
+        // `vy=+7.96` the next frame).
+        //
+        // A launch is visible in the quantity itself: nothing but a jump drives vertical speed
+        // *upward* past the threshold. The mover's own arc bookkeeping already agrees — a
+        // same-frame land+relaunch is a new arc there ([`crate::player::Player::advance_airborne_arc`]).
+        let prev_vertical = std::mem::replace(&mut drv.last_vertical_speed, mv.vertical_speed);
+        let launched = mv.vertical_speed > JUMP_ARC_MIN_UP && prev_vertical <= JUMP_ARC_MIN_UP;
+        if falling && (!was_falling || launched) {
             drv.jump_arc = mv.vertical_speed > JUMP_ARC_MIN_UP;
         }
         // The airborne-freeze's exact gate (`0x5fd8e8`, §5-arbitrated — decision 0868):

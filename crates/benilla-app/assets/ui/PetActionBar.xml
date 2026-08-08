@@ -207,8 +207,9 @@
             -- (PetActionButton_OnLoad l.234) — and unlike the action bar's, ALL THREE gestures here
             -- reach the same verb: the reference's OnClick-under-shift, OnDragStart and
             -- OnReceiveDrag all call PickupPetAction, which forks on whether the cursor is already
-            -- carrying. LOCK_ACTIONBAR stays the vanilla default (unlocked), so — as on ActionBar
-            -- — the ref's cvar guard is not reproduced and the drag is always live.
+            -- carrying. Both drag ends honour LOCK_ACTIONBAR since 1136 — the same uvar the main bar
+            -- declares (ActionBar.xml), which is the ref's own arrangement too: PetActionBarFrame.lua
+            -- reads a global UIOptionsFrame owns.
             button:RegisterForDrag("LeftButton", "RightButton")
             button.index = index
             button.icon = getglobal(button:GetName() .. "Icon")
@@ -273,12 +274,18 @@
         -- empty cursor it picks the slot up, with a pet payload already held it drops onto this
         -- slot. There is no separate "place" binding on this bar, which is also why a spell or an
         -- item can never land here — nothing but a pet slot produces the payload it accepts.
+        --
+        -- Both also honour the lock (the ref wraps each body in `if LOCK_ACTIONBAR ~= "1" then …`).
+        -- The shift-click in OnClick above is unguarded on this bar too, exactly as the reference
+        -- leaves it (l.253-255): the lock stops the drag, shift-click stays the way through.
         function BenillaPetActionButton_OnDragStart(button)
+            if LOCK_ACTIONBAR == "1" then return end
             PickupPetAction(button.index)
             BenillaPetActionBar_Update()
         end
 
         function BenillaPetActionButton_OnReceiveDrag(button)
+            if LOCK_ACTIONBAR == "1" then return end
             PickupPetAction(button.index)
             BenillaPetActionBar_Update()
         end

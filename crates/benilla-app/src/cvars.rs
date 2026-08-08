@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use crate::chat_bubble::BubbleConfig;
 use crate::clutter::ClutterConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
@@ -74,6 +75,12 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // the clutter-density knob — 0 is the client's bare frillDensity baseline (×1 = 16 visits),
     // each step +1×; the "2" default IS ClutterConfig's shipped ×3 (the reference's High).
     ("WorldDetail", "2"),
+    // The two chat-bubble switches (1139): 1.12's own registrar CVars over the bubble gate,
+    // which held them as `const bool` from 0598 until this window had a page for them.
+    // `ChatBubbles` is the reference's registered "1"; `ChatBubblesParty` is ON where the binary
+    // registers "0" — the director's `/p` ask, mirrored from BubbleConfig::default().
+    ("ChatBubbles", "1"),
+    ("ChatBubblesParty", "1"),
     // The minimap's two zoom indices (1131). Byte-verified 1.12 CVars, both registered `"3"`
     // (wow-re, at the `RegisterCVar 0x63db90` argument slot). No options row drives these — the
     // +/- buttons on the minimap do, through `Minimap:SetZoom`, exactly as in the reference, where
@@ -134,6 +141,7 @@ struct Knobs<'a> {
     names: &'a mut NameConfig,
     clutter: &'a mut ClutterConfig,
     minimap: &'a mut MinimapZoom,
+    bubbles: &'a mut BubbleConfig,
 }
 
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
@@ -160,6 +168,9 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
+        // The two bubble switches (1139) — flags, like every other pair here.
+        "chatbubbles" => knobs.bubbles.all = v != 0.0,
+        "chatbubblesparty" => knobs.bubbles.party = v != 0.0,
         // The panel's 0/1/2 lands as the density multiplier ×1/×2/×3; the clamp is the 1.12
         // slider's own range (an off-grid hand-edit rides between stops, like every slider).
         "worlddetail" => knobs.clutter.density = v.clamp(0.0, 2.0) + 1.0,
@@ -195,6 +206,7 @@ fn load_config(
     mut names: ResMut<NameConfig>,
     mut clutter: ResMut<ClutterConfig>,
     mut minimap: ResMut<MinimapZoom>,
+    mut bubbles: ResMut<BubbleConfig>,
 ) {
     let mut knobs = Knobs {
         sound: &mut sound,
@@ -206,6 +218,7 @@ fn load_config(
         names: &mut names,
         clutter: &mut clutter,
         minimap: &mut minimap,
+        bubbles: &mut bubbles,
     };
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
@@ -275,6 +288,7 @@ fn sync_cvars(
     mut names: ResMut<NameConfig>,
     mut clutter: ResMut<ClutterConfig>,
     mut minimap: ResMut<MinimapZoom>,
+    mut bubbles: ResMut<BubbleConfig>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -282,7 +296,7 @@ fn sync_cvars(
     if !persist.registered {
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 18] = [
+        let session: [(&str, String); 20] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -302,6 +316,8 @@ fn sync_cvars(
             // multiplier seeds off-grid honestly — the dropdown shows the raw number, checks
             // nothing (the 0959 out-of-range posture, dropdown-flavored).
             ("WorldDetail", (clutter.density - 1.0).to_string()),
+            ("ChatBubbles", flag(bubbles.all)),
+            ("ChatBubblesParty", flag(bubbles.party)),
             ("minimapZoom", minimap.outdoor.to_string()),
             ("minimapInsideZoom", minimap.inside.to_string()),
         ];
@@ -327,6 +343,7 @@ fn sync_cvars(
         names: &mut names,
         clutter: &mut clutter,
         minimap: &mut minimap,
+        bubbles: &mut bubbles,
     };
     for (name, value) in changes {
         if apply_to_knobs(&name, &value, &mut knobs) {
@@ -451,6 +468,11 @@ mod tests {
         // ClutterConfig::default() reads $WOW_CLUTTER_DENSITY; the registered default mirrors
         // the env-less ×3 literal (clutter.rs: "Default ×3 = High") on the panel's 0..2 scale.
         assert_eq!(d["WorldDetail"], 2.0);
+        // The bubble pair (1139) welds to BubbleConfig's defaults — including the "1" that
+        // deliberately disagrees with the binary's registered `ChatBubblesParty` "0" (0598).
+        let bubbles = BubbleConfig::default();
+        assert_eq!(d["ChatBubbles"] != 0.0, bubbles.all);
+        assert_eq!(d["ChatBubblesParty"] != 0.0, bubbles.party);
         // The minimap pair (1131) welds to the widget's own `MINIMAP_DEFAULT_ZOOM`, which is the
         // byte-verified registration default `"3"` — one truth, mirrored in three places.
         let zoom = MinimapZoom::default();
@@ -476,6 +498,7 @@ mod tests {
             fade_far: 70.0,
         };
         let mut minimap = MinimapZoom::default();
+        let mut bubbles = BubbleConfig::default();
         let mut knobs = Knobs {
             sound: &mut sound,
             scale: &mut scale,
@@ -486,6 +509,7 @@ mod tests {
             names: &mut names,
             clutter: &mut clutter,
             minimap: &mut minimap,
+            bubbles: &mut bubbles,
         };
         assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
         assert_eq!(knobs.sound.music, 0.7);
@@ -511,6 +535,11 @@ mod tests {
         assert!(!knobs.names.npc);
         assert!(apply_to_knobs("unitnameown", "1", &mut knobs));
         assert!(knobs.names.own);
+        // The bubble pair lands on the spawn gate's own knob (1139).
+        assert!(apply_to_knobs("ChatBubbles", "0", &mut knobs));
+        assert!(!knobs.bubbles.all);
+        assert!(apply_to_knobs("chatbubblesparty", "0", &mut knobs));
+        assert!(!knobs.bubbles.party);
         // WorldDetail: panel 0/1/2 → density ×1/×2/×3, clamped to the 1.12 slider's range.
         assert!(apply_to_knobs("WorldDetail", "0", &mut knobs));
         assert_eq!(knobs.clutter.density, 1.0);
@@ -586,6 +615,7 @@ mod tests {
             .init_resource::<NameConfig>()
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
+            .init_resource::<BubbleConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 
@@ -652,6 +682,7 @@ mod tests {
             .init_resource::<NameConfig>()
             .init_resource::<ClutterConfig>()
             .init_resource::<MinimapZoom>()
+            .init_resource::<BubbleConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app.update();

@@ -62,6 +62,16 @@
         ATTACK_BUTTON_FLASH_TIME = 0.4
         TOOLTIP_UPDATE_TIME = 0.2
 
+        -- "Lock ActionBars" (ref UIOptionsFrame.lua:102-103 — uvar LOCK_ACTIONBAR, default "0").
+        -- The reference declares it in its options window; ours lives with the bar it locks, which
+        -- is this codebase's rule for every stock global (1128/1134): the assignment sits beside its
+        -- consumers, and the options row CAPTURES it rather than restating a default of its own.
+        -- Read by the drag guards below and by the pet bar's (PetActionBar.xml, the ref's own second
+        -- consumer at PetActionBarFrame.lua:270/278); driven by the Action Bars page and by the
+        -- TOGGLEACTIONBARLOCK binding the option's tooltip promises (decision 1136).
+        LOCK_ACTIONBAR = "0"
+        RegisterForSave("LOCK_ACTIONBAR")
+
         -- CooldownFrame_SetTimer moved to Cooldown.xml (the ref's own file split) — the bag
         -- slots share it, so it loads before both consumers.
 
@@ -253,8 +263,8 @@
             -- by construction (OnClick/OnDragStart both call PickupAction; OnReceiveDrag calls
             -- PlaceAction — ref ActionBarFrame.xml:12-38). Both buttons drag, ref-verbatim too
             -- (l.108) — a started drag suppresses the click, so right-press-and-move relocates the
-            -- action while right-click-in-place still uses it. LOCK_ACTIONBAR stays the vanilla
-            -- default (unlocked), so unlike the ref's cvar guard, drag is always live here.
+            -- action while right-click-in-place still uses it. Both drag ends honour LOCK_ACTIONBAR
+            -- since 1136 — see the guards themselves for what the lock does and does not stop.
             button:RegisterForDrag("LeftButton", "RightButton")
             BenillaActionButton_Update(button)
         end
@@ -271,12 +281,19 @@
             BenillaActionButton_Update(button)
         end
 
+        -- The lock (ref ActionBarFrame.xml:23-38, both handlers wrapped in `if LOCK_ACTIONBAR ~= "1"
+        -- then … end`). Note what the reference does NOT guard, and neither do we: the shift-click
+        -- pick-up in OnClick above (its l.12-22 fork runs PickupAction unconditionally). So the lock
+        -- stops the *drag*, and shift-click stays the deliberate way to move an action with the bar
+        -- locked — which is what makes the setting usable rather than a wall.
         function BenillaActionButton_OnDragStart(button)
+            if LOCK_ACTIONBAR == "1" then return end
             PickupAction(BenillaActionButton_Action(button))
             BenillaActionButton_Update(button)
         end
 
         function BenillaActionButton_OnReceiveDrag(button)
+            if LOCK_ACTIONBAR == "1" then return end
             PlaceAction(BenillaActionButton_Action(button))
             BenillaActionButton_Update(button)
         end

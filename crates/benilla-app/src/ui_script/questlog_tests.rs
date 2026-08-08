@@ -531,6 +531,44 @@ fn progress_auto_watches_for_five_minutes() {
     assert!(s.errors().is_empty(), "expiry errors: {:?}", s.errors());
 }
 
+/// The flag that gates the above is the **reference's** uvar under the reference's name and value
+/// shape (decision 1136 — it was `BENILLA_AUTO_QUEST_WATCH`, a boolean, while nothing could change
+/// it): `AUTO_QUEST_WATCH`, a `"1"`/`"0"` string, which is what the Interface page's row writes.
+/// Off, progress no longer watches anything; back on, it does again.
+///
+/// The default asserted first is the one 1.12 *advertises* and does not deliver: it assigns the
+/// NUMBER `1` (UIOptionsFrame.lua:122) while every consumer compares `== "1"`, so the shipped
+/// client's auto-watch is dead until the player toggles the box. Ours ships the string.
+#[test]
+fn the_auto_watch_flag_is_the_references_uvar_and_gates_the_watch() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "QuestLogFrame.xml");
+    s.set_quest_log(eight_entries());
+    assert_eq!(s.eval::<String>("return AUTO_QUEST_WATCH").unwrap(), "1");
+
+    s.run(r#"AUTO_QUEST_WATCH = "0""#).unwrap();
+    s.fire_event(
+        "BENILLA_QUEST_PROGRESS",
+        vec![benilla_ui::script::ScriptValue::Int(1)],
+    );
+    assert!(
+        !s.eval::<bool>("return IsQuestWatched(1)").unwrap(),
+        "the flag off means progress watches nothing"
+    );
+
+    s.run(r#"AUTO_QUEST_WATCH = "1""#).unwrap();
+    s.fire_event(
+        "BENILLA_QUEST_PROGRESS",
+        vec![benilla_ui::script::ScriptValue::Int(1)],
+    );
+    assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
+    assert!(s.errors().is_empty(), "auto-watch errors: {:?}", s.errors());
+}
+
 /// The empty-log v1 simplification (this file's XML header comment): zero entries hides every row,
 /// disables Abandon, and shows the centered empty-state message instead of `EmptyQuestLogFrame`.
 #[test]

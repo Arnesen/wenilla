@@ -614,6 +614,21 @@
             },
             Graphics = { "RowUiScale", "RowWorldDetail" },
             Nameplates = { "RowPlayerNames", "RowNpcNames", "RowOwnName" },
+            -- The stock globals that were already defined AND consumed when 1134 opened the store
+            -- (1136; Buff Durations 1139), in the reference's own on-screen order — its Basic
+            -- Options anchor chain, Display block (CheckButton42 → 39 → 66) before Help (29).
+            Interface = {
+                "RowInstantQuestText", "RowBuffDurations", "RowAutoQuestWatch", "RowNewbieTips",
+            },
+            -- The two chat-bubble switches (decision 1139), in the reference's relative order —
+            -- its Advanced Options chat chain runs CheckButton37 → 46 (Loot Spam, no knob of ours)
+            -- → 38, so ours are adjacent with that gap named rather than silently closed.
+            Social = { "RowChatBubbles", "RowPartyChatBubbles" },
+            -- 1.12's Advanced Options "Action Bars" group is six rows; five of them are the
+            -- multibar show/hide toggles, which read `func = MultiBarN_IsVisible` — not a store at
+            -- all, and our two bottom multibars are always on (MultiBars.xml). So the honest page
+            -- is the sixth (decision 1136).
+            ActionBars = { "RowLockActionBar" },
             -- The floating-combat-text family (decision 1134), in the reference's own on-screen
             -- order — its AdvancedOptionsCombatText box's anchor chain, master → scroll mode →
             -- the twelve, NOT its check-button index order (which jumps 58→60→63…59→69).
@@ -695,6 +710,35 @@
             OptionsRow_OnLoad(row, nil, label, tip, child)
             row.uvar = uvar
             row.udefault = getglobal(uvar)
+        end
+
+        -- The other end of `applyFunc`, and the reason a saved "off" used to come back on
+        -- (decision 1139). A CVar row needs nothing here — the host reads its own table at boot.
+        -- A GLOBAL row does: the whole UI's XML runs BEFORE the saved chunk executes over it
+        -- (1128's load order), so every file-scope consumer already ran against the SHIPPED
+        -- default — CombatText_OnLoad armed six event registrations from SHOW_COMBAT_TEXT = "1",
+        -- BuffFrame seated its rows from the durations-shown geometry — and the saved value
+        -- landing afterwards changed the variable while leaving the world it configured alone.
+        --
+        -- 1.12 closes this with a hand-written ladder in UIOptionsFrame's VARIABLES_LOADED arm
+        -- (l.204-220, "Option specific function calls": BuffButtons_UpdatePositions, the
+        -- SIMPLE_CHAT/CHAT_LOCKED arms, MultiActionBar_ShowAllGrids). We already hold each side
+        -- effect on its own row, so the ladder is a walk: run every distinct applyFunc once, in
+        -- no particular order (they are independent by construction — each one re-derives one
+        -- feature's state from one global). A row whose defining file was not loaded has a nil
+        -- applyFunc and is skipped, which is what keeps a partial test harness honest.
+        function OptionsFrame_ApplySavedSettings()
+            local ran = {}
+            for key, rows in pairs(OPTIONS_PAGE_ROWS) do
+                for _, rkey in ipairs(rows) do
+                    local row = getglobal("OptionsFrameContainerBody" .. key .. rkey)
+                    local apply = row and row.applyFunc
+                    if apply and not ran[apply] then
+                        ran[apply] = 1
+                        apply()
+                    end
+                end
+            end
         end
 
         -- A slider row's own range and readout, when the template's 0..1 / 5% / percent (the
@@ -2183,6 +2227,147 @@
                                         </Frame>
                                     </Frames>
                                 </Frame>
+                                <!-- The ACTION BARS page (decision 1136). One row, because the
+                                     reference's group is the lock plus five multibar show/hide
+                                     toggles whose store is a `func`, not a uvar or a CVar — and our
+                                     two bottom multibars are unconditionally on. The lock itself
+                                     had to be BUILT before it could have a row: ActionBar.xml and
+                                     PetActionBar.xml now guard their drag ends on it, the way the
+                                     reference does. -->
+                                <Frame name="$parentActionBars" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowLockActionBar" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "LOCK_ACTIONBAR",
+                                                    "Lock ActionBars", "OPTION_TOOLTIP_LOCK_ACTIONBAR")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The INTERFACE page (decision 1136; the Buff Durations row is
+                                     1139) — the second store's second page, and the one 1134 §3
+                                     named as ready: stock globals already defined AND consumed,
+                                     needing only a row. Rows in the reference's own on-screen
+                                     order — Basic Options' anchor chain runs CheckButton42 → 39 →
+                                     62 → 66 in Display, then 29 in Help, and we hold all of those
+                                     but 62 (HIDE_OUTDOOR_WORLD_STATE: there is no zone-objective
+                                     tracker to hide). Labels and OPTION_TOOLTIP_* keys are its
+                                     GlobalStrings verbatim.
+
+                                     Only Buff Durations carries an `applyFunc`, and the split is
+                                     the honest one rather than an omission: the other three are
+                                     read at the moment their consumer acts — the tooltip as it is
+                                     built, the quest panel as it shows, the auto-watch as progress
+                                     arrives — so the write IS the apply. A setting is owed an
+                                     applyFunc exactly when something DERIVED from it is stated
+                                     once and kept: the buff bar's row pitch, the combat-text
+                                     family's event registrations. -->
+                                <Frame name="$parentInterface" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowInstantQuestText" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "QUEST_FADING_DISABLE",
+                                                    "Instant Quest Text", "OPTION_TOOLTIP_SHOW_QUEST_FADING")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The reference's own next link in that chain
+                                             (CheckButton39, anchored under 42), and the one row on
+                                             this page that DOES carry an applyFunc: the timer text
+                                             is re-decided by the bar's per-frame poll, but the row
+                                             PITCH is stated once and has to be re-stated when the
+                                             switch moves (decision 1139). -->
+                                        <Frame name="$parentRowBuffDurations" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowInstantQuestText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowInstantQuestText" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "SHOW_BUFF_DURATIONS",
+                                                    "Buff Durations", "OPTION_TOOLTIP_SHOW_BUFF_DURATION")
+                                                self.applyFunc = BenillaBuffButtons_UpdatePositions
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAutoQuestWatch" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowBuffDurations" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowBuffDurations" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "AUTO_QUEST_WATCH",
+                                                    "Automatic Quest Tracking", "OPTION_TOOLTIP_AUTO_QUEST_WATCH")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNewbieTips" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoQuestWatch" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoQuestWatch" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsGlobalRow_OnLoad(self, "SHOW_NEWBIE_TIPS",
+                                                    "Show Detailed Tooltips", "OPTION_TOOLTIP_SHOW_NEWBIE_TIPS")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
+                                <!-- The SOCIAL page (decision 1139) — the last category in this
+                                     window that opened onto nothing. Both rows are CVar rows, not
+                                     globals: `ChatBubbles`/`ChatBubblesParty` are 1.12's own
+                                     registrar CVars, and chat_bubble.rs held them as a pair of
+                                     `const bool` from 0598 — a gate transcribed faithfully with no
+                                     way to reach it, which is the same shape as the action-bar lock
+                                     and fixed the same way (the knob first, then the row).
+
+                                     1.12's own order, with one gap named: its Advanced Options chat
+                                     chain runs CheckButton37 (Chat Bubbles) → 46 (Loot Spam) → 38
+                                     (Party Chat Bubbles), and 46 is not ours to ship — no
+                                     `showLootSpam` knob exists. So these two are adjacent here and
+                                     in the reference's relative order. Neither is a dependency child:
+                                     the client gates party lines on their own CVar, so party bubbles
+                                     survive turning say/yell bubbles off. -->
+                                <Frame name="$parentSocial" hidden="true">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                        <Anchor point="BOTTOMRIGHT"/>
+                                    </Anchors>
+                                    <Frames>
+                                        <Frame name="$parentRowChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "ChatBubbles",
+                                                    "Show Chat Bubbles", "OPTION_TOOLTIP_CHAT_BUBBLES")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowPartyChatBubbles" inherits="OptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowChatBubbles" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowChatBubbles" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                OptionsRow_OnLoad(self, "ChatBubblesParty",
+                                                    "Show Party Chat Bubbles", "OPTION_TOOLTIP_PARTY_CHAT_BUBBLES")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                    </Frames>
+                                </Frame>
                                 <!-- The Nameplates page (0992 — the page 0952 promised when the
                                      category row joined): the three 1.12 UnitName* checkboxes over
                                      the overhead-name gates (nameplates.rs NameConfig), rows in
@@ -2482,6 +2667,24 @@
                                         getglobal(self:GetName() .. "Label"):SetText("Combat")
                                     </OnLoad></Scripts>
                                 </Button>
+                                <Button name="$parentSearchHeadActionBars" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "ActionBars"
+                                        getglobal(self:GetName() .. "Label"):SetText("Action Bars")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadInterface" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Interface"
+                                        getglobal(self:GetName() .. "Label"):SetText("Interface")
+                                    </OnLoad></Scripts>
+                                </Button>
+                                <Button name="$parentSearchHeadSocial" inherits="OptionsSearchHeadTemplate">
+                                    <Scripts><OnLoad>
+                                        self.categoryKey = "Social"
+                                        getglobal(self:GetName() .. "Label"):SetText("Social")
+                                    </OnLoad></Scripts>
+                                </Button>
                                 <Button name="$parentSearchHeadNameplates" inherits="OptionsSearchHeadTemplate">
                                     <Scripts><OnLoad>
                                         self.categoryKey = "Nameplates"
@@ -2658,6 +2861,17 @@
             </Button>
         </Frames>
         <Scripts>
+            <!-- The window is where the saved globals get applied, not just edited: the chunk
+                 lands after every file-scope consumer has already run (decision 1139). This is
+                 1.12's own seat for it — UIOptionsFrame registers the same event for the same
+                 reason — and the window is hidden at the time, which is the point: the event is
+                 the UI's, not the panel's. -->
+            <OnLoad>this:RegisterEvent("VARIABLES_LOADED")</OnLoad>
+            <OnEvent>
+                if event == "VARIABLES_LOADED" then
+                    OptionsFrame_ApplySavedSettings()
+                end
+            </OnEvent>
             <!-- Controls is the default page; a re-opened window keeps its last selection (the
                  era remembers too — Settings.OpenToCategory's default seat). The scale re-fits
                  on every show — the era panel manager re-runs checkFit the same way. -->

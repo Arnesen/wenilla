@@ -69,11 +69,28 @@ use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
 use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
 
-/// The two CVars (registrar `0x603280`): `ChatBubbles` ships "1"; `ChatBubblesParty` ships
-/// "0" — flipped ON here (the director's ask: `/p` bubbles), a deliberate deviation like
-/// [`crate::vplates::VPlateMode`]'s boot default.
-const CHAT_BUBBLES: bool = true;
-const CHAT_BUBBLES_PARTY: bool = true;
+/// The two CVars (registrar `0x603280`), host side. **Registered knobs since decision 1139** —
+/// they were a pair of `const bool` from 0598 until the options window had a Social page to put
+/// them on, which is exactly the shape 1134 calls a row over a frozen gate. The defaults are the
+/// values that were frozen: `ChatBubbles` the reference's own "1"; `ChatBubblesParty` flipped ON
+/// against the binary's "0" (the director's ask: `/p` bubbles), the same deliberate deviation
+/// [`crate::vplates::VPlateMode`]'s boot default carries.
+#[derive(Resource)]
+pub(crate) struct BubbleConfig {
+    /// `ChatBubbles` — say/yell and their monster variants.
+    pub(crate) all: bool,
+    /// `ChatBubblesParty` — party lines, which the client gates separately.
+    pub(crate) party: bool,
+}
+
+impl Default for BubbleConfig {
+    fn default() -> Self {
+        Self {
+            all: true,
+            party: true,
+        }
+    }
+}
 
 /// The bubble art (`0x4b0940` ctor) — the shared tooltip-family textures.
 const BG_TEXTURE: &str = "Interface\\Tooltips\\ChatBubble-Background";
@@ -109,11 +126,11 @@ const Z_TEXT: u64 = 3;
 /// PARTY selects `ChatBubblesParty`, every other bubbling kind `ChatBubbles` (`0x608b0d`).
 /// Guild/officer/whisper/emote are structurally implied by the byte gate but INFERRED on an
 /// OPEN remap (module doc) — out until a capture confirms.
-fn bubble_cvar(kind: ChatEventKind) -> Option<bool> {
+fn bubble_cvar(kind: ChatEventKind, cfg: &BubbleConfig) -> Option<bool> {
     use ChatEventKind as K;
     match kind {
-        K::Party => Some(CHAT_BUBBLES_PARTY),
-        K::Say | K::Yell | K::MonsterSay | K::MonsterYell => Some(CHAT_BUBBLES),
+        K::Party => Some(cfg.party),
+        K::Say | K::Yell | K::MonsterSay | K::MonsterYell => Some(cfg.all),
         _ => None,
     }
 }
@@ -202,9 +219,16 @@ pub(crate) struct BubbleQueue(Vec<(u64, ChatEventKind, String)>);
 
 impl BubbleQueue {
     /// Queue a routed wire line for a bubble. Drops non-bubbling kinds, disabled CVars, and
-    /// senderless lines here; the live-unit/range/plate gates run in the driver.
-    pub(crate) fn push(&mut self, sender_guid: u64, kind: ChatEventKind, text: &str) {
-        if sender_guid == 0 || !bubble_cvar(kind).unwrap_or(false) {
+    /// senderless lines here; the live-unit/range/plate gates run in the driver. The switch is
+    /// read at PUSH time, so a Social-page click takes the very next line either way.
+    pub(crate) fn push(
+        &mut self,
+        cfg: &BubbleConfig,
+        sender_guid: u64,
+        kind: ChatEventKind,
+        text: &str,
+    ) {
+        if sender_guid == 0 || !bubble_cvar(kind, cfg).unwrap_or(false) {
             return;
         }
         self.0.push((sender_guid, kind, text.to_string()));
@@ -556,6 +580,7 @@ pub(crate) struct ChatBubblePlugin;
 impl Plugin for ChatBubblePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BubbleQueue>()
+            .init_resource::<BubbleConfig>()
             .init_resource::<Bubbles>()
             .init_resource::<BubblesActive>()
             .add_systems(Startup, load_bubble_art.after(AssetSet::Open))
@@ -613,14 +638,20 @@ mod tests {
 
     /// The v1 kind set: say/yell + monster say/yell on `ChatBubbles`, party on
     /// `ChatBubblesParty` (benilla default ON — the 0598 deviation); everything else out
-    /// pending the OPEN remap capture.
+    /// pending the OPEN remap capture. And the two switches are genuinely separate: the client
+    /// gates party lines on their own CVar, so turning one off leaves the other bubbling.
     #[test]
     fn the_kind_set_is_the_uncontested_v1() {
         use ChatEventKind as K;
+        let on = BubbleConfig::default();
         for k in [K::Say, K::Yell, K::MonsterSay, K::MonsterYell] {
-            assert_eq!(bubble_cvar(k), Some(true));
+            assert_eq!(bubble_cvar(k, &on), Some(true));
         }
-        assert_eq!(bubble_cvar(K::Party), Some(true), "the director's /p ask");
+        assert_eq!(
+            bubble_cvar(K::Party, &on),
+            Some(true),
+            "the director's /p ask"
+        );
         for k in [
             K::Guild,
             K::Officer,
@@ -631,8 +662,29 @@ mod tests {
             K::Channel,
             K::MonsterEmote,
         ] {
-            assert_eq!(bubble_cvar(k), None, "{k:?} must not bubble in v1");
+            assert_eq!(bubble_cvar(k, &on), None, "{k:?} must not bubble in v1");
         }
+
+        let no_party = BubbleConfig {
+            all: true,
+            party: false,
+        };
+        assert_eq!(bubble_cvar(K::Party, &no_party), Some(false));
+        assert_eq!(
+            bubble_cvar(K::Say, &no_party),
+            Some(true),
+            "say is untouched"
+        );
+        let no_say = BubbleConfig {
+            all: false,
+            party: true,
+        };
+        assert_eq!(bubble_cvar(K::Say, &no_say), Some(false));
+        assert_eq!(
+            bubble_cvar(K::Party, &no_say),
+            Some(true),
+            "party has its own switch"
+        );
     }
 
     /// The border-unit lands the byte constants: 16 px at 1024-wide 4:3 (G44·16/(S·1024)

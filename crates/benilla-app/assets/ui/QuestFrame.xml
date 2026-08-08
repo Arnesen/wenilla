@@ -62,9 +62,10 @@
         window opening/closing does.
 
         Deviations (each cited again at its own widget below):
-          - `QUEST_FADING_DISABLE` (the ref's "Instant Quest Text" option) is pinned "1" — quest text
-            lands whole and the panel fade-ins skip; see the uvar's own comment below. The write-on
-            machinery itself (0132) is ref-verbatim and live behind the flag.
+          - `QUEST_FADING_DISABLE` (the ref's "Instant Quest Text" option) DEFAULTS "1" where the ref
+            defaults "0" — quest text lands whole and the panel fade-ins skip; see the uvar's own
+            comment below. The write-on machinery itself (0132) is ref-verbatim and live behind the
+            flag, and since decision 1136 the player can flip the flag on the Interface page.
           - No "Parchment"/"Book" material swap (`QuestFrame_SetMaterial`/`GetQuestBackgroundMaterial`)
             — this engine has no such Lua surface; the corner art below is the ref's Parchment skin only
             (already true of every window in this codebase).
@@ -93,9 +94,17 @@
         -- what the ref's instant mode actually does (see the OnShow arm below): it jams the
         -- reveal edge past the text rather than skipping the write-on, so the first OnUpdate
         -- tick plays one WriteQuest before the gradient runs off. Instant is one scribble, not
-        -- silence. The ref home for this uvar is the options window; it moves to a real options
-        -- surface when we build one.
+        -- silence.
+        --
+        -- The ref home for this uvar is the options window, and that is where it lives now: the
+        -- Interface page's "Instant Quest Text" row drives it (decision 1136), and this assignment
+        -- is the only place the default is written down. Note what that buys — our default is "1"
+        -- where 1.12's table says "0", and because the row CAPTURES its default here rather than
+        -- restating one, the Defaults button walks the page back to the director's pin, not to the
+        -- reference's. Registered for save on the line below, so a player who prefers the fade-in
+        -- keeps it (1128's load order: this assignment, then the saved chunk, then consumers).
         QUEST_FADING_DISABLE = "1"
+        RegisterForSave("QUEST_FADING_DISABLE")
 
         -- One quest-item row (kind = "choice"/"reward"/"required", 1-based `index`) — unchanged from
         -- before this pass; every panel's rows share it via `GetQuestItemInfo`.

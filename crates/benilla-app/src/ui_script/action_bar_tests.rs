@@ -410,6 +410,84 @@ fn shift_click_picks_up_not_uses() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// **Lock ActionBars** (decision 1136) — the `LOCK_ACTIONBAR` uvar the Options window's Action Bars
+/// row and the `TOGGLEACTIONBARLOCK` binding both write, guarding the two drag ends the way the
+/// reference does (ActionBarFrame.xml:23-38).
+///
+/// The teeth are the second half: the reference leaves the shift-click pick-up in `OnClick`
+/// UNGUARDED (l.12-22), so a locked bar still yields to the deliberate gesture. Guarding it too
+/// would be a "sensible" tightening that silently diverges — and would leave a locked bar with no
+/// way to rearrange it at all.
+#[test]
+fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    assert_eq!(
+        s.eval::<String>("return LOCK_ACTIONBAR").unwrap(),
+        "0",
+        "the bar ships unlocked, the reference's own default"
+    );
+
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_A".into()),
+            kind: 0x00,
+            action: 111,
+            count: 0,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.resolve();
+
+    s.run(r#"LOCK_ACTIONBAR = "1""#).unwrap();
+    s.run("BenillaActionButton_OnDragStart(BenillaActionButton1)")
+        .unwrap();
+    assert!(
+        s.cursor_payload().is_none(),
+        "a locked bar does not give the action up to a drag"
+    );
+    assert!(
+        s.eval::<bool>("return HasAction(1)").unwrap(),
+        "slot intact"
+    );
+    assert!(
+        s.take_action_sets().is_empty(),
+        "and nothing is sent to the server"
+    );
+
+    // Shift-click still picks up — the reference's unguarded fork, and the way out of a locked bar.
+    s.set_modifiers(true, false, false);
+    s.mouse_button(26.0, 22.0, "LeftButton", true);
+    s.mouse_button(26.0, 22.0, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    assert!(
+        s.cursor_payload().is_some(),
+        "shift-click is not what the lock stops"
+    );
+
+    // The receiving end is guarded too: the held action cannot be dropped back by a drag…
+    s.run("BenillaActionButton_OnReceiveDrag(BenillaActionButton1)")
+        .unwrap();
+    assert!(
+        s.cursor_payload().is_some(),
+        "a locked slot refuses the drop"
+    );
+    // …and unlocking makes both ends live again.
+    s.run(r#"LOCK_ACTIONBAR = "0""#).unwrap();
+    s.run("BenillaActionButton_OnReceiveDrag(BenillaActionButton1)")
+        .unwrap();
+    assert!(s.cursor_payload().is_none(), "unlocked, the drop lands");
+    assert_eq!(
+        s.take_action_sets(),
+        vec![(1, 0), (1, 111)],
+        "the shift-pickup's clear and the unlocked drop's set — and nothing from the two \
+         refused gestures between them"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// A physical drag from button 1 onto OCCUPIED button 2: the byte-verified action-bar hop (0218
 /// §4) — the displaced action lands on the cursor, TWO independent `action_sets` entries across
 /// the one gesture (0218 §4: "a drag-swap is two sends, never atomic").
