@@ -568,6 +568,7 @@ fn push_water_foam(
                 anchor: centroid / n as f32,
                 bias: FOAM_BIAS,
                 raster_bias: 0,
+                cam_relative: false,
                 // NEVER the chunk entity: a draw's probe identity must not own a registered
                 // mesh, or bevy's sorted-phase batcher claims the item and rewrites its
                 // `batch_range` (gpu_preprocessing.rs keys purely on `item.main_entity()`) —

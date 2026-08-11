@@ -142,6 +142,32 @@ fn first_invalid_group(path: &[f32]) -> Option<usize> {
     None
 }
 
+/// The mist's spawn accumulator — `acc := min(acc + dt·rate, MIST_CAP)` (`0x67b141`–`0x67b1aa`).
+///
+/// **This is the one precip layer whose density survives a frame-rate drop**, and the reason is
+/// this function. The drop kernels budget `rate · min(dt, 1/60)` and *discard* the remainder
+/// (verified: the constant at `0x80ffcc` has exactly six sites, one `fcomp`/`fld` pair per effect,
+/// and the count lands in a stack local that never persists) — so streaks and flakes thin in
+/// proportion to `fps/60`. The mist instead multiplies the **raw, uncapped** dt (`0xc62510` at
+/// `0x67b141`, absent from that six-site census), adds the carry, and stores it back
+/// (`0x67b172`), spending exactly one whole node per free slot (`0x67b261`: `fsub 1.0`) and
+/// keeping the fraction. A hitch therefore shifts the storm's **composition**, not just its
+/// density — the mist holds while the flakes thin.
+///
+/// The ceiling is `[mist+0x48]`, the **size field of the node container** at `mist+0x44`, written
+/// once from the ctor's 8th argument (`0x67a724`) which is `push 0x80` = **128 at all three call
+/// sites** (`0x674645` rain, `0x677448` snow, `0x679149` sand). It is a spiral-of-death guard and
+/// never a budget cap: the drain can only spend into a free slot and there are [`MIST_CAP`] of
+/// them, so 128 is the *smallest* ceiling that discards nothing the array could have absorbed.
+///
+/// benilla carried a bare, uncited `8.0` here. At the shader leg's 38 nodes/s that saturates after
+/// a **0.21 s** hitch (0.32 s at the CVar's default gain), against the binary's 3.4 s — quietly
+/// re-introducing the very frame-rate coupling the accumulator exists to prevent, and *only* on
+/// hitches. Decision 1159's follow-up.
+fn accrue(budget: f32, rate: f32, dt: f32) -> f32 {
+    (budget + rate * dt).min(MIST_CAP as f32)
+}
+
 /// The mist companion's frame: spawn-rate accumulator `budget += dt·2·max(density−0.5, 0)·K·Q`
 /// (the arg is the RAMPED effect density — the same `effect+0xd0` value the drop kinematics
 /// read, so the knee sits on the density, not the raw wire grade), one node per unit, cap 128;
@@ -181,7 +207,7 @@ pub(super) fn run_mist(
         WeatherKind::Snow => MIST_R_SNOW,
         _ => MIST_R_RAIN,
     };
-    mist.budget = (mist.budget + rate * dt).min(8.0);
+    mist.budget = accrue(mist.budget, rate, dt);
     let yaw = wind.mist_yaw();
     while mist.budget >= 1.0 && mist.nodes.len() < MIST_CAP {
         mist.budget -= 1.0;
@@ -303,6 +329,43 @@ pub(super) fn push_mist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mist accumulator carries a hitch's whole backlog, where the drop kernels would have
+    /// thrown it away — the one place precip density is frame-rate-independent.
+    ///
+    /// The old uncited `8.0` ceiling clipped that at a fifth of a second of stall. Pinned in the
+    /// units that matter: the shader leg's 38 nodes/s against the byte ceiling of [`MIST_CAP`].
+    #[test]
+    fn a_hitch_keeps_its_mist_backlog_up_to_the_node_capacity() {
+        let rate = 2.0 * (1.0 - 0.5) * 1.0 * MIST_Q; // full density, weatherDensity 3 → 38/s
+                                                     // A 1 s stall: every node owed is still owed afterwards. The retired `8.0` kept 8 of 38.
+        let after = accrue(0.0, rate, 1.0);
+        assert!(
+            (after - rate).abs() < 1e-3,
+            "a 1 s stall owes {rate} nodes, accumulator kept {after}"
+        );
+        // The ceiling is the node capacity, and it is a spiral guard, not a budget cap: nothing
+        // above `MIST_CAP` could ever be spent, because the drain needs a free slot per node.
+        assert_eq!(accrue(0.0, rate, 60.0), MIST_CAP as f32);
+        assert!(
+            accrue(0.0, rate, 3.0) < MIST_CAP as f32,
+            "a 3 s stall must still be carried whole — the binary's ceiling is 3.4 s at this rate"
+        );
+        // The fraction is kept across frames rather than truncated (`0x67b172` stores it back).
+        let dt = 1.0 / 60.0;
+        let (mut budget, mut spawned) = (0.0f32, 0u32);
+        for _ in 0..60 {
+            budget = accrue(budget, rate, dt);
+            while budget >= 1.0 {
+                budget -= 1.0;
+                spawned += 1;
+            }
+        }
+        assert_eq!(
+            spawned, 38,
+            "a second at 38 nodes/s must spawn 38, not 30-odd"
+        );
+    }
 
     /// The slope-validity walk (`0x67a8e1–0x67a933`): flat terrain passes whole; a roof-height
     /// jump within 3 cells of spawn stillbirths (the k=3 delta trips at m=0); farther jumps

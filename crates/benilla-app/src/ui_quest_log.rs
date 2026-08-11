@@ -34,6 +34,7 @@
 //! quests that are never in the log: auto-complete turn-ins. The state that backed it is gone
 //! rather than left dead, so the retired law can't be reached for by accident.
 
+use crate::ui_items::{count_of, InventoryScope};
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
@@ -142,6 +143,9 @@ impl Plugin for UiQuestLogPlugin {
                 Update,
                 (
                     feed_quest_log.in_set(UnitFeed).before(UiInput),
+                    // Before the script tick, so a QuestTimerFrame OnUpdate this frame reads this
+                    // frame's clock (the `minimap::feed_game_time` shape).
+                    feed_server_clock.before(UiInput),
                     drain_quest_log_abandons.after(UiInput),
                     drain_quest_log_collapses.after(UiInput),
                 ),
@@ -157,15 +161,22 @@ impl Plugin for UiQuestLogPlugin {
 /// live backpack+bags count, meaningful only for an item objective — [`crate::ui_items::count_of`]).
 ///
 /// The custom `text` field, when non-empty, REPLACES the auto-generated name in the line but keeps
-/// the "cur/req" suffix — INTERIM: the real client's exact custom-objective-text formatting is
-/// unpinned; a wow-re follow-up owns it.
+/// the "cur/req" suffix — CONFIRMED since (wow-re `ui/scratch/quest-leaderboard-law.md`: a
+/// creature objective carrying `ObjectiveText[i]` formats with `QUEST_OBJECTS_FOUND "%s: %d/%d"`,
+/// not the "slain" key, and that text IS the name — while `type` still answers `"monster"`).
+///
+/// **Known-wrong (decision 1156, not yet corrected):** `finished` must be `cur >= req` and NOTHING
+/// else. The whole-quest COMPLETE bit is read exactly once in the reference binding, by the `event`
+/// line, where it is that line's only predicate (`0x4e02a2`); or-ing it in here marks every
+/// objective finished the moment the quest completes. The fix must land WITH [`count_of`]'s scope
+/// widening (1156) — alone, it would render a banked-item quest's lines unfinished under a
+/// COMPLETE quest.
 fn objective_line(
     obj: &QuestObjective,
     counter: u8,
     creature_name: Option<&str>,
     item_name: Option<&str>,
     bag_count: u32,
-    quest_complete: bool,
 ) -> Option<QuestLogObjectiveView> {
     const PLACEHOLDER: &str = "...";
     if obj.creature_or_go != 0 && obj.required_count > 0 {
@@ -187,7 +198,9 @@ fn objective_line(
         return Some(QuestLogObjectiveView {
             text,
             kind: kind.into(),
-            finished: quest_complete || cur >= req,
+            finished: cur >= req,
+            cur,
+            req,
         });
     }
     if obj.item_id != 0 && obj.item_count > 0 {
@@ -201,7 +214,9 @@ fn objective_line(
         return Some(QuestLogObjectiveView {
             text,
             kind: "item".into(),
-            finished: quest_complete || cur >= req,
+            finished: cur >= req,
+            cur,
+            req,
         });
     }
     None
@@ -268,7 +283,6 @@ fn build_objectives(
     names: &mut NameCache,
     commands: &NetCommands,
 ) -> Vec<QuestLogObjectiveView> {
-    let quest_complete = log_slot.state & quest_slot_state::COMPLETE != 0;
     let mut objectives = Vec::with_capacity(template.objectives.len());
     for (i, obj) in template.objectives.iter().enumerate() {
         let is_go = obj.creature_or_go & GO_OBJECTIVE_BIT != 0;
@@ -287,7 +301,7 @@ fn build_objectives(
             })
             .flatten();
         let bag_count = if obj.item_id != 0 {
-            crate::ui_items::count_of(store, items, obj.item_id)
+            count_of(store, items, obj.item_id, InventoryScope::QUEST_ITEMS)
         } else {
             0
         };
@@ -297,7 +311,6 @@ fn build_objectives(
             creature_name.as_deref(),
             item_name.as_deref(),
             bag_count,
-            quest_complete,
         ) {
             objectives.push(line);
         }
@@ -371,6 +384,27 @@ fn remap_selection(old: &[QuestLogEntryView], new: &[QuestLogEntryView], sel: u3
         .position(|e| !e.is_header && e.quest_id == prev.quest_id)
         .map(|i| i as u32 + 1)
         .unwrap_or(0)
+}
+
+/// Push the server's wall clock into the VM every frame (decision 1150) — the number every
+/// countdown binding subtracts against.
+///
+/// Every frame, not on change: it is a *clock*, so "changed" is always, and the whole point is that
+/// `GetQuestTimers()` answers a fresh value on each of the reference `QuestTimerFrame`'s OnUpdate
+/// calls. Cheap by construction — one scalar write, no event, no diff, nothing downstream unless
+/// some frame actually reads it.
+///
+/// Silent before the first `SMSG_QUERY_TIME_RESPONSE` (the world-enter query answers within a round
+/// trip). The bindings then report *no* timer rather than a guessed one — see
+/// `benilla_ui::script::quest_log::seconds_left`.
+fn feed_server_clock(
+    script: Option<NonSendMut<UiScript>>,
+    clock: Res<crate::net::ServerWallClock>,
+) {
+    let (Some(mut script), Some(now)) = (script, clock.now_unix()) else {
+        return;
+    };
+    script.set_server_unix_time(now);
 }
 
 /// Read the self player's `PLAYER_QUEST_LOG` descriptor slots each frame, resolve entries/detail,
@@ -467,6 +501,7 @@ fn feed_quest_log(
             is_header: true,
             collapsed,
             complete: 0,
+            timer: 0, // a header row is not a quest and never carries a timer
             objectives: Vec::new(),
         });
         entry_slots.push(None);
@@ -501,6 +536,11 @@ fn feed_quest_log(
                 is_header: false,
                 collapsed: false,
                 complete,
+                // The slot's raw deadline (absolute unix seconds; 0 = untimed) — carried, never
+                // converted here. The countdown is subtracted per Lua call against the server
+                // clock, so this snapshot stays stable while the number on screen ticks
+                // (decision 1150).
+                timer: r.log_slot.timer,
                 objectives,
             });
             entry_slots.push(Some(r.slot));
@@ -557,7 +597,8 @@ fn feed_quest_log(
     //    (named divergence): the real client fires from the SMSG handlers and SKIPS a toast
     //    whose name is uncached (peek-only lookups); ours rides the log diff that feeds the
     //    lines, so the toast always agrees with the log (an in-flight name shows the log's own
-    //    placeholder, and its resolution can re-announce a line once).
+    //    placeholder). The diff announces an objective only when it ADVANCED — never on a
+    //    regression or a re-render ([`advanced`]; decision 1152 / B237).
     //  - QUEST_WATCH_UPDATE with the byte law's arg: the quest's **1-based WATCH-LIST position,
     //    0 when unwatched** (`0x703f50(0x221)` ← `0x4df880` — NOT the quest-log index the ref
     //    FrameXML's `AutoQuestWatch_Update(arg1)` treats it as; the shipped 1.12 auto-watch
@@ -599,7 +640,37 @@ fn feed_quest_log(
     *last = fresh;
 }
 
-/// One quest whose objectives moved between log states — the announce unit of [`feed_quest_log`].
+/// Did one objective **advance** between two log states — the announce predicate, and the whole of
+/// decision 1152's fix for B237.
+///
+/// The verified law (wow-re `object-layer/scratch/quest-update-ui-feedback-law.md`, handler
+/// `0x5e5ad0`) is that the progress toast fires from the server's *additive* announcements alone —
+/// `SMSG_QUESTUPDATE_ADD_KILL` (`ERR_QUEST_ADD_KILL_SII`) and `_ADD_ITEM`
+/// (`ERR_QUEST_ADD_ITEM_SII`, via `0x5dd060`). There is no removal opcode and no client-side
+/// re-announce, so the reference **cannot** toast on an objective going backwards. Ours rides the
+/// log diff (0340's named divergence — the same state feeds the toast and the log, so they always
+/// agree), which made the predicate "the rendered line changed" — strictly wider than the law, and
+/// wrong in exactly one director-visible way: a **turn-in** destroys the required items via an
+/// inline `SMSG_DESTROY_OBJECT` while the quest-log slot clears only in the tick's batched
+/// `SMSG_UPDATE_OBJECT` (vmangos `Player::RewardQuest` — `DestroyItemCount` at the top, the
+/// `SetQuestSlot(log_slot, 0)` ~40 lines later), so for a frame or two the quest is still in the
+/// log with an empty bag and the line dips to `0/req`. The old predicate read that dip as progress
+/// and popped "Rumbleshot's Ammo: 0/1" in the middle of the screen (B237).
+///
+/// Comparing the numbers rather than the string also drops the re-announce 0340 named as INTERIM
+/// (an item/creature **name** landing late rewrote `text` with `cur` unmoved, toasting the same
+/// line twice) — the reference skips a toast whose name is uncached outright, so suppressing the
+/// second is a step toward it, not away.
+///
+/// The whole-quest COMPLETE flip is deliberately NOT part of this: it is the reference's own
+/// separate `SMSG_QUESTUPDATE_COMPLETE` message (`ERR_QUEST_OBJECTIVE_COMPLETE_S`, one line for
+/// the quest), carried by [`QuestProgress::completed`].
+fn advanced(now: &QuestLogObjectiveView, was: &QuestLogObjectiveView) -> bool {
+    now.cur > was.cur
+}
+
+/// One quest whose objectives advanced between log states — the announce unit of
+/// [`feed_quest_log`].
 struct QuestProgress {
     /// The quest id (stable identity — the watch list is id-keyed).
     quest_id: u32,
@@ -607,13 +678,13 @@ struct QuestProgress {
     index: u32,
     /// The quest title (the COMPLETE toast's `%s`; empty falls to the UNKNOWN form).
     title: String,
-    /// The fresh text of every objective line that moved, in objective order.
+    /// The fresh text of every objective line that ADVANCED ([`advanced`]), in objective order.
     changed_lines: Vec<String>,
     /// The whole-quest COMPLETE state flipped on this diff (the `0x198` toast).
     completed: bool,
 }
 
-/// The quests present in BOTH states with a same-position objective line whose view changed, or
+/// The quests present in BOTH states with a same-position objective line that **advanced**, or
 /// whose whole-quest COMPLETE state flipped on — "achieved a quest objective", the trigger for
 /// the progress toasts and the auto-watch. A quest appearing (fresh accept — or its template
 /// resolving late and growing lines from zero) or leaving (turn-in/abandon) does NOT count: the
@@ -637,7 +708,7 @@ fn quests_with_progressed_objectives(
                 .objectives
                 .iter()
                 .zip(prev.objectives.iter())
-                .filter(|(now, was)| now != was)
+                .filter(|(now, was)| advanced(now, was))
                 .map(|(now, _)| now.text.clone())
                 .collect();
             let completed = e.complete == 1 && prev.complete != 1;
@@ -742,6 +813,7 @@ mod tests {
             is_header: true,
             collapsed: false,
             complete: 0,
+            timer: 0,
             objectives: Vec::new(),
         }
     }
@@ -755,6 +827,7 @@ mod tests {
             is_header: false,
             collapsed: false,
             complete: 0,
+            timer: 0,
             objectives: Vec::new(),
         }
     }
@@ -815,7 +888,7 @@ mod tests {
     #[test]
     fn creature_objective_with_resolved_name() {
         let o = obj(100, 10, 0, 0, "");
-        let line = objective_line(&o, 3, Some("Kobold Vermin"), None, 0, false).unwrap();
+        let line = objective_line(&o, 3, Some("Kobold Vermin"), None, 0).unwrap();
         assert_eq!(line.text, "Kobold Vermin slain: 3/10");
         assert_eq!(line.kind, "monster");
         assert!(!line.finished);
@@ -824,7 +897,7 @@ mod tests {
     #[test]
     fn creature_objective_in_flight_shows_a_placeholder() {
         let o = obj(100, 10, 0, 0, "");
-        let line = objective_line(&o, 0, None, None, 0, false).unwrap();
+        let line = objective_line(&o, 0, None, None, 0).unwrap();
         assert_eq!(line.text, "... slain: 0/10");
     }
 
@@ -832,7 +905,7 @@ mod tests {
     fn go_objective_falls_back_without_a_name_cache() {
         let go_id = ((-57i32) as u32) | 0x8000_0000;
         let o = obj(go_id, 1, 0, 0, "");
-        let line = objective_line(&o, 1, None, None, 0, false).unwrap();
+        let line = objective_line(&o, 1, None, None, 0).unwrap();
         assert_eq!(line.text, "Objective: 1/1");
         assert_eq!(line.kind, "object");
         assert!(line.finished); // cur (1) >= req (1)
@@ -842,7 +915,7 @@ mod tests {
     fn go_objective_prefers_its_custom_text_over_the_fallback() {
         let go_id = ((-57i32) as u32) | 0x8000_0000;
         let o = obj(go_id, 4, 0, 0, "Destroy the barricade");
-        let line = objective_line(&o, 1, None, None, 0, false).unwrap();
+        let line = objective_line(&o, 1, None, None, 0).unwrap();
         assert_eq!(line.text, "Destroy the barricade: 1/4");
         assert_eq!(line.kind, "object");
     }
@@ -851,7 +924,7 @@ mod tests {
     fn item_objective_counts_bags_and_clamps_to_required() {
         let o = obj(0, 0, 2000, 5, "");
         // 8 in the bags, but required is only 5 — the line clamps, doesn't overshoot.
-        let line = objective_line(&o, 0, None, Some("Kobold Ear"), 8, false).unwrap();
+        let line = objective_line(&o, 0, None, Some("Kobold Ear"), 8).unwrap();
         assert_eq!(line.text, "Kobold Ear: 5/5");
         assert_eq!(line.kind, "item");
         assert!(line.finished);
@@ -860,31 +933,37 @@ mod tests {
     #[test]
     fn item_objective_in_flight_shows_a_placeholder() {
         let o = obj(0, 0, 2000, 5, "");
-        let line = objective_line(&o, 0, None, None, 2, false).unwrap();
+        let line = objective_line(&o, 0, None, None, 2).unwrap();
         assert_eq!(line.text, "...: 2/5");
     }
 
     #[test]
     fn custom_text_overrides_the_creature_auto_line() {
         let o = obj(100, 10, 0, 0, "Slay the vermin");
-        let line = objective_line(&o, 4, Some("Kobold Vermin"), None, 0, false).unwrap();
+        let line = objective_line(&o, 4, Some("Kobold Vermin"), None, 0).unwrap();
         assert_eq!(line.text, "Slay the vermin: 4/10");
         assert_eq!(line.kind, "monster");
     }
 
+    /// Decision 1158, correcting 0109: a line's `finished` is `cur >= req` and **nothing else**.
+    /// The reference reads the whole-quest COMPLETE bit exactly once in `GetQuestLogLeaderBoard`
+    /// (`0x4e02a2`), in the `event` branch, where it is that line's only predicate — it is never
+    /// or-ed into a counted line's verdict (wow-re `ui/scratch/quest-leaderboard-law.md` §7). Only
+    /// the whole-quest turn-in predicate `0x4df580` reads the bit and the counts together.
     #[test]
-    fn whole_quest_complete_marks_every_line_finished_regardless_of_progress() {
+    fn a_complete_quest_does_not_mark_a_short_objective_finished() {
         let o = obj(100, 10, 0, 0, "");
-        // counter (1) is well short of required (10), but the quest's own state byte is COMPLETE.
-        let line = objective_line(&o, 1, Some("Kobold"), None, 0, true).unwrap();
+        // The counter (1) is well short of required (10). Whatever the quest's state byte says,
+        // THIS line is not finished.
+        let line = objective_line(&o, 1, Some("Kobold"), None, 0).unwrap();
         assert_eq!(line.text, "Kobold slain: 1/10");
-        assert!(line.finished);
+        assert!(!line.finished);
     }
 
     #[test]
     fn empty_objective_slot_emits_no_line() {
         let o = obj(0, 0, 0, 0, "");
-        assert!(objective_line(&o, 0, None, None, 0, false).is_none());
+        assert!(objective_line(&o, 0, None, None, 0).is_none());
     }
 
     // ── build_objectives: every occupied slot gets its own lines, not just the selection ────────────
@@ -955,8 +1034,11 @@ mod tests {
         assert_eq!(objectives[1].kind, "item");
     }
 
+    /// The 0109-era behaviour this inverts: a COMPLETE slot state used to mark every line
+    /// finished. Decision 1158 — the reference's per-line verdict never reads that bit
+    /// (`0x4e0110` §7); only the whole-quest turn-in predicate (`0x4df580`) combines the two.
     #[test]
-    fn build_objectives_marks_every_line_finished_when_the_slot_state_is_complete() {
+    fn a_complete_slot_state_does_not_finish_a_short_line() {
         let template = quest_template([
             obj(100, 10, 0, 0, ""),
             obj(0, 0, 0, 0, ""),
@@ -979,7 +1061,11 @@ mod tests {
             &template, &log_slot, &store, &mut items, &mut names, &commands,
         );
         assert_eq!(objectives.len(), 1);
-        assert!(objectives[0].finished);
+        assert!(
+            !objectives[0].finished,
+            "the counter is 1/10 — the quest's COMPLETE bit is not this line's business"
+        );
+        assert_eq!(objectives[0].text, "... slain: 1/10");
     }
 
     // ── money_split ──────────────────────────────────────────────────────────────────────────────
@@ -1007,13 +1093,24 @@ mod tests {
 
     // ── quests_with_progressed_objectives: the QUEST_WATCH_UPDATE per-quest trigger ─────────────────
 
+    /// A one-objective entry built the way [`objective_line`] builds one: the `cur`/`req` carried
+    /// on the view are READ BACK OUT of the line's own trailing `%d/%d`, so a fixture can never
+    /// claim a count its text disagrees with (the production invariant — the text is formatted
+    /// FROM the numbers).
     fn entry(quest_id: u32, objective_text: &str) -> QuestLogEntryView {
+        let (cur, req) = objective_text
+            .rsplit_once(' ')
+            .and_then(|(_, tail)| tail.split_once('/'))
+            .map(|(c, r)| (c.parse().unwrap(), r.parse().unwrap()))
+            .expect("fixture line must end in `cur/req`");
         QuestLogEntryView {
             quest_id,
             objectives: vec![QuestLogObjectiveView {
                 text: objective_text.into(),
                 kind: "monster".into(),
-                finished: false,
+                finished: cur >= req,
+                cur,
+                req,
             }],
             ..Default::default()
         }
@@ -1081,5 +1178,59 @@ mod tests {
         assert!(quests_with_progressed_objectives(&grown, &with_entry).is_empty());
         // A turn-in/abandon that removes the quest fires nothing either.
         assert!(quests_with_progressed_objectives(&with_entry, &empty).is_empty());
+    }
+
+    /// B237 / decision 1152 — the turn-in flash. `Player::RewardQuest` destroys the required items
+    /// at the top (an inline `SMSG_DESTROY_OBJECT`) and clears the log slot ~40 lines later (the
+    /// tick's batched `SMSG_UPDATE_OBJECT`), so the client holds a complete collect quest over an
+    /// empty bag for a frame or two and the line dips to `0/req`. That dip must announce NOTHING:
+    /// the reference's toast is `SMSG_QUESTUPDATE_ADD_ITEM` only, and no removal opcode exists.
+    #[test]
+    fn a_regressing_objective_never_announces() {
+        let held = state(vec![entry(313, "Rumbleshot's Ammo: 1/1")]);
+        let emptied = state(vec![entry(313, "Rumbleshot's Ammo: 0/1")]);
+        assert!(
+            quests_with_progressed_objectives(&held, &emptied).is_empty(),
+            "the bag emptying under a still-logged quest is not progress"
+        );
+        // The slot clearing on the next frame was already silent (the quest leaves the log).
+        assert!(quests_with_progressed_objectives(&emptied, &state(vec![])).is_empty());
+        // The control: the same quest actually being collected still announces.
+        let looted = state(vec![entry(313, "Rumbleshot's Ammo: 1/1")]);
+        assert_eq!(
+            quests_with_progressed_objectives(&emptied, &looted)[0].changed_lines,
+            ["Rumbleshot's Ammo: 1/1"]
+        );
+    }
+
+    /// The ask-once name caches answer a frame or more after the line first renders. That rewrite
+    /// moves `text` with the count standing still — the reference skips a toast whose name is
+    /// uncached outright, so re-announcing the line when the name lands (0340's named INTERIM) is
+    /// a toast the reference never fires.
+    #[test]
+    fn a_name_landing_late_does_not_re_announce() {
+        let placeholder = state(vec![entry(5, "...: 3/5")]);
+        let named = state(vec![entry(5, "Small Barnacled Clam: 3/5")]);
+        assert!(quests_with_progressed_objectives(&placeholder, &named).is_empty());
+    }
+
+    /// The whole-quest COMPLETE flip is its own reference message (`SMSG_QUESTUPDATE_COMPLETE` →
+    /// `ERR_QUEST_OBJECTIVE_COMPLETE_S`, one line for the quest) — it must not also re-announce
+    /// every objective line just because their `finished` flag flipped with it.
+    #[test]
+    fn the_complete_flip_announces_once_not_per_objective() {
+        let mut before = entry(9, "Kobold Vermin slain: 10/10");
+        before.complete = 0;
+        before.objectives[0].finished = false;
+        let mut after = entry(9, "Kobold Vermin slain: 10/10");
+        after.complete = 1;
+        after.title = "A Threat Within".into();
+        let fired = quests_with_progressed_objectives(&state(vec![before]), &state(vec![after]));
+        assert_eq!(fired.len(), 1);
+        assert!(fired[0].completed);
+        assert!(
+            fired[0].changed_lines.is_empty(),
+            "the objective count did not move — only the quest's COMPLETE state did"
+        );
     }
 }

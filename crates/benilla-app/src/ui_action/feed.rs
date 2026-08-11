@@ -22,6 +22,7 @@
 //! shapeshift-form byte indexed into `SpellShapeshiftForm.dbc`'s BonusActionBar column, wow-re
 //! byte-verified, firing `UPDATE_BONUS_ACTIONBAR` on change.
 
+use crate::ui_items::{count_of, InventoryScope};
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
@@ -293,7 +294,7 @@ pub(super) fn feed_actions(
                         .and_then(|t| icons.as_ref()?.catalog.get(t.display_info_id)?.icon.clone())
                         .unwrap_or_else(|| MISSING_ITEM_ICON.to_string());
                     let count = store
-                        .map(|s| crate::ui_items::count_of(&s.0, &items, button.action))
+                        .map(|s| count_of(&s.0, &items, button.action, InventoryScope::CARRIED))
                         .unwrap_or(0);
                     (Some(texture), count)
                 }
@@ -357,7 +358,7 @@ pub(super) fn feed_actions(
         for (&action, slot) in memory.pushed.iter_mut() {
             let changed = match slot.kind {
                 ACTION_KIND_ITEM => {
-                    let fresh = crate::ui_items::count_of(&store.0, &items, slot.action);
+                    let fresh = count_of(&store.0, &items, slot.action, InventoryScope::CARRIED);
                     let changed = fresh != slot.count;
                     if changed {
                         slot.count = fresh;

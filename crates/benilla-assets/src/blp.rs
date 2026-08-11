@@ -1,6 +1,7 @@
 //! BLP → Bevy [`Image`] loader.
 //!
-//! Decodes a WoW BLP texture into an `Image` in one of three variants (selected by loader settings):
+//! Decodes a WoW BLP texture into an `Image` in one of several variants (selected by loader
+//! settings):
 //! - [`BlpVariant::WorldArt`] — tiling world/model albedo: `Rgba8Unorm` (the RE'd gamma-space
 //!   invariant — the GPU does *not* linearize albedo on sample, so shader math stays in WoW's
 //!   gamma/byte space), the BLP's **authored** mip pyramid used verbatim (the real 1.12 client cannot
@@ -28,11 +29,20 @@ pub enum BlpVariant {
     WorldArt,
     /// Emissive billboard (celestial disc) — `Rgba8UnormSrgb`, clamp, mip 0 only.
     Sprite,
-    /// Gamma-lane effect sprite (weather flakes/splashes) — `Rgba8Unorm` like [`Self::WorldArt`]
-    /// but **mip 0 only** + clamp: thin cut-out shapes (a snowflake's arms) collapse to
-    /// near-zero alpha under the authored mip chain when a small world-space quad minifies —
-    /// the reference draws these through point-sprite/near-mip-0 paths and keeps them crisp.
+    /// Gamma-lane effect sprite (rain splashes, weather mist) — `Rgba8Unorm` like
+    /// [`Self::WorldArt`] but **mip 0 only** + clamp: these draw as world-space quads that are
+    /// magnified far more often than minified, and their thin cut-out arms collapse to near-zero
+    /// alpha under the authored mip chain.
     Effect,
+    /// A **point sprite** — [`Self::Effect`]'s clamp and gamma lane, but with the BLP's
+    /// **authored mip pyramid** kept (trilinear, no anisotropy). The snow flake's lane: the
+    /// reference draws it through `glDrawArrays(GL_POINTS)` with `GL_COORD_REPLACE`, so the whole
+    /// texture maps across a sprite that is **14 px at the eye and 1 px past 46 yd** — a 4.5×–64×
+    /// *minification* of a 64×64 texture, which is why the asset ships 7 mip levels. Mip-0-only
+    /// here is not "crisp", it is aliased: a 1-px flake samples one arbitrary texel of a dendrite
+    /// and the field becomes flickering speckle.
+    /// (wow-re `system/lighting/scratch/rf-snow-flake-render.md` §2.1/§6.)
+    PointSprite,
     /// OS cursor image — `Rgba8UnormSrgb`, single mip.
     Cursor,
 }
@@ -75,6 +85,9 @@ impl AssetLoader for BlpImageLoader {
             BlpVariant::Effect => {
                 let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
                 effect_image(w, h, rgba)
+            }
+            BlpVariant::PointSprite => {
+                point_sprite_image(blp_bytes_to_mip_chain(&bytes).map_err(to_io)?)
             }
             BlpVariant::Cursor => {
                 let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
@@ -178,6 +191,40 @@ fn effect_image(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         address_mode_v: ImageAddressMode::ClampToEdge,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    image
+}
+
+/// Point sprite: [`effect_image`]'s gamma lane and clamp, with the **authored mip pyramid** —
+/// see [`BlpVariant::PointSprite`]. No anisotropy: a point sprite is always screen-axis-aligned
+/// and square, so there is no anisotropic footprint to correct for.
+fn point_sprite_image(chain: BlpMipChain) -> Image {
+    let levels = chain.mips.len() as u32;
+    let mip0 = chain.mips[0].clone(); // satisfies Image::new's length assert; full chain set below
+    let mut data = Vec::with_capacity(chain.mips.iter().map(Vec::len).sum());
+    for mip in &chain.mips {
+        data.extend_from_slice(mip);
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: chain.width,
+            height: chain.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        mip0,
+        color_format(),
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = levels;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
         ..Default::default()
     });
     image

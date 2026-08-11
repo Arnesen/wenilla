@@ -215,6 +215,15 @@ pub fn played_time() -> Vec<u8> {
     Vec::new()
 }
 
+/// `CMSG_QUERY_TIME` body — empty (VERIFIED vmangos: `HandleQueryTimeOpcode` takes a
+/// `NullClientPacket`, `Handlers/QueryHandler.cpp:107`). Asks for the server's wall clock; the
+/// answer is `SMSG_QUERY_TIME_RESPONSE`, one `u32` of unix-epoch seconds. Decision 1150 — a timed
+/// quest's deadline is an absolute stamp in *that* epoch, so the countdown is only as right as our
+/// sample of the server's clock.
+pub fn query_time() -> Vec<u8> {
+    Vec::new()
+}
+
 /// `MSG_RANDOM_ROLL` client→server request body (VERIFIED vmangos
 /// `WorldPackets::Group::RandomRoll::ReadFromWorldPacket`, `Server/Packets/Group.cpp:39-43`): `u32
 /// minimum + u32 maximum`. The server validates `minimum <= maximum <= 10000` and broadcasts the

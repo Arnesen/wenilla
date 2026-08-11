@@ -16,6 +16,7 @@
 //! absent key shows nothing (the reference's data-suppression face) and localization rides
 //! for free.
 
+use crate::ui_items::{count_of, InventoryScope};
 use bevy::prelude::*;
 
 use crate::net::ObjectStore;
@@ -214,7 +215,7 @@ pub(super) fn first_missing_totem(
         .iter()
         .copied()
         .filter(|&t| t != 0)
-        .find(|&t| crate::ui_items::count_of(&store.0, items, t) == 0)
+        .find(|&t| count_of(&store.0, items, t, InventoryScope::CARRIED) == 0)
 }
 
 /// The first reagent slot whose owned count falls short — the `0x6e4000` reagent loop's failing
@@ -228,7 +229,7 @@ pub(super) fn first_short_reagent(
         .iter()
         .copied()
         .filter(|&(id, _)| id != 0)
-        .find(|&(id, n)| crate::ui_items::count_of(&store.0, items, id) < n)
+        .find(|&(id, n)| count_of(&store.0, items, id, InventoryScope::CARRIED) < n)
         .map(|(id, _)| id)
 }
 

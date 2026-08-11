@@ -162,6 +162,15 @@
                     frame.powerBar.textLockable = 1
                 end
             end
+            -- The hover seam (1146): who this bar belongs to, and what its click means.
+            local click = BenillaTargetFrame_OnClick
+            if unit == "player" then
+                click = BenillaPlayerFrame_OnClick
+            end
+            frame.healthBar.owner = frame
+            frame.powerBar.owner = frame
+            frame.healthBar.ownerClick = click
+            frame.powerBar.ownerClick = click
             frame.nameText  = getglobal(tf .. "NameText")
             frame.levelText = getglobal(tf .. "LevelText")
             frame.deadText  = getglobal(tf .. "DeadText")
@@ -268,6 +277,41 @@
         -- over a UI element in 1.12, and it is authored here in Lua rather than in the engine
         -- (wow-re item-target-cursor-and-dropitemonunit.md 4.3). Bag and paper-doll slots have no
         -- such branch, which is why they show the ordinary pointer.
+        -- A BAR's own hover (decision 1146; ref TextStatusBar's OnEnter/OnLeave on a mouse-enabled
+        -- bar). Two jobs, and the second is the one a naive transcription drops: reveal the numbers
+        -- while the pointer is on the bar, then hand the hover ON to the frame underneath, because
+        -- a mouse-enabled child swallows the parent's OnEnter — and with it the unit tooltip AND
+        -- the cast-cursor split that only exists over unit frames. Same for the click: the ref
+        -- routes its bars' OnMouseUp straight back to the frame's own handler (PlayerFrame.xml
+        -- l.304-306), which is what keeps a bar click targeting.
+        --
+        -- `owner`/`ownerClick` are stamped at load rather than read from GetParent(), because the
+        -- pet's bars are siblings of its TextureFrame, not children of the frame they belong to.
+        function BenillaUnitFrameBar_OnEnter(bar)
+            if TextStatusBar_UpdateTextString then
+                TextStatusBar_UpdateTextString(bar)
+                ShowTextStatusBarText(bar)
+            end
+            if bar.owner and BenillaUnitFrame_OnEnter and bar.owner.unit then
+                BenillaUnitFrame_OnEnter(bar.owner)
+            end
+        end
+
+        function BenillaUnitFrameBar_OnLeave(bar)
+            if HideTextStatusBarText then
+                HideTextStatusBarText(bar)
+            end
+            if bar.owner and BenillaUnitFrame_OnLeave and bar.owner.unit then
+                BenillaUnitFrame_OnLeave(bar.owner)
+            end
+        end
+
+        function BenillaUnitFrameBar_OnMouseUp(bar, button)
+            if bar.ownerClick then
+                bar.ownerClick(button)
+            end
+        end
+
         function BenillaUnitFrame_OnEnter(frame)
             local unit = frame.unit
             if SpellIsTargeting() then
@@ -533,6 +577,12 @@
                 local _, token = UnitPowerType(unit)
                 local c = BENILLA_POWER_COLORS[token] or BENILLA_POWER_COLORS.MANA
                 frame.powerBar:SetStatusBarColor(c.r, c.g, c.b)
+                -- NO label. 1.12 names the resource here (ref UnitFrame_UpdateManaType l.129 →
+                -- "Rage 0 / 100" off ManaBarColor's own prefix field, and CharacterFrame_OnLoad
+                -- labels health and XP the same way). Shipped in 1146, cut on the director's call
+                -- the same day: bare numbers read better on these bars (decision 1147). The
+                -- mechanism stays — SetTextStatusBarTextPrefix is live and one call brings any
+                -- label back — only the calls are gone.
                 frame.powerBar:SetMinMaxValues(0, maxPower)
                 frame.powerBar:SetValue(UnitPower(unit))
             else
@@ -928,7 +978,7 @@
         </Layers>
         <Frames>
             <!-- Health bar 119×12 TOPLEFT (106,-41), UI-StatusBar, green (ref l.288-315). -->
-            <StatusBar name="$parentHealthBar">
+            <StatusBar name="$parentHealthBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="106" y="-41"/></Offset></Anchor>
@@ -938,10 +988,13 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPLEFT (106,-52), UI-StatusBar; color set at runtime (ref l.316-341). -->
-            <StatusBar name="$parentPowerBar">
+            <StatusBar name="$parentPowerBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="106" y="-52"/></Offset></Anchor>
@@ -951,6 +1004,9 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
             <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame). 232×100 fills the
@@ -1216,7 +1272,7 @@
         </Layers>
         <Frames>
             <!-- Health bar 119×12 TOPRIGHT (-106,-41), UI-StatusBar, green (ref l.252-273). -->
-            <StatusBar name="$parentHealthBar">
+            <StatusBar name="$parentHealthBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-106" y="-41"/></Offset></Anchor>
@@ -1226,10 +1282,13 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
             <!-- Power bar 119×12 TOPRIGHT (-106,-52), UI-StatusBar; color set at runtime (ref l.274-292). -->
-            <StatusBar name="$parentPowerBar">
+            <StatusBar name="$parentPowerBar" enableMouse="true">
                 <Size><AbsDimension x="119" y="12"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-106" y="-52"/></Offset></Anchor>
@@ -1239,6 +1298,9 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
             <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame); it draws over the
@@ -1299,6 +1361,23 @@
                         <FontString name="$parentDeadText" inherits="GameFontNormalSmall">
                             <Anchors>
                                 <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="3"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                        <!-- The target's numerals (decision 1146), mirrored from the player's seats
+                             the way the whole frame is: x = −50 against the player's +50, the same
+                             1 px optical drop (1145). 1143 wired these bars and left the regions
+                             out because nothing could ever paint them — 1.12 never makes the target
+                             bars textLockable, so Status Bar Text does not pin them. The HOVER is
+                             what they were waiting for, and it is the reference's behaviour whole:
+                             on the target, the numbers are something you go and look at. -->
+                        <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="3"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                        <FontString name="$parentPowerBarText" inherits="TextStatusBarText">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-50" y="-9"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
                     </Layer>
@@ -1455,6 +1534,10 @@
                 frame.healthBar.textLockable = 1
                 frame.manaBar.textLockable = 1
             end
+            -- The pet's bars hover for their numbers, but hand nothing on: the pet frame has no
+            -- OnEnter of its own, and its click is its own handler (1146).
+            frame.healthBar.ownerClick = BenillaPetFrame_OnClick
+            frame.manaBar.ownerClick = BenillaPetFrame_OnClick
             frame.attackModeCounter = 0
             frame.attackModeSign = -1
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1716,7 +1799,7 @@
                 </Scripts>
             </Frame>
             <!-- Bars first, pushed one frame level under the TextureFrame at load (see OnLoad). -->
-            <StatusBar name="$parentHealthBar">
+            <StatusBar name="$parentHealthBar" enableMouse="true">
                 <Size><AbsDimension x="70" y="8"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-22"/></Offset></Anchor></Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
@@ -1724,9 +1807,12 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
-            <StatusBar name="$parentManaBar">
+            <StatusBar name="$parentManaBar" enableMouse="true">
                 <Size><AbsDimension x="70" y="8"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-29"/></Offset></Anchor></Anchors>
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
@@ -1734,6 +1820,9 @@
                 <Scripts>
                     <OnEvent>if TextStatusBar_OnEvent then TextStatusBar_OnEvent(arg1, arg2) end</OnEvent>
                     <OnValueChanged>if TextStatusBar_OnValueChanged then TextStatusBar_OnValueChanged() end</OnValueChanged>
+                    <OnEnter>BenillaUnitFrameBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaUnitFrameBar_OnLeave(self)</OnLeave>
+                    <OnMouseUp>BenillaUnitFrameBar_OnMouseUp(self, arg1)</OnMouseUp>
                 </Scripts>
             </StatusBar>
             <Frame name="$parentTextureFrame">
@@ -1769,20 +1858,24 @@
                         <FontString name="$parentName" inherits="GameFontNormalSmall" justifyH="LEFT">
                             <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="50" y="33"/></Offset></Anchor></Anchors>
                         </FontString>
-                        <!-- The pet's numerals (decision 1143), same font as the ref's
-                             (PetFrame.xml l.87-104). ONE divergence, and it is why these anchor to
-                             the bars instead of carrying the ref's literal offsets: the ref's are
-                             CENTER-from-TOPLEFT (82,-27)/(82,-38) against ITS small-frame bar
-                             seats, and ours sit at (47,-22)/(47,-29) — the same x=82 centre, a
-                             different pitch. Anchoring each string to its own bar lands it right by
-                             construction and cannot drift if the bars move again. The -1 is the
-                             same optical nudge the player's pair carries (1145), so the two frames
-                             agree about where a number sits in its bar. -->
+                        <!-- The pet's numerals: the reference's LITERAL seats, CENTER-from-TOPLEFT
+                             (82,-27) and (82,-38) (PetFrame.xml l.87-104). 1143 anchored these to
+                             the bars' own centres instead, on a comparison that was simply wrong —
+                             it read the ref's TEXT offsets against OUR BAR offsets and called the
+                             pitch different. The bars are byte-identical to the reference's, 70x8
+                             at (47,-22) and (47,-29), so the ref's text literals apply unchanged.
+                             The overlap that produced (director report, 2026-08-08, decision 1147)
+                             is what the literals exist to avoid: a 7 px bar pitch has no room for
+                             two centred ~12 px strings, so the reference drops the SECOND one clear
+                             of its bar (the mana bar ends at -37; its numerals sit at -38, just
+                             under it) rather than centring it. Centring both is what collided.
+                             No 1145 nudge here: that pixel was for a string centred in a bar, and
+                             the reference has already placed these deliberately off-centre. -->
                         <FontString name="$parentHealthBarText" inherits="TextStatusBarText">
-                            <Anchors><Anchor point="CENTER" relativeTo="BenillaPetFrameHealthBar" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                            <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="82" y="-27"/></Offset></Anchor></Anchors>
                         </FontString>
                         <FontString name="$parentManaBarText" inherits="TextStatusBarText">
-                            <Anchors><Anchor point="CENTER" relativeTo="BenillaPetFrameManaBar" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                            <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="82" y="-38"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>
                 </Layers>

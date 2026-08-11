@@ -38,8 +38,21 @@
 //! joints + `AnimationPlayer` + graph + [`ModelAnimations`] a creature gets ([`crate::entities::attach`]),
 //! but tagged with [`GoAnim`] instead of `AnimDriver`, so this driver — not `creature_anim` — owns it.
 //! Clips are keyed by AnimationData.dbc id, so a resolved id becomes a clip by a scan of
-//! [`ModelAnimations::clips`], exactly as `creature_anim` does. A one-shot motion held at its end frame
-//! *is* the destination rest pose, so playing the motion and holding needs no explicit settle step.
+//! [`ModelAnimations::clips`], exactly as `creature_anim` does.
+//!
+//! **A transition motion is a TRANSIENT substate, and the settle is explicit** (decision 1151,
+//! wow-re `gameobject-anim-arm.md` §2d/§3). The kernel's `flags` bit 0 says nothing about how long
+//! a transition lasts: bit 0 clear means the *pose* wraps its band for ever, and the whole
+//! door family (`G_Crate01`, every `World\Goober\` prop, the books) authors Close/Open/Destroy
+//! that way. What ends a swing is the **object layer**: the model's completion callback fires once
+//! at the arm's baked window end — span × replay, bit 0 ignored — and slot 14 `0x5f4120` advances
+//! the machine off the motion substate onto its rest one (2 Open → 3 Opened, 4 Close → 1 Closed,
+//! 5 Destroy → 6 Destroyed, 7 Rebuild → 1 Closed), arming that pose over the motion. So benilla
+//! arms a motion for exactly ONE window ([`RepeatAnimation::Never`]) and
+//! [`retire_transient_anim`] re-runs the state machine at its end — the same endpoint, and the
+//! same shape the Custom channel already uses (decisions 1099/1100). Honouring the loop bit
+//! instead is a chest lid that springs open and slams shut ~1.5×/s for ever, which is the report
+//! this record closes.
 //!
 //! The §243 **missing-sequence fallback** is no longer deferred: [`remap_missing`] implements the
 //! four-way remap, including the two legs that freeze a *motion* clip at frame 0 to stand in for an
@@ -94,13 +107,17 @@ pub(crate) struct GoAnim {
     /// so the bobber's same-frame pair (the forced `READY → ACTIVE` flip + the splash) resolves
     /// with the splash on top (decision 1086).
     custom: Option<u16>,
-    /// The Custom clip currently ARMED (set when [`drive_go_anim`] actually plays one) — the
-    /// completion-retire's watch (decision 1100, wow-re `go-display-sound-events.md` §6-8): the
-    /// reference's per-model completion callback fires ONCE at the clip's window end (span ×
-    /// replay-count, the loop bit ignored) and re-runs the GO state machine, which re-arms the
-    /// state's own pose over the Custom block. [`retire_custom_anim`] models exactly that; without
-    /// it the bobber's splash looped ~1.3 s forever (the director's 2-3 audible splashes).
-    custom_active: Option<u16>,
+    /// The clip armed for the current **TRANSIENT substate**, if any — the completion-retire's
+    /// watch (decisions 1100/1151, wow-re `gameobject-anim-arm.md` §2d + `go-display-sound-events.md`
+    /// §6-8). The reference keeps exactly one current substate in `[handler+0x10]`, and its
+    /// per-model completion callback fires ONCE at the arm's baked window end (span × replay, the
+    /// loop bit ignored); slot 14 `0x5f4120` then advances a transient substate onto its rest one
+    /// and arms that pose over the transient clip. **Two families reach it, and they share this
+    /// one slot exactly as the reference's does**: the §243 transition motions (2 Open / 4 Close /
+    /// 5 Destroy / 7 Rebuild) and the Custom0..3 block (8..11). [`retire_transient_anim`] models
+    /// the advance for both; without it a bit-0-clear clip runs for ever — the bobber's splash
+    /// looping ~1.3 s (1100's 2-3 audible splashes) and the crate lid never settling shut (1151).
+    transient: Option<u16>,
 }
 
 /// The GameObject's **stored** state — the binary's `go+0x27c`, which is what every consumer reads
@@ -112,6 +129,37 @@ pub(crate) fn go_state(anim: Option<&GoAnim>, store: &ObjectStore) -> u32 {
     anim.and_then(|a| a.state)
         .or_else(|| store.0.gameobject_state())
         .unwrap_or(GO_STATE_ACTIVE)
+}
+
+/// The inspector's GameObject **animation** readout (decision 1151): which sequence the §243 arm
+/// is actually playing on the object under the cursor — its `AnimationData` id, whether it is the
+/// state's held **rest** pose or a **transient** one (a transition motion, or a Custom block, which
+/// [`retire_transient_anim`]'s §2d advance ends at its window end), and the repeat the player is
+/// running it under. `None` when the object renders as a static mesh, or nothing is armed yet.
+///
+/// The line that closes the loop on this whole class of report. "The crate is stuck open/closing"
+/// and "the lid settles shut" are indistinguishable from every card line we had: the GO line said
+/// `state 1 closed(READY)`, which was **true**, while a `Forever` Close motion swung underneath
+/// it. `anim Close(146) · transition · loops` is that bug stated in one hover; `anim Closed(147) ·
+/// rest` is the fix, read the same way.
+///
+/// The newest arm is the **smallest seek** — a cross-fade's fading source is older by construction
+/// — the same pick [`fire_go_anim_events`] makes for the event scan.
+pub(crate) fn armed_anim(
+    go: &GoAnim,
+    player: &AnimationPlayer,
+    anims: &ModelAnimations,
+) -> Option<(u16, bool, RepeatAnimation)> {
+    let (clip, active) = anims
+        .clips
+        .iter()
+        .filter_map(|c| player.animation(c.node).map(|a| (c, a)))
+        .min_by(|a, b| a.1.seek_time().total_cmp(&b.1.seek_time()))?;
+    Some((
+        clip.anim_id,
+        go.transient == Some(clip.anim_id),
+        active.repeat_mode(),
+    ))
 }
 
 /// Which GameObject types get the state-driven **animated** instance (skinned lid/door + §243
@@ -418,42 +466,57 @@ fn close_go_lid(
     *last_source = current;
 }
 
-/// Play the §243 sequence for a change of the client-side [`GoAnim::state`] (written by any of the three
-/// callers). Mirrors the state-transition detection of [`crate::sound::gameobject`] (first sight silent),
-/// but points it at the model instead of the mixer — one system owns the visual, the other the audio.
-/// The **completion-driven retire** of an armed Custom clip (decision 1100; wow-re
-/// `go-display-sound-events.md` §6-8, §5-verified): the reference registers a per-model completion
-/// callback at GO model attach (`0x5f7d43` → `[M2+0x70]`) that fires ONCE when a sequence reaches
-/// its baked window end — span × replay-count, the **loop bit ignored** — and, for the transient
-/// substates (the Custom family 8..11 among them), re-runs the GO state machine at the current
-/// `GAMEOBJECT_STATE`, arming its pose through the playable-lookup fallback. For the bobber that
-/// resolves 149 → 151 → the lookup's all-fallback rows → **Stand**, landing one frame after the
-/// 1333 ms window — before the looping kernel's second `$GC0` crossing at 1533 ms. Net law: one
-/// splash per 0xB3, then the state pose.
+/// The **completion-driven retire** of the current TRANSIENT substate — the §2d advance
+/// (decisions 1100/1151; wow-re `gameobject-anim-arm.md` §2d/§3 + `go-display-sound-events.md`
+/// §6-8, §5-verified). The reference registers a per-model completion callback at GO model attach
+/// (`0x5f7d43` → `[M2+0x70]`) which the driver `0x719370` fires ONCE when the armed sequence
+/// reaches its baked window end — span × replay-count, the **loop bit ignored** — and slot 14
+/// `0x5f4120` dispatches on the current substate:
 ///
-/// Benilla's custom arm plays the clip `Never`-repeat (one window, the same endpoint), so "the
+/// | completed substate | advances to | i.e. |
+/// |--------------------|-------------|------|
+/// | 2 Open             | 3 Opened    | the swing settles open |
+/// | 4 Close            | 1 Closed    | the lid settles shut |
+/// | 5 Destroy          | 6 Destroyed | |
+/// | 7 Rebuild          | 1 Closed    | |
+/// | 0 Spawn, 8..11 Custom0-3 | re-run at the current state (`0x5f4190`) | |
+/// | 1/3/6 (a rest pose) | nothing (`0x5f4167`) | a held pose never advances |
+///
+/// **This — not the animation kernel — is what turns a transition clip into a resting state**, and
+/// it is why the kernel's loop bit is not the transition's duration: `G_Crate01`'s Close is
+/// `flags` bit 0 clear, so the *pose* would wrap for ever, and only this advance ends it. For the
+/// bobber's Custom0 the re-run resolves 149 → 151 → the lookup's all-fallback rows → **Stand**,
+/// landing one frame after the 1333 ms window — before the looping kernel's second `$GC0` crossing
+/// at 1533 ms. Net law: one splash per 0xB3, one swing per state change, then the state pose.
+///
+/// Benilla arms every transient clip `Never`-repeat (one window, the same endpoint), so "the
 /// window ended" is the player's finished flag; the retire then clears `shown`, which makes the
 /// state arm of [`drive_go_anim`] re-resolve the current state as a fresh rest pose — our
-/// state-machine re-run. Runs before [`drive_go_anim`] in the chain so the re-arm lands the same
-/// frame. Reads never deref-mut, so a quiet GO stays out of the Changed stream.
-fn retire_custom_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer, &ModelAnimations)>) {
+/// state-machine re-run, and (for a motion) exactly the table above, since `rest_anim(state)` is
+/// the destination row of whichever motion that state's change armed. Runs before
+/// [`drive_go_anim`] in the chain so the re-arm lands the same frame. Reads never deref-mut, so a
+/// quiet GO stays out of the Changed stream.
+fn retire_transient_anim(mut gos: Query<(&mut GoAnim, &AnimationPlayer, &ModelAnimations)>) {
     for (mut go, player, anims) in &mut gos {
-        let Some(id) = go.custom_active else {
+        let Some(id) = go.transient else {
             continue;
         };
         let done = anims
             .find(id)
             .is_none_or(|clip| player.animation(clip.node).is_none_or(|a| a.is_finished()));
         if done {
-            go.custom_active = None;
+            go.transient = None;
             // The completion's state-machine re-run: forget the shown pose so the state arm
             // re-resolves it (a silent rest snap — `resolve(None, state)`), exactly the
-            // reference's re-arm-over-the-Custom-block.
+            // reference's re-arm over the finished transient block.
             go.shown = None;
         }
     }
 }
 
+/// Play the §243 sequence for a change of the client-side [`GoAnim::state`] (written by any of the three
+/// callers). Mirrors the state-transition detection of [`crate::sound::gameobject`] (first sight silent),
+/// but points it at the model instead of the mixer — one system owns the visual, the other the audio.
 fn drive_go_anim(
     mut gos: Query<
         (
@@ -471,6 +534,10 @@ fn drive_go_anim(
             if go.shown != Some(state) {
                 let prev = go.shown;
                 go.shown = Some(state);
+                // A fresh substate replaces whatever transient one was live — the reference keeps
+                // exactly ONE (`[handler+0x10]`), so an old motion's completion can never fire
+                // over the pose that superseded it.
+                go.transient = None;
                 if let Some(play) = resolve(prev, state) {
                     // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as
                     // `creature_anim` does), through the §2c remap for a model that doesn't author
@@ -498,11 +565,26 @@ fn drive_go_anim(
                             // clock but keeps `speed` — so re-arming a node a frozen leg previously
                             // parked at rate 0 (the same Open clip serves both) would stay stuck.
                             active.set_speed(1.0);
-                            active.set_repeat(if clip.looping {
-                                RepeatAnimation::Forever
-                            } else {
-                                RepeatAnimation::Never
-                            });
+                            // **The transition motion is ONE window, whatever the loop bit says**
+                            // (decision 1151): it is a transient substate, ended by the object
+                            // layer's §2d advance ([`retire_transient_anim`]), never by the
+                            // kernel — whose bit-0-clear branch wraps the band for ever and would
+                            // make the crate lid spring open and slam shut ~1.5×/s. A *rest* pose
+                            // is the opposite: nothing advances off it (slot 14's `0x5f4167`), so
+                            // it holds or loops exactly as the model authored it.
+                            match play {
+                                Play::Motion(_) => {
+                                    active.set_repeat(RepeatAnimation::Never);
+                                    go.transient = Some(want);
+                                }
+                                Play::Rest(_) => {
+                                    active.set_repeat(if clip.looping {
+                                        RepeatAnimation::Forever
+                                    } else {
+                                        RepeatAnimation::Never
+                                    });
+                                }
+                            }
                         }
                     }
                     // else: nothing playable even after the remap — hold whatever the loader
@@ -518,7 +600,7 @@ fn drive_go_anim(
         // re-fires its events per pass, but the reference's COMPLETION callback fires at window
         // end (span × replay-count; the bobber's replay pair is 0..0 ⇒ one 1333 ms pass) and
         // re-runs the state machine, overwriting the Custom block before a second pass begins.
-        // `RepeatAnimation::Never` + [`retire_custom_anim`] reproduce that endpoint exactly: one
+        // `RepeatAnimation::Never` + [`retire_transient_anim`] reproduce that endpoint exactly: one
         // pass, one `$GC0` splash, then the state pose — never a churning loop.
         // (`is_some` pre-check: an unconditional `take()` mut-derefs the `Mut` and re-marks the
         // component Changed every frame, keeping this Changed-filtered query hot forever.)
@@ -533,7 +615,7 @@ fn drive_go_anim(
                     );
                     active.set_speed(1.0);
                     active.set_repeat(RepeatAnimation::Never);
-                    go.custom_active = Some(id);
+                    go.transient = Some(id);
                 }
             }
         }
@@ -639,7 +721,7 @@ pub(crate) fn plugin(app: &mut App) {
                     // The completion retire reads last frame's finished flags and must clear
                     // `shown` BEFORE the drive, so its state re-arm lands this frame — the
                     // reference's own one-frame-after-window-end timing.
-                    retire_custom_anim,
+                    retire_transient_anim,
                 ),
                 (drive_go_anim, drive_go_collision),
                 fire_go_anim_events,
@@ -703,6 +785,237 @@ mod tests {
         assert_eq!(custom_anim_id(3), Some(156));
         assert_eq!(custom_anim_id(4), None);
         assert_eq!(custom_anim_id(u32::MAX), None);
+    }
+
+    /// The delta [`step_clock`] uses for the next frame — the same device as the creature
+    /// driver's harness (`creature_anim/driver/tests.rs`) and for the same reason: with
+    /// `TimePlugin` live, `Time`'s delta is the REAL gap between two `app.update()` calls, so a
+    /// stalled frame on a loaded machine runs a whole clip out in one step and the assertions
+    /// below become a coin flip. Here the clock is a number the test writes.
+    #[derive(Resource, Default)]
+    struct NextStep(Option<Duration>);
+
+    fn step_clock(mut time: ResMut<Time>, mut next: ResMut<NextStep>) {
+        time.advance_by(next.0.take().unwrap_or(Duration::from_millis(1)));
+    }
+
+    /// Run one frame whose delta is exactly `ms`.
+    fn advance(app: &mut App, ms: u64) {
+        app.world_mut().resource_mut::<NextStep>().0 = Some(Duration::from_millis(ms));
+        app.update();
+    }
+
+    /// `G_Crate01`'s door family, as the bytes have it (pinned against the shipped asset by
+    /// `benilla-formats/tests/m2_go_crate_lid.rs`): Open/Opened/Close/Closed, **all four `looping`**
+    /// — `flags` bit 0 clear — with an empty replay range. Blend times are zeroed so the arm is a
+    /// cut and the assertions read the armed clip, not a fade.
+    const CRATE_FAMILY: [(u16, f32); 4] = [
+        (0x94, 0.666), // 148 Open   — the lid sweeps 0° → 75°
+        (0x95, 0.100), // 149 Opened — holds 75°
+        (0x92, 0.667), // 146 Close  — sweeps 75° → 0°
+        (0x93, 0.167), // 147 Closed — holds 0°
+    ];
+
+    /// An app running the two systems this file's law lives in, plus one GameObject wearing a
+    /// crate's animation set: REAL `AnimationClip` assets and a real graph, so Bevy's own
+    /// `advance_animations` ticks the completions [`retire_transient_anim`] watches.
+    fn crate_app(extra_ids: &[(u16, f32)]) -> (App, Entity) {
+        use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+        use bevy::animation::AnimationClip;
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
+            AssetPlugin::default(),
+            bevy::animation::AnimationPlugin,
+        ));
+        app.init_resource::<Time>();
+        app.init_resource::<NextStep>();
+        app.add_systems(bevy::app::First, step_clock);
+        app.add_systems(Update, (retire_transient_anim, drive_go_anim).chain());
+
+        let authored: Vec<(u16, f32)> = CRATE_FAMILY.iter().chain(extra_ids).copied().collect();
+        let handles: Vec<_> = authored
+            .iter()
+            .map(|&(_, dur)| {
+                let mut c = AnimationClip::default();
+                c.set_duration(dur);
+                app.world_mut()
+                    .resource_mut::<Assets<AnimationClip>>()
+                    .add(c)
+            })
+            .collect();
+        let (graph, nodes) = AnimationGraph::from_clips(handles);
+        let graph = app
+            .world_mut()
+            .resource_mut::<Assets<AnimationGraph>>()
+            .add(graph);
+
+        let mut lookup = vec![0xffffu16; 160];
+        for (slot, &(id, _)) in authored.iter().enumerate() {
+            lookup[id as usize] = slot as u16;
+        }
+        let anims = ModelAnimations {
+            graph: graph.clone(),
+            clips: authored
+                .iter()
+                .zip(&nodes)
+                .map(|(&(id, dur), &node)| benilla_assets::AnimClip {
+                    anim_id: id,
+                    seq_index: 0,
+                    node,
+                    // The asset fact this whole record turns on: the crate's transitions are
+                    // bit-0-clear bands, i.e. the kernel loops them.
+                    looping: true,
+                    duration: dur,
+                    move_speed: 0.0,
+                    blend_time: 0.0,
+                    bounds_center: Vec3::ZERO,
+                    bounds_radius: 0.0,
+                    bounds_min: Vec3::ZERO,
+                    bounds_max: Vec3::ZERO,
+                    events: Vec::new().into(),
+                    arm_nodes: None,
+                    upper_node: None,
+                    frequency: 0,
+                    replay: (0, 0),
+                    poses_bones: true,
+                })
+                .collect(),
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: lookup,
+            global_bones: Vec::new(),
+            first_seq: None,
+            pose: Default::default(),
+        };
+        // First sight is a closed chest, exactly as it streams in.
+        let go = app
+            .world_mut()
+            .spawn((
+                anims,
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimationGraphHandle(graph),
+                GoAnim {
+                    state: Some(GO_STATE_READY),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        (app, go)
+    }
+
+    /// What the object is actually playing: the armed `AnimationData` id and its repeat mode.
+    fn armed(app: &App, go: Entity) -> Option<(u16, RepeatAnimation)> {
+        let e = app.world().entity(go);
+        let node = e.get::<AnimationTransitions>()?.get_main_animation()?;
+        let id = e
+            .get::<ModelAnimations>()?
+            .clips
+            .iter()
+            .find(|c| c.node == node)?
+            .anim_id;
+        Some((
+            id,
+            e.get::<AnimationPlayer>()?.animation(node)?.repeat_mode(),
+        ))
+    }
+
+    /// **The report** (decision 1151): loot the crate, close the loot window, and the lid must
+    /// settle SHUT — not spring open and slam once a window, for ever.
+    ///
+    /// The whole door family is `flags` bit 0 clear, so a driver that arms a transition by the
+    /// clip's loop bit arms Close on `Forever`: the lid jumps back to 75° every 667 ms. What ends
+    /// a transition in the reference is the object layer's §2d advance (slot 14 `0x5f4120`:
+    /// substate 4 Close → 1 Closed), driven by the completion callback at the arm's baked window
+    /// — the loop bit ignored. This runs the whole click-to-settle cycle through the real systems
+    /// and real clips, and then keeps running: two seconds past the swing, three Close windows
+    /// wide, the crate must still be holding Closed.
+    #[test]
+    fn the_looted_crate_settles_shut_instead_of_flapping_for_ever() {
+        let (mut app, go) = crate_app(&[]);
+        let state = |app: &mut App, s: u32| {
+            app.world_mut()
+                .entity_mut(go)
+                .get_mut::<GoAnim>()
+                .unwrap()
+                .state = Some(s);
+        };
+
+        // Streamed in closed: the rest pose, snapped, and it keeps the loop the model authored —
+        // nothing advances off a held pose (`0x5f4167`), so this leg must NOT be narrowed to one
+        // window along with the motions.
+        app.update();
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+
+        // The open-lock cast lands: the lid swings open, ONE window.
+        state(&mut app, GO_STATE_ACTIVE);
+        app.update();
+        assert_eq!(
+            armed(&app, go),
+            Some((0x94, RepeatAnimation::Never)),
+            "the Open motion is a transient substate — one window, whatever its loop bit says"
+        );
+
+        // …and at its window end the machine advances 2 Open → 3 Opened on its own.
+        advance(&mut app, 700);
+        app.update();
+        assert_eq!(
+            armed(&app, go),
+            Some((0x95, RepeatAnimation::Forever)),
+            "the completion advance settles the swing onto the Opened rest pose"
+        );
+
+        // The loot window closes (`CMSG_LOOT_RELEASE`): the lid swings shut, ONE window.
+        state(&mut app, GO_STATE_READY);
+        app.update();
+        assert_eq!(armed(&app, go), Some((0x92, RepeatAnimation::Never)));
+
+        // 4 Close → 1 Closed, and then it STAYS there. Pre-1151 the Close clip was armed
+        // `Forever`, so this is the assertion the director's report failed at.
+        advance(&mut app, 700);
+        app.update();
+        assert_eq!(
+            armed(&app, go),
+            Some((0x93, RepeatAnimation::Forever)),
+            "the lid must settle on Closed"
+        );
+        for _ in 0..20 {
+            advance(&mut app, 100);
+            assert_eq!(
+                armed(&app, go),
+                Some((0x93, RepeatAnimation::Forever)),
+                "two seconds on — three Close windows — the crate is still shut"
+            );
+        }
+    }
+
+    /// The Custom channel shares the ONE transient slot with the motions (the reference's
+    /// `[handler+0x10]`), so 1100's bobber law has to keep holding through it: a Custom0 arms over
+    /// the state pose, runs exactly one window, and the completion re-runs the machine back onto
+    /// the state's own pose.
+    #[test]
+    fn a_custom_block_still_runs_one_window_and_hands_back_to_the_state() {
+        let (mut app, go) = crate_app(&[(153, 0.667)]); // Custom0 — the crate authors one
+        app.update();
+        assert_eq!(armed(&app, go), Some((0x93, RepeatAnimation::Forever)));
+
+        app.world_mut()
+            .entity_mut(go)
+            .get_mut::<GoAnim>()
+            .unwrap()
+            .custom = Some(153);
+        app.update();
+        assert_eq!(armed(&app, go), Some((153, RepeatAnimation::Never)));
+
+        advance(&mut app, 700);
+        app.update();
+        assert_eq!(
+            armed(&app, go),
+            Some((0x93, RepeatAnimation::Forever)),
+            "one Custom window, then the state pose — never a churning loop"
+        );
     }
 
     /// A `ModelAnimations` that owns exactly `ids` — only the lookup table matters to the remap.

@@ -57,6 +57,8 @@ fn eight_entries() -> QuestLogState {
                     text: "Kobold Vermin slain: 3/10".into(),
                     kind: "monster".into(),
                     finished: false,
+                    cur: 3,
+                    req: 10,
                 }]
             } else {
                 vec![]
@@ -734,6 +736,8 @@ fn overflowing_entry() -> QuestLogState {
             text: format!("Objective {i} of 10 slain: 0/5"),
             kind: "monster".into(),
             finished: false,
+            cur: 0,
+            req: 5,
         })
         .collect();
     QuestLogState {

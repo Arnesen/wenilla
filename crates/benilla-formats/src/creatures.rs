@@ -114,6 +114,8 @@ struct DisplayRow {
 struct ModelRow {
     path: String,
     scale: f32,
+    /// `Flags` (field 1) — see [`CreatureCatalog::breathes`] for the one bit we read.
+    flags: u32,
     /// `BloodID` — see [`CreatureModel::blood`]. Reads signed: `−1` marks a bloodless model.
     blood: i32,
     /// `FootprintTextureID` (field 6) — the `FootprintTextures.dbc` key. Reads signed: `−1`
@@ -185,6 +187,24 @@ impl CreatureCatalog {
     pub fn collision_height(&self, display_id: u32) -> Option<f32> {
         let row = self.display.get(&display_id)?;
         Some(self.models.get(&row.model_id)?.collision_height)
+    }
+
+    /// Does this display's model **breathe** — i.e. may it wear the `$BTH` hardcoded effects
+    /// (cold vapour, underwater bubbles, inebriated bubbles)?
+    ///
+    /// `CreatureModelData.Flags & 0x2` suppresses the whole family (wow-re
+    /// `object-layer/scratch/cold-breath-law.md` Q4, at `[unit+0xb3c]`): 99 of the 430 shipped
+    /// rows carry it — skeletons, ghosts, ghouls, zombies, banshees, every elemental, golems,
+    /// slimes, infernals, voidwalkers, succubi, spiders, frogs, crocodiles, turtles, totems. The
+    /// things that have no breath to see. Every player row is `0x4`, so players pass.
+    ///
+    /// An unknown display breathes — this catalog's degrade shape is "fall back to the common
+    /// case", and the common case is 331 of the 430 rows.
+    pub fn breathes(&self, display_id: u32) -> bool {
+        self.display
+            .get(&display_id)
+            .and_then(|row| self.models.get(&row.model_id))
+            .is_none_or(|m| m.flags & 0x2 == 0)
     }
 
     /// A display's **footprint decal** parameters — `CreatureModelData` fields 6..=8 through the
@@ -334,6 +354,7 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                     ModelRow {
                         path: name,
                         scale: f32_at(r, 4).unwrap_or(1.0),
+                        flags: u32_at(r, 1).unwrap_or(0),
                         // BloodID (field 5) reads signed: −1 marks a bloodless model in the real data.
                         blood: u32_at(r, 5).map_or(0, |v| v as i32),
                         // FootprintTextureID reads signed too: −1 = no prints (see ModelRow docs).
@@ -567,6 +588,50 @@ mod tests {
     /// were authored post-`modelScale` the box would read 2.111/1.25 = 1.689, so this row alone
     /// refutes the "divide the model scale out" reading (which is what vmangos's server-side
     /// `Unit::UpdateModelData` does).
+    /// `CreatureModelData.Flags & 0x2` — the `$BTH` suppression (B233, decision 1149). The census
+    /// on the shipped table is 99 of 430 rows, and the split is semantic, not arbitrary: the
+    /// things with no breath to see. **Every player row passes** (they carry `0x4`), which is what
+    /// makes the flag safe to gate the reported case on.
+    #[test]
+    fn the_breathless_models_are_the_ones_with_no_breath() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        assert_eq!(
+            cat.models.values().filter(|m| m.flags & 0x2 != 0).count(),
+            99,
+            "the shipped census: 99 of {} models suppress breath",
+            cat.models.len()
+        );
+        // Every playable race's own display breathes — the reported case.
+        for (display_id, label) in [
+            (49, "HumanMale"),
+            (50, "HumanFemale"),
+            (53, "DwarfMale"),
+            (59, "TaurenMale"),
+            (1564, "GnomeFemale"),
+        ] {
+            assert!(cat.breathes(display_id), "{label} breathes");
+        }
+        // …and the breathless: a skeleton, a water elemental, an infernal.
+        for (display_id, label) in [
+            (158, "Skeleton"),
+            (110, "WaterElemental"),
+            (169, "Infernal"),
+        ] {
+            assert!(!cat.breathes(display_id), "{label} has no breath to see");
+        }
+        assert!(
+            cat.breathes(0),
+            "an unknown display falls to the common case"
+        );
+    }
+
     #[test]
     fn collision_height_is_the_m2_collision_box() {
         let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");

@@ -40,6 +40,7 @@ pub(crate) use interior::{
     indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, LightAttach,
     INTERIOR_PROBE_HEIGHT,
 };
+pub(crate) use interior::{surface_terrain_sample, POSITION_PROBE_LIFT};
 use interior::{track_area_interior, track_current_interior, track_unit_interiors};
 pub use interior::{CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom};
 pub use probe::WmoCullProbe;
@@ -50,7 +51,7 @@ pub(crate) use seed::{down_ray_seeds, floor_z_at, DownRaySeeds};
 use crate::player::WorldCamera;
 use crate::terrain_stream::{terrain_height_under, TerrainStreamer};
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use benilla_assets::{AdtTile, WmoModel, WmoPortalInfo};
+use benilla_assets::{AdtTile, WmoGroupNav, WmoModel, WmoPortalInfo};
 use bevy::camera::Projection;
 use bevy::math::{Affine3A, Vec4};
 use bevy::prelude::*;
@@ -333,67 +334,64 @@ fn compute_wmo_pvs(
         let local_from_world = world_from_local.inverse();
         let eye_local = bevy_to_wow(local_from_world.transform_point3(eye_world));
         let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, eye_world, z));
-        if let Some(text) = &mut dump_text {
-            let mut trace = TraceLog::new(model, eye_local, terrain_local);
-            inst.visible = compute_pvs_traced(
-                model,
-                eye_local,
-                terrain_local,
-                &clip_from_world,
-                &world_from_local,
-                &mut trace,
-            );
-            text.push_str(&trace.text);
+        // ONE flood, with whichever recorders are attached — the dump must never change the answer
+        // it is photographing. It used to be an `if dump { trace } else { tap }`, so `WOW_CULLDUMP=1`
+        // skipped the claim/fog/window computation outright and every dumped run reported
+        // `room=none windows=unrestricted` no matter where the camera stood; the trace file said
+        // `seed: in Some(102)` on the same frame. That cost a wrong reading while diagnosing 1148.
+        let mut tap = SeedTap::default();
+        let mut log = dump_text
+            .is_some()
+            .then(|| TraceLog::new(model, eye_local, terrain_local));
+        inst.visible = compute_pvs_traced(
+            model,
+            eye_local,
+            terrain_local,
+            &clip_from_world,
+            &world_from_local,
+            &mut (&mut tap, &mut log),
+        );
+        if let (Some(text), Some(log)) = (&mut dump_text, &log) {
+            text.push_str(&log.text);
             text.push_str(&format!("visible: {:?}\n\n", inst.visible));
-        } else {
-            let mut tap = SeedTap::default();
-            inst.visible = compute_pvs_traced(
-                model,
-                eye_local,
-                terrain_local,
-                &clip_from_world,
-                &world_from_local,
-                &mut tap,
-            );
-            // Interior-fog + weather claims off the seed already computed. The claim mask is
-            // bit 0x8 ALONE (`[0xc7b748]` writer `0x6be451/77` tests only EXTERIOR — round 6
-            // Q-H(c)): an EXTERIOR_LIT-only porch/courtyard (`0x40`) still claims the camera
-            // and engages this WMO's MFOG fog; the weather gate reads whether the placement's
-            // flood reached an exterior group (already view-clipped — the deferred-window gate
-            // fires only when the doorway's screen rect survives, the carved pass-1 law).
-            if claim.is_none() {
-                if let Some(gi) = tap.in_group {
-                    if let Some(nav) = model.group_nav.get(gi).filter(|n| n.flags & 0x8 == 0) {
-                        fog_target = select_wmo_fog(&model.fogs, nav.fog_indices, eye_local);
-                        claim = Some(InteriorClaim {
-                            room: WmoRoom {
-                                instance: entity,
-                                group: gi as u16,
-                            },
-                            exterior_visible: model
-                                .group_nav
-                                .iter()
-                                .zip(&inst.visible)
-                                .any(|(n, v)| *v && n.flags & 0x148 != 0),
-                        });
-                        // The deferred exterior-window list is this claiming placement's alone: the
-                        // reference floods the CONTAINING map object (`[0xc7b748]`) and defers that
-                        // flood's windows. A step whose destination is EXTERIOR-flagged
-                        // (`0x148`, the same mask the weather gate uses) IS a window onto the
-                        // outdoor world, and the rect it was entered on is the accumulated clip.
-                        windows = Some(
-                            tap.entered
-                                .iter()
-                                .filter(|(to, _)| {
-                                    model
-                                        .group_nav
-                                        .get(*to)
-                                        .is_some_and(|n| n.flags & 0x148 != 0)
-                                })
-                                .map(|(_, rect)| *rect)
-                                .collect(),
-                        );
-                    }
+        }
+        // Interior-fog + weather claims off the seed already computed. The claim mask is
+        // bit 0x8 ALONE (`[0xc7b748]` writer `0x6be451/77` tests only EXTERIOR — round 6
+        // Q-H(c)): an EXTERIOR_LIT-only porch/courtyard (`0x40`) still claims the camera
+        // and engages this WMO's MFOG fog; the weather gate reads whether the placement's
+        // flood reached an exterior group (already view-clipped — the deferred-window gate
+        // fires only when the doorway's screen rect survives, the carved pass-1 law).
+        if claim.is_none() {
+            if let Some(gi) = tap.in_group {
+                if let Some(nav) = model.group_nav.get(gi).filter(|n| n.flags & EXTERIOR == 0) {
+                    fog_target = select_wmo_fog(&model.fogs, nav.fog_indices, eye_local);
+                    claim = Some(InteriorClaim {
+                        room: WmoRoom {
+                            instance: entity,
+                            group: gi as u16,
+                        },
+                        exterior_visible: model
+                            .group_nav
+                            .iter()
+                            .zip(&inst.visible)
+                            .any(|(n, v)| *v && n.flags & 0x148 != 0),
+                    });
+                    // The deferred exterior-window list is this claiming placement's alone: the
+                    // reference floods the CONTAINING map object (`[0xc7b748]`) and defers that
+                    // flood's windows. The push test is [`opens_a_window`] — `0x8` ALONE, NOT the
+                    // `0x148` on the line above. Those two are neighbours in the binary and
+                    // neighbours here, and 0774 recorded them as *correlated, not equivalent*;
+                    // the port read `0x148` anyway, which made every `0x40`-without-`0x8` group a
+                    // doorway onto the open world. Stormwind's streets are 115 of its 306 groups
+                    // (decision 0475), so one Trade District room opened eleven windows onto
+                    // Elwynn — decision 1148.
+                    windows = Some(
+                        tap.entered
+                            .iter()
+                            .filter(|(to, _)| opens_a_window(&model.group_nav, *to))
+                            .map(|(_, rect)| *rect)
+                            .collect(),
+                    );
                 }
             }
         }
@@ -454,6 +452,17 @@ impl FloodTrace for SeedTap {
     }
 }
 
+/// **The deferred-window push test.** A flood step opens a window onto the OPEN WORLD exactly when
+/// its DESTINATION group carries `0x8` — the recursion resolves the neighbour and tests
+/// `0x6b44f8 test byte [eax+0x10],0x8; 0x6b44fc je <skip-defer>` before pushing the clipped rect into
+/// `0xcbe310`/`0xcbe320` (wow-re `models/scratch/wmo-insideleg-phase3.md`, "Worklist provenance" —
+/// VERIFIED at the bytes). Nothing else qualifies: not [`EXTERIOR_LIT`], not the weather global's
+/// `0x148` (that mask lives at `0x6b42d0` and drives `[0xca80c4]`, a *correlated but different*
+/// signal — decision 0774 said so and the port read it anyway; decision 1148).
+fn opens_a_window(nav: &[WmoGroupNav], to: usize) -> bool {
+    nav.get(to).is_some_and(|n| n.flags & EXTERIOR != 0)
+}
+
 /// A tap on the flood's per-portal decisions. The `()` impl is a no-op the per-frame path uses; the
 /// probe dump and the audit harness pass a real recorder — one flood implementation, no trace copy to
 /// drift.
@@ -465,6 +474,62 @@ pub(crate) trait FloodTrace {
     fn entered(&mut self, _from: usize, _portal: u16, _to: usize, _rect: Rect, _on_plane: bool) {}
 }
 impl FloodTrace for () {}
+
+/// **Two recorders on one flood.** The per-frame path always needs the [`SeedTap`]; the dump wants a
+/// [`TraceLog`] as well. Pairing them keeps that a single flood — the alternative (branch on "are we
+/// dumping" and run one or the other) is what let `WOW_CULLDUMP=1` silently drop the claim/window
+/// computation and report a room the same trace file contradicted.
+impl<A: FloodTrace, B: FloodTrace> FloodTrace for (&mut A, &mut B) {
+    fn seed(&mut self, seeds: DownRaySeeds) {
+        self.0.seed(seeds);
+        self.1.seed(seeds);
+    }
+    fn side_fail(&mut self, from: usize, portal: u16, to: usize, d: f32) {
+        self.0.side_fail(from, portal, to, d);
+        self.1.side_fail(from, portal, to, d);
+    }
+    fn rect_none(&mut self, from: usize, portal: u16, to: usize) {
+        self.0.rect_none(from, portal, to);
+        self.1.rect_none(from, portal, to);
+    }
+    fn rect_collapse(&mut self, from: usize, portal: u16, to: usize) {
+        self.0.rect_collapse(from, portal, to);
+        self.1.rect_collapse(from, portal, to);
+    }
+    fn entered(&mut self, from: usize, portal: u16, to: usize, rect: Rect, on_plane: bool) {
+        self.0.entered(from, portal, to, rect, on_plane);
+        self.1.entered(from, portal, to, rect, on_plane);
+    }
+}
+
+/// An absent recorder records nothing — so "attach the dump only when asked" costs no second flood.
+impl<T: FloodTrace> FloodTrace for Option<T> {
+    fn seed(&mut self, seeds: DownRaySeeds) {
+        if let Some(t) = self {
+            t.seed(seeds);
+        }
+    }
+    fn side_fail(&mut self, from: usize, portal: u16, to: usize, d: f32) {
+        if let Some(t) = self {
+            t.side_fail(from, portal, to, d);
+        }
+    }
+    fn rect_none(&mut self, from: usize, portal: u16, to: usize) {
+        if let Some(t) = self {
+            t.rect_none(from, portal, to);
+        }
+    }
+    fn rect_collapse(&mut self, from: usize, portal: u16, to: usize) {
+        if let Some(t) = self {
+            t.rect_collapse(from, portal, to);
+        }
+    }
+    fn entered(&mut self, from: usize, portal: u16, to: usize, rect: Rect, on_plane: bool) {
+        if let Some(t) = self {
+            t.entered(from, portal, to, rect, on_plane);
+        }
+    }
+}
 
 /// The portal flood. Returns the per-group visible set (indexed by absolute group index). `eye_local` is
 /// the camera in WMO model space (WoW axes): it seeds the flood (the group whose floor it stands over —
@@ -790,6 +855,48 @@ mod tests {
         assert!(key(&[9]).drawn_by(&inst), "index past the set fails open");
     }
 
+    /// **Only `0x8` opens a window onto the open world** (`0x6b44f8`), and the flag values here are
+    /// Stormwind's own, read off a live cull trace at the director's `.go xyz -8798.70 478.64 95.79`
+    /// (decision 1148). The city is 306 groups of which **exactly one** — `g46`, `0x08809` — carries
+    /// `0x8`; the streets and rooms are `0x40`-without-`0x8` (decision 0475). Testing the weather
+    /// global's `0x148` instead turned all eleven rooms the flood reached from that spot into
+    /// doorways onto Elwynn, one of them 74% of the screen wide. If this test ever goes green on
+    /// `0x148` again, the whole exterior cull is off in every city.
+    #[test]
+    fn only_an_exterior_group_opens_a_window_onto_the_open_world() {
+        let g = |flags: u32| WmoGroupNav {
+            flags,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: 0xf,
+        };
+        // Stormwind's real group flags: the rooms/streets the flood reached from the reported spot…
+        let nav = [g(0x0b841), g(0x0a841), g(0x0ba41), g(0x08809), g(0x02a05)];
+        for to in [0, 1, 2] {
+            assert!(
+                !opens_a_window(&nav, to),
+                "g{to} is EXTERIOR_LIT (0x40) without EXTERIOR (0x8) — a lit indoor room, not a \
+                 doorway onto Elwynn"
+            );
+        }
+        assert!(!opens_a_window(&nav, 4), "0x02a05 carries neither bit");
+        // …and g46, the city's single exterior shell, which is the only real window.
+        assert!(
+            opens_a_window(&nav, 3),
+            "0x08809 carries 0x8 — this one IS the open world"
+        );
+        // A destination past the nav (a corrupt MOPR ref) fails CLOSED: an unknown group is not
+        // evidence of a doorway, and failing open here is the bug this test exists to catch.
+        assert!(
+            !opens_a_window(&nav, 99),
+            "an out-of-range group is no window"
+        );
+    }
+
     #[test]
     fn eye_on_portal_only_within_the_band_and_polygon() {
         // A vertical doorway portal in the x=0 plane, spanning y ∈ [-2,2], z ∈ [0,4].
@@ -946,6 +1053,7 @@ mod tests {
             lights: Vec::new(),
             group_bounds: Vec::new(),
             group_footprints: Vec::new(),
+            material_ground_type: Vec::new(),
             group_footprint_bounds: Vec::new(),
             group_footprint_grids: Vec::new(),
             group_light_refs: Vec::new(),

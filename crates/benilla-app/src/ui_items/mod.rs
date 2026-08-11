@@ -274,47 +274,205 @@ pub(crate) fn item_icon(
         .and_then(|d| d.icon.clone())
 }
 
-/// Count of item `entry` across the backpack + equipped bags. The quest-log feed
-/// ([`crate::ui_quest_log`]) needs this for an item-collection objective: unlike a creature/GO
-/// objective, item-objective progress is *not* one of the `PLAYER_QUEST_LOG` slot's 6-bit counters
-/// — the wire pin's finding is that the real client counts bag items itself, so this walks the same
-/// slot arrays the feed does and sums matching entries' stack counts. An unresolved slot (its item
-/// template still in flight) can't be matched to an entry and is skipped this frame; it counts once
-/// the answer lands and the feed reruns.
-pub(crate) fn count_of(store: &ObjectFields, items: &Items, entry: u32) -> u32 {
-    let mut total = 0u32;
-    for i in 0..PACK_SLOTS {
-        let guid = store.player_pack_slot(i).unwrap_or(0);
-        if guid == 0 {
-            continue;
+/// Which sections of the player's flat slot array a walk visits — the reference walker's own
+/// **section mask** (`0x622420`'s `ebx`; wow-re `ui/scratch/quest-leaderboard-law.md` §3.1 and
+/// `action-item-slot.md` §8.2). The reference has ONE walker over one contiguous 113-guid slot
+/// space (`PLAYER_FIELD_INV_SLOT_HEAD` through the end of the keyring) and parameterises it here;
+/// benilla had grown two hand-rolled walks that had already drifted apart, which is what decision
+/// 1158 collapsed back into [`walk_inventory`].
+///
+/// A container met in an ENABLED section is always recursed into — the reference gates sections
+/// only at the player's own root descriptor ("inside a recursed container every slot is visited
+/// unfiltered"), and its recursion bit `0x10` is clear in every mask any caller passes. Buyback
+/// (slots 69–80) has no bit at all and is unreachable at any mask.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct InventoryScope {
+    /// `0x01` — worn equipment, slots 0–18.
+    equipment: bool,
+    /// `0x02` — the four equipped bag slots 19–22, and their contents.
+    bags: bool,
+    /// `0x04` — the backpack, slots 23–38.
+    backpack: bool,
+    /// `0x08` — bank items (39–62) and the six bank-bag slots (63–68) with their contents.
+    bank: bool,
+    /// `0x40` — the keyring band.
+    keyring: bool,
+}
+
+impl InventoryScope {
+    /// `0x47` — what every caller that passes mask `0` actually gets, because `0x622420` rewrites
+    /// `mask |= 0x47` whenever the descriptor is the local player's root (`0x622434`–`0x622439`,
+    /// and the CGPlayer_C ctor sets that flag unconditionally at `0x5dd44d`). Gear + bags and
+    /// their contents + backpack + keyring; **no bank**.
+    pub(crate) const DEFAULT: Self = Self {
+        equipment: true,
+        bags: true,
+        backpack: true,
+        bank: false,
+        keyring: true,
+    };
+    /// `0x01` — the equip-vs-use fork's first stage, "is a copy of this already worn?"
+    /// (`0x4e5fe7`'s `push 1`). No expansion, no recursion.
+    pub(crate) const EQUIPMENT_ONLY: Self = Self {
+        equipment: true,
+        bags: false,
+        backpack: false,
+        bank: false,
+        keyring: false,
+    };
+    /// `0x4F` — [`Self::DEFAULT`] **plus the bank**, the mask the quest surfaces pass (`8`, which
+    /// the rewrite turns into `0x4F`). wow-re's call-site census of `0x622130` finds six such
+    /// sites and every one is a quest surface: `GetQuestLogLeaderBoard` (`0x4e0579`/`0x4e0592`),
+    /// the ADD_ITEM toast (`0x5dd0f5`), the whole-quest turn-in predicate (`0x4df778`), and
+    /// `GetAbandonQuestItems` (`0x4dfc8a`). **Quest item objectives count banked copies; nothing
+    /// else does.**
+    pub(crate) const QUEST_ITEMS: Self = Self {
+        bank: true,
+        ..Self::DEFAULT
+    };
+    /// Bags + backpack only — **narrower than any reference mask**, and named so the divergence is
+    /// visible at each call site rather than buried in a walk. This is what benilla's item counts
+    /// have always used; every non-quest caller keeps it verbatim under decision 1158 so that
+    /// record changes exactly one surface. Closing it (to [`Self::DEFAULT`], adding worn gear and
+    /// the keyring) moves action-bar counts and reagent counts and is its own change.
+    pub(crate) const CARRIED: Self = Self {
+        equipment: false,
+        bags: true,
+        backpack: true,
+        bank: false,
+        keyring: false,
+    };
+}
+
+/// The reference's inventory walk, once: a single ascending pass over the player's flat slot array,
+/// recursing depth-first into each container as it is passed, with `scope` gating the sections.
+/// `visit` sees every occupied slot as the wire `(bag_index, 0-based slot)` pair plus the instance
+/// guid, in walk order, and returns `Some` to stop the walk (a search) or `None` to continue (a
+/// count).
+///
+/// **The order is the reference's and is load-bearing** (decision 0666 pinned it for the search
+/// leg; 1158 made it the only copy): equipment 0–18 → bag slot 19 and all of bag 1's contents → 20
+/// (+contents) → 21 (+contents) → 22 (+contents) → backpack 23–38 → bank 39–62 → bank bag 63 and
+/// its contents → … → 68 (+contents) → keyring. Equipment is searched FIRST, and a bag's contents
+/// come before the backpack.
+fn walk_inventory<T>(
+    store: &ObjectFields,
+    items: &Items,
+    scope: InventoryScope,
+    mut visit: impl FnMut(u8, u8, u64) -> Option<T>,
+) -> Option<T> {
+    // A container's own contents, addressed by the container's slot number as the wire bag byte
+    // (true for equipped bags and bank bags alike — `BANK_BAG_SLOT_FIRST`'s note).
+    let contents =
+        |bag_slot: u8, bag_guid: u64, visit: &mut dyn FnMut(u8, u8, u64) -> Option<T>| {
+            let bag_fields = items.object(bag_guid)?;
+            let num_slots = bag_fields.container_num_slots().unwrap_or(0).min(36) as u8;
+            (0..num_slots).find_map(|j| {
+                let guid = bag_fields.container_slot(j).unwrap_or(0);
+                (guid != 0).then(|| visit(bag_slot, j, guid)).flatten()
+            })
+        };
+
+    if scope.equipment {
+        for i in 0..EQUIPMENT_SLOTS {
+            let guid = store.player_inv_slot(i).unwrap_or(0);
+            if guid != 0 {
+                if let Some(hit) = visit(BAG_PLAYER_INVENTORY, i, guid) {
+                    return Some(hit);
+                }
+            }
         }
+    }
+    if scope.bags {
+        for bag in 0..BAGS {
+            let bag_slot = BAG_SLOT_FIRST + bag;
+            let bag_guid = store.player_inv_slot(bag_slot).unwrap_or(0);
+            if bag_guid == 0 {
+                continue;
+            }
+            // The bag OBJECT is a candidate in its own right before its contents are.
+            if let Some(hit) = visit(BAG_PLAYER_INVENTORY, bag_slot, bag_guid) {
+                return Some(hit);
+            }
+            if let Some(hit) = contents(bag_slot, bag_guid, &mut visit) {
+                return Some(hit);
+            }
+        }
+    }
+    if scope.backpack {
+        for i in 0..PACK_SLOTS {
+            let guid = store.player_pack_slot(i).unwrap_or(0);
+            if guid != 0 {
+                if let Some(hit) = visit(BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST + i, guid) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    if scope.bank {
+        for i in 0..BANK_SLOTS {
+            let guid = store.player_bank_slot(i).unwrap_or(0);
+            if guid != 0 {
+                if let Some(hit) = visit(BAG_PLAYER_INVENTORY, BANK_SLOT_FIRST + i, guid) {
+                    return Some(hit);
+                }
+            }
+        }
+        for bag in 0..BANK_BAGS {
+            let bag_slot = BANK_BAG_SLOT_FIRST + bag;
+            let bag_guid = store.player_bank_bag_slot(bag).unwrap_or(0);
+            if bag_guid == 0 {
+                continue;
+            }
+            if let Some(hit) = visit(BAG_PLAYER_INVENTORY, bag_slot, bag_guid) {
+                return Some(hit);
+            }
+            if let Some(hit) = contents(bag_slot, bag_guid, &mut visit) {
+                return Some(hit);
+            }
+        }
+    }
+    if scope.keyring {
+        // The ADDRESSABLE 16, not the descriptor array's 32 (the reference walks all 32): 16.. is
+        // not a valid position on this wire, so it can never hold anything and the extra reads
+        // would only cost time.
+        for i in 0..KEYRING_SLOTS {
+            let guid = store.player_keyring_slot(i).unwrap_or(0);
+            if guid != 0 {
+                if let Some(hit) = visit(BAG_PLAYER_INVENTORY, KEYRING_SLOT_FIRST + i, guid) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How many of item `entry` the player holds within `scope`, summing each matching copy's
+/// `ITEM_FIELD_STACK_COUNT` — the reference's `0x622130(itemId, mask)` (`0x622160` is the
+/// per-item predicate: `OBJECT_FIELD_ENTRY` equality at `0x622166`, then `+= [+0x20]` at
+/// `0x622177`).
+///
+/// **The scope is the caller's, and it is not cosmetic**: a quest item objective counts banked
+/// copies ([`InventoryScope::QUEST_ITEMS`], the reference's mask `8` → `0x4F`) while an action
+/// button's count and a reagent count do not. An unresolved slot (its item template still in
+/// flight) can't be matched to an entry and is skipped this frame; it counts once the answer lands
+/// and the feed reruns.
+pub(crate) fn count_of(
+    store: &ObjectFields,
+    items: &Items,
+    entry: u32,
+    scope: InventoryScope,
+) -> u32 {
+    let mut total = 0u32;
+    walk_inventory::<()>(store, items, scope, |_, _, guid| {
         if let Some(fields) = items.object(guid) {
             if fields.object_entry() == Some(entry) {
                 total += fields.item_stack_count().unwrap_or(1);
             }
         }
-    }
-    for bag in 1..=BAGS {
-        let bag_guid = store.player_inv_slot(BAG_SLOT_FIRST + bag - 1).unwrap_or(0);
-        if bag_guid == 0 {
-            continue;
-        }
-        let Some(bag_fields) = items.object(bag_guid) else {
-            continue;
-        };
-        let num_slots = bag_fields.container_num_slots().unwrap_or(0).min(36) as u8;
-        for j in 0..num_slots {
-            let guid = bag_fields.container_slot(j).unwrap_or(0);
-            if guid == 0 {
-                continue;
-            }
-            if let Some(fields) = items.object(guid) {
-                if fields.object_entry() == Some(entry) {
-                    total += fields.item_stack_count().unwrap_or(1);
-                }
-            }
-        }
-    }
+        None
+    });
     total
 }
 
@@ -335,91 +493,34 @@ pub(crate) struct ItemSearch {
 /// output shape) plus the **instance guid** that occupies it, since the use fork needs it
 /// ([`item_use_command`]). This is the reference's inventory search, byte-verified (wow-re
 /// `action-item-slot.md` §8.2: the walker `0x622420` over `PLAYER_FIELD_INV_SLOT_HEAD`, predicate
-/// `OBJECT_FIELD_ENTRY` equality).
-///
-/// **Order is load-bearing and is the reference's, not a guess** (it was one until 2026-07-26 —
-/// decision 0666 supersedes 0216 §7's "unverified but necessary" note): a single ascending pass
-/// over the player's own slot array, recursing depth-first into each container as it is passed —
-///
-/// > equipment 0–18 → bag slot 19 (then all of bag 1's contents) → 20 (+contents) → 21 (+contents)
-/// > → 22 (+contents) → backpack 23–38 → keyring 81–112.
-///
-/// Two things that fall out and both matter: **equipment is searched FIRST** (the old walk never
-/// looked at it at all, so an equipped trinket's action button was inert), and **a bag's contents
-/// come before the backpack** (the old walk had the backpack first). Bank and buyback are never
-/// searched — the walker's default mode expands to `0x47`, which omits the bank's `0x08`, and no
-/// bit exists for buyback at all. The **keyring** (mode bit `0x40`, in that `0x47`) is last in the
-/// order and is walked here now that benilla models it (decision 0765) — a key with an on-use
-/// spell dropped on the action bar has to find its copy somewhere, and the keyring is the only
-/// place the server ever puts one.
+/// `OBJECT_FIELD_ENTRY` equality) — the first hit of [`walk_inventory`], whose doc carries the
+/// order and why it is load-bearing (decision 0666; bank and buyback are not in this scope).
 pub(crate) fn find_item(
     store: &ObjectFields,
     items: &Items,
     entry: u32,
     search: ItemSearch,
 ) -> Option<(u8, u8, u64)> {
-    // One candidate: the entry must match, and — under the charges filter — the instance must
-    // have uses left. A container is exempt from the charge test (the walker's own carve-out).
-    let hit = |guid: u64| -> bool {
-        if guid == 0 {
-            return false;
-        }
-        let Some(f) = items.object(guid) else {
-            return false;
-        };
-        if f.object_entry() != Some(entry) {
-            return false;
-        }
-        if search.live_charges_only && f.container_num_slots().is_none_or(|n| n == 0) {
-            return f.item_spell_charges(0).is_none_or(|c| c != 0);
-        }
-        true
+    let scope = if search.equipment_only {
+        InventoryScope::EQUIPMENT_ONLY
+    } else {
+        InventoryScope::DEFAULT
     };
-
-    // Equipment 0–18, then the four equipped-bag slots 19–22 — the bag OBJECT is a candidate in
-    // its own right before its contents are (a bag on the bar is a real, placeable action).
-    for i in 0..EQUIPMENT_SLOTS {
-        let guid = store.player_inv_slot(i).unwrap_or(0);
-        if hit(guid) {
-            return Some((BAG_PLAYER_INVENTORY, i, guid));
+    walk_inventory(store, items, scope, |bag, slot, guid| {
+        let f = items.object(guid)?;
+        if f.object_entry() != Some(entry) {
+            return None;
         }
-    }
-    if search.equipment_only {
-        return None;
-    }
-    for bag in 0..BAGS {
-        let bag_slot = BAG_SLOT_FIRST + bag;
-        let bag_guid = store.player_inv_slot(bag_slot).unwrap_or(0);
-        if hit(bag_guid) {
-            return Some((BAG_PLAYER_INVENTORY, bag_slot, bag_guid));
+        // Under the charges filter, the instance must have uses left. A container is exempt
+        // (the walker's own carve-out).
+        if search.live_charges_only
+            && f.container_num_slots().is_none_or(|n| n == 0)
+            && f.item_spell_charges(0).is_some_and(|c| c == 0)
+        {
+            return None;
         }
-        let Some(bag_fields) = items.object(bag_guid) else {
-            continue;
-        };
-        let num_slots = bag_fields.container_num_slots().unwrap_or(0).min(36) as u8;
-        for j in 0..num_slots {
-            let guid = bag_fields.container_slot(j).unwrap_or(0);
-            if hit(guid) {
-                return Some((bag_slot, j, guid));
-            }
-        }
-    }
-    for i in 0..PACK_SLOTS {
-        let guid = store.player_pack_slot(i).unwrap_or(0);
-        if hit(guid) {
-            return Some((BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST + i, guid));
-        }
-    }
-    // The keyring band, last (mode bit 0x40). Walked over the ADDRESSABLE 16, not the level-gated
-    // count: a slot the level hasn't unlocked can't hold anything, so the extra reads cost nothing
-    // and the walk needs no level in hand.
-    for i in 0..KEYRING_SLOTS {
-        let guid = store.player_keyring_slot(i).unwrap_or(0);
-        if hit(guid) {
-            return Some((BAG_PLAYER_INVENTORY, KEYRING_SLOT_FIRST + i, guid));
-        }
-    }
-    None
+        Some((bag, slot, guid))
+    })
 }
 
 /// The reference's **`HasKey()`** (`0x48ae90`) — "does this player own a key at all?", the one
@@ -1348,5 +1449,158 @@ mod find_item_tests {
             pairs.push((base + 1, (guid >> 32) as u32));
         }
         ObjectFields::from_pairs(&pairs)
+    }
+}
+
+/// [`count_of`]'s **scope** — decision 1158. The reference has one walker parameterised by a
+/// section mask, and the mask a caller passes is not cosmetic: the quest surfaces pass `8` (which
+/// the walker rewrites to `0x4F`) and so count **banked** copies; everything else passes `0` (→
+/// `0x47`) and does not. Every case here is a slot band that separates the two scopes.
+#[cfg(test)]
+mod count_of_tests {
+    use super::{count_of, InventoryScope};
+    use crate::items::Items;
+    use benilla_protocol::ObjectFields;
+
+    // Descriptor indices, raw (the module's own consts are private; the codebase's test idiom).
+    const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
+    const STACK: u16 = 14; // ITEM_FIELD_STACK_COUNT
+    const NUM_SLOTS: u16 = 48; // CONTAINER_FIELD_NUM_SLOTS
+    const SLOT_1: u16 = 50; // CONTAINER_FIELD_SLOT_1 (2 fields per guid)
+    const INV_SLOT_HEAD: u16 = 486; // player slots 0..22
+    const PACK_SLOT_1: u16 = 532; // player slots 23..38
+    const BANK_SLOT_1: u16 = 564; // player slots 39..62
+    const BANK_BAG_SLOT_1: u16 = 612; // player slots 63..68
+    const KEYRING_SLOT_1: u16 = 648; // player slots 81..112
+
+    const AMMO: u32 = 3_030; // the collect-quest item under test
+
+    /// A player whose flat slot array points at the given `(absolute player slot, guid)` pairs —
+    /// every band this module needs, each its own descriptor array on the wire.
+    fn player(slots: &[(u16, u64)]) -> ObjectFields {
+        let mut pairs = Vec::new();
+        for &(slot, guid) in slots {
+            let base = match slot {
+                0..=22 => INV_SLOT_HEAD + 2 * slot,
+                23..=38 => PACK_SLOT_1 + 2 * (slot - 23),
+                39..=62 => BANK_SLOT_1 + 2 * (slot - 39),
+                63..=68 => BANK_BAG_SLOT_1 + 2 * (slot - 63),
+                81..=112 => KEYRING_SLOT_1 + 2 * (slot - 81),
+                _ => panic!("slot {slot} is buyback or out of range"),
+            };
+            pairs.push((base, guid as u32));
+            pairs.push((base + 1, (guid >> 32) as u32));
+        }
+        ObjectFields::from_pairs(&pairs)
+    }
+
+    /// An item instance of `entry` holding `stack` copies.
+    fn stack(items: &mut Items, guid: u64, entry: u32, stack: u32) {
+        items.insert_object(
+            guid,
+            ObjectFields::from_pairs(&[(ENTRY, entry), (STACK, stack)]),
+        );
+    }
+
+    /// A container instance holding `contents` at its own inner slots.
+    fn bag(items: &mut Items, guid: u64, contents: &[(u8, u64)]) {
+        let mut pairs = vec![(ENTRY, 4_500), (NUM_SLOTS, 16)];
+        for &(slot, held) in contents {
+            pairs.push((SLOT_1 + 2 * u16::from(slot), held as u32));
+            pairs.push((SLOT_1 + 2 * u16::from(slot) + 1, (held >> 32) as u32));
+        }
+        items.insert_object(guid, ObjectFields::from_pairs(&pairs));
+    }
+
+    /// The headline: bank the quest's items and a quest objective still counts them. This is the
+    /// whole of the mask-`8` finding (wow-re `ui/scratch/quest-leaderboard-law.md` §3.1 — `8` is
+    /// exactly the bit that *adds the bank*, and every one of the six mask-`8` call sites in the
+    /// reference is a quest surface).
+    #[test]
+    fn a_quest_objective_counts_banked_copies_and_nothing_else_does() {
+        let store = player(&[(23, 0xA1), (39, 0xB1)]); // one stack in the backpack, one in the bank
+        let mut items = Items::default();
+        stack(&mut items, 0xA1, AMMO, 3);
+        stack(&mut items, 0xB1, AMMO, 5);
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            8,
+            "mask 0x4F sees the bank"
+        );
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::CARRIED),
+            3,
+            "an action-bar/reagent count must NOT see the bank"
+        );
+    }
+
+    /// Bank BAGS are recursed into as well — the walker's container recursion is gated by mask bit
+    /// `0x10`, which is clear in every mask any caller passes, and section gating applies only at
+    /// the player's own root descriptor.
+    #[test]
+    fn a_quest_objective_counts_the_contents_of_bank_bags() {
+        let store = player(&[(63, 0xBB)]); // a bag in bank-bag slot 1
+        let mut items = Items::default();
+        bag(&mut items, 0xBB, &[(0, 0xC1), (4, 0xC2)]);
+        stack(&mut items, 0xC1, AMMO, 2);
+        stack(&mut items, 0xC2, AMMO, 6);
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            8
+        );
+        assert_eq!(count_of(&store, &items, AMMO, InventoryScope::CARRIED), 0);
+    }
+
+    /// The other two bands `0x47` carries that benilla's own [`InventoryScope::CARRIED`] does not:
+    /// worn gear and the keyring. Both are in the quest scope.
+    #[test]
+    fn the_quest_scope_also_reaches_worn_gear_and_the_keyring() {
+        let store = player(&[(5, 0xE1), (81, 0xF1)]); // a worn copy and one in the keyring
+        let mut items = Items::default();
+        stack(&mut items, 0xE1, AMMO, 1);
+        stack(&mut items, 0xF1, AMMO, 1);
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            2
+        );
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::CARRIED),
+            0,
+            "benilla's pre-1158 count reached neither band — the named narrowing"
+        );
+    }
+
+    /// A carried bag's contents are in BOTH scopes — the change must not disturb the band every
+    /// caller already relied on.
+    #[test]
+    fn carried_bags_are_unchanged_in_both_scopes() {
+        let store = player(&[(19, 0xBA), (25, 0xA2)]);
+        let mut items = Items::default();
+        bag(&mut items, 0xBA, &[(2, 0xC1)]);
+        stack(&mut items, 0xC1, AMMO, 4);
+        stack(&mut items, 0xA2, AMMO, 1);
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            5
+        );
+        assert_eq!(count_of(&store, &items, AMMO, InventoryScope::CARRIED), 5);
+    }
+
+    /// Buyback (slots 69–80) has no mask bit at all and is unreachable at every scope — an item
+    /// sold to a vendor is gone from every count the client makes.
+    #[test]
+    fn buyback_is_never_counted() {
+        // The buyback band has no accessor in the walk by construction; assert the neighbouring
+        // bands still resolve so this is a real coverage statement, not a vacuous one.
+        let store = player(&[(38, 0xA1), (68, 0xBB)]);
+        let mut items = Items::default();
+        stack(&mut items, 0xA1, AMMO, 1);
+        bag(&mut items, 0xBB, &[(0, 0xC1)]);
+        stack(&mut items, 0xC1, AMMO, 1);
+        assert_eq!(
+            count_of(&store, &items, AMMO, InventoryScope::QUEST_ITEMS),
+            2,
+            "last backpack slot + last bank bag, with buyback between them untouched"
+        );
     }
 }

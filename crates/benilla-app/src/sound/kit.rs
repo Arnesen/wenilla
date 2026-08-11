@@ -160,12 +160,13 @@ pub(super) fn play_kit_ext(
     }
     .ok_or_else(|| anyhow!("unknown sound kit"))?;
 
-    let (id, volume, flags, min_dist, cutoff) = (
+    let (id, volume, flags, min_dist, cutoff, eax_def) = (
         kit.id,
         kit.volume,
         kit.flags,
         kit.min_distance,
         kit.distance_cutoff,
+        kit.eax_def,
     );
     // Selection-time audibility (0x45cdf0): positional kits out of cutoff never allocate —
     // checked first, before the weight pool, so a per-frame retry driver (the creature body-loop
@@ -231,14 +232,20 @@ pub(super) fn play_kit_ext(
     let mixer = out.mixer.as_mut().context("no audio device")?;
     let (track, handle) = match pos {
         Some(p) => {
-            let (t, h) = mixer.play_3d(data, p)?;
+            // `EAXDef 0` = no `SoundSamplePreferences` row = the reference's NULL-slot skip at
+            // `0x45cdc0`/`0x7a5bf0`: the channel never gets reverb properties, so it stays dry
+            // however wet the zone is. That is what keeps NPC voice lines (all 275 `SoundType 17`
+            // rows are `EAXDef 0`) out of an interior's reverb — decision 1155, bug B236.
+            let (t, h) = mixer.play_3d(data, p, eax_def != 0)?;
             (Some(t), h)
         }
         None => (None, mixer.play_2d(data)?),
     };
     // Every actual play, named. The one question the sound subsystem could not answer about itself
     // was "what just made that noise?" — a report of an unexpected sound had no trace to read, only
-    // a guess at which trigger fired. `RUST_LOG=benilla_app::sound=debug` now answers it.
+    // a guess at which trigger fired. `RUST_LOG=benilla_app::sound=debug` now answers it, and since
+    // 1155 it also answers "…and does it take the interior's reverb?" — the `EAXDef` wet/dry class
+    // is invisible in the audio itself, so a report of an unexpected echo needs it in the trace.
     debug!(
         "sound: play kit {id} ({}) {} {}",
         kits.catalog.get(id).map_or("?", |k| k.name.as_str()),
@@ -247,7 +254,11 @@ pub(super) fn play_kit_ext(
             SoundCategory::Music => "music",
             SoundCategory::Ambience => "ambience",
         },
-        if pos.is_some() { "3d" } else { "2d" },
+        match pos {
+            Some(_) if eax_def != 0 => "3d wet",
+            Some(_) => "3d dry",
+            None => "2d",
+        },
     );
     out.channels.push(ActiveChannel {
         kit: id,

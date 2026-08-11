@@ -325,23 +325,43 @@
             -- the full row, not the currently-visible one, exactly as the ref's SetNumTabs(5) is.
             PanelTemplates_SetNumTabs(frame, 3)
             PanelTemplates_SetTab(frame, 1)
+            -- The reference LABELS its numerals here (CharacterFrame_OnLoad l.55-57: "Health" on
+            -- the player's health bar, "XP" on the XP bar, with the power bar's following the
+            -- resource in UnitFrames.xml). Shipped in 1146 and cut the same day on the director's
+            -- call — bare numbers read better on our bars (decision 1147). The mechanism is
+            -- untouched and live: SetTextStatusBarTextPrefix works, and restoring any one of the
+            -- three is the one line the reference has. If it is ever restored, note the ordering
+            -- it depends on — a prefix only sticks on a bar that already has its TextString, and
+            -- this file's seat works only because the manifest runs UnitFrames (52) and ActionBar
+            -- (76) well ahead of it (149), exactly as FrameXML runs PlayerFrame (44) and
+            -- MainMenuBar (34) ahead of CharacterFrame (53).
         end
 
-        -- ref CharacterFrame_OnShow (l.82-93): Show*TextStatusBarText/ShowWatchedReputationBarText
-        -- OMITTED — no unit-frame bar-text-mode toggle or reputation-bar-text mechanism exists in
-        -- this engine. UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml); it was
-        -- omitted only for want of a micro bar. UnitPVPName -> plain UnitName (this file's header
-        -- comment: PVP rank is a named deferral).
+        -- ref CharacterFrame_OnShow (l.82-93). The Show*TextStatusBarText calls are LIVE as of
+        -- decision 1146 — the note that used to sit here ("no unit-frame bar-text-mode toggle
+        -- exists in this engine") was true when it was written and stopped being true when the
+        -- numerals landed (1143). Opening the character sheet reveals your own and your pet's
+        -- numbers for as long as it is open, whatever Status Bar Text says, through the same
+        -- lockShow refcount the hover uses — so a hover inside an open sheet still balances.
+        -- ShowWatchedReputationBarText stays OMITTED: no reputation watch bar exists.
+        -- UnitPVPName -> plain UnitName (this file's header comment: PVP rank is a named deferral).
         function BenillaCharacterFrame_OnShow()
             if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoOpen")
             SetPortraitTexture(getglobal("BenillaCharacterFramePortrait"), "player")
             getglobal("BenillaCharacterNameText"):SetText(UnitName("player"))
+            if ShowTextStatusBarText then -- engine tests load file subsets
+                ShowTextStatusBarText(BenillaPlayerFrameHealthBar)
+                ShowTextStatusBarText(BenillaPlayerFramePowerBar)
+                ShowTextStatusBarText(BenillaExpBar)
+                ShowTextStatusBarText(BenillaPetFrameHealthBar)
+                ShowTextStatusBarText(BenillaPetFrameManaBar)
+            end
         end
 
         -- ref CharacterFrame_OnHide (l.95-104): everything past the PlaySound is the OnShow list's
-        -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text pair still OMITTED for
-        -- the same reason as above. The subframe hide-loop is OUR OWN addition
+        -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text calls live too (1146),
+        -- the reputation one still omitted for the same reason as above. The subframe hide-loop is OUR OWN addition
         -- (decision 0437 phase 4): BenillaPaperDollFrame is a true engine child of this frame (its
         -- own header comment) so it hides for free on the parent's Hide-cascade, but
         -- BenillaSkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
@@ -354,6 +374,13 @@
         function BenillaCharacterFrame_OnHide()
             if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoClose")
+            if HideTextStatusBarText then -- engine tests load file subsets
+                HideTextStatusBarText(BenillaPlayerFrameHealthBar)
+                HideTextStatusBarText(BenillaPlayerFramePowerBar)
+                HideTextStatusBarText(BenillaExpBar)
+                HideTextStatusBarText(BenillaPetFrameHealthBar)
+                HideTextStatusBarText(BenillaPetFrameManaBar)
+            end
             for _, name in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
                 local subFrame = getglobal(name)
                 if subFrame then subFrame:Hide() end

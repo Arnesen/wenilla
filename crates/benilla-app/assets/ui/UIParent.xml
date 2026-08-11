@@ -75,6 +75,67 @@
         -- read by every `Model_OnUpdate` transcription (the character window's + inspect's).
         ROTATIONS_PER_SECOND = .5
 
+        -- ref SecondsToTime (UIParent.lua:1004-1031) and its GlobalStrings, in the ref's own home
+        -- file — two consumers now (the quest-timer window and the quest log's "Time Remaining:"
+        -- row, decision 1150), so it lives here rather than being redefined per file the way
+        -- BuffFrame.xml had to for SecondsToTimeAbbrev when it was the only caller.
+        --
+        -- Departures, both named:
+        -- - `GetText(TOKEN, nil, n)` is the ref's plural-aware GlobalString lookup, a C binding we
+        --   don't ship. Its enUS rule is the singular token for exactly 1 and the `_P1` twin
+        --   otherwise — the same rule already codified in `tooltip_item/render.rs` and MailFrame.xml
+        --   — so it collapses to the local `plural()` below and the four shipped string pairs
+        --   (GlobalStrings.lua:895-896, 2296-2297, 2693-2694, 3404-3405).
+        -- - Lua 5.1 dialect: `math.mod`/`math.floor` for the 5.0 bare `mod`/`floor`.
+        --
+        -- Everything else is verbatim, INCLUDING the two behaviours that look like bugs and are
+        -- not: the thresholds are strict `>` (86400 s reads as hours, not "1 Day"), and `count < 2`
+        -- stops after two units, so a 3-day quest reads "3 Days 4 Hrs" and never mentions minutes.
+        DAYS_ABBR = DAYS_ABBR or "Day"
+        DAYS_ABBR_P1 = DAYS_ABBR_P1 or "Days"
+        HOURS_ABBR = HOURS_ABBR or "Hr"
+        HOURS_ABBR_P1 = HOURS_ABBR_P1 or "Hrs"
+        MINUTES_ABBR = MINUTES_ABBR or "Min"
+        MINUTES_ABBR_P1 = MINUTES_ABBR_P1 or "Mins"
+        SECONDS_ABBR = SECONDS_ABBR or "Sec"
+        SECONDS_ABBR_P1 = SECONDS_ABBR_P1 or "Secs"
+
+        if not SecondsToTime then
+            local function plural(singular, pluralForm, n)
+                if n == 1 then return singular end
+                return pluralForm
+            end
+
+            function SecondsToTime(seconds, noSeconds)
+                local time = ""
+                local count = 0
+                local tempTime
+                seconds = math.floor(seconds)
+                if seconds > 86400 then
+                    tempTime = math.floor(seconds / 86400)
+                    time = tempTime .. " " .. plural(DAYS_ABBR, DAYS_ABBR_P1, tempTime) .. " "
+                    seconds = math.mod(seconds, 86400)
+                    count = count + 1
+                end
+                if seconds > 3600 then
+                    tempTime = math.floor(seconds / 3600)
+                    time = time .. tempTime .. " " .. plural(HOURS_ABBR, HOURS_ABBR_P1, tempTime) .. " "
+                    seconds = math.mod(seconds, 3600)
+                    count = count + 1
+                end
+                if count < 2 and seconds >= 60 then
+                    tempTime = math.floor(seconds / 60)
+                    time = time .. tempTime .. " " .. plural(MINUTES_ABBR, MINUTES_ABBR_P1, tempTime) .. " "
+                    seconds = math.mod(seconds, 60)
+                    count = count + 1
+                end
+                if count < 2 and seconds > 0 and not noSeconds then
+                    time = time .. seconds .. " " .. plural(SECONDS_ABBR, SECONDS_ABBR_P1, seconds) .. " "
+                end
+                return time
+            end
+        end
+
         UIPARENT_MANAGED_FRAME_POSITIONS = {}
         -- Frames
         UIPARENT_MANAGED_FRAME_POSITIONS["MultiBarBottomLeft"] = {baseY = 17, reputation = 9, maxLevel = -5, anchorTo = "ActionButton1", point = "BOTTOMLEFT", rpoint = "TOPLEFT"}
@@ -247,14 +308,24 @@
 
             -- The under-minimap right stack (ref l.1740-1770): anchorY walks down capture bars →
             -- quest timer → durability → quest watch, each shown frame pushing the next one down
-            -- by its own height. benilla ships the durability + quest-watch arms (below); the two
-            -- feeders above them (capture bars, quest timer) don't exist yet, so anchorY starts at
-            -- the ref's initial 0. The reference never leaves DurabilityFrame on its static XML
-            -- anchor (whose +40 hangs the side glyphs off-screen — director-caught): every pass
-            -- seats it at -CONTAINER_OFFSET_X, minus 20 more when a showSeparate glyph
+            -- by its own height. benilla ships the quest-timer, durability and quest-watch arms
+            -- (below); the capture bars above them don't exist yet, so anchorY starts at the ref's
+            -- initial 0. The reference never leaves DurabilityFrame on its static XML anchor
+            -- (whose +40 hangs the side glyphs off-screen — director-caught): every pass seats it
+            -- at -CONTAINER_OFFSET_X, minus 20 more when a showSeparate glyph
             -- (shield/off-weapon/ranged) extends the art to the right — then drops the quest
             -- tracker to the running anchorY so the two never collide at the same corner.
             local anchorY = 0
+            -- ref l.1753-1757 verbatim (decision 1150). Seated whether shown or not — the ref
+            -- SetPoints unconditionally and only the height accrual is gated — so the frame is
+            -- already in place the frame it appears. Nil-guarded like every row here: the
+            -- durability-only test harness ships no quest-timer frame.
+            if ( QuestTimerFrame ) then
+                QuestTimerFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
+                if ( QuestTimerFrame:IsShown() ) then
+                    anchorY = anchorY - QuestTimerFrame:GetHeight()
+                end
+            end
             if ( DurabilityFrame ) then
                 local durabilityOffset = 0
                 if ( DurabilityShield:IsShown() or DurabilityOffWeapon:IsShown() or DurabilityRanged:IsShown() ) then

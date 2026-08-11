@@ -12,7 +12,7 @@ use super::{
     AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
     Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
     PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundMessage,
-    ServerTime, TeleportMessage, WeatherMessage, WorldportMessage,
+    ServerTime, ServerWallClock, TeleportMessage, WeatherMessage, WorldportMessage,
 };
 
 mod anim;
@@ -94,7 +94,11 @@ pub(super) fn apply_net_updates(
     mut index: ResMut<GuidIndex>,
     mut self_guid: ResMut<SelfGuid>,
     mut status: ResMut<NetStatus>,
-    mut server_time: ResMut<ServerTime>,
+    // The two server clocks, paired in one param (the 16-SystemParam ceiling this signature
+    // already lives against): the in-game day/night clock the lighting reads, and the wall clock
+    // the absolute descriptor stamps are dated in (decision 1150). Different quantities, same
+    // handler file.
+    mut clocks: (ResMut<ServerTime>, ResMut<ServerWallClock>),
     mut reputations: ResMut<Reputations>,
     mut transforms: Query<&mut Transform>,
     mut stores: Query<&mut ObjectStore>,
@@ -588,7 +592,10 @@ pub(super) fn apply_net_updates(
                 minutes,
                 day_serial,
                 timescale,
-            } => session::time_speed(hours, minutes, day_serial, timescale, &mut server_time),
+            } => session::time_speed(hours, minutes, day_serial, timescale, &mut clocks.0),
+            SessionEvent::ServerUnixTime { unix_time } => {
+                session::server_unix_time(unix_time, &mut clocks.1)
+            }
             SessionEvent::Reputations { standings } => {
                 session::reputations(standings, &mut reputations)
             }

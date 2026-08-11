@@ -46,6 +46,17 @@ pub struct Material {
     /// EMISSION on lit batches (`flags & 0x10` — the windows-glow-at-night mechanism). Meaningless
     /// (usually zero) when the SIDN flag is clear.
     pub sidn_rgb: [u8; 3],
+    /// **MOMT+0x20 — the surface's `TerrainType.dbc` id**, i.e. what walking on this material
+    /// sounds like. The footstep chain's WMO leg: the client's down-ray arbitrates a terrain probe
+    /// against a WMO probe and the nearer surface supplies the terrain type, so a building's own
+    /// floor — not the ADT beneath it — decides the step indoors.
+    ///
+    /// Verified from the shipped 5875 data, not from a format doc: across all **815 root WMOs /
+    /// 10 299 materials** this dword only ever holds `{0,1,2,3,4,5,7,8,10}` — exactly the
+    /// `TerrainType.dbc` id domain (ids 0–10) — and **10 = "None" on 10 075 of them**, the
+    /// unauthored default, which resolves through `SoundID 0` to the generic `*Dirt` kit rather
+    /// than to silence. Only ~224 materials name a surface explicitly.
+    pub ground_type: u32,
 }
 
 impl Material {
@@ -201,6 +212,7 @@ fn parse_root(b: &[u8]) -> Result<WmoRoot> {
                         blend_mode: m.u32_at(8).ok_or(Error::Truncated("MOMT"))?,
                         texture_1: m.u32_at(12).ok_or(Error::Truncated("MOMT"))?,
                         sidn_rgb: [(sidn >> 16) as u8, (sidn >> 8) as u8, sidn as u8],
+                        ground_type: m.u32_at(0x20).ok_or(Error::Truncated("MOMT"))?,
                     });
                 }
             }

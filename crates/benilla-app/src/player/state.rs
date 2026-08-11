@@ -686,6 +686,29 @@ impl Player {
         self.move_flags
     }
 
+    /// The **commanded planar speed** in yd/s — the reference's `[[player+0x118]+0x84]`, the
+    /// CMovement speed scalar its producer `0x7c4c90` returns:
+    ///
+    /// ```text
+    /// mov  edx,[ecx+0x40]        ; movement flags
+    /// test dl,0xf                ; the four DIRECTION bits
+    /// jne  …                     ; moving → the speed
+    /// fld  dword ptr [0x7ffd74]  ; = 0.0
+    /// ```
+    ///
+    /// So it is **exactly zero with no direction key held** — not a measured velocity that decays,
+    /// and not the weather wind's 149 ms positional average (`0x67c150`): it is live, and tracks a
+    /// speed change on the same frame. The precipitation spawn slab's tilt keys on it through
+    /// `mgr+0x7c` (wow-re `wx-snow-placement-law.md` §9), which is why the distinction earns an
+    /// accessor: an averaged stand-in would leave the slab leaning for 150 ms after a stop, and a
+    /// raw `horiz_vel` would keep it leaning through an entire fall on take-off momentum.
+    pub(crate) fn planar_speed(&self) -> f32 {
+        if self.move_flags & 0xf == 0 {
+            return 0.0;
+        }
+        self.horiz_vel.with_y(0.0).length()
+    }
+
     /// The transport we're standing on (its guid), if any — the platform-frame attachment
     /// (decision 0438 phase 2). For instruments (the crossing probe watches the ride survive
     /// the map seam).

@@ -83,6 +83,56 @@ pub fn background_run() -> bool {
     })
 }
 
+/// Background-run envs whose run produces **no image** — nothing reads the framebuffer, so the
+/// window is pure plumbing. Prefix-matched, and the rule in [`no_pixel_run`] is **all-of**: a run
+/// counts as no-pixel only when *every* background env it sets is in this list, so a
+/// `WOW_PROBE_CHAT=… WOW_LIVE_SHOT=…` pairing (drive there, then shoot) keeps its full-size window.
+///
+/// Erring here is cheap in one direction only: a missing entry just means a big window, which is
+/// the old behaviour. A *wrong* entry shrinks a window someone is photographing — so a new
+/// `WOW_PROBE…`-named env that captures pixels has to be excluded by name here, since the bare
+/// `WOW_PROBE` prefix would otherwise sweep it in.
+const NO_PIXEL_ENV_PREFIXES: &[&str] = &[
+    "WOW_FPS_",
+    "WOW_LIVE_FPS",
+    "WOW_PARTICLE_CENSUS",
+    "WOW_PROBE",
+    "WOW_RIG",
+];
+
+/// Does this run read no pixels — i.e. may its window be small and parked out of the way?
+///
+/// The point is the director's screen. A probe window is asserted `AlwaysOnTop` for its whole life
+/// ([`crate::capture::ProbeFocusPlugin`], decision 0906 — an occluded macOS window throttles to
+/// ~1 fps and a wall-clock probe schedule then fires the wrong steps), which silently defeats
+/// everything this module does to keep instrumented runs behind the director's work: the level is
+/// re-asserted every frame, over the `AlwaysOnBottom` birth cage AND over the `Normal` this module
+/// hands back at release. That assertion is correct and stays. What was wrong is pairing it with
+/// the **full 1600×900 default**, so every agent probe planted a screen-filling window over
+/// whatever they were doing — six of them in one session, which is how it got reported
+/// (decision 1148). Un-occludable and unobtrusive were never in conflict: a small window in a
+/// corner is both.
+///
+/// `WOW_BG=1` (forced background, no run-driving env) is deliberately NOT no-pixel — that is the
+/// hand-driven case, and shrinking a window the director asked for is the opposite of the point.
+pub fn no_pixel_run() -> bool {
+    if !background_run() {
+        return false;
+    }
+    let mut saw_one = false;
+    for (name, _) in std::env::vars_os() {
+        let Some(name) = name.to_str() else { continue };
+        if !BG_ENV_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        if !NO_PIXEL_ENV_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            return false;
+        }
+        saw_one = true;
+    }
+    saw_one
+}
+
 /// On a [`background_run`], undo winit's launch-time app activation and window ordering (macOS;
 /// no-op elsewhere) for the length of the launch window, then get out of the way. The
 /// `focused: false` half lives where the window is built, in `main`.

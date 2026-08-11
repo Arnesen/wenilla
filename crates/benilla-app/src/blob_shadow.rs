@@ -493,6 +493,7 @@ fn push_shadows(
                 anchor: key.feet,
                 bias: SHADOW_SORT_BIAS,
                 raster_bias: SHADOW_RASTER_BIAS,
+                cam_relative: false,
                 main_entity: entity,
                 light: None,
             },

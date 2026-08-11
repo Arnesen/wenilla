@@ -835,6 +835,7 @@ fn writer_loop(
                         w.item_text_query(text_id, mail_id)
                     }
                     ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
+                    ClientCommand::QueryTime => w.query_time(),
                     // The inspect request (decision 0631) — no reply is awaited; see the writer.
                     ClientCommand::Inspect { target } => w.inspect(target),
                     // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.

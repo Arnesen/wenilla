@@ -27,6 +27,11 @@ const SUBSTATE_ANIM: [u16; 13] = [
     157, // 12 Despawn
 ];
 
+/// The **transient** (transition-motion) substates among the reachable ones — the rows slot 14
+/// `0x5f4120` advances off at the arm's window end (§2d: 2 Open → 3 Opened, 4 Close → 1 Closed,
+/// 5 Destroy → 6 Destroyed). Their duration is the object layer's, never the clip's loop bit.
+const MOTION_SUBSTATES: [usize; 3] = [2, 4, 5];
+
 /// The six substates a `GAMEOBJECT_STATE` × `GAMEOBJECT_ANIMPROGRESS` pair can actually produce
 /// (§2b). Substate 0 (Spawn) has no producer at all, and 8..12 come from other opcodes entirely.
 const REACHABLE: [(usize, &str); 6] = [
@@ -122,6 +127,11 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
     }
     let (mut parsed, mut no_seq, mut blind, mut sensitive, mut needs_remap, mut rate0) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // The transition half (decision 1151): a MOTION substate whose resolved sequence is bit-0-clear
+    // is one the kernel wraps for ever — so it is bounded only by the object layer's §2d completion
+    // advance, and a consumer that arms it by the loop bit instead flaps. And `replay` decides
+    // whether that window is one band or several.
+    let (mut looping_motion, mut looping_motion_sensitive, mut multi_replay) = (0u32, 0u32, 0u32);
     for (path, displays) in &models {
         let Ok(bytes) = chain.read_file(path) else {
             continue;
@@ -139,6 +149,7 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
         let seed = go_loader_seed(m, &seqs);
         let mut lines = Vec::new();
         let (mut differs, mut remapped, mut froze) = (false, false, false);
+        let (mut flaps, mut replays) = (false, false);
         for (sub, label) in REACHABLE {
             let lut = SUBSTATE_ANIM[sub];
             let (req, r0) = go_remap(m, lut);
@@ -146,6 +157,15 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
             remapped |= req != lut;
             froze |= r0;
             differs |= armed.map(|(_, s)| s) != seed.map(|(_, s)| s);
+            // The played sequence's own kernel law. `slot` is the M2's FILE slot, which is not this
+            // list's index (zero-duration sequences are dropped), so match on `seq_index`.
+            let played =
+                armed.and_then(|(_, slot)| seqs.iter().find(|s| s.seq_index == slot as usize));
+            // A transient substate (a transition motion) armed on a band the kernel wraps: what
+            // ends it is §2d, never the clip.
+            let motion = MOTION_SUBSTATES.contains(&sub);
+            flaps |= motion && !r0 && played.is_some_and(|s| s.looping);
+            replays |= played.is_some_and(|s| (s.min_replay, s.max_replay) != (0, 0));
             lines.push(format!(
                 "   {label} sub{sub}  lut {lut}{}  ->  {}{}",
                 if req == lut {
@@ -157,9 +177,30 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
                     Some((id, slot)) => format!("id {id} slot {slot}"),
                     None => "NOTHING".to_string(),
                 },
-                if r0 { "  [rate 0 — frozen]" } else { "" },
+                match played {
+                    None => String::new(),
+                    Some(s) => format!(
+                        "  {}{}{}",
+                        if s.looping { "loop " } else { "clamp" },
+                        if r0 {
+                            "  [rate 0 — frozen]"
+                        } else if motion {
+                            "  MOTION"
+                        } else {
+                            ""
+                        },
+                        if (s.min_replay, s.max_replay) == (0, 0) {
+                            String::new()
+                        } else {
+                            format!("  replay {}..{}", s.min_replay, s.max_replay)
+                        }
+                    ),
+                },
             ));
         }
+        flaps.then(|| looping_motion += 1);
+        (flaps && differs).then(|| looping_motion_sensitive += 1);
+        replays.then(|| multi_replay += 1);
         if differs {
             sensitive += 1;
         } else {
@@ -196,6 +237,16 @@ pub fn goanimscan(chain: &mut Chain) -> Result<()> {
          models a GO type that skips the arm renders in the wrong pose"
     );
     println!("  needing the §2c remap on some substate: {needs_remap}");
+    println!(
+        "  arming a LOOPING band on a transition (motion) substate: {looping_motion} \
+         ({looping_motion_sensitive} of them state-SENSITIVE, i.e. the transition is a clip the \
+         rest pose isn't)  — the §2d completion advance is the only thing that ends these; read \
+         as \"should this clip repeat?\" they swing for ever (decision 1151)"
+    );
+    println!(
+        "  authoring a non-empty replay range on a reachable substate: {multi_replay}  — R > 1 \
+         would make the transition several band lengths, so 0 here means one window IS the swing"
+    );
     println!("  hitting a rate-0 freeze leg (a motion clip standing in for a missing rest pose): {rate0}");
     Ok(())
 }

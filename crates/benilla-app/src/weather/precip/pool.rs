@@ -21,8 +21,11 @@ pub(super) struct Drop {
     pub(super) land_y: f32,
     /// The grid cell `land_y` was sampled for (see [`HeightCache`]).
     pub(super) cell: (i32, i32),
-    /// Per-particle size jitter (flake quads; 1.0 for rain streaks).
-    pub(super) size: f32,
+    /// Seconds since this particle became VISIBLE — the reference's `t − f1`, where `f1` is the
+    /// flake's birth stamp on its packet's clock. Snow's fade-in reads it (`rf-snow-flake-render`
+    /// §2.4); rain's streaks have no age term and ignore it. A record that replays late starts
+    /// at its own lag, exactly as `c_currentTime − f1` would.
+    pub(super) age: f32,
 }
 
 /// A recorded drop waiting in the packet pipeline: replays at `at` (its packet's `baseTime`
@@ -179,6 +182,71 @@ impl HeightCache {
     }
 }
 
+/// The eye band a census splits on: ±3 yd of the camera's height — the slice a player actually
+/// looks *through*, as opposed to the column of sky above them.
+const CENSUS_BAND: f32 = 3.0;
+/// The near-field radius a census counts: the sphere whose flakes dominate the look (the point
+/// sprite is 14 px at the eye and under 5 px past 30 yd).
+const CENSUS_NEAR: f32 = 15.0;
+
+/// A one-line **spatial** census of a live drop field, relative to the camera — the instrument
+/// for *"can you outrun the weather?"*, which the pool COUNTS alone cannot answer.
+///
+/// `axis` is a horizontal unit vector: the player's motion heading while they move, their view
+/// heading while they stand.
+///
+/// **`fwd`/`bwd` is the metric — read it first.** It splits the eye band about the plane through
+/// the camera ⊥ `axis`, reads ~50/50 on a centred field whatever the heading, and is what actually
+/// answers "is there weather in front of me". Measured across the 1159 fix: 3200/3350 standing,
+/// collapsing to 0 while running before the spawn-slab tilt and holding ~2115 after it.
+///
+/// **`centroid` is a weak second, and is easy to misread — it was, once.** Two biases sit on it:
+/// the drift heading is a fixed WORLD azimuth, so even a standing field's centroid sits
+/// `drift · mean_age` off along it (−5.5 yd at wire grade 0.6, −14 at 1.0, depending on which way
+/// the player faces); and it is *count-weighted*, so long-lived particles born high and to the rear
+/// dominate it. Under the slab tilt those two effects nearly cancel the forward shift at low grade:
+/// a Monte-Carlo of [`spawn_particle`] predicts the running centroid improving only 9% at grade 0.6
+/// against 49% at 1.0, and the live client measured 11% and 61% — agreeing with the law while
+/// looking, on the centroid alone, like the fix had barely worked. Never conclude from it alone.
+///
+/// `frames` is the count since the previous census, and it is **not decoration**: `run_kind`'s
+/// budget is `rate · min(dt, 1/60)` with the remainder dropped, so emission per second scales with
+/// frame rate and a sub-60 fps leg measures a genuinely thinner field than a 60 fps one on
+/// identical code (measured: ~43 fps legs read 48% of ~59 fps legs). Two census lines are only
+/// comparable at equal `frames`.
+pub(super) fn census(
+    drops: &[Drop],
+    cam: Vec3,
+    axis: Vec3,
+    speed: f32,
+    frames: u32,
+) -> Option<String> {
+    if drops.is_empty() {
+        return None;
+    }
+    let (mut sum, mut near, mut fwd, mut bwd) = (Vec3::ZERO, 0usize, 0usize, 0usize);
+    for d in drops {
+        let rel = d.pos - cam;
+        sum += rel;
+        if rel.length_squared() <= CENSUS_NEAR * CENSUS_NEAR {
+            near += 1;
+        }
+        if rel.y.abs() <= CENSUS_BAND {
+            if rel.dot(axis) > 0.0 {
+                fwd += 1;
+            } else {
+                bwd += 1;
+            }
+        }
+    }
+    let along = (sum / drops.len() as f32).dot(axis);
+    Some(format!(
+        "{} live, eye-band fwd {fwd} / bwd {bwd}, near({CENSUS_NEAR:.0} yd) {near}, \
+         centroid {along:+.1} yd along heading (moving {speed:.1} yd/s, {frames} fps)",
+        drops.len(),
+    ))
+}
+
 /// The reference's per-frame record count (`0x6754cc–ef`): `fistp(min(space, quota) − 0.5)`
 /// under round-nearest-EVEN — the x87 default. The parity matters: at `space = 1` this is
 /// `RNE(0.5) = 0` FOREVER, so a packet that lands on 6143 records can never full-close and
@@ -186,6 +254,76 @@ impl HeightCache {
 /// behind the reference's stochastic ~5 s / ~10 s upswing onset (round 3 Q-A).
 fn frame_count(space: usize, quota: f32) -> usize {
     ((space as f32).min(quota) - 0.5).round_ties_even().max(0.0) as usize
+}
+
+/// One kind's spawn box: `(half_xy, z_off)` — the horizontal half-extent of the scatter plane
+/// and the slab's local lift above it (HALF the ctor's vertical extent; see [`RAIN_Z_OFF`]).
+pub(super) const fn spawn_box(kind: WeatherKind) -> (f32, f32) {
+    match kind {
+        WeatherKind::Rain => (RAIN_HALF_XY, RAIN_Z_OFF),
+        _ => (SNOW_HALF_XY, SNOW_Z_OFF),
+    }
+}
+
+/// One particle's **placement law**, as a pure function of its five RNG draws — the reference's
+/// composed spawn (wow-re `wx-snow-placement-law.md`, `0x677750` snow / `0x674c50` rain):
+///
+/// ```text
+/// pos = R(α, ĥ×ŷ)·(O − T·V)  +  1.75·W  +  C
+/// ```
+///
+/// - `O` — the scatter, uniform over `±half_xy` on a **flat plane through the eye**, its vertical
+///   random dead (`·0.0` at `0x6777ce`). This is the plane the particle *arrives* on, not the one
+///   it is born on.
+/// - `T = z_off/|V.y|`, `O − T·V` — the back-projection up the particle's own velocity, so it
+///   starts `z_off` above the plane **in slab-local space** and passes its scatter point at `t = T`.
+/// - **`R` — the slab tilt into the direction of travel, and the term benilla was missing.**
+///   `α = 65°·sat(|W|/18)` about the horizontal axis ⊥ the heading ([`WeatherWind::slab`]).
+///   It rotates the **local offset only**: the velocity is written once at spawn and never
+///   re-touched, so drift stays world-fixed (`0x677a41` copies 3 dwords — position, not velocity).
+/// - `1.75·W + C` — the wind lead and the live camera eye, added AFTER the rotation, so the
+///   volume's origin rides the player while its *shape* leans.
+///
+/// Why the missing `R` was the whole of B233's "I can outrun the snow": untilted, every particle
+/// is born a flat `z_off` up and needs the full `T` to reach eye height — 7.8 s for snow at grade
+/// 0.6, during which a running player covers 54 yd against a 45 yd box. Tilted at a 7 yd/s run
+/// (α = 25.3°) the slab's leading corner is born ~8 yd up and ~53 yd ahead instead, arriving in
+/// ~2 s — so snow keeps meeting the runner head-on. Rain never showed the symptom because its
+/// `T` is 1.24 s, but it takes the same rotation.
+///
+/// Returns `(spawn, velocity)` in Bevy world space.
+pub(super) fn spawn_particle(
+    kind: WeatherKind,
+    w: f32,
+    origin: Vec3,
+    slab: Quat,
+    r: [f32; 5],
+) -> (Vec3, Vec3) {
+    let (half_xy, z_off) = spawn_box(kind);
+    let scatter = Vec3::new(
+        (r[0] - 0.5) * 2.0 * half_xy,
+        0.0,
+        (r[1] - 0.5) * 2.0 * half_xy,
+    );
+    // The byte kinematics (w = density): the drift heading centres on the WORLD-FIXED −1.57
+    // azimuth (0x80ffbc) ± a grade-scaled spread (the FULL width — `(r−0.5)` halves it) — rain
+    // stays a coherent sheet (±7.5° at grade 1); calm snow wanders anywhere (2π at grade 0).
+    let (vy, drift_mag, spread) = match kind {
+        WeatherKind::Rain => (
+            -(RAIN_VZ_BASE + RAIN_VZ_W * w + RAIN_VZ_RNG * w * r[2]),
+            ((2.0 * r[3] - 1.0) + RAIN_DRIFT_BASE) * w + RAIN_DRIFT_EPS,
+            RAIN_SPREAD_W * w + RAIN_SPREAD_BIAS,
+        ),
+        _ => (
+            -(SNOW_VZ_BASE + SNOW_VZ_W * w + w * r[2]),
+            ((r[3] - 0.5) + SNOW_DRIFT_OFF) * w + SNOW_DRIFT_EPS,
+            std::f32::consts::TAU - SNOW_SPREAD_W * w,
+        ),
+    };
+    let heading = DRIFT_AZ_CENTER + (r[4] - 0.5) * spread;
+    // `vy` is strictly negative for both kinds, so `T` is positive and finite.
+    let vel = wow_azimuth_to_bevy(heading) * drift_mag + Vec3::Y * vy;
+    (origin + slab * (scatter - vel * (z_off / -vy)), vel)
 }
 
 /// One kind's frame: record (RNE-counted, packet-stamped), activate sealed cohorts,
@@ -205,10 +343,16 @@ pub(super) fn run_kind(
     cam_pos: Vec3,
 ) {
     let density = weather.density_for(kind);
-    let (p, half_xy, z_off) = match kind {
-        WeatherKind::Rain => (RAIN_P, RAIN_HALF_XY, RAIN_Z_OFF),
-        _ => (SNOW_P, SNOW_HALF_XY, SNOW_Z_OFF),
+    let p = match kind {
+        WeatherKind::Rain => RAIN_P,
+        _ => SNOW_P,
     };
+    let z_off = spawn_box(kind).1;
+    // Every ground probe this frame casts from ONE plane. It has to be a constant: the slab tilt
+    // spreads the spawn heights across `z_off·(cos α ∓ (half_xy/z_off)·sin α)` — ~8..46 yd at a
+    // 7 yd/s run — and [`HeightCache`] throws its whole grid away when the cast height moves 8 yd,
+    // so probing from each particle's own height would nuke the cache every few particles.
+    let cast_plane = cam_pos.y + z_off;
 
     // ===== record (the emit gate + the RNE frame count) =====
     // The per-frame emit gate (`0x6754a0`, threshold `[0x8015b8]` = 1.0): a frame records only
@@ -219,45 +363,22 @@ pub(super) fn run_kind(
         let close_age = p / PACKET_CAP as f32;
         let (space, replay_at) = pool.open_for(now, rate, close_age);
         let n = frame_count(space, quota)
-            .min(POOL.saturating_sub(pool.drops.len() + pool.pending_len()));
+            .min(pool_bound(kind).saturating_sub(pool.drops.len() + pool.pending_len()));
+        // The emission volume's origin: the live camera eye carried forward by the wind lead
+        // (`+1.75·W + C`, added AFTER the tilt — the volume rides the player, its shape leans).
         let anchor = cam_pos + wind.vel * WIND_LEAD;
+        let origin = Vec3::new(anchor.x, cam_pos.y, anchor.z);
         let w = density;
         for _ in 0..n {
-            let (r1, r2, r3, r4, r5) = (
+            let r = [
                 rand01(rng),
                 rand01(rng),
                 rand01(rng),
                 rand01(rng),
                 rand01(rng),
-            );
-            // R2: the rand scatter lives on a flat plane at EYE height — the SEED point. (R10's
-            // plane tilt — `lerp(0, 65°, sat(speed/18))` about the ⊥-heading axis — keys on the
-            // ZONE AMBIENT wind speed (manager+0x84 → +0x7c), which benilla doesn't model yet;
-            // at zone wind 0 the tilt is identity, so flat IS the byte behaviour here.)
-            let scatter = Vec3::new((r1 - 0.5) * 2.0 * half_xy, 0.0, (r2 - 0.5) * 2.0 * half_xy);
-            let seed = Vec3::new(anchor.x, cam_pos.y, anchor.z) + scatter;
-            // The byte kinematics (w = density): the drift heading centres on the WORLD-FIXED
-            // −1.57 azimuth (0x80ffbc) ± a grade-scaled spread — rain stays a coherent sheet
-            // (±7.5° at grade 1); calm snow wanders anywhere (spread 2π at grade 0).
-            let (vy, drift_mag, spread) = match kind {
-                WeatherKind::Rain => (
-                    -(RAIN_VZ_BASE + RAIN_VZ_W * w + RAIN_VZ_RNG * w * r3),
-                    ((2.0 * r4 - 1.0) + RAIN_DRIFT_BASE) * w + RAIN_DRIFT_EPS,
-                    RAIN_SPREAD_W * w + RAIN_SPREAD_BIAS,
-                ),
-                _ => (
-                    -(SNOW_VZ_BASE + SNOW_VZ_W * w + w * r3),
-                    ((r4 - 0.5) + SNOW_DRIFT_OFF) * w + SNOW_DRIFT_EPS,
-                    std::f32::consts::TAU - SNOW_SPREAD_W * w,
-                ),
-            };
-            let heading = DRIFT_AZ_CENTER + (r5 - 0.5) * spread;
-            let vel = wow_azimuth_to_bevy(heading) * drift_mag + Vec3::Y * vy;
-            // Back-project the drop up its own velocity to the box top (`0x674df6–e53`):
-            // `T = −z_off/Vz`, spawn = seed − T·V — it starts z_off above the eye and passes
-            // its eye-plane scatter point at t = T. `vy` is strictly negative for both kinds.
-            let spawn = seed - vel * (z_off / -vy);
-            let land_y = heights.ground_y(spawn.x, spawn.z, spawn.y, spatial, filter);
+            ];
+            let (spawn, vel) = spawn_particle(kind, w, origin, wind.slab, r);
+            let land_y = heights.ground_y(spawn.x, spawn.z, cast_plane, spatial, filter);
             // Ground above the whole spawn column (a mountainside or roof over the box top) —
             // the oracle reports ground ≥ spawn z and the drop dies at birth (`0x675051`).
             if land_y >= spawn.y {
@@ -268,7 +389,7 @@ pub(super) fn run_kind(
                 vel,
                 land_y,
                 cell: HeightCache::key(spawn.x, spawn.z),
-                size: 0.7 + 0.6 * rand01(rng),
+                age: 0.0,
             };
             if let Some(pk) = &mut pool.open {
                 pk.count += 1;
@@ -284,7 +405,6 @@ pub(super) fn run_kind(
     // A record whose replay instant passed while its packet was still baking appears mid-
     // window: fast-forward its fall (drift included — re-sample the ground at the cell it
     // drifted to) and skip it if it already landed (no splash — an unseen landing never drew).
-    let cast_plane = cam_pos.y + z_off;
     let drops = &mut pool.drops;
     for pk in &mut pool.sealed {
         let mut i = 0;
@@ -294,6 +414,7 @@ pub(super) fn run_kind(
                 let lag = now - rec.at;
                 let mut drop = rec.drop;
                 drop.pos += drop.vel * lag;
+                drop.age = lag;
                 let cell = HeightCache::key(drop.pos.x, drop.pos.z);
                 if cell != drop.cell {
                     drop.cell = cell;
@@ -332,6 +453,7 @@ pub(super) fn run_kind(
     {
         pool.drops.retain_mut(|d| {
             d.pos += d.vel * dt;
+            d.age += dt;
             let cell = HeightCache::key(d.pos.x, d.pos.z);
             if cell != d.cell {
                 d.cell = cell;
@@ -364,6 +486,169 @@ pub(super) fn run_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A converged [`WeatherWind`] for a player running Bevy +X at `speed` — driven through the
+    /// real 149 ms window rather than hand-built, so these tests also pin the wiring.
+    fn wind_at(speed: f32) -> WeatherWind {
+        let mut wind = WeatherWind::default();
+        let dt = 1.0 / 60.0;
+        for i in 0..30 {
+            wind.update(Vec3::X * (speed * dt * i as f32), Vec3::X, speed, dt);
+        }
+        wind
+    }
+
+    /// The wire grade the director ran, through the published knee (`0x67bcc8`,
+    /// `max(0, (grade−0.25)·4/3)`) — the density the spawn kernel actually sees.
+    fn grade(wire: f32) -> f32 {
+        ((wire - 0.25) * (4.0 / 3.0)).max(0.0)
+    }
+
+    /// The slab **leans into the direction of travel** (`α = 65°·sat(|W|/18)`, `0x677965`–
+    /// `0x677a55`): at a 7 yd/s run the leading corner is born ~8 yd up and ~53 yd ahead instead
+    /// of a flat 30 up / 45 ahead, and the trailing corner rides up to ~46. Reproduces wow-re's
+    /// own worked numbers for `wx-snow-placement-law.md`.
+    #[test]
+    fn the_spawn_slab_leans_into_the_run() {
+        let wind = wind_at(7.0);
+        let (half_xy, z_off) = spawn_box(WeatherKind::Snow);
+        let lead = wind.slab * Vec3::new(half_xy, z_off, 0.0);
+        let trail = wind.slab * Vec3::new(-half_xy, z_off, 0.0);
+        assert!(
+            (lead.x - 53.5).abs() < 0.5 && (lead.y - 7.9).abs() < 0.5,
+            "leading corner {lead:?} — wow-re's worked value is (53.5, 7.9)"
+        );
+        assert!(
+            (trail.x + 27.9).abs() < 0.5 && (trail.y - 46.3).abs() < 0.5,
+            "trailing corner {trail:?} — wow-re's worked value is (−27.9, 46.3)"
+        );
+        // Standing still there is no heading to lean into, and the slab is flat.
+        assert_eq!(wind_at(0.0).slab, Quat::IDENTITY);
+    }
+
+    /// The two wind rotations are **separate ramps off the same axis**, not one constant reused:
+    /// at 18 yd/s the slab has saturated at 65° while the streak apex is only at 27°. Collapsing
+    /// them would silently halve the slab's lean at every running speed.
+    #[test]
+    fn the_slab_and_streak_tilts_are_distinct_ramps() {
+        let wind = wind_at(18.0);
+        let deg = |q: Quat| q.angle_between(Quat::IDENTITY).to_degrees();
+        assert!(
+            (deg(wind.slab) - 65.0).abs() < 0.5,
+            "slab {}",
+            deg(wind.slab)
+        );
+        assert!(
+            (deg(wind.tilt) - 27.0).abs() < 0.5,
+            "streak {}",
+            deg(wind.tilt)
+        );
+    }
+
+    /// **B233's pin — a running player must keep meeting snow head-on.**
+    ///
+    /// For each particle, ask where it crosses EYE HEIGHT and where the camera is at that
+    /// instant. Untilted, a snowflake at the director's grade needs its whole ~7.8 s fall to get
+    /// there, and a 7 yd/s runner covers 54 yd in that time against a 45 yd box — so nearly every
+    /// arrival lands *behind* them. That is exactly what the live probe measured: the forward eye
+    /// band collapsed 25× and hit literally zero, and the field's centroid sat 36 yd back.
+    ///
+    /// The slab tilt is the term that fixes it, so this test asserts the *contrast*: the fix has
+    /// to be worth several times the broken behaviour, not merely nonzero.
+    #[test]
+    fn a_running_player_still_meets_snow_head_on() {
+        let ahead_share = |speed: f32, slab: Quat| {
+            let m = grade(0.6);
+            let origin = Vec3::X * (speed * WIND_LEAD);
+            let mut rng = 0x9E37_79B9_u32;
+            let (mut ahead, mut total) = (0u32, 0u32);
+            for _ in 0..40_000 {
+                let r = [
+                    rand01(&mut rng),
+                    rand01(&mut rng),
+                    rand01(&mut rng),
+                    rand01(&mut rng),
+                    rand01(&mut rng),
+                ];
+                let (spawn, vel) = spawn_particle(WeatherKind::Snow, m, origin, slab, r);
+                // Born at or below the eye: it never crosses the plane, so it is not an arrival.
+                if spawn.y <= 0.0 {
+                    continue;
+                }
+                // The camera runs +X from the origin; eye height is y = 0 and the ground is flat.
+                let tau = spawn.y / -vel.y;
+                total += 1;
+                if (spawn.x + vel.x * tau) - speed * tau > 0.0 {
+                    ahead += 1;
+                }
+            }
+            f64::from(ahead) / f64::from(total)
+        };
+
+        let standing = ahead_share(0.0, Quat::IDENTITY);
+        assert!(
+            (standing - 0.5).abs() < 0.05,
+            "a standing player's arrivals should split ~50/50, got {standing:.3}"
+        );
+
+        let running = wind_at(7.0);
+        let tilted = ahead_share(7.0, running.slab);
+        let flat = ahead_share(7.0, Quat::IDENTITY);
+        eprintln!(
+            "snow arrivals ahead of the player: standing {standing:.3}, \
+             running tilted {tilted:.3}, running flat (the B233 shape) {flat:.3}"
+        );
+        assert!(
+            flat < 0.10,
+            "the untilted slab is supposed to reproduce B233 (nearly nothing arrives ahead of a \
+             runner); got {flat:.3} — if this rose, the symptom's cause moved"
+        );
+        assert!(
+            tilted > 0.25,
+            "with the slab tilt a runner should still meet a quarter or more of the arrivals \
+             head-on (wow-re's worked value is ~0.34); got {tilted:.3}"
+        );
+        assert!(
+            tilted > flat * 3.0,
+            "the tilt must dominate, not nudge: tilted {tilted:.3} vs flat {flat:.3}"
+        );
+    }
+
+    /// Rain takes the same rotation and must not change character: its fall is 1.24 s, so it
+    /// never had B233's problem, and the tilt shifts its arrival band forward without emptying
+    /// either side. (wow-re Q5: `[−61,+69]` → `[−45,+86]`.)
+    #[test]
+    fn the_tilt_leaves_rain_balanced() {
+        let m = grade(0.6);
+        let speed = 7.0;
+        let slab = wind_at(speed).slab;
+        let origin = Vec3::X * (speed * WIND_LEAD);
+        let mut rng = 0x1234_5678_u32;
+        let (mut ahead, mut total) = (0u32, 0u32);
+        for _ in 0..40_000 {
+            let r = [
+                rand01(&mut rng),
+                rand01(&mut rng),
+                rand01(&mut rng),
+                rand01(&mut rng),
+                rand01(&mut rng),
+            ];
+            let (spawn, vel) = spawn_particle(WeatherKind::Rain, m, origin, slab, r);
+            if spawn.y <= 0.0 {
+                continue;
+            }
+            let tau = spawn.y / -vel.y;
+            total += 1;
+            if (spawn.x + vel.x * tau) - speed * tau > 0.0 {
+                ahead += 1;
+            }
+        }
+        let share = f64::from(ahead) / f64::from(total);
+        assert!(
+            (0.35..0.75).contains(&share),
+            "rain should stay balanced fore/aft under the tilt, got {share:.3}"
+        );
+    }
 
     /// The RNE frame count (`0x6754cc–ef`, x87 round-nearest-even): normal quotas round to
     /// the nearest count, and `space = 1` yields `RNE(0.5) = 0` — the parity stick that keeps
@@ -404,7 +689,7 @@ mod tests {
             vel: Vec3::NEG_Y,
             land_y: -100.0,
             cell: (0, 0),
-            size: 1.0,
+            age: 0.0,
         };
         let mut pool = Pool {
             open: Some(Packet {
@@ -468,7 +753,7 @@ mod tests {
                                 vel: Vec3::NEG_Y,
                                 land_y: -100.0,
                                 cell: (0, 0),
-                                size: 1.0,
+                                age: 0.0,
                             },
                         });
                     }

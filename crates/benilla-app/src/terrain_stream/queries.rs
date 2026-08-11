@@ -61,6 +61,25 @@ pub(crate) fn doodad_ground_shade(
     }
 }
 
+/// The MCNK `areaId` under a **Bevy-space** position on the resident terrain — the OUTDOOR leg of
+/// the client's `GetAreaID 0x670250`, for any unit rather than the player.
+///
+/// [`CurrentArea`] is the player's authority and races a WMO interior claim ahead of this
+/// ([`update_current_area`]); there is no per-unit equivalent of that claim, so a caller asking
+/// about a *remote* unit gets the terrain answer alone. `None` off-terrain / mid-stream, and an
+/// `areaId` of 0 (unassigned in the data) reads as a miss, same as the player's resolver.
+pub(crate) fn area_id_under(
+    streamer: &TerrainStreamer,
+    adt_tiles: &Assets<AdtTile>,
+    bevy_pos: Vec3,
+) -> Option<u32> {
+    let wow = bevy_to_wow(bevy_pos);
+    let (tx, ty) = world_to_tile(wow[0], wow[1]);
+    let ts = streamer.tiles.get(&(tx as i32, ty as i32))?;
+    let adt = adt_tiles.get(&ts.handle)?;
+    benilla_formats::area_id_at(&adt.chunks, wow).filter(|&id| id != 0)
+}
+
 /// The `GroundEffectTexture` id under a **Bevy-space** position on the resident terrain — the
 /// footstep terrain-type source (decision 0070 slice 3; the same global position→tile→chunk
 /// lookup shape as [`doodad_ground_shade`]). `None` off-terrain / mid-stream / no-effect cell —

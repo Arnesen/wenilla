@@ -30,7 +30,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
-use crate::ui_items::{count_of, item_icon};
+use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_tradeskill::SpellFocus;
@@ -192,7 +192,7 @@ fn feed_craft(
                 let mut reagents = Vec::new();
                 let mut num_available = u32::MAX;
                 for &(entry, need) in d.reagents.iter().filter(|&&(e, n)| e != 0 && n != 0) {
-                    let have = count_of(&store.0, &items, entry);
+                    let have = count_of(&store.0, &items, entry, InventoryScope::CARRIED);
                     // A reagent is an ITEM row, so it terminates in the one genuinely shared chain
                     // (wow-re §5): ItemTemplate → ItemDisplayInfo → icon. Unlike the *recipe* icon
                     // above, there is nothing per-binding about this one.
@@ -217,7 +217,7 @@ fn feed_craft(
                 }
                 let mut tools = Vec::new();
                 for &t in d.totems.iter().filter(|&&t| t != 0) {
-                    let have = count_of(&store.0, &items, t) > 0;
+                    let have = count_of(&store.0, &items, t, InventoryScope::CARRIED) > 0;
                     if let Some(info) = items.template(t, 0, &commands) {
                         tools.push((info.name.clone(), have));
                     }

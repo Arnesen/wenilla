@@ -52,6 +52,45 @@ fn simple_server_bodies_parse() {
     }
 }
 
+/// The server wall clock (`CMSG_QUERY_TIME` 462 / `SMSG_QUERY_TIME_RESPONSE` 463, decision 1150):
+/// an empty request body, and a response of one LE `u32` of unix-epoch seconds — the epoch a timed
+/// quest's descriptor deadline is written in.
+///
+/// Byte-exact against the vmangos sender (`WorldSession::SendQueryTimeResponse`,
+/// `Handlers/QueryHandler.cpp:418-423` — `packet->time = (uint32)time(nullptr)`, that field and
+/// nothing else). The sample is a real present-day stamp with all four bytes distinct, so a byte
+/// order or width slip reads as a wildly wrong date rather than a plausible one.
+#[test]
+fn query_time_round_trips_the_server_wall_clock() {
+    assert!(
+        messages::query_time().is_empty(),
+        "CMSG_QUERY_TIME is a NullClientPacket"
+    );
+
+    // 2026-08-13T12:00:00Z = 1_786_622_400 = 0x6a7db1c0.
+    assert_eq!(u32::from_le_bytes([0xc0, 0xb1, 0x7d, 0x6a]), 1_786_622_400);
+    let p = messages::parse_server(messages::opcode::SMSG_QUERY_TIME_RESPONSE, &hx("c0b17d6a"))
+        .unwrap();
+    assert!(matches!(
+        p,
+        ServerPacket::QueryTimeResponse {
+            unix_time: 1_786_622_400
+        }
+    ));
+    assert!(matches!(
+        decode(p)[..],
+        [SessionEvent::ServerUnixTime {
+            unix_time: 1_786_622_400
+        }]
+    ));
+
+    // A short body is an error, not a silent zero: every countdown drawn from this clock would
+    // otherwise be wrong rather than absent.
+    assert!(
+        messages::parse_server(messages::opcode::SMSG_QUERY_TIME_RESPONSE, &hx("c0b17d")).is_err()
+    );
+}
+
 /// The cinematic trigger (opcode 250, body a bare `CinematicSequences.dbc` id u32 per the vmangos
 /// `SendCinematicStart` sender) parses and decodes to the event the Net drain must ack — and the
 /// char-delete result (opcode 60, one result byte) parses.

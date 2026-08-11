@@ -727,83 +727,10 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
 /// exemption. Skips without the extracted reference.
 #[test]
 fn the_window_geometry_matches_the_reference_framexml() {
-    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../WoW/_extracted_framexml/FriendsFrame.xml");
-    if !reference.is_file() {
-        eprintln!("skipping: no extracted FrameXML at {}", reference.display());
+    let Some(reference) = super::framexml_diff::reference("FriendsFrame.xml") else {
+        eprintln!("skipping: no extracted FrameXML");
         return;
-    }
-
-    /// Named element → the `AbsDimension` pairs inside it, up to the next named element.
-    /// Hand-rolled rather than a regex: this crate has no regex dependency, and adding one for a
-    /// test that scans two files is a worse trade than twenty lines of `find`.
-    fn scrape(text: &str) -> Vec<(String, Vec<(f32, f32)>)> {
-        const TAGS: &[&str] = &[
-            "<Button name=\"",
-            "<Frame name=\"",
-            "<EditBox name=\"",
-            "<ScrollFrame name=\"",
-            "<FontString name=\"",
-            "<Texture name=\"",
-            "<CheckButton name=\"",
-        ];
-        // Every (offset, name) where a named element starts, in document order.
-        let mut marks: Vec<(usize, String)> = Vec::new();
-        for tag in TAGS {
-            let mut from = 0;
-            while let Some(hit) = text[from..].find(tag) {
-                let at = from + hit;
-                let name_start = at + tag.len();
-                let Some(len) = text[name_start..].find('"') else {
-                    break;
-                };
-                marks.push((at, text[name_start..name_start + len].to_string()));
-                from = name_start + len;
-            }
-        }
-        marks.sort_by_key(|(at, _)| *at);
-
-        // `$parent*` names repeat across templates (every row template has a `$parentName`), so a
-        // bare name would compare one template's column against another's. Qualify each by the
-        // template it lives in — the nearest preceding real name.
-        let mut owner = String::new();
-        marks
-            .iter()
-            .enumerate()
-            .map(|(i, (at, name))| {
-                let end = marks.get(i + 1).map_or(text.len(), |(next, _)| *next);
-                let key = if let Some(child) = name.strip_prefix("$parent") {
-                    format!("{owner}/{child}")
-                } else {
-                    owner = name.clone();
-                    name.clone()
-                };
-                (key, dimensions(&text[*at..end]))
-            })
-            .collect()
-    }
-
-    /// Every `<AbsDimension x=".." y=".."/>` in `chunk`, in order.
-    fn dimensions(chunk: &str) -> Vec<(f32, f32)> {
-        const OPEN: &str = "<AbsDimension x=\"";
-        let mut out = Vec::new();
-        let mut rest = chunk;
-        while let Some(hit) = rest.find(OPEN) {
-            rest = &rest[hit + OPEN.len()..];
-            let Some((x, tail)) = rest.split_once('"') else {
-                break;
-            };
-            let Some(y_at) = tail.find("y=\"") else { break };
-            let Some((y, tail)) = tail[y_at + 3..].split_once('"') else {
-                break;
-            };
-            if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
-                out.push((x, y));
-            }
-            rest = tail;
-        }
-        out
-    }
+    };
 
     // Differences that are ours on purpose. Each is a *deliberate* deviation with a reason, not a
     // tolerance: the list is short and every entry names why.
@@ -877,36 +804,5 @@ fn the_window_geometry_matches_the_reference_framexml() {
         "FriendsFrameCloseButton",
     ];
 
-    let ours = scrape(
-        &std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/FriendsFrame.xml"),
-        )
-        .unwrap(),
-    );
-    let theirs: std::collections::HashMap<String, Vec<(f32, f32)>> =
-        scrape(&std::fs::read_to_string(&reference).unwrap())
-            .into_iter()
-            .collect();
-
-    let mut compared = 0;
-    let mut drifted = Vec::new();
-    for (name, dims) in &ours {
-        let key = name.replace("Benilla", "");
-        let Some(ref_dims) = theirs.get(&key) else {
-            continue; // ours alone (the local template faces) — nothing to compare against
-        };
-        compared += 1;
-        if dims != ref_dims && !EXPECTED.contains(&key.as_str()) {
-            drifted.push(format!("{key}: ours {dims:?} != ref {ref_dims:?}"));
-        }
-    }
-    assert!(
-        compared > 60,
-        "only {compared} elements matched by name — the scrape or the naming broke"
-    );
-    assert!(
-        drifted.is_empty(),
-        "geometry differs from the reference FrameXML:\n  {}",
-        drifted.join("\n  ")
-    );
+    super::framexml_diff::assert_geometry_matches("FriendsFrame.xml", &reference, EXPECTED, 61);
 }

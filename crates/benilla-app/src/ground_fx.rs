@@ -261,6 +261,7 @@ pub(crate) fn update_ground_fx_decals(
                 anchor: decal.center,
                 bias: GROUND_FX_DEPTH_BIAS,
                 raster_bias: GROUND_FX_DEPTH_BIAS as i32,
+                cam_relative: false,
                 main_entity: entity,
                 light: None,
             },

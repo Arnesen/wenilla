@@ -84,6 +84,9 @@ struct ExtractedDraw {
     anchor: Vec3,
     bias: f32,
     raster_bias: i32,
+    /// Vertices are already camera-relative — the prepare rebase skips this draw. See
+    /// [`super::buffer::EffectDrawSpec::cam_relative`].
+    cam_relative: bool,
     /// Vertex range in the shared stream.
     range: Range<u32>,
     /// A booth's scene-light override (0539 §5); `None` = the world's shared light buffer.
@@ -355,6 +358,7 @@ fn extract_effects(
         anchor: d.anchor,
         bias: d.bias,
         raster_bias: d.raster_bias,
+        cam_relative: d.cam_relative,
         range: d.range.clone(),
         light: d.light.clone(),
     }));
@@ -456,6 +460,12 @@ fn prepare_effects(
         // (`DECAL_WORLD_CLIP`, the same `raster_bias != 0` predicate — decision 0781), so a
         // rebase here would shift them a full camera-position off.
         if draw.raster_bias != 0 {
+            continue;
+        }
+        // …and so does a draw whose producer already wrote camera-relative vertices: subtracting
+        // again would shift it a whole camera position off. That flag exists for f32 precision on
+        // sub-centimetre geometry — see [`super::buffer::EffectDrawSpec::cam_relative`].
+        if draw.cam_relative {
             continue;
         }
         let Some(cam) = cams.get(&MainEntity::from(draw.cam)) else {

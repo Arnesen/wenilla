@@ -132,6 +132,15 @@ pub struct FootprintTris {
     /// day/night exterior colours as the object's base instead of the MOCV sample (§11's binary
     /// selector).
     pub mopy_flags: Vec<u8>,
+    /// Per-TRIANGLE MOPY **material id** (parallel to [`Self::mopy_flags`]) — the index into the
+    /// ROOT's MOMT, and through it the face's `TerrainType` (`WmoRoot::material_ground_types`).
+    /// This is the footstep surface's WMO leg: the client's material ray reads exactly this byte
+    /// off the hit face (`0x6a26fc`, wow-re `wmo-footstep-surface.md`).
+    ///
+    /// `0xFF` occurs on disk and is not an index — those faces all carry MOPY flag `0x08` and are
+    /// already dropped by [`FOOTPRINT_REJECT`] before anything can sample them. Consumers still
+    /// bounds-check: the client does not, the shipped assets simply never break the invariant.
+    pub mopy_material: Vec<u8>,
 }
 
 /// The footprint ray's per-face MOPY reject mask (wow-re `unit-light-combine-storm.md`, the BSP
@@ -155,6 +164,7 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
     }
     let mut indices = Vec::new();
     let mut mopy_flags = Vec::new();
+    let mut mopy_material = Vec::new();
     for (ti, tri) in group.vertex_indices.chunks_exact(3).enumerate() {
         let flags = group.material_info.get(ti).map_or(0, |m| m.flags);
         if flags & FOOTPRINT_REJECT != 0 {
@@ -162,6 +172,7 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
         }
         indices.extend_from_slice(tri);
         mopy_flags.push(flags);
+        mopy_material.push(group.material_info.get(ti).map_or(0xFF, |m| m.material_id));
     }
     Some(FootprintTris {
         positions: group
@@ -176,6 +187,7 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
             .map(|c| [c.r, c.g, c.b])
             .collect(),
         mopy_flags,
+        mopy_material,
     })
 }
 

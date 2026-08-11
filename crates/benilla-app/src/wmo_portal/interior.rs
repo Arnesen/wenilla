@@ -538,7 +538,35 @@ pub(super) fn footprint_sample(
     model: &WmoModel,
     probe_local: [f32; 3],
 ) -> Option<(usize, [u8; 3], bool)> {
-    footprint_scan(model, probe_local, false)
+    footprint_scan(model, probe_local, false, None).map(|(g, c, m, _)| (g, c, m))
+}
+
+/// The footstep surface's **material ray** (decision 1161) — the second of the client's two rays.
+/// The first (the collision-face down-ray that races terrain) has already picked `group`; this
+/// re-casts the same column over that group's RENDER faces and reads the winning face's
+/// `TerrainType` id: `MOPY[face].material_id → MOMT[id].ground_type` (`0x6a26c0`).
+///
+/// It is the *same* candidate set the lighting sample walks, and not by coincidence: both are the
+/// client's `0x88`-reject face walk ([`FOOTPRINT_REJECT`](benilla_formats::FootprintTris) — a
+/// COLLISION or VISITED face is invisible to either). The two rays deliberately see different
+/// geometry, which is why a floor authored as a render sheet over a separate collision sheet
+/// resolves its *material* off the render layer while the arbitration used the collision one.
+///
+/// `None` = the client's `−1`: no accepted render face under the probe in that group, or a
+/// material id past the root's MOMT. The caller must read that as **silent**, never as a reason to
+/// fall back to the terrain leg — the building won the column either way.
+pub(crate) fn surface_terrain_sample(
+    model: &WmoModel,
+    group: usize,
+    probe_local: [f32; 3],
+) -> Option<u32> {
+    let (_, _, _, material) = footprint_scan(model, probe_local, false, Some(group))?;
+    // The client indexes MOMT unchecked; the assets hold the invariant (every `0xFF` face carries
+    // MOPY `0x08` and was dropped at parse). We bounds-check rather than inherit a latent OOB.
+    model
+        .material_ground_type
+        .get(usize::from(material))
+        .copied()
 }
 
 /// The containment attach's **upward retry** (`6a908d`: the down leg missed, so the segment is
@@ -549,20 +577,26 @@ pub(super) fn footprint_sample_above(
     model: &WmoModel,
     probe_local: [f32; 3],
 ) -> Option<(usize, [u8; 3], bool)> {
-    footprint_scan(model, probe_local, true)
+    footprint_scan(model, probe_local, true, None).map(|(g, c, m, _)| (g, c, m))
 }
 
-/// The shared body of the two footprint legs: `up` flips which side of the probe a face must lie
-/// on and which of the candidates wins (nearest, in the cast's own direction).
+/// The shared body of the footprint/material legs: `up` flips which side of the probe a face must
+/// lie on and which of the candidates wins (nearest, in the cast's own direction); `only_group`
+/// restricts the scan to a single group, which is what the material ray needs — the arbitration
+/// has already chosen the group, and the nearest render face *overall* can belong to another one.
 fn footprint_scan(
     model: &WmoModel,
     probe_local: [f32; 3],
     up: bool,
-) -> Option<(usize, [u8; 3], bool)> {
+    only_group: Option<usize>,
+) -> Option<(usize, [u8; 3], bool, u8)> {
     let (px, py, pz) = (probe_local[0], probe_local[1], probe_local[2]);
-    let mut best: Option<(f32, usize, [f32; 3], bool)> = None;
+    let mut best: Option<(f32, usize, [f32; 3], bool, u8)> = None;
     for (gi, fp) in model.group_footprints.iter().enumerate() {
         let Some(fp) = fp else { continue };
+        if only_group.is_some_and(|g| g != gi) {
+            continue;
+        }
         // Broad phase on the load-derived face bounds (the 0330 rule — from the faces, never an
         // authored box, so the cull is exact): a down-ray at (px, py) can hit no face of a group
         // whose XY face bounds exclude the column, and no face whose LOWEST vertex is already
@@ -621,14 +655,22 @@ fn footprint_scan(
                 wa * f32::from(ca[2]) + wb * f32::from(cb[2]) + wc * f32::from(cc[2]),
             ];
             let mopy = fp.mopy_flags.get(ti).is_some_and(|f| f & 0x1 != 0);
-            best = Some((z, gi, mocv, mopy));
+            let material = fp.mopy_material.get(ti).copied().unwrap_or(0xFF);
+            best = Some((z, gi, mocv, mopy, material));
         };
         match model.group_footprint_grids.get(gi).and_then(Option::as_ref) {
             Some(grid) => grid.candidates(px, py).for_each(&mut consider),
             None => (0..fp.indices.len() / 3).for_each(&mut consider),
         }
     }
-    best.map(|(_, gi, mocv, mopy)| (gi, mocv.map(|v| v.round().clamp(0.0, 255.0) as u8), mopy))
+    best.map(|(_, gi, mocv, mopy, material)| {
+        (
+            gi,
+            mocv.map(|v| v.round().clamp(0.0, 255.0) as u8),
+            mopy,
+            material,
+        )
+    })
 }
 
 /// Whether a probe column (model-local WoW coords) can hit any of a building's collision faces:
@@ -692,6 +734,7 @@ mod tests {
             lights: Vec::new(),
             group_bounds: Vec::new(),
             group_footprints: Vec::new(),
+            material_ground_type: Vec::new(),
             group_footprint_bounds: Vec::new(),
             group_footprint_grids: Vec::new(),
             group_light_refs: Vec::new(),
@@ -706,7 +749,7 @@ mod tests {
     /// sits far away in XY with a HIGHER face (z = 5) that would shadow group 0's hit if a broken
     /// cull ever let its column test slip.
     fn two_group_footprints() -> Vec<Option<FootprintTris>> {
-        let face = |offset: [f32; 3]| FootprintTris {
+        let face = |offset: [f32; 3], material: u8| FootprintTris {
             positions: vec![
                 [offset[0], offset[1], offset[2]],
                 [offset[0] + 10.0, offset[1], offset[2]],
@@ -715,10 +758,11 @@ mod tests {
             indices: vec![0, 1, 2],
             mocv: vec![[10, 20, 30]; 3],
             mopy_flags: vec![0],
+            mopy_material: vec![material],
         };
         vec![
-            Some(face([-5.0, -5.0, 0.0])),
-            Some(face([100.0, 100.0, 5.0])),
+            Some(face([-5.0, -5.0, 0.0], 1)),
+            Some(face([100.0, 100.0, 5.0], 2)),
         ]
     }
 
@@ -728,6 +772,7 @@ mod tests {
     fn slab_field(n: usize) -> FootprintTris {
         let (mut positions, mut indices, mut mocv, mut mopy_flags) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut mopy_material = Vec::new();
         for iy in 0..n {
             for ix in 0..n {
                 let (x, y) = (ix as f32 * 4.0, iy as f32 * 4.0);
@@ -744,6 +789,7 @@ mod tests {
                 mocv.extend_from_slice(&[[shade, shade / 2, shade / 3]; 4]);
                 indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                 mopy_flags.extend_from_slice(&[0, 0]);
+                mopy_material.extend_from_slice(&[0, 0]);
             }
         }
         FootprintTris {
@@ -751,7 +797,36 @@ mod tests {
             indices,
             mocv,
             mopy_flags,
+            mopy_material,
         }
+    }
+
+    /// **The material ray reads the hit FACE's material, inside the group the arbitration chose.**
+    /// The group restriction is the whole point (decision 1161): the first ray already picked the
+    /// group off the *collision* faces, so a nearer render face in a different group must not steal
+    /// the answer. And a group with no face under the column is the client's `−1` — silent — not an
+    /// invitation to go looking elsewhere.
+    #[test]
+    fn material_ray_resolves_per_group_and_bounds_checks() {
+        let mut model = bare_model();
+        model.group_footprints = two_group_footprints();
+        model.group_footprint_bounds = footprint_tri_bounds(&model.group_footprints);
+        // A root MOMT: material 0 unauthored ("None"), 1 = Wood (TerrainType 4), 2 = Snow (3).
+        model.material_ground_type = vec![10, 4, 3];
+        // Over group 0's floor, asking about group 0: its own face's material.
+        assert_eq!(surface_terrain_sample(&model, 0, [0.0, 0.0, 2.0]), Some(4));
+        // The same column asked about group 1 — whose only face is 100 yd away — is silent, and
+        // must NOT wander into group 0's face.
+        assert_eq!(surface_terrain_sample(&model, 1, [0.0, 0.0, 2.0]), None);
+        // Group 1's own column resolves group 1's material.
+        assert_eq!(
+            surface_terrain_sample(&model, 1, [103.0, 103.0, 7.0]),
+            Some(3)
+        );
+        // A material id past the root's MOMT is the bounds check the client doesn't do: silent,
+        // never an out-of-range index.
+        model.material_ground_type = vec![10];
+        assert_eq!(surface_terrain_sample(&model, 0, [0.0, 0.0, 2.0]), None);
     }
 
     /// **The column index never changes a verdict.** Same model, same columns, indexed vs not:

@@ -22,6 +22,11 @@
 //! rungs (owner-last 0719/0721, the decal biases, foam's water tie-break) moved from material
 //! `depth_bias` into the item key (`sky_order`'s sign law); the rasterizer half of the old
 //! material `depth_bias` lives on as [`EffectDraw::raster_bias`] (the coplanar decals need it).
+//!
+//! The rebase is a *late* subtraction, which is fine until a producer's geometry is smaller than
+//! an f32 ULP at the position it writes — the rounding has already happened by then. The snow
+//! flake reached that (millimetre quads at ~5600-yd coordinates), so a draw may declare
+//! [`EffectDrawSpec::cam_relative`] and do the subtraction itself.
 
 use std::ops::Range;
 
@@ -32,7 +37,9 @@ use bevy::render::render_resource::Buffer;
 
 /// One vertex of the shared lane. **World-space** position in the stream; the render-world
 /// prepare pass rebases it camera-relative before upload (0733 §2), so instruments reading the
-/// stream (depth probe, depth dump) always see world coordinates.
+/// stream (depth probe, depth dump) always see world coordinates — with one declared exception,
+/// [`EffectDrawSpec::cam_relative`], whose producer has already done the subtraction because its
+/// geometry is too small to survive being written in absolute-world f32 at all.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EffectVertex {
@@ -207,6 +214,8 @@ pub struct EffectDraw {
     /// the draw's verts skip the cam-relative rebase and run the world-mesh `clip_from_world`,
     /// so the depth tie the bias settles is against the same arithmetic.
     pub raster_bias: i32,
+    /// Are this draw's vertices **already camera-relative**? See [`EffectDrawSpec::cam_relative`].
+    pub cam_relative: bool,
     /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris).
     pub range: Range<u32>,
     /// The producing entity — the phase probe's identity for this item (`item.entity.1`, so a
@@ -275,6 +284,24 @@ pub struct EffectDrawSpec {
     pub anchor: Vec3,
     pub bias: f32,
     pub raster_bias: i32,
+    /// Set when the producer has **already** written camera-relative vertices, so
+    /// [`super::render`]'s rebase must skip this draw. The default (`false`) is the lane's
+    /// contract: producers write ABSOLUTE world positions and the rebase subtracts the camera
+    /// on the upload copy.
+    ///
+    /// It exists for **precision**, and precisely one family needs it. `EffectVertex::pos` is
+    /// f32, WoW world coordinates run to ±17066 yd, and the rebase happens *after* the producer's
+    /// rounding — so a vertex offset smaller than an ULP at the writing position is simply lost.
+    /// Every other family's geometry is centimetre-scale or bigger and never notices. The snow
+    /// flake is the lane's first **sub-centimetre** geometry: reproducing the reference's point
+    /// sprite (14 px at the eye) puts a near flake's half-extent at ~1.6 mm, which at Kharanos's
+    /// ~5600-yd coordinates is **3 ULPs** and at a map corner **0.8** — measured: a 14 px sprite
+    /// 0.3 yd from the eye loses 2.4 px of width there and 6+ px at the map edge, i.e. visible
+    /// size flicker and dropouts on exactly the flakes the eye is drawn to. Writing the offsets
+    /// camera-relative keeps every term small and the arithmetic exact.
+    ///
+    /// The sort [`Self::anchor`] stays absolute either way — it is not a vertex.
+    pub cam_relative: bool,
     pub main_entity: Entity,
     pub light: Option<Buffer>,
 }
@@ -321,6 +348,7 @@ impl EffectQuads {
                 anchor: spec.anchor,
                 bias: spec.bias,
                 raster_bias: spec.raster_bias,
+                cam_relative: spec.cam_relative,
                 range: start..end,
                 main_entity: spec.main_entity,
                 light: spec.light,
@@ -434,6 +462,7 @@ mod tests {
                     anchor: Vec3::ZERO,
                     bias: 0.0,
                     raster_bias: 0,
+                    cam_relative: false,
                     main_entity: Entity::PLACEHOLDER,
                     light: None,
                 },

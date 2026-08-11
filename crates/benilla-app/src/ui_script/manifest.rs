@@ -255,6 +255,11 @@ const UI_MANIFEST: &[&str] = &[
     // NPC session — loaded after MerchantFrame (the BenillaMoney coin helpers it reuses) and
     // alongside QuestFrame (same arc); the 'L' binding below calls its ToggleQuestLog().
     "QuestLogFrame.xml",
+    // The timed-quest countdown window under the minimap (decision 1150): the reference's own
+    // file split. After MinimapCluster (its anchor), UIParent (the manage pass that re-seats it,
+    // and SecondsToTime), GameTooltip (its row hover), and QuestLogFrame — whose window a row
+    // click opens, and whose MAX_QUESTS it shares.
+    "QuestTimerFrame.xml",
     "ChatFrame.xml",
     // The macro window (decision 0983): the editor + its name/icon popup, driven over the
     // engine's OWN macro table (`benilla_ui::script::macros` — 1.12 macros have no server

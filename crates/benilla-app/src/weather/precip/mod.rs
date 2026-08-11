@@ -6,17 +6,31 @@
 //! (constants, rates, gates, blend states) are the reference's, the x87 quirks are not.
 //!
 //! The verified structure:
-//! - **Rain**: drops scatter on the CAMERA-EYE plane across 130×130 yd, then **back-project up
-//!   the velocity to the box top** — `T = −37.5/Vz`, spawn = seed − T·V, so every drop starts
-//!   **37.5 yd above the eye** and passes its eye-plane scatter point at t = T (`0x674df6–e53`;
+//! - **Placement** is one law for both kinds ([`pool::spawn_particle`], wow-re
+//!   `wx-snow-placement-law.md`): `pos = R·(O − T·V) + 1.75·W + C`. The scatter `O` lies on the
+//!   plane the particle *arrives* on; `−T·V` back-projects it up its own velocity; **`R` leans the
+//!   whole slab into the direction of travel** by `65°·sat(speed/18)`; then the wind lead and the
+//!   live camera eye. `R` was missing until decision 1159 and its absence IS B233's second half —
+//!   without it a particle needs its entire fall to reach eye height, which a running player
+//!   outpaces (snow at grade 0.6: 7.8 s of fall against 54 yd of running, versus a 45 yd box).
+//! - **Rain**: drops scatter across 130×130 yd, `T = −37.5/Vz` (`0x674df6–e53`;
 //!   rf-weather-emission-timeline Q5 — the old "spawns AT eye height" read killed only the box's
 //!   z-RANDOM, not the constant lift, and made density camera-angle-dependent). Each drop dies
 //!   at the **terrain** under its spawn column and leaves a 0.25 s *patter* splash **1:1** (calm
 //!   wind only). Streaks draw as fixed-size comet-tail TRIANGLES (0.1 wide × 2.0 long) with
 //!   **no vertex colour** — the look is `RainDrop01.blp` (authored grey-128-neutral) under
 //!   **Mod2x** (`2·src·dst`) and a **forced grey fog** over 70..75 yd that IS the distance fade.
-//! - **Snow**: same rails, 90×90 box, spawn plane +30, slow wandering kinematics, alpha-blended
-//!   flake quads (half 1/12), fog off.
+//! - **Snow**: same rails, 90×90 box, slab lift +30, slow wandering kinematics — but a
+//!   completely different DRAW. The leg that runs is the ARB **point sprite** `0x678610`
+//!   (`glDrawArrays(GL_POINTS)`, `snowpoint.bls`), so a flake is sized in **pixels**,
+//!   `max(1, 14·clamp01(1 − 0.02·d))` — denominated in the ERA's screen height so the angle, not
+//!   the pixel count, carries to a modern display ([`SNOW_PX_REF_HEIGHT`], decision 1162) — with
+//!   alpha `clamp01(t − f1)` falling (a 1 s fade-in) and
+//!   `clamp01(1 − 4·(t − f2))` settled. Blend mode 2 (SrcAlpha, 1−SrcAlpha), fog OFF,
+//!   depth-write off, RGB white. The `1/12` world-space triangle of `0x678960` is the
+//!   fixed-function FALLBACK and never runs on real hardware — benilla drew it (as a *quad*,
+//!   times an invented size jitter) while taking the shader leg's population, which is B233's
+//!   "flakes seem too big" (decision 1149; wow-re `rf-snow-flake-render.md`).
 //! - **Mist**: every precip type carries a companion mist — its own object in the reference
 //!   (ctor `0x67a5b0`, spawn `0x67a990`, render `0x67ae20`); the law lives in [`mist`].
 //! - Ground heights come from a **lazy height cache** of the reference's weather ground
@@ -70,8 +84,8 @@ mod pool;
 mod render;
 mod wind;
 use mist::{push_mist, run_mist, Mist};
-use pool::{run_kind, HeightCache, Pool};
-use render::{push_flakes, push_patters, push_streaks};
+use pool::{census, run_kind, HeightCache, Pool};
+use render::{push_flakes, push_patters, push_streaks, FlakeView};
 pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 
 // ===== The reference's constants (byte-cited; render laws from wow-re rf-weather-render.md,
@@ -93,8 +107,36 @@ const SHADER_LEG: bool = true;
 /// `effect+0x70`), so the steady population is demand-bounded (`rate · fall_time`).
 const PACKET_CAP: usize = 0x1800;
 /// Benilla's live+pending bound per effect (the reference has none — allocator-bounded): the
-/// leg's steady demand plus one packet of pipeline lag, with headroom.
-const POOL: usize = if SHADER_LEG { 0xC000 } else { 0x4000 };
+/// leg's steady demand `rate · fall_time` plus one packet of pipeline lag, with headroom.
+///
+/// **Per kind, because the two demands differ by 1.7×** and one shared number silently clipped
+/// snow. Rain falls at ~28 yd/s from +37.5, so `35000 · 1.34 s ≈ 47k`; snow *sinks* at 5.5–6.5
+/// from +30, so `14000 · ~5.5 s ≈ 76k` — against the old shared `0xC000` = 49152 the snow field
+/// saturated, emission stalled at the bound, and the sky held ~64% of the reference's flakes.
+/// The vertex cost is the reason to keep these tight: the reference draws one *point* per flake
+/// (`glDrawArrays(GL_POINTS)`, 32 B), while benilla's shared effect stream draws a quad, so every
+/// flake costs 4 vertices here.
+const fn pool_bound(kind: WeatherKind) -> usize {
+    match kind {
+        WeatherKind::Snow => {
+            if SHADER_LEG {
+                0x18000
+            } else {
+                0x4000
+            }
+        }
+        _ => {
+            if SHADER_LEG {
+                0xC000
+            } else {
+                0x4000
+            }
+        }
+    }
+}
+/// The largest pool bound — the `take(…)` guard on a push, where the kind is already implied by
+/// which pool is being drawn.
+const POOL: usize = pool_bound(WeatherKind::Snow);
 // Density gain `K` (`rate = K·P·grade` per second) is the live `weatherDensity` setting's table
 // entry — `WeatherState::density_gain()` (`0x67b870`: 0.1/0.33/0.66/1.0 for setting 0–3). The
 // transcriptions carried quality 2's 0.66 as a baked constant; the reference runs at 3 (K=1.0).
@@ -142,13 +184,18 @@ const PATTER_UP: f32 = 1.0 / 6.0;
 /// snow 90×90 (`0x42b40000`).
 const RAIN_HALF_XY: f32 = 65.0;
 const SNOW_HALF_XY: f32 = 45.0;
-/// Spawn-plane lift above the camera eye — HALF the ctor vertical extent (rain 75 → +37.5,
+/// The slab's lift in **slab-local** space — HALF the ctor vertical extent (rain 75 → +37.5,
 /// snow 60 → +30). Q5-CORRECTED (wow-re rf-weather-emission-timeline): the box's z-RANDOM is
 /// dead (`·0.0`) but the constant lift is not — `0x674df6–e53` builds `T = −37.5/Vz` and seeds
-/// `local.z = −T·Vz = +37.5`, back-projecting the drop so its trajectory passes the eye-plane
+/// `local.z = −T·Vz = +37.5`, back-projecting the drop so its trajectory passes the arrival-plane
 /// scatter point at t = T. The earlier "spawns AT eye height" read (rf-weather-render Q4) was
 /// the bug behind camera-angle-dependent density, the precip-free view above the horizon, and
 /// uphill terrain getting no rain (director-caught, 2026-07-12).
+///
+/// **It is not a world height.** The slab tilt rotates the local offset, so the realised spawn
+/// heights fan out to `z_off·cos α ∓ half_xy·sin α` — ~8..46 yd for snow at a 7 yd/s run, and the
+/// leading edge dips *below* the eye entirely past ~13 yd/s. Reading this as "the plane the
+/// particles are born on" is what made the untilted model look self-consistent (decision 1159).
 const RAIN_Z_OFF: f32 = 37.5;
 const SNOW_Z_OFF: f32 = 30.0;
 /// Snow fall speed: `vz = −2 − 3.5m − m·r` (`wx_snowspawn.rs` R3c: 2.0/3.5 bit-cited) — calm
@@ -161,15 +208,62 @@ const SNOW_DRIFT_EPS: f32 = 0.015;
 /// Snow heading spread: `2π − 5.934·m` (R3a, `0x80fff4`) — calm snow wanders in ANY direction,
 /// a blizzard's flakes align to ±10° of the wind.
 const SNOW_SPREAD_W: f32 = f32::from_bits(0x40bd_e44f); // ≈ 5.9341197
-/// Snow flake quad half-size — the snow quad pass builds its corner basis ·(1/12) (`0x678960`
-/// region 1; the 0.05 previously here was the RAIN streak half-width — the ledger's rain/snow
-/// mislabel, corrected by rf-weather-render).
-const SNOW_HALF: f32 = 1.0 / 12.0;
+/// Snow flake size — **`snowpoint.bls`'s point-size law, in WINDOW PIXELS** (wow-re
+/// `rf-snow-flake-render.md` §2.4, read at the shipped shader's bytes):
+///
+/// ```text
+/// pointsize(d) = max(1.0, 14.0 · clamp01(1 − 0.02·d))   pixels, d = |flake − eye| in yards
+/// ```
+///
+/// The snow leg that RUNS is `0x678610`, the ARB **point-sprite** pass
+/// (`glDrawArrays(GL_POINTS)`, one vertex per flake, `GL_COORD_REPLACE` texcoords,
+/// `GL_VERTEX_PROGRAM_POINT_SIZE_ARB`); `0x678960`'s 1/12 world-space triangle is the
+/// fixed-function fallback, dead on any GPU since ~2002 (ctor `0x677420` clears the leg flag only
+/// when `snowpoint.bls` fails to compile, `GL_ARB_point_sprite` is missing, or
+/// `useWeatherShaders` is 0). benilla drew the *fallback's* geometry while taking the *shader*
+/// leg's population — the two mutually exclusive sides of `0x6790c1` — and inflated it further
+/// with an invented per-flake size jitter; that pairing is what made the flakes read as far too
+/// big (B233, decision 1149).
+///
+/// **This is not a world size, and it is not `∝ 1/d`.** A flake 1 yd away is 14 px and one 30 yd
+/// away is 5.6 px — near flakes far smaller, and distant flakes far larger, than any fixed
+/// world-space quad. wgpu has no point-sprite size (WebGPU pins `PointList` at 1 px), so
+/// [`render::push_flakes`] reproduces the law by inverting the projection: a quad of world
+/// half-extent `px · z_view · tan(fovY/2) / viewport_height_px` covers exactly `px` pixels.
+const SNOW_PX_AT_EYE: f32 = 14.0;
+/// The screen height those pixels were authored against — **the resolution the size law is
+/// implicitly denominated in**, and the one term that has to be ours rather than the reference's.
+///
+/// `snowpoint.bls` sizes a flake in *framebuffer pixels*, so its **angular** size is
+/// `14 / framebuffer_height`. That was never a choice about looks — it is simply how
+/// `GL_VERTEX_PROGRAM_POINT_SIZE_ARB` works — and on 2004 hardware the framebuffer *was* the
+/// screen. Obey the number literally on a modern display and the flakes shrink in proportion to
+/// how good the monitor is: at the reference install's own `gxResolution 1280x800` a near flake
+/// spans `14/800` = **1.75%** of frame height, while benilla on a scale-factor-2 4K panel
+/// (physical ≈ 2144 tall) spans `14/2144` = **0.65%** — **2.7× smaller**, from resolution alone.
+/// That is B233's "the size of the snow is way too small" (director A/B, decision 1162), and it is
+/// the same failure mode `lib.rs` already records for FFXGlow's texel-pinned blur geometry.
+///
+/// So the law is evaluated in **era pixels** and converted to an angle, which makes the sprite
+/// resolution-independent: the live viewport height cancels out of
+/// `px · z · tan(fovY/2) / height` entirely. At an 800-px-tall window benilla draws exactly the
+/// reference's 14 physical pixels; at 4K it draws 37 physical pixels covering the same angle.
+///
+/// **This is the number to turn if the flakes still read wrong.** It is a look constant, not a
+/// byte-cited one — 800 is this install's `Config.wtf`, i.e. the resolution the director's own
+/// side-by-side was captured at. A different era resolution is a different (equally faithful)
+/// look: 640×480 would make them 1.67× bigger again.
+const SNOW_PX_REF_HEIGHT: f32 = 800.0;
+/// The falloff slope: `1 − 0.02·d` reaches the 1 px floor at `d = 13/0.28 ≈ 46.4` yd.
+const SNOW_PX_FALLOFF: f32 = 0.02;
+/// `max(1.0, …)` — the floor the ARB program applies last.
+const SNOW_PX_MIN: f32 = 1.0;
 /// A settled flake fades over 0.25 s (`snow_patter_value`: `max(t,0) + 0.25`).
 const SNOW_SETTLE_LIFE: f32 = 0.25;
-/// Snow blend = mode 2 (SrcAlpha, 1−SrcAlpha), FOG OFF (rf-weather-render Q3) — the alpha blend
-/// benilla first gave rain belongs to snow. Flake alpha is the texture's own (vertex white).
-const SNOW_ALPHA: f32 = 1.0;
+/// A FALLING flake fades **in** over its first second — the vertex program's
+/// `alpha = clamp01(t − f1)` (rf-snow-flake-render §2.4). benilla drew every falling flake at
+/// alpha 1.0, so the top of the column was a hard-edged sheet instead of a soft one.
+const SNOW_FADE_IN: f32 = 1.0;
 
 /// The precipitation state: per-kind pools + the mist companion + the shared xorshift RNG.
 #[derive(Resource)]
@@ -238,18 +332,24 @@ fn setup_precip(
     if existing.is_some() || cam.single().is_err() {
         return;
     }
-    // Streaks keep the authored mips (a solid bar survives minification); the flake + splash
-    // cut-outs load mip-0-only (`BlpVariant::Effect`) — their thin arms collapse to near-zero
-    // alpha under the mip chain and vanish at a few pixels (the reference's point-sprite path
-    // never minifies them).
+    // Streaks keep the authored mips (a solid bar survives minification); the splash + mist
+    // cut-outs load mip-0-only (`BlpVariant::Effect`) — they draw as world-space quads that are
+    // magnified far more often than minified, and their thin arms collapse under the mip chain.
+    // The FLAKE is the exception (`BlpVariant::PointSprite`): the reference's point sprite is
+    // 14 px at the eye and 1 px past 46 yd — a 4.5×–64× minification of a 64×64 texture, which
+    // is why the asset ships 7 mips. Mip-0-only there is flickering speckle, not crispness.
     let effect = |s: &mut benilla_assets::BlpLoaderSettings| {
         s.variant = benilla_assets::BlpVariant::Effect;
+    };
+    let point_sprite = |s: &mut benilla_assets::BlpLoaderSettings| {
+        s.variant = benilla_assets::BlpVariant::PointSprite;
     };
     commands.insert_resource(PrecipAssets {
         streak: asset_server.load("mpq://textures/weather/raindrop01.blp"),
         splash: asset_server
             .load_with_settings("mpq://textures/weather/raindropsplash01.blp", effect),
-        flake: asset_server.load_with_settings("mpq://textures/weather/snowflake01.blp", effect),
+        flake: asset_server
+            .load_with_settings("mpq://textures/weather/snowflake01.blp", point_sprite),
         mist: asset_server.load_with_settings("mpq://textures/weather/snowmist01.blp", effect),
     });
     commands.insert_resource(Precip {
@@ -268,12 +368,18 @@ fn simulate_precip(
     weather: Res<WeatherState>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     player: Query<&Transform, (With<crate::net::SelfPlayer>, Without<WorldCamera>)>,
+    // The commanded planar speed the spawn slab's tilt keys on (`mgr+0x7c`) — live, not the
+    // wind's 149 ms average.
+    avatar: Res<crate::player::Player>,
     spatial: SpatialQuery,
     indoors: Res<WeatherIndoors>,
     mut wind: ResMut<WeatherWind>,
     mut heights: ResMut<HeightCache>,
     mut precip: Option<ResMut<Precip>>,
     mut last_cut: Local<u32>,
+    // Frames since the previous census — the spawn budget scales with frame rate, so two census
+    // lines are only comparable at equal frame counts (see [`pool::census`]).
+    mut census_frames: Local<u32>,
 ) {
     let Some(precip) = precip.as_deref_mut() else {
         return;
@@ -292,9 +398,14 @@ fn simulate_precip(
     let now = time.elapsed_secs();
     let cam_pos = cam_tf.translation();
     // The wind tracks the local PLAYER's motion (object 0x8fe) — orbiting the camera does not
-    // stir it. The camera stands in only when no player entity exists (captures, data-less).
-    let wind_pos = player.single().map_or(cam_pos, |t| t.translation);
-    wind.update(wind_pos, dt);
+    // stir it. The camera stands in only when no player entity exists (captures, data-less), and
+    // then its own forward is the heading's sub-1-yd/s source.
+    let (wind_pos, facing) = player
+        .single()
+        .map_or((cam_pos, cam_tf.forward().as_vec3()), |t| {
+            (t.translation, t.forward().as_vec3())
+        });
+    wind.update(wind_pos, facing, avatar.planar_speed(), dt);
 
     let filter = player_query_filter();
     let Precip {
@@ -345,6 +456,7 @@ fn simulate_precip(
     // Throttled 1 Hz state log — the capture/live diagnosis instrument (debug builds only
     // chatter when something is falling or queued in the packet pipeline). Second-resolution
     // deliberately: the pipeline's visible-onset instant is what look-checks time against.
+    *census_frames += 1;
     if (weather.effect_density > 0.0
         || !rain.drops.is_empty()
         || !snow.drops.is_empty()
@@ -362,6 +474,20 @@ fn simulate_precip(
             snow.patters.len(),
             weather.effect_density,
         );
+        // …and WHERE those drops are relative to the player, which the counts cannot say. The
+        // split axis is the player's heading while they move and their view heading while they
+        // stand, so the standing reading is the ~50/50 baseline the moving one is read against.
+        let motion = wind.vel.with_y(0.0);
+        let axis = motion
+            .try_normalize()
+            .or_else(|| cam_tf.forward().as_vec3().with_y(0.0).try_normalize())
+            .unwrap_or(Vec3::Z);
+        for (name, pool) in [("rain", &*rain), ("snow", &*snow)] {
+            if let Some(c) = census(&pool.drops, cam_pos, axis, motion.length(), *census_frames) {
+                debug!("weather field ({name}): {c}");
+            }
+        }
+        *census_frames = 0;
     }
 
     // ===== the mist companion (rf-weather-render Q6) =====
@@ -395,7 +521,7 @@ fn push_precip(
     indoors: Res<WeatherIndoors>,
     lighting: Res<WowLighting>,
     wind: Res<WeatherWind>,
-    cam: Query<(Entity, &GlobalTransform), With<WorldCamera>>,
+    cam: Query<(Entity, &GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut quads: ResMut<EffectQuads>,
 ) {
     let (Some(precip), Some(assets)) = (precip, assets) else {
@@ -404,12 +530,31 @@ fn push_precip(
     if indoors.0 {
         return;
     }
-    let Ok((cam_entity, cam_tf)) = cam.single() else {
+    let Ok((cam_entity, cam_tf, camera, proj)) = cam.single() else {
         return;
     };
     let cam_pos = cam_tf.translation();
     let cam_right = cam_tf.right().as_vec3();
     let cam_up = cam_tf.up().as_vec3();
+    // Snow's size law is in ERA PIXELS (`snowpoint.bls` sizes in framebuffer pixels; benilla
+    // denominates them in the era's screen height so the *angle* carries over — see
+    // [`SNOW_PX_REF_HEIGHT`]). The live viewport is still required, but only as the "is this camera
+    // actually drawing?" gate: a camera with no sized target draws nothing this frame anyway.
+    let flake_view = camera
+        .physical_viewport_size()
+        .filter(|vp| vp.y > 0)
+        .map(|_| FlakeView {
+            eye: cam_pos,
+            forward: cam_tf.forward().as_vec3(),
+            right: cam_right,
+            up: cam_up,
+            world_per_px: match proj {
+                Projection::Perspective(p) => (p.fov * 0.5).tan(),
+                // An orthographic world camera has no perspective divide; the reference has no
+                // such mode, so there is nothing to be faithful to — keep the sprites sane.
+                _ => (crate::player::CAM_FOVY * 0.5).tan(),
+            } / SNOW_PX_REF_HEIGHT,
+        });
     let spec = |texture: &Handle<Image>, blend: EffectBlend, fog: EffectFog| EffectDrawSpec {
         cam: cam_entity,
         texture: texture.id(),
@@ -421,6 +566,9 @@ fn push_precip(
         anchor: cam_pos,
         bias: 0.0,
         raster_bias: 0,
+        // Streaks, patters and mist are all centimetre-scale or bigger, so absolute world verts
+        // cost them nothing; the flake draw below overrides this (its quads are millimetres).
+        cam_relative: false,
         main_entity: Entity::PLACEHOLDER,
         light: None,
     };
@@ -436,18 +584,24 @@ fn push_precip(
         start,
         spec(&assets.splash, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    let start = quads.begin();
-    push_flakes(
-        &mut quads.verts,
-        &precip.snow.drops,
-        &precip.snow.patters,
-        cam_right,
-        cam_up,
-    );
-    quads.commit_quads(
-        start,
-        spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off),
-    );
+    if let Some(view) = &flake_view {
+        let start = quads.begin();
+        push_flakes(
+            &mut quads.verts,
+            &precip.snow.drops,
+            &precip.snow.patters,
+            view,
+        );
+        quads.commit_quads(
+            start,
+            EffectDrawSpec {
+                // [`push_flakes`] wrote camera-relative offsets — the only family in the lane
+                // whose geometry is small enough for absolute-world f32 to lose it.
+                cam_relative: true,
+                ..spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off)
+            },
+        );
+    }
     let start = quads.begin();
     push_mist(
         &mut quads.verts,

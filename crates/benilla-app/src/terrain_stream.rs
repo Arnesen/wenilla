@@ -60,8 +60,8 @@ pub(crate) use spawn::{m2_fade, point_light, spawn_model_entities};
 // The position queries + area authority (their home is `queries`; paths stay `terrain_stream::X`).
 use queries::update_current_area;
 pub(crate) use queries::{
-    doodad_ground_shade, ground_effect_under, terrain_height_under, AreaAuthoritySet, CurrentArea,
-    ShadeResolve,
+    area_id_under, doodad_ground_shade, ground_effect_under, terrain_height_under,
+    AreaAuthoritySet, CurrentArea, ShadeResolve,
 };
 
 /// Wall-clock spent per frame spawning streamed-in geometry (terrain tiles in [`stream_terrain`],

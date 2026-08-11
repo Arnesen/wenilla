@@ -266,6 +266,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 timescale,
             }
         }
+        // The OTHER clock (decision 1150) — kept beside SETTIMESPEED precisely because they are
+        // easy to confuse: this one is wall-clock UNIX seconds (vmangos
+        // `WorldSession::SendQueryTimeResponse`, `Handlers/QueryHandler.cpp:418-423` — a bare
+        // `(uint32)time(nullptr)`), the epoch every absolute stamp the server writes into a
+        // descriptor field is expressed in. SETTIMESPEED above is the in-game day/night clock and
+        // says nothing about it.
+        opcode::SMSG_QUERY_TIME_RESPONSE => ServerPacket::QueryTimeResponse {
+            unix_time: read_u32_le(&mut r)?,
+        },
         opcode::SMSG_BINDPOINTUPDATE => {
             // vmangos BindpointUpdate::AppendBodyTo (Packets/Misc.cpp): x, y, z, mapId, areaId.
             let position = Vector3d::read(&mut r)?;

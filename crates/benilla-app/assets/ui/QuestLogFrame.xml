@@ -84,6 +84,12 @@
         -- one rolling pool across every watch, dynamically re-chained each paint — the ref's own
         -- model (the old fixed 5×(1+4) per-slot grid predated region Show/Hide/SetPoint).
         BENILLA_QUESTWATCH_LINES = 30
+        -- The timed-quest countdown row (decision 1150). UPDATE_DELAY is the ref's own
+        -- (QuestLogFrame.lua:5) — the throttle on the "Time Remaining:" repaint, not a benilla
+        -- dial. TIME_REMAINING is the shipped enUS GlobalString (GlobalStrings.lua:4248), inlined
+        -- like every other string in these files (we load no GlobalStrings.lua).
+        BENILLA_QUESTLOG_UPDATE_DELAY = 0.1
+        BENILLA_TIME_REMAINING = "Time Remaining:"
 
         -- The detail pane's ScrollFrame child-resize sum (`BenillaQuestLogDetail_ResizeChild`'s own
         -- comment) — fixed offsets/row heights transcribed from this chain's own FontString/SetPoint
@@ -454,6 +460,14 @@
             else
                 objSpan = BENILLA_QUESTLOG_DETAIL_OBJ_GAP
             end
+            -- The countdown row, when the selection has one (decision 1150): one more -10 hop and
+            -- one more fixed 12px row ahead of the objectives, whether or not any objective follows
+            -- it — both branches above start at the same ObjectivesText→next -10, so the delta is
+            -- the same either way. Read off the ref's own hasTimer flag rather than a second
+            -- parameter, so the OnUpdate re-check below re-sums it without threading state.
+            if BenillaQuestLogHasTimer then
+                objSpan = objSpan + BENILLA_QUESTLOG_DETAIL_OBJ_GAP + BENILLA_QUESTLOG_DETAIL_OBJ_ROW
+            end
 
             local height = BENILLA_QUESTLOG_DETAIL_TOP
                 + BenillaQuestLogDetail_TextHeight(title)
@@ -484,6 +498,24 @@
         -- converged (no host measurement changed since the last check).
         function BenillaQuestLogDetail_OnUpdate()
             BenillaQuestLogDetail_ResizeChild(detailObjAnchorIndex, detailRewardHeight)
+        end
+
+        -- ref QuestLog_OnUpdate (QuestLogFrame.lua:96-105), transcribed 1:1 including its
+        -- UPDATE_DELAY throttle: the countdown is repainted ten times a second, not every frame —
+        -- SecondsToTime's output only changes once a second, so anything faster is a re-measure of
+        -- an identical string. The flag/accumulator pair is the ref's own (its two fields on
+        -- QuestLogFrame; ours are file globals because our detail state already lives that way).
+        function BenillaQuestLog_OnUpdate(elapsed)
+            if not BenillaQuestLogHasTimer then
+                return
+            end
+            BenillaQuestLogTimePassed = (BenillaQuestLogTimePassed or 0) + (elapsed or 0)
+            if BenillaQuestLogTimePassed > BENILLA_QUESTLOG_UPDATE_DELAY then
+                local left = GetQuestLogTimeLeft()
+                getglobal("BenillaQuestLogTimerText"):SetText(
+                    BENILLA_TIME_REMAINING .. " " .. SecondsToTime(left or 0))
+                BenillaQuestLogTimePassed = 0
+            end
         end
 
         -- Steps the detail ScrollFrame by `delta` px — the wheel handler and both scrollbar arrow
@@ -529,6 +561,11 @@
         function BenillaQuestLogDetail_Clear()
             getglobal("BenillaQuestLogQuestTitle"):SetText("")
             getglobal("BenillaQuestLogObjectivesText"):SetText("")
+            -- The ref clears hasTimer on the empty-log path too (QuestLog_Update, :108) — without
+            -- it the per-tick repaint keeps writing a countdown into a pane with no selection, and
+            -- the child height keeps paying for a row that isn't there.
+            BenillaQuestLogHasTimer = nil
+            getglobal("BenillaQuestLogTimerText"):SetText("")
             getglobal("BenillaQuestLogDescriptionTitle"):SetText("")
             getglobal("BenillaQuestLogDescription"):SetText("")
             for i = 1, BENILLA_QUESTLOG_MAX_OBJECTIVES do
@@ -758,6 +795,26 @@
             -- paragraph (not the leaderboard lines) is the second.
             local description, objectivesText = GetQuestLogQuestText()
             getglobal("BenillaQuestLogObjectivesText"):SetText(objectivesText or "")
+
+            -- pin §3, QuestLog_UpdateQuestDetails (QuestLogFrame.lua:364-374) verbatim, minus the
+            -- Show/Hide our region model has no verb for: a timed quest gets the "Time Remaining:"
+            -- row and pushes Objective1 below it; an untimed one blanks the row (our stand-in for
+            -- the ref's :Hide()) and anchors Objective1 straight onto ObjectivesText, so the row
+            -- costs an untimed quest no space at all. `hasTimer` is the ref's own flag and drives
+            -- both the per-tick repaint (BenillaQuestLog_OnUpdate) and the child-height sum.
+            local questTimer = GetQuestLogTimeLeft()
+            local timerText = getglobal("BenillaQuestLogTimerText")
+            local objective1 = getglobal("BenillaQuestLogObjective1")
+            if questTimer then
+                BenillaQuestLogHasTimer = 1
+                BenillaQuestLogTimePassed = 0
+                timerText:SetText(BENILLA_TIME_REMAINING .. " " .. SecondsToTime(questTimer))
+                objective1:SetPoint("TOPLEFT", timerText, "BOTTOMLEFT", 0, -10)
+            else
+                BenillaQuestLogHasTimer = nil
+                timerText:SetText("")
+                objective1:SetPoint("TOPLEFT", getglobal("BenillaQuestLogObjectivesText"), "BOTTOMLEFT", 0, -10)
+            end
             getglobal("BenillaQuestLogDescription"):SetText(description or "")
             -- Lua-managed header (ref text=QUEST_DESCRIPTION is static since the ref always has a real
             -- selection whenever this pane is even visible; our flat window keeps the same FontString
@@ -791,13 +848,15 @@
             -- Objective10 — a quest with fewer than 10 objectives would otherwise drag this header
             -- down by however much dead space the unused tail slots add (this window's own comment
             -- on the FontString). No RequiredMoney branch here (this file's documented v1 gap: no
-            -- widget backs GetQuestLogRequiredMoney yet); no timer branch (no timed-quest countdown,
-            -- same v1 gap as QuestLogObjective1's own fixed anchor) — those two ref branches collapse
-            -- to the ref's own final "else" (anchor to ObjectivesText) whenever they don't apply.
+            -- widget backs GetQuestLogRequiredMoney yet) — that ref branch collapses into the rest.
+            -- The objective-less TIMED branch (ref :432-437) is transcribed: a timed quest with no
+            -- leaderboard lines hangs the header off the countdown row, not off ObjectivesText.
             local objAnchorIndex = math.min(numObjectives, BENILLA_QUESTLOG_MAX_OBJECTIVES)
             local descTitle = getglobal("BenillaQuestLogDescriptionTitle")
             if objAnchorIndex > 0 then
                 descTitle:SetPoint("TOPLEFT", getglobal("BenillaQuestLogObjective" .. objAnchorIndex), "BOTTOMLEFT", 0, -10)
+            elseif questTimer then
+                descTitle:SetPoint("TOPLEFT", getglobal("BenillaQuestLogTimerText"), "BOTTOMLEFT", 0, -10)
             else
                 descTitle:SetPoint("TOPLEFT", getglobal("BenillaQuestLogObjectivesText"), "BOTTOMLEFT", 0, -10)
             end
@@ -1480,15 +1539,28 @@
                                     <Size><AbsDimension x="275" y="0"/></Size>
                                     <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogQuestTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                 </FontString>
+                                <!-- The timed-quest countdown row (decision 1150) — the ref's QuestLogTimerText,
+                                     QuestLogFrame.xml:648-659, at its own anchor and offset. Untimed quests are the
+                                     overwhelming majority, so the row must cost them NOTHING: the ref hides it and
+                                     re-SetPoints Objective1 straight onto ObjectivesText (QuestLogFrame.lua:370/374),
+                                     and `BenillaQuestLogDetail_Update` transcribes exactly that pair of branches. Our
+                                     region model has no Show/Hide for a bare FontString (the recurring comment
+                                     below), so the untimed case leaves this string EMPTY — it draws nothing, and
+                                     nothing anchors through it, so its 12px sits harmlessly behind Objective1's row
+                                     rather than displacing anything. -->
+                                <FontString name="BenillaQuestLogTimerText" inherits="QuestFontNormalSmall" justifyH="LEFT">
+                                    <Size><AbsDimension x="285" y="12"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjectivesText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                </FontString>
                                 <!-- No `hidden=` on these 10 (a no-op on a region anyway — same reasoning as the
                                      empty-state text above): each starts textless (no `text=` attribute) and stays
                                      that way until `BenillaQuestLogDetail_Update` fills the ones in use.
-                                     Objective1's (0,-10) COLLAPSES the ref's two hops — ObjectivesText→QuestLogTimerText
-                                     (0,-10) then →QuestLogObjective1 (0,-10), QuestLogFrame.xml:648-670 — into one: we
-                                     ship no timer text (no timed-quest countdown yet, this file's header comment), so
-                                     there's no intermediate row to occupy that first -10, and stacking both would
-                                     double the gap the ref never shows for an untimed quest. Revisit (re-insert the
-                                     timer row at its own -10 slot) once GetQuestLogTimeLeft() is wired.
+                                     Objective1's XML anchor is the UNTIMED one (straight onto ObjectivesText) rather
+                                     than the ref's static hop through the timer row, because in this engine that
+                                     row cannot be hidden — the timed branch re-SetPoints it through
+                                     BenillaQuestLogTimerText, which is the ref's own runtime behaviour either way
+                                     (QuestLogFrame.lua:370/374; only the XML seed differs, and the ref re-points it
+                                     on every populate before anything is drawn).
 
                                      Height is EXPLICIT 12 (GameFontNormalSmall is 10px, `Fonts.xml`), NOT the ref's
                                      auto "y=0" — a deliberate v1 deviation: a FontString anchored by a single point
@@ -1720,6 +1792,11 @@
         <Scripts>
             <OnLoad>BenillaQuestLogFrame_OnLoad(self)</OnLoad>
             <OnEvent>BenillaQuestLogFrame_OnEvent(self)</OnEvent>
+            <!-- The countdown's own repaint (ref QuestLog_OnUpdate, QuestLogFrame.lua:96-105) —
+                 the ONLY thing the ref's window OnUpdate does. Gated on hasTimer, so it costs an
+                 untimed selection nothing, and gated on the window being effectively visible by
+                 `UiScript::tick`'s own OnUpdate gate, so it costs a closed window nothing. -->
+            <OnUpdate>BenillaQuestLog_OnUpdate(arg1)</OnUpdate>
             <!-- The list wheel lives on the WINDOW, not just the child catcher: the engine bubbles a
                  spin up the PARENT chain (script/pointer.rs mouse_wheel), so a spin over a quest-title
                  row (no OnMouseWheel of its own) must reach this window to scroll — a sibling catcher

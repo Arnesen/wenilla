@@ -526,6 +526,7 @@ pub(super) fn push_ring(
             anchor: state.key.feet,
             bias: RING_DEPTH_BIAS,
             raster_bias: RING_DEPTH_BIAS as i32,
+            cam_relative: false,
             main_entity: Entity::PLACEHOLDER,
             light: None,
         },

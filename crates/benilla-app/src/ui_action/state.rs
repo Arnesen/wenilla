@@ -23,6 +23,7 @@
 //! §2a fold-back: reagents, forms, stealth, aura states (the Execute-family target dependence),
 //! the works.
 
+use crate::ui_items::{count_of, InventoryScope};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -460,7 +461,9 @@ pub(super) fn feed_action_state(
                 // put a stack number under a mount (Class 15) on the bar.
                 st.consumable = template.as_ref().is_some_and(|t| t.is_consumable());
                 let count = me
-                    .map(|(s, _, _, _)| crate::ui_items::count_of(&s.0, &items, button.action))
+                    .map(|(s, _, _, _)| {
+                        count_of(&s.0, &items, button.action, InventoryScope::CARRIED)
+                    })
                     .unwrap_or(0);
                 // Worn on any equipment slot (0..18) — the green border's IsEquippedAction.
                 st.equipped = me.is_some_and(|(s, _, _, _)| {

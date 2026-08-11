@@ -250,11 +250,27 @@ impl Mixer {
     /// **disabled** — gain over distance is WoW's own math (decision 0070; the kit player's pump
     /// computes `rolloff · near_field` and drives the channel volume). The backend contributes
     /// pan only. The returned track handle must live as long as the sound (drop unloads it).
+    ///
+    /// `reverb_send` is the kit's `SoundEntries.EAXDef` reduced to "does this sound take the wet
+    /// send at all" (decision 1155). 3D-open is **necessary but not sufficient** in the reference:
+    /// `0x458f1c` hands `EAXDef` to the slot lookup `0x45cdc0`, and because
+    /// `SoundSamplePreferences.dbc` holds only ids 1 and 2 — **there is no id 0** — an `EAXDef 0`
+    /// kit resolves a NULL slot and `FSOUND_Reverb_SetChannelProperties` (`0x7a5bf0`) skips before
+    /// it ever tests the 3D flag. Those channels are dry no matter what the zone preset says.
+    /// benilla models neither row's per-channel EAX properties, so the projection is the binary's
+    /// own branch and nothing more: populated slot ⇒ send at unity, NULL slot ⇒ no send.
     pub(crate) fn play_3d(
         &mut self,
         data: StaticSoundData,
         pos: Vec3,
+        reverb_send: bool,
     ) -> Result<(SpatialTrackHandle, StaticSoundHandle)> {
+        // The zone wet level lives on the send's own volume, so per-zone reverb stays one knob
+        // and never a per-track update; the per-KIT half is this route existing or not.
+        let mut builder = SpatialTrackBuilder::new().attenuation_function(None);
+        if reverb_send {
+            builder = builder.with_send(&self.reverb_send, Decibels(0.0));
+        }
         let mut track = self
             .manager
             .add_spatial_sub_track(
@@ -264,10 +280,7 @@ impl Mixer {
                     y: pos.y,
                     z: pos.z,
                 },
-                // Route into the reverb send at unity: the zone wet level lives on the send's own
-                // volume, so per-zone reverb is one knob, not a per-track update.
-                SpatialTrackBuilder::new()
-                    .attenuation_function(None)
+                builder
                     // Outlive the handle by exactly as long as the sound needs (decision 1026).
                     // kira defaults this to `false` (`track/sub/spatial_builder.rs`), which makes
                     // `should_be_removed()` fire the instant the handle drops — so a channel that
@@ -277,8 +290,7 @@ impl Mixer {
                     // set, the drop only *marks* the track and kira keeps it until its sounds
                     // finish. Cannot leak: every path that drops a channel stops its sound first,
                     // and a stopped sound finishes.
-                    .persist_until_sounds_finish(true)
-                    .with_send(&self.reverb_send, Decibels(0.0)),
+                    .persist_until_sounds_finish(true),
             )
             .map_err(|e| anyhow::anyhow!("spatial track alloc: {e}"))?;
         let handle = track

@@ -378,6 +378,18 @@ pub const SMSG_NOTIFICATION: u16 = 0x01CB; // 459
 /// [`super::chat::read_played_time`]).
 pub const CMSG_PLAYED_TIME: u16 = 0x01CC; // 460
 pub const SMSG_PLAYED_TIME: u16 = 0x01CD; // 461
+/// The server's wall clock (VERIFIED vmangos `Opcodes_1_12_1.h`: 462/463): empty CMSG body
+/// (`NullClientPacket`), SMSG body one `u32` = the server's `time(nullptr)`, i.e. **unix-epoch
+/// seconds** (`WorldSession::SendQueryTimeResponse`, `Handlers/QueryHandler.cpp:418-423`).
+///
+/// This is the epoch the quest-log slot's timer field is expressed in — a timed quest's deadline
+/// is written as `time(nullptr) + limitTime` (`Player::AddQuest`), an absolute stamp with no
+/// relative form anywhere on the wire. So a countdown needs the *server's* now, not ours: that is
+/// what this pair is for, and why benilla sends it (decision 1150). The CMSG body is
+/// [`super::query_time`]; the response is decoded inline beside `SMSG_LOGIN_SETTIMESPEED`, the
+/// other clock packet.
+pub const CMSG_QUERY_TIME: u16 = 0x01CE; // 462
+pub const SMSG_QUERY_TIME_RESPONSE: u16 = 0x01CF; // 463
 /// `/random` (VERIFIED vmangos `Opcodes_1_12_1.h`: 507) — same opcode both directions, different
 /// bodies: client sends `u32 min + u32 max` ([`super::client::random_roll`],
 /// `WorldPackets::Group::RandomRoll::ReadFromWorldPacket`, `Server/Packets/Group.cpp:39-43`); the

@@ -11,6 +11,7 @@
 //! Lock.dbc requirement lines ("Requires <key item>" / "Requires <skill>") — the verified
 //! `0x52aa20` law. The standalone-corpse builder joins when corpse objects stream.
 
+use crate::ui_items::{count_of, InventoryScope};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -233,9 +234,9 @@ fn spell_tooltip_view(
             } else {
                 name
             };
-            let short = vctx
-                .store
-                .is_some_and(|s| crate::ui_items::count_of(&s.0, vctx.items, entry) < count);
+            let short = vctx.store.is_some_and(|s| {
+                count_of(&s.0, vctx.items, entry, InventoryScope::CARRIED) < count
+            });
             parts.push(if short {
                 format!("|cffff2020{text}|r")
             } else {
@@ -468,7 +469,9 @@ fn feed_spell_tooltips(
         .into_iter()
         .map(|entry| {
             let named = items.template(entry, 0, &commands).is_some();
-            let owned = self_store.map_or(0, |s| crate::ui_items::count_of(&s.0, &items, entry));
+            let owned = self_store.map_or(0, |s| {
+                count_of(&s.0, &items, entry, InventoryScope::CARRIED)
+            });
             (entry, (owned, named))
         })
         .collect();
@@ -494,9 +497,9 @@ fn feed_spell_tooltips(
                         memory.reagents.entry(entry)
                     {
                         let named = vctx.items.template(entry, 0, vctx.commands).is_some();
-                        let owned = vctx
-                            .store
-                            .map_or(0, |s| crate::ui_items::count_of(&s.0, vctx.items, entry));
+                        let owned = vctx.store.map_or(0, |s| {
+                            count_of(&s.0, vctx.items, entry, InventoryScope::CARRIED)
+                        });
                         slot.insert((owned, named));
                     }
                 }

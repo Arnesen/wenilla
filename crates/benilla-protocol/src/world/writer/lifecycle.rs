@@ -39,6 +39,18 @@ impl WorldWriter {
         self.send(opcode::CMSG_LOGOUT_CANCEL, &[])
     }
 
+    /// Ask the server for its wall clock (`CMSG_QUERY_TIME`, empty body); answered with
+    /// `SMSG_QUERY_TIME_RESPONSE`, one `u32` of unix-epoch seconds.
+    ///
+    /// A cadence/obligation send like [`ping`](Self::ping), not a player intent: the server writes
+    /// *absolute* stamps in its own epoch into descriptor fields — a timed quest's deadline is
+    /// `time(nullptr) + limitTime` — and nothing on the wire ever restates them as a duration. So
+    /// every countdown the client draws is only as right as its last sample of this clock; benilla
+    /// takes one on entering the world (decision 1150).
+    pub fn query_time(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_QUERY_TIME, &messages::query_time())
+    }
+
     /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
     /// packet the real client sends when the cinematic ends or the player ESCs out. Must answer
     /// every `SMSG_TRIGGER_CINEMATIC` ([`SessionEvent::CinematicTriggered`]

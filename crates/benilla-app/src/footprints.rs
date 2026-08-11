@@ -7,8 +7,11 @@
 //!
 //! **The mechanism — wow-re §5 cross-checked** (`footprint-decals.md`, folded back in 1012):
 //! - **Surface gate**: `TerrainType.Flags & 1` (`0x699eb6`) — set on exactly **Snow** and
-//!   **Sand** — resolved under the unit through the same ground-effect → TerrainType chain the
-//!   footstep sounds ride ([`benilla_formats::FootstepCatalog::leaves_footprints`]).
+//!   **Sand** — on the surface [`crate::surface`] resolves under the unit, the *same* value the
+//!   footstep sound uses. The reference resolves it once per unit into `CGUnit+0xc60` and the
+//!   decal, the spray and `$FSD` all read that one dword (wow-re `wmo-footstep-surface.md` F3), so
+//!   indoors the gate reads the building's own floor: a tavern's floorboards take no prints while
+//!   the snow outside its door does (decision 1161).
 //! - **Trigger**: each per-foot animation event tag (`$xL*`/`$xR*`; the same [`AnimSoundEvent`]
 //!   stream the sounds read). **`$FSD` is sound-only** — a quadruped whose run authors only
 //!   `$FSD` leaves no prints, faithfully. Position = the event record's authored offset through
@@ -45,8 +48,6 @@ use avian3d::prelude::Collider;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use benilla_assets::AdtTile;
-
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::blob_shadow::SHADOW_RASTER_BIAS;
 use crate::collision::GroundDecalSurface;
@@ -60,7 +61,6 @@ use crate::particles::buffer::{
 use crate::player::WorldCamera;
 use crate::schedule::WorldStage;
 use crate::sound::footsteps::Footsteps;
-use crate::terrain_stream::{ground_effect_under, TerrainStreamer};
 
 /// Print lifetime, spawn to gone — the reference's 6000 ms (byte-verified, wow-re
 /// `footprint-decals.md`: `t = 1 − age/6000`, die at `t < 0`).
@@ -169,7 +169,12 @@ fn spawn_footprints(
     time: Res<Time>,
     // GlobalTransform for the same reason as the footstep sounds (0441): a mounted unit's steps
     // are the MOUNT child's tags, whose local Transform is the seat-relative ~origin.
-    units: Query<(&NetEntity, &GlobalTransform, Option<&BoneAttach>)>,
+    units: Query<(
+        &NetEntity,
+        &GlobalTransform,
+        Option<&BoneAttach>,
+        Option<&crate::wmo_portal::UnitWmoRoom>,
+    )>,
     // The spawner's ROOT (the rider for a mount child): the pool select, the print scale (the
     // rider's SCALE_X — RE-corrected), and the state gates all read the root.
     parents: Query<&ChildOf>,
@@ -179,8 +184,7 @@ fn spawn_footprints(
     footsteps: Option<Res<Footsteps>>,
     creatures: Option<Res<Creatures>>,
     ink: Option<Res<FootprintInk>>,
-    streamer: Res<TerrainStreamer>,
-    adt_tiles: Res<Assets<AdtTile>>,
+    surface: crate::surface::SurfaceUnderfoot,
     surfaces: Query<&Collider, With<GroundDecalSurface>>,
     mut prints: ResMut<Footprints>,
 ) {
@@ -198,7 +202,7 @@ fn spawn_footprints(
         let Some(side) = footfall_side(&ev.ident) else {
             continue;
         };
-        let Ok((net, transform, attach)) = units.get(ev.entity) else {
+        let Ok((net, transform, attach, room)) = units.get(ev.entity) else {
             continue;
         };
         // The ink + dims come from the EVENT's model (the mount for a mounted composite); the
@@ -243,11 +247,13 @@ fn spawn_footprints(
         {
             continue;
         }
-        // The surface gate, read under the foot itself (a beach edge prints per-foot).
-        if !footsteps
-            .0
-            .leaves_footprints(ground_effect_under(&streamer, &adt_tiles, foot))
-        {
+        // The surface gate, on the SAME terrain type the footstep sound used: the reference
+        // resolves it once per unit (`CGUnit+0xc60`) and the decal, the spray and `$FSD` all read
+        // that one dword (wow-re `wmo-footstep-surface.md` F3). So this reads the UNIT's surface,
+        // not a per-foot sample of the ground — indoors that is the building's own floor, which is
+        // why a tavern's floorboards take no prints while the snow outside its door does.
+        let terrain = surface.terrain_type(&footsteps.0, room, transform.translation());
+        if !terrain.is_some_and(|t| footsteps.0.terrain_leaves_footprints(t)) {
             continue;
         }
         // Print frame: length along the unit's facing, width across, yawed to the facing.
@@ -375,6 +381,7 @@ fn push_footprints(
                 anchor: print.anchor,
                 bias: PRINT_SORT_BIAS,
                 raster_bias: SHADOW_RASTER_BIAS,
+                cam_relative: false,
                 main_entity: lane.0,
                 light: None,
             },

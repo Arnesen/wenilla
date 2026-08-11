@@ -537,6 +537,7 @@ pub(crate) fn simulate_chain_beams(
                 // No owner rung: a beam is not a model's emitter (module docs, approximation (d)).
                 bias: 0.0,
                 raster_bias: 0,
+                cam_relative: false,
                 main_entity: entity,
                 light: None,
             },

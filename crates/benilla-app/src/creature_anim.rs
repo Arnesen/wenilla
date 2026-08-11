@@ -680,6 +680,10 @@ pub(crate) use events::{
     advance_track, footfall_side, is_footstep_sound, scan_events, AnimSoundEvent,
 };
 
+/// The `$BTH` breath puffs — a unit's visible cold vapour in a snow zone (B233, decision 1149).
+mod breath;
+use breath::{classify_breath, fire_breath};
+
 mod impact;
 use impact::route_swing_impacts;
 pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, SwingSlowdown};
@@ -978,6 +982,14 @@ impl Plugin for CreatureAnimPlugin {
         lod::plugin(app);
         pose::plugin(app);
         compose::plugin(app);
+        breath::register(app);
+        // The breath classifier is a per-unit environment resolve, not an animation step: it runs
+        // off the area authority, at its own 10 s cadence, and only publishes the component
+        // `fire_breath` reads inside the chain below.
+        app.add_systems(
+            Update,
+            classify_breath.after(crate::terrain_stream::AreaAuthoritySet),
+        );
         app.add_message::<AnimSoundEvent>()
             .add_message::<SwingMessage>()
             .add_message::<SwingImpact>()
@@ -1045,6 +1057,9 @@ impl Plugin for CreatureAnimPlugin {
                     // entity-visuals chain so the arrow appears/vanishes the frame the keyframe
                     // lands, not one behind.
                     drive_nock_latch,
+                    // …and the `$BTH` puff off the same scan: another SpellKitFx writer, so it
+                    // belongs ahead of the entity-visuals chain like its `arm_*_fx` siblings.
+                    fire_breath,
                 )
                     .chain()
                     .after(WorldStage::Net)

@@ -673,6 +673,15 @@ pub(crate) struct Model {
     /// The watched (tracked) quests, by stable quest id in watch order — the tracker HUD's set
     /// (engine-owned like the selection; pruned by `set_quest_log` when a quest leaves the log).
     pub(crate) quest_log_watched: Vec<u32>,
+    /// The server's wall clock in unix-epoch seconds, pushed by the app each frame it has one
+    /// ([`UiScript::set_server_unix_time`]); `None` before the first `SMSG_QUERY_TIME_RESPONSE`.
+    ///
+    /// Held here rather than folded into the quest-log snapshot because the *engine* owns every
+    /// countdown the Lua reads: a timed quest's deadline is an absolute stamp in this epoch, and
+    /// `GetQuestTimers` subtracts against it **per call**, exactly as the reference's C binding
+    /// does. That is what lets the reference `QuestTimerFrame` tick smoothly from its OnUpdate
+    /// while the log snapshot itself only changes when the log does (decision 1150).
+    pub(crate) server_unix_time: Option<f64>,
     /// The player's purse in copper (`GetMoney`), pushed each frame it changes by the app's
     /// `PLAYER_FIELD_COINAGE` feed ([`UiScript::set_money`]). Plain data — the money display + the
     /// merchant window's coin line read it.
@@ -1012,6 +1021,7 @@ impl Model {
             spell_tooltip_asks: HashSet::new(),
             quest_log_collapses: Vec::new(),
             quest_log_watched: Vec::new(),
+            server_unix_time: None,
             worldmap: super::worldmap::WorldMapState::default(),
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),

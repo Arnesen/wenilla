@@ -222,6 +222,13 @@ impl Creatures {
         self.catalog.footprint(display_id)
     }
 
+    /// Does this display's model breathe — may it wear the `$BTH` puffs (cold vapour, bubbles)?
+    /// `CreatureModelData.Flags & 0x2` suppresses the family: skeletons, ghosts, elementals,
+    /// golems, slimes, totems. See [`benilla_formats::CreatureCatalog::breathes`].
+    pub(crate) fn breathes(&self, display_id: u32) -> bool {
+        self.catalog.breathes(display_id)
+    }
+
     /// A display's **base render alpha** (`CreatureDisplayInfo.CreatureModelAlpha / 255`) — the
     /// `baseAlpha` factor of the per-unit alpha product the aura CharProc nodes multiply into
     /// (`crate::aura_visual`). `None` for an unknown display.

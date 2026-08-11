@@ -79,7 +79,7 @@ pub use client::{
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
     creature_query, force_speed_ack, full_guid, join_channel, leave_channel, messagechat,
     messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack, move_spline_done,
-    movement, pet_name_query, ping, played_time, random_roll, teleport_ack, text_emote,
+    movement, pet_name_query, ping, played_time, query_time, random_roll, teleport_ack, text_emote,
 };
 pub use combat_log::{
     DamageShield, EnvironmentalDamageLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,

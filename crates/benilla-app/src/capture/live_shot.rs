@@ -2,7 +2,7 @@
 //! with the two validity gates that make its output *evidence*: the death gate (a dead/ghost
 //! avatar renders the whole world through the death filter) and the subject gate
 //! (`WOW_SHOT_REQUIRE` — a frame that cannot contain the reported subject is not a measurement of
-//! it). Split from `probes.rs` when the gates outgrew it; the sibling probe one-shots stay there.
+//! it). Split from `probes` when the gates outgrew it; the sibling probe one-shots stay there.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};

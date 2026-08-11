@@ -55,6 +55,12 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     ("MasterSoundEffects", "1"),
     ("EnableMusic", "1"),
     ("EnableAmbience", "1"),
+    // Zone reverb (1153). The binary registers this one `"1"` (`0x4573be`) and we register it
+    // `"0"` — the only row here that knowingly leaves the registrar's default, because the
+    // reference's reverb is EAX-over-hardware and that hardware has not existed since Vista:
+    // `"1"` would ship audio the real client has never actually produced (bug B236).
+    // `SoundConfig::reverb` carries the evidence.
+    ("SoundReverb", "0"),
     ("uiScale", "0.9"),
     ("farclip", "777"),
     // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
@@ -177,6 +183,8 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "mastersoundeffects" => knobs.sound.enabled = v != 0.0,
         "enablemusic" => knobs.sound.music_enabled = v != 0.0,
         "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
+        // The client's own parse for this one is literally `!= 0` too (`0x4574d0`: `setne al`).
+        "soundreverb" => knobs.sound.reverb = v != 0.0,
         "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
         "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
@@ -324,7 +332,7 @@ fn sync_cvars(
     if !persist.registered {
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 22] = [
+        let session: [(&str, String); 23] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -332,6 +340,7 @@ fn sync_cvars(
             ("MasterSoundEffects", flag(sound.enabled)),
             ("EnableMusic", flag(sound.music_enabled)),
             ("EnableAmbience", flag(sound.ambience_enabled)),
+            ("SoundReverb", flag(sound.reverb)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
             ("deselectOnClick", flag(click.deselect_on_click)),
@@ -477,6 +486,9 @@ mod tests {
         assert_eq!(d["MasterSoundEffects"] != 0.0, sound.enabled);
         assert_eq!(d["EnableMusic"] != 0.0, sound.music_enabled);
         assert_eq!(d["EnableAmbience"] != 0.0, sound.ambience_enabled);
+        // Welded like the rest — and deliberately NOT the binary's registrar "1" (1153).
+        assert_eq!(d["SoundReverb"] != 0.0, sound.reverb);
+        assert!(!sound.reverb, "zone reverb ships off (decision 1153)");
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 777 literal (view.rs doc: "Default 777").

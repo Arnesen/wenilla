@@ -23,7 +23,7 @@ use super::super::{
     CharActionResultMessage, CharListMessage, ClientCommand, DisconnectedMessage, DroppedOpcodes,
     EnteredWorldMessage, GameTime, GuidIndex, LoggedOutMessage, LoginFailedMessage,
     LoginStageMessage, NetCommands, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid,
-    ServerTime, TeleportMessage, WorldportMessage,
+    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
 };
 
 /// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
@@ -333,6 +333,27 @@ pub(super) fn time_speed(
         info!("net: server game-time {hours:02}:{minutes:02} (drives lighting)");
     }
     server_time.0 = Some(GameTime::new(hours, minutes, day_serial, timescale));
+}
+
+/// The server **wall** clock (`SMSG_QUERY_TIME_RESPONSE`, answering the world-enter
+/// `CMSG_QUERY_TIME`) — the epoch the absolute descriptor stamps are dated in, and so the origin of
+/// every countdown drawn from one (today: the timed-quest timer, decision 1150). Nothing to do with
+/// [`time_speed`] above, which is the in-game day/night clock.
+///
+/// Logged once per session at info, with the skew against our own clock: that number is exactly
+/// what a "the countdown is wrong by a constant" report would be about, and it costs one line.
+pub(super) fn server_unix_time(unix_time: u32, clock: &mut ServerWallClock) {
+    if clock.0.is_none() {
+        let local = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        info!(
+            "net: server wall clock {unix_time} (local clock differs by {}s)",
+            local - i64::from(unix_time)
+        );
+    }
+    clock.sample(unix_time);
 }
 
 /// The login reputation store (`SMSG_INITIALIZE_FACTIONS`).

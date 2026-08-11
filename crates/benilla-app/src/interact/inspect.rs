@@ -69,6 +69,19 @@ pub(super) struct InspectStores<'w, 's> {
     /// The ask-once GO template cache — the readable head a TEXT object's line reports
     /// (decision 1105).
     go_templates: Res<'w, crate::go_templates::GameObjectTemplates>,
+    /// The GameObject **animation** readout (decision 1151) — what the §243 arm is playing right
+    /// now, for the card's `anim` line. Its own query rather than a `collision` member because it
+    /// needs the model components: they sit on the same entity as [`crate::go_anim::GoAnim`], but
+    /// a GO whose model authors no skeleton renders as a static mesh and has none of them.
+    go_anims: Query<
+        'w,
+        's,
+        (
+            &'static crate::go_anim::GoAnim,
+            &'static AnimationPlayer,
+            &'static benilla_assets::ModelAnimations,
+        ),
+    >,
 }
 
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
@@ -143,11 +156,12 @@ pub(super) fn inspect_ui(
         .map(|c| c.parent());
     let (factions, self_store) = (stores.factions.as_deref(), stores.self_store.single().ok());
     let go_templates = &*stores.go_templates;
-    let (stores, kinds, collision, lit) = (
+    let (stores, kinds, collision, lit, go_anims) = (
         &stores.stores,
         &stores.kinds,
         &stores.collision,
         &stores.lit,
+        &stores.go_anims,
     );
     let store = net_entity.and_then(|p| stores.get(p).ok());
     // The unit's server name through the query cache — asks on first hover, fills on a later frame
@@ -294,13 +308,15 @@ pub(super) fn inspect_ui(
             None => format!("casting {}", c.spell_id),
         }
     });
+    // An `AnimationData` id as the card names it — shared by the creature and GameObject anim
+    // lines below, which read the same id space.
+    let fmt = |id: u16| match anim_data.as_ref().and_then(|a| a.0.name(id)) {
+        Some(name) => format!("{name}({id})"),
+        None => format!("{id}"),
+    };
     // The animation slots this frame (requested `AnimationData` ids — the selector's choice,
     // before missing-clip substitution): the full-body base + any masked upper-body overlay.
     let anim_line = net_entity.and_then(|p| drivers.get(p).ok()).map(|d| {
-        let fmt = |id: u16| match anim_data.as_ref().and_then(|a| a.0.name(id)) {
-            Some(name) => format!("{name}({id})"),
-            None => format!("{id}"),
-        };
         let (base, overlay) = d.playing();
         let base = base.map(&fmt).unwrap_or_else(|| "—".into());
         // The base slot's live playback rate (decision 0903) — `speed / (moveSpeed · modelScale)`
@@ -317,6 +333,23 @@ pub(super) fn inspect_ui(
             Some(o) => format!("anim {base} + overlay {}{rate}", fmt(o)),
             None => format!("anim {base}{rate}"),
         }
+    });
+    // The same line for a **GameObject** (decision 1151), which is driven by `GoAnim` rather than
+    // `AnimDriver` and so never reached the branch above: the sequence the §243 arm is playing,
+    // whether it is a transient one (a transition motion / a Custom block — something the §2d
+    // completion advance must end) or the state's held rest pose, and the repeat it is running
+    // under. A `transition · loops` reading is the "stuck open/closing" bug, stated.
+    let anim_line = anim_line.or_else(|| {
+        let (id, transient, repeat) = net_entity
+            .and_then(|p| go_anims.get(p).ok())
+            .and_then(|(go, player, anims)| crate::go_anim::armed_anim(go, player, anims))?;
+        let kind = if transient { "transition" } else { "rest" };
+        let repeat = match repeat {
+            bevy::animation::RepeatAnimation::Forever => " · loops".to_string(),
+            bevy::animation::RepeatAnimation::Never => String::new(),
+            bevy::animation::RepeatAnimation::Count(n) => format!(" · ×{n}"),
+        };
+        Some(format!("anim {} · {kind}{repeat}", fmt(id)))
     });
     // The light lane + the attach that found it (decision 0776). Absent until the classifier has
     // resolved the anchor once — a freshly streamed object shows no line rather than a wrong one.

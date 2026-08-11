@@ -191,6 +191,14 @@ pub enum ServerPacket {
         day_serial: u32,
         timescale: f32,
     },
+    /// `SMSG_QUERY_TIME_RESPONSE`: the server's wall clock in **unix-epoch seconds**, answering our
+    /// `CMSG_QUERY_TIME`. Not the in-game clock — that is [`Self::TimeSpeed`]'s packed date, a
+    /// different quantity entirely. This one exists so the client can read the *absolute* stamps
+    /// the server writes into descriptor fields: today the quest-log slot's timed-quest deadline
+    /// (decision 1150).
+    QueryTimeResponse {
+        unix_time: u32,
+    },
     /// The player's hearthstone bind point (`SMSG_BINDPOINTUPDATE`, at login + on re-bind):
     /// position + map + the AreaTable id the `$z` token names.
     BindPoint {
@@ -1112,6 +1120,7 @@ impl ServerPacket {
             ServerPacket::TransferAborted { .. } => "SMSG_TRANSFER_ABORTED".into(),
             ServerPacket::LoginVerifyWorld { .. } => "SMSG_LOGIN_VERIFY_WORLD".into(),
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
+            ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),

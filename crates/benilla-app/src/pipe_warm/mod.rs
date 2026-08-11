@@ -601,6 +601,7 @@ fn warm_effect_lane(
                             anchor: Vec3::ZERO,
                             bias: 0.0,
                             raster_bias,
+                            cam_relative: false,
                             main_entity: cam,
                             light: None,
                         },

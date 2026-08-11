@@ -101,6 +101,7 @@ mod sky_order;
 mod smart_rect;
 mod sound;
 mod sun;
+mod surface;
 mod target;
 mod terrain;
 mod terrain_stream;
@@ -375,7 +376,19 @@ pub fn run(build: BuildId) -> AppExit {
                                 let (w, h) = v.split_once('x')?;
                                 Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
                             })
-                            .unwrap_or(UVec2::new(1600, 900))
+                            // A run that reads no pixels gets a SMALL window. It is held
+                            // `AlwaysOnTop` for its whole life so it can never be occluded into
+                            // the ~1 fps throttle (`capture::ProbeFocusPlugin`, decision 0906) —
+                            // at the full default that meant every agent probe planted a
+                            // screen-filling window over the director's work. Small + cornered
+                            // (`ProbeFocusPlugin` parks it) is un-occludable AND out of the way;
+                            // anything photographing pixels keeps the full size, and `WOW_WIN`
+                            // overrides either way (decision 1148).
+                            .unwrap_or(if bgwin::no_pixel_run() {
+                                UVec2::new(640, 360)
+                            } else {
+                                UVec2::new(1600, 900)
+                            })
                             .into()
                     },
                     // `$WOW_NOVSYNC=1`: uncap presentation so a headless FPS-journal run measures

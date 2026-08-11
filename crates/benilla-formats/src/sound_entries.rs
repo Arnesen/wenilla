@@ -54,7 +54,13 @@ pub struct SoundKit {
     /// Selection/cull radius: the `d² < cutoff²` audibility gate + per-frame virtualization
     /// (wow-re `0x45cdf0`/`0x7a5000`). `0` = non-positional (no 3D cull).
     pub distance_cutoff: f32,
-    /// Per-kit EAX class (0/1/2 in the data) — reverb-send tier, consumed with the reverb slice.
+    /// `SoundSamplePreferences.dbc` FK — the per-channel EAX wet send (0/1/2 in the data;
+    /// 2 072 kits carry 0, 2 549 carry 2, 2 carry 1). **`0` means dry, not "default"**: that DBC
+    /// holds only ids 1 and 2, so the client's id-indexed slot lookup (`0x45cdc0`) returns NULL
+    /// and `FSOUND_Reverb_SetChannelProperties` (`0x7a5bf0`) skips before it even tests the
+    /// 3D-open flag. Authored dryness — and it is how NPC voice lines stay out of an interior's
+    /// reverb: **all 275 `SoundType 17` rows are `EAXDef 0`** (creature barks split 706 wet /
+    /// 285 dry). wow-re `reverb-default-and-eax-hardware.md`; benilla decision 1155.
     pub eax_def: u32,
 }
 
@@ -213,6 +219,51 @@ mod tests {
             bytes.len() > 1000,
             "{path} is a real WAV ({} B)",
             bytes.len()
+        );
+    }
+
+    /// The `EAXDef` census the reverb send is gated on (decision 1155, bug B236). `EAXDef 0` is a
+    /// NULL `SoundSamplePreferences` slot in the client, i.e. a channel that never receives reverb
+    /// properties — so this is the authored line between wet and dry, and it must not drift.
+    /// Skips without client data.
+    #[test]
+    fn real_sound_entries_eaxdef_census() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_sound_kit_catalog(&mut chain).expect("load sound kits");
+
+        // Only three values exist, and `SoundSamplePreferences.dbc` has rows 1 and 2 only — so 0
+        // is "no row", never "row zero".
+        let mut n = [0usize; 3];
+        for k in cat.kits.values() {
+            assert!(k.eax_def <= 2, "kit {} has EAXDef {}", k.id, k.eax_def);
+            n[k.eax_def as usize] += 1;
+        }
+        assert_eq!(
+            (n[0], n[1], n[2]),
+            (2072, 2, 2549),
+            "the 5875 EAXDef census"
+        );
+
+        // The load-bearing one: NPC voice lines (`SoundType 17`, what `NPCSounds.dbc` references)
+        // are dry to a kit — this is why the Thunderbrew Distillery's NPCs carry no echo.
+        let voices: Vec<_> = cat.kits.values().filter(|k| k.sound_type == 17).collect();
+        assert_eq!(voices.len(), 275, "the type-17 NPC voice rows");
+        assert!(
+            voices.iter().all(|k| k.eax_def == 0),
+            "every NPC voice kit is authored dry"
+        );
+
+        // The control: creature barks are a genuine mix, so the gate is not a no-op that happens
+        // to silence everything.
+        let barks: Vec<_> = cat.kits.values().filter(|k| k.sound_type == 10).collect();
+        assert!(
+            barks.iter().any(|k| k.eax_def != 0) && barks.iter().any(|k| k.eax_def == 0),
+            "creature barks split wet/dry"
         );
     }
 }

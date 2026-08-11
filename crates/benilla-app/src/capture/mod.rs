@@ -401,7 +401,7 @@ fn resize_request() -> Option<(u32, u32)> {
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-/// The present mode a perf probe uncaps to (also the live probe's — see `probes.rs`).
+/// The present mode a perf probe uncaps to (also the live probe's — see `probes/live_fps.rs`).
 ///
 /// `AutoNoVsync`, measured, not assumed: explicit `Immediate` on macOS/Metal is a trap — A/B'd
 /// 2026-07-27 (overlook-noon, release, twice each), it *rails* near 16.6 ms AND takes 1.0–1.5 s

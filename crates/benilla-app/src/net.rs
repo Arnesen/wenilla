@@ -15,7 +15,7 @@
 //! covers in one frame. Coordinates cross from raw WoW into Bevy space here (`wow_to_bevy`).
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use benilla_protocol::{
     messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,
@@ -78,6 +78,7 @@ impl Plugin for NetPlugin {
             .init_resource::<NetStatus>()
             .init_resource::<DroppedOpcodes>()
             .init_resource::<ServerTime>()
+            .init_resource::<ServerWallClock>()
             .init_resource::<Reputations>()
             .init_resource::<HomeBind>()
             .init_resource::<Proficiencies>()
@@ -125,7 +126,9 @@ impl Plugin for NetPlugin {
                 )
                     .chain()
                     .in_set(WorldStage::Net),
-            );
+            )
+            // Not part of the movement chain above: one send on the world-enter message.
+            .add_systems(Update, send_query_time.in_set(WorldStage::Net));
     }
 }
 
@@ -346,6 +349,88 @@ pub(crate) struct DropTally {
 /// until the first time packet. Read by the lighting subsystem to drive time-of-day.
 #[derive(Resource, Default)]
 pub(crate) struct ServerTime(pub(crate) Option<GameTime>);
+
+/// The server's **wall clock** (`SMSG_QUERY_TIME_RESPONSE`, asked for on entering the world),
+/// advanced monotonically from the sample. `None` until the first answer lands.
+///
+/// Not [`ServerTime`] just above: that is the *in-game* day/night clock the lighting reads, a
+/// different quantity in a different unit which says nothing about the epoch here. This one is
+/// unix-epoch seconds, and it exists because the server writes **absolute** stamps in that epoch
+/// into descriptor fields — a timed quest's deadline is `time(nullptr) + limitTime` (vmangos
+/// `Player::AddQuest`) and no packet ever restates it as a duration. So a countdown is
+/// `deadline − now_unix()`, and the local machine's own wall clock is deliberately never consulted:
+/// a player whose clock is a minute off would see every countdown a minute wrong, silently and only
+/// on their screen (decision 1150).
+#[derive(Resource, Default)]
+pub(crate) struct ServerWallClock(pub(crate) Option<WallClockSample>);
+
+/// One `SMSG_QUERY_TIME_RESPONSE` sample plus the monotonic instant it arrived — the [`GameTime`]
+/// pattern, for the same reason: the clock advances between packets without re-reading a local wall
+/// clock that an NTP step or a manual change can move under us.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WallClockSample {
+    /// The server's `time(nullptr)` at `received`.
+    base_unix: u32,
+    /// When the answer arrived (monotonic).
+    received: Instant,
+}
+
+impl ServerWallClock {
+    /// Take a fresh sample (the `SMSG_QUERY_TIME_RESPONSE` handler).
+    ///
+    /// The reply is one round trip old, so the clock reads ~RTT/2 behind the server's; against a
+    /// countdown displayed to the second that is below the noise floor, which is why there is no
+    /// correction term here.
+    pub(crate) fn sample(&mut self, unix_time: u32) {
+        self.0 = Some(WallClockSample {
+            base_unix: unix_time,
+            received: Instant::now(),
+        });
+    }
+
+    /// Server unix seconds now (fractional), or `None` before the first sample.
+    pub(crate) fn now_unix(&self) -> Option<f64> {
+        self.0
+            .map(|s| f64::from(s.base_unix) + s.received.elapsed().as_secs_f64())
+    }
+
+    /// Whether the sample is old enough to re-ask (or absent entirely).
+    fn stale(&self) -> bool {
+        self.0.is_none_or(|s| s.received.elapsed() >= RESYNC_AFTER)
+    }
+}
+
+/// How long a wall-clock sample stands before the client asks again — the reference's own hour
+/// (wow-re: the resync site `0x4de836` is gated on `now > [0xbb749c]`, armed `= now + 0xe10` at
+/// `0x4def11`; decision 1154).
+const RESYNC_AFTER: Duration = Duration::from_secs(3600);
+
+/// Ask for the server's wall clock (decision 1150) — on entering the world (login, worldport and
+/// instance transfer alike, the same cascade the mail arc's `QueryNextMailTime` hangs off), and
+/// hourly thereafter.
+///
+/// The hourly leg is the reference's, and it is not about our own drift: a monotonic base does not
+/// wander against a wall clock at any rate a countdown could show. What it tracks is the **server**
+/// being re-clocked under us — the one direction no local reasoning can see — for the price of four
+/// bytes an hour (decision 1154). It also self-heals a session that entered the world before the
+/// socket could answer.
+fn send_query_time(
+    mut entered: MessageReader<EnteredWorldMessage>,
+    commands: Res<NetCommands>,
+    clock: Res<ServerWallClock>,
+    status: Res<NetStatus>,
+    mut asked_at: Local<Option<Instant>>,
+) {
+    let entering = entered.read().next().is_some();
+    // Only chase the cadence while a session exists — a command with no live writer evaporates
+    // with a warn, and the world-enter send covers the reconnect.
+    let due =
+        status.connected && clock.stale() && asked_at.is_none_or(|t| t.elapsed() >= RESYNC_AFTER);
+    if entering || due {
+        *asked_at = Some(Instant::now());
+        let _ = commands.0.send(ClientCommand::QueryTime);
+    }
+}
 
 /// Our player's reputation store (`SMSG_INITIALIZE_FACTIONS`, once at login): `(flags, standing)`
 /// per reputation-list slot, indexed by `Faction.dbc`'s `reputationIndex`. The standing excludes the
@@ -969,6 +1054,11 @@ pub(crate) enum ClientCommand {
     /// login to seed `HasNewMail()`/the minimap letter icon (decision 0544 P3, sent by
     /// `crate::ui_mail`'s world-enter one-shot).
     QueryNextMailTime,
+    /// Ask for the server's wall clock (`CMSG_QUERY_TIME`, empty body) — sent on every world
+    /// entry, answered by `SMSG_QUERY_TIME_RESPONSE` into [`ServerWallClock`]. That clock is the
+    /// only way to read the absolute deadlines the server writes into descriptor fields, which is
+    /// how the timed-quest countdown gets its number (decision 1150).
+    QueryTime,
     /// Ask to inspect a player (`CMSG_INSPECT`, `u64 target`) — the UnitPopup INSPECT row
     /// (decision 0631). Fire-and-forget: the reply echoes the guid and nothing else, and the window
     /// paints from the already-streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields. Sent anyway because

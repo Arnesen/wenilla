@@ -1505,26 +1505,56 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
     );
     assert_eq!(
         text(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
-        "72 / 100"
+        "72 / 100",
+        "bare numbers: the reference's \"Health\"/\"Rage\" labels were cut on the \
+         director's call (1147)"
     );
     assert_eq!(
         text(&s, "BenillaPlayerFrameTextureFramePowerBarText"),
         "45 / 80",
-        "the power bar reads its own resource — rage here"
+        "the power bar shows the number alone, whatever resource it is"
     );
 
-    // The target has no numerals to pin: 1.12 never makes its bars textLockable, so its numbers
-    // are hover-only there — and our bars have no hover yet, which is why the text regions are not
-    // declared at all rather than declared and permanently dark. The wiring is unconditional though (the
-    // shared OnLoad runs for the target too), so the day a hover lands they are one pair of
-    // FontStrings away.
+    // The target's stay dark with the switch ON: 1.12 never makes its bars textLockable, so the
+    // option does not reach them.
     assert!(
-        s.eval::<bool>(
-            "return BenillaTargetFrameTextureFrameHealthBarText == nil              and BenillaTargetFrameHealthBar.lockShow == 0"
-        )
-        .unwrap(),
-        "no target numerals, but the target's bars are wired for them"
+        !shown(&s, "BenillaTargetFrameTextureFrameHealthBarText"),
+        "the switch pins your own numbers, never the target's"
     );
+
+    // ...but the HOVER reveals them, which is how you read a target's health in 1.12 (1146).
+    s.run("BenillaUnitFrameBar_OnEnter(BenillaTargetFrameHealthBar)")
+        .unwrap();
+    assert!(shown(&s, "BenillaTargetFrameTextureFrameHealthBarText"));
+    assert_eq!(
+        text(&s, "BenillaTargetFrameTextureFrameHealthBarText"),
+        "50 / 100"
+    );
+    s.run("BenillaUnitFrameBar_OnLeave(BenillaTargetFrameHealthBar)")
+        .unwrap();
+    assert!(
+        !shown(&s, "BenillaTargetFrameTextureFrameHealthBarText"),
+        "and go away again — the lockShow refcount balances"
+    );
+
+    // The same hover works with the switch OFF, which is the point of it on YOUR frame too: the
+    // numbers are there when you go looking, without living on the bar.
+    s.run("SetCVar(\"statusBarText\", \"0\", \"STATUS_BAR_TEXT\")")
+        .unwrap();
+    s.tick(0.0);
+    assert!(!shown(&s, "BenillaPlayerFrameTextureFrameHealthBarText"));
+    s.run("BenillaUnitFrameBar_OnEnter(BenillaPlayerFrameHealthBar)")
+        .unwrap();
+    assert!(
+        shown(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
+        "hover shows them even with the option off"
+    );
+    s.run("BenillaUnitFrameBar_OnLeave(BenillaPlayerFrameHealthBar)")
+        .unwrap();
+    assert!(!shown(&s, "BenillaPlayerFrameTextureFrameHealthBarText"));
+    s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
+        .unwrap();
+    s.tick(0.0);
 
     // A health change repaints through the bar's own OnValueChanged, like the reference's.
     s.set_unit("player", Some(alive(31, 45, 1)));
@@ -1533,5 +1563,102 @@ fn status_bar_text_paints_the_player_numerals_but_not_the_targets() {
         text(&s, "BenillaPlayerFrameTextureFrameHealthBarText"),
         "31 / 100"
     );
+
+    // A power-type change repaints the same way (it used to re-LABEL the bar too — 1147 cut that).
+    s.set_unit("player", Some(alive(31, 60, 3)));
+    s.fire_event("UNIT_DISPLAYPOWER", vec![ScriptValue::Str("player".into())]);
+    assert_eq!(
+        text(&s, "BenillaPlayerFrameTextureFramePowerBarText"),
+        "60 / 80"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The numerals do not collide** (decision 1147) — the pin for a bug the director caught on
+/// screen: the pet frame's two numeral strings overlapped each other and its name.
+///
+/// The cause was a bad transcription, not a bad seat. 1.12's pet bars are 70×8 at `(47,-22)` and
+/// `(47,-29)` — a **7 px pitch** for strings taller than that — so the reference does not centre the
+/// second one: it drops it clear, to `(82,-38)`, just under a bar that ends at −37. 1143 replaced
+/// those literals with "anchor each string to its own bar's centre", on a comparison that read the
+/// reference's TEXT offsets against our BAR offsets and concluded the geometry differed. It does
+/// not: our bars are byte-identical to the reference's, so its literals apply unchanged.
+///
+/// This asserts the PROPERTY, not the numbers, so it survives a future nudge (1145 moved the
+/// player's pair the day before this). Text metrics come from the harness's own measurer — a
+/// FontString with a single CENTER anchor and no measured size cannot pin either edge, so it falls
+/// back to its owner's rect and every string would appear to sit in the same box.
+#[test]
+fn no_two_numeral_strings_overlap_on_any_frame() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    let alive = |health: u32, power: u32| UnitState {
+        exists: true,
+        name: Some("Onehunter".into()),
+        health,
+        max_health: health,
+        level: 40,
+        power_type: 0,
+        power,
+        max_power: power,
+        dead: false,
+        reaction: 4,
+        ..UnitState::default()
+    };
+    s.set_unit("player", Some(alive(4122, 3300)));
+    s.set_unit("target", Some(alive(4122, 3300)));
+    s.set_unit("pet", Some(alive(256, 100)));
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
+    s.register_cvars([("statusBarText", "0")]);
+    s.run("SetCVar(\"statusBarText\", \"1\", \"STATUS_BAR_TEXT\")")
+        .unwrap();
+    s.tick(0.0);
+
+    // The host's half of the measure round-trip, at the numerals' real font size: NumberFontNormal
+    // is ~14 px tall, and a digit runs ~7 px wide. The round-trip answers a frame late, so settle.
+    for _ in 0..4 {
+        let answers: Vec<(u32, f32, f32, u64)> = s
+            .fontstrings_needing_measure()
+            .into_iter()
+            .map(|r| (r.id, r.text.chars().count() as f32 * 7.0, 14.0, r.key))
+            .collect();
+        s.set_measured_text_unwrapped(&answers);
+        s.tick(0.05);
+        s.resolve();
+    }
+
+    // The pin is the SEPARATION between the two numeral seats, which is the thing that broke and
+    // the thing the reference authored deliberately. Not "the line boxes must not overlap": at a
+    // 14 px NumberFontNormal the reference's own player seats are 12 px apart, so the boxes DO
+    // overlap there while the ink (a digit's ~10 px cap height, centred) does not. Only a seat
+    // pitch well under the font is a real collision — the pet's was 7 px.
+    for (frame, upper, lower, want) in [
+        (
+            "player",
+            "BenillaPlayerFrameTextureFrameHealthBarText",
+            "BenillaPlayerFrameTextureFramePowerBarText",
+            12.0,
+        ),
+        (
+            "pet",
+            "BenillaPetFrameTextureFrameHealthBarText",
+            "BenillaPetFrameTextureFrameManaBarText",
+            11.0,
+        ),
+    ] {
+        let mid = |s: &UiScript, n: &str| -> f64 {
+            s.eval::<f64>(&format!("return ({n}:GetTop() + {n}:GetBottom()) / 2"))
+                .unwrap()
+        };
+        let apart = mid(&s, upper) - mid(&s, lower);
+        assert!(
+            (apart - want).abs() < 0.51,
+            "{frame}: the numerals sit {apart:.1} px apart, the reference authors {want:.0}"
+        );
+    }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

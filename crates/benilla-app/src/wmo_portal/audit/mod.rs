@@ -280,6 +280,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_footprint_bounds: benilla_assets::footprint_tri_bounds(&group_footprints),
         group_footprint_grids: benilla_assets::footprint_tri_grids(&group_footprints),
         group_footprints,
+        material_ground_type: Vec::new(),
         group_light_refs: Vec::new(),
         group_liquids,
         doodad_base: Vec::new(),

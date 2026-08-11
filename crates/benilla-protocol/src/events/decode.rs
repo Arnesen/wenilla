@@ -577,6 +577,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             day_serial,
             timescale,
         }],
+        ServerPacket::QueryTimeResponse { unix_time } => {
+            vec![SessionEvent::ServerUnixTime { unix_time }]
+        }
         ServerPacket::BindPoint { area, .. } => vec![SessionEvent::BindPoint { area }],
         ServerPacket::SetProficiency {
             item_class,

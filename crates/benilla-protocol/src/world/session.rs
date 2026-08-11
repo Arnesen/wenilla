@@ -548,6 +548,14 @@ impl WorldSession {
         self.send(opcode::CMSG_QUEST_QUERY, &messages::quest_query(quest_id))
     }
 
+    /// Ask the server for its wall clock (`CMSG_QUERY_TIME`) — the unsplit twin of
+    /// [`WorldWriter::query_time`]; answered by `SMSG_QUERY_TIME_RESPONSE`, one `u32` of
+    /// unix-epoch seconds. That is the epoch a timed quest's deadline is written in, so no
+    /// countdown can be read off the descriptor without it (decision 1150).
+    pub fn query_time(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_QUERY_TIME, &messages::query_time())
+    }
+
     /// Abandon a quest-log slot (`CMSG_QUESTLOG_REMOVE_QUEST`) — the unsplit twin of
     /// [`WorldWriter::questlog_remove_quest`]; no ack SMSG, the server clears the
     /// `PLAYER_QUEST_LOG` slot fields directly.

@@ -503,6 +503,7 @@ pub(crate) fn simulate_ribbons(
                         0.0
                     },
                 raster_bias: 0,
+                cam_relative: false,
                 main_entity: entity,
                 light: None, // trails never carry a light override (world lane only)
             },

@@ -76,6 +76,36 @@ impl AreaTableCatalog {
         None
     }
 
+    /// Is `area_id` **cold** — does a unit standing here puff visible breath?
+    ///
+    /// The client's `0x67e9c0` (wow-re `object-layer/scratch/cold-breath-law.md` Q2), byte-exact:
+    ///
+    /// ```text
+    /// cold ⟺ ((leaf.Flags & 0x2) || no valid parent ? leaf.Flags : parent.Flags) & 0x1
+    /// ```
+    ///
+    /// **One hop, never a chain walk** ([`Self::top_zone`] is a different question with a
+    /// different answer). Bit `0x1` is authored on exactly four leaf rows in 5875 — Dun Morogh,
+    /// Winterspring, Razorfen Downs, Naxxramas — and the single-hop inheritance is what spreads it
+    /// to the 45 areas that are actually cold: every sub-area of Dun Morogh and Winterspring
+    /// carries `0x40` (bit `0x2` clear) and therefore reads its zone's flags instead. Bit `0x2` is
+    /// the opt-out that makes a sub-area answer for itself.
+    ///
+    /// This is **independent of the weather**: snowfall and breath vapour share no input, and
+    /// there is no indoor suppression — standing in the Thunderbrew Distillery is as cold as the
+    /// road outside, because indoor-ness only changes *which row* resolves, not this test.
+    pub fn is_cold(&self, area_id: u32) -> bool {
+        let Some(leaf) = self.by_id.get(&area_id) else {
+            return false;
+        };
+        let row = if leaf.flags & 0x2 != 0 {
+            leaf
+        } else {
+            self.by_id.get(&leaf.zone_id).unwrap_or(leaf)
+        };
+        row.flags & 0x1 != 0
+    }
+
     /// The id of the zone **named** `name`, case-insensitively — the reverse of [`Self::name`],
     /// for the one caller that has a name and needs the id: `/who`'s `z-"Elwynn Forest"` term,
     /// which goes on the wire as a zone id (decision 0668).
@@ -197,5 +227,57 @@ mod tests {
         // …and the FFA-pit bit on the leaf pit rows, NOT the enclosing arena row.
         assert_ne!(cat.get(2177).expect("Battle Ring").flags & 0x80, 0);
         assert_eq!(cat.get(1741).expect("Gurubashi Arena").flags & 0x80, 0);
+    }
+
+    /// The cold-breath predicate on the shipped table (`0x67e9c0`): bit `0x1` is authored on
+    /// exactly four rows, and the ONE-HOP parent inheritance is what makes the sub-areas cold.
+    /// This is the test that would have caught reading the leaf alone — every place a player
+    /// actually stands in Dun Morogh is a sub-area whose own flags are `0x40`.
+    #[test]
+    fn cold_areas_inherit_one_hop_from_their_zone() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_area_table_catalog(&mut chain).expect("load AreaTable");
+
+        // The four authored rows.
+        for (id, label) in [
+            (1, "Dun Morogh"),
+            (618, "Winterspring"),
+            (722, "Razorfen Downs"),
+            (3456, "Naxxramas"),
+        ] {
+            assert_ne!(cat.get(id).expect(label).flags & 0x1, 0, "{label} authored");
+            assert!(cat.is_cold(id), "{label} is cold");
+        }
+
+        // The sub-areas: own flags `0x40` (bit 0x1 clear, bit 0x2 clear) → they read the zone's.
+        for (id, label) in [
+            (131, "Kharanos"),
+            (132, "Coldridge Valley"),
+            (136, "The Grizzled Den"),
+            (2255, "Everlook"),
+        ] {
+            let row = cat.get(id).expect(label);
+            assert_eq!(row.flags & 0x3, 0, "{label} authors neither bit itself");
+            assert!(cat.is_cold(id), "{label} inherits its zone's cold");
+        }
+
+        // Negative controls, including the sharp one: Gnomeregan the Dun Morogh sub-area (133) is
+        // cold; Gnomeregan the dungeon row (721), which is its own top-level zone, is not.
+        assert!(cat.is_cold(133), "Gnomeregan the sub-area");
+        for (id, label) in [
+            (721, "Gnomeregan (dungeon)"),
+            (12, "Elwynn Forest"),
+            (1519, "Stormwind City"),
+            (36, "Alterac Mountains"),
+            (267, "Hillsbrad Foothills"),
+        ] {
+            assert!(!cat.is_cold(id), "{label} is not cold");
+        }
+        assert!(!cat.is_cold(0), "an unknown area is not cold");
     }
 }

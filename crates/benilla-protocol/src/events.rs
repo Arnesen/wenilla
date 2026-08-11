@@ -304,6 +304,12 @@ pub enum SessionEvent {
         day_serial: u32,
         timescale: f32,
     },
+    /// The server's **wall clock** in unix-epoch seconds (`SMSG_QUERY_TIME_RESPONSE`, answering our
+    /// `CMSG_QUERY_TIME`) — not [`Self::TimeSpeed`]'s in-game day/night clock, a different quantity
+    /// with a different consumer. This one dates the absolute stamps the server writes into
+    /// descriptor fields: a timed quest's deadline is `time(nullptr) + limitTime`, so the quest
+    /// countdown is a subtraction against *this* number (decision 1150).
+    ServerUnixTime { unix_time: u32 },
     /// The player's hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the
     /// `$z` token names ("Returns you to <area>.").
     BindPoint { area: u32 },

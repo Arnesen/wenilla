@@ -48,3 +48,19 @@ opt-level = 1
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# The director's play loop (decision 1157): `release` plus incremental compilation. `benilla-app` is one crate of
+# ~243k lines, and release is non-incremental by cargo's default, so a one-line edit re-optimizes
+# all of it — measured 2m47s (43s frontend, ~121s LLVM at opt-level 3) against a 1.8s stamp rebuild
+# and a 2.5s no-op. Incremental caches both halves per codegen unit, so an edit pays for what it
+# touched. Cargo applies `incremental` to workspace members ONLY (verified: `target/debug/incremental`
+# holds our 16 crates and zero registry deps), so the ~760 dependencies stay non-incremental and
+# sccache-cacheable — 0192's wrapper and the cold-slot build are untouched.
+#
+# Why a separate profile rather than flipping `release`: incremental raises the codegen-unit count
+# and drops cross-unit inlining, which is a real codegen difference. The FPS campaign grades on
+# default `release` (0736) and same-day A/B is the law, so the graded profile must not quietly
+# change under it. Run it as `cargo play` (the alias in `.cargo/config.toml`).
+[profile.play]
+inherits = "release"
+incremental = true

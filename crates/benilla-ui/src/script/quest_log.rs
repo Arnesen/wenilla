@@ -21,10 +21,16 @@
 //! `RemoveQuestWatch`/`GetNumQuestWatches`/`GetQuestIndexForWatch`) — keyed by the entries' stable
 //! [`QuestLogEntryView::quest_id`] under the index-based Era API, pruned on push, cap 5.
 //!
+//! A fourth engine-owned bit is the **countdown** (`GetQuestTimers`/`GetQuestIndexForTimer`/
+//! `GetQuestLogTimeLeft`, decision 1150): the snapshot carries each row's absolute deadline and the
+//! bindings subtract the live server clock per call, so the reference's `QuestTimerFrame` can tick
+//! from its OnUpdate without the log snapshot changing under it. [`seconds_left`] carries the
+//! reference's byte-verified formula and the ways a row has no timer to show (decision 1154).
+//!
 //! v1 scope (the deliberate `nil`/false stubs, each a later slice): party share
-//! (`GetQuestLogPushable`/`IsUnitOnQuest`), timed quests (`GetQuestLogTimeLeft`), reward spells
-//! (`GetQuestLogRewardSpell`), and zone **headers** ([`QuestLogEntryView::is_header`] is plumbed
-//! but the app pushes a flat list — headers need the QuestSort/AreaTable DBC join).
+//! (`GetQuestLogPushable`/`IsUnitOnQuest`), reward spells (`GetQuestLogRewardSpell`), and zone
+//! **headers** ([`QuestLogEntryView::is_header`] is plumbed but the app pushes a flat list —
+//! headers need the QuestSort/AreaTable DBC join).
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -56,6 +62,14 @@ pub struct QuestLogEntryView {
     /// Whole-quest state from the descriptor slot's state byte: `1` complete, `-1` failed, `0`
     /// in progress (`GetQuestLogTitle`'s `isComplete` is `1`/`-1`/`nil` off this).
     pub complete: i32,
+    /// A timed quest's **deadline**, as the descriptor slot carries it: absolute unix-epoch
+    /// seconds (`time(nullptr) + limitTime`, vmangos `Player::AddQuest`), `0` when the quest is
+    /// untimed. Deliberately the raw stamp and not a remaining-seconds count: a remaining count
+    /// would change every second, and this snapshot is diffed by the app to decide whether to fire
+    /// `QUEST_LOG_UPDATE` — a live number in here would rebuild the whole quest log every frame.
+    /// The countdown is subtracted per call instead, against [`super::Model::server_unix_time`]
+    /// (decision 1150).
+    pub timer: u32,
     /// The formatted objective lines for THIS entry (`GetNumQuestLeaderBoards(i)` /
     /// `GetQuestLogLeaderBoard(j, i)` serve any index off these — the watch tracker HUD reads
     /// non-selected quests' lines). The selection's no-arg reads come from here too; the
@@ -74,6 +88,16 @@ pub struct QuestLogObjectiveView {
     pub kind: String,
     /// Whether this objective is done (darkens the line + `(Complete)` suffix in the ref).
     pub finished: bool,
+    /// The progress numbers `text` was formatted from — the `%d/%d` of the line (`cur` already
+    /// clamped to `req`). Not exposed to Lua (`GetQuestLogLeaderBoard` returns text/type/finished
+    /// only); they exist so the app's progress announce can ask *"did this ADVANCE?"* instead of
+    /// *"did the rendered line change?"*. A text-only diff cannot tell progress from a regression,
+    /// and a quest turn-in produces exactly that regression — the required items are destroyed a
+    /// frame or two before the log slot clears, so the line dips to `0/req` while the quest is
+    /// still in the log (decision 1152 / B237).
+    pub cur: u32,
+    /// See [`Self::cur`].
+    pub req: u32,
 }
 
 /// The selected quest's detail pane — resolved by the app from the `QUEST_QUERY_RESPONSE` template
@@ -158,6 +182,67 @@ impl super::UiScript {
     pub fn set_quest_log_selection(&mut self, i: u32) {
         self.model_mut().quest_log_selection = i;
     }
+
+    /// Push the server's wall clock (unix-epoch seconds) — the app's `SMSG_QUERY_TIME_RESPONSE`
+    /// sample, advanced monotonically. Every countdown the engine answers is subtracted against
+    /// this, so it is pushed each frame rather than on change (decision 1150).
+    ///
+    /// This is the reference's `G` in a different frame of reference, and it is worth naming the
+    /// equivalence because the two look nothing alike. The client stores only an **offset**
+    /// `G = local_epoch@sync − server_epoch@sync` and computes `deadline + G − localNow()`; we
+    /// store the server stamp and advance it monotonically, i.e. `deadline − serverNow()`.
+    /// Expand either and both reduce to `remaining_at_sync − elapsed`. The one behavioural
+    /// difference is deliberate and in our favour: a local wall-clock step mid-session (an NTP
+    /// correction, a manual change) jumps the reference's countdown and cannot move ours
+    /// (decision 1154).
+    pub fn set_server_unix_time(&mut self, unix_secs: f64) {
+        self.model_mut().server_unix_time = Some(unix_secs);
+    }
+}
+
+/// The signed seconds remaining on a quest-log row's timer, or `None` when the row has no timer at
+/// all. **This is the reference's own formula**, byte-verified (wow-re
+/// `system/ui/scratch/quest-timer-law.md`, the 2026-08-09 §5 trio; decision 1154):
+///
+/// ```text
+/// value = slot.timer + G − now − 1
+/// ```
+///
+/// — computed identically by all four of its consumers (`0x4e0905`, `0x4e14b9`, `0x4e16c9`,
+/// `0x4de6b6`). Our `now` already carries `G` folded in (see [`super::UiScript::set_server_unix_time`]),
+/// so what is left here is the deadline, the clock, and **the `−1`**.
+///
+/// That `−1` is not a rounding artefact to tidy away: a quest expiring exactly `N` seconds after
+/// the sampled clock reads `N − 1`, and its last second reads `0`. The bias is downward by
+/// construction — the reference never overstates the time a player has left, and neither do we.
+///
+/// Three ways there is nothing to show, each a deliberate answer rather than a fallthrough:
+///
+/// - `timer == 0` — the quest is untimed. The overwhelming majority of rows, and header rows too
+///   (the app pushes them with no timer, matching the reference's own header skip at `0x4e1460`).
+/// - The row is **failed** (`complete < 0`). vmangos writes the slot timer to the literal `1` and
+///   sets the state's FAIL bit when a timed quest runs out (`Player::FailQuest`,
+///   `Player.cpp:13430`), and the row *stays in the log* until the player abandons it. The
+///   reference tests the same bit **before** the arithmetic (`test byte [slot+0x7],0x2` at each of
+///   the four sites), so that `1` never reaches a subtraction there either.
+/// - No server clock yet — the deadline is an absolute stamp in the server's epoch and there is
+///   nothing honest to subtract from it. The reference agrees exactly: its `G == 0` is the
+///   never-synced sentinel and `GetQuestLogTimeLeft` answers nil on it.
+///
+/// A **negative** result is returned as such: the two list bindings drop the row (the reference's
+/// `js` at `0x4e14c5`), while `GetQuestLogTimeLeft` clamps it at 0. Same split, same reason.
+fn seconds_left(entry: &QuestLogEntryView, now: Option<f64>) -> Option<i64> {
+    if entry.timer == 0 || entry.complete < 0 {
+        return None;
+    }
+    let now = now?;
+    Some((f64::from(entry.timer) - now - 1.0).floor() as i64)
+}
+
+/// The list bindings' view: seconds remaining, and only for a row that still has some. Drops the
+/// expired rows the reference's `js` drops.
+fn live_seconds_left(entry: &QuestLogEntryView, now: Option<f64>) -> Option<i64> {
+    seconds_left(entry, now).filter(|&s| s >= 0)
 }
 
 /// Register the quest-log globals.
@@ -465,11 +550,81 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ── v1 stubs (each the seam of a named later slice — see the module doc) ─────────────────────
+    // ── Timed quests (decision 1150) ─────────────────────────────────────────────────────────────
+    // The engine owns the countdown, as the reference's C bindings do: the pushed snapshot carries
+    // each row's absolute DEADLINE, and these subtract the live server clock per call. That split
+    // is what lets the ref's QuestTimerFrame re-read GetQuestTimers() every OnUpdate and paint a
+    // ticking number, while `set_quest_log` only fires QUEST_LOG_UPDATE when the log really moves.
+
+    // GetQuestTimers() → seconds remaining, ONE RETURN PER TIMED QUEST, in quest-log order — a
+    // genuine vararg return (the ref reads it as `QuestTimerFrame_Update(GetQuestTimers())` and
+    // walks `arg.n`, QuestTimerFrame.lua:11/:19). No timed quests → no values at all, which is the
+    // ref's own "hide the frame" signal.
+    g.set(
+        "GetQuestTimers",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let now = model.server_unix_time;
+            Ok(MultiValue::from_vec(
+                model
+                    .quest_log
+                    .entries
+                    .iter()
+                    .filter_map(|e| live_seconds_left(e, now))
+                    .map(Value::Integer)
+                    .collect(),
+            ))
+        })?,
+    )?;
+
+    // GetQuestIndexForTimer(timerIndex) → the 1-based QUEST-LOG index that timer belongs to (the
+    // same index space GetQuestLogTitle takes — headers included, since the app pushes them into
+    // the same list). The ref's timer buttons carry their 1-based ordinal as the frame id and map
+    // back through this for the click and the hover tooltip (QuestTimerFrame.lua:43,
+    // QuestTimerFrame.xml:20). Out of range → nil.
+    g.set(
+        "GetQuestIndexForTimer",
+        lua.create_function(|lua, t: usize| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let now = model.server_unix_time;
+            let index = t.checked_sub(1).and_then(|n| {
+                model
+                    .quest_log
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| live_seconds_left(e, now).is_some())
+                    .nth(n)
+                    .map(|(i, _)| i as i64 + 1)
+            });
+            Ok(match index {
+                Some(i) => Value::Integer(i),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
+    // GetQuestLogTimeLeft() → the SELECTION's seconds remaining, or nil when it has no timer —
+    // the ref branches on exactly that nil to show or hide its "Time Remaining:" row and to
+    // re-anchor the objectives beneath it (QuestLogFrame.lua:364-374).
     g.set(
         "GetQuestLogTimeLeft",
-        lua.create_function(|_, ()| Ok(Value::Nil))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let left = (model.quest_log_selection as usize)
+                .checked_sub(1)
+                .and_then(|n| model.quest_log.entries.get(n))
+                .and_then(|e| seconds_left(e, model.server_unix_time));
+            Ok(match left {
+                // Clamped, not dropped — the reference's own asymmetry against the two list
+                // bindings above (decision 1154).
+                Some(s) => Value::Integer(s.max(0)),
+                None => Value::Nil,
+            })
+        })?,
     )?;
+
+    // ── v1 stubs (each the seam of a named later slice — see the module doc) ─────────────────────
     g.set(
         "GetQuestLogRewardSpell",
         lua.create_function(|_, ()| Ok(Value::Nil))?,
@@ -575,6 +730,8 @@ mod tests {
                         text: "Kobold Vermin slain: 3/10".into(),
                         kind: "monster".into(),
                         finished: false,
+                        cur: 3,
+                        req: 10,
                     }],
                     ..Default::default()
                 },
@@ -587,6 +744,8 @@ mod tests {
                         text: "Kobold Worker slain: 10/10".into(),
                         kind: "monster".into(),
                         finished: true,
+                        cur: 10,
+                        req: 10,
                     }],
                     ..Default::default()
                 },
@@ -787,6 +946,102 @@ mod tests {
         s.run("AddQuestWatch(1)").unwrap();
         s.set_quest_log(QuestLogState::default());
         assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 0);
+    }
+
+    /// The countdown trio (decisions 1150/1154). One deadline stamp in the snapshot, one clock
+    /// pushed beside it, and every read is a live subtraction — so advancing the clock alone (no
+    /// re-push of the log) makes the number fall, which is precisely what the reference's
+    /// per-OnUpdate `GetQuestTimers()` depends on.
+    ///
+    /// Every number below carries the reference's `−1` (`value = deadline + G − now − 1`,
+    /// byte-verified at all four of its consumers): 500 seconds of wall gap reads 499.
+    #[test]
+    fn timers_count_down_against_the_pushed_server_clock() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        // Quest 2 is on a 15-minute leash that ends at unix 1_000_900; quest 1 is untimed.
+        state.entries[1].timer = 1_000_900;
+        s.set_quest_log(state);
+
+        // No clock sample yet: nothing to subtract from, so nothing is claimed.
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetQuestTimers())")
+                .unwrap(),
+            0
+        );
+        assert!(s
+            .eval::<bool>("return GetQuestLogTimeLeft() == nil")
+            .unwrap());
+
+        // 400 s in.
+        s.set_server_unix_time(1_000_400.0);
+        assert!(s
+            .eval::<bool>(
+                "local n, a = select('#', GetQuestTimers()), GetQuestTimers()\n\
+                 return n == 1 and a == 499"
+            )
+            .unwrap());
+        // The timer maps back to entry 2 — the untimed row 1 does not shift the mapping.
+        assert_eq!(s.eval::<i64>("return GetQuestIndexForTimer(1)").unwrap(), 2);
+        assert!(s
+            .eval::<bool>("return GetQuestIndexForTimer(2) == nil")
+            .unwrap());
+
+        // The selection's own reading: nil on the untimed row, the count on the timed one — the
+        // exact branch the ref's "Time Remaining:" row keys on.
+        s.run("SelectQuestLogEntry(1)").unwrap();
+        assert!(s
+            .eval::<bool>("return GetQuestLogTimeLeft() == nil")
+            .unwrap());
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 499);
+
+        // Only the CLOCK moves — no set_quest_log — and the number falls anyway.
+        s.set_server_unix_time(1_000_880.0);
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 19);
+
+        // The last second reads 0, not 1 — the `−1`'s downward bias at the very end of the window.
+        s.set_server_unix_time(1_000_899.0);
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 0);
+
+        // Past the deadline the two bindings SPLIT, exactly as the reference's do: the list drops
+        // the row (its `js`), while GetQuestLogTimeLeft clamps at 0 and keeps answering.
+        s.set_server_unix_time(1_000_910.0);
+        assert_eq!(s.eval::<i64>("return GetQuestLogTimeLeft()").unwrap(), 0);
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetQuestTimers())")
+                .unwrap(),
+            0
+        );
+        assert!(s
+            .eval::<bool>("return GetQuestIndexForTimer(1) == nil")
+            .unwrap());
+    }
+
+    /// A FAILED timed quest shows no timer. vmangos writes the slot timer to the literal `1` and
+    /// sets the FAIL state bit (`Player::FailQuest`), leaving the row in the log until the player
+    /// abandons it — so without the state test the frame would show a clamped "0" for ever.
+    #[test]
+    fn a_failed_timed_quest_drops_out_of_the_timer_list() {
+        let mut s = UiScript::new().unwrap();
+        let mut state = two_quests();
+        state.entries[0].timer = 1_000_900;
+        state.entries[1].timer = 1; // failed: the server's own sentinel
+        state.entries[1].complete = -1;
+        s.set_quest_log(state);
+        s.set_server_unix_time(1_000_400.0);
+
+        assert!(s
+            .eval::<bool>(
+                "local n, a = select('#', GetQuestTimers()), GetQuestTimers()\n\
+                 return n == 1 and a == 499"
+            )
+            .unwrap());
+        assert_eq!(s.eval::<i64>("return GetQuestIndexForTimer(1)").unwrap(), 1);
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert!(s
+            .eval::<bool>("return GetQuestLogTimeLeft() == nil")
+            .unwrap());
     }
 
     #[test]

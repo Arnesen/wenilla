@@ -23,8 +23,8 @@ use clap::Parser;
 
 use probes::{
     Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, OpenItem, Probe,
-    QueryNames, Quest, QuestItem, QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot,
-    Vendor, WorldState,
+    QueryNames, Quest, QuestItem, QuestLog, QuestTimer, Speed, Spells, Spirit, SwapPackSlots,
+    UsePackSlot, Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -153,6 +153,14 @@ struct Cli {
     /// deploy's probes are gmlevel 6).
     #[arg(long)]
     questlog: bool,
+    /// Live-verify the timed-quest COUNTDOWN chain (decision 1150, B234): GM-add a quest with a
+    /// `LimitTime`, read its `PLAYER_QUEST_LOG` slot's raw timer field (an absolute unix stamp,
+    /// not a duration), ask `CMSG_QUERY_TIME` for the server's own clock, and require the
+    /// subtraction to land inside the template's own `limit_time` window. The one leg no offline
+    /// test can cover: two independent packets whose epochs must agree. Needs a GM account (the
+    /// deploy's probes are gmlevel 6).
+    #[arg(long)]
+    questtimer: bool,
     /// Live-verify the quest-STARTER item wire (decision 0664): `.additem` the Northshire Gift
     /// Voucher (entry 14646, starts quest 5805 "Welcome!"), find it in the backpack, and run the
     /// fork a bag right-click makes for an item whose template carries a non-zero `StartQuest` —
@@ -378,6 +386,9 @@ fn main() -> Result<()> {
     }
     if cli.questlog {
         probes.push(Box::new(QuestLog));
+    }
+    if cli.questtimer {
+        probes.push(Box::new(QuestTimer::default()));
     }
     if cli.loot {
         probes.push(Box::new(Loot {

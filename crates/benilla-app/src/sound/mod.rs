@@ -84,6 +84,28 @@ pub(crate) struct SoundConfig {
     /// the stream alive at zero, so re-enabling resumes mid-track where the reference re-picks.
     pub music_enabled: bool,
     pub ambience_enabled: bool,
+    /// Zone reverb — 1.12's `SoundReverb` CVar (`0x4573be` registration, callback `0x4574d0`,
+    /// flag byte `[0x835a4c]`). The flag gates **both** EAX paths: the zone/environment preset
+    /// (`0x45a75b`: flag zero ⇒ `FSOUND_Reverb_SetProperties` is never called) and the
+    /// per-channel wet send (`0x458f13` ⇒ `FSOUND_Reverb_SetChannelProperties`). Read by
+    /// [`reverb::zone_reverb`].
+    ///
+    /// **Registrar default is `"1"`; ours is `false`** — the one place benilla's CVar defaults
+    /// leave the binary's (decisions 1153, 1155). The reference *emits* both calls on a stock
+    /// boot — VERIFIED, and its three writers of `[0x835a4c]` all write 1 — but they are FMOD 3's
+    /// EAX API, and its own header says `ONLY SUPPORTED ON WIN32 W/ FSOUND_HW3D FLAG`. The
+    /// reference client's `Logs/Sound.log` on this machine reports
+    /// `Driver: 0 'Primary Sound Driver' 00000000` (caps 0 — no `HARDWARE`/`EAX2`/`EAX3`) and
+    /// `0 3D hardware` channels, and DirectSound lost hardware mixing in Vista. So "emitted, and
+    /// rendered as nothing" — **the render half is INFERRED**, not byte-verified (we cannot read
+    /// `fmod.dll` from `WoW.exe`); the live capture that would settle it is named in 1155.
+    /// benilla is the first 1.12 client to render this DSP in software, so `false` is what the
+    /// reference is heard to produce rather than what its registrar says. **This is not what
+    /// fixes B236** — that is the `EAXDef` dryness on [`Mixer::play_3d`], which holds whichever
+    /// way this flag sits. Turn it on with `/run SetCVar("SoundReverb", 1)` — applies live and
+    /// persists — to hear what the DBC data asks for. (The reference's route is
+    /// `/console SoundReverb 1`; benilla has no `ConsoleExec` yet.)
+    pub reverb: bool,
 }
 
 impl SoundConfig {
@@ -112,6 +134,7 @@ impl Default for SoundConfig {
             ambience: 0.6,
             music_enabled: true,
             ambience_enabled: true,
+            reverb: false,
         }
     }
 }

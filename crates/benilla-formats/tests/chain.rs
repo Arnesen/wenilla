@@ -1338,3 +1338,101 @@ fn reads_the_wmo_skybox_and_its_per_group_gate() {
         "and not one of its groups asks for one"
     );
 }
+
+/// **The footstep chain's WMO leg, on the shipped bytes** (decision 1161, bug B236's sequel).
+///
+/// `MOMT+0x20` is a `TerrainType.dbc` id, and this is the evidence for that claim rather than a
+/// format doc: across every root WMO in the archive the dword only ever takes ids the table
+/// actually has, and `10 "None"` — the unauthored default — dominates. The Kharanos inn is the
+/// reported case: it authors `None` on all 20 materials, so the reference gives a walker its
+/// generic dry kit and NO footprint, where reading the ADT beneath the floor gives snow and snow
+/// prints.
+#[test]
+fn wmo_ground_type_is_a_terrain_type_id() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let cat = benilla_formats::load_footstep_catalog(&mut chain).expect("footstep catalog");
+
+    // The Kharanos inn ("Thunderbrew Distillery" is the AREA name; the model is snow_Inn).
+    let inn = chain
+        .read_file("World\\wmo\\KhazModan\\Buildings\\Dwarven_Inn\\snow_Inn\\Snow_Inn.wmo")
+        .expect("the Kharanos inn root");
+    let inn = benilla_formats::parse_wmo_root(&inn).expect("inn root parses");
+    let ground = inn.material_ground_types();
+    assert_eq!(ground.len(), 20, "the inn's material count");
+    assert!(
+        ground.iter().all(|&g| g == 10),
+        "every Kharanos inn material is the unauthored `None`: {ground:?}"
+    );
+
+    // `None` is not silence — it is a real row, and it is the quiet generic step.
+    assert_eq!(
+        cat.sound_class_of(10),
+        Some(0),
+        "TerrainType 10 -> SoundID 0"
+    );
+    assert!(
+        !cat.terrain_leaves_footprints(10),
+        "a WMO floor takes no prints"
+    );
+    assert!(
+        cat.terrain_leaves_footprints(3) && cat.terrain_leaves_footprints(7),
+        "Snow and Sand are the print surfaces"
+    );
+    assert_eq!(
+        cat.resolve_terrain(7, 10).map(|(dry, _)| dry),
+        Some(560),
+        "class 7 indoors: CharacterMediumLargeDirt"
+    );
+    assert_eq!(
+        cat.resolve_terrain(7, 3).map(|(dry, _)| dry),
+        Some(563),
+        "class 7 on snow: CharacterMediumLargeSnow — what the ADT-only chain wrongly played inside"
+    );
+
+    // The value-domain argument, over every root WMO in the archive: nothing outside the table.
+    let roots: Vec<String> = chain
+        .list()
+        .expect("chain listing")
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_lowercase();
+            l.ends_with(".wmo")
+                && !l
+                    .strip_suffix(".wmo")
+                    .and_then(|s| s.rsplit('_').next())
+                    .is_some_and(|t| t.len() == 3 && t.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+    assert_eq!(roots.len(), 815, "root WMOs in the 5875 archive");
+    let (mut total, mut none, mut multi) = (0usize, 0usize, 0usize);
+    for name in &roots {
+        let Ok(bytes) = chain.read_file(name) else {
+            continue;
+        };
+        let Ok(root) = benilla_formats::parse_wmo_root(&bytes) else {
+            continue;
+        };
+        let g = root.material_ground_types();
+        for &v in &g {
+            assert!(
+                cat.sound_class_of(v).is_some(),
+                "{name}: ground_type {v} is not a TerrainType id"
+            );
+            total += 1;
+            none += usize::from(v == 10);
+        }
+        multi += usize::from(g.iter().collect::<std::collections::HashSet<_>>().len() > 1);
+    }
+    assert_eq!(
+        (total, none),
+        (10_299, 10_075),
+        "the 5875 ground_type census"
+    );
+    assert_eq!(multi, 121, "roots authoring more than one surface");
+}

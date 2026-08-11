@@ -210,6 +210,7 @@ pub(super) fn push_reticle(
             anchor: state.key.center,
             bias: RETICLE_DEPTH_BIAS,
             raster_bias: RETICLE_DEPTH_BIAS as i32,
+            cam_relative: false,
             main_entity: Entity::PLACEHOLDER,
             light: None,
         },

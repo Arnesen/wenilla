@@ -1,6 +1,6 @@
 //! The weather **wind** — the local player's trailing-average velocity (`0x67c150`) and the
-//! frames derived from it: the streak apex tilt and the mist spawn yaw. Split from `precip`'s
-//! root; the sim/spawn economics stay there.
+//! three frames derived from it: the **spawn-slab tilt**, the streak apex tilt, and the mist
+//! spawn yaw. Split from `precip`'s root; the sim/spawn economics stay there.
 
 use bevy::prelude::*;
 
@@ -9,12 +9,25 @@ use bevy::prelude::*;
 const WIND_TILT_DIV: f32 = 30.0;
 const WIND_TILT_MAX_DEG: f32 = 45.0;
 
+/// **Spawn-slab tilt**: `α = lerp(0°, 65°, sat(|wind|/18))` (`0x677965`–`0x677a55`). Shares the
+/// ⊥-heading axis with the streak tilt but is a *separate* rotation with its own ramp — steeper
+/// (65° vs 45°) and reaching full tilt at a lower speed (18 vs 30 yd/s). See
+/// [`super::pool::spawn_particle`] for what it does and why its absence was B233.
+const SLAB_TILT_DIV: f32 = 18.0;
+const SLAB_TILT_MAX_DEG: f32 = 65.0;
+
 /// Wind = the **local player's** trailing-average velocity (`0x67c150`, verified: the list is
 /// per-frame position deltas of object 0x8fe — the player, not the camera — trimmed to a
 /// **~149 ms** window; `wind = Σ(Δpos)/((Σ(Δms)+1)·0.001)`, a true yd/s velocity). Orbiting
-/// the camera therefore does NOT stir the wind. The streak apex tilt derives from it here; the
-/// wind heading (manager+0x78) updates only while `|wind.xy| ≥ 1` (`wx_wind_angle`'s gate) and
-/// holds its last value through calm.
+/// the camera therefore does NOT stir the wind. The streak apex tilt and the spawn-box lead
+/// derive from it here.
+///
+/// **The spawn-slab tilt does not.** It keys on `mgr+0x7c`, which merges two sources at one store
+/// (`0x67bf91`): the ridden transport's averaged planar speed when `|mgr+0x5c|² > 2`, else the
+/// local player's own **live** CMovement speed `[[player+0x118]+0x84]`. benilla has no ridden
+/// transports yet, so it is always the second — [`crate::player::Player::planar_speed`], passed
+/// into [`Self::update`]. Averaging it would be wrong in both directions: late to lean in, and
+/// still leaning 150 ms after the player stops.
 #[derive(Resource)]
 pub(crate) struct WeatherWind {
     pub(super) last_pos: Option<Vec3>,
@@ -22,10 +35,25 @@ pub(crate) struct WeatherWind {
     window: Vec<(f32, Vec3)>,
     /// The windowed planar velocity (Bevy x/z, y forced 0), yd/s.
     pub(super) vel: Vec3,
-    /// The held wind heading (WoW frame, `manager+0x78`) — updated only at |wind| ≥ 1.
+    /// The wind heading (WoW frame, `manager+0x78`) — the wind's own azimuth at |wind| ≥ 1, the
+    /// unit's facing below it. Rewritten every frame; it does **not** hold through calm.
     heading: f32,
+    /// The same heading as a **Bevy planar unit direction**. Kept alongside the angle rather than
+    /// re-derived from it, because the two angle conventions in this file are 90° apart and only
+    /// compose correctly as a *rotation*: [`heading`] is `atan2(y, x)` in the WoW frame, while
+    /// [`wow_azimuth_to_bevy`] reads its argument as the kernels' `(vx, vy) = (sin a, cos a)`
+    /// pair — i.e. `atan2(x, y)`. [`Self::mist_yaw`] composes them as a rotation and is fine;
+    /// feeding `heading` straight into `wow_azimuth_to_bevy` to get a *direction* would silently
+    /// yield an axis a quarter turn off.
+    heading_dir: Vec3,
     /// Streak-field tilt (rotates the fall axis toward the motion), from `weather_wind_tilt`.
     pub(super) tilt: Quat,
+    /// The **spawn-slab** tilt — rotates each particle's slab-local offset into the direction of
+    /// travel, so the volume's leading edge is born low and close instead of a flat `z_off` up.
+    /// `α = 65°·sat(live_speed/18)`, linear from zero with **no dead zone** (`0x674ba0` is a plain
+    /// clamped lerp and `0x677965`–`0x677a41` has no branch at all): 9° at a 2.5 yd/s walk, 25.3°
+    /// at a 7 yd/s run, saturated from 18 up. Exactly identity at rest, on the same frame.
+    pub(super) slab: Quat,
 }
 
 impl Default for WeatherWind {
@@ -35,7 +63,10 @@ impl Default for WeatherWind {
             window: Vec::new(),
             vel: Vec3::ZERO,
             heading: 0.0,
+            // The direction `heading = 0` names: `atan2(−x, −z) = 0` ⇒ `−z = 1`.
+            heading_dir: Vec3::NEG_Z,
             tilt: Quat::IDENTITY,
+            slab: Quat::IDENTITY,
         }
     }
 }
@@ -45,7 +76,10 @@ impl Default for WeatherWind {
 const WIND_WINDOW_S: f32 = 0.149;
 
 impl WeatherWind {
-    pub(super) fn update(&mut self, pos: Vec3, dt: f32) {
+    /// `pos` — the local player's feet; `facing` — their aim as a Bevy direction (the heading's
+    /// source below 1 yd/s); `live_speed` — their commanded planar speed in yd/s
+    /// ([`crate::player::Player::planar_speed`], the reference's `mgr+0x7c`).
+    pub(super) fn update(&mut self, pos: Vec3, facing: Vec3, live_speed: f32, dt: f32) {
         if dt <= 0.0 {
             return;
         }
@@ -75,25 +109,52 @@ impl WeatherWind {
         self.vel = sum_dpos / (total.mul_add(1000.0, 1.0) * 0.001);
 
         let mag2 = self.vel.length_squared();
-        // wx_wind_angle's gate: the heading only re-derives while |wind| ≥ 1; through calm it
-        // HOLDS (the mist frame doesn't spin on idle noise).
-        if mag2 >= 1.0 {
-            // wind_wow = (−vel.z, −vel.x) per the bevy→wow basis; heading = atan2(y, x).
-            self.heading = (-self.vel.x).atan2(-self.vel.z);
-        }
+        // `mgr+0x78` (`0x67be40`): the `|W_xy| ≥ 1` test selects the heading's SOURCE — it does
+        // NOT suppress the write. All three of its legs store `[esi+0x78]` (`0x67bee0`/`0x67bef6`/
+        // `0x67bf02`), and below 1 yd/s the heading is overwritten with the **unit's own facing**
+        // (`0x67beff call [vtbl+0x18]`). The earlier "it HOLDS through calm" reading was wrong —
+        // corrected by wow-re alongside the slab tilt, `wx-snow-placement-law.md` §9.
+        self.heading_dir = if mag2 >= 1.0 {
+            self.vel / mag2.sqrt()
+        } else {
+            facing
+                .with_y(0.0)
+                .try_normalize()
+                .unwrap_or(self.heading_dir)
+        };
+        // wind_wow = (−dir.z, −dir.x) per the bevy→wow basis; heading = atan2(y, x).
+        self.heading = (-self.heading_dir.x).atan2(-self.heading_dir.z);
 
-        // weather_wind_tilt (0x674a70): tilt = lerp(0°, 45°, sat(|wind.xy|/30)) about the
-        // horizontal axis ⊥ the wind; below |wind|² < 0.001 no tilt at all. The handedness is
-        // verified: the apex tips DOWNWIND (+wind = motion heading) — rain rushes into a
-        // moving player.
+        // Both rotations turn about `ŷ × ĥ` = `(h.z, 0, −h.x)`: a positive angle about it carries
+        // `ŷ` toward `ĥ` (`R·ŷ = ŷcos + ĥsin`), i.e. leans into the heading. The handedness is
+        // verified for the streak — the apex tips DOWNWIND, rain rushing into a moving player —
+        // and wow-re re-derived it independently for the slab.
+        let lean = |dir: Vec3, speed: f32, div: f32, max_deg: f32| {
+            Vec3::new(dir.z, 0.0, -dir.x)
+                .try_normalize()
+                .map_or(Quat::IDENTITY, |axis| {
+                    Quat::from_axis_angle(
+                        axis,
+                        ((speed / div).clamp(0.0, 1.0) * max_deg).to_radians(),
+                    )
+                })
+        };
+        // The streak apex (`weather_wind_tilt 0x674a70`) keys on the AVERAGED wind, and dies below
+        // |wind|² < 0.001.
         self.tilt = if mag2 < 0.001 {
             Quat::IDENTITY
         } else {
-            let mag = mag2.sqrt();
-            let tilt_deg = (mag / WIND_TILT_DIV).clamp(0.0, 1.0) * WIND_TILT_MAX_DEG;
-            let axis = Vec3::new(self.vel.z, 0.0, -self.vel.x) / mag;
-            Quat::from_axis_angle(axis, tilt_deg.to_radians())
+            lean(self.vel, mag2.sqrt(), WIND_TILT_DIV, WIND_TILT_MAX_DEG)
         };
+        // The slab keys on `mgr+0x7c` — the LIVE commanded speed, not the averaged wind, and not
+        // lagged by the 149 ms window. It is exactly 0 with no direction bit held, so this is
+        // identity at rest with no epsilon needed.
+        self.slab = lean(
+            self.heading_dir,
+            live_speed,
+            SLAB_TILT_DIV,
+            SLAB_TILT_MAX_DEG,
+        );
     }
 
     /// The held wind heading (`manager+0x78`, WoW frame). Starts 0 = world north.
@@ -140,30 +201,73 @@ mod tests {
         }
     }
 
-    /// Calm start ⇒ heading 0 (the fallback facing) ⇒ an identity mist frame; walking
-    /// re-derives the heading once `|wind| ≥ 1` (`wx_wind_angle`'s gate); standing still again
-    /// HOLDS it — the mist frame must not snap back or spin on idle noise.
+    /// `mgr+0x78`'s `|W| ≥ 1` test picks the heading's **source**, it does not gate the store
+    /// (`0x67be40`: all three legs write `[esi+0x78]`). Moving, the heading is the wind's own
+    /// azimuth; on stopping it is **overwritten with the unit's facing** rather than held.
+    ///
+    /// This test previously asserted the opposite ("standing still again HOLDS it"). That reading
+    /// was wrong — corrected by wow-re in the same round that found the spawn-slab tilt. The
+    /// visible consequence is the mist frame: it re-aims to where the player is looking when they
+    /// stop, instead of staying pinned to the direction they last ran.
     #[test]
-    fn heading_gates_and_holds() {
+    fn heading_takes_the_facing_below_a_yard_per_second() {
+        let dt = 1.0 / 60.0;
         let mut wind = WeatherWind::default();
         assert_eq!(wind.heading_wow(), 0.0);
         assert!(wind.mist_yaw().angle_between(Quat::IDENTITY) < 1e-6);
         // Walk Bevy +X at 8 yd/s for 0.3 s — the ~149 ms window reads ~8 yd/s.
-        let dt = 1.0 / 60.0;
         for i in 0..18 {
-            wind.update(Vec3::new(8.0 * dt * i as f32, 0.0, 0.0), dt);
+            wind.update(Vec3::X * (8.0 * dt * i as f32), Vec3::X, 8.0, dt);
         }
         assert!(wind.vel.length() > 1.0, "window should read ~8 yd/s");
-        let moving = wind.heading_wow();
         // Bevy +X = WoW −Y ⇒ wind_wow = (0, −8) ⇒ heading −π/2.
+        let moving = wind.heading_wow();
         assert!((moving + std::f32::consts::FRAC_PI_2).abs() < 1e-3);
-        // Stand still: the wind decays through the window, the heading holds.
+        // Stop, and turn to face Bevy −Z. The wind decays out of the window and the heading
+        // follows the FACING to 0 — it does not stay at the direction of travel.
         let last = wind.last_pos.unwrap();
         for _ in 0..60 {
-            wind.update(last, dt);
+            wind.update(last, Vec3::NEG_Z, 0.0, dt);
         }
         assert!(wind.vel.length() < 0.01);
-        assert_eq!(wind.heading_wow(), moving);
+        assert!(
+            wind.heading_wow().abs() < 1e-3,
+            "stopped and facing −Z, the heading should read 0, got {}",
+            wind.heading_wow()
+        );
+        // …and the slab levels the moment the commanded speed is 0, with no 149 ms tail.
+        assert_eq!(wind.slab, Quat::IDENTITY);
+    }
+
+    /// The slab's tilt keys on the LIVE commanded speed (`mgr+0x7c`), not the averaged wind: on
+    /// the very first frame of a run it is already at its full angle, and on the first frame of a
+    /// stop it is already flat — while `vel`, the 149 ms average, is still catching up in both
+    /// directions. Keying the tilt off `vel` would lean the slab in late and hold it late.
+    #[test]
+    fn the_slab_tracks_the_commanded_speed_not_the_averaged_wind() {
+        let dt = 1.0 / 60.0;
+        let mut wind = WeatherWind::default();
+        // One frame of running: the average has barely moved, the slab is already fully leaned.
+        wind.update(Vec3::X * (7.0 * dt), Vec3::X, 7.0, dt);
+        let deg = |q: Quat| q.angle_between(Quat::IDENTITY).to_degrees();
+        assert!(
+            wind.vel.length() < 7.0,
+            "the 149 ms average should still be catching up, got {}",
+            wind.vel.length()
+        );
+        assert!(
+            (deg(wind.slab) - 25.28).abs() < 0.1,
+            "slab {} — 65°·(7/18) is 25.28°",
+            deg(wind.slab)
+        );
+        // Keep running so the average converges, then stop dead.
+        for i in 2..40 {
+            wind.update(Vec3::X * (7.0 * dt * i as f32), Vec3::X, 7.0, dt);
+        }
+        assert!(wind.vel.length() > 6.0, "the average has caught up");
+        wind.update(Vec3::X * (7.0 * dt * 39.0), Vec3::X, 0.0, dt);
+        assert!(wind.vel.length() > 1.0, "the average still carries the run");
+        assert_eq!(wind.slab, Quat::IDENTITY, "but the slab is flat that frame");
     }
 
     /// The mist stream is ANTI-player-motion (`0x67a990`: `−heading` through the negated
@@ -176,7 +280,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         // Walk Bevy +X (east) at 8 yd/s.
         for i in 0..18 {
-            wind.update(Vec3::new(8.0 * dt * i as f32, 0.0, 0.0), dt);
+            wind.update(Vec3::X * (8.0 * dt * i as f32), Vec3::X, 8.0, dt);
         }
         let motion = Vec3::X;
         // The base azimuth −1.57 is the stream's centre; spin it by the mist frame.

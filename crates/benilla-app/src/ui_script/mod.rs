@@ -718,11 +718,18 @@ mod duel_tests;
 #[cfg(test)]
 mod enchant_confirm_tests;
 
+/// The shared reference-geometry diff (decision 0675) every transcribed window's test calls.
+#[cfg(test)]
+mod framexml_diff;
+
 #[cfg(test)]
 mod friends_tests;
 
 #[cfg(test)]
 mod quest_tests;
+
+#[cfg(test)]
+mod quest_timer_tests;
 
 #[cfg(test)]
 mod durability_tests;
