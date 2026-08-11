@@ -8,9 +8,11 @@
         Ground truth: the 1.12 `UIParent.lua` extract (scratchpad/UIParent.lua, patch-2.MPQ), quoted
         verbatim in the line-numbered comments below — never re-derived. v1 scope (pin §3): the
         **left + center two-slot logic only**. The real client's `full`/`doublewide` areas, the
-        `CanOpenPanels`/full-screen/native-center gates, `UIChildWindows`, and `UISpecialFrames` are
-        all out of scope — no benilla panel uses them yet — but the registration table keeps their
-        exact shape (`area`, `pushable`, `whileDead`) so a later row drops in unchanged.
+        `CanOpenPanels`/full-screen/native-center gates and `UIChildWindows` are all out of scope —
+        no benilla panel uses them yet — but the registration table keeps their exact shape
+        (`area`, `pushable`, `whileDead`) so a later row drops in unchanged. **`UISpecialFrames`
+        left that list in decision 1206**: it is not ours to use, it is the table an ADDON writes
+        its own window into, and 34 corpus call sites do.
 
         Frame names here are OUR shipped names (`Benilla*`); UIParent.lua's names (`GossipFrame`,
         `MerchantFrame`, `LootFrame`) are the semantic reference the pin cites, not what we register.
@@ -20,50 +22,52 @@
         -- rows benilla ships/anticipates today (pin §1): Gossip + Merchant are live; Loot registers
         -- now (pushable=7) so the coming loot window lands on an already-wired system.
         UIPanelWindows = {}
-        UIPanelWindows["BenillaGossipFrame"] = { area = "left", pushable = 0 }
-        UIPanelWindows["BenillaMerchantFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["GossipFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["MerchantFrame"] = { area = "left", pushable = 0 }
         -- The mail window (decision 0544): the reference UIParent.lua l.37 registers MailFrame
         -- area="left", pushable=0. The OpenMailFrame is NOT a panel — it is a special-frame toplevel
-        -- (UIParent.lua l.46 UISpecialFrames), closed by ESC in ToggleGameMenu below (this v1 drops
-        -- the UISpecialFrames table, so escapable toplevels are hard-listed there, like WorldMapFrame).
-        UIPanelWindows["BenillaMailFrame"] = { area = "left", pushable = 0 }
+        -- (UIParent.lua l.46 UISpecialFrames), closed by ESC in ToggleGameMenu below. Our own
+        -- escapable toplevels stay hard-listed in that chain rather than pushed into
+        -- UISpecialFrames — the table exists now (1206) but it is the ADDONS' list, and mixing our
+        -- windows into it would make an addon's `tremove` able to break the client's own ESC.
+        UIPanelWindows["MailFrame"] = { area = "left", pushable = 0 }
         -- The trade window (decision 0592 P1, TradeFrame.xml): the ref's own UIParent.lua l.27
         -- registration (`UIPanelWindows["TradeFrame"] = { area = "left", pushable = 1 }`). Without
         -- this row ShowUIPanel takes its unregistered branch — a bare frame:Show() with no left-slot
         -- placement — so the window flips IsShown() but never lands on screen (the bug: OPEN_WINDOW
         -- arrived on both clients, yet no window). pushable=1 lets a pushable=0 panel (a merchant)
         -- shove it to center, the reference's browse-while-trading arbitration.
-        UIPanelWindows["BenillaTradeFrame"] = { area = "left", pushable = 1 }
+        UIPanelWindows["TradeFrame"] = { area = "left", pushable = 1 }
         -- The trainer window (decision 0237 phase 3, TrainerFrame.xml): an NPC session exactly like
         -- Gossip/Merchant above (area "left", pushable 0) — competes for/replaces them at the slot.
         UIPanelWindows["BenillaTrainerFrame"] = { area = "left", pushable = 0 }
         -- The bank window (decision 0604 phase 4, BankFrame.xml): the ref's own UIParent.lua l.28
         -- registration (`UIPanelWindows["BankFrame"] = { area = "left", pushable = 6 }`), quoted
         -- verbatim — the same left-slot competition as the other NPC-session windows above.
-        UIPanelWindows["BenillaBankFrame"] = { area = "left", pushable = 6 }
+        UIPanelWindows["BankFrame"] = { area = "left", pushable = 6 }
         -- The taxi-map window (decision 0484 phase 2, TaxiFrame.xml): the ref's own UIParent.lua
         -- registration line (`UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }`),
         -- quoted verbatim — same left-slot competition as Gossip/Merchant/Trainer above.
-        UIPanelWindows["BenillaTaxiFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["TaxiFrame"] = { area = "left", pushable = 0 }
         -- The dressing room (decision 1060, DressUpFrame.xml): the ref's own UIParent.lua l.41
         -- registration (`UIPanelWindows["DressUpFrame"] = { area = "left", pushable = 2 }`), quoted
         -- verbatim — pushable=2 lets the NPC-session windows (pushable=0) shove it aside, which is
         -- what makes "ctrl-click a merchant's item" show both.
-        UIPanelWindows["BenillaDressUpFrame"] = { area = "left", pushable = 2 }
-        UIPanelWindows["BenillaQuestFrame"] = { area = "left", pushable = 0 }
-        UIPanelWindows["BenillaQuestLogFrame"] = { area = "left", pushable = 0 }
-        UIPanelWindows["BenillaLootFrame"] = { area = "left", pushable = 7 }
+        UIPanelWindows["DressUpFrame"] = { area = "left", pushable = 2 }
+        UIPanelWindows["QuestFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["QuestLogFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["LootFrame"] = { area = "left", pushable = 7 }
         -- The character window (decision 0208 phase 1a, CharacterFrame.xml): the ref's own
         -- CharacterFrame row (area "left", pushable 0) — competes for/replaces the other left-slot
         -- windows exactly like Gossip/Merchant/Quest/QuestLog above.
-        UIPanelWindows["BenillaCharacterFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["CharacterFrame"] = { area = "left", pushable = 0 }
         -- The inspect window (decision 0631, InspectFrame.xml): the ref's own InspectFrame row
         -- (`Blizzard_InspectUI.lua:4` — area "left", pushable 0), so inspecting swaps out whichever
         -- left-slot window was open, exactly as the character window does.
         UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }
         -- The spellbook (decision 0216 §8, SpellBookFrame.xml): the ref's own SpellBookFrame row
         -- (area "left", pushable 0) — same left-slot competition as every window above.
-        UIPanelWindows["BenillaSpellBookFrame"] = { area = "left", pushable = 0 }
+        UIPanelWindows["SpellBookFrame"] = { area = "left", pushable = 0 }
         -- The talent window (decision 0304 §4, TalentFrame.xml): the ref's own TalentFrame row is
         -- `{ area = "left", pushable = 6, whileDead = 1 }` — pushable 6 kept (one tier above the
         -- plain NPC-session/player-state windows' 0, matching the ref exactly); `whileDead` is
@@ -74,7 +78,7 @@
         -- The social window (decision 0668) — the ref's own registration line verbatim
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
-        UIPanelWindows["BenillaFriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
+        UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
         -- The macro window (decision 0983, MacroFrame.xml) — the ref's own registration line
         -- verbatim (`UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }`,
         -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro
@@ -375,9 +379,33 @@
             frame:Hide()
         end
 
-        -- CloseWindows(ignoreCenter) — UIParent.lua l.928-957, v1 left+center slice (the
-        -- doublewide/full-screen/UISpecialFrames handling, l.932-954, is dropped: none exist yet).
-        -- Implemented per the pin so the function exists; wiring it to ESC is a later slice.
+        -- UISpecialFrames (UIParent.lua l.52-55) — **the addon's own ESC list**, and the reason
+        -- this stopped being "dropped: none exist yet" (decision 1206).
+        --
+        -- `tinsert(UISpecialFrames, "MyFrame")` is THE 1.12 idiom for "ESC should close my
+        -- window", and it is 34 call sites across the corpus. With the table absent that line is
+        -- `bad argument #1 to 'tinsert' (table expected, got nil)` — which killed 11 addons at
+        -- load, the second-largest wall in the survey after the Lua-5.0 generic-for.
+        --
+        -- Seeded with the reference's own two entries — **both** of them now. 1206 seeded only
+        -- `ItemRefTooltip`, and its Rejected section wrote down why, verbatim: *"Listing
+        -- `ColorPickerFrame`. The reference seeds it; we do not ship one, and a name that resolves
+        -- to nothing is skipped harmlessly — but seeding a frame we lack would be writing a claim
+        -- we cannot honour."* ColorPickerFrame.xml ships it, so the claim is honourable now, and
+        -- the entry is the reference's own rather than one of ours.
+        --
+        -- Note it does NOT contradict the paragraph above (our own escapable toplevels stay
+        -- hard-listed in the ESC chain). The concern there is an addon's `tremove` breaking the
+        -- CLIENT's own ESC; here the ESC chain carries the colour picker on its own rung — and has
+        -- to, because ESC on this window must CANCEL (restore the colour), which this walk's plain
+        -- `Hide` cannot do. So the table entry is not what makes ESC work; it is what makes
+        -- `CloseWindows` put the picker away when something ELSE closes the world's windows —
+        -- opening the game menu, a `CloseAllWindows()` — which is exactly the reference's own
+        -- behaviour on that path, cancel-less Hide and all.
+        UISpecialFrames = { "ItemRefTooltip", "ColorPickerFrame" }
+
+        -- CloseWindows(ignoreCenter) — UIParent.lua l.928-957. The doublewide slice stays dropped
+        -- (we have none); the UISpecialFrames loop at l.947-954 is now carried.
         function CloseWindows(ignoreCenter)
             local leftFrame = GetLeftFrame()
             local centerFrame = GetCenterFrame()
@@ -390,6 +418,18 @@
                 local info = UIPanelWindows[centerFrame:GetName()]
                 if not info or info.area ~= "center" or not ignoreCenter then
                     HideUIPanel(centerFrame)
+                end
+            end
+
+            -- The special frames, the reference's own loop (l.947-954): a plain Hide, never
+            -- HideUIPanel, because these hold no panel slot. Its `for index, value in
+            -- UISpecialFrames do` is Lua 5.0's iterator-less generic-for, which our VM cannot run
+            -- (decision 1202) — `ipairs` is the same walk in the dialect we have.
+            for _, name in ipairs(UISpecialFrames) do
+                local frame = getglobal(name)
+                if frame and frame:IsVisible() then
+                    frame:Hide()
+                    found = 1
                 end
             end
 
@@ -467,7 +507,7 @@
                 -- The backpack (bag 0) always exists; an equipped-bag window only when a bag is in
                 -- the slot (the same existence test as BagFrame.xml's BenillaOpenAllBags).
                 local exists = bagId == 0
-                    or (C_Container and C_Container.GetContainerNumSlots(bagId) > 0)
+                    or (GetContainerNumSlots and GetContainerNumSlots(bagId) > 0)
                 local bag = exists and getglobal(BAG_WINDOWS[bagId + 1])
                 if bag then
                     if bag:IsShown() then
@@ -557,6 +597,29 @@
             if StaticPopup_EscapePressed() then
                 return
             end
+            -- The colour picker next (ColorPickerFrame.xml). The reference hooks ESC on the frame
+            -- itself (`<OnKeyDown>` l.177-184, whose ESCAPE arm is `HideUIPanel(this)` +
+            -- `cancelFunc(previousValues)`); this engine gives plain frames no raw key events, so
+            -- it routes through this chain exactly like the AddOns list on the next rung.
+            -- **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
+            -- clicking the real button is how the options rung below already spells this (the ref's
+            -- `OptionsFrameCancel:Click()`), so there is one cancel path, not two.
+            local picker = getglobal("ColorPickerFrame")
+            if picker and picker:IsVisible() then
+                ColorPickerCancelButton:Click()
+                return
+            end
+            -- The AddOns list next (decision 1197). The reference's glue twin hooks ESC directly
+            -- (`AddonList_OnKeyDown`, whose ESCAPE arm is `AddonList_OnCancel`); this engine gives
+            -- plain frames no raw key events, so it routes through this shared chain like the
+            -- stack-split spinner and the world map do. **Cancel, not hide** — ESC on that window
+            -- means "discard what I just ticked", which is the reference's own arm and the reason
+            -- the panel stages its edits at all.
+            local addons = getglobal("AddonListFrame")
+            if addons and addons:IsVisible() then
+                AddonList_OnCancel()
+                return
+            end
             -- The options window next (l.1483-1484, live since decision 0950 — this rung sat
             -- unfilled while GameMenuFrame.xml's disabled buttons were the gap). The ref
             -- cancel-clicks (`OptionsFrameCancel:Click()`); ours hides: benilla applies changes
@@ -585,7 +648,7 @@
             -- — this engine has no plain-frame keyboard capture (StackSplit.xml's own header comment),
             -- so it routes through this shared chain instead. Just hides (StackSplitFrame_OnHide
             -- clears the owner's hasStackSplit flag) — no accept, matching a real Cancel click.
-            local split = getglobal("BenillaStackSplitFrame")
+            local split = getglobal("StackSplitFrame")
             if split and split:IsVisible() then
                 split:Hide()
                 return
@@ -604,7 +667,7 @@
             -- UISpecialFrames (UIParent.lua l.46), so ESC closes it BEFORE the mail panel itself —
             -- routed through this chain since this v1 drops the UISpecialFrames table. Its OnHide
             -- runs the taken-letter auto-delete + close sound (MailFrame.lua OpenMailFrame_OnHide).
-            local openmail = getglobal("BenillaOpenMailFrame")
+            local openmail = getglobal("OpenMailFrame")
             if openmail and openmail:IsVisible() then
                 HideUIPanel(openmail)
                 return

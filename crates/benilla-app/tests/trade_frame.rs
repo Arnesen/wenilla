@@ -23,11 +23,11 @@ const FILES: [&str; 5] = [
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<String> {
+    let provider = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
         let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read_to_string(dir.join(&norm))
-            .or_else(|_| std::fs::read_to_string(dir.join(base)))
+        std::fs::read(dir.join(&norm))
+            .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
     for file in FILES {
@@ -81,18 +81,18 @@ fn trade_frame_loads_and_key_regions_exist() {
     let s = UiScript::new().unwrap();
     load_ui(&s);
     for name in [
-        "BenillaTradeFrame",
-        "BenillaTradePlayerItem1",
-        "BenillaTradePlayerItem1ItemButton",
-        "BenillaTradePlayerItem7", // the enchant slot
-        "BenillaTradeRecipientItem1",
-        "BenillaTradeRecipientItem7",
-        "BenillaTradeFrameTradeButton",
-        "BenillaTradeFrameCancelButton",
-        "BenillaTradePlayerInputMoneyGold", // our gold is now the editable input (P2)
-        "BenillaTradeRecipientMoneyFrameCoin1",
-        "BenillaTradeHighlightPlayer",
-        "BenillaTradeHighlightRecipientEnchant",
+        "TradeFrame",
+        "TradePlayerItem1",
+        "TradePlayerItem1ItemButton",
+        "TradePlayerItem7", // the enchant slot
+        "TradeRecipientItem1",
+        "TradeRecipientItem7",
+        "TradeFrameTradeButton",
+        "TradeFrameCancelButton",
+        "TradePlayerInputMoneyGold", // our gold is now the editable input (P2)
+        "TradeRecipientMoneyFrameCoin1",
+        "TradeHighlightPlayer",
+        "TradeHighlightRecipientEnchant",
     ] {
         assert!(
             s.eval::<bool>(&format!("return getglobal('{name}') ~= nil"))
@@ -101,9 +101,7 @@ fn trade_frame_loads_and_key_regions_exist() {
         );
     }
     // The window is hidden until TRADE_SHOW.
-    assert!(!s
-        .eval::<bool>("return BenillaTradeFrame:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TradeFrame:IsShown()").unwrap());
 }
 
 #[test]
@@ -114,51 +112,50 @@ fn trade_show_opens_and_both_columns_populate() {
 
     s.fire_event("TRADE_SHOW", vec![]);
     assert!(
-        s.eval::<bool>("return BenillaTradeFrame:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return TradeFrame:IsShown()").unwrap(),
         "the window opens on TRADE_SHOW"
     );
     // ...and it is SLOTTED into the left panel, not merely Show()n unpositioned. Without the
-    // UIPanelWindows["BenillaTradeFrame"] row, ShowUIPanel takes its unregistered branch — a bare
+    // UIPanelWindows["TradeFrame"] row, ShowUIPanel takes its unregistered branch — a bare
     // frame:Show() with no SetLeftFrame placement — which still flips IsShown() but leaves the
     // window off its panel slot, so it never lands on screen (the live "OPEN_WINDOW arrived on both
     // clients, yet no window" bug). This is the assertion that catches that missing registration.
     assert_eq!(
         s.eval::<String>("return GetLeftFrame() and GetLeftFrame():GetName() or ''")
             .unwrap(),
-        "BenillaTradeFrame",
+        "TradeFrame",
         "TRADE_SHOW slots the window into the left panel"
     );
 
     // Our slot 1 and the partner's slot 1 painted their names + icons from the fed state.
     assert_eq!(
-        s.eval::<String>("return BenillaTradePlayerItem1Name:GetText()")
+        s.eval::<String>("return TradePlayerItem1Name:GetText()")
             .unwrap(),
         "Linen Cloth"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaTradeRecipientItem1Name:GetText()")
+        s.eval::<String>("return TradeRecipientItem1Name:GetText()")
             .unwrap(),
         "Silk Cloth"
     );
     assert!(
-        s.eval::<bool>("return BenillaTradePlayerItem1ItemButtonIcon:IsShown()")
+        s.eval::<bool>("return TradePlayerItem1ItemButtonIcon:IsShown()")
             .unwrap(),
         "a filled slot shows its icon"
     );
     // An empty slot clears its name + hides its icon.
     assert_eq!(
-        s.eval::<String>("return BenillaTradePlayerItem2Name:GetText()")
+        s.eval::<String>("return TradePlayerItem2Name:GetText()")
             .unwrap(),
         ""
     );
     assert!(!s
-        .eval::<bool>("return BenillaTradePlayerItem2ItemButtonIcon:IsShown()")
+        .eval::<bool>("return TradePlayerItem2ItemButtonIcon:IsShown()")
         .unwrap());
 
     // The partner's name paints from GetTradePartnerName().
     assert_eq!(
-        s.eval::<String>("return BenillaTradeFrameRecipientNameText:GetText()")
+        s.eval::<String>("return TradeFrameRecipientNameText:GetText()")
             .unwrap(),
         "Thrall"
     );
@@ -166,7 +163,7 @@ fn trade_show_opens_and_both_columns_populate() {
     // The partner's read-only gold rendered a coin (5s → 1 coin); our own gold is the editable input,
     // exercised in `player_money_input_reflects_then_offers`.
     assert!(s
-        .eval::<bool>("return BenillaTradeRecipientMoneyFrameCoin1:IsShown()")
+        .eval::<bool>("return TradeRecipientMoneyFrameCoin1:IsShown()")
         .unwrap());
 
     assert!(s.take_errors().is_empty(), "clean repaint");
@@ -183,7 +180,7 @@ fn enchant_slot_shows_the_not_traded_note() {
     s.fire_event("TRADE_SHOW", vec![]);
     // Slot 7 with an item but no enchant shows the coloured "will not be traded" note.
     assert_eq!(
-        s.eval::<String>("return BenillaTradePlayerItem7Name:GetText()")
+        s.eval::<String>("return TradePlayerItem7Name:GetText()")
             .unwrap(),
         "|cffffffffWill Not Be Traded|r"
     );
@@ -198,7 +195,7 @@ fn accept_update_drives_the_column_glows() {
     s.fire_event("TRADE_SHOW", vec![]);
     // Highlights start hidden (TradeFrame_Update hides all four).
     assert!(!s
-        .eval::<bool>("return BenillaTradeHighlightRecipient:IsShown()")
+        .eval::<bool>("return TradeHighlightRecipient:IsShown()")
         .unwrap());
 
     // The partner accepts: their column + enchant glow show, ours stay hidden.
@@ -207,13 +204,13 @@ fn accept_update_drives_the_column_glows() {
         vec![ScriptValue::Int(0), ScriptValue::Int(1)],
     );
     assert!(s
-        .eval::<bool>("return BenillaTradeHighlightRecipient:IsShown()")
+        .eval::<bool>("return TradeHighlightRecipient:IsShown()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaTradeHighlightRecipientEnchant:IsShown()")
+        .eval::<bool>("return TradeHighlightRecipientEnchant:IsShown()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaTradeHighlightPlayer:IsShown()")
+        .eval::<bool>("return TradeHighlightPlayer:IsShown()")
         .unwrap());
 
     // We accept: our glow shows and the Trade button disables (the reference's own-accept lock).
@@ -222,10 +219,10 @@ fn accept_update_drives_the_column_glows() {
         vec![ScriptValue::Int(1), ScriptValue::Int(0)],
     );
     assert!(s
-        .eval::<bool>("return BenillaTradeHighlightPlayer:IsShown()")
+        .eval::<bool>("return TradeHighlightPlayer:IsShown()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaTradeFrameTradeButton:IsEnabled()")
+        .eval::<bool>("return TradeFrameTradeButton:IsEnabled()")
         .unwrap());
     assert!(s.take_errors().is_empty());
 }
@@ -239,22 +236,16 @@ fn closing_the_window_queues_the_cancel() {
     let _ = s.take_trade_close();
 
     // The X button hides the window → OnHide → CloseTrade queues the local close/cancel verb.
-    s.run("BenillaTradeFrameCloseButton:Click()").unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaTradeFrame:IsShown()")
-        .unwrap());
+    s.run("TradeFrameCloseButton:Click()").unwrap();
+    assert!(!s.eval::<bool>("return TradeFrame:IsShown()").unwrap());
     assert!(s.take_trade_close(), "closing queued the CloseTrade intent");
     assert!(s.take_errors().is_empty());
 
     // TRADE_CLOSED from the server-driven path also hides it.
     s.fire_event("TRADE_SHOW", vec![]);
-    assert!(s
-        .eval::<bool>("return BenillaTradeFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return TradeFrame:IsShown()").unwrap());
     s.fire_event("TRADE_CLOSED", vec![]);
-    assert!(!s
-        .eval::<bool>("return BenillaTradeFrame:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TradeFrame:IsShown()").unwrap());
 }
 
 #[test]
@@ -265,7 +256,7 @@ fn trade_button_click_queues_accept() {
     s.fire_event("TRADE_SHOW", vec![]);
     let _ = s.take_trade_accept();
 
-    s.run("BenillaTradeFrameTradeButton:Click()").unwrap();
+    s.run("TradeFrameTradeButton:Click()").unwrap();
     assert!(s.take_trade_accept(), "the Trade button queues AcceptTrade");
     assert!(s.take_errors().is_empty());
 }
@@ -284,7 +275,7 @@ fn player_money_input_reflects_then_offers() {
     for box_ in ["Gold", "Silver", "Copper"] {
         assert!(
             s.eval::<bool>(&format!(
-                "return getglobal('BenillaTradePlayerInputMoney{box_}') ~= nil"
+                "return getglobal('TradePlayerInputMoney{box_}') ~= nil"
             ))
             .unwrap(),
             "money box {box_} exists"
@@ -297,9 +288,9 @@ fn player_money_input_reflects_then_offers() {
     s.fire_event("PLAYER_TRADE_MONEY", vec![]);
     assert_eq!(
         s.eval::<(String, String, String)>(
-            "return BenillaTradePlayerInputMoneyGold:GetText(), \
-             BenillaTradePlayerInputMoneySilver:GetText(), \
-             BenillaTradePlayerInputMoneyCopper:GetText()"
+            "return TradePlayerInputMoneyGold:GetText(), \
+             TradePlayerInputMoneySilver:GetText(), \
+             TradePlayerInputMoneyCopper:GetText()"
         )
         .unwrap(),
         ("1".into(), "23".into(), "45".into()),
@@ -314,8 +305,7 @@ fn player_money_input_reflects_then_offers() {
     // A genuine keystroke offers the running total (bypass the affordability clamp — a bare harness
     // has no purse).
     s.run("GetMoney = function() return 100000000 end").unwrap();
-    s.run("BenillaTradePlayerInputMoneyGold:SetText('2')")
-        .unwrap();
+    s.run("TradePlayerInputMoneyGold:SetText('2')").unwrap();
     assert_eq!(
         s.take_trade_money(),
         Some(2 * 10000 + 23 * 100 + 45),
@@ -337,7 +327,7 @@ fn slot_click_routes_player_to_clear_and_recipient_to_inert() {
     let _ = s.take_trade_clear_items();
 
     // Our filled slot 1 clicked with an empty cursor → a clear routed through ClickTradeButton.
-    s.run("BenillaTradePlayerItem1ItemButton:Click()").unwrap();
+    s.run("TradePlayerItem1ItemButton:Click()").unwrap();
     assert_eq!(
         s.take_trade_clear_items(),
         vec![1],
@@ -346,8 +336,7 @@ fn slot_click_routes_player_to_clear_and_recipient_to_inert() {
 
     // The partner's filled slot is read-only — the click hits ClickTargetTradeButton, which queues
     // nothing on either channel.
-    s.run("BenillaTradeRecipientItem1ItemButton:Click()")
-        .unwrap();
+    s.run("TradeRecipientItem1ItemButton:Click()").unwrap();
     assert!(
         s.take_trade_clear_items().is_empty() && s.take_trade_set_items().is_empty(),
         "the partner slot is inert (ClickTargetTradeButton)"

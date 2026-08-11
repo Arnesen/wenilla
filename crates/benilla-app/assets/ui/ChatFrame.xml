@@ -17,6 +17,173 @@
         "Say:" with static insets.
     -->
     <Script><![CDATA[
+        -- ── SlashCmdList — the addon slash-command registry (decision 1195) ────────────────────
+        -- Declared HERE, not in Rust, because the 1.12 client declares it in ChatFrame.lua and the
+        -- captured `_G` attributes it `table framexml`. An addon's registration is three lines at
+        -- FILE SCOPE:
+        --     SLASH_MYADDON1 = "/myaddon"
+        --     SlashCmdList["MYADDON"] = function(msg) ... end
+        -- so a missing table is not a missing feature, it is `attempt to index global
+        -- 'SlashCmdList'` on the addon's very first chunk — 26 of a 218-addon corpus died there.
+        -- The dispatch walk is `benilla_ui::script::slash`, transcribing ChatEdit_ParseText's.
+        --
+        -- It starts EMPTY: benilla's own commands are dispatched host-side (decision 0881's table)
+        -- where the reference registers them here. That divergence is recorded in `slash.rs`.
+        SlashCmdList = {}
+
+        -- ── ChatTypeInfo — the per-chat-type table addons read colors out of ──────────────────
+        -- Declared HERE because the 1.12 client declares it at the top of ChatFrame.lua, and it
+        -- is an ADDON-FACING table before it is ours: `local info = ChatTypeInfo["SAY"]` then
+        -- `frame:AddMessage(text, info.r, info.g, info.b, info.id)` is the standard way an addon
+        -- prints a colored line.
+        --
+        -- Measured, and the raw count is misleading enough to be worth writing down: 234 corpus
+        -- sites, but **192 of them are one line** — AceEvent-2.0's
+        -- `ChatTypeInfo and ChatTypeInfo.WHISPER and ChatTypeInfo.WHISPER.r`, a GUARDED readiness
+        -- probe that copy-pastes into 64 addons and cannot raise. The reads that actually index
+        -- the table are 42 sites in 6 addons (ChatLog, oRA2/Participant's RaidWarn, Glory-2.0's
+        -- two FuBar hosts, FuBar_HeyFu) — those are `attempt to index global 'ChatTypeInfo'`
+        -- without it, and they are the reason this exists.
+        --
+        -- Three columns, three sources:
+        --   sticky  the reference's own literals (ChatFrame.lua l.10-114) — the five sticky types
+        --           are SAY/PARTY/RAID/GUILD/BATTLEGROUND, which `ui_chat::edit` already quotes.
+        --   id      GetChatTypeIndex's 1-based index into the engine's 94-entry color registry
+        --           (wow-re `chat-color-table.md`, static table 0x804710) — the ref sets it in
+        --           ChatFrame_OnLoad, and AddMessage's 5th argument is what consumes it.
+        --   r,g,b   that registry's byte defaults, /255 — the engine hands Lua 0..1 floats
+        --           (it re-normalizes with the f32 1/255 at 0x8026c8).
+        --
+        -- ONE DIVERGENCE, and it is a shortcut through a two-step: the reference's OnLoad writes
+        -- 1.0/1.0/1.0 into every entry and waits for the engine's UPDATE_CHAT_COLOR storm to fill
+        -- the real values in (ChatFrame.lua l.1349 is the only writer in the whole default UI).
+        -- benilla has no chat-color settings surface and nothing that fires that event, so the
+        -- values are seeded at their END STATE directly. `ui_chat::event::default_color` is the
+        -- same wow-re table rendered host-side for our own feed, and
+        -- `chat_type_info_matches_the_host_color_table` fails if the two ever drift.
+        --
+        -- REPLY and COMBAT_ERROR are the two keys FrameXML declares that the engine's registry
+        -- does NOT contain, so GetChatTypeIndex answers 0 for both and no UPDATE_CHAT_COLOR is
+        -- ever fired for either name. They do NOT share a fate, and the first version of this
+        -- block got that wrong by generalising:
+        --   COMBAT_ERROR  nothing writes it, ever — id 0, white, on the real client too.
+        --   REPLY         the UPDATE_CHAT_COLOR handler MIRRORS WHISPER INTO IT by hand
+        --                 (ChatFrame.lua l.1357-1365: `if strupper(arg1) == "WHISPER" then
+        --                 info = ChatTypeInfo["REPLY"] ... end`). So its end state is WHISPER's
+        --                 FF80FF, which is what the /r header shows, and seeding it white was a
+        --                 bug the comment above it was busy justifying.
+        -- CHANNEL1..CHANNEL10 are the boot-seeded extras (indices 95-104), each colored from the
+        -- live CHANNEL entry — FFC0C0.
+        ChatTypeInfo = {}
+        local function chatType(name, sticky, id, r, g, b)
+            ChatTypeInfo[name] = { sticky = sticky, id = id, r = r / 255, g = g / 255, b = b / 255 }
+        end
+        chatType("SAY",                                  1,   1, 255, 255, 255)
+        chatType("PARTY",                                1,   2, 170, 170, 255)
+        chatType("RAID",                                 1,   3, 255, 127,   0)
+        chatType("GUILD",                                1,   4,  64, 255,  64)
+        chatType("OFFICER",                              0,   5,  64, 192,  64)
+        chatType("YELL",                                 0,   6, 255,  64,  64)
+        chatType("WHISPER",                              0,   7, 255, 128, 255)
+        chatType("WHISPER_INFORM",                       0,   8, 255, 128, 255)
+        chatType("REPLY",                                0,   0, 255, 128, 255)
+        chatType("EMOTE",                                0,   9, 255, 128,  64)
+        chatType("TEXT_EMOTE",                           0,  10, 255, 128,  64)
+        chatType("SYSTEM",                               0,  11, 255, 255,   0)
+        chatType("MONSTER_WHISPER",                      0,  27, 179, 179, 179)
+        chatType("MONSTER_SAY",                          0,  12, 255, 255, 159)
+        chatType("MONSTER_YELL",                         0,  13, 255,  64,  64)
+        chatType("MONSTER_EMOTE",                        0,  14, 255, 128,  64)
+        chatType("CHANNEL",                              0,  15, 255, 192, 192)
+        chatType("CHANNEL_JOIN",                         0,  16, 192, 128, 128)
+        chatType("CHANNEL_LEAVE",                        0,  17, 192, 128, 128)
+        chatType("CHANNEL_LIST",                         0,  18, 192, 128, 128)
+        chatType("CHANNEL_NOTICE",                       0,  19, 192, 192, 192)
+        chatType("CHANNEL_NOTICE_USER",                  0,  20, 192, 192, 192)
+        chatType("AFK",                                  0,  21, 255, 128, 255)
+        chatType("DND",                                  0,  22, 255, 128, 255)
+        chatType("IGNORED",                              0,  23, 255,   0,   0)
+        chatType("SKILL",                                0,  24,  85,  85, 255)
+        chatType("LOOT",                                 0,  25,   0, 170,   0)
+        chatType("COMBAT_ERROR",                         0,   0, 255, 255, 255)
+        chatType("COMBAT_MISC_INFO",                     0,  26, 128, 128, 255)
+        chatType("CHANNEL1",                             0,  95, 255, 192, 192)
+        chatType("CHANNEL2",                             0,  96, 255, 192, 192)
+        chatType("CHANNEL3",                             0,  97, 255, 192, 192)
+        chatType("CHANNEL4",                             0,  98, 255, 192, 192)
+        chatType("CHANNEL5",                             0,  99, 255, 192, 192)
+        chatType("CHANNEL6",                             0, 100, 255, 192, 192)
+        chatType("CHANNEL7",                             0, 101, 255, 192, 192)
+        chatType("CHANNEL8",                             0, 102, 255, 192, 192)
+        chatType("CHANNEL9",                             0, 103, 255, 192, 192)
+        chatType("CHANNEL10",                            0, 104, 255, 192, 192)
+        chatType("COMBAT_SELF_HITS",                     0,  28, 255, 255, 255)
+        chatType("COMBAT_SELF_MISSES",                   0,  29, 255, 255, 255)
+        chatType("COMBAT_PET_HITS",                      0,  30, 255, 255, 255)
+        chatType("COMBAT_PET_MISSES",                    0,  31, 255, 255, 255)
+        chatType("COMBAT_PARTY_HITS",                    0,  32, 255, 255, 255)
+        chatType("COMBAT_PARTY_MISSES",                  0,  33, 255, 255, 255)
+        chatType("COMBAT_FRIENDLYPLAYER_HITS",           0,  34, 255, 255, 255)
+        chatType("COMBAT_FRIENDLYPLAYER_MISSES",         0,  35, 255, 255, 255)
+        chatType("COMBAT_HOSTILEPLAYER_HITS",            0,  36, 255, 255, 255)
+        chatType("COMBAT_HOSTILEPLAYER_MISSES",          0,  37, 255, 255, 255)
+        chatType("COMBAT_CREATURE_VS_SELF_HITS",         0,  38, 255,  47,  47)
+        chatType("COMBAT_CREATURE_VS_SELF_MISSES",       0,  39, 255,  47,  47)
+        chatType("COMBAT_CREATURE_VS_PARTY_HITS",        0,  40, 255, 255, 255)
+        chatType("COMBAT_CREATURE_VS_PARTY_MISSES",      0,  41, 255, 255, 255)
+        chatType("COMBAT_CREATURE_VS_CREATURE_HITS",     0,  42, 255, 255, 255)
+        chatType("COMBAT_CREATURE_VS_CREATURE_MISSES",   0,  43, 255, 255, 255)
+        chatType("COMBAT_FRIENDLY_DEATH",                0,  44, 255, 255, 255)
+        chatType("COMBAT_HOSTILE_DEATH",                 0,  45, 255, 255, 255)
+        chatType("COMBAT_XP_GAIN",                       0,  46, 111, 111, 255)
+        chatType("COMBAT_HONOR_GAIN",                    0,  82, 224, 202,  10)
+        chatType("SPELL_SELF_DAMAGE",                    0,  47, 255, 255,   0)
+        chatType("SPELL_SELF_BUFF",                      0,  48, 255, 255,   0)
+        chatType("SPELL_PET_DAMAGE",                     0,  49, 255, 255, 255)
+        chatType("SPELL_PET_BUFF",                       0,  50, 255, 255, 255)
+        chatType("SPELL_PARTY_DAMAGE",                   0,  51, 255, 255, 255)
+        chatType("SPELL_PARTY_BUFF",                     0,  52, 255, 255, 255)
+        chatType("SPELL_FRIENDLYPLAYER_DAMAGE",          0,  53, 255, 255, 255)
+        chatType("SPELL_FRIENDLYPLAYER_BUFF",            0,  54, 255, 255, 255)
+        chatType("SPELL_HOSTILEPLAYER_DAMAGE",           0,  55, 255, 255, 255)
+        chatType("SPELL_HOSTILEPLAYER_BUFF",             0,  56, 255, 255, 255)
+        chatType("SPELL_CREATURE_VS_SELF_DAMAGE",        0,  57, 202,  76, 217)
+        chatType("SPELL_CREATURE_VS_SELF_BUFF",          0,  58, 255, 255, 255)
+        chatType("SPELL_CREATURE_VS_PARTY_DAMAGE",       0,  59, 255, 255, 255)
+        chatType("SPELL_CREATURE_VS_PARTY_BUFF",         0,  60, 255, 255, 255)
+        chatType("SPELL_CREATURE_VS_CREATURE_DAMAGE",    0,  61, 255, 255, 255)
+        chatType("SPELL_CREATURE_VS_CREATURE_BUFF",      0,  62, 255, 255, 255)
+        chatType("SPELL_TRADESKILLS",                    0,  63, 255, 255, 255)
+        chatType("SPELL_DAMAGESHIELDS_ON_SELF",          0,  64, 255, 255, 255)
+        chatType("SPELL_DAMAGESHIELDS_ON_OTHERS",        0,  65, 255, 255, 255)
+        chatType("SPELL_AURA_GONE_SELF",                 0,  66, 255, 255, 255)
+        chatType("SPELL_AURA_GONE_PARTY",                0,  67, 255, 255, 255)
+        chatType("SPELL_AURA_GONE_OTHER",                0,  68, 255, 255, 255)
+        chatType("SPELL_ITEM_ENCHANTMENTS",              0,  69, 255, 255, 255)
+        chatType("SPELL_BREAK_AURA",                     0,  70, 255, 255, 255)
+        chatType("SPELL_PERIODIC_SELF_DAMAGE",           0,  71, 255, 255, 255)
+        chatType("SPELL_PERIODIC_SELF_BUFFS",            0,  72, 255, 255, 255)
+        chatType("SPELL_PERIODIC_PARTY_DAMAGE",          0,  73, 255, 255, 255)
+        chatType("SPELL_PERIODIC_PARTY_BUFFS",           0,  74, 255, 255, 255)
+        chatType("SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE", 0,  75, 255, 255, 255)
+        chatType("SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",  0,  76, 255, 255, 255)
+        chatType("SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",  0,  77, 255, 255, 255)
+        chatType("SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",   0,  78, 255, 255, 255)
+        chatType("SPELL_PERIODIC_CREATURE_DAMAGE",       0,  79, 255, 255, 255)
+        chatType("SPELL_PERIODIC_CREATURE_BUFFS",        0,  80, 255, 255, 255)
+        chatType("SPELL_FAILED_LOCALPLAYER",             0,  81, 255, 255, 255)
+        chatType("BG_SYSTEM_NEUTRAL",                    0,  83, 255, 120,  10)
+        chatType("BG_SYSTEM_ALLIANCE",                   0,  84,   0, 174, 239)
+        chatType("BG_SYSTEM_HORDE",                      0,  85, 255,   0,   0)
+        chatType("COMBAT_FACTION_CHANGE",                0,  86, 128, 128, 255)
+        chatType("MONEY",                                0,  87, 255, 255,   0)
+        chatType("RAID_LEADER",                          0,  88, 255, 219, 183)
+        chatType("RAID_WARNING",                         0,  89, 255, 219, 183)
+        chatType("RAID_BOSS_EMOTE",                      0,  91, 255, 219, 183)
+        chatType("FILTERED",                             0,  92, 255,   0,   0)
+        chatType("BATTLEGROUND",                         1,  93, 255, 127,   0)
+        chatType("BATTLEGROUND_LEADER",                  0,  94, 255, 219, 183)
+
         -- ── BenillaFCF: the FloatingChatFrame behaviors, transcribed (ref FloatingChatFrame.lua)
         -- Quoted constants: CHAT_TAB_SHOW_DELAY=0.2, CHAT_FRAME_FADE_TIME=0.15,
         -- DEFAULT_CHATFRAME_ALPHA=0.25, CHAT_BUTTON_FLASH_TIME=0.5,
@@ -111,7 +278,7 @@
         -- fade over 0.15s, conceal on leave; a flashing tab forces the tabs visible; the
         -- selected window's textures ride the same fade toward alpha 0.25 (the chat-cache
         -- default window alpha is 0 — the box only exists on hover).
-        function BenillaFCF_OnUpdate(elapsed)
+        function FCF_OnUpdate(elapsed)
             local s = BenillaFCF
             local x, y = GetCursorPosition()
             if overDock(x, y) then
@@ -171,7 +338,8 @@
 
         -- ChatFrame_OnUpdate transcription: the bottom button's blink while scrolled up
         -- (CHAT_BUTTON_FLASH_TIME = 0.5s toggle; hidden the moment the view is AtBottom).
-        function BenillaChatFrame_OnUpdate(frame, elapsed)
+        function ChatFrame_OnUpdate(elapsed)
+            local frame = this
             local flash = getglobal(frame:GetName() .. "BottomButtonFlash")
             if not flash then return end
             if frame:AtBottom() then
@@ -235,7 +403,8 @@
         BENILLA_UIMENU_NUMBUTTONS = 32
         BENILLA_UIMENU_TIMEOUT = 2.0
 
-        function BenillaUIMenu_Initialize(menu)
+        function UIMenu_Initialize()
+            local menu = this
             menu.numButtons = 0
             menu.subMenu = ""
             local name = menu:GetName()
@@ -251,7 +420,8 @@
         end
 
         -- Rows past the button pool are dropped (the ref message()s; nothing we author overflows).
-        function BenillaUIMenu_AddButton(menu, text, shortcut, func, nested)
+        function UIMenu_AddButton(text, shortcut, func, nested)
+            local menu = this
             local id = menu.numButtons + 1
             if id > BENILLA_UIMENU_NUMBUTTONS then return end
             menu.numButtons = id
@@ -268,12 +438,12 @@
             menu:SetHeight(id * BENILLA_UIMENU_BUTTON_HEIGHT + BENILLA_UIMENU_BORDER_HEIGHT * 2)
         end
 
-        function BenillaUIMenu_OnShow()
+        function UIMenu_OnShow()
             this.timeleft = BENILLA_UIMENU_TIMEOUT
             this.counting = 1
         end
 
-        function BenillaUIMenu_OnUpdate(elapsed)
+        function UIMenu_OnUpdate(elapsed)
             if this.counting == 1 then
                 local timeleft = (this.timeleft or BENILLA_UIMENU_TIMEOUT) - elapsed
                 if timeleft <= 0 then
@@ -284,29 +454,29 @@
             end
         end
 
-        function BenillaUIMenu_StartCounting(menu)
+        function UIMenu_StartCounting(menu)
             menu.counting = 1
-            if menu.parentMenu then BenillaUIMenu_StartCounting(getglobal(menu.parentMenu)) end
+            if menu.parentMenu then UIMenu_StartCounting(getglobal(menu.parentMenu)) end
         end
 
-        function BenillaUIMenu_StopCounting(menu)
+        function UIMenu_StopCounting(menu)
             menu.counting = 0
             menu.timeleft = BENILLA_UIMENU_TIMEOUT
-            if menu.parentMenu then BenillaUIMenu_StopCounting(getglobal(menu.parentMenu)) end
+            if menu.parentMenu then UIMenu_StopCounting(getglobal(menu.parentMenu)) end
         end
 
-        function BenillaUIMenuButton_OnLoad()
+        function UIMenuButton_OnLoad()
             this:SetPoint("TOP", this:GetParent():GetName(), "TOP", 0,
                 -((this:GetID() - 1) * BENILLA_UIMENU_BUTTON_HEIGHT) - BENILLA_UIMENU_BORDER_HEIGHT)
         end
 
-        function BenillaUIMenuButton_OnClick()
+        function UIMenuButton_OnClick()
             if this.func then this.func() end
             this:GetParent():Hide()
             PlaySound("UChatScrollButton")
         end
 
-        function BenillaUIMenuButton_OnEnter()
+        function UIMenuButton_OnEnter()
             local nested = this.nested
             if nested then
                 local menu = getglobal(nested)
@@ -317,15 +487,15 @@
                     menu:SetPoint("BOTTOMLEFT", this:GetName(), "BOTTOMRIGHT", 10, -12)
                     menu:Show()
                 end
-                BenillaUIMenu_StopCounting(menu)
+                UIMenu_StopCounting(menu)
             else
-                BenillaUIMenu_StopCounting(this:GetParent())
+                UIMenu_StopCounting(this:GetParent())
             end
         end
 
-        function BenillaUIMenuButton_OnLeave()
-            BenillaUIMenu_StartCounting(this:GetParent())
-            if this.nested then BenillaUIMenu_StartCounting(getglobal(this.nested)) end
+        function UIMenuButton_OnLeave()
+            UIMenu_StartCounting(this:GetParent())
+            if this.nested then UIMenu_StartCounting(getglobal(this.nested)) end
         end
 
         -- ── The chat menu rows (ref ChatMenu_* in ChatFrame.lua, adapted): every type row
@@ -342,16 +512,16 @@
             eb:SetText(prefix .. (eb:GetText() or ""))
         end
 
-        function BenillaChatMenu_OnLoad()
-            BenillaUIMenu_Initialize(this)
-            BenillaUIMenu_AddButton(this, "Say", "/s", function() BenillaChatMenu_Type("/s ") end)
-            BenillaUIMenu_AddButton(this, "Party Chat", "/p", function() BenillaChatMenu_Type("/p ") end)
-            BenillaUIMenu_AddButton(this, "Guild Chat", "/g", function() BenillaChatMenu_Type("/g ") end)
-            BenillaUIMenu_AddButton(this, "Yell", "/y", function() BenillaChatMenu_Type("/y ") end)
-            BenillaUIMenu_AddButton(this, "Whisper", "/w", function() BenillaChatMenu_Type("/w ") end)
-            BenillaUIMenu_AddButton(this, "Emote", "/e", function() BenillaChatMenu_Type("/e ") end, "EmoteMenu")
-            BenillaUIMenu_AddButton(this, "Reply", "/r", function() BenillaChatMenu_Type("/r ") end)
-            BenillaUIMenu_AddButton(this, "Voice Emote", nil, nil, "VoiceMacroMenu")
+        function ChatMenu_OnLoad()
+            UIMenu_Initialize()
+            UIMenu_AddButton("Say", "/s", function() BenillaChatMenu_Type("/s ") end)
+            UIMenu_AddButton("Party Chat", "/p", function() BenillaChatMenu_Type("/p ") end)
+            UIMenu_AddButton("Guild Chat", "/g", function() BenillaChatMenu_Type("/g ") end)
+            UIMenu_AddButton("Yell", "/y", function() BenillaChatMenu_Type("/y ") end)
+            UIMenu_AddButton("Whisper", "/w", function() BenillaChatMenu_Type("/w ") end)
+            UIMenu_AddButton("Emote", "/e", function() BenillaChatMenu_Type("/e ") end, "EmoteMenu")
+            UIMenu_AddButton("Reply", "/r", function() BenillaChatMenu_Type("/r ") end)
+            UIMenu_AddButton("Voice Emote", nil, nil, "VoiceMacroMenu")
         end
 
         -- An emote row submits its /command through the REAL chat pipeline (SubmitChatInput →
@@ -379,11 +549,11 @@
         end
 
         function BenillaOnEmoteMenuLoad(list)
-            BenillaUIMenu_Initialize(this)
+            UIMenu_Initialize()
             this.parentMenu = "ChatMenu"
             for _, cmd in ipairs(list) do
                 local c = cmd
-                BenillaUIMenu_AddButton(this, cmd, nil, function() BenillaEmoteMenu_Click(c) end)
+                UIMenu_AddButton(cmd, nil, function() BenillaEmoteMenu_Click(c) end)
             end
         end
     ]]></Script>
@@ -560,8 +730,8 @@
                 if event == "EXECUTE_CHAT_LINE" then SubmitChatInput(arg1) end
             </OnEvent>
             <OnUpdate>
-                BenillaFCF_OnUpdate(arg1)
-                BenillaChatFrame_OnUpdate(this, arg1)
+                FCF_OnUpdate(arg1)
+                ChatFrame_OnUpdate(arg1)
             </OnUpdate>
             <OnMouseWheel>
                 -- WoW wheel convention: +1 per notch up, -1 down. Up = older messages.
@@ -694,16 +864,16 @@
         <Size><AbsDimension x="128" y="16"/></Size>
         <Scripts>
             <OnLoad>
-                BenillaUIMenuButton_OnLoad()
+                UIMenuButton_OnLoad()
             </OnLoad>
             <OnClick>
-                BenillaUIMenuButton_OnClick()
+                UIMenuButton_OnClick()
             </OnClick>
             <OnEnter>
-                BenillaUIMenuButton_OnEnter()
+                UIMenuButton_OnEnter()
             </OnEnter>
             <OnLeave>
-                BenillaUIMenuButton_OnLeave()
+                UIMenuButton_OnLeave()
             </OnLeave>
         </Scripts>
         <Layers>
@@ -762,13 +932,13 @@
         </Frames>
         <Scripts>
             <OnShow>
-                BenillaUIMenu_OnShow()
+                UIMenu_OnShow()
                 PlaySound("UChatScrollButton")
                 this:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
                 this:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
             </OnShow>
             <OnUpdate>
-                BenillaUIMenu_OnUpdate(arg1)
+                UIMenu_OnUpdate(arg1)
             </OnUpdate>
         </Scripts>
     </Frame>
@@ -819,10 +989,10 @@
         </Frames>
         <Scripts>
             <OnLoad>
-                BenillaChatMenu_OnLoad()
+                ChatMenu_OnLoad()
             </OnLoad>
             <OnShow>
-                BenillaUIMenu_OnShow()
+                UIMenu_OnShow()
                 EmoteMenu:Hide()
                 VoiceMacroMenu:Hide()
                 this:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
@@ -903,6 +1073,14 @@
          chat-cache window COLOR, which ships 0 0 0; the ChatFrameBackground art itself is
          white, so untinted it reads as a white wash over the world). -->
     <Script><![CDATA[
+        -- `DEFAULT_CHAT_FRAME = ChatFrame1` — the reference's own line (ChatFrame.lua), and the
+        -- name half of FrameXML actually prints through. It sits here rather than in the header
+        -- script because a <Script> block runs where it stands: at the top of this file
+        -- ChatFrame1 does not exist yet. Measured demand: 3 of the 218 vanilla-corpus addons
+        -- die on `attempt to index global 'DEFAULT_CHAT_FRAME'` without it, and many more reach
+        -- it on a later path.
+        DEFAULT_CHAT_FRAME = ChatFrame1
+
         BenillaFCF_SelectDock(1)
         for i = 1, 2 do
             for _, t in ipairs(BenillaFCF_Textures(i)) do

@@ -274,14 +274,10 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
 
     // Drag Fireball off its book button (press → past the 4px threshold → the payload is up).
     let (l, r, t, b) = (
-        s.eval::<f32>("return BenillaSpellButton1:GetLeft()")
-            .unwrap(),
-        s.eval::<f32>("return BenillaSpellButton1:GetRight()")
-            .unwrap(),
-        s.eval::<f32>("return BenillaSpellButton1:GetTop()")
-            .unwrap(),
-        s.eval::<f32>("return BenillaSpellButton1:GetBottom()")
-            .unwrap(),
+        s.eval::<f32>("return SpellButton1:GetLeft()").unwrap(),
+        s.eval::<f32>("return SpellButton1:GetRight()").unwrap(),
+        s.eval::<f32>("return SpellButton1:GetTop()").unwrap(),
+        s.eval::<f32>("return SpellButton1:GetBottom()").unwrap(),
     );
     let (x1, y1) = ((l + r) * 0.5, (t + b) * 0.5);
     s.mouse_button(x1, y1, "LeftButton", true);
@@ -338,7 +334,7 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
             slots,
         }),
     );
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.cursor_item().is_some(), "fixture: the item is held");
     s.mouse_button(cx, cy, "LeftButton", true);
     s.mouse_button(cx, cy, "LeftButton", false);
@@ -347,4 +343,161 @@ fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
         "a chat click never touches an item payload"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+// ── ChatTypeInfo: the addon-facing color table ────────────────────────────────────────────────
+
+/// `ChatTypeInfo` carries the shipped default chat colors twice: once in `assets/ui/ChatFrame.xml`
+/// for addons to read, and once in [`crate::ui_chat::default_color`] for our own feed to render.
+/// Both are the same wow-re byte table (`chat-color-table.md`, the static registry at
+/// `.rdata 0x804710`) — so this is the gate that makes the duplication safe: every kind we model
+/// must agree to the byte, and the table's shape (`sticky`/`id`) must be the reference's.
+#[test]
+fn chat_type_info_matches_the_host_color_table() {
+    use crate::ui_chat::{default_color, ChatEventKind as K};
+
+    /// Each modeled kind and its `ChatTypeInfo` key — the reference's own spellings.
+    const PAIRS: &[(&str, K, i64)] = &[
+        ("SAY", K::Say, 1),
+        ("PARTY", K::Party, 2),
+        ("RAID", K::Raid, 3),
+        ("GUILD", K::Guild, 4),
+        ("OFFICER", K::Officer, 5),
+        ("YELL", K::Yell, 6),
+        ("WHISPER", K::Whisper, 7),
+        ("WHISPER_INFORM", K::WhisperInform, 8),
+        ("EMOTE", K::Emote, 9),
+        ("TEXT_EMOTE", K::TextEmote, 10),
+        ("SYSTEM", K::System, 11),
+        ("MONSTER_SAY", K::MonsterSay, 12),
+        ("MONSTER_YELL", K::MonsterYell, 13),
+        ("MONSTER_EMOTE", K::MonsterEmote, 14),
+        ("MONSTER_WHISPER", K::MonsterWhisper, 27),
+        ("CHANNEL", K::Channel, 15),
+        ("CHANNEL_JOIN", K::ChannelJoin, 16),
+        ("CHANNEL_LEAVE", K::ChannelLeave, 17),
+        ("CHANNEL_NOTICE", K::ChannelNotice, 19),
+        ("CHANNEL_NOTICE_USER", K::ChannelNoticeUser, 20),
+        ("CHANNEL_LIST", K::ChannelList, 18),
+        ("AFK", K::Afk, 21),
+        ("DND", K::Dnd, 22),
+        ("IGNORED", K::Ignored, 23),
+        ("SKILL", K::Skill, 24),
+        ("LOOT", K::Loot, 25),
+        ("MONEY", K::Money, 87),
+        ("COMBAT_XP_GAIN", K::CombatXpGain, 46),
+        ("RAID_LEADER", K::RaidLeader, 88),
+        ("RAID_WARNING", K::RaidWarning, 89),
+        ("RAID_BOSS_EMOTE", K::RaidBossEmote, 91),
+        ("BATTLEGROUND", K::Battleground, 93),
+        ("BATTLEGROUND_LEADER", K::BattlegroundLeader, 94),
+        ("BG_SYSTEM_NEUTRAL", K::BgSystemNeutral, 83),
+        ("BG_SYSTEM_ALLIANCE", K::BgSystemAlliance, 84),
+        ("BG_SYSTEM_HORDE", K::BgSystemHorde, 85),
+    ];
+
+    let s = chat_frame();
+    for (name, kind, want_id) in PAIRS {
+        let (r, g, b, id): (f64, f64, f64, i64) = s
+            .eval(&format!(
+                r#"local i = ChatTypeInfo["{name}"] return i.r, i.g, i.b, i.id"#
+            ))
+            .unwrap_or_else(|e| panic!(r#"ChatTypeInfo["{name}"]: {e}"#));
+        let got = [
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8,
+        ];
+        assert_eq!(got, default_color(*kind), r#"ChatTypeInfo["{name}"] color"#);
+        // `id` is GetChatTypeIndex's 1-based registry slot, asserted EXACTLY rather than as a
+        // range: four of these ship the same FFDBB7 and a range check would let a transposition
+        // inside that family through with both colors still matching.
+        assert_eq!(id, *want_id, r#"ChatTypeInfo["{name}"].id"#);
+    }
+}
+
+/// The table's *shape*, transcribed rather than derived: the reference's 105 keys, its five sticky
+/// types (the set `ui_chat::edit`'s `SendType::sticky` already quotes), the two keys FrameXML
+/// declares that the engine's color registry does not contain, and the ten boot-seeded channel
+/// extras. An addon reads `.sticky` and `.id` as often as it reads the color.
+#[test]
+fn chat_type_info_has_the_references_shape() {
+    let s = chat_frame();
+
+    let count: i64 = s
+        .eval("local n = 0 for _ in pairs(ChatTypeInfo) do n = n + 1 end return n")
+        .unwrap();
+    assert_eq!(count, 105, "the reference declares 105 keys");
+
+    let sticky: String = s
+        .eval(
+            "local t = {} for k, v in pairs(ChatTypeInfo) do if v.sticky == 1 then \
+             table.insert(t, k) end end table.sort(t) return table.concat(t, \" \")",
+        )
+        .unwrap();
+    assert_eq!(sticky, "BATTLEGROUND GUILD PARTY RAID SAY");
+
+    // REPLY and COMBAT_ERROR are declared by FrameXML and absent from the engine's 94-entry
+    // registry, so GetChatTypeIndex answers 0 for both — but their COLORS differ, which is the
+    // trap this asserts. Nothing ever writes COMBAT_ERROR. REPLY is written by hand inside the
+    // UPDATE_CHAT_COLOR handler, which mirrors WHISPER into it (ChatFrame.lua l.1357-1365), so
+    // its end state is WHISPER's FF80FF. Seeding both white reads as symmetric and is wrong.
+    for (name, want) in [
+        ("REPLY", [255u8, 128, 255]),
+        ("COMBAT_ERROR", [255, 255, 255]),
+    ] {
+        let (id, r, g, b): (i64, f64, f64, f64) = s
+            .eval(&format!(
+                r#"local i = ChatTypeInfo["{name}"] return i.id, i.r, i.g, i.b"#
+            ))
+            .unwrap();
+        assert_eq!(id, 0, r#""{name}".id — not in the engine's registry"#);
+        let got = [
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8,
+        ];
+        assert_eq!(got, want, r#""{name}" color"#);
+    }
+
+    // The extras: CHANNEL1..CHANNEL10, indices 95..104, each the live CHANNEL entry's FFC0C0.
+    for n in 1..=10 {
+        let (id, r, g, b): (i64, f64, f64, f64) = s
+            .eval(&format!(
+                r#"local i = ChatTypeInfo["CHANNEL{n}"] return i.id, i.r, i.g, i.b"#
+            ))
+            .unwrap();
+        assert_eq!(id, 94 + n, "CHANNEL{n}.id");
+        let rgb = [
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8,
+        ];
+        assert_eq!(rgb, [255, 192, 192], "CHANNEL{n} color");
+    }
+}
+
+/// **Every event name we fire is a key the reference's own `ChatTypeInfo` carries.**
+/// `ChatFrame_OnEvent` recovers the type with `strsub(event, 10)` and indexes
+/// `ChatTypeInfo[type]` with it — a name that misses that table is a name whose colour, id and
+/// sticky flag an addon cannot look up, so this is the check that our `CHAT_MSG_*` spellings are
+/// the reference's and not ours.
+///
+/// Swept over `ChatEventKind::ALL` rather than a second hand-written list, so a kind added without
+/// a matching table key fails here instead of shipping a name nothing can resolve.
+#[test]
+fn fired_event_names_are_all_chat_type_info_keys() {
+    use crate::ui_chat::{event_name, ChatEventKind as K};
+
+    let s = chat_frame();
+    for &kind in K::ALL {
+        let name = event_name(kind);
+        let key = name
+            .strip_prefix("CHAT_MSG_")
+            .unwrap_or_else(|| panic!("{name}: every fired chat event is CHAT_MSG_-prefixed"));
+        let present: bool = s
+            .eval(&format!(r#"return ChatTypeInfo["{key}"] ~= nil"#))
+            .unwrap();
+        assert!(present, r#"{name} → ChatTypeInfo["{key}"] is missing"#);
+    }
 }

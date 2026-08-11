@@ -58,46 +58,46 @@
         </Layers>
     </Frame>
 
-    <Frame name="BenillaComboFrame" frameStrata="MEDIUM" toplevel="true" parent="UIParent" hidden="true" alpha="0">
+    <Frame name="ComboFrame" frameStrata="MEDIUM" toplevel="true" parent="UIParent" hidden="true" alpha="0">
         <Size><AbsDimension x="256" y="32"/></Size>
         <!-- ref l.56-62: TOPRIGHT of the target frame, (-44,-9). -->
         <Anchors>
-            <Anchor point="TOPRIGHT" relativeTo="BenillaTargetFrame">
+            <Anchor point="TOPRIGHT" relativeTo="TargetFrame">
                 <Offset><AbsDimension x="-44" y="-9"/></Offset>
             </Anchor>
         </Anchors>
         <Frames>
-            <Frame name="BenillaComboPoint1" inherits="BenillaComboPointTemplate">
+            <Frame name="ComboPoint1" inherits="BenillaComboPointTemplate">
                 <Anchors>
                     <Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
             </Frame>
-            <Frame name="BenillaComboPoint2" inherits="BenillaComboPointTemplate">
+            <Frame name="ComboPoint2" inherits="BenillaComboPointTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="BenillaComboPoint1" relativePoint="BOTTOM">
+                    <Anchor point="TOP" relativeTo="ComboPoint1" relativePoint="BOTTOM">
                         <Offset><AbsDimension x="7" y="4"/></Offset>
                     </Anchor>
                 </Anchors>
             </Frame>
-            <Frame name="BenillaComboPoint3" inherits="BenillaComboPointTemplate">
+            <Frame name="ComboPoint3" inherits="BenillaComboPointTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="BenillaComboPoint2" relativePoint="BOTTOM">
+                    <Anchor point="TOP" relativeTo="ComboPoint2" relativePoint="BOTTOM">
                         <Offset><AbsDimension x="5" y="2"/></Offset>
                     </Anchor>
                 </Anchors>
             </Frame>
-            <Frame name="BenillaComboPoint4" inherits="BenillaComboPointTemplate">
+            <Frame name="ComboPoint4" inherits="BenillaComboPointTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="BenillaComboPoint3" relativePoint="BOTTOM">
+                    <Anchor point="TOP" relativeTo="ComboPoint3" relativePoint="BOTTOM">
                         <Offset><AbsDimension x="2" y="1"/></Offset>
                     </Anchor>
                 </Anchors>
             </Frame>
             <!-- The fifth is the odd one out: the reference sizes it 15×18 (ref l.101-104). -->
-            <Frame name="BenillaComboPoint5" inherits="BenillaComboPointTemplate">
+            <Frame name="ComboPoint5" inherits="BenillaComboPointTemplate">
                 <Size><AbsDimension x="15" y="18"/></Size>
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="BenillaComboPoint4" relativePoint="BOTTOM">
+                    <Anchor point="TOP" relativeTo="ComboPoint4" relativePoint="BOTTOM">
                         <Offset><AbsDimension x="0" y="1"/></Offset>
                     </Anchor>
                 </Anchors>
@@ -107,11 +107,11 @@
             <OnLoad>
                 this:RegisterEvent("PLAYER_TARGET_CHANGED");
                 this:RegisterEvent("PLAYER_COMBO_POINTS");
-                BenillaComboPoint1Highlight:SetAlpha(0);
-                BenillaComboPoint1Shine:SetAlpha(0);
+                ComboPoint1Highlight:SetAlpha(0);
+                ComboPoint1Shine:SetAlpha(0);
             </OnLoad>
             <OnEvent>
-                BenillaComboPointsFrame_OnEvent();
+                ComboPointsFrame_OnEvent();
             </OnEvent>
         </Scripts>
     </Frame>
@@ -130,22 +130,22 @@
         -- ref ComboFrame.lua `ComboPointsFrame_OnEvent`. Only points ABOVE the last count animate
         -- (`i > COMBO_FRAME_LAST_NUM_POINTS`) — a repaint at the same count must not re-flare every
         -- dot, which is why the last count is remembered across events rather than recomputed.
-        function BenillaComboPointsFrame_OnEvent()
+        function ComboPointsFrame_OnEvent()
             local comboPoints = GetComboPoints();
             if comboPoints > 0 then
-                if not BenillaComboFrame:IsVisible() then
-                    BenillaComboFrame:Show();
-                    UIFrameFadeIn(BenillaComboFrame, COMBOFRAME_FADE_IN);
+                if not ComboFrame:IsVisible() then
+                    ComboFrame:Show();
+                    UIFrameFadeIn(ComboFrame, COMBOFRAME_FADE_IN);
                 end
                 for i = 1, MAX_COMBO_POINTS do
-                    local comboPointHighlight = getglobal("BenillaComboPoint"..i.."Highlight");
-                    local comboPointShine = getglobal("BenillaComboPoint"..i.."Shine");
+                    local comboPointHighlight = getglobal("ComboPoint"..i.."Highlight");
+                    local comboPointShine = getglobal("ComboPoint"..i.."Shine");
                     if i <= comboPoints then
                         if i > COMBO_FRAME_LAST_NUM_POINTS then
                             local fadeInfo = {};
                             fadeInfo.mode = "IN";
                             fadeInfo.timeToFade = COMBOFRAME_HIGHLIGHT_FADE_IN;
-                            fadeInfo.finishedFunc = BenillaComboPointShineFadeIn;
+                            fadeInfo.finishedFunc = ComboPointShineFadeIn;
                             fadeInfo.finishedArg1 = comboPointShine;
                             UIFrameFade(comboPointHighlight, fadeInfo);
                         end
@@ -155,25 +155,25 @@
                     end
                 end
             else
-                BenillaComboPoint1Highlight:SetAlpha(0);
-                BenillaComboPoint1Shine:SetAlpha(0);
-                BenillaComboFrame:Hide();
+                ComboPoint1Highlight:SetAlpha(0);
+                ComboPoint1Shine:SetAlpha(0);
+                ComboFrame:Hide();
             end
             COMBO_FRAME_LAST_NUM_POINTS = comboPoints;
         end
 
-        function BenillaComboPointShineFadeIn(frame)
+        function ComboPointShineFadeIn(frame)
             local fadeInfo = {};
             fadeInfo.mode = "IN";
             fadeInfo.timeToFade = COMBOFRAME_SHINE_FADE_IN;
-            fadeInfo.finishedFunc = BenillaComboPointShineFadeOut;
+            fadeInfo.finishedFunc = ComboPointShineFadeOut;
             fadeInfo.finishedArg1 = frame:GetName();
             UIFrameFade(frame, fadeInfo);
         end
 
         -- The name round-trip is the reference's own workaround ("hack since a frame can't have a
         -- reference to itself in it") — kept, so the chain reads as its source does.
-        function BenillaComboPointShineFadeOut(frameName)
+        function ComboPointShineFadeOut(frameName)
             UIFrameFadeOut(getglobal(frameName), COMBOFRAME_SHINE_FADE_OUT);
         end
         ]]>

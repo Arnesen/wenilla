@@ -147,8 +147,8 @@
           - Bare `min`/`max`/`select` (used verbatim in `_DrawLines`/`_SetPrereqs` below): CONFIRMED
             available — `min`/`max` are house-stdlib aliases for `math.min`/`math.max`
             (`benilla-ui/src/script/stdlib.rs`), `select` is stock Lua 5.1. The ref's own `arg`/`arg.n`
-            Lua-5.0 vararg table (`_SetPrereqs`) has no equivalent here — `LUA_COMPAT_VARARG` isn't
-            shipped (WorldMapFrame.xml's own identical note) — replaced with `select("#", ...)`/
+            Lua-5.0 vararg table (`_SetPrereqs`) is written the 5.1-native way
+            (WorldMapFrame.xml's own identical note) — replaced with `select("#", ...)`/
             `select(i, ...)` over a trailing `...`, WorldMapFrame.xml's own precedent for the identical
             substitution.
           - `GetTalentTabInfo` called TWICE in a row by the ref's own `TalentFrame_Update` (l.152-154:
@@ -1049,7 +1049,7 @@
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-65" y="-77"/></Offset></Anchor></Anchors>
                 <Frames>
                     <!-- The scrollbar: BenillaScrollBarTemplate's own geometry (ScrollTemplates.xml's
-                         BenillaFauxScrollFrameTemplate, whose Slider anchor shape is reused directly
+                         FauxScrollFrameTemplate, whose Slider anchor shape is reused directly
                          here without the Frame wrapper around it — this file's header comment). Its
                          inherited OnValueChanged is REPLACED below (not chained — verified). -->
                     <Slider name="BenillaTalentFrameScrollBar" inherits="BenillaScrollBarTemplate">

@@ -127,6 +127,13 @@ impl AreaTableCatalog {
         fallback
     }
 
+    /// Every row, unordered — for the rare query that is a whole-table **scan by flag** rather
+    /// than a lookup by id. The chat auto-join's city-word row (`Flags & 0x200`) is the first such
+    /// consumer, and it is a scan in the client too.
+    pub fn rows(&self) -> impl Iterator<Item = &AreaTableRow> {
+        self.by_id.values()
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

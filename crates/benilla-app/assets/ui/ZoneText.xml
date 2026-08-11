@@ -170,8 +170,11 @@ PvP info shows only on NEW_AREA (SetZoneText(1)).
         end
     ]]></Script>
     <!-- These frames are shown when the current zone or subzone changes.
-         (ref carries toplevel="true" on both; dropped here — SetToplevel is a v1 object-model
-         gap and click-raise is meaningless on mouse-less splash text.) -->
+         (ref carries toplevel="true" on both; still dropped here, but the reason has changed.
+         `SetToplevel` is no longer a gap — the raise law is built, `script::object::toplevel` —
+         and its real trigger is Show, not a click, so "click-raise is meaningless on mouse-less
+         splash text" was the wrong argument. What holds now: these are LOW-strata splash frames
+         that overlap nothing in LOW, so the occlusion gate declines. One word to re-add.) -->
     <Frame name="ZoneTextFrame" parent="UIParent" frameStrata="LOW">
         <Anchors>
             <Anchor point="BOTTOM">

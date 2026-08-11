@@ -341,7 +341,7 @@ fn the_boot_phase_materializes_no_frames() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/Fonts.xml");
     let text = std::fs::read_to_string(&dir).expect("Fonts.xml");
     let doc = benilla_ui::framexml::parse(&text).expect("parses");
-    let provider = |_: &str| -> Option<String> { None };
+    let provider = |_: &str| -> Option<Vec<u8>> { None };
     let report = benilla_ui::loader::load(&s, &doc, &provider);
     assert_eq!(
         report.frames, 0,
@@ -421,4 +421,77 @@ fn the_shipped_ui_takes_variables_loaded_without_a_script_error() {
         "VARIABLES_LOADED script errors: {:?}",
         s.errors()
     );
+}
+
+/// **Every `<Font name=…>` the shipped manifest declares is a real Lua global** — a `Font` object
+/// answering the FontInstance getters, not a bare style record with no name.
+///
+/// The per-fragment test in `benilla-ui` proves the mechanism on a two-font document; this proves
+/// it over the 54 fonts our real `Fonts.xml` (and the windows after it) actually declare, in
+/// manifest order, which is the only place a name collision with a *frame* of the same name — the
+/// one way publication can silently not happen, since `publish_global` never overwrites — could
+/// show up.
+///
+/// The named spot-checks are the corpus's four most-wanted font objects: `GameFontNormal` (98
+/// addons), `GameTooltipText` (89), `GameFontHighlightSmall` (69), `GameTooltipHeaderText` (the
+/// `Tablet-2.0.lua:289` header-size probe, 268 read sites).
+#[test]
+fn every_shipped_font_object_is_published_as_a_lua_global() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "loader errors: {failures:?}");
+
+    // Collect the declared names straight out of the shipped XML, so the sweep cannot go stale.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("assets/ui").flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "xml") {
+            let text = std::fs::read_to_string(&path).expect("read");
+            for chunk in text.split("<Font ").skip(1) {
+                if let Some(rest) = chunk.split_once("name=\"") {
+                    if let Some((name, _)) = rest.1.split_once('"') {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    assert!(
+        names.len() >= 50,
+        "only {} <Font name=> declarations found — the sweep broke",
+        names.len()
+    );
+
+    let mut unpublished: Vec<&str> = Vec::new();
+    for name in &names {
+        match s.eval::<String>(&format!("return {name}:GetObjectType()")) {
+            Ok(t) if t == "Font" => {}
+            _ => unpublished.push(name),
+        }
+    }
+    assert!(
+        unpublished.is_empty(),
+        "declared <Font name=> that is not a Font global: {unpublished:?}"
+    );
+
+    // The four the corpus wants most actually carry a face and a size, not just a name.
+    for name in [
+        "GameFontNormal",
+        "GameTooltipText",
+        "GameFontHighlightSmall",
+        "GameTooltipHeaderText",
+    ] {
+        let (face, height) = s
+            .eval::<(String, f32)>(&format!("return {name}:GetFont()"))
+            .unwrap_or_else(|e| panic!("{name}:GetFont() — {e}"));
+        assert!(
+            face.to_ascii_uppercase().ends_with(".TTF"),
+            "{name}: {face}"
+        );
+        assert!(height > 0.0, "{name}: height {height}");
+    }
 }

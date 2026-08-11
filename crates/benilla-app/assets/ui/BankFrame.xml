@@ -3,7 +3,7 @@
         benilla's bank window (decision 0604 phase 4): the vault is already streamed (the 24 bank
         slots + 6 bank bags ride the descriptor at login, exactly like the backpack — see the
         decision's "pinned mechanism"), so this file is purely the window over the existing
-        C_Container/cursor plumbing. Geometry/art below are QUOTED from the real `BankFrame.xml`
+        container/cursor plumbing. Geometry/art below are QUOTED from the real `BankFrame.xml`
         (`WoW/_extracted_framexml/BankFrame.xml`/`.lua`, read this session — line-cited inline),
         turned onto OUR house idioms per decision 0068/0084: no `ItemButtonTemplate`/
         `SmallMoneyFrameTemplate`/`UIPanelButtonTemplate` ship, so every one of those is either a
@@ -59,7 +59,8 @@
         BENILLA_BANK_ITEM_SLOTS = 24  -- NUM_BANKGENERIC_SLOTS (ref BankFrame.lua:3)
         BENILLA_BANK_BAG_SLOTS = 6    -- NUM_BANKBAGSLOTS (ref BankFrame.lua:4)
 
-        function BenillaBankFrame_OnLoad(frame)
+        function BankFrame_OnLoad()
+            local frame = this
             SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
             frame:RegisterEvent("BANKFRAME_OPENED")
             frame:RegisterEvent("BANKFRAME_CLOSED")
@@ -68,7 +69,7 @@
             frame:RegisterEvent("PLAYER_MONEY")
             -- Container -1 is a container like any other: the same lock/cooldown maintenance
             -- events the bag windows register (BagFrame.xml's BenillaBagFrame_OnLoad), handled
-            -- below by BenillaBankFrame_OnEvent directly (not delegated — the shared window-level
+            -- below by BankFrame_OnEvent directly (not delegated — the shared window-level
             -- repaint helper caps at BENILLA_BAG_WINDOW_MAX_SLOTS=20, short of the bank's 24).
             frame:RegisterEvent("ITEM_LOCK_CHANGED")
             frame:RegisterEvent("BAG_UPDATE_COOLDOWN")
@@ -81,14 +82,14 @@
             if name == nil or name == "" then
                 name = "Banker"
             end
-            getglobal("BenillaBankFrameTitleText"):SetText(name)
+            getglobal("BankFrameTitleText"):SetText(name)
         end
 
         -- Repaint every one of the 24 generic slots (PLAYERBANKSLOTS_CHANGED names ONE slot; the
         -- spec allows repainting all 24 — cheap, and spares tracking a slot->button map).
         function BenillaBankFrame_RepaintItems()
             for i = 1, BENILLA_BANK_ITEM_SLOTS do
-                local button = getglobal("BenillaBankItem" .. i)
+                local button = getglobal("BankItem" .. i)
                 if button then BenillaBagSlot_Update(button) end
             end
         end
@@ -100,7 +101,7 @@
         function BenillaBankFrame_UpdateBagRow()
             local numSlots, full = GetNumBankSlots()
             for i = 1, BENILLA_BANK_BAG_SLOTS do
-                local button = getglobal("BenillaBankBagButton" .. i)
+                local button = getglobal("BankBagButton" .. i)
                 if button then
                     local texture = BenillaGetBankBagTexture(i)
                     button.icon:SetTexture(texture or "Interface\\PaperDoll\\UI-PaperDoll-Slot-Bag")
@@ -115,15 +116,15 @@
             end
 
             local cost = GetBankSlotCost(numSlots)
-            BenillaBankFrame.nextSlotCost = cost
-            BenillaMoney_Set("BenillaBankFrameCostMoney", cost, true)
+            BankFrame.nextSlotCost = cost
+            BenillaMoney_Set("BankFrameCostMoney", cost, true)
             if GetMoney() >= cost then
-                BenillaMoney_SetColor("BenillaBankFrameCostMoney", 1.0, 1.0, 1.0)
+                BenillaMoney_SetColor("BankFrameCostMoney", 1.0, 1.0, 1.0)
             else
-                BenillaMoney_SetColor("BenillaBankFrameCostMoney", 1.0, 0.1, 0.1)
+                BenillaMoney_SetColor("BankFrameCostMoney", 1.0, 0.1, 0.1)
             end
 
-            local purchaseFrame = getglobal("BenillaBankFramePurchaseInfo")
+            local purchaseFrame = getglobal("BankFramePurchaseInfo")
             if full then
                 purchaseFrame:Hide()
             else
@@ -131,7 +132,8 @@
             end
         end
 
-        function BenillaBankFrame_OnEvent(frame)
+        function BankFrame_OnEvent(event)
+            local frame = this
             if event == "BANKFRAME_OPENED" then
                 BenillaBankFrame_SetTitle(arg1)
                 BenillaBankFrame_RepaintItems()
@@ -144,7 +146,7 @@
             elseif event == "PLAYERBANKBAGSLOTS_CHANGED" then
                 BenillaBankFrame_UpdateBagRow()
             elseif event == "PLAYER_MONEY" then
-                BenillaMoney_Set("BenillaBankFrameMoney", GetMoney())
+                BenillaMoney_Set("BankFrameMoney", GetMoney())
                 BenillaBankFrame_UpdateBagRow() -- the cost coins' afford color can flip too
             elseif event == "ITEM_LOCK_CHANGED" then
                 if arg1 == -1 then
@@ -159,15 +161,15 @@
 
         function BenillaBankFrame_CloseButton_OnClick()
             CloseBankFrame()
-            HideUIPanel(getglobal("BenillaBankFrame"))
+            HideUIPanel(getglobal("BankFrame"))
         end
 
         -- CloseBankBagFrames (ref BankFrame.lua:119-123), over our popout naming.
-        function BenillaCloseBankBagFrames()
+        function CloseBankBagFrames()
             for j = 1, BENILLA_BANK_BAG_SLOTS do
                 local frame = getglobal("BenillaBankBagFrame" .. j)
                 if frame and frame:IsShown() then frame:Hide() end
-                local button = getglobal("BenillaBankBagButton" .. j)
+                local button = getglobal("BankBagButton" .. j)
                 if button then button:SetChecked(nil) end
             end
         end
@@ -204,7 +206,7 @@
             -- Only a slot actually holding a bag opens its popout — the reference's ToggleBag on
             -- a bagless (or unpurchased) slot is a no-op beyond the click sound; the container
             -- feed reports 0 slots exactly when no bag object sits in the slot.
-            if C_Container.GetContainerNumSlots(4 + id) == 0 then
+            if GetContainerNumSlots(4 + id) == 0 then
                 button:SetChecked(nil)
                 return
             end
@@ -272,7 +274,7 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="BenillaBankFrame" id="-1" hidden="true">
+    <Frame name="BankFrame" id="-1" hidden="true">
         <!-- The real 384×512 window (ref l.77-90). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
              this to the left slot on open, the same NPC-session convention as Merchant/Trainer/Mail.
              id="-1" = BANK_CONTAINER: the 24 item buttons below read it via GetParent():GetID(), the
@@ -282,7 +284,7 @@
             <Layer level="BACKGROUND">
                 <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref l.93-104), bound in OnLoad via
                      SetPortraitTexture(region, "npc") — the Merchant/Trainer/Gossip convention. -->
-                <Texture name="BenillaBankFramePortrait">
+                <Texture name="BankFramePortrait">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>
@@ -296,7 +298,7 @@
                 </Texture>
                 <!-- Title: the banker's name (ref BankFrameTitleText l.115-123, GameFontHighlight,
                      CENTER (6,233)); "Banker" until BANKFRAME_OPENED's arg1 lands. -->
-                <FontString name="BenillaBankFrameTitleText" inherits="GameFontHighlight" justifyH="CENTER" text="Banker">
+                <FontString name="BankFrameTitleText" inherits="GameFontHighlight" justifyH="CENTER" text="Banker">
                     <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="6" y="233"/></Offset></Anchor></Anchors>
                 </FontString>
                 <!-- Section labels (ref l.124-141: ITEMSLOTTEXT/BAGSLOTTEXT, GameFontNormal, CENTER
@@ -312,7 +314,7 @@
         <Frames>
             <!-- Close X: the house minimize-button convention (Merchant/Trainer/Mail), TOPRIGHT
                  (-30,-8) — see the header's deviation note on the reference's own offset. -->
-            <Button name="BenillaBankFrameCloseButton">
+            <Button name="BankFrameCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
@@ -325,100 +327,100 @@
                  TOPLEFT(40,-73), 12px column gap, -7px row gap — QUOTED verbatim. Each is a
                  BenillaBagSlotTemplate button (BagFrame.xml) read against container -1; physIndex
                  is `25 - i` so button i resolves to slot i (see the header's deviation note). -->
-            <Button name="BenillaBankItem1" inherits="BenillaBagSlotTemplate">
+            <Button name="BankItem1" inherits="BenillaBagSlotTemplate">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="40" y="-73"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 24)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem2" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 23)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem3" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 22)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem4" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 21)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem5" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem6" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem7" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            <Button name="BankItem7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem8" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem7" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem7" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem9" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem8" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem8" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem10" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem11" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem10" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem10" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem12" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem11" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem11" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem13" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            <Button name="BankItem13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem14" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem15" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem14" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem14" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem16" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem15" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem15" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem17" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem16" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem16" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem18" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem17" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem17" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem19" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            <Button name="BankItem19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem20" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem19" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem19" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem21" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem20" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem21" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem20" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem22" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem21" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem22" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem21" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem23" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem22" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem23" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem22" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaBankItem24" inherits="BenillaBagSlotTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem23" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="BankItem24" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem23" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
             </Button>
 
@@ -426,28 +428,28 @@
                  column gap. Button id = the bag-button number (1..6, what BankButtonIDToInvSlotID
                  and BenillaGetBankBagTexture expect) — NOT the container id (5..10), which the
                  popout windows below carry instead via their own `id=`. -->
-            <CheckButton name="BenillaBankBagButton1" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-32"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton1" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankItem19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-32"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 1)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaBankBagButton2" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton2" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankBagButton1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 2)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaBankBagButton3" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton3" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankBagButton2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 3)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaBankBagButton4" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton4" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankBagButton3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 4)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaBankBagButton5" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton5" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankBagButton4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 5)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaBankBagButton6" inherits="BenillaBankBagButtonTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="BankBagButton6" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BankBagButton5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 6)</OnLoad></Scripts>
             </CheckButton>
 
@@ -455,46 +457,46 @@
                  window (-15,-105). House coin rig (BenillaMoney_Set) in place of the reference's
                  SmallMoneyFrameTemplate; the Purchase button is a local UI-Panel-Button redraw (no
                  UIPanelButtonTemplate ships — the house convention every NPC window uses). -->
-            <Frame name="BenillaBankFramePurchaseInfo">
+            <Frame name="BankFramePurchaseInfo">
                 <Size><AbsDimension x="300" y="72"/></Size>
-                <Anchors><Anchor point="CENTER" relativeTo="BenillaBankFrame" relativePoint="CENTER"><Offset><AbsDimension x="-15" y="-105"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="CENTER" relativeTo="BankFrame" relativePoint="CENTER"><Offset><AbsDimension x="-15" y="-105"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="BACKGROUND">
                         <FontString inherits="GameFontHighlight" text="Do you wish to purchase space for an additional bag?" justifyH="LEFT">
                             <Size><AbsDimension x="280" y="0"/></Size>
                             <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="10" y="20"/></Offset></Anchor></Anchors>
                         </FontString>
-                        <FontString name="BenillaBankFrameCostLabel" inherits="GameFontNormal" text="Cost:" justifyH="LEFT">
+                        <FontString name="BankFrameCostLabel" inherits="GameFontNormal" text="Cost:" justifyH="LEFT">
                             <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="30" y="-10"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Frame name="BenillaBankFrameCostMoneyCoin1">
+                    <Frame name="BankFrameCostMoneyCoin1">
                         <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostLabel" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="BankFrameCostLabel" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
                         <Layers><Layer level="OVERLAY">
                             <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
                             <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
                         </Layer></Layers>
                     </Frame>
-                    <Frame name="BenillaBankFrameCostMoneyCoin2">
+                    <Frame name="BankFrameCostMoneyCoin2">
                         <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="BankFrameCostMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
                         <Layers><Layer level="OVERLAY">
                             <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
                             <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
                         </Layer></Layers>
                     </Frame>
-                    <Frame name="BenillaBankFrameCostMoneyCoin3">
+                    <Frame name="BankFrameCostMoneyCoin3">
                         <Size><AbsDimension x="13" y="13"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="BankFrameCostMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
                         <Layers><Layer level="OVERLAY">
                             <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture>
                             <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
                         </Layer></Layers>
                     </Frame>
-                    <Button name="BenillaBankFramePurchaseButton" text="Purchase">
+                    <Button name="BankFramePurchaseButton" text="Purchase">
                         <Size><AbsDimension x="124" y="21"/></Size>
                         <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
                         <NormalFont inherits="GameFontNormal"/>
@@ -512,7 +514,7 @@
             <!-- The player's own money (ref BankFrameMoneyFrame, l.501-509: BOTTOMRIGHT(-38,102)).
                  Same right-to-left coin chain as MerchantFrame's purse — copper-first, right-flush
                  off Coin1 (BenillaMoney_Set's own module doc, MerchantFrame.xml). -->
-            <Frame name="BenillaBankFrameMoneyCoin1">
+            <Frame name="BankFrameMoneyCoin1">
                 <Size><AbsDimension x="13" y="13"/></Size>
                 <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-51" y="102"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="OVERLAY">
@@ -520,17 +522,17 @@
                     <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
                 </Layer></Layers>
             </Frame>
-            <Frame name="BenillaBankFrameMoneyCoin2">
+            <Frame name="BankFrameMoneyCoin2">
                 <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors><Anchor point="RIGHT" relativeTo="BenillaBankFrameMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="RIGHT" relativeTo="BankFrameMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="OVERLAY">
                     <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
                     <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
                 </Layer></Layers>
             </Frame>
-            <Frame name="BenillaBankFrameMoneyCoin3">
+            <Frame name="BankFrameMoneyCoin3">
                 <Size><AbsDimension x="13" y="13"/></Size>
-                <Anchors><Anchor point="RIGHT" relativeTo="BenillaBankFrameMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="RIGHT" relativeTo="BankFrameMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="OVERLAY">
                     <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
                     <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
@@ -538,14 +540,14 @@
             </Frame>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaBankFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaBankFrame_OnEvent(self)</OnEvent>
+            <OnLoad>BankFrame_OnLoad()</OnLoad>
+            <OnEvent>BankFrame_OnEvent(event)</OnEvent>
             <!-- OnShow/OnHide (ref l.518-526): OpenBackpack/CloseBackpack per the 0561 contract
                  (MerchantFrame.xml's own placement is the model); the reference OnHide order
                  (CloseBankBagFrames(); CloseBankFrame(); PlaySound(...)) kept exactly, with
                  CloseBackpack folded in at the Merchant convention's spot. -->
             <OnShow>OpenBackpack(); PlaySound("igMainMenuOpen")</OnShow>
-            <OnHide>BenillaCloseBankBagFrames(); CloseBankFrame(); CloseBackpack(); PlaySound("igMainMenuClose")</OnHide>
+            <OnHide>CloseBankBagFrames(); CloseBankFrame(); CloseBackpack(); PlaySound("igMainMenuClose")</OnHide>
         </Scripts>
     </Frame>
 

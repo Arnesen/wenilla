@@ -22,11 +22,11 @@ const FILES: [&str; 5] = [
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<String> {
+    let provider = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
         let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read_to_string(dir.join(&norm))
-            .or_else(|_| std::fs::read_to_string(dir.join(base)))
+        std::fs::read(dir.join(&norm))
+            .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
     for file in FILES {
@@ -89,16 +89,16 @@ fn mail_frame_loads_and_key_regions_exist() {
     load_ui(&s);
     // The window, both tabs' bodies, a row, the open-letter toplevel, and the send-tab widgets.
     for name in [
-        "BenillaMailFrame",
-        "BenillaInboxFrame",
-        "BenillaMailItem1",
-        "BenillaMailItem1Button",
-        "BenillaMailItem7",
-        "BenillaSendMailFrame",
-        "BenillaSendMailNameEditBox",
-        "BenillaSendMailMailButton",
-        "BenillaOpenMailFrame",
-        "BenillaOpenMailReplyButton",
+        "MailFrame",
+        "InboxFrame",
+        "MailItem1",
+        "MailItem1Button",
+        "MailItem7",
+        "SendMailFrame",
+        "SendMailNameEditBox",
+        "SendMailMailButton",
+        "OpenMailFrame",
+        "OpenMailReplyButton",
     ] {
         assert!(
             s.eval::<bool>(&format!("return getglobal('{name}') ~= nil"))
@@ -107,7 +107,7 @@ fn mail_frame_loads_and_key_regions_exist() {
         );
     }
     // The window is hidden until MAIL_SHOW.
-    assert!(!s.eval::<bool>("return BenillaMailFrame:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return MailFrame:IsShown()").unwrap());
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn mail_show_opens_and_inbox_populates() {
 
     s.fire_event("MAIL_SHOW", vec![]);
     assert!(
-        s.eval::<bool>("return BenillaMailFrame:IsShown()").unwrap(),
+        s.eval::<bool>("return MailFrame:IsShown()").unwrap(),
         "the window opens on MAIL_SHOW"
     );
     // MAIL_SHOW's CheckInbox() queued the inbox-refresh intent.
@@ -128,23 +128,19 @@ fn mail_show_opens_and_inbox_populates() {
     assert_eq!(s.eval::<i64>("return GetInboxNumItems()").unwrap(), 2);
     // Row 1 painted its sender + subject from the fed state.
     assert_eq!(
-        s.eval::<String>("return BenillaMailItem1Sender:GetText()")
+        s.eval::<String>("return MailItem1Sender:GetText()")
             .unwrap(),
         "Thrall"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaMailItem1Subject:GetText()")
+        s.eval::<String>("return MailItem1Subject:GetText()")
             .unwrap(),
         "Warchief's orders"
     );
     // The row's clickable child button is shown for a populated row, hidden past the 2 mails (the
     // reference row FRAME stays shown — only $parentButton toggles; ref InboxFrame_Update l.120/180).
-    assert!(s
-        .eval::<bool>("return BenillaMailItem1Button:IsShown()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaMailItem3Button:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return MailItem1Button:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return MailItem3Button:IsShown()").unwrap());
 
     // No script errors escaped the event-driven repaints.
     assert!(s.take_errors().is_empty(), "clean repaint");
@@ -165,18 +161,18 @@ fn paging_math_enables_next_only_when_overflowing() {
 
     // Page 1: prev disabled, next enabled.
     assert!(!s
-        .eval::<bool>("return BenillaInboxPrevPageButton:IsEnabled()")
+        .eval::<bool>("return InboxPrevPageButton:IsEnabled()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaInboxNextPageButton:IsEnabled()")
+        .eval::<bool>("return InboxNextPageButton:IsEnabled()")
         .unwrap());
     // Turn the page: prev enabled, next disabled (only 2 mails on page 2).
-    s.run("BenillaInboxNextPage()").unwrap();
+    s.run("InboxNextPage()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaInboxPrevPageButton:IsEnabled()")
+        .eval::<bool>("return InboxPrevPageButton:IsEnabled()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaInboxNextPageButton:IsEnabled()")
+        .eval::<bool>("return InboxNextPageButton:IsEnabled()")
         .unwrap());
 }
 
@@ -197,12 +193,12 @@ fn cod_tag_shows_on_a_cod_mail() {
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
 
     assert!(
-        s.eval::<bool>("return BenillaMailItem1ButtonCOD:IsShown()")
+        s.eval::<bool>("return MailItem1ButtonCOD:IsShown()")
             .unwrap(),
         "the COD mail shows its coin tag"
     );
     assert!(
-        !s.eval::<bool>("return BenillaMailItem2ButtonCOD:IsShown()")
+        !s.eval::<bool>("return MailItem2ButtonCOD:IsShown()")
             .unwrap(),
         "the plain mail hides the COD tag"
     );
@@ -220,16 +216,14 @@ fn opening_a_letter_shows_the_open_frame_and_queues_the_body() {
 
     // Click row 1: the check button toggles on → open the letter.
     // A programmatic click toggles the check button on, then fires OnClick (this = the button).
-    s.run("BenillaMailItem1Button:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaOpenMailFrame:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap(),
         "the open-letter frame shows"
     );
     // The sender/subject/body painted; GetInboxText queued the open (mark-read + body ask).
     assert_eq!(
-        s.eval::<String>("return BenillaOpenMailSender:GetText()")
-            .unwrap(),
+        s.eval::<String>("return OpenMailSender:GetText()").unwrap(),
         "Thrall"
     );
     assert!(s.take_mail_opens().contains(&1), "opening queued the row");
@@ -244,20 +238,18 @@ fn reply_switches_to_send_tab_prefilled() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     // A programmatic click toggles the check button on, then fires OnClick (this = the button).
-    s.run("BenillaMailItem1Button:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
 
-    s.run("BenillaOpenMail_Reply()").unwrap();
+    s.run("OpenMail_Reply()").unwrap();
     // The send tab is now shown, the recipient prefilled, the subject "RE: "-prefixed.
-    assert!(s
-        .eval::<bool>("return BenillaSendMailFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return SendMailFrame:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaSendMailNameEditBox:GetText()")
+        s.eval::<String>("return SendMailNameEditBox:GetText()")
             .unwrap(),
         "Thrall"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaSendMailSubjectEditBox:GetText()")
+        s.eval::<String>("return SendMailSubjectEditBox:GetText()")
             .unwrap(),
         "RE: Warchief's orders"
     );
@@ -277,11 +269,9 @@ fn closing_a_plain_letter_does_not_delete_it() {
     let _ = s.take_mail_opens();
     let _ = s.take_mail_deletes();
 
-    s.run("BenillaMailItem1Button:Click()").unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaOpenMailFrame:IsShown()")
-        .unwrap());
-    s.run("BenillaOpenMailCancelButton:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
+    assert!(s.eval::<bool>("return OpenMailFrame:IsShown()").unwrap());
+    s.run("OpenMailCancelButton:Click()").unwrap();
     assert!(s.take_errors().is_empty(), "no Lua errors on close");
     let deletes = s.take_mail_deletes();
     assert!(
@@ -308,8 +298,8 @@ fn closing_a_taken_husk_deletes_it() {
     let _ = s.take_mail_opens();
     let _ = s.take_mail_deletes();
 
-    s.run("BenillaMailItem1Button:Click()").unwrap();
-    s.run("BenillaOpenMailCancelButton:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
+    s.run("OpenMailCancelButton:Click()").unwrap();
     assert!(s.take_errors().is_empty(), "no Lua errors on close");
     assert_eq!(
         s.take_mail_deletes(),
@@ -331,12 +321,12 @@ fn expiry_text_pluralizes_days() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     assert_eq!(
-        s.eval::<String>("return BenillaMailItem1ExpireTime:GetText()")
+        s.eval::<String>("return MailItem1ExpireTime:GetText()")
             .unwrap(),
         "|cff20ff2029 Days|r"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaMailItem2ExpireTime:GetText()")
+        s.eval::<String>("return MailItem2ExpireTime:GetText()")
             .unwrap(),
         "|cff20ff201 Day|r"
     );
@@ -357,21 +347,21 @@ fn letter_button_shows_for_a_body_letter_and_click_queues_the_copy() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
 
-    s.run("BenillaMailItem1Button:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaOpenMailLetterButton:IsShown()")
+        s.eval::<bool>("return OpenMailLetterButton:IsShown()")
             .unwrap(),
         "a takeable, not-yet-copied body shows the letter button"
     );
     assert!(s
-        .eval::<bool>("return BenillaOpenMailMoneyButton:IsShown()")
+        .eval::<bool>("return OpenMailMoneyButton:IsShown()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaOpenMailAttachmentText:GetText()")
+        s.eval::<String>("return OpenMailAttachmentText:GetText()")
             .unwrap(),
         "Take Attachments:"
     );
-    s.run("BenillaOpenMailLetterButton:Click()").unwrap();
+    s.run("OpenMailLetterButton:Click()").unwrap();
     assert_eq!(
         s.take_mail_take_texts(),
         vec![1],
@@ -393,12 +383,12 @@ fn letter_button_hides_once_copied() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
 
-    s.run("BenillaMailItem1Button:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
     assert!(!s
-        .eval::<bool>("return BenillaOpenMailLetterButton:IsShown()")
+        .eval::<bool>("return OpenMailLetterButton:IsShown()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaOpenMailMoneyButton:IsShown()")
+        .eval::<bool>("return OpenMailMoneyButton:IsShown()")
         .unwrap());
     assert!(s.take_errors().is_empty());
 }
@@ -413,9 +403,9 @@ fn money_button_hover_shows_the_amount_tooltip() {
     s.set_mail(Some(MailState { inbox: vec![mail] }));
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
-    s.run("BenillaMailItem1Button:Click()").unwrap();
+    s.run("MailItem1Button:Click()").unwrap();
 
-    s.run("BenillaOpenMailMoneyButton_OnEnter(BenillaOpenMailMoneyButton)")
+    s.run("BenillaOpenMailMoneyButton_OnEnter(OpenMailMoneyButton)")
         .unwrap();
     assert!(
         s.eval::<bool>("return GameTooltip:IsShown()").unwrap(),
@@ -440,7 +430,7 @@ fn inbox_page_label_stays_empty_like_the_reference() {
     s.fire_event("MAIL_SHOW", vec![]);
     s.fire_event("MAIL_INBOX_UPDATE", vec![]);
     let text = s
-        .eval::<Option<String>>("return BenillaInboxCurrentPage:GetText()")
+        .eval::<Option<String>>("return InboxCurrentPage:GetText()")
         .unwrap();
     assert!(
         text.as_deref().unwrap_or("").is_empty(),

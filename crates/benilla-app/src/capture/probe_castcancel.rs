@@ -86,10 +86,10 @@ struct ProbeCastCancel {
 /// probe's target) and use it. `false` = not resolved yet — a fresh character's first login
 /// still has the item-query round trip in flight, so the caller retries per frame.
 const USE_HEARTH_CHUNK: &str = "return (function()\n\
-    for s = 1, C_Container.GetContainerNumSlots(0) do\n\
-      local link = C_Container.GetContainerItemLink(0, s)\n\
+    for s = 1, GetContainerNumSlots(0) do\n\
+      local link = GetContainerItemLink(0, s)\n\
       if link and string.find(link, \"item:6948\", 1, true) then\n\
-        C_Container.UseContainerItem(0, s)\n\
+        UseContainerItem(0, s)\n\
         return true\n\
       end\n\
     end\n\

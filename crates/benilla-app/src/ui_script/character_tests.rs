@@ -165,16 +165,11 @@ fn shipped_character_frame_drives_end_to_end() {
         s.take_sounds().is_empty(),
         "no sound at load (never transitions)"
     );
-    assert!(!s
-        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap());
 
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
@@ -182,18 +177,18 @@ fn shipped_character_frame_drives_end_to_end() {
     );
 
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterNameText:GetText()")
+        s.eval::<String>("return CharacterNameText:GetText()")
             .unwrap(),
         "Benilla"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterLevelText:GetText()")
+        s.eval::<String>("return CharacterLevelText:GetText()")
             .unwrap(),
         "Level 12 Night Elf Warrior"
     );
     // STR effective 15, posBuff 2 > 0 → green (ref PaperDollFrame_SetStats).
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterStatFrame1StatText:GetText()")
+        s.eval::<String>("return CharacterStatFrame1StatText:GetText()")
             .unwrap(),
         "|cff20ff2015|r"
     );
@@ -202,12 +197,12 @@ fn shipped_character_frame_drives_end_to_end() {
     // never a re-declared region in an instance, which this engine renders as a SECOND
     // anchorless default-font FontString (the white/overlapping-label regression).
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterStatFrame1Label:GetText()")
+        s.eval::<String>("return CharacterStatFrame1Label:GetText()")
             .unwrap(),
         "Strength:"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterAttackFrameLabel:GetText()")
+        s.eval::<String>("return CharacterAttackFrameLabel:GetText()")
             .unwrap(),
         "Melee Attack"
     );
@@ -215,9 +210,9 @@ fn shipped_character_frame_drives_end_to_end() {
     s.resolve();
     // The template's label sits LEFT-anchored at its row's left edge.
     assert_eq!(
-        s.eval::<f32>("return BenillaCharacterStatFrame1Label:GetLeft()")
+        s.eval::<f32>("return CharacterStatFrame1Label:GetLeft()")
             .unwrap(),
-        s.eval::<f32>("return BenillaCharacterStatFrame1:GetLeft()")
+        s.eval::<f32>("return CharacterStatFrame1:GetLeft()")
             .unwrap(),
     );
     // Exactly ONE region carries the label text, in the small gold font (GameFontNormalSmall:
@@ -250,19 +245,18 @@ fn shipped_character_frame_drives_end_to_end() {
     );
     // Armor (school 0) reads straight off UnitArmor's base.
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterArmorFrameStatText:GetText()")
+        s.eval::<String>("return CharacterArmorFrameStatText:GetText()")
             .unwrap(),
         "120"
     );
     // MagicResFrame1 = id 6 (arcane) — resistances[6] = 3.
     assert_eq!(
-        s.eval::<String>("return BenillaMagicResText1:GetText()")
-            .unwrap(),
+        s.eval::<String>("return MagicResText1:GetText()").unwrap(),
         "3"
     );
     // No ranged weapon in this fixture: the N/A fallback (ref PaperDollFrame_SetRangedAttack).
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterRangedAttackFrameStatText:GetText()")
+        s.eval::<String>("return CharacterRangedAttackFrameStatText:GetText()")
             .unwrap(),
         "N/A"
     );
@@ -286,14 +280,10 @@ fn shipped_character_frame_drives_end_to_end() {
 
     // Hovering an EMPTY slot (Neck, never populated) shows the slot-name tooltip fallback.
     let neck_center = {
-        let l: f32 = s.eval("return BenillaCharacterNeckSlot:GetLeft()").unwrap();
-        let r: f32 = s
-            .eval("return BenillaCharacterNeckSlot:GetRight()")
-            .unwrap();
-        let t: f32 = s.eval("return BenillaCharacterNeckSlot:GetTop()").unwrap();
-        let b: f32 = s
-            .eval("return BenillaCharacterNeckSlot:GetBottom()")
-            .unwrap();
+        let l: f32 = s.eval("return CharacterNeckSlot:GetLeft()").unwrap();
+        let r: f32 = s.eval("return CharacterNeckSlot:GetRight()").unwrap();
+        let t: f32 = s.eval("return CharacterNeckSlot:GetTop()").unwrap();
+        let b: f32 = s.eval("return CharacterNeckSlot:GetBottom()").unwrap();
         ((l + r) * 0.5, (t + b) * 0.5)
     };
     s.mouse_move(neck_center.0, neck_center.1);
@@ -308,10 +298,10 @@ fn shipped_character_frame_drives_end_to_end() {
     // siblings); a transcription that drops the flag renders the ~380px sentence as one
     // unwrapped line (the director's tooltip max-width report).
     let res_center = {
-        let l: f32 = s.eval("return BenillaMagicResFrame1:GetLeft()").unwrap();
-        let r: f32 = s.eval("return BenillaMagicResFrame1:GetRight()").unwrap();
-        let t: f32 = s.eval("return BenillaMagicResFrame1:GetTop()").unwrap();
-        let b: f32 = s.eval("return BenillaMagicResFrame1:GetBottom()").unwrap();
+        let l: f32 = s.eval("return MagicResFrame1:GetLeft()").unwrap();
+        let r: f32 = s.eval("return MagicResFrame1:GetRight()").unwrap();
+        let t: f32 = s.eval("return MagicResFrame1:GetTop()").unwrap();
+        let b: f32 = s.eval("return MagicResFrame1:GetBottom()").unwrap();
         ((l + r) * 0.5, (t + b) * 0.5)
     };
     s.mouse_move(res_center.0, res_center.1);
@@ -341,7 +331,7 @@ fn shipped_character_frame_drives_end_to_end() {
 
     // Rotating the model pane advances the booth yaw from the ref's default 0.61 by +0.03/click and
     // plays the rotate kit (ref UIParent.lua:1421-1442).
-    s.run("BenillaPaperDollModel_RotateRight(BenillaCharacterModelFrame)")
+    s.run("BenillaPaperDollModel_RotateRight(CharacterModelFrame)")
         .unwrap();
     assert!(
         (s.paperdoll_yaw() - 0.64).abs() < 0.001,
@@ -354,12 +344,9 @@ fn shipped_character_frame_drives_end_to_end() {
     );
 
     // ToggleCharacter() again closes it through HideUIPanel, playing the close kit.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert!(s.errors().is_empty(), "close errors: {:?}", s.errors());
-    assert!(!s
-        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igCharacterInfoClose".into())],
@@ -368,11 +355,11 @@ fn shipped_character_frame_drives_end_to_end() {
 }
 
 /// Regression — the close button's z-order (the reported "missing red X"): the character window
-/// carries no border art of its own; its whole frame-and-background IS `BenillaPaperDollFrame`'s
+/// carries no border art of its own; its whole frame-and-background IS `PaperDollFrame`'s
 /// BACKGROUND layer, a full-window page created AFTER the close button. Every frame defaults to
 /// level 0, so within the window draw order is creation order (`order.rs`) — the page's art painted
 /// over the earlier-created button and it vanished. The button's `OnLoad` raises its frame level
-/// (the same idiom `BenillaCharacterNameFrame` uses), so its art must paint AFTER every one of the
+/// (the same idiom `CharacterNameFrame` uses), so its art must paint AFTER every one of the
 /// page's own quads. Checked on the real extracted draw order, not merely the level integer.
 #[test]
 fn close_button_draws_above_the_paper_doll_page() {
@@ -384,8 +371,7 @@ fn close_button_draws_above_the_paper_doll_page() {
     load_xml(&s, "CharacterFrame.xml");
     s.set_unit("player", Some(player_unit()));
     // The window must be SHOWN for extract() to emit quads (hidden="true" by default).
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.resolve();
 
     // extract() returns quads already sorted ascending by draw order, so index == paint order.
@@ -395,14 +381,14 @@ fn close_button_draws_above_the_paper_doll_page() {
     // The window's page art draws first; its LAST quad is the top-most page pixel.
     let page_last = quads
         .iter()
-        .rposition(|q| owner(q).as_deref() == Some("BenillaPaperDollFrame"))
+        .rposition(|q| owner(q).as_deref() == Some("PaperDollFrame"))
         .expect("the paper-doll page renders its background art");
 
     // The close button's red-X normal texture must render at all …
     let close_x = quads
         .iter()
         .position(|q| {
-            owner(q).as_deref() == Some("BenillaCharacterFrameCloseButton")
+            owner(q).as_deref() == Some("CharacterFrameCloseButton")
                 && matches!(&q.content,
                     QuadContent::Texture { path: Some(p), .. } if p.contains("MinimizeButton-Up"))
         })
@@ -430,11 +416,10 @@ fn level_line_survives_no_player_snapshot_yet() {
 
     // No set_unit("player", ...) call at all — UnitLevel/UnitRace/UnitClass answer their absent
     // shapes (0 / nil,nil / nil,nil, `unit.rs`'s own contract).
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<String>("return BenillaCharacterLevelText:GetText()")
+        s.eval::<String>("return CharacterLevelText:GetText()")
             .unwrap(),
         "Level 0 ? ?"
     );
@@ -465,15 +450,14 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     s.set_inventory_slots(inventory_with_head_item());
     // The window must be SHOWN for `extract()` to emit its quads below (hidden="true" by
     // default) — the icon-dim check needs a real render pass, not just the engine-side state.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
     s.resolve();
 
     assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
     assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
 
-    s.run(r#"BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, "LeftButton")"#)
+    s.run(r#"BenillaPaperDollSlot_OnClick(CharacterHeadSlot, "LeftButton")"#)
         .unwrap();
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
 
@@ -495,7 +479,7 @@ fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
     assert!(head_icon_dim, "the picked slot's icon dims");
 
     // Clicking the SAME slot again cancels — mirrors the bag's own same-slot-cancel contract.
-    s.run(r#"BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, "LeftButton")"#)
+    s.run(r#"BenillaPaperDollSlot_OnClick(CharacterHeadSlot, "LeftButton")"#)
         .unwrap();
     assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
     assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
@@ -529,17 +513,17 @@ fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
     .unwrap();
 
     s.set_container(0, Some(backpack_with_fitting_helm()));
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     s.tick(0.0); // dispatches the queued CURSOR_UPDATE to every registered doll slot
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 
     assert!(
-        s.eval::<bool>("return lockHighlighted['BenillaCharacterHeadSlot'] == true")
+        s.eval::<bool>("return lockHighlighted['CharacterHeadSlot'] == true")
             .unwrap(),
         "the fitting slot locks its highlight"
     );
     assert!(
-        s.eval::<bool>("return unlockHighlighted['BenillaCharacterNeckSlot'] == true")
+        s.eval::<bool>("return unlockHighlighted['CharacterNeckSlot'] == true")
             .unwrap(),
         "a non-fitting slot stays unhighlighted"
     );
@@ -558,28 +542,19 @@ fn model_pane_click_auto_equips_a_held_bag_item() {
     load_xml(&s, "CharacterFrame.xml");
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
     s.resolve();
 
     s.set_container(0, Some(backpack_with_fitting_helm()));
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
 
     let center = {
-        let l: f32 = s
-            .eval("return BenillaCharacterModelFrame:GetLeft()")
-            .unwrap();
-        let r: f32 = s
-            .eval("return BenillaCharacterModelFrame:GetRight()")
-            .unwrap();
-        let t: f32 = s
-            .eval("return BenillaCharacterModelFrame:GetTop()")
-            .unwrap();
-        let b: f32 = s
-            .eval("return BenillaCharacterModelFrame:GetBottom()")
-            .unwrap();
+        let l: f32 = s.eval("return CharacterModelFrame:GetLeft()").unwrap();
+        let r: f32 = s.eval("return CharacterModelFrame:GetRight()").unwrap();
+        let t: f32 = s.eval("return CharacterModelFrame:GetTop()").unwrap();
+        let b: f32 = s.eval("return CharacterModelFrame:GetBottom()").unwrap();
         ((l + r) * 0.5, (t + b) * 0.5)
     };
     s.mouse_button(center.0, center.1, "LeftButton", true);
@@ -607,8 +582,7 @@ fn broken_equipped_item_tints_its_doll_slot_red() {
     let mut inv = inventory_with_head_item();
     inv[1].as_mut().unwrap().durability = Some((0, 40));
     s.set_inventory_slots(inv);
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.fire_event(
         "UNIT_INVENTORY_CHANGED",
         vec![ScriptValue::Str("player".into())],
@@ -756,21 +730,14 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
             .unwrap()
     };
 
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
-    assert!(
-        shown(&mut s, "BenillaPaperDollFrame"),
-        "opens on the doll page"
-    );
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    assert!(shown(&mut s, "PaperDollFrame"), "opens on the doll page");
 
     // Tab to Skills — by point, the director's gesture.
     let tab2 = text_center(&mut s, "Skills");
     click(&mut s, tab2);
-    assert!(
-        shown(&mut s, "BenillaSkillFrame"),
-        "Skills tab shows the page"
-    );
-    assert!(!shown(&mut s, "BenillaPaperDollFrame"), "doll page yields");
+    assert!(shown(&mut s, "SkillFrame"), "Skills tab shows the page");
+    assert!(!shown(&mut s, "PaperDollFrame"), "doll page yields");
 
     // Select a skill row — arms the detail pane (the report's precondition).
     let row = text_center(&mut s, "Blacksmithing");
@@ -779,11 +746,11 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
         s.eval::<i64>("return GetSelectedSkill()").unwrap() > 0,
         "the row click selects"
     );
-    assert!(shown(&mut s, "BenillaSkillDetailBar"), "detail bar arms");
+    assert!(shown(&mut s, "SkillDetailBar"), "detail bar arms");
     // The description body renders through the SKILL_DESCRIPTION format (skillType is "" in every
     // reachable 1.12 branch) — the nil-global half of the report, pinned.
     assert_eq!(
-        s.eval::<String>("return BenillaSkillDetailDescriptionText:GetText()")
+        s.eval::<String>("return SkillDetailDescriptionText:GetText()")
             .unwrap(),
         "|cffffffff|r Working with metals.",
         "the detail description renders via SKILL_DESCRIPTION"
@@ -793,10 +760,10 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     // name; accepting queues the CMSG_UNLEARN_SKILL intent BY SKILL ID and removes nothing
     // locally (the server's SetSkill(id,0,0) round trip owns the removal).
     assert!(
-        shown(&mut s, "BenillaSkillDetailUnlearnButton"),
+        shown(&mut s, "SkillDetailUnlearnButton"),
         "the unlearn button shows for a profession"
     );
-    s.run("BenillaSkillDetailUnlearnButton:Click()").unwrap();
+    s.run("SkillDetailUnlearnButton:Click()").unwrap();
     assert!(
         shown(&mut s, "StaticPopup1"),
         "the UNLEARN_SKILL confirm opens"
@@ -823,7 +790,7 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     let defense = text_center(&mut s, "Defense");
     click(&mut s, defense);
     assert!(
-        !shown(&mut s, "BenillaSkillDetailUnlearnButton"),
+        !shown(&mut s, "SkillDetailUnlearnButton"),
         "no unlearn button for Defense"
     );
     // Restore the profession selection so the round trip below leaves familiar state.
@@ -834,23 +801,23 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
     let tab1 = text_center(&mut s, "Character");
     assert_eq!(
         s.hit_test_name(tab1.0, tab1.1).as_deref(),
-        Some("BenillaCharacterFrameTab1"),
+        Some("CharacterFrameTab1"),
         "the Character tab OWNS its point while Skills is up (the wheel catcher must not)"
     );
     click(&mut s, tab1);
     assert!(
-        shown(&mut s, "BenillaPaperDollFrame"),
+        shown(&mut s, "PaperDollFrame"),
         "the Character tab switches back (the 2026-07-17 report)"
     );
-    assert!(!shown(&mut s, "BenillaSkillFrame"), "Skills page yields");
+    assert!(!shown(&mut s, "SkillFrame"), "Skills page yields");
 
     // Once more around — "flaky" only shows up on repetition.
     let tab2 = text_center(&mut s, "Skills");
     click(&mut s, tab2);
-    assert!(shown(&mut s, "BenillaSkillFrame"), "second trip to Skills");
+    assert!(shown(&mut s, "SkillFrame"), "second trip to Skills");
     let tab1 = text_center(&mut s, "Character");
     click(&mut s, tab1);
-    assert!(shown(&mut s, "BenillaPaperDollFrame"), "second trip back");
+    assert!(shown(&mut s, "PaperDollFrame"), "second trip back");
 
     assert!(
         s.errors().is_empty(),
@@ -883,12 +850,11 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     load_xml(&s, "CharacterFrame.xml");
     s.set_unit("player", Some(player_unit()));
     s.set_player_combat_stats(Some(combat_stats()));
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.resolve();
 
     // The left arrow's centre, in screen points.
-    let btn = "BenillaCharacterModelFrameRotateLeftButton";
+    let btn = "CharacterModelFrameRotateLeftButton";
     let (bx, by) = {
         let l: f32 = s.eval(&format!("return {btn}:GetLeft()")).unwrap();
         let r: f32 = s.eval(&format!("return {btn}:GetRight()")).unwrap();
@@ -929,7 +895,7 @@ fn rotate_arrows_tap_twice_and_spin_while_held() {
     );
 
     // The right arrow spins the other way (held-RIGHT subtracts).
-    let rbtn = "BenillaCharacterModelFrameRotateRightButton";
+    let rbtn = "CharacterModelFrameRotateRightButton";
     let (rx, ry) = {
         let l: f32 = s.eval(&format!("return {rbtn}:GetLeft()")).unwrap();
         let r: f32 = s.eval(&format!("return {rbtn}:GetRight()")).unwrap();
@@ -996,14 +962,14 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     }
 
     let selected = |s: &mut UiScript| {
-        s.eval::<i64>("return PanelTemplates_GetSelectedTab(BenillaCharacterFrame)")
+        s.eval::<i64>("return PanelTemplates_GetSelectedTab(CharacterFrame)")
             .unwrap()
     };
     // A tab wears its "Active" (=Disabled) art exactly when it is the selected one — the visible
     // half of the same fact, so a SetTab that updated the number without repainting fails here too.
     let wearing_active_art = |s: &mut UiScript, tab: u32| {
         s.eval::<bool>(&format!(
-            "return BenillaCharacterFrameTab{tab}MiddleDisabled:IsVisible()"
+            "return CharacterFrameTab{tab}MiddleDisabled:IsVisible()"
         ))
         .unwrap()
     };
@@ -1013,20 +979,18 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     };
 
     // Open on Character (the `C` binding), then move to Skills the same way.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert_eq!(selected(&mut s), 1);
-    s.run(r#"ToggleCharacter("BenillaSkillFrame")"#).unwrap();
-    assert!(shown(&mut s, "BenillaSkillFrame"));
+    s.run(r#"ToggleCharacter("SkillFrame")"#).unwrap();
+    assert!(shown(&mut s, "SkillFrame"));
     assert_eq!(selected(&mut s), 3, "the row follows a keybind to Skills");
     assert!(wearing_active_art(&mut s, 3));
     assert!(!wearing_active_art(&mut s, 1));
 
     // THE REPORT: `C` from the Skills page. The page goes back to Character — and so must the row.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
-    assert!(shown(&mut s, "BenillaPaperDollFrame"));
-    assert!(!shown(&mut s, "BenillaSkillFrame"));
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    assert!(shown(&mut s, "PaperDollFrame"));
+    assert!(!shown(&mut s, "SkillFrame"));
     assert_eq!(
         selected(&mut s),
         1,
@@ -1041,14 +1005,11 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     // Character tab is inert while the Character page is up. The window only closed because the row
     // still said Skills: tab 1 was left enabled, the click reached `ToggleCharacter`, and the page
     // it named was already visible — the HideUIPanel arm.
-    s.run("BenillaCharacterFrameTab1:Click()").unwrap();
+    s.run("CharacterFrameTab1:Click()").unwrap();
     assert!(
-        shown(&mut s, "BenillaCharacterFrame"),
+        shown(&mut s, "CharacterFrame"),
         "the selected tab is disabled — clicking it cannot close the window"
     );
-    assert!(
-        shown(&mut s, "BenillaPaperDollFrame"),
-        "…or change the page"
-    );
+    assert!(shown(&mut s, "PaperDollFrame"), "…or change the page");
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }

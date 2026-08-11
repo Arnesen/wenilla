@@ -157,8 +157,8 @@
         end
 
         -- ── The continent/zone dropdowns (ref verbatim, except the vararg walk: the reference's
-        -- `arg.n` needs LUA_COMPAT_VARARG, which stock 5.1 — and ours — doesn't ship; select()
-        -- is the 5.1-native spelling). ─────────────────────────────────────────────────────────
+        -- `arg.n` is written as select("#", ...), the 5.1-native spelling and this tree's house
+        -- style for it). ──────────────────────────────────────────────────────────────────────
         function WorldMapContinentsDropDown_OnLoad()
             UIDropDownMenu_Initialize(this, WorldMapContinentsDropDown_Initialize);
             UIDropDownMenu_SetWidth(130);

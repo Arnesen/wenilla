@@ -13,20 +13,18 @@
         here, not redefined.
 
         Docks the left UIPanel slot exactly like Gossip/Merchant/Quest/QuestLog (`UiPanels.xml`
-        `UIPanelWindows["BenillaCharacterFrame"] = { area = "left", pushable = 0 }`, mirroring the
+        `UIPanelWindows["CharacterFrame"] = { area = "left", pushable = 0 }`, mirroring the
         ref's own `CharacterFrame` row, `UIParent.lua` pin cited in `UiPanels.xml`'s header) — so it
         competes for/replaces those windows, never stacks with them. `ToggleCharacter(tab)` (ref
-        `CharacterFrame.lua:3-23`, kept BARE — not Benilla-prefixed — matching this codebase's own
-        `ToggleQuestLog()` precedent: the addon-facing entry point keeps the real global name even
-        though the frames it drives are Benilla-prefixed) is the show/hide/tab-switch entry point;
+        `CharacterFrame.lua:3-23`) is the show/hide/tab-switch entry point;
         the app's 'C' binding calls it (`ui_script/mod.rs`).
 
-        ONE deliberate naming deviation from the ref, applied consistently: every frame this file
-        defines is Benilla-prefixed (`BenillaCharacterFrame`, `BenillaPaperDollFrame`, …) — including
-        the string `ToggleCharacter`/`CharacterFrame_ShowSubFrame` pass around internally
-        (`BENILLA_CHARACTERFRAME_SUBFRAMES` lists `"BenillaPaperDollFrame"`, not the ref's bare
-        `"PaperDollFrame"`) — matching the same-prefix convention every other window in this codebase
-        already follows (Merchant/Bag/QuestLog never leave a sub-piece unprefixed).
+        Every frame this file defines wears the REFERENCE's name (`CharacterFrame`,
+        `PaperDollFrame`, …) — including the strings `ToggleCharacter`/`CharacterFrame_ShowSubFrame`
+        pass around internally (`BENILLA_CHARACTERFRAME_SUBFRAMES` lists `"PaperDollFrame"`). The
+        `Benilla` prefix these carried until the reference-naming pass is gone: addons index these
+        globals by the reference's name, and a prefixed frame is simply the wrong name for a frame
+        that IS the reference's.
 
         Phase 1a shipped the window, display-only. Phase 1b (THIS pass) adds the equip
         interactions over the SAME display — `PickupInventoryItem`/`UseInventoryItem`/
@@ -78,7 +76,7 @@
             in the real client — omitted outright rather than transcribing unreachable branches; the
             ammo slot always shows.
           - Class-specific stat-tooltip flavor text (`WARRIOR_STRENGTH_TOOLTIP` and its ~20 siblings):
-            only the 5 `DEFAULT_*_TOOLTIP` fallbacks ship. `BenillaPaperDollStatTooltip` still looks
+            only the 5 `DEFAULT_*_TOOLTIP` fallbacks ship. `PaperDollStatTooltip` still looks
             the class-specific global up FIRST exactly like the ref, so dropping in the per-class
             table later is pure string data, no logic change — the numeric stat lines (the
             load-bearing content) are complete either way.
@@ -108,12 +106,12 @@
 
         Engine-gap notes (transcribed anyway per this file's own instructions, or worked around) —
         the first two are CLOSED, kept only because the workarounds below still read as if they held:
-          - `HitRectInsets` (both `BenillaCharacterFrame` and `BenillaPaperDollFrame`, ref's identical
+          - `HitRectInsets` (both `CharacterFrame` and `PaperDollFrame`, ref's identical
             0/30/0/45 on both) was a loader no-op when this file was written; it landed with the
             micro menu (decision 0655) and now really insets the mouse rect.
           - `enableMouse`/`setAllPoints` (frame-level) were no-ops on `<Frame>` too; both are wired
             now (`loader/geometry.rs`'s `apply_attrs`/`apply_anchors`, and
-            `loader/tests.rs::frame_set_all_points_pins_to_parent`). `BenillaPaperDollFrame` still
+            `loader/tests.rs::frame_set_all_points_pins_to_parent`). `PaperDollFrame` still
             carries an explicit `Size`+`TOPLEFT` anchor rather than the ref's `setAllPoints="true"`
             — exactly equivalent for a child sized to fill its parent, so it is left alone rather
             than churned.
@@ -240,14 +238,14 @@
         -- frost/shadow; Holy(1) never rides the paper doll (only 5 of the 6 schools show here).
         BENILLA_MAGICRES_IDS = { 6, 2, 3, 4, 5 }
         -- The pages that exist so far (this file's header comment; the 0138 merchant-tab
-        -- precedent — tabs arrive with their pages). Benilla-prefixed, unlike the ref's bare
-        -- "PaperDollFrame"/"SkillFrame". 1:1 with the tab row below (index N is tab N's page) —
+        -- precedent — tabs arrive with their pages), named exactly as the reference names them
+        -- ("PaperDollFrame"/"SkillFrame"). 1:1 with the tab row below (index N is tab N's page) —
         -- decision 0437 phase 4 added the Skills page, decision 1057 the Pet one, which takes the
         -- real client's own slot 2 and pushes Skills to 3. Reputation/Honor (the real client's
         -- tabs 3/5) are still OMITTED, which is the whole reason our Skills tab renders 3rd where
         -- the reference's is 4th.
         BENILLA_CHARACTERFRAME_SUBFRAMES = {
-            "BenillaPaperDollFrame", "BenillaPetPaperDollFrame", "BenillaSkillFrame",
+            "PaperDollFrame", "PetPaperDollFrame", "SkillFrame",
         }
 
         -- ── The window: toggle / tab dispatch (ref CharacterFrame.lua:1-48) ─────────────────────
@@ -272,10 +270,10 @@
             -- lets the page CLOSE itself when the pet vanishes underneath it (the pet page's own
             -- OnEvent calls straight back in here to do exactly that). Hoisted below the getglobal
             -- (the ref tests it above) purely so the visibility read has a frame to ask.
-            if tab == "BenillaPetPaperDollFrame" and not HasPetUI() and not subFrame:IsVisible() then
+            if tab == "PetPaperDollFrame" and not HasPetUI() and not subFrame:IsVisible() then
                 return
             end
-            local frame = getglobal("BenillaCharacterFrame")
+            local frame = getglobal("CharacterFrame")
             -- ref CharacterFrame.lua:11, and the line whose absence desynced this window: the tab
             -- row is selected HERE, from the page's own id, on EVERY path — including the one that
             -- closes the window. Having it only on the tab-button OnClick meant a KEYBIND
@@ -315,12 +313,13 @@
             PlaySound("igCharacterInfoTab")
         end
 
-        function BenillaCharacterFrame_OnLoad(frame)
+        function CharacterFrame_OnLoad()
+            local frame = this
             -- GetID()/SetID() DO exist (landed with slice 2's BagFrame, which relies on them for
             -- its own per-window bag id) — the STALE claim this comment used to make is corrected
             -- here (0208 phase 1b touched this function anyway). 3 tabs ship as of decision 1057
             -- (Character + Pet + Skills); the window opens on tab 1 by default, matching the real
-            -- client. Tab 2 raises and hides itself with the pet — BenillaPetTab_Update, which the
+            -- client. Tab 2 raises and hides itself with the pet — PetTab_Update, which the
             -- pet page runs at its own OnLoad and on every pet transition — so the COUNT here is
             -- the full row, not the currently-visible one, exactly as the ref's SetNumTabs(5) is.
             PanelTemplates_SetNumTabs(frame, 3)
@@ -345,41 +344,41 @@
         -- lockShow refcount the hover uses — so a hover inside an open sheet still balances.
         -- ShowWatchedReputationBarText stays OMITTED: no reputation watch bar exists.
         -- UnitPVPName -> plain UnitName (this file's header comment: PVP rank is a named deferral).
-        function BenillaCharacterFrame_OnShow()
+        function CharacterFrame_OnShow()
             if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoOpen")
-            SetPortraitTexture(getglobal("BenillaCharacterFramePortrait"), "player")
-            getglobal("BenillaCharacterNameText"):SetText(UnitName("player"))
+            SetPortraitTexture(getglobal("CharacterFramePortrait"), "player")
+            getglobal("CharacterNameText"):SetText(UnitName("player"))
             if ShowTextStatusBarText then -- engine tests load file subsets
-                ShowTextStatusBarText(BenillaPlayerFrameHealthBar)
-                ShowTextStatusBarText(BenillaPlayerFramePowerBar)
-                ShowTextStatusBarText(BenillaExpBar)
-                ShowTextStatusBarText(BenillaPetFrameHealthBar)
-                ShowTextStatusBarText(BenillaPetFrameManaBar)
+                ShowTextStatusBarText(PlayerFrameHealthBar)
+                ShowTextStatusBarText(PlayerFramePowerBar)
+                ShowTextStatusBarText(MainMenuExpBar)
+                ShowTextStatusBarText(PetFrameHealthBar)
+                ShowTextStatusBarText(PetFrameManaBar)
             end
         end
 
         -- ref CharacterFrame_OnHide (l.95-104): everything past the PlaySound is the OnShow list's
         -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text calls live too (1146),
         -- the reputation one still omitted for the same reason as above. The subframe hide-loop is OUR OWN addition
-        -- (decision 0437 phase 4): BenillaPaperDollFrame is a true engine child of this frame (its
+        -- (decision 0437 phase 4): PaperDollFrame is a true engine child of this frame (its
         -- own header comment) so it hides for free on the parent's Hide-cascade, but
-        -- BenillaSkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
+        -- SkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
         -- attachment (grepped `benilla-ui/src/loader`: the XML `parent=` attribute is read nowhere,
         -- unlike `relativeTo`, which resolves by name regardless of tree position — see
         -- SkillFrame.xml's own header comment) — so nothing else would hide it when the WHOLE
         -- character window closes (ESC, the close X, or another left-slot window bumping it via
         -- UIPanel exclusivity). Looping every BENILLA_CHARACTERFRAME_SUBFRAMES entry here, once,
         -- keeps this correct as more non-nested tabs (Pet/Reputation/Honor) land the same way.
-        function BenillaCharacterFrame_OnHide()
+        function CharacterFrame_OnHide()
             if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoClose")
             if HideTextStatusBarText then -- engine tests load file subsets
-                HideTextStatusBarText(BenillaPlayerFrameHealthBar)
-                HideTextStatusBarText(BenillaPlayerFramePowerBar)
-                HideTextStatusBarText(BenillaExpBar)
-                HideTextStatusBarText(BenillaPetFrameHealthBar)
-                HideTextStatusBarText(BenillaPetFrameManaBar)
+                HideTextStatusBarText(PlayerFrameHealthBar)
+                HideTextStatusBarText(PlayerFramePowerBar)
+                HideTextStatusBarText(MainMenuExpBar)
+                HideTextStatusBarText(PetFrameHealthBar)
+                HideTextStatusBarText(PetFrameManaBar)
             end
             for _, name in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
                 local subFrame = getglobal(name)
@@ -398,14 +397,15 @@
         -- SKILL_LINES_CHANGED are OMITTED (talents/guild/skills are out of this phase's event
         -- contract; UNIT_RANGEDDAMAGE isn't in it either — UNIT_DAMAGE/UNIT_ATTACK_SPEED alone
         -- trigger the ranged refresh below, same as the ref's own first branch already does).
-        function BenillaPaperDollFrame_OnLoad(frame)
-            getglobal("BenillaCharacterAttackFrameLabel"):SetText(MELEE_ATTACK)
-            getglobal("BenillaCharacterDamageFrameLabel"):SetText(DAMAGE_COLON)
-            getglobal("BenillaCharacterAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
-            getglobal("BenillaCharacterRangedAttackFrameLabel"):SetText(RANGED_ATTACK)
-            getglobal("BenillaCharacterRangedDamageFrameLabel"):SetText(DAMAGE_COLON)
-            getglobal("BenillaCharacterRangedAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
-            getglobal("BenillaCharacterArmorFrameLabel"):SetText(ARMOR_COLON)
+        function PaperDollFrame_OnLoad()
+            local frame = this
+            getglobal("CharacterAttackFrameLabel"):SetText(MELEE_ATTACK)
+            getglobal("CharacterDamageFrameLabel"):SetText(DAMAGE_COLON)
+            getglobal("CharacterAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
+            getglobal("CharacterRangedAttackFrameLabel"):SetText(RANGED_ATTACK)
+            getglobal("CharacterRangedDamageFrameLabel"):SetText(DAMAGE_COLON)
+            getglobal("CharacterRangedAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
+            getglobal("CharacterArmorFrameLabel"):SetText(ARMOR_COLON)
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("UNIT_LEVEL")
             frame:RegisterEvent("UNIT_RESISTANCES")
@@ -417,33 +417,37 @@
             frame:RegisterEvent("UNIT_ATTACK")
         end
 
-        -- ref PaperDollFrame_OnEvent (l.37-76), the unit-token branch only (unit == "player" always
-        -- true here — no pet/other-unit reuse in phase 1a) and this file's registered subset only.
-        function BenillaPaperDollFrame_OnEvent(frame)
+        -- ref PaperDollFrame_OnEvent(event, unit) (l.37-76), the unit-token branch only (unit ==
+        -- "player" always true here — no pet/other-unit reuse in phase 1a) and this file's
+        -- registered subset only. `unit` is the DECLARED second parameter, not the `arg1` global:
+        -- the XML passes `arg1` into it exactly as the reference's own does (PaperDollFrame.xml),
+        -- so an addon calling the 1.12 arity is read correctly rather than off a stale global.
+        function PaperDollFrame_OnEvent(event, unit)
+            local frame = this
             if event == "PLAYER_ENTERING_WORLD" then
                 return
             end
             if not frame:IsVisible() then return end
-            if arg1 ~= "player" then return end
+            if unit ~= "player" then return end
             if event == "UNIT_LEVEL" then
-                BenillaPaperDollFrame_SetLevel()
+                PaperDollFrame_SetLevel()
             elseif event == "UNIT_DAMAGE" or event == "UNIT_ATTACK_SPEED" then
-                BenillaPaperDollFrame_SetDamage()
-                BenillaPaperDollFrame_SetRangedAttack()
-                BenillaPaperDollFrame_SetRangedDamage()
-                BenillaPaperDollFrame_SetAttackBothHands()
+                PaperDollFrame_SetDamage()
+                PaperDollFrame_SetRangedAttack()
+                PaperDollFrame_SetRangedDamage()
+                PaperDollFrame_SetAttackBothHands()
             elseif event == "UNIT_ATTACK" then
-                BenillaPaperDollFrame_SetAttackBothHands()
+                PaperDollFrame_SetAttackBothHands()
             elseif event == "UNIT_RESISTANCES" then
-                BenillaPaperDollFrame_SetResistances()
-                BenillaPaperDollFrame_SetArmor()
+                PaperDollFrame_SetResistances()
+                PaperDollFrame_SetArmor()
             elseif event == "UNIT_STATS" then
-                BenillaPaperDollFrame_SetStats()
+                PaperDollFrame_SetStats()
             elseif event == "UNIT_ATTACK_POWER" then
-                BenillaPaperDollFrame_SetAttackPower()
+                PaperDollFrame_SetAttackPower()
             elseif event == "UNIT_RANGED_ATTACK_POWER" then
-                BenillaPaperDollFrame_SetRangedAttack()
-                BenillaPaperDollFrame_SetRangedAttackPower()
+                PaperDollFrame_SetRangedAttack()
+                PaperDollFrame_SetRangedAttackPower()
             end
         end
 
@@ -451,17 +455,17 @@
         -- header). The relic Hide/Show branch is DROPPED outright — UnitHasRelicSlot is
         -- vanilla-always-false, so CharacterAmmoSlot simply never has a reason to hide; it ships
         -- with no hidden="true" at all (see its own Button below).
-        function BenillaPaperDollFrame_OnShow()
-            BenillaPaperDollFrame_SetLevel()
-            BenillaPaperDollFrame_SetStats()
-            BenillaPaperDollFrame_SetResistances()
-            BenillaPaperDollFrame_SetArmor()
-            BenillaPaperDollFrame_SetDamage()
-            BenillaPaperDollFrame_SetAttackPower()
-            BenillaPaperDollFrame_SetAttackBothHands()
-            BenillaPaperDollFrame_SetRangedAttack()
-            BenillaPaperDollFrame_SetRangedDamage()
-            BenillaPaperDollFrame_SetRangedAttackPower()
+        function PaperDollFrame_OnShow()
+            PaperDollFrame_SetLevel()
+            PaperDollFrame_SetStats()
+            PaperDollFrame_SetResistances()
+            PaperDollFrame_SetArmor()
+            PaperDollFrame_SetDamage()
+            PaperDollFrame_SetAttackPower()
+            PaperDollFrame_SetAttackBothHands()
+            PaperDollFrame_SetRangedAttack()
+            PaperDollFrame_SetRangedDamage()
+            PaperDollFrame_SetRangedAttackPower()
         end
         -- ref PaperDollFrame_OnHide (l.587-592) is entirely commented-out in the ref itself (the
         -- ShoppingTooltip/compare-tooltip lines, OMIT) — nothing to transcribe, no OnHide wired.
@@ -471,18 +475,18 @@
         -- harmless placeholder for that one-tick window, not a fidelity change (verified live: an
         -- unguarded format() errors "string expected, got nil" the instant this fires before the
         -- first snapshot).
-        function BenillaPaperDollFrame_SetLevel()
-            getglobal("BenillaCharacterLevelText"):SetText(
+        function PaperDollFrame_SetLevel()
+            getglobal("CharacterLevelText"):SetText(
                 format(PLAYER_LEVEL, UnitLevel("player"), UnitRace("player") or "?", UnitClass("player") or "?"))
         end
 
         -- ref PaperDollFrame_SetStats (l.131-174), including its per-refresh label SetText (l.140)
-        -- — the labels' one source of text (see BenillaPaperDollFrame_OnLoad's header comment).
-        function BenillaPaperDollFrame_SetStats()
+        -- — the labels' one source of text (see PaperDollFrame_OnLoad's header comment).
+        function PaperDollFrame_SetStats()
             for i = 1, BENILLA_NUM_STATS do
-                local label = getglobal("BenillaCharacterStatFrame" .. i .. "Label")
-                local text = getglobal("BenillaCharacterStatFrame" .. i .. "StatText")
-                local frame = getglobal("BenillaCharacterStatFrame" .. i)
+                local label = getglobal("CharacterStatFrame" .. i .. "Label")
+                local text = getglobal("CharacterStatFrame" .. i .. "StatText")
+                local frame = getglobal("CharacterStatFrame" .. i)
                 local statName = getglobal("SPELL_STAT" .. (i - 1) .. "_NAME")
                 label:SetText(statName .. ":")
                 local stat, effectiveStat, posBuff, negBuff = UnitStat("player", i)
@@ -517,11 +521,11 @@
         -- ref PaperDollFrame_SetResistances (l.176-228). `resistanceLevel` is a proper `local` here
         -- (the ref leaks it as an implicit global, harmless there — Lua 5.0's default — but our
         -- sandboxed globals table is worth not littering).
-        function BenillaPaperDollFrame_SetResistances()
+        function PaperDollFrame_SetResistances()
             for i = 1, BENILLA_NUM_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
-                local text = getglobal("BenillaMagicResText" .. i)
-                local frame = getglobal("BenillaMagicResFrame" .. i)
+                local text = getglobal("MagicResText" .. i)
+                local frame = getglobal("MagicResFrame" .. i)
                 local base, resistance, positive, negative = UnitResistance("player", resistId)
                 local resistanceName = getglobal("RESISTANCE" .. resistId .. "_NAME")
                 frame.tooltip = resistanceName .. " " .. resistance
@@ -566,13 +570,13 @@
         -- ref PaperDollFrame_SetArmor (l.230-250). NOTE the ref's own third UnitArmor return
         -- (`armor`) is unused here too — PaperDollFormatStat gets `base`, not `armor`; transcribed
         -- verbatim, not "fixed".
-        function BenillaPaperDollFrame_SetArmor(unit, prefix)
+        function PaperDollFrame_SetArmor(unit, prefix)
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local base, effectiveArmor, armor, posBuff, negBuff = UnitArmor(unit)
             local frame = getglobal(prefix .. "ArmorFrame")
             local text = getglobal(prefix .. "ArmorFrameStatText")
-            BenillaPaperDollFormatStat(ARMOR, base, posBuff, negBuff, frame, text)
+            PaperDollFormatStat(ARMOR, base, posBuff, negBuff, frame, text)
             local playerLevel = UnitLevel(unit)
             local armorReduction = effectiveArmor / ((85 * playerLevel) + 400)
             armorReduction = 100 * (armorReduction / (armorReduction + 1))
@@ -584,9 +588,9 @@
         -- solely for the pet page (decision 1057), which is why it arrives now and not in 0208.
         -- `UnitDefense`'s second return is a single signed modifier, not the pos/neg pair the other
         -- setters get, so the split into posBuff/negBuff happens here.
-        function BenillaPaperDollFrame_SetDefense(unit, prefix)
+        function PaperDollFrame_SetDefense(unit, prefix)
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local base, modifier = UnitDefense(unit)
             local frame = getglobal(prefix .. "DefenseFrame")
             local text = getglobal(prefix .. "DefenseFrameStatText")
@@ -597,13 +601,13 @@
             elseif modifier < 0 then
                 negBuff = modifier
             end
-            BenillaPaperDollFormatStat(DEFENSE_COLON, base, posBuff, negBuff, frame, text)
+            PaperDollFormatStat(DEFENSE_COLON, base, posBuff, negBuff, frame, text)
         end
 
         -- ref PaperDollFrame_SetDamage (l.274-372).
-        function BenillaPaperDollFrame_SetDamage(unit, prefix)
+        function PaperDollFrame_SetDamage(unit, prefix)
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local damageText = getglobal(prefix .. "DamageFrameStatText")
             local damageFrame = getglobal(prefix .. "DamageFrame")
             local speed, offhandSpeed = UnitAttackSpeed(unit)
@@ -677,13 +681,13 @@
         end
 
         -- ref PaperDollFrame_SetAttackPower (l.374-389).
-        function BenillaPaperDollFrame_SetAttackPower(unit, prefix)
+        function PaperDollFrame_SetAttackPower(unit, prefix)
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local base, posBuff, negBuff = UnitAttackPower(unit)
             local frame = getglobal(prefix .. "AttackPowerFrame")
             local text = getglobal(prefix .. "AttackPowerFrameStatText")
-            BenillaPaperDollFormatStat(MELEE_ATTACK_POWER, base, posBuff, negBuff, frame, text)
+            PaperDollFormatStat(MELEE_ATTACK_POWER, base, posBuff, negBuff, frame, text)
             frame.tooltipSubtext = format(MELEE_ATTACK_POWER_TOOLTIP,
                 math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
         end
@@ -691,9 +695,9 @@
         -- ref PaperDollFrame_SetAttackBothHands (l.391-417) — the weapon-skill line (decision 0208's
         -- own "to confirm": the equipped-weapon subclass -> skill-id table is UnitAttackBothHands's
         -- own concern, not this file's).
-        function BenillaPaperDollFrame_SetAttackBothHands(unit, prefix)
+        function PaperDollFrame_SetAttackBothHands(unit, prefix)
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local mainHandAttackBase, mainHandAttackMod = UnitAttackBothHands(unit)
             local frame = getglobal(prefix .. "AttackFrame")
             local text = getglobal(prefix .. "AttackFrameStatText")
@@ -717,13 +721,13 @@
         -- The literal slot id 18 is the ref's OWN hardcoded value (l.435) — quoted verbatim; what
         -- GetInventoryItemTexture resolves id 18 to is the parallel binding's call, not re-derived
         -- here.
-        function BenillaPaperDollFrame_SetRangedAttack(unit, prefix)
+        function PaperDollFrame_SetRangedAttack(unit, prefix)
             if unit == "pet" then return end
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local frame = getglobal(prefix .. "RangedAttackFrame")
             local text = getglobal(prefix .. "RangedAttackFrameStatText")
-            local paperDoll = getglobal("BenillaPaperDollFrame")
+            local paperDoll = getglobal("PaperDollFrame")
             local rangedAttackBase, rangedAttackMod = UnitRangedAttack(unit)
             local rangedTexture = GetInventoryItemTexture("player", 18)
             local oldValue = paperDoll.noRanged
@@ -735,8 +739,8 @@
                 frame.tooltip = nil
             end
             if oldValue ~= paperDoll.noRanged then
-                BenillaPaperDollFrame_SetRangedAttackPower()
-                BenillaPaperDollFrame_SetRangedDamage()
+                PaperDollFrame_SetRangedAttackPower()
+                PaperDollFrame_SetRangedDamage()
             end
             if not rangedTexture then return end
             if rangedAttackMod == 0 then
@@ -755,13 +759,13 @@
         end
 
         -- ref PaperDollFrame_SetRangedDamage (l.468-537).
-        function BenillaPaperDollFrame_SetRangedDamage(unit, prefix)
+        function PaperDollFrame_SetRangedDamage(unit, prefix)
             if unit == "pet" then return end
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local damageText = getglobal(prefix .. "RangedDamageFrameStatText")
             local damageFrame = getglobal(prefix .. "RangedDamageFrame")
-            local paperDoll = getglobal("BenillaPaperDollFrame")
+            local paperDoll = getglobal("PaperDollFrame")
             if paperDoll.noRanged then
                 damageText:SetText(NOT_APPLICABLE)
                 damageFrame.damage = nil
@@ -813,13 +817,13 @@
         end
 
         -- ref PaperDollFrame_SetRangedAttackPower (l.539-566).
-        function BenillaPaperDollFrame_SetRangedAttackPower(unit, prefix)
+        function PaperDollFrame_SetRangedAttackPower(unit, prefix)
             if unit == "pet" then return end
             unit = unit or "player"
-            prefix = prefix or "BenillaCharacter"
+            prefix = prefix or "Character"
             local frame = getglobal(prefix .. "RangedAttackPowerFrame")
             local text = getglobal(prefix .. "RangedAttackPowerFrameStatText")
-            local paperDoll = getglobal("BenillaPaperDollFrame")
+            local paperDoll = getglobal("PaperDollFrame")
             if paperDoll.noRanged then
                 text:SetText(NOT_APPLICABLE)
                 frame.tooltip = nil
@@ -831,13 +835,13 @@
                 return
             end
             local base, posBuff, negBuff = UnitRangedAttackPower(unit)
-            BenillaPaperDollFormatStat(RANGED_ATTACK_POWER, base, posBuff, negBuff, frame, text)
+            PaperDollFormatStat(RANGED_ATTACK_POWER, base, posBuff, negBuff, frame, text)
             frame.tooltipSubtext = format(RANGED_ATTACK_POWER_TOOLTIP,
                 math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
         end
 
         -- ref PaperDollFormatStat (l.804-833).
-        function BenillaPaperDollFormatStat(name, base, posBuff, negBuff, frame, textString)
+        function PaperDollFormatStat(name, base, posBuff, negBuff, frame, textString)
             local effective = math.max(0, base + posBuff + negBuff)
             local text = HIGHLIGHT_FONT_COLOR_CODE .. name .. " " .. effective
             if posBuff == 0 and negBuff == 0 then
@@ -865,17 +869,13 @@
             frame.tooltip = text
         end
 
-        -- ref PaperDollStatTooltip (l.786-802) — `this` (the ref's ambient global) becomes an
-        -- explicit `button` param here, matching this codebase's own house convention (Merchant/
-        -- Bag/QuestLog all thread `self` explicitly rather than lean on the engine's `this`
-        -- global, which DOES exist — `benilla-ui/src/script/event.rs` — but isn't this codebase's
-        -- idiom).
-        -- `unit` joins the signature for the pet page (decision 1057): the ref's own
-        -- PaperDollStatTooltip(unit, stat) always took it — its pet rows pass "pet" (ref
-        -- PetPaperDollFrame.xml:345) — and phase 1a simply had no second unit to pass, so it was
-        -- inlined as "player". Restored, defaulted, and third rather than first because `button`
-        -- leads by house convention (above).
-        function BenillaPaperDollStatTooltip(button, stat, unit)
+        -- ref PaperDollStatTooltip(unit, stat) (l.786-802), signature-exact: the button is the
+        -- ambient `this` the reference reads, NOT a leading parameter, and `unit` leads `stat`
+        -- exactly as the ref declares them (its pet rows pass "pet" — ref PetPaperDollFrame.xml:345;
+        -- ours likewise, decision 1057). A leading frame parameter here was a wrong SHAPE behind a
+        -- right name — 1199's failure mode — because an addon calls the 1.12 arity.
+        function PaperDollStatTooltip(unit, stat)
+            local button = this
             -- classFileName nil until the first player snapshot lands (this file's SetLevel comment
             -- on the same engine timing gap) — "" just misses every class lookup, falling through to
             -- DEFAULT_*_TOOLTIP below exactly like an unrecognized class would. A pet has no class
@@ -893,7 +893,8 @@
         end
 
         -- ref CharacterDamageFrame_OnEnter (l.835-851).
-        function BenillaCharacterDamageFrame_OnEnter(button)
+        function CharacterDamageFrame_OnEnter()
+            local button = this
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             GameTooltip:SetText(INVTYPE_WEAPONMAINHAND, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
             GameTooltip:AddDoubleLine(ATTACK_SPEED_COLON, string.format("%.2f", button.attackSpeed),
@@ -916,7 +917,8 @@
         end
 
         -- ref CharacterRangedDamageFrame_OnEnter (l.853-863).
-        function BenillaCharacterRangedDamageFrame_OnEnter(button)
+        function CharacterRangedDamageFrame_OnEnter()
+            local button = this
             if not button.damage then return end
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             GameTooltip:SetText(INVTYPE_RANGED, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
@@ -1141,7 +1143,7 @@
 
         -- ── The model pane (ref UIParent.lua:1420-1462) ─────────────────────────────────────────
         -- This file's header comment: a booth-texture stand-in, not a live widget. `frame` here is
-        -- BenillaCharacterModelFrame; `frame.facing` stands in for the ref's `model.rotation`.
+        -- CharacterModelFrame; `frame.facing` stands in for the ref's `model.rotation`.
         -- These four are the ref's SHARED Model_* helpers (UIParent.lua), and they are shared here
         -- too: the pet page's pane (decision 1057) drives the very same code. The one thing that
         -- differs per pane is WHERE the yaw goes — the engine has no `Model:SetFacing` widget
@@ -1294,7 +1296,7 @@
     <!--
         The magic-resistance icon frame (ref MagicResistanceFrameTemplate, ref-PaperDollFrame.xml:
         106-123): 32x29, a generic tooltip OnEnter reading self.tooltip/self.tooltipSubtext (both
-        filled by BenillaPaperDollFrame_SetResistances) — no per-instance OnEnter override needed
+        filled by PaperDollFrame_SetResistances) — no per-instance OnEnter override needed
         (the ref's own MagicResFrame1-5 instances carry none either).
     -->
     <Frame name="BenillaMagicResistanceFrameTemplate" virtual="true">
@@ -1313,7 +1315,7 @@
         </Scripts>
     </Frame>
 
-    <Frame name="BenillaCharacterFrame" hidden="true">
+    <Frame name="CharacterFrame" hidden="true">
         <!-- The real 384x512 window (ref-CharacterFrame.xml:5-7). No <Anchors> — ShowUIPanel/
              SetLeftFrame SetPoints this to the left slot on open (UiPanels.xml's own convention). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -1325,7 +1327,7 @@
                  (the live model-bake binding, UnitFrames.xml's own precedent) — "player" is a fixed
                  token here (unlike a unit frame, this window only ever shows the local player). -->
             <Layer level="ARTWORK">
-                <Texture name="BenillaCharacterFramePortrait">
+                <Texture name="CharacterFramePortrait">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>
@@ -1336,12 +1338,12 @@
                  l.35-64). UnitPVPName -> plain UnitName (this file's header comment: PVP rank is a
                  named deferral) — CharacterTitleText/CharacterGuildText (both PVP-rank/guild-driven)
                  are dropped with it. -->
-            <Frame name="BenillaCharacterNameFrame">
+            <Frame name="CharacterNameFrame">
                 <Size><AbsDimension x="109" y="12"/></Size>
                 <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="232"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer>
-                        <FontString name="BenillaCharacterNameText" inherits="GameFontNormal" text="NAME">
+                        <FontString name="CharacterNameText" inherits="GameFontNormal" text="NAME">
                             <Size><AbsDimension x="300" y="12"/></Size>
                             <Anchors><Anchor point="CENTER"/></Anchors>
                             <Color r="1.0" g="1.0" b="1.0"/>
@@ -1355,13 +1357,13 @@
             <!-- Close: the ref's own UIPanelCloseButton position (CENTER of TOPRIGHT, -44,-25 — ref
                  l.65-78), on the minimize-button art this codebase's close buttons all use (no
                  UIPanelCloseButton template ships — Gossip/Bag/Merchant's own header comments).
-                 OnLoad raises the frame level +1 (the same idiom BenillaCharacterNameFrame above uses,
-                 transcribed from the ref): the window's own art is BenillaPaperDollFrame's BACKGROUND
+                 OnLoad raises the frame level +1 (the same idiom CharacterNameFrame above uses,
+                 transcribed from the ref): the window's own art is PaperDollFrame's BACKGROUND
                  layer — a full-window sibling created AFTER this button — so at the shared default
                  level 0 the page's art paints over the button by creation order (order.rs). The ref's
                  close button rides the client's show-time bucket-tail re-insertion instead; benilla
                  proxies that with creation order, so the explicit raise is the faithful compensation. -->
-            <Button name="BenillaCharacterFrameCloseButton">
+            <Button name="CharacterFrameCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-44" y="-25"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
@@ -1369,7 +1371,7 @@
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
                 <Scripts>
                     <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
-                    <OnClick>HideUIPanel(getglobal("BenillaCharacterFrame"))</OnClick>
+                    <OnClick>HideUIPanel(getglobal("CharacterFrame"))</OnClick>
                 </Scripts>
             </Button>
             <!-- The tab row (ref l.79-96 — CENTER of BOTTOMLEFT +60,+62 — each tab chained off the
@@ -1379,7 +1381,7 @@
                  (Character/Pet/Reputation/Skills/Honor, ref l.79-168) and ours is 3rd until
                  Reputation/Honor land (the "tabs arrive with their pages" precedent, 0138/0208).
                  Tab 2 starts HIDDEN — it is raised only for a unit with a pet UI, by the pet page's
-                 BenillaPetTab_Update, which also re-anchors tab 3 onto tab 2's LEFT while it is
+                 PetTab_Update, which also re-anchors tab 3 onto tab 2's LEFT while it is
                  down so the row has no gap (ref PetPaperDollFrame.lua:189-198). Tab 3's XML anchor
                  is the WITH-pet one; the update owns it from load onward.
                  No hover tooltip (MicroButtonTooltipText/TOGGLECHARACTER0 have no engine surface,
@@ -1389,16 +1391,16 @@
                  the loader resolves a key-shaped `text=` through the shipped strings, so the row is
                  localized like the reference's. (Tabs 1/3 carried the enUS literals from 0437;
                  same words either way in enUS, and now the same mechanism.) -->
-            <Button name="BenillaCharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="CHARACTER">
+            <Button name="CharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="CHARACTER">
                 <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="60" y="62"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(1)</OnClick></Scripts>
             </Button>
-            <Button name="BenillaCharacterFrameTab2" inherits="CharacterFrameTabButtonTemplate" text="PET" hidden="true">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaCharacterFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
+            <Button name="CharacterFrameTab2" inherits="CharacterFrameTabButtonTemplate" text="PET" hidden="true">
+                <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(2)</OnClick></Scripts>
             </Button>
-            <Button name="BenillaCharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" text="SKILLS">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaCharacterFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
+            <Button name="CharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" text="SKILLS">
+                <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(3)</OnClick></Scripts>
             </Button>
 
@@ -1406,7 +1408,7 @@
                  exactly fill the parent instead of the ref's setAllPoints="true" — the same effect
                  (see this file's header: frame-level setAllPoints was a no-op when this was written
                  and is wired now; the explicit size is equivalent, so it stays). -->
-            <Frame name="BenillaPaperDollFrame" id="1">
+            <Frame name="PaperDollFrame" id="1">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                 <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
@@ -1431,9 +1433,9 @@
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
                         </Texture>
                         <!-- "Level %d %s %s" under the name (ref l.174-182). -->
-                        <FontString name="BenillaCharacterLevelText" inherits="GameFontNormalSmall">
+                        <FontString name="CharacterLevelText" inherits="GameFontNormalSmall">
                             <Anchors>
-                                <Anchor point="TOP" relativeTo="BenillaCharacterNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
+                                <Anchor point="TOP" relativeTo="CharacterNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
                             </Anchors>
                         </FontString>
                     </Layer>
@@ -1442,7 +1444,7 @@
                     <!-- The model pane (ref PlayerModel CharacterModelFrame, l.204-273): 233x224 at
                          TOPLEFT (65,-78). This file's header comment: a plain Frame sampling the
                          paper-doll booth bake, not a live <Model>/<PlayerModel> widget. -->
-                    <Frame name="BenillaCharacterModelFrame">
+                    <Frame name="CharacterModelFrame">
                         <Size><AbsDimension x="233" y="224"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-78"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -1463,7 +1465,7 @@
                                  `RegisterForClicks("LeftButtonDown","LeftButtonUp")` is the ref's own
                                  (l.241-243/l.263-265): OnClick fires on BOTH edges, so one tap nudges
                                  twice (2 × 0.03), and holding hands the spin to the pane's OnUpdate. -->
-                            <Button name="BenillaCharacterModelFrameRotateLeftButton">
+                            <Button name="CharacterModelFrameRotateLeftButton">
                                 <Size><AbsDimension x="35" y="35"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                 <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
@@ -1471,18 +1473,18 @@
                                 <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                                 <Scripts>
                                     <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                                    <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("BenillaCharacterModelFrame"))</OnClick>
+                                    <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("CharacterModelFrame"))</OnClick>
                                 </Scripts>
                             </Button>
-                            <Button name="BenillaCharacterModelFrameRotateRightButton">
+                            <Button name="CharacterModelFrameRotateRightButton">
                                 <Size><AbsDimension x="35" y="35"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
                                 <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
                                 <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
                                 <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                                 <Scripts>
                                     <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                                    <OnClick>BenillaPaperDollModel_RotateRight(getglobal("BenillaCharacterModelFrame"))</OnClick>
+                                    <OnClick>BenillaPaperDollModel_RotateRight(getglobal("CharacterModelFrame"))</OnClick>
                                 </Scripts>
                             </Button>
                         </Frames>
@@ -1506,54 +1508,54 @@
                     <!-- The attributes block (ref CharacterAttributesFrame, l.274-405): 230x78 at
                          TOPLEFT (67,-291), the 9-piece UI-Character-StatBackground plate (3 stacked
                          3-piece columns: player-stat / melee / ranged) behind the rows. -->
-                    <Frame name="BenillaCharacterAttributesFrame">
+                    <Frame name="CharacterAttributesFrame">
                         <Size><AbsDimension x="230" y="78"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="67" y="-291"/></Offset></Anchor></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
-                                <Texture name="BenillaPlayerStatBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="PlayerStatBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
                                     <Anchors><Anchor point="TOPLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
                                 </Texture>
-                                <Texture name="BenillaPlayerStatBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="PlayerStatBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="53"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPlayerStatBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="PlayerStatBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
                                 </Texture>
-                                <Texture name="BenillaPlayerStatBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="PlayerStatBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPlayerStatBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="PlayerStatBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
                                 </Texture>
-                                <Texture name="BenillaMeleeAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="MeleeAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
                                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="115" y="0"/></Offset></Anchor></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
                                 </Texture>
-                                <Texture name="BenillaMeleeAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="MeleeAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="12"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="MeleeAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
                                 </Texture>
-                                <Texture name="BenillaMeleeAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="MeleeAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="MeleeAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
                                 </Texture>
-                                <Texture name="BenillaRangedAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="RangedAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundBottom" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="MeleeAttackBackgroundBottom" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
                                 </Texture>
-                                <Texture name="BenillaRangedAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="RangedAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="11"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaRangedAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="RangedAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
                                 </Texture>
-                                <Texture name="BenillaRangedAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                <Texture name="RangedAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
                                     <Size><AbsDimension x="115" y="16"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaRangedAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="RangedAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
                                     <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
                                 </Texture>
                             </Layer>
@@ -1561,52 +1563,52 @@
                         <Frames>
                             <!-- The 5 primary attributes (ref l.407-491): TOPLEFT (6,-3), chained
                                  BOTTOMLEFT-to-BOTTOMLEFT. Labels are the TEMPLATE's $parentLabel,
-                                 filled from Lua exactly like the ref (BenillaPaperDollFrame_OnLoad /
+                                 filled from Lua exactly like the ref (PaperDollFrame_OnLoad /
                                  _SetStats — see the former's header comment); instances declare no
                                  regions of their own, same as the ref's. -->
-                            <Frame name="BenillaCharacterStatFrame1" inherits="BenillaStatRowTemplate">
+                            <Frame name="CharacterStatFrame1" inherits="BenillaStatRowTemplate">
                                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-3"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
-                                    <OnEnter>BenillaPaperDollStatTooltip(self, "STRENGTH")</OnEnter>
+                                    <OnEnter>PaperDollStatTooltip("player", "STRENGTH")</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="BenillaCharacterStatFrame2" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame1" relativePoint="BOTTOMLEFT"/></Anchors>
+                            <Frame name="CharacterStatFrame2" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame1" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
-                                    <OnEnter>BenillaPaperDollStatTooltip(self, "AGILITY")</OnEnter>
+                                    <OnEnter>PaperDollStatTooltip("player", "AGILITY")</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="BenillaCharacterStatFrame3" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame2" relativePoint="BOTTOMLEFT"/></Anchors>
+                            <Frame name="CharacterStatFrame3" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame2" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
-                                    <OnEnter>BenillaPaperDollStatTooltip(self, "STAMINA")</OnEnter>
+                                    <OnEnter>PaperDollStatTooltip("player", "STAMINA")</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="BenillaCharacterStatFrame4" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame3" relativePoint="BOTTOMLEFT"/></Anchors>
+                            <Frame name="CharacterStatFrame4" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame3" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
-                                    <OnEnter>BenillaPaperDollStatTooltip(self, "INTELLECT")</OnEnter>
+                                    <OnEnter>PaperDollStatTooltip("player", "INTELLECT")</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
-                            <Frame name="BenillaCharacterStatFrame5" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame4" relativePoint="BOTTOMLEFT"/></Anchors>
+                            <Frame name="CharacterStatFrame5" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame4" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
-                                    <OnEnter>BenillaPaperDollStatTooltip(self, "SPIRIT")</OnEnter>
+                                    <OnEnter>PaperDollStatTooltip("player", "SPIRIT")</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
                             <!-- Armor (ref l.492-511), chained off Stat5's BOTTOMLEFT. -->
-                            <Frame name="BenillaCharacterArmorFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame5" relativePoint="BOTTOMLEFT"/></Anchors>
+                            <Frame name="CharacterArmorFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterStatFrame5" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
                                     <OnEnter>
@@ -1620,8 +1622,8 @@
                             </Frame>
                             <!-- Melee attack rating (ref l.512-531), TOPLEFT of the attributes frame
                                  itself (122,-2) — the second column's own chain root. -->
-                            <Frame name="BenillaCharacterAttackFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttributesFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="122" y="-2"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterAttackFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterAttributesFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="122" y="-2"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
                                     <OnEnter>
@@ -1634,8 +1636,8 @@
                                 </Scripts>
                             </Frame>
                             <!-- Melee attack power (ref l.532-554), 99px-wide override (OnLoad). -->
-                            <Frame name="BenillaCharacterAttackPowerFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterAttackPowerFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
                                     <OnEnter>
@@ -1648,17 +1650,17 @@
                                 </Scripts>
                             </Frame>
                             <!-- Melee damage (ref l.555-574), 99px-wide override, dedicated OnEnter. -->
-                            <Frame name="BenillaCharacterDamageFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterDamageFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
-                                    <OnEnter>BenillaCharacterDamageFrame_OnEnter(self)</OnEnter>
+                                    <OnEnter>CharacterDamageFrame_OnEnter()</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
                             <!-- Ranged attack rating (ref l.575-594). -->
-                            <Frame name="BenillaCharacterRangedAttackFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterDamageFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-6"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterRangedAttackFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterDamageFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-6"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true)</OnLoad>
                                     <OnEnter>
@@ -1672,8 +1674,8 @@
                             </Frame>
                             <!-- Ranged attack power (ref l.595-619), 99px-wide, conditional tooltip
                                  (the N/A / wand-equipped states leave self.tooltip nil). -->
-                            <Frame name="BenillaCharacterRangedAttackPowerFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterRangedAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterRangedAttackPowerFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterRangedAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
                                     <OnEnter>
@@ -1689,11 +1691,11 @@
                             </Frame>
                             <!-- Ranged damage (ref l.620-639), 99px-wide, dedicated OnEnter (no-ops
                                  while self.damage is nil, e.g. no ranged weapon equipped). -->
-                            <Frame name="BenillaCharacterRangedDamageFrame" inherits="BenillaStatRowTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterRangedAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                            <Frame name="CharacterRangedDamageFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterRangedAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
-                                    <OnEnter>BenillaCharacterRangedDamageFrame_OnEnter(self)</OnEnter>
+                                    <OnEnter>CharacterRangedDamageFrame_OnEnter()</OnEnter>
                                     <OnLeave>GameTooltip:Hide()</OnLeave>
                                 </Scripts>
                             </Frame>
@@ -1704,72 +1706,72 @@
                          32x160 wrapper, TOPRIGHT of PaperDollFrame's own TOPLEFT (297,-77); each
                          32x29 icon TOP-chained off the previous, ids 6/2/3/4/5 (arcane/fire/nature/
                          frost/shadow — Holy(1) never rides the paper doll). -->
-                    <Frame name="BenillaCharacterResistanceFrame">
+                    <Frame name="CharacterResistanceFrame">
                         <Size><AbsDimension x="32" y="160"/></Size>
                         <Anchors>
-                            <Anchor point="TOPRIGHT" relativeTo="BenillaPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="297" y="-77"/></Offset></Anchor>
+                            <Anchor point="TOPRIGHT" relativeTo="PaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="297" y="-77"/></Offset></Anchor>
                         </Anchors>
                         <Frames>
-                            <Frame name="BenillaMagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
-                                <Anchors><Anchor point="TOP" relativeTo="BenillaCharacterResistanceFrame" relativePoint="TOP"/></Anchors>
+                            <Frame name="MagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="CharacterResistanceFrame" relativePoint="TOP"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
                                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                             <TexCoords left="0" right="1.0" top="0.2265625" bottom="0.33984375"/>
                                         </Texture>
-                                        <FontString name="BenillaMagicResText1" inherits="GameFontHighlightSmall" text="X">
+                                        <FontString name="MagicResText1" inherits="GameFontHighlightSmall" text="X">
                                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="BenillaMagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
-                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame1" relativePoint="BOTTOM"/></Anchors>
+                            <Frame name="MagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="MagicResFrame1" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
                                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                             <TexCoords left="0" right="1.0" top="0" bottom="0.11328125"/>
                                         </Texture>
-                                        <FontString name="BenillaMagicResText2" inherits="GameFontHighlightSmall" text="X">
+                                        <FontString name="MagicResText2" inherits="GameFontHighlightSmall" text="X">
                                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="BenillaMagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
-                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame2" relativePoint="BOTTOM"/></Anchors>
+                            <Frame name="MagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="MagicResFrame2" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
                                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                             <TexCoords left="0" right="1.0" top="0.11328125" bottom="0.2265625"/>
                                         </Texture>
-                                        <FontString name="BenillaMagicResText3" inherits="GameFontHighlightSmall" text="X">
+                                        <FontString name="MagicResText3" inherits="GameFontHighlightSmall" text="X">
                                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="BenillaMagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
-                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame3" relativePoint="BOTTOM"/></Anchors>
+                            <Frame name="MagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="MagicResFrame3" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
                                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                             <TexCoords left="0" right="1.0" top="0.33984375" bottom="0.453125"/>
                                         </Texture>
-                                        <FontString name="BenillaMagicResText4" inherits="GameFontHighlightSmall" text="X">
+                                        <FontString name="MagicResText4" inherits="GameFontHighlightSmall" text="X">
                                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                             </Frame>
-                            <Frame name="BenillaMagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
-                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame4" relativePoint="BOTTOM"/></Anchors>
+                            <Frame name="MagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="MagicResFrame4" relativePoint="BOTTOM"/></Anchors>
                                 <Layers>
                                     <Layer level="BACKGROUND">
                                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                             <TexCoords left="0" right="1.0" top="0.453125" bottom="0.56640625"/>
                                         </Texture>
-                                        <FontString name="BenillaMagicResText5" inherits="GameFontHighlightSmall" text="X">
+                                        <FontString name="MagicResText5" inherits="GameFontHighlightSmall" text="X">
                                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
@@ -1781,80 +1783,80 @@
                     <!-- The 19 equipment slots (ref l.761-931): left column TOPLEFT (21,-74) chained
                          BOTTOMLEFT -4, right column TOPLEFT (305,-74) chained the same way, the
                          weapon row off the page's own BOTTOMLEFT (122,127) then chained TOPRIGHT +5. -->
-                    <Button name="BenillaCharacterHeadSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                    <Button name="CharacterHeadSlot" inherits="BenillaPaperDollItemSlotTemplate">
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-74"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "HeadSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterNeckSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterHeadSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterNeckSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterHeadSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "NeckSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterShoulderSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterNeckSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterShoulderSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterNeckSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ShoulderSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterBackSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterShoulderSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterBackSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterShoulderSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "BackSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterChestSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterBackSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterChestSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterBackSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ChestSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterShirtSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterChestSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterShirtSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterChestSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ShirtSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterTabardSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterShirtSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterTabardSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterShirtSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "TabardSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterWristSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterTabardSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterWristSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterTabardSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "WristSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterHandsSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                    <Button name="CharacterHandsSlot" inherits="BenillaPaperDollItemSlotTemplate">
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="305" y="-74"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "HandsSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterWaistSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterHandsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterWaistSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterHandsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "WaistSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterLegsSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterWaistSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterLegsSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterWaistSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "LegsSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterFeetSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterLegsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterFeetSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterLegsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "FeetSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterFinger0Slot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFeetSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterFinger0Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFeetSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Finger0Slot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterFinger1Slot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFinger0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterFinger1Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFinger0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Finger1Slot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterTrinket0Slot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFinger1Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterTrinket0Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFinger1Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Trinket0Slot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterTrinket1Slot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterTrinket0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterTrinket1Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterTrinket0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Trinket1Slot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterMainHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                    <Button name="CharacterMainHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
                         <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="122" y="127"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "MainHandSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterSecondaryHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterMainHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterSecondaryHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterMainHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "SecondaryHandSlot")</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaCharacterRangedSlot" inherits="BenillaPaperDollItemSlotTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterSecondaryHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                    <Button name="CharacterRangedSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterSecondaryHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "RangedSlot")</OnLoad></Scripts>
                     </Button>
 
@@ -1868,10 +1870,10 @@
                          Merchant/this file's own template) uses the same "blank text = invisible"
                          idiom with no Show/Hide dance, applied here too for consistency.
                          $parentStock OMITTED (this file's header comment: no ref Lua populates it). -->
-                    <Button name="BenillaCharacterAmmoSlot">
+                    <Button name="CharacterAmmoSlot">
                         <Size><AbsDimension x="27" y="27"/></Size>
                         <Anchors>
-                            <Anchor point="LEFT" relativeTo="BenillaCharacterRangedSlot" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor>
+                            <Anchor point="LEFT" relativeTo="CharacterRangedSlot" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor>
                         </Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
@@ -1909,16 +1911,16 @@
                     </Button>
                 </Frames>
                 <Scripts>
-                    <OnLoad>BenillaPaperDollFrame_OnLoad(self)</OnLoad>
-                    <OnEvent>BenillaPaperDollFrame_OnEvent(self)</OnEvent>
-                    <OnShow>BenillaPaperDollFrame_OnShow()</OnShow>
+                    <OnLoad>PaperDollFrame_OnLoad()</OnLoad>
+                    <OnEvent>PaperDollFrame_OnEvent(event, arg1)</OnEvent>
+                    <OnShow>PaperDollFrame_OnShow()</OnShow>
                 </Scripts>
             </Frame>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaCharacterFrame_OnLoad(self)</OnLoad>
-            <OnShow>BenillaCharacterFrame_OnShow()</OnShow>
-            <OnHide>BenillaCharacterFrame_OnHide()</OnHide>
+            <OnLoad>CharacterFrame_OnLoad()</OnLoad>
+            <OnShow>CharacterFrame_OnShow()</OnShow>
+            <OnHide>CharacterFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

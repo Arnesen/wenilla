@@ -2,11 +2,15 @@
     <!--
         The chat-link tooltip (decision 0274 P4) - ref ItemRef.xml/ItemRef.lua, quoted: a
         standalone GameTooltip instance parked above the bottom center that SetItemRef fills via
-        SetHyperlink when a chat item link is clicked, plus its corner close button. The plate is
-        the shared tooltip plate (GameTooltip.xml has the art + Thicken rationale); the ref gets
-        it from GameTooltipTemplate.
+        SetHyperlink when a chat item link is clicked, plus its corner close button. The plate,
+        the status bar and the OnHide come from GameTooltipTemplate — the same inheritance the ref
+        uses (ref ItemRef.xml l.4) — declared in GameTooltip.xml, which the manifest loads first.
 
         Departures, each named:
+        - No coin row (ref: the template's $parentMoneyFrame): our money row is the coin trio the
+          GameTooltip instance declares, and its OnTooltipAddMoney/OnTooltipCleared pair stays
+          there with it, so a chat-link tooltip renders no price line. The reasoning is on
+          GameTooltipTemplate.
         - No drag (ref: movable + RegisterForDrag + StartMoving/StopMovingOrSizing +
           ValidateFramePosition): benilla has no user-moved-frame affordance yet - the window
           sits on its declared anchor.
@@ -87,27 +91,11 @@
         end
     ]]></Script>
 
-    <GameTooltip name="ItemRefTooltip" frameStrata="HIGH" hidden="true">
+    <GameTooltip name="ItemRefTooltip" inherits="GameTooltipTemplate" frameStrata="HIGH" hidden="true">
         <Size><AbsDimension x="128" y="64"/></Size>
         <Anchors>
             <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="80"/></Offset></Anchor>
         </Anchors>
-        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
-            <EdgeSize><AbsValue val="16"/></EdgeSize>
-            <TileSize><AbsValue val="16"/></TileSize>
-            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
-        </Backdrop>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentThicken">
-                    <Anchors>
-                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
-                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
-                    </Anchors>
-                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
-                </Texture>
-            </Layer>
-        </Layers>
         <Frames>
             <!-- ref ItemRefCloseButton (ItemRef.xml l.17-36, quoted): the corner minimize-style
                  close; OnLoad's SetPadding(16) keeps it off the text. -->
@@ -125,11 +113,15 @@
             </Button>
         </Frames>
         <Scripts>
+            <!-- The template's own OnLoad, re-declared to add the padding (ref ItemRef.xml
+                 l.38-42's shape, minus its drag arming — see the no-drag departure above); the
+                 loader's later SetScript wins, so GameTooltip_OnLoad has to be called here too.
+                 OnHide is the template's unchanged, so it is not re-declared — ref ItemRef.xml
+                 declares none either. -->
             <OnLoad>
                 GameTooltip_OnLoad(self)
                 self:SetPadding(16)
             </OnLoad>
-            <OnHide>GameTooltip_OnHide(this)</OnHide>
         </Scripts>
     </GameTooltip>
 

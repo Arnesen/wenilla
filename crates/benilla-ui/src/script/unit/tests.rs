@@ -54,7 +54,7 @@ fn unit_reaction_reports_the_scale_value_or_nil() {
         .unwrap());
 }
 
-/// The target plate's faction decision (TargetFrame_CheckFaction, as `BenillaUnitFrame_Update`
+/// The target plate's faction decision (TargetFrame_CheckFaction, as `UnitFrame_Update`
 /// composes it): a player-controlled target picks red (mutually hostile) or blue (else) and
 /// NEVER the reaction green; only an NPC reads the reaction swatch. This pins the predicate
 /// composition the plate branch depends on — a friendly *player* must resolve to blue, which is
@@ -356,19 +356,20 @@ fn power_bindings_read_the_active_type() {
             .unwrap(),
         (1, "RAGE".into())
     );
-    assert_eq!(s.eval::<i64>(r#"return UnitPower("player")"#).unwrap(), 35);
+    assert_eq!(s.eval::<i64>(r#"return UnitMana("player")"#).unwrap(), 35);
     assert_eq!(
-        s.eval::<i64>(r#"return UnitPowerMax("player")"#).unwrap(),
+        s.eval::<i64>(r#"return UnitManaMax("player")"#).unwrap(),
         100
     );
-    // The active type asked for explicitly serves the value; another type serves 0 (v1 shape).
-    assert_eq!(
-        s.eval::<i64>(r#"return UnitPower("player", 1)"#).unwrap(),
-        35
-    );
-    assert_eq!(
-        s.eval::<i64>(r#"return UnitPower("player", 0)"#).unwrap(),
-        0
+    // **The 1.12 verbs take one argument and report the ACTIVE power**, whatever it is — this
+    // unit is a rage user and `UnitMana` reads 35 rage, which looks wrong and is exactly right
+    // (`UnitFrame.lua`: `local currValue = UnitMana(unit)` for every power type). Asking about a
+    // specific type is `UnitPowerType(unit)` first; there is no second argument to pass, and the
+    // Era pair that had one is gone (decision 1190's beyond-1.12 list, 1188 phase 5).
+    assert!(
+        s.eval::<bool>("return UnitPower == nil and UnitPowerMax == nil")
+            .unwrap(),
+        "the Era spellings must not linger beside the 1.12 ones"
     );
     // An absent unit: type reads as mana, values 0.
     assert_eq!(
@@ -609,5 +610,87 @@ fn unit_classification_reads_the_five_word_table() {
         s.eval::<String>(r#"return UnitClassification()"#).unwrap(),
         "normal",
         "a missing token is normal, not nil"
+    );
+}
+
+// ── `UnitAffectingCombat` and `TargetByName` ────────────────────────────────────────────────────
+
+/// `UnitAffectingCombat` → the number 1 / nil, and **one arm serves both "not in combat" and "no
+/// such unit"** (`0x517e48` and `0x517e5c` jump to the same `0x517e73`). That indistinguishability
+/// is the behaviour, not a shortcut: an addon must not be able to probe existence with this verb.
+#[test]
+fn unit_affecting_combat_is_one_or_nil_and_hides_the_missing_unit() {
+    let mut s = UiScript::new().unwrap();
+    let mut hot = player();
+    hot.in_combat = true;
+    s.set_unit("player", Some(hot));
+    s.set_unit("target", Some(player())); // exists, peaceful
+
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitAffectingCombat("player")"#)
+            .unwrap(),
+        1,
+        "the number 1, never a boolean"
+    );
+    assert!(s
+        .eval::<bool>(r#"return UnitAffectingCombat("target") == nil"#)
+        .unwrap());
+    assert!(
+        s.eval::<bool>(r#"return UnitAffectingCombat("party3") == nil"#)
+            .unwrap(),
+        "an unresolvable token is the SAME nil a peaceful unit gives"
+    );
+    // A number is accepted and stringified (`0x6f3510` is number-OR-string): it resolves the
+    // token "5", finds nothing, and answers nil — it does not raise.
+    assert!(s
+        .eval::<bool>("return UnitAffectingCombat(5) == nil")
+        .unwrap());
+}
+
+/// A missing or wrong-typed argument **raises** — `0x6f4940` is `luaL_error` and does not return,
+/// so the caller's statement is abandoned rather than continuing with a nil.
+#[test]
+fn unit_affecting_combat_raises_on_a_bad_argument() {
+    let s = UiScript::new().unwrap();
+    for call in ["UnitAffectingCombat()", "UnitAffectingCombat({})"] {
+        let err = s
+            .eval::<mlua::Value>(&format!("return {call}"))
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains(r#"Usage: UnitAffectingCombat("unit")"#),
+            "{call} must raise the usage line, got {err}"
+        );
+    }
+}
+
+/// `TargetByName(name [, exactMatch])` queues the name **and the second argument** — the flag the
+/// slash command has no way to supply, which turns the resolver's longest-common-prefix tier off.
+#[test]
+fn target_by_name_queues_the_name_and_the_exact_flag() {
+    let mut s = UiScript::new().unwrap();
+    assert!(s.take_target_by_name_requests().is_empty());
+
+    s.run(r#"TargetByName("Rag")"#).unwrap();
+    s.run(r#"TargetByName("Ragnaros", 1)"#).unwrap();
+    s.run(r#"TargetByName("Ragnaros", 0)"#).unwrap();
+    s.run(r#"TargetByName("Ragnaros", true)"#).unwrap();
+    s.run("TargetByName(5)").unwrap(); // a number stringifies, as `0x6f3690` does
+    assert_eq!(
+        s.take_target_by_name_requests(),
+        vec![
+            ("Rag".to_string(), false),
+            ("Ragnaros".to_string(), true),
+            ("Ragnaros".to_string(), false),
+            ("Ragnaros".to_string(), true),
+            ("5".to_string(), false),
+        ]
+    );
+    assert!(s.take_target_by_name_requests().is_empty());
+
+    // A missing/wrong-typed name raises (`0x489d69 call 0x6f3510` → `0x489de1`).
+    let err = s.eval::<mlua::Value>("return TargetByName()").unwrap_err();
+    assert!(
+        format!("{err}").contains(r#"Usage: TargetByName("name")"#),
+        "got {err}"
     );
 }

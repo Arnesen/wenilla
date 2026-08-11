@@ -61,6 +61,11 @@ pub(super) fn tip_mut(model: &mut Model, h: FrameHandle) -> mlua::Result<&mut To
 /// hover).
 fn apply_font(d: &mut RegionData, name: &str, fo: Option<&FontObject>) {
     d.font_object = Some(name.to_string());
+    // The severance mask is left standing — a re-point does NOT restore inheritance in the
+    // reference (see `super::font`'s module doc on the `+0x2c` inheritMask). A freshly created
+    // line has a clean mask anyway; an adopted XML-declared line keeps whatever its own attributes
+    // severed. Either way the line inherits the object LIVE from here: a later
+    // `GameTooltipText:SetFont(…)` re-paints every tooltip line through `font::propagate`.
     if let Some(f) = fo {
         d.font_path = f.font.clone();
         d.font_height = f.height;
@@ -263,6 +268,11 @@ fn write_cell(model: &mut Model, rh: crate::widget::RegionHandle, text: &str, co
     let d = model.region_data.entry(rh).or_default();
     d.text = Some(text.to_string());
     d.vertex_color = Some(color);
+    // `AddLine("…", r, g, b)`'s colour is this line's OWN colour, exactly as if Lua had called
+    // `SetTextColor` on the cell — so it must survive a later mutation of the font object the
+    // line inherits ([`super::types::FontExplicit`]). Without the mark, one
+    // `GameTooltipText:SetTextColor(…)` would repaint every red/green line in the tooltip.
+    d.font_explicit.color = true;
     d.hidden = false;
 }
 

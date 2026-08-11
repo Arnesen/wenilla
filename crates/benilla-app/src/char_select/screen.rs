@@ -43,6 +43,8 @@ pub(super) enum SelectAction {
     CreateChar,
     /// Rendered disabled — realm choice is out of scope (decision 0465 §6).
     ChangeRealm,
+    /// Open the AddOns list (decision 1197) — the reference's `CharacterSelectAddonsButton`.
+    Addons,
     RotateLeft,
     RotateRight,
 }
@@ -253,6 +255,34 @@ fn spawn_screen(
             });
 
         rotate_cluster(ui, art, &font, s);
+
+        // **AddOns** (decision 1197) — the reference's `CharacterSelectAddonsButton`, which 1191
+        // §5 recorded as never built because there was no list behind it. There is now. Bottom
+        // LEFT, out of the way of the Enter World / Back cluster; the reference sits it in the
+        // same lower band. Shown only when something is installed, exactly as the reference's
+        // `UpdateAddonButton` hides it on `GetNumAddOns() == 0`.
+        if super::addons::AddonsPanel::any_installed() {
+            ui.spawn((Node {
+                position_type: PositionType::Absolute,
+                left: px(30.0),
+                bottom: px(25.0),
+                flex_direction: FlexDirection::Row,
+                ..default()
+            },))
+                .with_children(|actions| {
+                    glue_button(
+                        actions,
+                        art,
+                        &font,
+                        SelectAction::Addons,
+                        strings.text("ADDONS", "AddOns"),
+                        140.0,
+                        35.0,
+                        GlueBtnKind::Small,
+                        s,
+                    );
+                });
+        }
 
         // Back (100×35 at BOTTOMRIGHT (−30,25)) and Delete Character (165×35 at its LEFT).
         ui.spawn((Node {

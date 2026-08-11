@@ -51,17 +51,17 @@ fn the_xp_bar_takes_the_mouse_and_explains_itself() {
     // the mouse ahead of it.
     let (x, y) = s
         .eval::<(f64, f64)>(
-            "return BenillaExpBar:GetLeft() + BenillaExpBar:GetWidth() / 4, \
-                    (BenillaExpBar:GetBottom() + BenillaExpBar:GetTop()) / 2",
+            "return MainMenuExpBar:GetLeft() + MainMenuExpBar:GetWidth() / 4, \
+                    (MainMenuExpBar:GetBottom() + MainMenuExpBar:GetTop()) / 2",
         )
         .unwrap();
     assert_eq!(
         s.hit_test_name(x as f32, y as f32).as_deref(),
-        Some("BenillaExpBar"),
+        Some("MainMenuExpBar"),
         "the XP strip must be mouse-enabled or the hover never fires"
     );
 
-    s.run("BenillaExpBar_OnEnter(BenillaExpBar)").unwrap();
+    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -120,15 +120,15 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     let ok: bool = s
         .eval(
             r#"
-            local tick, fill = BenillaExhaustionTick, BenillaExhaustionLevelFillBar
-            local expected = (1000 + 1400) / 10000 * BenillaExpBar:GetWidth()
+            local tick, fill = ExhaustionTick, ExhaustionLevelFillBar
+            local expected = (1000 + 1400) / 10000 * MainMenuExpBar:GetWidth()
             local x = tick:GetCenter()
-            local r, g, b = BenillaExpBar:GetStatusBarColor()
+            local r, g, b = MainMenuExpBar:GetStatusBarColor()
             -- fill's width via its RESOLVED edges: the authored size is 0 x 13, and the engine
             -- derives the span from the TOPLEFT + runtime-TOPRIGHT anchor pair (layout.rs's
             -- zero-size law), exactly as the real client does.
             return tick:IsVisible() and fill:IsShown()
-               and math.abs((x - BenillaExpBar:GetLeft()) - expected) < 0.5
+               and math.abs((x - MainMenuExpBar:GetLeft()) - expected) < 0.5
                and math.abs((fill:GetRight() - fill:GetLeft()) - expected) < 0.5
                and r == 0.0 and math.abs(g - 0.39) < 0.001 and math.abs(b - 0.88) < 0.001
         "#,
@@ -142,9 +142,9 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     let ok: bool = s
         .eval(
             r#"
-            local r, g, b = BenillaExpBar:GetStatusBarColor()
-            return not BenillaExhaustionTick:IsShown()
-               and not BenillaExhaustionLevelFillBar:IsShown()
+            local r, g, b = MainMenuExpBar:GetStatusBarColor()
+            return not ExhaustionTick:IsShown()
+               and not ExhaustionLevelFillBar:IsShown()
                and GetXPExhaustion() == nil
                and math.abs(r - 0.58) < 0.001 and g == 0.0 and math.abs(b - 0.55) < 0.001
         "#,
@@ -186,9 +186,9 @@ fn the_exhaustion_tick_marks_where_rested_runs_out() {
     let ok: bool = s
         .eval(
             r#"
-            local r, g, b = BenillaExpBar:GetStatusBarColor()
-            return not BenillaExhaustionTick:IsShown()
-               and not BenillaExhaustionLevelFillBar:IsShown()
+            local r, g, b = MainMenuExpBar:GetStatusBarColor()
+            return not ExhaustionTick:IsShown()
+               and not ExhaustionLevelFillBar:IsShown()
                and math.abs(g - 0.39) < 0.001
         "#,
         )
@@ -225,8 +225,8 @@ fn the_max_level_rail_replaces_the_xp_bar_at_60() {
     let ok: bool = s
         .eval(
             r#"
-            return BenillaExpBar:IsShown() and not BenillaMaxLevelBar:IsShown()
-               and BenillaExhaustionTick:IsShown()
+            return MainMenuExpBar:IsShown() and not MainMenuBarMaxLevelBar:IsShown()
+               and ExhaustionTick:IsShown()
         "#,
         )
         .unwrap();
@@ -239,8 +239,8 @@ fn the_max_level_rail_replaces_the_xp_bar_at_60() {
     let ok: bool = s
         .eval(
             r#"
-            return not BenillaExpBar:IsShown() and BenillaMaxLevelBar:IsShown()
-               and not BenillaExhaustionTick:IsShown()
+            return not MainMenuExpBar:IsShown() and MainMenuBarMaxLevelBar:IsShown()
+               and not ExhaustionTick:IsShown()
         "#,
         )
         .unwrap();
@@ -264,8 +264,9 @@ fn the_gryphons_outrank_the_bars_across_hide_show_cycles() {
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     // The relog shape: the strip hidden (a stale max-level rail), then re-shown; the rail's
     // own arrival is ALWAYS a hidden→visible re-stamp (it is born hidden).
-    s.run("BenillaExpBar:Hide() BenillaExpBar:Show()").unwrap();
-    s.run("BenillaMaxLevelBar:Show()").unwrap();
+    s.run("MainMenuExpBar:Hide() MainMenuExpBar:Show()")
+        .unwrap();
+    s.run("MainMenuBarMaxLevelBar:Show()").unwrap();
     s.resolve();
     let quads = s.extract();
     let z_max = |suffix: &str| {
@@ -298,19 +299,19 @@ fn the_xp_bar_numerals_show_on_hover() {
     s.set_player_xp(1234, 5678);
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
 
-    s.run("BenillaExpBar_OnEnter(BenillaExpBar)").unwrap();
+    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
     assert_eq!(
-        s.eval::<String>("return BenillaExpBarText:GetText()")
+        s.eval::<String>("return MainMenuBarExpText:GetText()")
             .unwrap(),
         "1234 / 5678"
     );
     assert!(s
-        .eval::<bool>("return BenillaExpBarText:IsShown()")
+        .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
 
-    s.run("BenillaExpBar_OnLeave(BenillaExpBar)").unwrap();
+    s.run("BenillaExpBar_OnLeave(MainMenuExpBar)").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaExpBarText:IsShown()")
+        !s.eval::<bool>("return MainMenuBarExpText:IsShown()")
             .unwrap(),
         "leaving drops the lockShow refcount to 0 and hides the numerals"
     );
@@ -330,16 +331,16 @@ fn the_rest_state_line_joins_the_held_open_tooltip() {
 
     // 1.12's default posture (0661): detailed newbie tips ON.
     s.run("SHOW_NEWBIE_TIPS = \"1\"").unwrap();
-    s.run("BenillaExpBar_OnEnter(BenillaExpBar)").unwrap();
+    s.run("BenillaExpBar_OnEnter(MainMenuExpBar)").unwrap();
     assert_eq!(
-        s.eval::<f64>("return BenillaExhaustionTick.timer").unwrap(),
+        s.eval::<f64>("return ExhaustionTick.timer").unwrap(),
         1.0,
         "the bar hover arms the tick's timer"
     );
 
     // Three OnUpdate ticks walk the timer 1 → 0.4 → −0.2 → fire (the ref's `< 0` edge).
     for _ in 0..3 {
-        s.run("BenillaExhaustionTick_OnUpdate(0.6)").unwrap();
+        s.run("ExhaustionTick_OnUpdate(0.6)").unwrap();
     }
     let appended: String = s.eval("return GameTooltipTextLeft3:GetText()").unwrap();
     assert!(

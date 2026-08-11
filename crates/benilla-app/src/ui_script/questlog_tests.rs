@@ -124,16 +124,12 @@ fn shipped_questlog_frame_drives_end_to_end() {
         s.take_sounds().is_empty(),
         "no sound at load (never transitions)"
     );
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return QuestLogFrame:IsVisible()").unwrap());
 
     // ToggleQuestLog() (the 'L' binding's entry point) opens it through ShowUIPanel.
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaQuestLogFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return QuestLogFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igQuestLogOpen".into())],
@@ -143,35 +139,34 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // Row 1 carries entry 1's title (indented), the count line reads "Quests: |cffffffff8/20|r", and nothing having been
     // selected, the first non-header entry auto-selects (pin §2's SetFirstValidSelection).
     assert!(s
-        .eval::<String>("return BenillaQuestLogTitle1Text:GetText()")
+        .eval::<String>("return QuestLogTitle1Text:GetText()")
         .unwrap()
         .contains("Quest 1"));
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogCount:GetText()")
-            .unwrap(),
+        s.eval::<String>("return QuestLogCount:GetText()").unwrap(),
         "Quests: |cffffffff8/20|r"
     );
     assert_eq!(s.eval::<i64>("return GetQuestLogSelection()").unwrap(), 1);
 
     // The detail pane carries the pushed title + objective text.
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogQuestTitle:GetText()")
+        s.eval::<String>("return QuestLogQuestTitle:GetText()")
             .unwrap(),
         "Quest 1"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogObjective1:GetText()")
+        s.eval::<String>("return QuestLogObjective1:GetText()")
             .unwrap(),
         "Kobold Vermin slain: 3/10"
     );
     // The reward row (QuestFrame.xml's item-row pattern, reused) + its money.
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogReward1Name:GetText()")
+        s.eval::<String>("return QuestLogReward1Name:GetText()")
             .unwrap(),
         "Militia Hammer"
     );
     assert_ne!(
-        s.eval::<String>("return BenillaQuestLogRewardTitleText:GetText()")
+        s.eval::<String>("return QuestLogRewardTitleText:GetText()")
             .unwrap(),
         "",
         "the Rewards header shows once there's a reward to show"
@@ -179,25 +174,23 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // Lua-managed Description header (no longer a static `text=` — QuestLogFrame.xml's header
     // comment on why it used to float over the empty-log parchment).
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogDescriptionTitle:GetText()")
+        s.eval::<String>("return QuestLogDescriptionTitle:GetText()")
             .unwrap(),
         "Description"
     );
     // No choices in this fixture: "You will receive:" (REWARD_ITEMS_ONLY), not "...also...", and
     // the choose-text/choice rows stay blank/hidden (QuestFrame.lua:454-473).
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogItemReceiveText:GetText()")
+        s.eval::<String>("return QuestLogItemReceiveText:GetText()")
             .unwrap(),
         "You will receive:"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogItemChooseText:GetText()")
+        s.eval::<String>("return QuestLogItemChooseText:GetText()")
             .unwrap(),
         ""
     );
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogChoice1:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return QuestLogChoice1:IsShown()").unwrap());
 
     // Wheel DOWN over an actual list ROW (delta -1) advances the faux-scroll offset by one: row 1 now
     // shows entry 2's title. Aiming over a row (not the empty margin) is the case that matters — a spin
@@ -218,7 +211,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     s.mouse_wheel(wx, wy, -1.0);
     assert!(s.errors().is_empty(), "wheel errors: {:?}", s.errors());
     assert!(
-        s.eval::<String>("return BenillaQuestLogTitle1Text:GetText()")
+        s.eval::<String>("return QuestLogTitle1Text:GetText()")
             .unwrap()
             .contains("Quest 2"),
         "wheel-down scrolled the list by one row"
@@ -275,9 +268,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
     // ToggleQuestLog() again closes it through HideUIPanel, playing the close kit.
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return QuestLogFrame:IsVisible()").unwrap());
     assert_eq!(
         s.take_sounds(),
         vec![SoundRequest::KitName("igQuestLogClose".into())],
@@ -289,7 +280,7 @@ fn shipped_questlog_frame_drives_end_to_end() {
 /// QuestLogFrame.lua:469-505 — driven through the `set_modifiers` mirror the cursor arc landed),
 /// toggling both the row's watch checkbox (a `SetTexture` toggle — bare Texture regions have no
 /// Show/Hide, same limit as the FontString regions elsewhere in this window) and the
-/// always-on-screen tracker HUD (`BenillaQuestWatchFrame`), which the log window itself doesn't
+/// always-on-screen tracker HUD (`QuestWatchFrame`), which the log window itself doesn't
 /// own or gate on visibility.
 #[test]
 fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
@@ -306,7 +297,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
 
     // Nothing watched yet — the tracker HUD is hidden and row 1 shows no checkbox texture.
     assert!(!s
-        .eval::<bool>("return BenillaQuestWatchFrame:IsVisible()")
+        .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
     let checkbox_shown = |s: &mut UiScript| {
         s.resolve();
@@ -369,15 +360,15 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     // watched quest's title on line 1 and its objective on line 2, ref-colored (title dark-gold —
     // objectives incomplete; objective 0.8-gray — unfinished).
     assert!(s
-        .eval::<bool>("return BenillaQuestWatchFrame:IsVisible()")
+        .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaQuestWatchLine1:GetText()")
+        s.eval::<String>("return QuestWatchLine1:GetText()")
             .unwrap(),
         "Quest 1"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestWatchLine2:GetText()")
+        s.eval::<String>("return QuestWatchLine2:GetText()")
             .unwrap(),
         " - Kobold Vermin slain: 3/10"
     );
@@ -396,7 +387,7 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
     assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
     assert!(!checkbox_shown(&mut s), "unwatching clears the checkbox");
     assert!(!s
-        .eval::<bool>("return BenillaQuestWatchFrame:IsVisible()")
+        .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
 }
 
@@ -438,7 +429,7 @@ fn watch_guards_no_op_without_erroring() {
     );
     assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
             .unwrap(),
         "This quest has no objectives to track",
         "the ref's QUEST_WATCH_NO_OBJECTIVES red line surfaces"
@@ -473,7 +464,7 @@ fn watch_guards_no_op_without_erroring() {
     assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
     assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 5);
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
             .unwrap(),
         "You may only watch 5 quests at a time",
         "the ref's QUEST_WATCH_TOO_MANY red line surfaces"
@@ -504,7 +495,7 @@ fn progress_auto_watches_for_five_minutes() {
     assert!(s.errors().is_empty(), "auto-watch errors: {:?}", s.errors());
     assert!(s.eval::<bool>("return IsQuestWatched(1)").unwrap());
     assert!(s
-        .eval::<bool>("return BenillaQuestWatchFrame:IsVisible()")
+        .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
     assert!(s
         .eval::<bool>("return BENILLA_QUEST_WATCH_TIMERS[\"Quest 1\"] ~= nil")
@@ -528,7 +519,7 @@ fn progress_auto_watches_for_five_minutes() {
         "expired after 300 s without progress"
     );
     assert!(!s
-        .eval::<bool>("return BenillaQuestWatchFrame:IsVisible()")
+        .eval::<bool>("return QuestWatchFrame:IsVisible()")
         .unwrap());
     assert!(s.errors().is_empty(), "expiry errors: {:?}", s.errors());
 }
@@ -589,27 +580,24 @@ fn empty_quest_log_hides_rows_and_disables_abandon() {
     // A bare FontString region has no Show/Hide/IsVisible in this engine (only Frames/Buttons do —
     // `region.rs`'s method table) — the empty-state message is a toggled SetText, read back here.
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogEmptyText:GetText()")
+        s.eval::<String>("return QuestLogEmptyText:GetText()")
             .unwrap(),
         "Your quest log is empty."
     );
+    assert!(!s.eval::<bool>("return QuestLogTitle1:IsVisible()").unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaQuestLogTitle1:IsVisible()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogAbandonButton:IsEnabled()")
+        .eval::<bool>("return QuestLogAbandonButton:IsEnabled()")
         .unwrap());
     // The Description header is now Lua-managed (BenillaQuestLogDetail_Clear blanks it) rather than
     // a static `text=` — it used to float "Description" over the empty-log parchment with no
     // selection (this task's fix; QuestLogFrame.xml's header comment on the FontString).
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogDescriptionTitle:GetText()")
+        s.eval::<String>("return QuestLogDescriptionTitle:GetText()")
             .unwrap(),
         ""
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogCount:GetText()")
-            .unwrap(),
+        s.eval::<String>("return QuestLogCount:GetText()").unwrap(),
         "Quests: |cffffffff0/20|r"
     );
 }
@@ -668,27 +656,21 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Both choice rows show, the rest of the 6-row cap stays hidden.
-    assert!(s
-        .eval::<bool>("return BenillaQuestLogChoice1:IsShown()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaQuestLogChoice2:IsShown()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogChoice3:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return QuestLogChoice1:IsShown()").unwrap());
+    assert!(s.eval::<bool>("return QuestLogChoice2:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestLogChoice3:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogChoice1Name:GetText()")
+        s.eval::<String>("return QuestLogChoice1Name:GetText()")
             .unwrap(),
         "Worn Sword"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogChoice2Name:GetText()")
+        s.eval::<String>("return QuestLogChoice2Name:GetText()")
             .unwrap(),
         "Worn Mace"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogItemChooseText:GetText()")
+        s.eval::<String>("return QuestLogItemChooseText:GetText()")
             .unwrap(),
         "You may choose one of these rewards:"
     );
@@ -699,33 +681,29 @@ fn reward_rows_follow_the_refs_two_per_row_layout() {
     // Frame/Button — `region.rs` has no GetPoint), so the anchor CHAIN itself is verified via the
     // mandatory capture-loop screenshot (this task's report), not introspected here.
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogItemReceiveText:GetText()")
+        s.eval::<String>("return QuestLogItemReceiveText:GetText()")
             .unwrap(),
         "You will also receive:"
     );
 
     // One fixed reward shows, chained under the receive text (its own SetPoint target).
-    assert!(s
-        .eval::<bool>("return BenillaQuestLogReward1:IsShown()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaQuestLogReward2:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return QuestLogReward1:IsShown()").unwrap());
+    assert!(!s.eval::<bool>("return QuestLogReward2:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogReward1Name:GetText()")
+        s.eval::<String>("return QuestLogReward1Name:GetText()")
             .unwrap(),
         "Militia Hammer"
     );
 
     assert_eq!(
-        s.eval::<String>("return BenillaQuestLogRewardTitleText:GetText()")
+        s.eval::<String>("return QuestLogRewardTitleText:GetText()")
             .unwrap(),
         "Rewards"
     );
 }
 
-/// One entry whose selected detail overflows the 261px-tall `BenillaQuestLogDetailScroll`: 10
-/// objective lines (each a FIXED 12px slot, `BenillaQuestLogObjective1`'s own XML comment) plus a
+/// One entry whose selected detail overflows the 261px-tall `QuestLogDetailScroll`: 10
+/// objective lines (each a FIXED 12px slot, `QuestLogObjective1`'s own XML comment) plus a
 /// long description and a reward row push the child's summed height (`BenillaQuestLogDetail_
 /// ResizeChild`) well past the pane — load-bearing for the scroll/clip tests below even
 /// engine-only (no font atlas, so every auto-height FontString measures 0 here — this fixture
@@ -770,8 +748,8 @@ fn overflowing_entry() -> QuestLogState {
 }
 
 /// The ScrollFrame clip (decision 0112 §4): every quad in the moved detail chain's subtree —
-/// `BenillaQuestLogDetailChild` and its descendants (here, a reward row's icon-slot texture) —
-/// carries `BenillaQuestLogDetailScroll`'s own resolved rect as its clip, so content that overflows
+/// `QuestLogDetailChild` and its descendants (here, a reward row's icon-slot texture) —
+/// carries `QuestLogDetailScroll`'s own resolved rect as its clip, so content that overflows
 /// the pane never draws past its bottom edge; a sibling entirely outside the scroll child (the
 /// window's own book-icon chrome) stays unclipped, mirroring `scrollframe.rs`'s own unit test for
 /// the mechanism, just through the shipped window instead of a synthetic fixture.
@@ -828,7 +806,7 @@ fn overflowing_detail_content_clips_to_the_scrollframe_rect() {
 
 /// Wheeling over the detail pane changes `GetVerticalScroll()` — the ScrollFrame is
 /// mouse-wheel-interactive by construction (decision 0112, no wheel-catcher needed), and is
-/// declared after `BenillaQuestLogWheelCatcher` in this window's `<Frames>` so it out-ranks the
+/// declared after `QuestLogWheelCatcher` in this window's `<Frames>` so it out-ranks the
 /// catcher within its own rect (this window's own XML comment on hit-test z-order).
 #[test]
 fn wheel_over_the_detail_pane_changes_vertical_scroll() {
@@ -850,14 +828,14 @@ fn wheel_over_the_detail_pane_changes_vertical_scroll() {
     let (x, y) = (scroll_rect.left + 10.0, scroll_rect.top - 10.0);
 
     assert_eq!(
-        s.eval::<f32>("return BenillaQuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
             .unwrap(),
         0.0
     );
     s.mouse_wheel(x, y, -1.0); // WoW convention: -1 = down
     assert!(s.errors().is_empty(), "wheel errors: {:?}", s.errors());
     let after = s
-        .eval::<f32>("return BenillaQuestLogDetailScroll:GetVerticalScroll()")
+        .eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
         .unwrap();
     assert!(
         after > 0.0,
@@ -883,10 +861,9 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     s.resolve(); // GetVerticalScrollRange (SetVerticalScroll's clamp) reads resolved rects.
 
-    s.run("BenillaQuestLogDetailScroll:SetVerticalScroll(10)")
-        .unwrap();
+    s.run("QuestLogDetailScroll:SetVerticalScroll(10)").unwrap();
     assert_eq!(
-        s.eval::<f32>("return BenillaQuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
             .unwrap(),
         10.0
     );
@@ -895,18 +872,18 @@ fn selection_change_resets_detail_scroll_but_a_quest_log_update_refresh_does_not
     s.fire_event("QUEST_LOG_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "refresh errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<f32>("return BenillaQuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
             .unwrap(),
         10.0,
         "QUEST_LOG_UPDATE's data-refresh path must not yank the scroll position (pin §5)"
     );
 
     // A manual reselect (the row-click path — no doNotScroll) DOES reset it.
-    s.run(r#"BenillaQuestLogTitle_OnClick(BenillaQuestLogTitle1, "LeftButton")"#)
+    s.run(r#"BenillaQuestLogTitle_OnClick(QuestLogTitle1, "LeftButton")"#)
         .unwrap();
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
     assert_eq!(
-        s.eval::<f32>("return BenillaQuestLogDetailScroll:GetVerticalScroll()")
+        s.eval::<f32>("return QuestLogDetailScroll:GetVerticalScroll()")
             .unwrap(),
         0.0,
         "a manual reselect snaps the detail pane's scroll back to the top"
@@ -1063,14 +1040,13 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     s.run("ToggleQuestLog()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return BenillaQuestLogReward1:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return QuestLogReward1:IsShown()").unwrap(),
         "the fixture's one fixed reward row is laid out"
     );
     let _ = s.take_dressup_intents();
 
     // A PLAIN click is inert: no room, no chat text, no error (the row has no select arm).
-    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    s.run("QuestLogReward1:Click()").unwrap();
     assert!(
         s.take_dressup_intents().is_empty(),
         "a plain click never opens the dressing room"
@@ -1086,7 +1062,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
     // SHIFT + chat open → the reward's full escaped link (ref l.547-550).
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    s.run("QuestLogReward1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.eval::<String>("return ChatFrameEditBox:GetText()")
@@ -1101,7 +1077,7 @@ fn reward_rows_preview_and_post_and_a_plain_click_stays_inert() {
 
     // CTRL → the room wearing the reward (ref l.543-546): re-dress first, then try it on.
     s.set_modifiers(false, true, false);
-    s.run("BenillaQuestLogReward1:Click()").unwrap();
+    s.run("QuestLogReward1:Click()").unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
         s.take_dressup_intents(),

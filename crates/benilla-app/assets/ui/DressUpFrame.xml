@@ -46,8 +46,8 @@
         -- tries the clicked item on. Both halves ride ONE ordered intent queue app-side, so the
         -- reset can never overtake the try-on (dressup.rs's module doc).
         function DressUpItem(item)
-            if not BenillaDressUpFrame:IsVisible() then
-                ShowUIPanel(BenillaDressUpFrame)
+            if not DressUpFrame:IsVisible() then
+                ShowUIPanel(DressUpFrame)
                 BenillaDressUpModel_Dress()   -- ref: DressUpModel:SetUnit("player")
             end
             BenillaDressUpModel_TryOn(item)   -- ref: DressUpModel:TryOn(item)
@@ -86,10 +86,10 @@
         -- character window's level line documents).
         function SetDressUpBackground()
             local texture = DressUpTexturePath()
-            BenillaDressUpBackgroundTopLeft:SetTexture(texture .. 1)
-            BenillaDressUpBackgroundTopRight:SetTexture(texture .. 2)
-            BenillaDressUpBackgroundBotLeft:SetTexture(texture .. 3)
-            BenillaDressUpBackgroundBotRight:SetTexture(texture .. 4)
+            DressUpBackgroundTopLeft:SetTexture(texture .. 1)
+            DressUpBackgroundTopRight:SetTexture(texture .. 2)
+            DressUpBackgroundBotLeft:SetTexture(texture .. 3)
+            DressUpBackgroundBotRight:SetTexture(texture .. 4)
         end
 
         -- The pane's facing — the paper doll's pair of handlers, over this room's own booth yaw
@@ -147,7 +147,7 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <Frame name="BenillaDressUpFrame" toplevel="true" hidden="true">
+    <Frame name="DressUpFrame" toplevel="true" hidden="true">
         <!-- The ref's 384×512 window. No <Anchors>: ShowUIPanel seats it in the left slot, this
              house's convention for every panel window (MerchantFrame.xml/CraftFrame.xml). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -156,7 +156,7 @@
             <!-- The "player" portrait, 60×60 at TOPLEFT (7,-6) (ref l.20-33) — BACKGROUND so the
                  window art's ring frames it; bound in OnShow, like every other portrait here. -->
             <Layer level="BACKGROUND">
-                <Texture name="BenillaDressUpFramePortrait">
+                <Texture name="DressUpFramePortrait">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>
@@ -180,61 +180,61 @@
                     <Size><AbsDimension x="128" y="256"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
                 </Texture>
-                <FontString name="BenillaDressUpFrameTitleText" inherits="GameFontHighlight" text="DRESSUP_FRAME">
+                <FontString name="DressUpFrameTitleText" inherits="GameFontHighlight" text="DRESSUP_FRAME">
                     <Size><AbsDimension x="300" y="14"/></Size>
                     <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaDressUpFrameDescriptionText" inherits="GameFontNormalSmall" text="DRESSUP_FRAME_INSTRUCTIONS">
+                <FontString name="DressUpFrameDescriptionText" inherits="GameFontNormalSmall" text="DRESSUP_FRAME_INSTRUCTIONS">
                     <Size><AbsDimension x="260" y="36"/></Size>
                     <Anchors>
-                        <Anchor point="CENTER" relativeTo="BenillaDressUpFrameTitleText" relativePoint="BOTTOM"><Offset><AbsDimension x="10" y="-22"/></Offset></Anchor>
+                        <Anchor point="CENTER" relativeTo="DressUpFrameTitleText" relativePoint="BOTTOM"><Offset><AbsDimension x="10" y="-22"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
             </Layer>
             <!-- The race backdrop behind the model, four quadrants (ref l.73-118); the files are
                  chosen per race by SetDressUpBackground above. -->
             <Layer level="OVERLAY">
-                <Texture name="BenillaDressUpBackgroundTopLeft">
+                <Texture name="DressUpBackgroundTopLeft">
                     <Size><AbsDimension x="256" y="255"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="22" y="-76"/></Offset></Anchor></Anchors>
                 </Texture>
-                <Texture name="BenillaDressUpBackgroundTopRight">
+                <Texture name="DressUpBackgroundTopRight">
                     <Size><AbsDimension x="62" y="255"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaDressUpBackgroundTopLeft" relativePoint="TOPRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="DressUpBackgroundTopLeft" relativePoint="TOPRIGHT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaDressUpBackgroundBotLeft">
+                <Texture name="DressUpBackgroundBotLeft">
                     <Size><AbsDimension x="256" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaDressUpBackgroundTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="DressUpBackgroundTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaDressUpBackgroundBotRight">
+                <Texture name="DressUpBackgroundBotRight">
                     <Size><AbsDimension x="62" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaDressUpBackgroundTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="DressUpBackgroundTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
                 </Texture>
             </Layer>
         </Layers>
         <Frames>
             <!-- The corner close X: the ref's UIPanelCloseButton seat (CENTER of TOPRIGHT, -46,-25 —
                  ref l.120-127) on the minimize-button art every close button in this house uses. -->
-            <Button name="BenillaDressUpFrameCloseButton">
+            <Button name="DressUpFrameCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-46" y="-25"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
                 <Scripts>
-                    <OnClick>HideUIPanel(BenillaDressUpFrame)</OnClick>
+                    <OnClick>HideUIPanel(DressUpFrame)</OnClick>
                 </Scripts>
             </Button>
             <!-- Close (ref l.128-146) and Reset (l.147-165, chained off Close's LEFT). Reset is the
                  ref's `DressUpModel:Dress()` + its gsTitleOptionOK click. -->
-            <Button name="BenillaDressUpFrameCancelButton" inherits="BenillaDressUpPanelButtonTemplate" text="CLOSE">
+            <Button name="DressUpFrameCancelButton" inherits="BenillaDressUpPanelButtonTemplate" text="CLOSE">
                 <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="305" y="-422"/></Offset></Anchor></Anchors>
                 <Scripts>
-                    <OnClick>HideUIPanel(BenillaDressUpFrame)</OnClick>
+                    <OnClick>HideUIPanel(DressUpFrame)</OnClick>
                 </Scripts>
             </Button>
-            <Button name="BenillaDressUpFrameResetButton" inherits="BenillaDressUpPanelButtonTemplate" text="RESET">
-                <Anchors><Anchor point="RIGHT" relativeTo="BenillaDressUpFrameCancelButton" relativePoint="LEFT"/></Anchors>
+            <Button name="DressUpFrameResetButton" inherits="BenillaDressUpPanelButtonTemplate" text="RESET">
+                <Anchors><Anchor point="RIGHT" relativeTo="DressUpFrameCancelButton" relativePoint="LEFT"/></Anchors>
                 <Scripts>
                     <OnClick>
                         BenillaDressUpModel_Dress()
@@ -245,7 +245,7 @@
 
             <!-- The model pane (ref the <DressUpModel> widget, l.166-207): 316×351 anchored BOTTOM
                  (-11,+85). A plain Frame sampling the "dressup" booth bake (header). -->
-            <Frame name="BenillaDressUpModelFrame">
+            <Frame name="DressUpModelFrame">
                 <Size><AbsDimension x="316" y="351"/></Size>
                 <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-11" y="85"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -267,26 +267,26 @@
                          then right chained off its TOPRIGHT. Both edges registered, so one tap fires
                          OnClick twice and holding hands the spin to the pane's OnUpdate — the ref's
                          own tap-and-hold (decision 0638 §3). -->
-                    <Button name="BenillaDressUpModelFrameRotateLeftButton">
+                    <Button name="DressUpModelFrameRotateLeftButton">
                         <Size><AbsDimension x="35" y="35"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaDressUpFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="21" y="-75"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="DressUpFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="21" y="-75"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
                         <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                         <Scripts>
                             <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                            <OnClick>BenillaDressUpModel_RotateLeft(getglobal("BenillaDressUpModelFrame"))</OnClick>
+                            <OnClick>BenillaDressUpModel_RotateLeft(getglobal("DressUpModelFrame"))</OnClick>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaDressUpModelFrameRotateRightButton">
+                    <Button name="DressUpModelFrameRotateRightButton">
                         <Size><AbsDimension x="35" y="35"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaDressUpModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="DressUpModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
                         <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                         <Scripts>
                             <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                            <OnClick>BenillaDressUpModel_RotateRight(getglobal("BenillaDressUpModelFrame"))</OnClick>
+                            <OnClick>BenillaDressUpModel_RotateRight(getglobal("DressUpModelFrame"))</OnClick>
                         </Scripts>
                     </Button>
                 </Frames>
@@ -303,7 +303,7 @@
             <OnLoad>SetDressUpBackground()</OnLoad>
             <OnShow>
                 SetDressUpBackground()
-                SetPortraitTexture(BenillaDressUpFramePortrait, "player")
+                SetPortraitTexture(DressUpFramePortrait, "player")
                 PlaySound("igCharacterInfoOpen")
             </OnShow>
             <!-- Closing empties the booth (dressup.rs's `Close` intent): the ref's widget keeps its

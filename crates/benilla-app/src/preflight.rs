@@ -74,9 +74,10 @@ const MOVE_BLOCKERS: &[(u32, &str)] = &[
     (0x0100_0000, "POSSESSED (another unit holds the reins)"),
 ];
 
-/// `UNIT_FLAG_IN_COMBAT` — worth naming on entry: an unattended probe that logs in already fighting
-/// is the exact shape of the accident the unattended-combat ban exists for (method.md).
-const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
+/// Worth naming on entry: an unattended probe that logs in already fighting is the exact shape of
+/// the accident the unattended-combat ban exists for (method.md). The bit itself is declared once
+/// ([`crate::player`]).
+use crate::player::UNIT_FLAG_IN_COMBAT;
 
 /// `UNIT_FLAG_SILENCED` — casts silently refuse.
 const UNIT_FLAG_SILENCED: u32 = 0x0000_2000;

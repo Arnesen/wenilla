@@ -39,7 +39,7 @@ pub(super) enum UiFixture {
     /// render): vault slots with icons, bag buttons (owned icon / bought-empty / red unpurchased),
     /// and the purchase row's DBC cost.
     Bank,
-    /// The multi-quest greeting panel (`QUEST_GREETING`, `BenillaQuestGreetingPanel`): a greeting
+    /// The multi-quest greeting panel (`QUEST_GREETING`, `QuestGreetingPanel`): a greeting
     /// line plus an "Available Quests" list of `UI-Quest-BulletPoint` title rows — the frame the
     /// gossip-vs-greeting confusion turned on, and previously uncaptured (bullet/title seating had
     /// no regression baseline).

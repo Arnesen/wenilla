@@ -170,7 +170,7 @@ fn solo_target_right_click_invites_a_player() {
 
     // Right-click the target frame through the real hit path.
     let (cx, cy) = s
-        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
@@ -268,7 +268,7 @@ fn solo_target_trade_click_queues_an_initiate() {
 
     // Right-click the target frame → PLAYER menu.
     let (cx, cy) = s
-        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
@@ -334,7 +334,7 @@ fn solo_target_follow_click_queues_an_exact_by_name_follow() {
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
 
     let (cx, cy) = s
-        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
@@ -401,7 +401,7 @@ fn solo_target_inspect_click_reaches_inspect_unit() {
     s.resolve();
 
     let (cx, cy) = s
-        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .eval::<(f64, f64)>("return TargetFrame:GetCenter()")
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
@@ -478,6 +478,28 @@ fn bake_pet_strings(s: &UiScript) {
 
 /// A pet that exists, so `UnitExists("pet")` passes the dropdown's own gate.
 fn a_pet(s: &mut UiScript, name: &str) {
+    // A player first: `PetFrame` is a CHILD of `PlayerFrame` (our UnitFrames.xml:1792 and the
+    // reference's PetFrame.xml:4 both say `parent="PlayerFrame"`), and `UnitFrame_Update` hides a
+    // frame whose unit does not exist — so a pet with no player leaves the pet frame inside a
+    // hidden parent and the right-click never lands. A pet without a player is not a state the game
+    // can be in; the fixture was only ever getting away with it because the loader used to ignore
+    // the `parent=` attribute.
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Me".into()),
+            health: 100,
+            max_health: 100,
+            level: 60,
+            is_player: true,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event(
+        "UNIT_HEALTH",
+        vec![benilla_ui::script::ScriptValue::Str("player".into())],
+    );
     s.set_unit(
         "pet",
         Some(UnitState {
@@ -499,9 +521,7 @@ fn a_pet(s: &mut UiScript, name: &str) {
 /// `DropDownList1` afterwards.
 fn right_click_the_pet_frame(s: &mut UiScript) {
     s.resolve();
-    let (cx, cy) = s
-        .eval::<(f64, f64)>("return BenillaPetFrame:GetCenter()")
-        .unwrap();
+    let (cx, cy) = s.eval::<(f64, f64)>("return PetFrame:GetCenter()").unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
     s.resolve();
@@ -702,7 +722,7 @@ fn the_pet_details_row_opens_the_pet_paper_doll() {
     click_row(&mut s, 2);
     assert_eq!(
         s.eval::<String>("return BENILLA_TEST_TOGGLED").unwrap(),
-        "BenillaPetPaperDollFrame"
+        "PetPaperDollFrame"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -96,8 +96,15 @@ pub(crate) fn resolve(diff: &[(String, Vec<String>)]) -> Vec<(String, Vec<String
                 held.retain(|h| h != k);
             }
         }
-        if let Some((_, slot)) = table.iter_mut().find(|(n, _)| n == name) {
-            *slot = keys.clone();
+        match table.iter_mut().find(|(n, _)| n == name) {
+            Some((_, slot)) => *slot = keys.clone(),
+            // **A name that is not in SPECS is an ADDON's command, and it is kept** (decision
+            // 1201). Dropping it here is what made an addon binding forget its key every restart:
+            // the row was written by `to_diff`, read back by `from_diff`, had its chord stolen
+            // from whoever else held it by the pass above — and was then thrown away, so the
+            // binding registered at world entry with nothing to restore. `Bindings.txt` is a flat
+            // list in the reference too; an addon's row is a row like any other.
+            None => table.push((name.clone(), keys.clone())),
         }
     }
     table
@@ -180,11 +187,16 @@ mod tests {
                 ("BOGUSCMD".to_string(), vec!["Q".to_string()]),
             ]
         );
-        // Unknown commands pass through parse (kept for forward compat); resolve just drops
-        // what the registry doesn't know — after stealing its keys, so the file's intent
-        // ("Q belongs to BOGUSCMD, not STRAFELEFT") still holds for the commands we do have.
+        // **A command the registry does not know is KEPT** (decision 1201). It used to be
+        // dropped after its keys were stolen, which was right for a genuinely bogus line and
+        // catastrophic for the case that actually occurs: an ADDON's command, whose
+        // `Bindings.xml` registers at world entry, hours after this file was read. Dropping it
+        // meant the binding registered with nothing to restore and forgot the player's chord
+        // every restart (1192 §4). The steal still happens either way, so the file's intent
+        // ("Q belongs to that command, not STRAFELEFT") holds for the commands we do have.
         let resolved = resolve(&parsed);
-        assert!(!resolved.iter().any(|(n, _)| n == "BOGUSCMD"));
+        let bogus = &resolved.iter().find(|(n, _)| n == "BOGUSCMD").unwrap().1;
+        assert_eq!(bogus, &vec!["Q".to_string()]);
         let strafe = &resolved.iter().find(|(n, _)| n == "STRAFELEFT").unwrap().1;
         assert!(
             strafe.is_empty(),

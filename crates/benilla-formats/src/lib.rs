@@ -37,6 +37,8 @@ mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
 mod itembagfamily;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
+mod itemclass;
+pub use itemclass::{load_item_classes, ItemClassCatalog};
 mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
@@ -45,6 +47,8 @@ pub use factions::{
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
+mod languages;
+pub use languages::{load_default_languages, DefaultLanguages};
 mod creature_families;
 pub use creature_families::{
     load_creature_families, load_pet_food_names, CreatureFamilies, CreatureFamily, PetFoodNames,
@@ -226,6 +230,10 @@ mod area_poi;
 pub use area_poi::{load_area_poi_catalog, AreaPoi, AreaPoiCatalog};
 mod area_table;
 pub use area_table::{load_area_table_catalog, AreaTableCatalog, AreaTableRow};
+mod chat_channels;
+pub use chat_channels::{
+    flags as chat_channel_flags, load_chat_channels_catalog, ChatChannelRow, ChatChannelsCatalog,
+};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 mod zone_map;

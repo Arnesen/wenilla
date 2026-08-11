@@ -19,7 +19,7 @@
         BENILLA_ERRORS_FADE = 1.0   -- INTERIM (comment above)
 
         function BenillaErrorsFrame_AddMessage(text, r, g, b)
-            local frame = getglobal("BenillaErrorsFrame")
+            local frame = getglobal("UIErrorsFrame")
             -- insertMode="TOP": newest first, older lines shift down and off the list.
             table.insert(frame.messages, 1, { text = text, r = r, g = g, b = b, age = 0 })
             while table.getn(frame.messages) > BENILLA_ERRORS_LINES do
@@ -31,7 +31,7 @@
 
         function BenillaErrorsFrame_Paint(frame)
             for i = 1, BENILLA_ERRORS_LINES do
-                local line = getglobal("BenillaErrorsFrameLine" .. i)
+                local line = getglobal("UIErrorsFrameLine" .. i)
                 local msg = frame.messages[i]
                 if msg then
                     line:SetText(msg.text)
@@ -49,19 +49,24 @@
             end
         end
 
-        function BenillaErrorsFrame_OnLoad(frame)
+        function UIErrorsFrame_OnLoad()
+            local frame = this
             frame.messages = {}
             frame:RegisterEvent("UI_INFO_MESSAGE")
             frame:RegisterEvent("UI_ERROR_MESSAGE")
             frame:Hide()
         end
 
-        function BenillaErrorsFrame_OnEvent(frame)
-            if not arg1 then return end
+        -- ref UIErrorsFrame_OnEvent(event, message) (UIErrorsFrame.lua:8-15) — the message is the
+        -- DECLARED second parameter, not the `arg1` global: the XML passes `arg1` into it exactly
+        -- as the reference's own does, and an addon calling the 1.12 arity is then read correctly.
+        function UIErrorsFrame_OnEvent(event, message)
+            local frame = this
+            if not message then return end
             if event == "UI_INFO_MESSAGE" then
-                BenillaErrorsFrame_AddMessage(arg1, 1.0, 1.0, 0.0) -- ref UIErrorsFrame.lua:12
+                BenillaErrorsFrame_AddMessage(message, 1.0, 1.0, 0.0) -- ref UIErrorsFrame.lua:12
             elseif event == "UI_ERROR_MESSAGE" then
-                BenillaErrorsFrame_AddMessage(arg1, 1.0, 0.1, 0.1) -- ref UIErrorsFrame.lua:14
+                BenillaErrorsFrame_AddMessage(message, 1.0, 0.1, 0.1) -- ref UIErrorsFrame.lua:14
             end
         end
 
@@ -86,7 +91,7 @@
          own content is flat FontString REGIONS at level 0 while those panels carry dozens of nested
          child frames at level 1+, so left in the default MEDIUM its toasts draw UNDER whichever
          panel is open — invisible in exactly the state you most want to read them. Decision 0597. -->
-    <Frame name="BenillaErrorsFrame" frameStrata="HIGH">
+    <Frame name="UIErrorsFrame" frameStrata="HIGH">
         <Size><AbsDimension x="512" y="60"/></Size>
         <Anchors>
             <Anchor point="TOP" relativePoint="TOP">
@@ -95,23 +100,23 @@
         </Anchors>
         <Layers>
             <Layer level="OVERLAY">
-                <FontString name="BenillaErrorsFrameLine1" inherits="GameFontNormalLarge" justifyH="CENTER">
+                <FontString name="UIErrorsFrameLine1" inherits="GameFontNormalLarge" justifyH="CENTER">
                     <Size><AbsDimension x="512" y="0"/></Size>
                     <Anchors><Anchor point="TOP" relativePoint="TOP"/></Anchors>
                 </FontString>
-                <FontString name="BenillaErrorsFrameLine2" inherits="GameFontNormalLarge" justifyH="CENTER">
+                <FontString name="UIErrorsFrameLine2" inherits="GameFontNormalLarge" justifyH="CENTER">
                     <Size><AbsDimension x="512" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativeTo="BenillaErrorsFrameLine1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="TOP" relativeTo="UIErrorsFrameLine1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaErrorsFrameLine3" inherits="GameFontNormalLarge" justifyH="CENTER">
+                <FontString name="UIErrorsFrameLine3" inherits="GameFontNormalLarge" justifyH="CENTER">
                     <Size><AbsDimension x="512" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativeTo="BenillaErrorsFrameLine2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="TOP" relativeTo="UIErrorsFrameLine2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>
         </Layers>
         <Scripts>
-            <OnLoad>BenillaErrorsFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaErrorsFrame_OnEvent(self)</OnEvent>
+            <OnLoad>UIErrorsFrame_OnLoad()</OnLoad>
+            <OnEvent>UIErrorsFrame_OnEvent(event, arg1)</OnEvent>
             <OnUpdate>BenillaErrorsFrame_OnUpdate(self, arg1)</OnUpdate>
         </Scripts>
     </Frame>

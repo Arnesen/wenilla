@@ -7,12 +7,15 @@
 //!   §5) contains the point. Pure query; fires nothing, mutates nothing.
 //! - [`UiScript::mouse_move`] hit-tests every move and, on a captured-frame **change**, fires the
 //!   `OnLeave`/`OnEnter` pair (RF-0025's `motion=true` hover boundary) — and, before that,
-//!   advances an armed drag gesture and an in-flight **Slider thumb drag** (both move within one
-//!   frame, crossing no hover boundary, so they must run before the boundary early-return).
+//!   advances an armed drag gesture, an in-flight **Slider thumb drag**, and an in-flight
+//!   **frame move** (`StartMoving`, [`super::object`]'s `movable` cluster). All three move within
+//!   one frame, crossing no hover boundary, so they must run before the boundary early-return.
 //! - [`UiScript::mouse_button`] resolves `OnMouseDown`/`OnMouseUp`, the `OnClick`
 //!   press/release-registration rules ([`button::wants_click`]), the **drag trio** + **world
 //!   drop** below, the **Slider thumb-drag** capture (a left press on a thumb, decision 0250 §5),
-//!   and EditBox click-to-focus — all keyed off the same hit-test.
+//!   and EditBox click-to-focus — all keyed off the same hit-test. The **double-click detector**
+//!   ([`DOUBLE_CLICK_SECS`]) rides the release edge here too: a click on a frame whose previous
+//!   click landed within 300 ms fires `OnDoubleClick` **instead of** that second `OnClick`.
 //! - [`UiScript::mouse_wheel`] fires `OnMouseWheel`, bubbling to the nearest ancestor with a
 //!   handler when the hit frame has none (a ScrollFrame under a non-scrolling child).
 //!
@@ -48,6 +51,28 @@ use crate::order;
 use super::clip::{effective_clip, scroll_clip_sources};
 use super::{button, cursor, editbox, event, UiScript};
 
+/// The double-click interval — **300 ms, VERIFIED off the bytes**, a hardcoded instruction
+/// immediate: `0x77937b  81 f9 2c 01 00 00  cmp ecx, 0x12c`, comparing `now − [this+0x334]` inside
+/// the Button mouse-UP dispatcher `0x7792d0` (wow-re `ui/scratch/button-doubleclick-law.md`, a §5
+/// cross-check dispatched from here).
+///
+/// The units are verified too, not assumed: `now` comes from `0x42c010` → `0x42b790`, whose
+/// scale is stored as `1.0/freq × 1000.0` and whose counter is `KERNEL32!GetTickCount` (import
+/// `[0x7ff310]`) — milliseconds either way.
+///
+/// **What it is NOT**, because all three were live hypotheses and each is closed at the bytes:
+/// it is not the OS setting (`CS_DBLCLKS` is never requested — all four `RegisterClassExA` sites
+/// pass `style = 0x20` = `CS_OWNDC` alone — and `GetDoubleClickTime` is not imported), it is not a
+/// CVar (no such `.rdata` string; nothing near the compare reaches `CVar::Register 0x63db90`), and
+/// there is **no position gate** (the `0x766122`–`0x766140` "double-click detector" this was first
+/// chased through is really the zero-motion cursor-move coalescing filter — that gloss in
+/// `world-click-drag-arbitration.md` l.238 is refuted and corrected). The only spatial constraint
+/// is that each release hit-tests inside the frame, applied independently; the two clicks may land
+/// arbitrarily far apart.
+///
+/// So the interval does not follow the host OS double-click speed and the player cannot change it.
+pub(super) const DOUBLE_CLICK_SECS: f64 = 0.300;
+
 // ── Input / hit-testing (decision 0068; spec-faithful, not byte-pinned) ─────────────────────
 //
 // The mouse-focus model (`propagation.md`): focus walks frames top-down in reverse draw order;
@@ -67,6 +92,35 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<super::Model>().expect("model app_data");
             Ok(model.cursor_pos)
+        })?,
+    )?;
+
+    // `GetMouseFocus()` — the frame the mouse is over, or nil.
+    //
+    // **The corpus's most-wanted engine verb**: 78 of 218 addons call it (decision 1195). Every
+    // tooltip scanner, every "what am I hovering" helper and every mouseover-macro library is this
+    // one call. It is a pure read of the hover state [`UiScript::mouse_move`] already maintains —
+    // `Model::mouseover`, the frame that owns the `OnEnter`/`OnLeave` boundary — so the answer is
+    // exactly the frame whose `OnEnter` last fired, which is what an addon means by "focus".
+    //
+    // Returns the frame's **wrapper table**, not its name: the reference returns a frame object and
+    // callers immediately write `GetMouseFocus():GetName()`.
+    lua.globals().set(
+        "GetMouseFocus",
+        lua.create_function(|lua, ()| {
+            let id = {
+                let mut model = lua.app_data_mut::<super::Model>().expect("model app_data");
+                // Re-check liveness: a frame can be destroyed between the hover and this call, and
+                // handing back a wrapper for a dead handle is worse than answering nil.
+                model
+                    .mouseover
+                    .filter(|&h| model.arena.frame(h).is_some())
+                    .map(|h| model.frame_id(h))
+            };
+            match id {
+                Some(id) => Ok(Value::Table(super::object::frame_wrapper(lua, id)?)),
+                None => Ok(Value::Nil),
+            }
         })?,
     )?;
     Ok(())
@@ -107,8 +161,9 @@ impl UiScript {
     /// Move the cursor to `(x, y)`: hit-test, and if the captured frame **changed** since the last
     /// move, fire `OnLeave(self, motion=true)` on the frame being left (if any and still live) and
     /// `OnEnter(self, motion=true)` on the newly-captured frame (if any). Tracks the current
-    /// mouseover in the model. Also advances an armed [`super::Model::drag`] gesture (decision 0216 §3):
-    /// this runs BEFORE the no-boundary-crossed early return below, since dragging within one
+    /// mouseover in the model. Also advances an armed [`super::Model::drag`] gesture (decision 0216 §3)
+    /// and an in-flight [`super::Model::moving`] frame ([`super::object`]'s `movable` cluster):
+    /// both run BEFORE the no-boundary-crossed early return below, since dragging within one
     /// frame crosses no hover boundary at all. Returns the captured frame id (so the app can drive
     /// `PointerOverUi`). Handler errors are collected into [`UiScript::errors`], never panicking.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> Option<u32> {
@@ -128,6 +183,11 @@ impl UiScript {
             // Advance an in-flight Slider thumb drag first — dragging within one frame crosses no
             // hover boundary, so this must run before the early return below (decision 0250 §5).
             let slider_change = super::slider::drag_move(&mut model, x, y);
+            // A frame in flight from `StartMoving()` follows the cursor here for the same reason
+            // (`object::movable`): the frame moves *under* the cursor, so the hover boundary never
+            // crosses and a pump behind the early return would only ever advance when the cursor
+            // left the frame it is dragging.
+            super::object::advance_move(&mut model, (x, y));
             let drag_start = cursor::maybe_start_drag(&mut model, (x, y));
             let new_handle = new_id.and_then(|id| model.id_to_frame.get(&id).copied());
             if new_handle == model.mouseover {
@@ -224,6 +284,9 @@ impl UiScript {
     /// statement-position calls (`script.mouse_button(...);`) are unaffected.
     pub fn mouse_button(&mut self, x: f32, y: f32, button: &str, down: bool) -> bool {
         let hit_id = self.hit_test(x, y);
+        // The session clock, read before the borrow below — the double-click detector's only input
+        // beyond the hit ([`Model::last_click`]). Same `GetTime()` seconds every script sees.
+        let now = self.now();
         self.model_mut().cursor_pos = (x, y);
         let btn = match self.lua.create_string(button) {
             Ok(s) => Value::String(s),
@@ -237,11 +300,12 @@ impl UiScript {
         // "<Button>ButtonDown"; a release fires it when press+release landed on the same frame AND
         // it registered "<Button>ButtonUp" — UNLESS a started drag is being resolved instead.
         #[allow(clippy::type_complexity)]
-        let (click_id, drag_release, world_dropped, slider_jump): (
+        let (click_id, drag_release, world_dropped, slider_jump, double_id): (
             Option<u32>,
             Option<cursor::DragRelease>,
             bool,
             Option<(u32, f32)>,
+            Option<u32>,
         ) = {
             let mut model = self.model_mut();
             let hit_handle = hit_id.and_then(|id| model.id_to_frame.get(&id).copied());
@@ -268,7 +332,7 @@ impl UiScript {
                 let click = hit_handle
                     .filter(|&h| button::wants_click(&model, h, &wants))
                     .and(hit_id);
-                (click, None, false, jump)
+                (click, None, false, jump, None)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
                 // A left release ends any in-flight thumb drag (decision 0250 §5).
@@ -300,7 +364,48 @@ impl UiScript {
                         .filter(|&h| same_frame && button::wants_click(&model, h, &wants))
                         .and(hit_id)
                 };
-                (click, release, dropped, None)
+                // ── The double-click adjudication — on the RELEASE edge, on the click that just
+                // qualified, and STRICTLY EXCLUSIVE with it.
+                //
+                // All three of those are byte-verified (wow-re `ui/scratch/button-doubleclick-law.md`):
+                // the only site that fires the `+0x4d4` slot is `0x77938d`, inside the mouse-UP
+                // dispatcher `0x7792d0` — the mouse-DOWN dispatcher `0x779210` has no double-click
+                // leg at all — and `0x77939d jmp 0x7793b5` skips *past* the single leg's
+                // `call [edx+0x94]`, so **`OnDoubleClick` REPLACES the second `OnClick`; it is not
+                // additive**. Whatever suppresses the click (a resolved drag, a release on another
+                // frame, a button this widget never registered) suppresses this too, by
+                // construction: it hangs off `click`.
+                //
+                // The handler-presence test is load-bearing, not an optimisation. The binary's
+                // chain includes `[+0x4d4] != 0`, so a widget with no `OnDoubleClick` script takes
+                // the ordinary single leg every time — without that gate, rattling any button in
+                // the UI would silently swallow every second `OnClick`.
+                let target = click.and(hit_handle);
+                let double = target.filter(|&h| {
+                    model
+                        .scripts
+                        .get(&h)
+                        .is_some_and(|s| s.contains("OnDoubleClick"))
+                        && model
+                            .last_click
+                            .get(&h)
+                            .is_some_and(|&t| now - t <= DOUBLE_CLICK_SECS)
+                });
+                if let Some(h) = double {
+                    // A completed double ZEROES the stamp (`0x779393`), so clicks PAIR: four fast
+                    // clicks are Click · DoubleClick · Click · DoubleClick, never one click and
+                    // three doubles.
+                    model.last_click.remove(&h);
+                } else if let Some(h) = target {
+                    // A fired single ARMS the detector (`0x7793af`) — on the click *predicate*,
+                    // not on an `OnClick` handler existing: the binary stamps after calling the
+                    // firer, which is itself a no-op when no script is bound.
+                    model.last_click.insert(h, now);
+                }
+                let double_id = double.and_then(|h| model.frame_to_id.get(&h).copied());
+                // Exclusive, not additive — the double leg is taken *instead of* the single one.
+                let click = if double_id.is_some() { None } else { click };
+                (click, release, dropped, None, double_id)
             }
         };
         // A track press's value jump fires OnValueChanged first (outside the borrow), the same
@@ -402,6 +507,19 @@ impl UiScript {
             // One click home for the physical and programmatic (`Click()`) paths: gated on a
             // Button's enabled flag, a CheckButton toggles before OnClick fires (button.rs).
             button::click_button(&self.lua, id, button, down);
+        }
+        // `OnDoubleClick(self, button)` — fired where `OnClick` would have been and instead of it
+        // (`0x77938d call [edx+0x98]`, the mouse-UP dispatcher's exclusive second leg). One
+        // argument, the button name of the *completing* release, and it plays the same click sound
+        // as a single: the base firer `0x779650` is the byte-twin of the single leg's `0x779540`.
+        //
+        // `arg2` is 0 in both legs; we pass it only for `OnClick`, where our binding already spells
+        // it as the documented `down` flag, and drop it here to match the Era-facing
+        // `OnDoubleClick(self, button)` signature the corpus is written against.
+        if let Some(id) = double_id {
+            if let Err(e) = event::fire_widget_handler(&self.lua, id, "OnDoubleClick", vec![btn]) {
+                self.push_error(e);
+            }
         }
         hit_id.is_some() || world_dropped
     }

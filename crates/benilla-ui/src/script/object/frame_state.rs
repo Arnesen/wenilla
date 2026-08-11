@@ -333,6 +333,40 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(model.arena.is_mouse_enabled(h))
         })?,
     )?;
+    // `EnableMouseWheel(flag)` / `IsMouseWheelEnabled()` — the wheel's own gate, a separate flag
+    // from `EnableMouse` in the reference and separate here (decision 1198).
+    //
+    // The flag is real and round-trips. **The dispatch is NOT gated on it yet, deliberately.**
+    // Our wheel dispatch keys off "does this frame carry an `OnMouseWheel` handler", walking up to
+    // the nearest ancestor that does — more permissive than the reference, which also requires the
+    // frame to be wheel-enabled so a scroll region can hand the wheel to the window behind it
+    // without tearing its handler out.
+    //
+    // Gating it today would break our own UI: 44 `OnMouseWheel` sites across 14 shipped files and
+    // **not one of them declares `enableMouseWheel`**, because the loader has never read that
+    // attribute. The condition to flip it is concrete rather than someday — teach the loader the
+    // attribute, declare it on those 44 sites, then gate. Until then this is a disclosed superset
+    // (1189's argument, pointed the other way), and the two corpus addons that stopped on the
+    // missing *method* are unblocked either way.
+    m.set(
+        "EnableMouseWheel",
+        lua.create_function(|lua, (this, enable): (Table, bool)| {
+            let h = frame_handle_of(lua, &this)?;
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .arena
+                .set_mouse_wheel_enabled(h, enable);
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "IsMouseWheelEnabled",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model.arena.is_mouse_wheel_enabled(h))
+        })?,
+    )?;
     // Clamp-to-screen (`0x776c00`/`0x776cb0`, geometry flags bit4 — layout.md): the layout resolve
     // keeps the frame's assembled rect inside the window, size preserved. GameTooltip frames
     // default true by construction (widget::Frame::clamped_to_screen — decision 0352).

@@ -255,7 +255,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 }
 
 /// The frame's effective scale, ε-guarded (a zero would poison the local-unit division).
-fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
+pub(super) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     let s = model
         .arena
         .frame(h)

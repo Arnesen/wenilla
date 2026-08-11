@@ -28,7 +28,10 @@ use crate::widget::{FrameHandle, FrameKind};
 mod events_regions;
 mod frame_state;
 mod layout_methods;
+mod movable;
+pub(crate) mod toplevel;
 pub(crate) use layout_methods::anchor_bits_eq;
+pub(crate) use movable::{advance_move, FrameMove};
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // id ↔ lightuserdata
@@ -134,8 +137,20 @@ fn point_name(p: Point) -> &'static str {
     }
 }
 
+/// Every closed-vocabulary attribute parser **trims** before it matches (decision 1204).
+///
+/// Not tidiness: `zBar.xml:146` — a shipped, working 1.12 addon — declares
+/// `frameStrata="BACKGROUND "` with a trailing space, and the real client took it. Ours refused,
+/// the frame's whole `<Frames>` subtree went with it, and the addon never loaded. Whitespace is
+/// never meaningful in an enum token, so trimming is both the lenient answer and the correct one;
+/// it is applied at the three parsers rather than at the attribute read, because a `text=`
+/// attribute's leading space IS meaningful and must not be touched.
+fn enum_token(s: &str) -> String {
+    s.trim().to_ascii_uppercase()
+}
+
 fn strata_from_str(s: &str) -> Option<Strata> {
-    Some(match s.to_ascii_uppercase().as_str() {
+    Some(match enum_token(s).as_str() {
         "WORLD" => Strata::World,
         "BACKGROUND" => Strata::Background,
         "LOW" => Strata::Low,
@@ -151,7 +166,7 @@ fn strata_from_str(s: &str) -> Option<Strata> {
 }
 
 pub(super) fn draw_layer_from_str(s: &str) -> Option<DrawLayer> {
-    Some(match s.to_ascii_uppercase().as_str() {
+    Some(match enum_token(s).as_str() {
         "BACKGROUND" => DrawLayer::Background,
         "BORDER" => DrawLayer::Border,
         "ARTWORK" => DrawLayer::Artwork,
@@ -162,7 +177,7 @@ pub(super) fn draw_layer_from_str(s: &str) -> Option<DrawLayer> {
 }
 
 fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
-    Some(match s.to_ascii_uppercase().as_str() {
+    Some(match enum_token(s).as_str() {
         "FRAME" => FrameKind::Frame,
         "BUTTON" => FrameKind::Button,
         "CHECKBUTTON" => FrameKind::CheckButton,
@@ -230,7 +245,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set("__framescript_meta", frame_meta)?;
 
     // CreateFrame(kind, name?, parent?, inherits?) — a global (RF-0024's factory is the loader's;
-    // this is the runtime one). `inherits` (4th) is the loader's template job — accepted + warned.
+    // this is the runtime one). `inherits` (4th) applies a registered template to the frame this
+    // call just made, through `crate::loader::apply_template`.
     let create_frame = lua.create_function(create_frame)?;
     lua.globals().set("CreateFrame", create_frame)?;
 
@@ -302,6 +318,7 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
         Some(FrameKind::ScrollingMessageFrame) => &[super::messageframe::REG_MESSAGEFRAME_METHODS],
         Some(FrameKind::ScrollFrame) => &[super::scrollframe::REG_SCROLLFRAME_METHODS],
         Some(FrameKind::Slider) => &[super::slider::REG_SLIDER_METHODS],
+        Some(FrameKind::ColorSelect) => &[super::colorselect::REG_COLORSELECT_METHODS],
         Some(FrameKind::Button) => &[super::button::REG_BUTTON_METHODS],
         Some(FrameKind::CheckButton) => &[
             super::button::REG_CHECKBUTTON_METHODS,
@@ -314,13 +331,29 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
     }
 }
 
+/// `CreateFrame(kind, name?, parent?, inherits?)` — the runtime frame factory.
+///
+/// The fourth argument is a **template name list**, and honouring it is what makes
+/// `CreateFrame("Button", "MyButton", UIParent, "UIPanelButtonTemplate")` — the corpus's most
+/// common single line — produce a button with art, regions, scripts and a fired `OnLoad` rather
+/// than an empty frame. The frame is created first and decorated second
+/// ([`crate::loader::apply_template`]), in that order and never the other way: the template's own
+/// `OnLoad` must be able to see the frame's real name, and `$parent` inside the template must
+/// resolve against **the caller's** name, not the template's.
+///
+/// An unusable template (unknown, non-virtual, the wrong shape) is a warning on the model and a
+/// perfectly usable frame — never an error that takes the frame with it.
 fn create_frame(
     lua: &Lua,
     (kind, name, parent, inherits): (String, Option<Value>, Option<Value>, Option<Value>),
 ) -> mlua::Result<Table> {
-    let kind = frame_kind_from_str(&kind)
+    let frame_kind = frame_kind_from_str(&kind)
         .ok_or_else(|| mlua::Error::runtime(format!("CreateFrame: unknown frame type '{kind}'")))?;
     let name: Option<String> = match &name {
+        Some(Value::String(s)) => Some(s.to_str()?.to_string()),
+        _ => None,
+    };
+    let template: Option<String> = match &inherits {
         Some(Value::String(s)) => Some(s.to_str()?.to_string()),
         _ => None,
     };
@@ -337,18 +370,23 @@ fn create_frame(
         }
     };
 
-    if matches!(&inherits, Some(v) if !v.is_nil()) {
-        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        model.warnings.push(format!(
-            "CreateFrame: `inherits`/template expansion is the XML loader's job — ignored for '{}'",
-            name.as_deref().unwrap_or("<unnamed>")
-        ));
+    // A 4th argument that is present but not a string is the caller's bug, not a template.
+    if template.is_none() {
+        if let Some(v) = inherits.as_ref().filter(|v| !v.is_nil()) {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.warnings.push(format!(
+                "CreateFrame: the 4th argument (inherits) must be a template-name string, got {}; \
+                 ignored for '{}'",
+                v.type_name(),
+                name.as_deref().unwrap_or("<unnamed>")
+            ));
+        }
     }
 
     // Create in the arena, mint the id, seed a default layout input. All under one write borrow.
     let id = {
         let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-        let h = model.arena.create(kind, name, parent_handle);
+        let h = model.arena.create(frame_kind, name, parent_handle);
         // The client's CreateFrame inheritance (the ctor doc's "loader/CreateFrame concern" —
         // widget/mod.rs `create`): a child enters its PARENT's stratum at the parent's level + 1.
         // The ctor's bare MEDIUM/0 left a DIALOG-strata popup drawing its own translucent
@@ -366,20 +404,34 @@ fn create_frame(
         id
     };
 
-    frame_wrapper(lua, id)
+    // The wrapper exists (and, if named, is published to `_G`) BEFORE the template runs — a
+    // template's `OnLoad` fires inside this call, and the reference's addons rely on both facts:
+    // `local b = CreateFrame(...)` hands back a frame whose OnLoad has already run, and that
+    // handler can reach itself by name.
+    let wrapper = frame_wrapper(lua, id)?;
+    if let Some(template) = template {
+        let messages = crate::loader::apply_template(lua, &wrapper, &kind, &template);
+        if !messages.is_empty() {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.warnings.extend(messages);
+        }
+    }
+    Ok(wrapper)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Frame method surface — the table itself is built by the three clusters above
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Build the shared frame method table from the three clusters ([`frame_state`], [`layout_methods`],
-/// [`events_regions`]) and publish it to the registry.
+/// Build the shared frame method table from the five clusters ([`frame_state`], [`layout_methods`],
+/// [`events_regions`], [`movable`], [`toplevel`]) and publish it to the registry.
 fn install_frame_methods(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
     frame_state::install(lua, &m)?;
     layout_methods::install(lua, &m)?;
     events_regions::install(lua, &m)?;
+    movable::install(lua, &m)?;
+    toplevel::install(lua, &m)?;
     lua.set_named_registry_value(REG_FRAME_METHODS, m)?;
     Ok(())
 }

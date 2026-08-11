@@ -302,7 +302,7 @@
         function KeyBindingsPage_Update()
             local page = KeyBindingsPage
             local scroll = getglobal("OptionsFrameContainerBodyKeybindingsScrollFrame")
-            local offset = BenillaFauxScrollFrame_GetOffset(scroll)
+            local offset = FauxScrollFrame_GetOffset(scroll)
             for i = 1, KEYBINDINGS_DISPLAYED do
                 local name = KEYBINDINGS_ROW_BASE .. i
                 local row = getglobal(name)
@@ -317,7 +317,7 @@
                     row:Hide()
                 end
             end
-            BenillaFauxScrollFrame_Update(scroll, table.getn(page.items),
+            FauxScrollFrame_Update(scroll, table.getn(page.items),
                 KEYBINDINGS_DISPLAYED, KEYBINDINGS_ROW_HEIGHT)
             KeyBindings_UpdateUnbindKey()
         end

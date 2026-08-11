@@ -29,6 +29,13 @@ use benilla_world::view::CAM_NEAR;
 ///        || (elapsed < 800ms && yaw_travel < 2.25° && pitch_travel < 2.0°)
 /// ```
 ///
+/// **The `ms` on those two numbers is now VERIFIED, where 1122 could only infer it** (wow-re
+/// `ui/scratch/button-doubleclick-law.md`, 2026-08-11, a side effect of the `OnDoubleClick` §5):
+/// the clock both constants are compared against is `0x42c010` → `0x42b790`, whose counter is the
+/// `KERNEL32!GetTickCount` import at `[0x7ff310]` and whose scale is stored as `1.0/freq × 1000.0`
+/// — milliseconds in either counter mode. Nothing here changes; the units simply stopped being a
+/// guess.
+///
 /// **A press under 200 world selects however far the mouse swept.** That arm is the entire bug report
 /// (ledger B226): flick the cursor across a mob and click on arrival with the hand still moving, and
 /// the reference targets it — the camera has been orbiting since the first motion sample and selects

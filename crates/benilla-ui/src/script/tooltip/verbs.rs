@@ -7,7 +7,9 @@ use mlua::{Lua, Table, Value, Variadic};
 
 use crate::layout::{Anchor, Point};
 use crate::script::object::{frame_handle_of, frame_wrapper};
+use crate::script::region::region_handle_of;
 use crate::script::Model;
+use crate::widget::{KindState, TOOLTIP_LINE_GAP, TOOLTIP_PAD};
 
 use super::{
     append_line, bool_arg, cancel_fade, clear_content, fire_cleared, hide_tooltip, now,
@@ -208,6 +210,70 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "NumLines",
         lua.create_function(|lua, this: Table| with_tip(lua, &this, |t| t.num_lines as i64))?,
+    )?;
+    // AddFontStrings(left, right) — adopt two caller-made FontStrings as the next line pair
+    // (`0x530c40`, wow-re `system/ui/scratch/bindings.md`; the parent module's doc already names it
+    // as how the real class grows past its template's 30 declared pairs).
+    //
+    // The scan-tooltip idiom, and the reason this landed with the font-object work rather than
+    // separately: `Gratuity-2.0.lua:56-59` builds its whole 30-line hidden tooltip out of
+    // `tt:CreateFontString()` + `:SetFontObject(GameFontNormal)` + `tt:AddFontStrings(l, r)`, so
+    // publishing the font globals only moved that library's death one line down. Five corpus addons
+    // sit behind those four lines.
+    //
+    // The pair is placed exactly as an engine-grown one (hidden, left/right justified, hung off the
+    // previous line) — the layout pass owns line geometry either way — but the regions' FONTS are
+    // left alone, since choosing them is the entire point of the caller doing this by hand.
+    m.set(
+        "AddFontStrings",
+        lua.create_function(|lua, (this, left, right): (Table, Table, Table)| {
+            let h = frame_handle_of(lua, &this)?;
+            let lh = region_handle_of(lua, &left)?;
+            let rh = region_handle_of(lua, &right)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let frame_id = model.frame_id(h);
+            let prev_left = match model.arena.frame(h).map(|f| &f.kind_state) {
+                Some(KindState::Tooltip(t)) => t.left_lines.last().copied(),
+                _ => return Err(mlua::Error::runtime("not a GameTooltip")),
+            };
+            let anchor = match prev_left {
+                None => Anchor::new(
+                    Point::TopLeft,
+                    frame_id,
+                    Point::TopLeft,
+                    TOOLTIP_PAD,
+                    -TOOLTIP_PAD,
+                ),
+                Some(prev) => {
+                    let prev_id = model.region_id(prev);
+                    Anchor::new(
+                        Point::TopLeft,
+                        prev_id,
+                        Point::BottomLeft,
+                        0.0,
+                        -TOOLTIP_LINE_GAP,
+                    )
+                }
+            };
+            let left_id = model.region_id(lh);
+            {
+                let d = model.region_data.entry(lh).or_default();
+                d.hidden = true;
+                d.justify_h = crate::script::JustifyH::Left;
+                d.anchors = vec![anchor];
+            }
+            {
+                let d = model.region_data.entry(rh).or_default();
+                d.hidden = true;
+                d.justify_h = crate::script::JustifyH::Right;
+                d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
+            }
+            model.touch_layout(); // two line rows entered the layout graph (decision 0740)
+            let t = tip_mut(&mut model, h)?;
+            t.left_lines.push(lh);
+            t.right_lines.push(rh);
+            Ok(())
+        })?,
     )?;
     // SetMinimumWidth(w) — a floor on the auto-sized width (the ref's SetTooltipMoney calls it
     // with the money row's width so coins never overhang the plate).

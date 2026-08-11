@@ -926,6 +926,11 @@ pub(crate) struct ItemSubClasses(pub(crate) benilla_formats::ItemSubClassCatalog
 #[derive(Resource)]
 pub(crate) struct ItemBagFamilies(pub(crate) benilla_formats::ItemBagFamilyCatalog);
 
+/// The ItemClass.dbc catalog — what an item's class is *called* ("Weapon", "Container"),
+/// i.e. `GetItemInfo`'s `itemType`. See [`feed`]'s template resolve.
+#[derive(Resource)]
+pub(crate) struct ItemClasses(pub(crate) benilla_formats::ItemClassCatalog);
+
 /// Startup (after the MPQ chain opens): the item-tooltip DBCs. On failure a resource is simply
 /// absent — set items render without their SET block, subclass gates read as absent.
 fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<benilla_assets::WorldAssets>>) {
@@ -947,6 +952,13 @@ fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<benilla_asset
             commands.insert_resource(ItemSubClasses(cat));
         }
         Err(e) => warn!("ui_items: ItemSubClass.dbc failed to load: {e:#}"),
+    }
+    match benilla_formats::load_item_classes(&mut chain) {
+        Ok(cat) => {
+            info!("ui_items: ItemClass.dbc loaded ({} classes)", cat.len());
+            commands.insert_resource(ItemClasses(cat));
+        }
+        Err(e) => warn!("ui_items: ItemClass.dbc failed to load: {e:#}"),
     }
     match benilla_formats::load_item_bag_families(&mut chain) {
         Ok(cat) => {

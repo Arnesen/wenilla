@@ -94,6 +94,30 @@ impl Toc {
         Vec::new()
     }
 
+    /// Soft dependencies: `## OptionalDeps:` (and `## OptionalDep:` by symmetry with the required
+    /// pair above).
+    ///
+    /// **They load FIRST and their failures are ignored** — `AddOn_Load 0x51f240`'s own order,
+    /// quoted in 1191 §2 — which is what lets `## OptionalDeps: FuBar, Ace2` mean "if Ace2 is
+    /// installed, its libraries are already global by the time my files run". **130 corpus addons
+    /// declare them**, and the whole FuBar family leans on exactly that: `FuBar_BagFu`'s `.toc`
+    /// lists `FuBarPlugin-2.0.lua` BEFORE `AceLibrary.lua`, which only works because the `Ace2`
+    /// addon went first.
+    ///
+    /// **`## OptionalDependencies:` is NOT accepted here**, though 4 corpus addons write it. The
+    /// long form is verified for the required half (`Dependencies`) and merely plausible for this
+    /// one, and 1204's rule is to be lenient only where the grammar admits no ambiguity. Queued as
+    /// an RE question with its cost attached: four addons.
+    pub fn optional_dependencies(&self) -> Vec<&str> {
+        for key in ["OptionalDeps", "OptionalDep"] {
+            let deps = self.list(key);
+            if !deps.is_empty() {
+                return deps;
+            }
+        }
+        Vec::new()
+    }
+
     /// `## LoadOnDemand: 1` (Era loader; absent in 1.12 manifests).
     pub fn load_on_demand(&self) -> bool {
         self.directive("LoadOnDemand").map(str::trim) == Some("1")

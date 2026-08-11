@@ -23,8 +23,27 @@
 //!
 //! `<Include>`/`<Script file=>` need file bytes, which this crate must not read itself (no Bevy, no
 //! IO — decision 0068 §1). The app supplies a `files` closure that resolves a FrameXML path to its
-//! text (from the MPQ/addon dir); the loader stays IO-free. A path with no provider hit is a warning,
-//! not an error — the load continues.
+//! **bytes** (from the MPQ/addon dir); the loader stays IO-free.
+//!
+//! **Bytes, not text** (decision 1193). A `<Script file=>` chunk is handed to Lua as the bytes on
+//! disk, exactly as the reference's `luaL_loadbuffer` receives them; only an `<Include>`d document
+//! is decoded ([`crate::source::decode`]), because roxmltree needs `&str` and Lua does not. Before
+//! 1193 the provider returned `String`, so a cp1252 locale file did not lose a glyph — it read as
+//! *absent*, and the include or every handler in the script vanished with it.
+//!
+//! **The loader owns relative-path resolution; the provider owns the root** (decision 1186). A
+//! reference is relative to the directory of the *file that contains it*, and may walk up with `..`
+//! — `Bagnon/src/main.xml` reaches its sibling as `templates.xml` and a shared library addon as
+//! `..\..\BagBrother\core\core.xml`. Only the loader knows the include tree, so it does the joining
+//! ([`join_ref`]) and hands the provider one already-resolved path; the provider decides what that
+//! path is allowed to reach. [`load`] starts at the root, [`load_in`] starts at a named directory.
+//!
+//! A path with **no provider hit is an error**, not a warning: by [`LoadReport`]'s own definition
+//! errors are "things that dropped a frame or a handler", and an unresolved `<Include>` drops a
+//! whole document while an unresolved `<Script file=>` drops every handler in it. It was a warning
+//! until 1186, and the cost was that an addon which resolved *nothing* reported success — Bagnon
+//! missed all eleven of its references and came back with zero errors. The load still continues
+//! (0068: the client logs and carries on); only the reporting changed.
 //!
 //! ## MAXCSTACK discipline (decision 0068, probe A)
 //!
@@ -35,7 +54,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mlua::{Function, Table};
+use mlua::{Function, ObjectLike, Table, Value};
 
 use crate::framexml::{self, Element, ParsedDocument, ScriptRef, TopLevel};
 use crate::script::{FontObject, JustifyH, JustifyV, Outline, UiScript};
@@ -72,16 +91,45 @@ pub struct LoadReport {
 /// ([`Loader::do_font`]); a `virtual` template is registered for later `inherits=`; a non-virtual
 /// instance is expanded ([`crate::framexml::expand`]) and materialized.
 ///
-/// `files` is the engine-free seam (see module docs): it resolves a FrameXML/Lua path to its text.
-/// Returning `None` yields a warning, not an error.
+/// `files` is the engine-free seam (see module docs): it resolves a FrameXML/Lua path to its
+/// **bytes**. Returning `None` yields a warning, not an error.
 pub fn load(
     script: &UiScript,
     doc: &ParsedDocument,
-    files: &dyn Fn(&str) -> Option<String>,
+    files: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> LoadReport {
+    load_in(script, doc, "", files)
+}
+
+/// [`load`] for a document that does **not** sit at the provider's root.
+///
+/// `base` is the document's own directory, in the provider's path space (`/`-separated, no
+/// trailing slash; `""` is the root). Every `<Include>`/`<Script file=>` inside resolves against
+/// it, and each nested include resolves against *its* own directory in turn — so an addon whose
+/// manifest lists `src\main.xml` passes `"<Addon>/src"` here and its `<Include file="templates.xml">`
+/// reaches `<Addon>/src/templates.xml` (decision 1186).
+pub fn load_in(
+    script: &UiScript,
+    doc: &ParsedDocument,
+    base: &str,
+    files: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> LoadReport {
+    load_into(script.lua(), doc, base, files)
+}
+
+/// [`load_in`] against the VM directly, for a caller that holds `&Lua` rather than `&UiScript` —
+/// which is every Lua binding, and therefore `LoadAddOn` (1188 phase 2). Identical behaviour;
+/// `load_in` is the same call with the script's own VM.
+pub fn load_into(
+    lua: &mlua::Lua,
+    doc: &ParsedDocument,
+    base: &str,
+    files: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> LoadReport {
     let mut loader = Loader {
-        script,
+        lua,
         files,
+        base: base.to_string(),
         report: LoadReport::default(),
         warned: HashSet::new(),
     };
@@ -91,10 +139,169 @@ pub fn load(
     loader.report
 }
 
+/// Apply a **template** to a frame that already exists — the runtime half of `inherits=`.
+///
+/// This is the fourth argument of `CreateFrame(kind, name, parent, "UIPanelButtonTemplate")`, and
+/// it is the single most common way an addon builds anything. `wrapper` is the frame the binding
+/// has just created, `kind` is the kind string it was given, and `template` is the raw — possibly
+/// comma-separated — `inherits=` list. Returns the messages worth surfacing (warnings first, then
+/// the errors that dropped something); the caller decides where they go. Nothing here can fail
+/// the call.
+///
+/// **The caller's own name wins, and that is the load-bearing part.** `CreateFrame("Button",
+/// "MyButton", p, "SomeTemplate")` is a frame named `MyButton`, so the template's `$parentText`
+/// resolves to `MyButtonText` — which is the global the addon's very next line calls `getglobal`
+/// on. A template whose children came out named after the *template* would be useless.
+///
+/// **The frame is never dropped, whatever the template turns out to be.** Four cases, each a
+/// message and a usable frame:
+/// - an **unknown** name — the reference creates the frame anyway, so we do;
+/// - a name whose element was **not `virtual="true"`** — only virtual elements are ever registered
+///   ([`Loader::load_doc`]), so from the registry's side it is indistinguishable from unknown, and
+///   it reads as unknown;
+/// - a **region** template (a virtual `<Texture>`/`<FontString>`) where a frame was asked for —
+///   its frame-shaped content (`<Size>`, `<Anchors>`) still applies, its region-only content
+///   cannot, and it says so;
+/// - a **kind that disagrees with the template's tag** — the frame already exists as the kind
+///   `CreateFrame` was given and no template can retype it, so [`framexml::inherits_node`] keeps
+///   the caller's kind and the per-kind passes skip what would not apply. Named, not pretended.
+///
+/// **Why this cannot simply call [`Loader::materialize`]:** materialize's step 1 *is*
+/// `CreateFrame`, and this runs from inside that binding — it would recurse forever. The steps
+/// after it are [`Loader::decorate`], which is what both entry points share.
+///
+/// Reachable from a Lua binding at all only because decision 1191 §4 made the loader `&Lua`-native.
+pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &str) -> Vec<String> {
+    let template = template.trim();
+    if template.is_empty() {
+        return Vec::new();
+    }
+    // A template is a node in the registry, never a file: `<Include>`/`<Script file=>` are
+    // top-level-only, so nothing reachable under `decorate` can ask for bytes.
+    let no_files = |_: &str| -> Option<Vec<u8>> { None };
+    let mut loader = Loader {
+        lua,
+        files: &no_files,
+        base: String::new(),
+        report: LoadReport::default(),
+        warned: HashSet::new(),
+    };
+
+    let (own_name, parent_name) = loader.frame_names(wrapper);
+    let self_name = own_name.clone().unwrap_or_else(|| parent_name.clone());
+    let dbg = format!(
+        "CreateFrame(\"{kind}\", \"{}\", inherits=\"{template}\")",
+        own_name.as_deref().unwrap_or("<unnamed>")
+    );
+
+    // The one thing `expand` cannot tell us: what kind each named template was *declared* as. Read
+    // it straight off the registry — a diagnostic pass only; the resolution below is still the
+    // document layer's single implementation.
+    let mut notes = Vec::new();
+    let mut any_resolved = false;
+    {
+        let model = loader.model();
+        let templates = model.framexml_templates.borrow();
+        for name in template.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            // A name that is missing entirely is `expand`'s warning to give, just below.
+            let Some(el) = templates.get(name) else {
+                continue;
+            };
+            any_resolved = true;
+            let tag = &el.tag;
+            if tag.eq_ignore_ascii_case("Texture") || tag.eq_ignore_ascii_case("FontString") {
+                notes.push(format!(
+                    "{dbg}: '{name}' is a <{tag}> REGION template, not a frame template; its \
+                     frame-shaped content still applies, its region-only content cannot"
+                ));
+            } else if !tag.eq_ignore_ascii_case(kind) {
+                notes.push(format!(
+                    "{dbg}: '{name}' is a <{tag}>, but a {kind} was created; the frame keeps the \
+                     kind CreateFrame was given, so the <{tag}>-only parts of the template do not \
+                     apply"
+                ));
+            }
+        }
+    }
+    if !any_resolved {
+        notes.push(format!(
+            "{dbg}: no template of that name is registered — the frame exists and is usable, but \
+             it is bare (only a `virtual=\"true\"` element is ever registered as a template)"
+        ));
+    }
+    loader.report.warnings.extend(notes);
+
+    // One expansion, through the document layer's own splice/chain/cycle path — the same call the
+    // XML `inherits=` path makes. Its warnings are terse by design (they were written for a
+    // document walk), so prefix the ones this call produced: a log line has to name the
+    // `CreateFrame` it came from or nobody can act on it.
+    let first = loader.report.warnings.len();
+    let expanded = loader.expand(&framexml::inherits_node(kind, template));
+    for w in &mut loader.report.warnings[first..] {
+        *w = format!("{dbg}: {w}");
+    }
+
+    loader.decorate(&expanded, wrapper, &self_name, &parent_name, &dbg);
+
+    let mut out = loader.report.warnings;
+    out.extend(loader.report.errors);
+    out
+}
+
+/// Join a FrameXML reference against the directory of the file that contains it, **lexically**.
+///
+/// FrameXML paths are `\`- or `/`-separated and may walk up with `..` — that is how a shared
+/// library addon is reached (`..\..\BagBrother\core\core.xml`). Resolution here touches no
+/// filesystem and follows no symlink: it is pure string arithmetic, so the provider is the only
+/// thing that decides what a resolved path may reach.
+///
+/// A `..` that walks above the root is **kept** as a leading `..` rather than clamped, so the
+/// provider can see the escape and refuse it instead of silently being handed a path that looks
+/// contained.
+pub fn join_ref(base: &str, path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let combined = if path.starts_with('/') || base.is_empty() {
+        path.trim_start_matches('/').to_string()
+    } else {
+        format!("{base}/{path}")
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for seg in combined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => match out.last() {
+                Some(&"..") | None => out.push(".."),
+                _ => {
+                    out.pop();
+                }
+            },
+            s => out.push(s),
+        }
+    }
+    out.join("/")
+}
+
+/// The directory part of a provider path — `""` for a bare name.
+fn dir_of(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
 struct Loader<'a> {
-    pub(super) script: &'a UiScript,
-    pub(super) files: &'a dyn Fn(&str) -> Option<String>,
-    // The template + font-element registries live ON the UiScript (`framexml_templates` /
+    /// **The VM itself, not a `UiScript`** — every piece of state this loader touches
+    /// (the two FrameXML registries, the font objects, the chunk runner) is reachable from a bare
+    /// `&Lua` through [`Model`]. That is what lets `LoadAddOn` load an addon from inside a Lua
+    /// binding, synchronously, the way the reference does (1188 phase 2): a binding is handed
+    /// `&Lua` and can never obtain the `&UiScript` that owns it.
+    pub(super) lua: &'a mlua::Lua,
+    pub(super) files: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    /// The current document's own directory in the provider's path space — what a relative
+    /// `<Include>`/`<Script file=>` inside it resolves against. Saved and restored around each
+    /// nested include, so depth-1 and depth-5 both resolve against their own file's folder.
+    pub(super) base: String,
+    // The template + font-element registries live on the `Model` (`framexml_templates` /
     // `framexml_fonts`), persisted ACROSS `load` calls — the client's template table is global
     // (`0x6ee500`), so a file may `inherits=` a template an earlier file registered (the real
     // MerchantFrame.xml ← CharacterFrameTemplates.xml). "Register before use" in load order,
@@ -108,7 +315,33 @@ struct Loader<'a> {
 
 impl Loader<'_> {
     pub(super) fn lua(&self) -> &mlua::Lua {
-        self.script.lua()
+        self.lua
+    }
+
+    /// Run a chunk in the one global state — `UiScript::run`'s body, reachable from `&Lua`.
+    ///
+    /// Takes **bytes**, because a `<Script file=>` chunk is whatever is on disk (decision 1193) and
+    /// Lua 5.0 strings are byte strings. An inline `<Script>` body arrives as `&str` from the XML
+    /// and is passed through as its own bytes, which is the same thing.
+    fn run(&self, chunk: &[u8]) -> mlua::Result<()> {
+        self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).exec()
+    }
+
+    /// The model, for the two FrameXML registries below.
+    fn model(&self) -> mlua::AppDataRefMut<'_, crate::script::Model> {
+        self.lua
+            .app_data_mut::<crate::script::Model>()
+            .expect("model app_data")
+    }
+
+    /// Run a widget handler with the client's calling convention — `UiScript::invoke_handler`'s
+    /// body, reachable from `&Lua`.
+    pub(super) fn invoke_handler(
+        &self,
+        wrapper: &mlua::Table,
+        func: &mlua::Function,
+    ) -> mlua::Result<()> {
+        crate::script::event::invoke_with_globals(self.lua, wrapper.clone(), func, None, Vec::new())
     }
 
     pub(super) fn warn_once(&mut self, key: &str, msg: impl Into<String>) {
@@ -155,20 +388,24 @@ impl Loader<'_> {
         for item in &doc.items {
             match item {
                 TopLevel::Include(path) => self.do_include(path),
-                TopLevel::Script(ScriptRef::File(path)) => match (self.files)(path) {
-                    Some(text) => {
-                        if let Err(e) = self.script.run(&text) {
-                            self.report
-                                .errors
-                                .push(format!("<Script file=\"{path}\">: {e}"));
+                TopLevel::Script(ScriptRef::File(path)) => {
+                    let joined = join_ref(&self.base, path);
+                    match (self.files)(&joined) {
+                        Some(bytes) => {
+                            if let Err(e) = self.run(crate::source::chunk(&bytes)) {
+                                self.report
+                                    .errors
+                                    .push(format!("<Script file=\"{path}\">: {e}"));
+                            }
                         }
+                        None => self.report.errors.push(format!(
+                            "<Script file=\"{path}\">: no provider hit for \"{joined}\"; \
+                             every handler in it is missing"
+                        )),
                     }
-                    None => self.report.warnings.push(format!(
-                        "<Script file=\"{path}\">: no provider hit; skipped"
-                    )),
-                },
+                }
                 TopLevel::Script(ScriptRef::Inline(body)) => {
-                    if let Err(e) = self.script.run(body) {
+                    if let Err(e) = self.run(body.as_bytes()) {
                         self.report.errors.push(format!("inline <Script>: {e}"));
                     }
                 }
@@ -178,7 +415,7 @@ impl Loader<'_> {
                     // carries at instantiation time. An unnamed virtual node was already warned at
                     // parse time and cannot be inherited, so it is simply not registered.
                     if let Some(name) = el.name() {
-                        self.script
+                        self.model()
                             .framexml_templates
                             .borrow_mut()
                             .insert(name.to_string(), el.clone());
@@ -193,16 +430,23 @@ impl Loader<'_> {
     }
 
     pub(super) fn do_include(&mut self, path: &str) {
-        let Some(text) = (self.files)(path) else {
-            self.report.warnings.push(format!(
-                "<Include file=\"{path}\">: no provider hit; skipped"
+        let joined = join_ref(&self.base, path);
+        let Some(bytes) = (self.files)(&joined) else {
+            self.report.errors.push(format!(
+                "<Include file=\"{path}\">: no provider hit for \"{joined}\"; the whole \
+                 document it names is missing"
             ));
             return;
         };
-        match framexml::parse(&text) {
+        // An included document is the one place text is forced: roxmltree parses `&str` (1193).
+        match framexml::parse(&crate::source::decode(&bytes)) {
             Ok(sub) => {
                 self.report.warnings.extend(sub.warnings.iter().cloned());
+                // The included document's OWN directory is what ITS relative references resolve
+                // against — restored after, so a sibling include at this level is unaffected.
+                let outer = std::mem::replace(&mut self.base, dir_of(&joined).to_string());
                 self.load_doc(&sub);
+                self.base = outer;
             }
             Err(e) => self
                 .report
@@ -214,13 +458,15 @@ impl Loader<'_> {
     /// Resolve `inherits=` against the script's persistent registry (`framexml::expand`),
     /// folding its warnings into the report.
     pub(super) fn expand(&mut self, el: &Element) -> Element {
-        let templates = self.script.framexml_templates.borrow();
+        let model = self.model();
+        let templates = model.framexml_templates.borrow();
         let view: HashMap<&str, &Element> =
             templates.iter().map(|(k, v)| (k.as_str(), v)).collect();
         let mut warns = Vec::new();
         let out = framexml::expand(el, &view, &mut warns);
         drop(view);
         drop(templates);
+        drop(model);
         self.report.warnings.extend(warns);
         out
     }
@@ -232,7 +478,8 @@ impl Loader<'_> {
     /// unknown template. The talent branch/arrow art pool is the first region-template user.
     pub(super) fn expand_region(&mut self, el: &Element) -> Element {
         let hit = el.attr("inherits").is_some_and(|names| {
-            let templates = self.script.framexml_templates.borrow();
+            let model = self.model();
+            let templates = model.framexml_templates.borrow();
             names
                 .split(',')
                 .map(str::trim)
@@ -256,21 +503,44 @@ impl Loader<'_> {
         };
         // Resolve `inherits` against the font registry (reuse the generic template merge).
         let merged = {
-            let fonts = self.script.framexml_fonts.borrow();
+            let model = self.model();
+            let fonts = model.framexml_fonts.borrow();
             let view: HashMap<&str, &Element> =
                 fonts.iter().map(|(k, v)| (k.as_str(), v)).collect();
             let mut warns = Vec::new();
             let merged = framexml::expand(el, &view, &mut warns);
             drop(view);
             drop(fonts);
+            drop(model);
             self.report.warnings.extend(warns);
             merged
         };
 
         let font = font_object_from_element(&merged);
-        self.script.register_font_object(&name, font);
-        // Store the merged (flattened) node so a chain rooted here reads resolved values.
-        self.script.framexml_fonts.borrow_mut().insert(name, merged);
+        // One model borrow, then the insert — `font_objects` and `framexml_fonts` are both on it.
+        {
+            let mut model = self.model();
+            model.font_objects.insert(name.clone(), font);
+            // Store the merged (flattened) node so a chain rooted here reads resolved values.
+            model
+                .framexml_fonts
+                .borrow_mut()
+                .insert(name.clone(), merged);
+        }
+        // …and publish `_G[name]` as a real font OBJECT. In 1.12 a `<Font name="GameFontNormal">`
+        // is not only a style record: it is addressable Lua, and that is how the whole addon
+        // ecosystem paints text — `fs:SetFontObject(GameFontNormal)` is 3,180 of the corpus's 3,186
+        // call sites, against 6 that pass a string. Registering the record without ever publishing
+        // the name is why `Gratuity-2.0.lua:57` was handed nil and took five addons down at load.
+        // The object and its method surface are `crate::script::font`.
+        //
+        // Flattening is untouched: the merge above still resolves the `inherits=` chain once, at
+        // load, and publishing only gives the result a name.
+        if let Err(e) = crate::script::font::publish(self.lua(), &name) {
+            self.report
+                .warnings
+                .push(format!("<Font name=\"{name}\">: {e}"));
+        }
     }
 
     /// Materialize one (already template-expanded) frame element into a live frame, then recurse its
@@ -279,12 +549,67 @@ impl Loader<'_> {
     /// `parent` is the enclosing frame's wrapper (`None` at top level). `parent_name` is the
     /// already-resolved name of the nearest named ancestor (or `"Top"`), used to substitute `$parent`
     /// in this frame's name and in its anchors' `relativeTo` (rf27).
-    pub(super) fn materialize(&mut self, el: &Element, parent: Option<&Table>, parent_name: &str) {
+    /// Returns the created frame's wrapper — `None` when `CreateFrame` refused (an unknown frame
+    /// type, rf24 `0x6ee280`'s factory-table miss), which also skips the whole subtree. The
+    /// `<ScrollChild>` pass is the one caller that needs the handle back.
+    pub(super) fn materialize(
+        &mut self,
+        el: &Element,
+        parent: Option<&Table>,
+        parent_name: &str,
+    ) -> Option<Table> {
+        // ─ Step 1 and ONLY step 1 lives here: resolve the name and call CreateFrame. Everything
+        //   after it is `decorate`, because the runtime template path enters at exactly that seam
+        //   (`apply_template`) — its frame already exists, and re-entering here would recurse.
         // Name (with $parent substitution) — the resolved name is what CreateFrame publishes and what
         // this frame's own children substitute `$parent` against.
         let resolved_name: Option<String> = el
             .name()
             .map(|raw| framexml::resolve_name(raw, parent_name));
+
+        // 1a · `parent="SomeFrame"` — the OTHER way an element names its parent, and the one the
+        //      reference's own FrameXML uses most, because its files are flat: `<Frame name="X"
+        //      parent="UIParent">` at top level rather than nested inside `<Frames>`. We only ever
+        //      read the lexical parent, so **708 corpus sites across 79 addons** produced a frame
+        //      with `GetParent() == nil` — no visibility inheritance, no scale or alpha
+        //      inheritance, and `this:GetParent():Hide()` raising on a nil. Nothing warned, because
+        //      an ignored attribute is not an error: 1205's silent-drop class again.
+        //
+        //      The attribute WINS over the lexical parent when both are present, which is the
+        //      reference's rule and is what lets an addon nest an element for authoring
+        //      convenience and still attach it elsewhere. An unresolvable name warns and falls back
+        //      to the lexical parent rather than erroring — the frame is real and usable either
+        //      way, and 0068's log-and-continue is the house rule for a name lookup.
+        let attr_parent: Option<Table> = el.attr("parent").and_then(|raw| {
+            let name = framexml::resolve_name(raw, parent_name);
+            // A FRAME, not merely a global of that name. `_G` is one namespace: an addon's own
+            // `MyAddon = {}` sits in it beside every frame, and the corpus really does write
+            // `parent="TheoryCraft"` where the addon owns that name. Handing a plain table to
+            // `CreateFrame` would raise and take the element's whole subtree with it — a name
+            // collision costing a window. The identity test is RF-0023's own: a frame wrapper
+            // carries its handle at `T[0]` as lightuserdata, and nothing else does.
+            let hit = self
+                .lua()
+                .globals()
+                .get::<Table>(name.as_str())
+                .ok()
+                .filter(|t| matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(_))));
+            if hit.is_none() {
+                self.report.warnings.push(format!(
+                    "{}: parent=\"{name}\" names no frame — falling back to the enclosing one",
+                    resolved_name.as_deref().unwrap_or(&el.tag)
+                ));
+            }
+            hit
+        });
+        // `$parent` in THIS element's own anchors means its parent — so when the attribute supplied
+        // one, that is the name to substitute against (rf27's rule, applied to rf27's other input).
+        let attr_parent_name = attr_parent.as_ref().and_then(|_| {
+            el.attr("parent")
+                .map(|raw| framexml::resolve_name(raw, parent_name))
+        });
+        let parent_name = attr_parent_name.as_deref().unwrap_or(parent_name);
+        let parent = attr_parent.as_ref().or(parent);
 
         // 1 · CreateFrame(kind = element tag, name, parent). An unknown frame type errors here (the
         //     factory-table miss, rf24 `0x6ee280`) — record it and skip the whole subtree.
@@ -294,7 +619,7 @@ impl Loader<'_> {
                 self.report
                     .errors
                     .push(format!("CreateFrame global missing: {e}"));
-                return;
+                return None;
             }
         };
         let wrapper: Table =
@@ -309,7 +634,7 @@ impl Loader<'_> {
                             .map(|n| format!(" name=\"{n}\""))
                             .unwrap_or_default()
                     ));
-                    return;
+                    return None;
                 }
             };
         self.report.frames += 1;
@@ -324,43 +649,129 @@ impl Loader<'_> {
         // `$parent` against `parent_name` (their `$parent` is this frame's enclosing parent).
         let self_name = resolved_name.as_deref().unwrap_or(parent_name).to_string();
 
+        self.decorate(el, &wrapper, &self_name, parent_name, &dbg_name);
+        Some(wrapper)
+    }
+
+    /// Everything a frame element does to a frame that **already exists**: LoadXML attributes,
+    /// `<Size>`, `<Anchors>`, `<Layers>` regions, the per-kind extras, `<Scripts>`, the nested
+    /// `<Frames>` pass, and finally this frame's own `OnLoad` (bottom-up, rf26).
+    ///
+    /// Split out of [`Self::materialize`] because materialize's *first* step is `CreateFrame`, and
+    /// the runtime template path — [`apply_template`], i.e. `CreateFrame`'s own fourth argument —
+    /// is called from **inside** that binding. It cannot re-enter materialize without recursing
+    /// forever; it enters here instead, and the two paths share every step that follows.
+    ///
+    /// The two names are not the same thing and the difference is the load-bearing one (rf27):
+    /// `self_name` is what `$parent` means to this frame's **contents** (its regions, its nested
+    /// frames), `parent_name` is what `$parent` means to this frame's **own** anchors.
+    pub(super) fn decorate(
+        &mut self,
+        el: &Element,
+        wrapper: &Table,
+        self_name: &str,
+        parent_name: &str,
+        dbg_name: &str,
+    ) {
         // 2 · LoadXML attributes (rf24 `0x769820`).
-        self.apply_attrs(el, &wrapper, &dbg_name);
+        self.apply_attrs(el, wrapper, dbg_name);
         // 3 · <Size> and 4 · <Anchors> (the CLayoutFrame geometry base, rf24 `0x767800`).
-        self.apply_size(el, &wrapper, &dbg_name);
-        self.apply_anchors(el, &wrapper, parent_name, &dbg_name);
+        self.apply_size(el, wrapper, dbg_name);
+        self.apply_anchors(el, wrapper, parent_name, dbg_name);
         // 5 · <Layers> regions (rf24 `0x769d70`) — `$parent` in a region name is *this* frame.
-        self.apply_layers(el, &wrapper, &self_name, &dbg_name);
+        self.apply_layers(el, wrapper, self_name, dbg_name);
         // 5·b — a frame's **direct-child** `<FontString>` (outside `<Layers>`): the engine's special
         // font string (a ScrollingMessageFrame's line font, an EditBox's text font). Created on
         // OVERLAY so its resolved font object (ChatFontNormal — face/height/shadow) is what the
         // frame's line/text rendering reads. See [`Self::apply_special_fontstrings`].
-        self.apply_special_fontstrings(el, &wrapper, &self_name, &dbg_name);
+        self.apply_special_fontstrings(el, wrapper, self_name, dbg_name);
         // 5a · <Backdrop> plate (rf24 LoadXML `0x77e6c0`): the tiled bg + 8-piece border.
-        self.apply_backdrop(el, &wrapper, &dbg_name);
+        self.apply_backdrop(el, wrapper, dbg_name);
         // 5b · per-kind LoadXML extras (RF-28's typed tables) — StatusBar + Button/CheckButton;
-        //      the EditBox flags/caps (RF-0082).
-        self.apply_statusbar(el, &wrapper, &dbg_name);
-        self.apply_slider(el, &wrapper, &self_name, &dbg_name);
-        self.apply_button(el, &wrapper, &self_name, &dbg_name);
-        self.apply_editbox(el, &wrapper, &dbg_name);
-        self.apply_messageframe(el, &wrapper, &dbg_name);
+        //      the EditBox flags/caps (RF-0082). Every one of these gates on the element's own tag,
+        //      which is why `apply_template` builds its synthetic node with the kind CreateFrame was
+        //      given: a Frame asked to wear a <Button> template simply skips the Button-only steps
+        //      instead of calling SetNormalTexture on something that has no such method.
+        self.apply_statusbar(el, wrapper, dbg_name);
+        self.apply_slider(el, wrapper, self_name, dbg_name);
+        self.apply_button(el, wrapper, self_name, dbg_name);
+        self.apply_editbox(el, wrapper, dbg_name);
+        self.apply_messageframe(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (rf24 `0x769ef0`); OnLoad is captured to fire bottom-up below.
-        let onload = self.apply_scripts(el, &wrapper, &dbg_name);
+        let onload = self.apply_scripts(el, wrapper, dbg_name);
 
         // 7 · nested <Frames> — build children (firing THEIR OnLoads) before ours (rf26). A child's
         //     `$parent` (name and anchors) resolves against this frame's name.
         for frames_el in children_named(el, "Frames") {
             for child in &frames_el.children {
                 let expanded = self.expand(child);
-                self.materialize(&expanded, Some(&wrapper), &self_name);
+                self.materialize(&expanded, Some(wrapper), self_name);
+            }
+        }
+
+        // 7b · `<ScrollChild>` — the ScrollFrame's panning content (wow-5875-re
+        //      `rf28-typed-widget-loadxml.md`: "its single child frame is instantiated via
+        //      `0x6ee280`(childNode, this, status)" — the same RF-0026 path `<Frames>` uses — then
+        //      "stored +0x318, flag +0x314=1", which is `SetScrollChild`).
+        //
+        //      **This is what gives a ScrollFrame its scroll range**, and without it
+        //      `FauxScrollFrameTemplate` — the template five corpus addons instantiate and 34 more
+        //      reach through `FauxScrollFrame_Update` — produces a frame whose range is 0, whose
+        //      `SetVerticalScroll` clamps to 0, and whose `OnVerticalScroll` therefore fires with
+        //      `arg1 = 0` forever. The list never scrolls and nothing errors.
+        //
+        //      An **empty** `<ScrollChild>` is an error in the reference, so it is one here.
+        for sc in children_named(el, "ScrollChild") {
+            let Some(child) = sc.children.first() else {
+                self.report.errors.push(format!(
+                    "{dbg_name}: <ScrollChild> is empty — the reference errors here, and a \
+                     ScrollFrame with no child has no scroll range at all"
+                ));
+                continue;
+            };
+            let expanded = self.expand(child);
+            let Some(child_wrapper) = self.materialize(&expanded, Some(wrapper), self_name) else {
+                continue; // materialize already reported why
+            };
+            if let Err(e) = wrapper.call_method::<()>("SetScrollChild", child_wrapper) {
+                self.report
+                    .errors
+                    .push(format!("{dbg_name}: <ScrollChild>: {e}"));
             }
         }
 
         // 8 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
-            self.fire_onload(&wrapper, &func, &dbg_name);
+            self.fire_onload(wrapper, &func, dbg_name);
         }
+    }
+
+    /// The two names a decoration needs, read back from the frame itself through the **public
+    /// object model** (`GetName`/`GetParent`) rather than the arena — the discipline this module
+    /// holds to everywhere else (see the module docs). Used by [`apply_template`], whose caller
+    /// hands it a wrapper and nothing else.
+    ///
+    /// Returns the frame's own name (`None` if it is anonymous) and the name of its nearest
+    /// **named** ancestor — rf27 rule 3's walk, with [`framexml::DEFAULT_PARENT_NAME`] when there
+    /// is none.
+    fn frame_names(&self, wrapper: &Table) -> (Option<String>, String) {
+        let own = wrapper
+            .call_method::<Option<String>>("GetName", ())
+            .ok()
+            .flatten();
+        let mut cur = wrapper.clone();
+        // Bounded: the arena's parent chain is a tree, and a walk that somehow is not must still
+        // return rather than hang a load.
+        for _ in 0..64 {
+            let Ok(Some(parent)) = cur.call_method::<Option<Table>>("GetParent", ()) else {
+                break;
+            };
+            if let Ok(Some(name)) = parent.call_method::<Option<String>>("GetName", ()) {
+                return (own, name);
+            }
+            cur = parent;
+        }
+        (own, framexml::DEFAULT_PARENT_NAME.to_string())
     }
 }
 

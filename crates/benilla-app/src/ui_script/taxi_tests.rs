@@ -71,9 +71,7 @@ fn menu() -> TaxiUiState {
 fn shipped_taxi_frame_drives_end_to_end() {
     let mut s = taxi_script();
 
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
 
     s.set_taxi(Some(menu()));
     s.fire_event(
@@ -82,33 +80,22 @@ fn shipped_taxi_frame_drives_end_to_end() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    assert!(s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaTaxiNameText:GetText()")
-            .unwrap(),
+        s.eval::<String>("return TaxiNameText:GetText()").unwrap(),
         "Dungar Longdrink"
     );
 
     // The two pushed nodes show; the pool's remainder (slot 3 onward) stays hidden.
-    assert!(s
-        .eval::<bool>("return BenillaTaxiButton1:IsVisible()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaTaxiButton2:IsVisible()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiButton3:IsVisible()")
-        .unwrap());
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiButton50:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return TaxiButton1:IsVisible()").unwrap());
+    assert!(s.eval::<bool>("return TaxiButton2:IsVisible()").unwrap());
+    assert!(!s.eval::<bool>("return TaxiButton3:IsVisible()").unwrap());
+    assert!(!s.eval::<bool>("return TaxiButton50:IsVisible()").unwrap());
 
     // A click on node 2 (Sentinel Hill) drains through TakeTaxiNode.
     s.resolve();
     let (cx, cy) = s
-        .eval::<(f32, f32)>("return BenillaTaxiButton2:GetCenter()")
+        .eval::<(f32, f32)>("return TaxiButton2:GetCenter()")
         .unwrap();
     s.mouse_button(cx, cy, "LeftButton", true);
     s.mouse_button(cx, cy, "LeftButton", false);
@@ -118,9 +105,7 @@ fn shipped_taxi_frame_drives_end_to_end() {
     // TAXIMAP_CLOSED hides the window.
     s.set_taxi(None);
     s.fire_event("TAXIMAP_CLOSED", vec![]);
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -151,9 +136,7 @@ fn no_single_hop_destination_posts_the_error_and_closes() {
 
     // OnShow ran DrawOneHopLines, which found zero single-hop nodes: the red error line posted
     // and the window hid itself again — the reference's own reaction to a dead-end flight point.
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
     s.resolve();
     let quads = s.extract();
     let has_refusal = quads.iter().any(|q| match &q.content {
@@ -164,7 +147,7 @@ fn no_single_hop_destination_posts_the_error_and_closes() {
     });
     assert!(
         has_refusal,
-        "ERR_TAXINOPATHS posted to BenillaErrorsFrame: {quads:?}"
+        "ERR_TAXINOPATHS posted to UIErrorsFrame: {quads:?}"
     );
 }
 
@@ -178,14 +161,10 @@ fn close_button_queues_the_intent_and_hides() {
         "TAXIMAP_OPENED",
         vec![ScriptValue::Str("Dungar Longdrink".into())],
     );
-    assert!(s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
 
     s.run("BenillaTaxiCloseButton_OnClick()").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(s.take_taxi_close());
-    assert!(!s
-        .eval::<bool>("return BenillaTaxiFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return TaxiFrame:IsVisible()").unwrap());
 }

@@ -125,6 +125,68 @@ impl WidgetArena {
         }
     }
 
+    /// Renumber `strata`'s **occupied** levels contiguously into `[0, count)` and return `count` —
+    /// `level_compact 0x764eb0`, the step `CSimpleTop::Raise 0x7650f0` runs immediately before it
+    /// sets the raised frame's level to `bucket->count(+0x8)` (wow-re `ui/scratch/toplevel-raise.md`,
+    /// consequence 1: the new level is the counter read *after* compaction, "never from a live
+    /// max-scan of frames").
+    ///
+    /// **Only frames in the bucket are renumbered — i.e. effective-visible ones.** A stratum bucket
+    /// is an array of intrusive level lists, and a frame is linked into one only while it is
+    /// effectively visible (the same visible-gate [`WidgetArena::resequence_to_tail`] mirrors); a
+    /// hidden frame is in no bucket, so its `+0xc4` is not touched and it re-enters at whatever level
+    /// it kept.
+    ///
+    /// **The renumber is strictly order-preserving, so by itself it changes no draw order**: distinct
+    /// levels map to distinct indices monotonically and equal levels stay equal. Its whole job is to
+    /// keep the raise target *bounded* — without it, `level := max + 1` would ratchet upward one step
+    /// per raise for as long as the session lasts.
+    ///
+    /// Two things it deliberately is **not**: it does not propagate (every same-strata descendant is
+    /// itself in the bucket and is renumbered by its own level node), and it does not relink — the
+    /// client relocates whole level nodes with their intrusive lists intact, so link order (our
+    /// `insertion_seq`) must survive. That is why this writes `level` directly instead of going
+    /// through [`WidgetArena::set_frame_level`], which would do both.
+    pub fn compact_levels(&mut self, strata: Strata) -> u16 {
+        let mut occupied: Vec<u16> = self
+            .iter_frames()
+            .filter(|(_, f)| f.effective_visible && f.strata == strata)
+            .map(|(_, f)| f.level)
+            .collect();
+        occupied.sort_unstable();
+        occupied.dedup();
+        let renumber: Vec<(FrameHandle, u16)> = self
+            .iter_frames()
+            .filter(|(_, f)| f.effective_visible && f.strata == strata)
+            .filter_map(|(h, f)| {
+                let idx = occupied.binary_search(&f.level).ok()? as u16;
+                (idx != f.level).then_some((h, idx))
+            })
+            .collect();
+        for (h, level) in renumber {
+            if let Some(f) = self.frame_mut(h) {
+                f.level = level;
+            }
+        }
+        occupied.len() as u16
+    }
+
+    // ── The toplevel flag (flag word bit 0x1) ────────────────────────────────────────────────────
+
+    /// Set a frame's `toplevel` bit — `SetToplevel 0x775440` / XML `toplevel`, both through the pure
+    /// bit-setter `0x76a3c0` (see [`Frame::toplevel`]). A pure flag write: **it raises nothing**.
+    /// A stale handle is a no-op.
+    pub fn set_toplevel(&mut self, h: FrameHandle, toplevel: bool) {
+        if let Some(f) = self.frame_mut(h) {
+            f.toplevel = toplevel;
+        }
+    }
+
+    /// Whether the frame carries the `toplevel` bit (`IsToplevel`). A stale handle reads as `false`.
+    pub fn is_toplevel(&self, h: FrameHandle) -> bool {
+        self.frame(h).is_some_and(|f| f.toplevel)
+    }
+
     // ── Scale (effective_scale) ──────────────────────────────────────────────────────────────────
 
     /// Set `h`'s own scale and recompute effective scale down the subtree, ε-gated, per
@@ -242,6 +304,18 @@ impl WidgetArena {
         }
     }
 
+    /// `EnableMouseWheel` — the wheel's own gate, separate from the mouse's (decision 1198).
+    pub fn set_mouse_wheel_enabled(&mut self, h: FrameHandle, enabled: bool) {
+        if let Some(f) = self.frame_mut(h) {
+            f.mouse_wheel_enabled = enabled;
+        }
+    }
+
+    /// Whether the frame currently accepts the wheel. A stale handle reads as `false`.
+    pub fn is_mouse_wheel_enabled(&self, h: FrameHandle) -> bool {
+        self.frame(h).is_some_and(|f| f.mouse_wheel_enabled)
+    }
+
     /// Whether the frame currently accepts the mouse (see [`WidgetArena::set_mouse_enabled`]). A
     /// stale handle reads as `false`.
     pub fn is_mouse_enabled(&self, h: FrameHandle) -> bool {
@@ -282,8 +356,13 @@ impl WidgetArena {
 
     // ── Small helpers ────────────────────────────────────────────────────────────────────────────
 
-    /// Is `maybe_ancestor` on the parent chain of `node` (walking up, loop-guarded)?
-    fn is_ancestor(&self, maybe_ancestor: FrameHandle, node: FrameHandle) -> bool {
+    /// Is `maybe_ancestor` on the parent chain of `node` (walking up, loop-guarded)? — the client's
+    /// `is_descendant 0x767010`, read the other way round.
+    ///
+    /// Two callers, and they are the two the binary has: [`WidgetArena::set_parent`]'s cycle guard,
+    /// and the raise's overlap scan, which excludes the raised frame's own subtree from the frames
+    /// it may be considered to overlap ([`crate::script::object::toplevel`]).
+    pub fn is_ancestor(&self, maybe_ancestor: FrameHandle, node: FrameHandle) -> bool {
         let mut cur = self.frame(node).and_then(|f| f.parent);
         let mut guard = 0usize;
         while let Some(c) = cur {

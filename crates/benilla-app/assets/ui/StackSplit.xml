@@ -39,7 +39,7 @@
         -- ContainerFrameItemButton_OnClick's own closure). maxStack < 2 hides instead of showing (a
         -- 1-stack has nothing to split) — the ref's own guard.
         function OpenStackSplitFrame(maxStack, owner, anchor, anchorTo)
-            local frame = BenillaStackSplitFrame
+            local frame = StackSplitFrame
             if frame.owner then
                 frame.owner.hasStackSplit = nil
             end
@@ -51,9 +51,9 @@
             frame.owner = owner
             owner.hasStackSplit = true
             frame.split = 1
-            BenillaStackSplitText:SetText(frame.split)
-            BenillaStackSplitLeftButton:Disable()
-            BenillaStackSplitRightButton:Enable()
+            StackSplitText:SetText(frame.split)
+            StackSplitLeftButton:Disable()
+            StackSplitRightButton:Enable()
             -- ref l.21-22: ClearAllPoints first — SetPoint only replaces an anchor of the SAME
             -- point, and the anchor callers choose (BagFrame.xml passes "BOTTOMRIGHT") differs from
             -- this frame's authored placeholder ("CENTER"), so skipping this would leave both live.
@@ -67,7 +67,7 @@
         -- (no caller has a live reason to resize an open spinner today) — kept so a later caller
         -- (the paper doll / bank slice) drops in without a new function.
         function UpdateStackSplitFrame(maxStack)
-            local frame = BenillaStackSplitFrame
+            local frame = StackSplitFrame
             frame.maxStack = maxStack
             if frame.maxStack < 2 then
                 if frame.owner then
@@ -78,44 +78,44 @@
             end
             if frame.split > frame.maxStack then
                 frame.split = frame.maxStack
-                BenillaStackSplitText:SetText(frame.split)
+                StackSplitText:SetText(frame.split)
             end
             if frame.split == frame.maxStack then
-                BenillaStackSplitRightButton:Disable()
+                StackSplitRightButton:Disable()
             else
-                BenillaStackSplitRightButton:Enable()
+                StackSplitRightButton:Enable()
             end
             if frame.split == 1 then
-                BenillaStackSplitLeftButton:Disable()
+                StackSplitLeftButton:Disable()
             else
-                BenillaStackSplitLeftButton:Enable()
+                StackSplitLeftButton:Enable()
             end
         end
 
         function BenillaStackSplitLeft_Click()
-            local frame = BenillaStackSplitFrame
+            local frame = StackSplitFrame
             if frame.split == 1 then return end
             frame.split = frame.split - 1
-            BenillaStackSplitText:SetText(frame.split)
+            StackSplitText:SetText(frame.split)
             if frame.split == 1 then
-                BenillaStackSplitLeftButton:Disable()
+                StackSplitLeftButton:Disable()
             end
-            BenillaStackSplitRightButton:Enable()
+            StackSplitRightButton:Enable()
         end
 
         function BenillaStackSplitRight_Click()
-            local frame = BenillaStackSplitFrame
+            local frame = StackSplitFrame
             if frame.split == frame.maxStack then return end
             frame.split = frame.split + 1
-            BenillaStackSplitText:SetText(frame.split)
+            StackSplitText:SetText(frame.split)
             if frame.split == frame.maxStack then
-                BenillaStackSplitRightButton:Disable()
+                StackSplitRightButton:Disable()
             end
-            BenillaStackSplitLeftButton:Enable()
+            StackSplitLeftButton:Enable()
         end
 
         function BenillaStackSplitOkay_Click()
-            local frame = BenillaStackSplitFrame
+            local frame = StackSplitFrame
             if frame.owner then
                 frame.owner.SplitStack(frame.owner, frame.split)
             end
@@ -123,7 +123,7 @@
         end
 
         function BenillaStackSplitCancel_Click()
-            BenillaStackSplitFrame:Hide()
+            StackSplitFrame:Hide()
         end
 
         -- OnHide (ref l.158-162): ANY hide — Okay, Cancel, or ToggleGameMenu's chain hook below —
@@ -131,8 +131,8 @@
         -- l.35-39, checks `this.hasStackSplit` to auto-close the spinner if the SLOT itself goes away
         -- mid-split — no consumer needs that half here, but the flag's own clear is this function's
         -- job regardless of which button caused the hide).
-        function BenillaStackSplitFrame_OnHide()
-            local frame = BenillaStackSplitFrame
+        function StackSplitFrame_OnHide()
+            local frame = StackSplitFrame
             if frame.owner then
                 frame.owner.hasStackSplit = nil
             end
@@ -152,7 +152,7 @@
         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
     </Button>
 
-    <Frame name="BenillaStackSplitFrame" frameStrata="HIGH" hidden="true">
+    <Frame name="StackSplitFrame" frameStrata="HIGH" hidden="true">
         <!-- ref StackSplitFrame.xml l.4-7: 172×96. The CENTER anchor here is only the pre-first-open
              placeholder — OpenStackSplitFrame always repositions before the first Show. -->
         <Size><AbsDimension x="172" y="96"/></Size>
@@ -167,7 +167,7 @@
                     <TexCoords left="0" right="0.671875" top="0" bottom="0.75"/>
                 </Texture>
                 <!-- ref l.16-24: the count, GameFontHighlight, right-justified, RIGHT -50/+18. -->
-                <FontString name="BenillaStackSplitText" inherits="GameFontHighlight" justifyH="RIGHT">
+                <FontString name="StackSplitText" inherits="GameFontHighlight" justifyH="RIGHT">
                     <Anchors>
                         <Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-50" y="18"/></Offset></Anchor>
                     </Anchors>
@@ -176,7 +176,7 @@
         </Layers>
         <Frames>
             <!-- ref l.28-47: the left/right arrows, 16×16, RIGHT/LEFT-of-CENTER ±59/64, +18. -->
-            <Button name="BenillaStackSplitLeftButton">
+            <Button name="StackSplitLeftButton">
                 <Size><AbsDimension x="16" y="16"/></Size>
                 <Anchors>
                     <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-59" y="18"/></Offset></Anchor>
@@ -188,7 +188,7 @@
                     <OnClick>BenillaStackSplitLeft_Click()</OnClick>
                 </Scripts>
             </Button>
-            <Button name="BenillaStackSplitRightButton">
+            <Button name="StackSplitRightButton">
                 <Size><AbsDimension x="16" y="16"/></Size>
                 <Anchors>
                     <Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="64" y="18"/></Offset></Anchor>
@@ -201,7 +201,7 @@
                 </Scripts>
             </Button>
             <!-- ref l.68-84: Okay, RIGHT-of-BOTTOM -3/+32. -->
-            <Button name="BenillaStackSplitButton1" inherits="BenillaStackSplitButtonTemplate" text="OKAY">
+            <Button name="StackSplitButton1" inherits="BenillaStackSplitButtonTemplate" text="OKAY">
                 <Anchors>
                     <Anchor point="RIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-3" y="32"/></Offset></Anchor>
                 </Anchors>
@@ -210,7 +210,7 @@
                 </Scripts>
             </Button>
             <!-- ref l.85-101: Cancel, LEFT-of-BOTTOM +5/+32. -->
-            <Button name="BenillaStackSplitButton2" inherits="BenillaStackSplitButtonTemplate" text="CANCEL">
+            <Button name="StackSplitButton2" inherits="BenillaStackSplitButtonTemplate" text="CANCEL">
                 <Anchors>
                     <Anchor point="LEFT" relativePoint="BOTTOM"><Offset><AbsDimension x="5" y="32"/></Offset></Anchor>
                 </Anchors>
@@ -220,7 +220,7 @@
             </Button>
         </Frames>
         <Scripts>
-            <OnHide>BenillaStackSplitFrame_OnHide()</OnHide>
+            <OnHide>StackSplitFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

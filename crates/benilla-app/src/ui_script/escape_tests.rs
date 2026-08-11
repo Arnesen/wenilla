@@ -85,14 +85,14 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Pick up slot 1 onto the cursor.
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.cursor_item().is_some(), "cursor holds the picked item");
     assert!(
         s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
         "bag is open before ESC"
     );
     assert!(
-        s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaLootFrame\"")
+        s.eval::<bool>("return GetLeftFrame():GetName() == \"LootFrame\"")
             .unwrap(),
         "loot holds the left panel slot before ESC"
     );
@@ -115,8 +115,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
         "ESC vacated the panel slot"
     );
     assert!(
-        !s.eval::<bool>("return BenillaLootFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return LootFrame:IsVisible()").unwrap(),
         "ESC hid the loot window"
     );
     assert!(
@@ -266,14 +265,11 @@ fn escape_closes_an_open_stack_split_frame() {
     )
     .unwrap();
     s.set_modifiers(false, false, false);
-    assert!(s
-        .eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
     s.run("ToggleGameMenu()").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "ESC closed the split frame"
     );
     // ESC's unconditional cursor-clear (ToggleGameMenu's own first line) ran too — nothing was
@@ -443,5 +439,53 @@ fn escape_ladder_targeting_rung_after_cast_before_windows() {
         !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
         "the idle press falls through both spell rungs to CloseAllWindows"
     );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **`UISpecialFrames` — an addon's own ESC list** (decision 1206).
+///
+/// `tinsert(UISpecialFrames, "MyFrame")` is *the* 1.12 idiom for "ESC should close my window", and
+/// 34 corpus call sites use it. With the table absent that line was
+/// `bad argument #1 to 'tinsert' (table expected, got nil)` — 11 addons dead at load, the
+/// second-largest wall in the survey.
+///
+/// The walk is the reference's own (`UIParent.lua` l.947-954, inside `CloseWindows`): a plain
+/// `Hide`, never `HideUIPanel`, because these frames hold no panel slot.
+#[test]
+fn an_addon_frame_registered_in_uispecialframes_closes_on_escape() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameMenuFrame.xml");
+
+    // The addon's three lines, verbatim in shape.
+    s.run(
+        r#"
+        MyAddonWindow = CreateFrame("Frame", "MyAddonWindow", UIParent)
+        MyAddonWindow:Show()
+        tinsert(UISpecialFrames, "MyAddonWindow")
+        "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(s.eval::<bool>("return MyAddonWindow:IsVisible()").unwrap());
+
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(
+        !s.eval::<bool>("return MyAddonWindow:IsVisible()").unwrap(),
+        "ESC closed the addon's window"
+    );
+    // ...and it ATE the press: the menu must not also open, or ESC would close the window and
+    // raise the menu in one keystroke.
+    assert!(
+        !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
+        "CloseAllWindows returning truthy is what stops the chain (UIParent.lua l.1491)"
+    );
+
+    // A name in the table that resolves to nothing is skipped, not an error — the reference's own
+    // `if (frame and frame:IsVisible())`.
+    s.run(r#"tinsert(UISpecialFrames, "NoSuchFrameAnywhere") ToggleGameMenu()"#)
+        .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

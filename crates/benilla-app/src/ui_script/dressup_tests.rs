@@ -102,9 +102,7 @@ fn ctrl_click_on_a_bag_item_opens_the_room_wearing_it() {
     s.set_screen_size(1024.0, 768.0);
     load_room(&s);
     let (x, y) = backpack_with_jerky(&mut s);
-    assert!(!s
-        .eval::<bool>("return BenillaDressUpFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return DressUpFrame:IsVisible()").unwrap());
 
     s.set_modifiers(false, true, false);
     s.mouse_button(x, y, "LeftButton", true);
@@ -112,8 +110,7 @@ fn ctrl_click_on_a_bag_item_opens_the_room_wearing_it() {
     s.set_modifiers(false, false, false);
 
     assert!(
-        s.eval::<bool>("return BenillaDressUpFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return DressUpFrame:IsVisible()").unwrap(),
         "ctrl-click opened the dressing room"
     );
     assert_eq!(
@@ -145,11 +142,10 @@ fn shift_click_posts_the_link_with_chat_open_and_splits_with_it_closed() {
     s.mouse_button(x, y, "LeftButton", false);
     s.set_modifiers(false, false, false);
     assert!(
-        s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "with chat closed, shift-click still opens the stack splitter"
     );
-    s.run("BenillaStackSplitFrame:Hide()").unwrap();
+    s.run("StackSplitFrame:Hide()").unwrap();
 
     // Chat open → the link, and no splitter.
     assert!(s.focus_editbox("ChatFrameEditBox"));
@@ -164,8 +160,7 @@ fn shift_click_posts_the_link_with_chat_open_and_splits_with_it_closed() {
         "the item's full escaped link landed in the chat box"
     );
     assert!(
-        !s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "with chat open the splitter must NOT open"
     );
     assert!(
@@ -197,8 +192,7 @@ fn ctrl_clicking_a_chat_link_previews_it() {
         "a chat link's id reached TryOn through DressUpItemLink's own gsub"
     );
     assert!(
-        s.eval::<bool>("return BenillaDressUpFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return DressUpFrame:IsVisible()").unwrap(),
         "and the room opened"
     );
     // The plain click still shows the link tooltip rather than the room (no modifier).
@@ -243,7 +237,7 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
 
     // CTRL on the head slot → the room, wearing the helm.
     s.set_modifiers(false, true, false);
-    s.run("BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, \"LeftButton\")")
+    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
         .unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
@@ -254,7 +248,7 @@ fn the_paper_doll_slots_preview_and_post_what_you_wear() {
     // SHIFT with chat open → the link; the item is never picked up either way.
     assert!(s.focus_editbox("ChatFrameEditBox"));
     s.set_modifiers(true, false, false);
-    s.run("BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, \"LeftButton\")")
+    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
         .unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
@@ -299,7 +293,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
     assert!(s.focus_editbox("ChatFrameEditBox"));
 
     s.set_modifiers(true, false, false);
-    s.run("BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, \"LeftButton\")")
+    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
         .unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
@@ -312,7 +306,7 @@ fn shift_clicking_an_unresolved_slot_posts_nothing_and_never_raises() {
 
     // And ctrl on the same unresolved slot is inert too (DressUpItemLink's own nil guard).
     s.set_modifiers(false, true, false);
-    s.run("BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, \"LeftButton\")")
+    s.run("BenillaPaperDollSlot_OnClick(CharacterHeadSlot, \"LeftButton\")")
         .unwrap();
     s.set_modifiers(false, false, false);
     assert!(
@@ -330,7 +324,7 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_room(&s);
-    s.run("ShowUIPanel(BenillaDressUpFrame)").unwrap();
+    s.run("ShowUIPanel(DressUpFrame)").unwrap();
     let _ = s.take_sounds();
     let _ = s.take_dressup_intents();
     s.resolve();
@@ -341,7 +335,7 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
         "ref UIParent.lua:1422"
     );
 
-    s.run("BenillaDressUpFrameResetButton:Click()").unwrap();
+    s.run("DressUpFrameResetButton:Click()").unwrap();
     assert_eq!(s.take_dressup_intents(), vec![DressUpIntent::Dress]);
     assert_eq!(
         s.take_sounds(),
@@ -353,10 +347,10 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
     let before = s.dressup_yaw();
     let (x, y) = s
         .eval::<(f32, f32)>(
-            "return (BenillaDressUpModelFrameRotateLeftButton:GetLeft() \
-                     + BenillaDressUpModelFrameRotateLeftButton:GetRight()) / 2, \
-                    (BenillaDressUpModelFrameRotateLeftButton:GetTop() \
-                     + BenillaDressUpModelFrameRotateLeftButton:GetBottom()) / 2",
+            "return (DressUpModelFrameRotateLeftButton:GetLeft() \
+                     + DressUpModelFrameRotateLeftButton:GetRight()) / 2, \
+                    (DressUpModelFrameRotateLeftButton:GetTop() \
+                     + DressUpModelFrameRotateLeftButton:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(x, y, "LeftButton", true);
@@ -368,7 +362,7 @@ fn reset_re_dresses_close_empties_and_the_arrows_spin_the_pane() {
         s.dressup_yaw()
     );
 
-    s.run("HideUIPanel(BenillaDressUpFrame)").unwrap();
+    s.run("HideUIPanel(DressUpFrame)").unwrap();
     assert_eq!(
         s.take_dressup_intents(),
         vec![DressUpIntent::Close],

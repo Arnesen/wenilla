@@ -23,7 +23,7 @@
         the action bar behind it, and an unguarded call would abort the rest of that OnShow. Same
         posture as UiPanels.xml's `CloseMenus and CloseMenus()` and the `if GameTooltip` guards.
 
-        Structure: the buttons are TOP-LEVEL frames anchored by name into BenillaActionBarArtFrame
+        Structure: the buttons are TOP-LEVEL frames anchored by name into MainMenuBarArtFrame
         (this engine has no cross-file `parent=` attachment — SkillFrame.xml's header comment), then
         seated one frame level above the art by BenillaActionBarArt_SeatAbove (ActionBar.xml) so the
         bar plate doesn't paint over them. Same shape the bag bar next door already uses.
@@ -153,10 +153,10 @@
         -- reference lists first. Its keyring arm has no frame here; the still-unwired Help button
         -- simply never pushes.
         function UpdateMicroButtons()
-            BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("BenillaCharacterFrame"))
-            BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("BenillaSpellBookFrame"))
+            BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("CharacterFrame"))
+            BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("SpellBookFrame"))
             BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("BenillaTalentFrame"))
-            BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("BenillaQuestLogFrame"))
+            BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("QuestLogFrame"))
             BenillaMicroButton_SetPushed(WorldMapMicroButton, BenillaMicro_PanelShown("WorldMapFrame"))
             BenillaMicroButton_SetPushed(MainMenuMicroButton, BenillaMicro_PanelShown("GameMenuFrame"))
         end
@@ -249,7 +249,7 @@
          button's TOP -28. -->
     <Button name="CharacterMicroButton" inherits="BenillaMicroButtonTemplate">
         <Anchors>
-            <Anchor point="BOTTOMLEFT" relativeTo="BenillaActionBarArtFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="552" y="2"/></Offset></Anchor>
+            <Anchor point="BOTTOMLEFT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="552" y="2"/></Offset></Anchor>
         </Anchors>
         <Layers>
             <Layer level="OVERLAY">
@@ -262,7 +262,7 @@
         </Layers>
         <Scripts>
             <OnLoad>CharacterMicroButton_OnLoad(self)</OnLoad>
-            <OnClick>ToggleCharacter("BenillaPaperDollFrame")</OnClick>
+            <OnClick>ToggleCharacter("PaperDollFrame")</OnClick>
             <OnUpdate>CharacterMicroButton_OnUpdate(self)</OnUpdate>
         </Scripts>
     </Button>

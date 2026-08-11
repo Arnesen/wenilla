@@ -82,19 +82,17 @@ fn push(s: &mut UiScript, state: SocialState, event: &str) {
 fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     let s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
+    assert!(s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
     assert!(s
-        .eval::<bool>("return BenillaFriendsFrame:IsVisible()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaFriendsListFrame:IsVisible()")
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameTitleText:GetText()")
+        s.eval::<String>("return FriendsFrameTitleText:GetText()")
             .unwrap(),
         "Friends List"
     );
     assert_eq!(
-        s.eval::<i64>("return BenillaFriendsFrameTab3.isDisabled or 0")
+        s.eval::<i64>("return FriendsFrameTab3.isDisabled or 0")
             .unwrap(),
         1,
         "the guild tab is disabled, not absent"
@@ -104,22 +102,20 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     // ref's compact TabButtonTemplate (16px). Getting this wrong is invisible to every behaviour
     // assertion — it only shows up as the wrong-looking window.
     assert_eq!(
-        s.eval::<f64>("return BenillaFriendsFrameTab1Left:GetWidth()")
+        s.eval::<f64>("return FriendsFrameTab1Left:GetWidth()")
             .unwrap(),
         20.0,
         "the window tab strip keeps the big tab art"
     );
     assert_eq!(
-        s.eval::<f64>("return BenillaFriendsFrameToggleTab1Left:GetWidth()")
+        s.eval::<f64>("return FriendsFrameToggleTab1Left:GetWidth()")
             .unwrap(),
         16.0,
         "the in-panel toggle pair is the compact tab art"
     );
     // …and toggling the same tab again closes the window (the ref's own second branch).
     s.run("ToggleFriendsFrame(1)").unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaFriendsFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return FriendsFrame:IsVisible()").unwrap());
 }
 
 /// A friend row shows name/zone/status on its top line and "Level N Class" underneath; an
@@ -146,27 +142,27 @@ fn friend_rows_render_the_online_and_offline_templates() {
     );
 
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameFriendButton1NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1NameLocation:GetText()")
             .unwrap(),
         "Onerogue |cffffffff- Elwynn Forest|r <AFK>"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameFriendButton1Info:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton1Info:GetText()")
             .unwrap(),
         "Level 60 Rogue"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameFriendButton2NameLocation:GetText()")
+        s.eval::<String>("return FriendsFrameFriendButton2NameLocation:GetText()")
             .unwrap(),
         "|cff999999Twomage - Offline|r"
     );
     assert!(
-        s.eval::<bool>("return BenillaFriendsFrameFriendButton2:IsVisible()")
+        s.eval::<bool>("return FriendsFrameFriendButton2:IsVisible()")
             .unwrap(),
         "both rows shown"
     );
     assert!(
-        !s.eval::<bool>("return BenillaFriendsFrameFriendButton3:IsVisible()")
+        !s.eval::<bool>("return FriendsFrameFriendButton3:IsVisible()")
             .unwrap(),
         "rows past the list are hidden"
     );
@@ -182,10 +178,8 @@ fn the_friend_buttons_follow_the_selection() {
     push(&mut s, SocialState::default(), "FRIENDLIST_UPDATE");
     for button in ["SendMessage", "GroupInvite", "RemoveFriend"] {
         assert!(
-            !s.eval::<bool>(&format!(
-                "return BenillaFriendsFrame{button}Button:IsEnabled()"
-            ))
-            .unwrap(),
+            !s.eval::<bool>(&format!("return FriendsFrame{button}Button:IsEnabled()"))
+                .unwrap(),
             "{button} is disabled with no friends"
         );
     }
@@ -200,12 +194,12 @@ fn the_friend_buttons_follow_the_selection() {
         "FRIENDLIST_UPDATE",
     );
     assert!(
-        s.eval::<bool>("return BenillaFriendsFrameRemoveFriendButton:IsEnabled()")
+        s.eval::<bool>("return FriendsFrameRemoveFriendButton:IsEnabled()")
             .unwrap(),
         "an offline friend can still be removed"
     );
     assert!(
-        !s.eval::<bool>("return BenillaFriendsFrameSendMessageButton:IsEnabled()")
+        !s.eval::<bool>("return FriendsFrameSendMessageButton:IsEnabled()")
             .unwrap(),
         "…but not whispered"
     );
@@ -231,19 +225,19 @@ fn the_friend_buttons_queue_their_verbs() {
     );
     let _ = s.take_social_requests();
 
-    s.run("BenillaFriendsFrame_RemoveFriend()").unwrap();
+    s.run("FriendsFrame_RemoveFriend()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::RemoveFriendIndex(2)]
     );
 
-    s.run("BenillaFriendsFrame_GroupInvite()").unwrap();
+    s.run("FriendsFrame_GroupInvite()").unwrap();
     assert!(s.take_party_requests().iter().any(|r| matches!(
         r,
         benilla_ui::script::PartyRequest::InviteName(n) if n == "Twomage"
     )));
 
-    s.run("BenillaFriendsFrame_SendMessage()").unwrap();
+    s.run("FriendsFrame_SendMessage()").unwrap();
     assert_eq!(s.take_tell_requests(), vec!["Twomage".to_string()]);
 }
 
@@ -263,32 +257,32 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
         "IGNORELIST_UPDATE",
     );
 
-    s.run("BenillaFriendsFrameToggleTab2:Click()").unwrap();
+    s.run("FriendsFrameToggleTab2:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaIgnoreListFrame:IsVisible()")
+        .eval::<bool>("return IgnoreListFrame:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaFriendsListFrame:IsVisible()")
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameTitleText:GetText()")
+        s.eval::<String>("return FriendsFrameTitleText:GetText()")
             .unwrap(),
         "Ignore List"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameIgnoreButton1Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton1Name:GetText()")
             .unwrap(),
         "Spammer"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaFriendsFrameIgnoreButton2Name:GetText()")
+        s.eval::<String>("return FriendsFrameIgnoreButton2Name:GetText()")
             .unwrap(),
         "Ninja"
     );
 
     // Remove Player un-ignores the selected name.
     let _ = s.take_social_requests();
-    s.run("BenillaFriendsFrame_UnIgnore()").unwrap();
+    s.run("FriendsFrame_UnIgnore()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::DelIgnore("Spammer".to_string())]
@@ -296,13 +290,13 @@ fn the_ignore_list_is_the_other_half_of_tab_one() {
 
     // Back to the friends half — through the IGNORE frame's own Friends tab, since the friends
     // frame's copy is hidden with it (the ref ships the pair twice for exactly this reason).
-    s.run("BenillaIgnoreFrameToggleTab1:Click()").unwrap();
+    s.run("IgnoreFrameToggleTab1:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaFriendsListFrame:IsVisible()")
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
         .unwrap());
     s.run("ShowIgnorePanel()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaIgnoreListFrame:IsVisible()")
+        .eval::<bool>("return IgnoreListFrame:IsVisible()")
         .unwrap());
 }
 
@@ -330,34 +324,31 @@ fn who_rows_fill_their_columns() {
         "WHO_LIST_UPDATE",
     );
 
-    assert!(s
-        .eval::<bool>("return BenillaWhoFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return WhoFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameButton1Name:GetText()")
+        s.eval::<String>("return WhoFrameButton1Name:GetText()")
             .unwrap(),
         "Tigole"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameButton1Level:GetText()")
+        s.eval::<String>("return WhoFrameButton1Level:GetText()")
             .unwrap(),
         "40"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameButton1Class:GetText()")
+        s.eval::<String>("return WhoFrameButton1Class:GetText()")
             .unwrap(),
         "Rogue",
         "class, not race — the API returns race first but the column is class"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameButton1Variable:GetText()")
+        s.eval::<String>("return WhoFrameButton1Variable:GetText()")
             .unwrap(),
         "Westfall",
         "the variable column defaults to Zone (dropdown entry 1)"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameTotals:GetText()")
-            .unwrap(),
+        s.eval::<String>("return WhoFrameTotals:GetText()").unwrap(),
         "1 Person Found  ",
         "singular template for one hit"
     );
@@ -386,16 +377,16 @@ fn the_who_dropdown_switches_the_variable_column() {
     );
     let _ = s.take_social_requests();
 
-    s.run("UIDropDownMenu_SetSelectedID(BenillaWhoFrameDropDown, 2); BenillaWhoList_Update()")
+    s.run("UIDropDownMenu_SetSelectedID(WhoFrameDropDown, 2); WhoList_Update()")
         .unwrap();
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameButton1Variable:GetText()")
+        s.eval::<String>("return WhoFrameButton1Variable:GetText()")
             .unwrap(),
         "Legacy of Steel"
     );
 
     // A column header sorts by its own key.
-    s.run("BenillaWhoFrameColumnHeader3:Click()").unwrap();
+    s.run("WhoFrameColumnHeader3:Click()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::SortWho("level".to_string())]
@@ -430,17 +421,17 @@ fn the_who_buttons_need_a_selected_row() {
         "WHO_LIST_UPDATE",
     );
     assert!(
-        !s.eval::<bool>("return BenillaWhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
             .unwrap(),
         "nothing selected yet"
     );
 
-    s.run("BenillaWhoFrameButton2:Click()").unwrap();
+    s.run("WhoFrameButton2:Click()").unwrap();
     assert!(s
-        .eval::<bool>("return BenillaWhoFrameAddFriendButton:IsEnabled()")
+        .eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
         .unwrap());
     let _ = s.take_social_requests();
-    s.run("BenillaWhoFrameAddFriendButton:Click()").unwrap();
+    s.run("WhoFrameAddFriendButton:Click()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::AddFriend("Furor".to_string())]
@@ -456,7 +447,7 @@ fn the_who_buttons_need_a_selected_row() {
         "WHO_LIST_UPDATE",
     );
     assert!(
-        !s.eval::<bool>("return BenillaWhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
             .unwrap(),
         "a fresh answer drops the old selection"
     );
@@ -474,7 +465,7 @@ fn showing_the_who_frame_claims_the_next_answer() {
             .contains(&SocialRequest::SetWhoToUi(true)),
         "showing the frame routes results to it"
     );
-    s.run("HideUIPanel(BenillaFriendsFrame)").unwrap();
+    s.run("HideUIPanel(FriendsFrame)").unwrap();
     assert!(
         s.take_social_requests()
             .contains(&SocialRequest::SetWhoToUi(false)),
@@ -488,9 +479,9 @@ fn the_who_edit_box_sends_its_filter() {
     let mut s = setup();
     s.run("ShowWhoPanel()").unwrap();
     let _ = s.take_social_requests();
-    s.run("BenillaWhoFrameEditBox:SetText(\"z-\\\"Elwynn Forest\\\" 1-10\")")
+    s.run("WhoFrameEditBox:SetText(\"z-\\\"Elwynn Forest\\\" 1-10\")")
         .unwrap();
-    s.run("BenillaWhoFrameEditBox_OnEnterPressed()").unwrap();
+    s.run("WhoFrameEditBox_OnEnterPressed()").unwrap();
     assert_eq!(
         s.take_social_requests(),
         vec![SocialRequest::Who("z-\"Elwynn Forest\" 1-10".to_string())]
@@ -526,9 +517,7 @@ fn the_slash_bodies_match_the_reference() {
 
     // A bare `/who` opens the Who panel and sends the default filter, which it also shows.
     s.run("BenillaSlashWho(\"\")").unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaWhoFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return WhoFrame:IsVisible()").unwrap());
     let requests = s.take_social_requests();
     let sent = requests
         .iter()
@@ -542,7 +531,7 @@ fn the_slash_bodies_match_the_reference() {
         "the default filter is zone-scoped: {sent}"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaWhoFrameEditBox:GetText()")
+        s.eval::<String>("return WhoFrameEditBox:GetText()")
             .unwrap(),
         sent,
         "and the edit box shows what was sent"
@@ -555,7 +544,7 @@ fn the_slash_bodies_match_the_reference() {
 fn add_friend_without_a_target_opens_the_name_dialog() {
     let mut s = setup();
     s.run("ToggleFriendsFrame(1)").unwrap();
-    s.run("BenillaFriendsFrameAddFriendButton:Click()").unwrap();
+    s.run("FriendsFrameAddFriendButton:Click()").unwrap();
 
     assert!(
         s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
@@ -623,8 +612,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         "WHO_LIST_UPDATE",
     );
 
-    s.run("BenillaWhoFrameButton1:Click(\"RightButton\")")
-        .unwrap();
+    s.run("WhoFrameButton1:Click(\"RightButton\")").unwrap();
     assert!(
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "the menu opens"
@@ -637,7 +625,7 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
     );
     // …and a right-click must NOT also select the row (the ref's two branches are exclusive).
     assert!(
-        !s.eval::<bool>("return BenillaWhoFrameAddFriendButton:IsEnabled()")
+        !s.eval::<bool>("return WhoFrameAddFriendButton:IsEnabled()")
             .unwrap(),
         "right-click does not select"
     );
@@ -672,7 +660,7 @@ fn right_clicking_an_offline_friend_opens_nothing() {
         },
         "FRIENDLIST_UPDATE",
     );
-    s.run("BenillaFriendsFrameFriendButton1:Click(\"RightButton\")")
+    s.run("FriendsFrameFriendButton1:Click(\"RightButton\")")
         .unwrap();
     assert!(
         !s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
@@ -700,7 +688,7 @@ fn selecting_a_row_reads_back_in_the_same_tick() {
     );
     let _ = s.take_social_requests();
 
-    s.run("BenillaFriendsFrameFriendButton2:Click()").unwrap();
+    s.run("FriendsFrameFriendButton2:Click()").unwrap();
     assert_eq!(
         s.eval::<i64>("return GetSelectedFriend()").unwrap(),
         2,
@@ -795,7 +783,7 @@ fn the_window_geometry_matches_the_reference_framexml() {
         // separate <HighlightTexture> block the scrape attributes to the same element).
         "WhoFrameColumnHeaderTemplate/Right",
         // The three faux-scroll frames: the ref decorates each with two UI-Character-ScrollBar
-        // trough textures. benilla's BenillaFauxScrollFrameTemplate draws its own complete bar
+        // trough textures. benilla's FauxScrollFrameTemplate draws its own complete bar
         // (decisions 0247/0250/0251), so the ref's loose art would double it.
         "FriendsFrameFriendsScrollFrame",
         "FriendsFrameIgnoreScrollFrame",

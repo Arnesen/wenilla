@@ -31,6 +31,7 @@
 // spent its whole diff clearing it out of. Dev builds still warn normally.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
+pub mod addon_harness;
 mod area;
 mod area_trigger;
 #[cfg(feature = "dev")]

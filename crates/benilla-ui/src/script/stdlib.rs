@@ -48,9 +48,11 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
     // success or `(nil, errmsg)` on failure — the stock `loadstring` contract. `set_mode(Text)`
     // makes mlua reject a binary chunk (the `\27Lua` signature), the "loadstring of bytecode
     // rejected" guarantee.
+    // The BOM strip and the `#`-line skip ride along, because in the reference they live *inside*
+    // `luaL_loadbuffer`/`luaX_setinput` — the same door `loadstring` goes through (decision 1193).
     let loadstring = lua.create_function(
         |lua, (src, chunkname): (mlua::String, Option<mlua::String>)| {
-            let bytes = src.as_bytes().to_vec();
+            let bytes = crate::source::chunk(&src.as_bytes()).to_vec();
             let name = match &chunkname {
                 Some(n) => format!("={}", n.to_str()?),
                 None => "=(loadstring)".to_string(),
@@ -72,6 +74,25 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
 
 /// Install the WoW stdlib layer (aliases, `strsplit` family, positional `format`, …).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // The default `geterrorhandler()` reports into the same channel a failed handler uses, so an
+    // addon's `geterrorhandler()(msg)` surfaces where every other script error does rather than
+    // vanishing (decision 1195). Named with the `__benilla_` prefix because it is host plumbing,
+    // not a 1.12 global — the reference's default handler is FrameXML's `_ERRORMESSAGE`.
+    lua.globals().set(
+        "__benilla_script_error",
+        lua.create_function(|lua, msg: mlua::Value| {
+            let text = match &msg {
+                mlua::Value::String(s) => s.to_string_lossy(),
+                other => format!("{other:?}"),
+            };
+            lua.app_data_mut::<super::Model>()
+                .expect("model app_data")
+                .errors
+                .push(text);
+            Ok(())
+        })?,
+    )?;
+
     lua.load(WOW_STDLIB)
         .set_name("=[benilla wow stdlib]")
         .set_mode(mlua::ChunkMode::Text)
@@ -82,17 +103,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// The stdlib layer, in Lua. One place, so each alias is the one-liner the task calls for and the
 /// `format`/`strsplit` logic is readable. Runs once at construction.
 const WOW_STDLIB: &str = r#"
--- ── the nine probe-found bare-global aliases (+ strlower/strrep) ────────────────────────────────
+-- ── the bare string family ─────────────────────────────────────────────────────────────────────
+-- Every name here is present in the REAL 1.12 client's global table — the in-world `_G` captured
+-- from the running reference client (wow-5875-re's item-13 fixture, 19,572 entries), which is the
+-- authority this file now answers to (decision 1189).
+--
+-- 1187 also installed `strmatch`, `strrev`, `gmatch`, `strlenutf8` and `strcmputf8i` from
+-- Blizzard's *Era* enumeration, to get a Classic Era addon further. **None of them exist in
+-- 1.12** — `string.match`/`gmatch` are Lua 5.1 additions the 5.0 client never had — and Era is
+-- not our target. They are gone; adding a global the client does not have is how an addon that
+-- feature-detects gets sent down a path we cannot honour.
 strlen  = string.len
 strsub  = string.sub
 strupper = string.upper
 strlower = string.lower
 strrep  = string.rep
 strfind = string.find
+strbyte = string.byte
+strchar = string.char
 gsub    = string.gsub
 tinsert = table.insert
 tremove = table.remove
-getn    = table.getn or function(t) return #t end
+-- `getn`, `sort`, `foreach` and `foreachi` are bound by `lua50` (decision 1194), which owns the
+-- 5.0 shapes of `table.getn`/`setn` and must not be shadowed by a second implementation here.
 
 -- ── the bare math aliases (the same 1.12 global family; the reference FrameXML uses them
 -- unqualified — WorldMapFrame's overlay pool calls ceil/mod, CooldownFrame floor, …). `mod` is
@@ -103,8 +136,13 @@ abs   = math.abs
 max   = math.max
 min   = math.min
 sqrt  = math.sqrt
-mod   = math.fmod
+mod   = math.mod        -- 5.0's name for fmod; `math.fmod` is removed by `lua50` (decision 1194)
 random = math.random
+-- `randomseed` is an ENGINE global in 1.12 exactly like `random` beside it (the captured `_G` types
+-- both `function engine`), and it is the half that was missing: `IgniteStatus` calls it at file
+-- scope in its OnLoad and dies on `attempt to call global 'randomseed'`. Seeding a PRNG is the one
+-- thing an addon does that has no FrameXML counterpart to copy, so the bare name is all it has.
+randomseed = math.randomseed
 -- `PI` is an ENGINE global in 1.12, not a FrameXML one: the reference reads it bare (UIParent.lua's
 -- `elapsedTime * 2 * PI * ROTATIONS_PER_SECOND`, TabardFrame.lua l.61-68) and no shipped FrameXML
 -- file ever assigns it (grepped over the whole 1.12 extraction) — so the client supplies it, here,
@@ -116,6 +154,67 @@ function sin(d) return math.sin(math.rad(d)) end
 function cos(d) return math.cos(math.rad(d)) end
 rad = math.rad
 deg = math.deg
+-- The rest of the bare math family, each verified present in the real 1.12 client's global
+-- table (decision 1189's captured `_G`; 1187 had reached for Blizzard's Era enumeration).
+-- `tan` and the inverses follow sin/cos into DEGREES — same family, same convention; that is
+-- consistent-with the verified sin/cos finding rather than separately byte-verified, and it is
+-- the convention every addon rotation helper assumes (`atan2` returning degrees is why
+-- `atan2(dy, dx)` feeds a texture rotation directly).
+function tan(d) return math.tan(math.rad(d)) end
+function asin(x) return math.deg(math.asin(x)) end
+function acos(x) return math.deg(math.acos(x)) end
+function atan(x) return math.deg(math.atan(x)) end
+function atan2(y, x) return math.deg(math.atan2(y, x)) end
+exp = math.exp
+log = math.log
+log10 = math.log10
+frexp = math.frexp
+ldexp = math.ldexp
+
+-- ── the debug* family: six verified STUBS and two real ones ────────────────────────────────────
+--
+-- wow-re carved all eight (`system/ui/scratch/lua-dialect.md` §3a, and the 2026-08-11 batch):
+-- `debuginfo`, `debugload`, `debugprint`, `debugdump`, `debugbreak` and `debugtimestamp` are
+-- **byte-identical `xor eax,eax; ret` stubs** — three bytes, no `call`, no memory write. They
+-- cannot print, log, write or set a global, and they return ZERO Lua values. So these are not
+-- no-ops we invented under a real name (the "absent capability" class 1203 named); they are the
+-- reference's own no-ops, transcribed.
+--
+-- That is what lets `BasicControls.xml` stop guarding its `debuginfo()` call and transcribe
+-- `_ERRORMESSAGE` verbatim, which it now does.
+--
+-- `debugprofilestart`/`debugprofilestop` are the two that are REAL (RDTSC via `0x4293d0`): start
+-- latches, stop answers the elapsed milliseconds since it. Modelled on `GetTime`'s own clock —
+-- the same monotonic session seconds the tick advances — because benilla has no cycle counter and
+-- an addon uses these to time its own work, which milliseconds answer honestly.
+do
+    local function noop() end
+    debuginfo = noop
+    debugload = noop
+    debugprint = noop
+    debugdump = noop
+    debugbreak = noop
+    debugtimestamp = noop
+
+    local profileStart = 0
+    function debugprofilestart() profileStart = GetTime() end
+    function debugprofilestop() return (GetTime() - profileStart) * 1000 end
+end
+
+-- ── the error handler (decision 1195) ──────────────────────────────────────────────────────────
+-- `seterrorhandler(f)` / `geterrorhandler()` are ENGINE globals in 1.12 (the captured `_G` says
+-- so), and `_ERRORMESSAGE` — the default handler they start out holding — is FrameXML's. That
+-- split is why the pair lives here and the default is a plain function rather than a Rust binding:
+-- our own transcribed UI can replace it exactly as the reference's `UIErrorsFrame` does.
+--
+-- The idiom this exists for is `geterrorhandler()(msg)` — an addon's pcall wrapper reporting a
+-- caught error the way the client would. Without the pair that line is `attempt to call a nil
+-- value` INSIDE an error path, which turns a recoverable addon fault into a dead addon.
+do
+    local handler = function(msg) __benilla_script_error(msg) end
+    function seterrorhandler(f) handler = f end
+    function geterrorhandler() return handler end
+end
 
 -- ── _G accessors (RF-0023 getglobal/setglobal: _G[name] get/set) ───────────────────────────────
 function getglobal(name) return _G[name] end

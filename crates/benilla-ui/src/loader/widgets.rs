@@ -80,7 +80,15 @@ impl Loader<'_> {
             return;
         }
         let tex = |tag: &str, method: &str, this: &mut Self| {
-            for t in children_named(el, tag) {
+            for raw in children_named(el, tag) {
+                // A state texture may `inherits=` a virtual `<Texture>` — `<NormalTexture
+                // inherits="UIPanelButtonUpTexture"/>` is how the reference's whole shared button
+                // kit carries its art, and it is the ONLY form those templates use. Expanding here
+                // is the same call a `<Layers>` region gets (`expand_region`, which passes a
+                // non-template `inherits=` through untouched), and without it the reads below found
+                // no `file=`, no `<TexCoords>` and no `<Size>`: a button with no art and NO ERROR.
+                let expanded = this.expand_region(raw);
+                let t = &expanded;
                 if let Some(file) = t.attr("file") {
                     this.call(wrapper, method, file.to_string(), dbg);
                 } else if let Some(c) = children_named(t, "Color").next().map(color_of) {
@@ -328,7 +336,14 @@ impl Loader<'_> {
             }
         }
         let layer = el.attr("drawLayer").map(str::to_string);
-        for tt in children_named(el, "ThumbTexture") {
+        for raw in children_named(el, "ThumbTexture") {
+            // Same two rules as a Button's state textures, for the same reasons: `inherits=` on a
+            // virtual `<Texture>` is expanded here (see `apply_button`), and a NAMED thumb is
+            // published as a global — `UIPanelScrollBarTemplate`'s own
+            // `ScrollFrame_OnScrollRangeChanged` reaches it with
+            // `getglobal(bar:GetName().."ThumbTexture")`.
+            let expanded = self.expand_region(raw);
+            let tt = &expanded;
             if let Some(file) = tt.attr("file") {
                 self.call(
                     wrapper,
@@ -349,6 +364,13 @@ impl Loader<'_> {
                 self.apply_region_layout(tt, &region, self_name, dbg);
                 if let Some(tc) = tex_coords_of(tt) {
                     self.call_region(&region, "SetTexCoord", tc, dbg);
+                }
+                if let Some(rname) = tt.name().map(|raw| framexml::resolve_name(raw, self_name)) {
+                    if let Err(e) = self.lua().globals().set(rname.clone(), region) {
+                        self.report
+                            .warnings
+                            .push(format!("{dbg}: thumb-texture global '{rname}': {e}"));
+                    }
                 }
             }
         }

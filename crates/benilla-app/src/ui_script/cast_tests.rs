@@ -412,14 +412,17 @@ fn managed_positions_track_the_bottom_bar_stack() {
     assert_eq!(bottom(&s, "ChatFrame1"), 85.0, "chat baseY");
 
     // The always-on bottom multibars appear (0270): bottomEither for the bar, bottomLeft for chat.
-    s.run("BenillaMultiBarBottomLeft = { IsShown = function() return true end }; BenillaMultiBarBottomRight = BenillaMultiBarBottomLeft; UIParent_ManageFramePositions()")
+    // The bar stubs carry a no-op SetPoint: `MultiBarBottomLeft` and `ShapeshiftBarFrame` are
+    // themselves rows in UIPARENT_MANAGED_FRAME_POSITIONS, so since those frames wear their
+    // reference names the pass positions them as well as reading their visibility.
+    s.run("MultiBarBottomLeft = { IsShown = function() return true end, SetPoint = function() end }; MultiBarBottomRight = MultiBarBottomLeft; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0, "60 + bottomEither 40");
     assert_eq!(bottom(&s, "ChatFrame1"), 102.0, "85 + bottomLeft 17");
 
     // The stance bar shows (the warrior at login): the pet term, plus chat's both-flags extra.
-    s.run("BenillaShapeshiftBarFrame = { IsShown = function() return true end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame = { IsShown = function() return true end, SetPoint = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 140.0, "60 + 40 + pet 40");
@@ -430,7 +433,7 @@ fn managed_positions_track_the_bottom_bar_stack() {
     );
 
     // It hides again (a druid leaving forms is the live case): everything settles back.
-    s.run("BenillaShapeshiftBarFrame = { IsShown = function() return false end }; UIParent_ManageFramePositions()")
+    s.run("ShapeshiftBarFrame = { IsShown = function() return false end, SetPoint = function() end }; UIParent_ManageFramePositions()")
         .unwrap();
     s.resolve();
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0);

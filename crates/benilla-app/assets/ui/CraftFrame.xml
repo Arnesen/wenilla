@@ -31,7 +31,7 @@
             session), the UIPanel slot system (carries NO hardcoded <Anchors> — ShowUIPanel/SetLeftFrame
             SetPoints it), OnShow/OnHide PlaySound pair.
           - TradeSkillFrame.xml — the FLAT layout constraint (below), the faux-scroll list kit
-            (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
+            (FauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
             UIPanelButtonTemplate/close-button/item-button idioms (no such templates ship in this house
             dialect — TalentFrame.xml's own ENGINE API note, restated per-window, StackSplit.xml's own
             "own local virtual template, not a cross-file inherits" convention), the persistent
@@ -316,8 +316,8 @@
             end
 
             local scrollFrame = getglobal("BenillaCraftListScrollFrame")
-            BenillaFauxScrollFrame_Update(scrollFrame, numCrafts, CRAFTS_DISPLAYED, CRAFT_SKILL_HEIGHT)
-            local craftOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+            FauxScrollFrame_Update(scrollFrame, numCrafts, CRAFTS_DISPLAYED, CRAFT_SKILL_HEIGHT)
+            local craftOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
             -- The skill-rank StatusBar (ref l.107-123): Show/Hide are real here (real widgets, not
             -- flattened Layer regions).
@@ -437,7 +437,7 @@
                 ExpandCraftSkillLine(0)
             else
                 self.collapsed = true
-                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+                FauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
                 CollapseCraftSkillLine(0)
             end
         end
@@ -513,7 +513,7 @@
             else
                 BenillaCraftFrame_SetSelection(GetCraftSelectionIndex())
             end
-            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+            FauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
             SetPortraitTexture(getglobal("BenillaCraftFramePortrait"), "player")
             BenillaCraftFrame_Update()
             ShowUIPanel(frame)
@@ -529,7 +529,7 @@
                     BenillaCraftFrame_SetSelection(selection)
                 elseif GetNumCrafts() > 0 then
                     BenillaCraftFrame_SetSelection(1)
-                    BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+                    FauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
                 end
                 BenillaCraftFrame_Update()
             elseif event == "CRAFT_CLOSE" then
@@ -839,11 +839,11 @@
             <Button name="BenillaCraft7" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
             <Button name="BenillaCraft8" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
 
-            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+            <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
                  8-row span (CRAFTS_DISPLAYED × CRAFT_SKILL_HEIGHT), TradeSkillFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in BenillaCraftFrame_OnLoad. -->
-            <Frame name="BenillaCraftListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+            <Frame name="BenillaCraftListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
             </Frame>

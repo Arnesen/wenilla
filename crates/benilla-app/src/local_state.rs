@@ -157,6 +157,39 @@ pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
 
+/// `benilla-config/addons/<Realm>-<Character>.txt` — the AddOn **enable state** (1188 phase 2).
+///
+/// Per character, like the reference: it writes `WTF/Account/<ACC>/<Realm>/<Char>/AddOns.txt` as
+/// the last step of its UI shutdown (`0x490bd0`'s tail, after the saved-variables files). The
+/// file's own format is the reference's too — one `<AddOnName>: enabled|disabled` per line,
+/// confirmed against a real 1.12 install rather than remembered. An addon absent from the file is
+/// enabled, which is what makes a freshly-dropped-in folder just work.
+pub(crate) fn addons_state_path(realm: &str, character: &str) -> Option<PathBuf> {
+    let key = format!("{}-{}", file_token(realm), file_token(character));
+    home().map(|h| h.join("addons").join(format!("{key}.txt")))
+}
+
+/// `benilla-config/saved/` — **per-addon** saved variables, account scope (1188 phase 3): one
+/// `<Addon>.lua` per addon that declares `## SavedVariables`.
+///
+/// The reference's shape, one level flatter: it writes
+/// `WTF/Account/<ACC>/SavedVariables/<Addon>.lua`, and our whole state folder is already
+/// per-install, so the folder IS the account scope (0954, and 1128 reserved this exact path —
+/// spelled `benilla/saved/` before 1180 renamed the folder).
+///
+/// Distinct from [`saved_variables_path`], which is the *flat* channel our own FrameXML uses
+/// through `RegisterForSave`. The reference has both too, and they are not the same mechanism.
+pub(crate) fn addon_saved_account_dir() -> Option<PathBuf> {
+    home().map(|h| h.join("saved"))
+}
+
+/// `benilla-config/saved/<Realm>-<Character>/` — per-addon saved variables, character scope
+/// (`## SavedVariablesPerCharacter`). Loaded **after** the account file, so it wins.
+pub(crate) fn addon_saved_character_dir(realm: &str, character: &str) -> Option<PathBuf> {
+    let key = format!("{}-{}", file_token(realm), file_token(character));
+    home().map(|h| h.join("saved").join(key))
+}
+
 /// `benilla-config/camera/<realm>-<character>.txt` — the third-person camera pose (decision 1131; the
 /// `<Char>/camera-settings.txt` analog, and character-scoped for the same reason it is there: a
 /// gnome rogue and a tauren warrior want different zooms). Two lines, the reference's own keys and

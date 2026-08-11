@@ -87,22 +87,72 @@ pub(super) fn fire_widget_handler(
     fire(lua, id, script, None, extra)
 }
 
+/// Drain [`Model::pending_size_changed`] and fire `OnSizeChanged(self, width, height)` for each.
+///
+/// The resolve pass ([`super::UiScript::resolve_layout`]) only ever holds a `&mut Model` — three of
+/// its callers reach it that way — so it *queues* the frames whose resolved size moved and this
+/// runs at the next `&Lua` seam. Errors are recorded, never propagated: a handler blowing up must
+/// not abort a layout pass.
+///
+/// **Drains exactly once, deliberately.** A handler is free to resize things, `Show()` something,
+/// or call `UpdateScrollChildRect` — each of which can re-enter the resolver and queue *more*
+/// entries. Looping until the queue empties would let a handler that grows its own frame spin the
+/// engine forever inside one call; taking one batch instead leaves the next batch for the next
+/// resolve, which is exactly the reference's shape (its `ApplyRect` fires, the handler dirties the
+/// layout, and the *next* layout pass fires again). A genuinely oscillating handler oscillates at
+/// one fire per frame, visibly, instead of hanging the client.
+pub(super) fn fire_size_changes(lua: &Lua) {
+    let pending = std::mem::take(
+        &mut lua
+            .app_data_mut::<Model>()
+            .expect("model")
+            .pending_size_changed,
+    );
+    for (id, w, h) in pending {
+        if let Err(e) = fire(
+            lua,
+            id,
+            "OnSizeChanged",
+            None,
+            vec![Value::Number(f64::from(w)), Value::Number(f64::from(h))],
+        ) {
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .errors
+                .push(e.to_string());
+        }
+    }
+}
+
 /// Fire `OnShow`/`OnHide` for a set of frames whose effective visibility just changed (from
 /// [`crate::widget::WidgetArena::set_shown`]/`set_parent`'s changed-list). Errors are recorded in
 /// [`Model::errors`] rather than propagated — a handler error must not abort the `Show()` call.
+///
+/// **This is also where the `toplevel` raise fires** (`effective_visible_show 0x76ae10` @`0x76aee0`,
+/// wow-re `ui/scratch/toplevel-raise.md`): the binary tests the toplevel bit and raises *after* the
+/// subtree's visibility has propagated and *before* that node's OnShow notify — which is exactly
+/// this seam, since the arena has finished propagating by the time it hands back the changed list.
+/// Per node and in list order, so a handler reading `GetFrameLevel()` sees the raised value the way
+/// it would in the reference. It lives here rather than at the Lua `Show` binding because *every*
+/// visibility transition this engine performs runs `0x76ae10` — an arena-level show from the
+/// tooltip path (or a future host one) must raise too, and a second seam is how that gets forgotten.
 pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
-    // Resolve (id, now-visible?) under one short borrow, then fire with no borrow held.
-    let items: Vec<(u32, bool)> = {
+    // Resolve (handle, id, now-visible?) under one short borrow, then fire with no borrow held.
+    let items: Vec<(FrameHandle, u32, bool)> = {
         let mut model = lua.app_data_mut::<Model>().expect("model");
         changed
             .into_iter()
             .filter_map(|h| {
                 let vis = model.arena.frame(h)?.effective_visible;
-                Some((model.frame_id(h), vis))
+                Some((h, model.frame_id(h), vis))
             })
             .collect()
     };
-    for (id, visible) in items {
+    for (h, id, visible) in items {
+        if visible {
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            super::object::toplevel::raise_on_show(&mut model, h);
+        }
         let name = if visible { "OnShow" } else { "OnHide" };
         if let Err(e) = fire(lua, id, name, None, Vec::new()) {
             lua.app_data_mut::<Model>()

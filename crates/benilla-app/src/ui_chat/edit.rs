@@ -56,6 +56,32 @@ impl SendType {
         )
     }
 
+    /// The chat-type TOKEN an addon passes to `SendChatMessage` (decision 1199) — the reference's
+    /// own `ChatTypeInfo` keys, uppercase.
+    ///
+    /// `None` for a token we do not send. That is the honest answer for `"AFK"`/`"DND"` (which
+    /// set a flag rather than sending a line) and for anything an addon simply made up; the
+    /// caller reports it rather than guessing SAY, because a raid warning silently going to /say
+    /// is worse than one that does not go.
+    pub(crate) fn from_token(token: &str) -> Option<SendType> {
+        Some(match token {
+            "SAY" => SendType::Say,
+            "YELL" => SendType::Yell,
+            "EMOTE" => SendType::Emote,
+            "WHISPER" => SendType::Whisper,
+            "PARTY" => SendType::Party,
+            "RAID" => SendType::Raid,
+            "RAID_LEADER" => SendType::RaidLeader,
+            "RAID_WARNING" => SendType::RaidWarning,
+            "GUILD" => SendType::Guild,
+            "OFFICER" => SendType::Officer,
+            "BATTLEGROUND" => SendType::Battleground,
+            "BATTLEGROUND_LEADER" => SendType::BattlegroundLeader,
+            "CHANNEL" => SendType::Channel,
+            _ => return None,
+        })
+    }
+
     /// The wire kind this type sends as.
     pub(crate) fn wire(self) -> ChatKind {
         match self {
@@ -127,11 +153,19 @@ impl SendType {
 /// The channels this session has joined, in join order — the CLIENT-side number law
 /// (`GetChannelName(n)`): `/1` is the first joined, `/2` the second; the numbered display form
 /// ("1. General - Elwynn Forest") and the `[N. Name]` prefixes all derive from this order.
-/// Fed by YOU_JOINED / YOU_LEFT notices ([`super::feed`]); the zone AUTO-join walk is the P6
-/// remainder (flagged in 0288).
+/// Fed by YOU_JOINED / YOU_LEFT notices ([`super::feed`]); the zone AUTO-join walk that fills it
+/// at login is [`super::channels`].
 #[derive(Resource, Default)]
 pub(crate) struct ChannelState {
     pub joined: Vec<String>,
+    /// `ChatChannels.dbc`, loaded once at Startup ([`super::channels::load_chat_channels`]).
+    ///
+    /// It lives here because both of its consumers are this type's own business: composing the
+    /// auto-join names, and answering a chat event's **arg7** — the built-in ChannelID behind a
+    /// name, which is a pure function of the name (the server resolves it the same way) and so
+    /// needs no extra bookkeeping at join time. Empty without an install, which degrades to
+    /// "no zone channels, arg7 always 0" rather than to an error.
+    pub channels: benilla_formats::ChatChannelsCatalog,
 }
 
 impl ChannelState {
@@ -141,6 +175,40 @@ impl ChannelState {
             .iter()
             .position(|c| c.eq_ignore_ascii_case(name))
             .map(|i| i as u32 + 1)
+    }
+
+    /// Fill an event's four channel slots (arg4, arg7, arg8, arg9) in place.
+    ///
+    /// **They are one record, not four fields.** In the reference all four are read off the
+    /// client's local channel record — `slot+0x00`, `+0x04`, `+0x94`, `+0x98` — so a name that is
+    /// *not* in the local list has no record to read and every one of them is empty: arg4 falls
+    /// back to the bare incoming name and arg7/arg8/arg9/arg10 are `0/0/""/0` together. They are
+    /// never independently populated. (wow-re `system/ui/scratch/chat-msg-event-args.md` §§4, 7-10,
+    /// VERIFIED; the `"%d. %s"` prefix at `0x8445c8` is applied on the hit leg `0x49aa48`, and
+    /// `0x49aa86` is the bare-name miss leg.)
+    ///
+    /// So: on entry `event.channel` holds the name as the wire gave it ("General - Elwynn Forest").
+    /// If we are in that channel, on exit arg4 is the numbered display form, arg9 the stored name
+    /// **with its " - Zone" tail intact** (§9: the DBC name column *is* the format string the
+    /// client built the stored name with), arg8 the 1-based local slot and arg7 the
+    /// `ChatChannels.dbc` ChannelID — 0 for a custom channel. If we are not, nothing is stamped.
+    ///
+    /// arg7 is resolved from the name against `ChatChannels.dbc` rather than remembered per join.
+    /// That is safe *because* it only ever runs on the hit leg: the id the client stores in
+    /// `slot+0x94` came from the same DBC row at join time, and vmangos resolves the name the same
+    /// way (`GetChannelEntryFor`), so no two of the three can disagree.
+    pub(crate) fn stamp_channel(&self, event: &mut super::event::ChatEvent) {
+        // A miss leaves all four alone — see the "one record" note above.
+        let Some(n) = self
+            .number_of(&event.channel)
+            .filter(|_| !event.channel.is_empty())
+        else {
+            return;
+        };
+        event.channel_base = event.channel.clone();
+        event.zone_channel_id = self.channels.zone_channel_id(&event.channel_base);
+        event.channel_number = n;
+        event.channel = format!("{n}. {}", event.channel_base);
     }
 }
 

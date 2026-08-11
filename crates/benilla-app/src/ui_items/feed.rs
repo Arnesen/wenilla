@@ -106,6 +106,7 @@ fn standing_label(rank: u32) -> &'static str {
 /// `0x506f70`; its bare name otherwise), the skill requirement's name off `SkillLine.dbc`, the
 /// reputation requirement off `Faction.dbc` names (the red check is the engine's, against the
 /// player's rank map).
+#[allow(clippy::too_many_arguments)] // one app-resolved catalog per argument, by design
 fn template_view(
     t: &ItemInfo,
     spells: Option<&crate::ui_action::Spells>,
@@ -113,6 +114,8 @@ fn template_view(
     home_area: Option<&str>,
     factions: Option<&benilla_formats::FactionCatalog>,
     sub_classes: Option<&benilla_formats::ItemSubClassCatalog>,
+    classes: Option<&benilla_formats::ItemClassCatalog>,
+    icons: Option<&ItemDisplays>,
 ) -> benilla_ui::script::ItemTemplateView {
     let spell_name = |id: u32| -> Option<String> {
         spells
@@ -128,9 +131,25 @@ fn template_view(
         inventory_type: t.inventory_type,
         proficiency_alt: sub_classes.and_then(|c| c.proficiency_alt(t.class, t.subclass)),
         hide_subclass: sub_classes.is_some_and(|c| c.hides_name(t.class, t.subclass)),
+        // `GetItemInfo`'s type pair. The subclass spelling is `name()` — VerboseName first —
+        // because that is the binding's own two-step (`0x48e311`), and it is deliberately NOT the
+        // `display_name()` the tooltip's type cell prints: a one-handed sword is "One-Handed
+        // Swords" to an addon and "Sword" on the tooltip. Both spellings are in the same row.
+        item_type: classes.and_then(|c| c.name(t.class)).map(str::to_string),
+        item_sub_type: sub_classes
+            .and_then(|c| c.name(t.class, t.subclass))
+            .map(str::to_string),
         flags: t.flags,
         bonding: t.bonding,
         max_count: t.max_count,
+        // The stack size — a DIFFERENT wire field from `max_count` (the account-wide unique cap).
+        // Linen Cloth is `max_count 0, stackable 20`; `GetItemInfo`'s `itemStackCount` is this one.
+        stackable: t.stackable,
+        // The same `ItemDisplayInfo.dbc` icon the bag slots resolve, as a ready
+        // `Interface\Icons\…` path — `GetItemInfo`'s `itemTexture`.
+        icon: icons
+            .and_then(|i| i.catalog.get(t.display_info_id))
+            .and_then(|d| d.icon.clone()),
         start_quest: t.start_quest,
         container_slots: t.container_slots,
         stats: t.stats.clone(),
@@ -281,6 +300,10 @@ pub(super) fn feed_item_stats(
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
     factions: Option<Res<crate::target::Factions>>,
     sub_classes: Option<Res<super::ItemSubClasses>>,
+    // `GetItemInfo`'s `itemType` and `itemTexture`: the class-name table, and the same
+    // ItemDisplayInfo icons the bag slots already resolve through.
+    classes: Option<Res<super::ItemClasses>>,
+    icons: Option<Res<ItemDisplays>>,
     mut pending: Local<std::collections::HashSet<u32>>,
     mut last_home: Local<Option<String>>,
 ) {
@@ -322,6 +345,8 @@ pub(super) fn feed_item_stats(
             home_area.as_deref(),
             factions.as_deref().map(|f| f.catalog()),
             sub_classes.as_deref().map(|s| &s.0),
+            classes.as_deref().map(|c| &c.0),
+            icons.as_deref(),
         );
         script.set_item_template(id, view);
     }

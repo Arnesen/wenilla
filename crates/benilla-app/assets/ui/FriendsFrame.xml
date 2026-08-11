@@ -64,11 +64,11 @@
         }
 
         BENILLA_FRIENDS_SUBFRAMES = {
-            "BenillaFriendsListFrame", "BenillaIgnoreListFrame", "BenillaWhoFrame",
+            "FriendsListFrame", "IgnoreListFrame", "WhoFrame",
         }
 
         -- ── Sub-frame switching (ref FriendsFrame_ShowSubFrame l.25-33) ────────────────────────
-        function BenillaFriendsFrame_ShowSubFrame(frameName)
+        function FriendsFrame_ShowSubFrame(frameName)
             for i = 1, table.getn(BENILLA_FRIENDS_SUBFRAMES) do
                 local value = BENILLA_FRIENDS_SUBFRAMES[i]
                 if value == frameName then
@@ -107,38 +107,38 @@
         -- ── The window's repaint (ref FriendsFrame_Update l.81-126) ────────────────────────────
         -- Each tab swaps the four corner art textures as well as the sub-frame: the ref reuses one
         -- 384x512 window shell for lists that want different bottom art.
-        function BenillaFriendsFrame_Update()
-            local frame = BenillaFriendsFrame
+        function FriendsFrame_Update()
+            local frame = FriendsFrame
             if frame.selectedTab == 1 then
-                BenillaFriendsFrameTopLeft:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopLeft")
-                BenillaFriendsFrameTopRight:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopRight")
+                FriendsFrameTopLeft:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopLeft")
+                FriendsFrameTopRight:SetTexture("Interface\\PaperDollInfoFrame\\UI-Character-General-TopRight")
                 if frame.showFriendsList then
-                    BenillaFriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\UI-FriendsFrame-BotLeft")
-                    BenillaFriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\UI-FriendsFrame-BotRight")
-                    BenillaFriendsFrameTitleText:SetText(FRIENDS_LIST)
-                    BenillaFriendsList_Update()
-                    BenillaFriendsFrame_ShowSubFrame("BenillaFriendsListFrame")
+                    FriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\UI-FriendsFrame-BotLeft")
+                    FriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\UI-FriendsFrame-BotRight")
+                    FriendsFrameTitleText:SetText(FRIENDS_LIST)
+                    FriendsList_Update()
+                    FriendsFrame_ShowSubFrame("FriendsListFrame")
                 else
-                    BenillaFriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\UI-IgnoreFrame-BotLeft")
-                    BenillaFriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\UI-IgnoreFrame-BotRight")
-                    BenillaFriendsFrameTitleText:SetText(IGNORE_LIST)
-                    BenillaIgnoreList_Update()
-                    BenillaFriendsFrame_ShowSubFrame("BenillaIgnoreListFrame")
+                    FriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\UI-IgnoreFrame-BotLeft")
+                    FriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\UI-IgnoreFrame-BotRight")
+                    FriendsFrameTitleText:SetText(IGNORE_LIST)
+                    IgnoreList_Update()
+                    FriendsFrame_ShowSubFrame("IgnoreListFrame")
                 end
             elseif frame.selectedTab == 2 then
-                BenillaFriendsFrameTopLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft")
-                BenillaFriendsFrameTopRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight")
-                BenillaFriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\WhoFrame-BotLeft")
-                BenillaFriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\WhoFrame-BotRight")
-                BenillaFriendsFrameTitleText:SetText(WHO_LIST)
-                BenillaWhoList_Update()
-                BenillaFriendsFrame_ShowSubFrame("BenillaWhoFrame")
+                FriendsFrameTopLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft")
+                FriendsFrameTopRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight")
+                FriendsFrameBottomLeft:SetTexture("Interface\\FriendsFrame\\WhoFrame-BotLeft")
+                FriendsFrameBottomRight:SetTexture("Interface\\FriendsFrame\\WhoFrame-BotRight")
+                FriendsFrameTitleText:SetText(WHO_LIST)
+                WhoList_Update()
+                FriendsFrame_ShowSubFrame("WhoFrame")
             end
         end
 
         -- ── The friends list (ref FriendsList_Update l.142-210) ────────────────────────────────
-        function BenillaFriendsList_Update()
-            local frame = BenillaFriendsFrame
+        function FriendsList_Update()
+            local frame = FriendsFrame
             local numFriends = GetNumFriends()
             frame.selectedFriend = GetSelectedFriend()
 
@@ -151,25 +151,25 @@
                 end
                 local _, _, _, _, connected = GetFriendInfo(frame.selectedFriend)
                 if connected then
-                    BenillaFriendsFrameSendMessageButton:Enable()
-                    BenillaFriendsFrameGroupInviteButton:Enable()
+                    FriendsFrameSendMessageButton:Enable()
+                    FriendsFrameGroupInviteButton:Enable()
                 else
-                    BenillaFriendsFrameSendMessageButton:Disable()
-                    BenillaFriendsFrameGroupInviteButton:Disable()
+                    FriendsFrameSendMessageButton:Disable()
+                    FriendsFrameGroupInviteButton:Disable()
                 end
-                BenillaFriendsFrameRemoveFriendButton:Enable()
+                FriendsFrameRemoveFriendButton:Enable()
             else
-                BenillaFriendsFrameSendMessageButton:Disable()
-                BenillaFriendsFrameGroupInviteButton:Disable()
-                BenillaFriendsFrameRemoveFriendButton:Disable()
+                FriendsFrameSendMessageButton:Disable()
+                FriendsFrameGroupInviteButton:Disable()
+                FriendsFrameRemoveFriendButton:Disable()
             end
 
-            local offset = BenillaFauxScrollFrame_GetOffset(BenillaFriendsFrameFriendsScrollFrame)
+            local offset = FauxScrollFrame_GetOffset(FriendsFrameFriendsScrollFrame)
             for i = 1, FRIENDS_TO_DISPLAY do
                 local index = offset + i
                 local name, level, class, area, connected, status = GetFriendInfo(index)
-                local nameLocation = getglobal("BenillaFriendsFrameFriendButton" .. i .. "NameLocation")
-                local info = getglobal("BenillaFriendsFrameFriendButton" .. i .. "Info")
+                local nameLocation = getglobal("FriendsFrameFriendButton" .. i .. "NameLocation")
+                local info = getglobal("FriendsFrameFriendButton" .. i .. "Info")
                 if not name or name == "" then
                     name = UNKNOWN
                 end
@@ -181,7 +181,7 @@
                     info:SetText(UNKNOWN)
                 end
 
-                local button = getglobal("BenillaFriendsFrameFriendButton" .. i)
+                local button = getglobal("FriendsFrameFriendButton" .. i)
                 button:SetID(index)
                 if index == frame.selectedFriend then
                     button:LockHighlight()
@@ -195,13 +195,13 @@
                 end
             end
 
-            BenillaFauxScrollFrame_Update(BenillaFriendsFrameFriendsScrollFrame, numFriends,
+            FauxScrollFrame_Update(FriendsFrameFriendsScrollFrame, numFriends,
                 FRIENDS_TO_DISPLAY, FRIENDS_FRAME_FRIEND_HEIGHT)
         end
 
         -- ── The ignore list (ref IgnoreList_Update l.212-251) ──────────────────────────────────
-        function BenillaIgnoreList_Update()
-            local frame = BenillaFriendsFrame
+        function IgnoreList_Update()
+            local frame = FriendsFrame
             local numIgnores = GetNumIgnores()
             frame.selectedIgnore = GetSelectedIgnore()
             if numIgnores > 0 then
@@ -209,17 +209,17 @@
                     SetSelectedIgnore(1)
                     frame.selectedIgnore = GetSelectedIgnore()
                 end
-                BenillaFriendsFrameStopIgnoreButton:Enable()
+                FriendsFrameStopIgnoreButton:Enable()
             else
-                BenillaFriendsFrameStopIgnoreButton:Disable()
+                FriendsFrameStopIgnoreButton:Disable()
             end
 
-            local offset = BenillaFauxScrollFrame_GetOffset(BenillaFriendsFrameIgnoreScrollFrame)
+            local offset = FauxScrollFrame_GetOffset(FriendsFrameIgnoreScrollFrame)
             for i = 1, IGNORES_TO_DISPLAY do
                 local index = offset + i
-                getglobal("BenillaFriendsFrameIgnoreButton" .. i .. "Name")
+                getglobal("FriendsFrameIgnoreButton" .. i .. "Name")
                     :SetText(GetIgnoreName(index) or "")
-                local button = getglobal("BenillaFriendsFrameIgnoreButton" .. i)
+                local button = getglobal("FriendsFrameIgnoreButton" .. i)
                 button:SetID(index)
                 if index == frame.selectedIgnore then
                     button:LockHighlight()
@@ -233,14 +233,14 @@
                 end
             end
 
-            BenillaFauxScrollFrame_Update(BenillaFriendsFrameIgnoreScrollFrame, numIgnores,
+            FauxScrollFrame_Update(FriendsFrameIgnoreScrollFrame, numIgnores,
                 IGNORES_TO_DISPLAY, FRIENDS_FRAME_IGNORE_HEIGHT)
         end
 
         -- ── The who list (ref WhoList_Update l.253-325) ────────────────────────────────────────
-        function BenillaWhoList_Update()
+        function WhoList_Update()
             local numWhos, totalCount = GetNumWhoResults()
-            local frame = BenillaWhoFrame
+            local frame = WhoFrame
 
             -- "132 People Found  (50 displayed)" — the suffix appears only when the server
             -- matched more than it could send (ref l.264-268).
@@ -252,25 +252,25 @@
             if totalCount == 1 then
                 totalTemplate = WHO_FRAME_TOTAL_TEMPLATE
             end
-            BenillaWhoFrameTotals:SetText(format(totalTemplate, totalCount) .. "  " .. displayedText)
+            WhoFrameTotals:SetText(format(totalTemplate, totalCount) .. "  " .. displayedText)
 
             local showScrollBar = nil
             if numWhos > WHOS_TO_DISPLAY then
                 showScrollBar = 1
             end
-            local column = UIDropDownMenu_GetSelectedID(BenillaWhoFrameDropDown) or 1
-            local offset = BenillaFauxScrollFrame_GetOffset(BenillaWhoListScrollFrame)
+            local column = UIDropDownMenu_GetSelectedID(WhoFrameDropDown) or 1
+            local offset = FauxScrollFrame_GetOffset(WhoListScrollFrame)
             for i = 1, WHOS_TO_DISPLAY do
                 local index = offset + i
-                local button = getglobal("BenillaWhoFrameButton" .. i)
+                local button = getglobal("WhoFrameButton" .. i)
                 button.whoIndex = index
                 local name, guild, level, race, class, zone = GetWhoInfo(index)
-                getglobal("BenillaWhoFrameButton" .. i .. "Name"):SetText(name or "")
-                getglobal("BenillaWhoFrameButton" .. i .. "Level"):SetText(level or "")
-                getglobal("BenillaWhoFrameButton" .. i .. "Class"):SetText(class or "")
+                getglobal("WhoFrameButton" .. i .. "Name"):SetText(name or "")
+                getglobal("WhoFrameButton" .. i .. "Level"):SetText(level or "")
+                getglobal("WhoFrameButton" .. i .. "Class"):SetText(class or "")
                 -- The variable column follows the dropdown: zone / guild / race (ref l.274-279).
                 local columnTable = { zone, guild, race }
-                local variable = getglobal("BenillaWhoFrameButton" .. i .. "Variable")
+                local variable = getglobal("WhoFrameButton" .. i .. "Variable")
                 variable:SetText(columnTable[column] or "")
                 if showScrollBar then
                     variable:SetWidth(95)
@@ -292,80 +292,80 @@
 
             -- The two who buttons need a selected row (ref l.302-309).
             if not frame.selectedWho then
-                BenillaWhoFrameGroupInviteButton:Disable()
-                BenillaWhoFrameAddFriendButton:Disable()
+                WhoFrameGroupInviteButton:Disable()
+                WhoFrameAddFriendButton:Disable()
             else
-                BenillaWhoFrameGroupInviteButton:Enable()
-                BenillaWhoFrameAddFriendButton:Enable()
+                WhoFrameGroupInviteButton:Enable()
+                WhoFrameAddFriendButton:Enable()
                 frame.selectedName = GetWhoInfo(frame.selectedWho)
             end
 
             -- The middle column and the dropdown narrow to make room for the bar (ref l.311-318).
             if showScrollBar then
-                BenillaWhoFrameColumn_SetWidth(105, BenillaWhoFrameColumnHeader2)
-                UIDropDownMenu_SetWidth(80, BenillaWhoFrameDropDown)
+                WhoFrameColumn_SetWidth(105, WhoFrameColumnHeader2)
+                UIDropDownMenu_SetWidth(80, WhoFrameDropDown)
             else
-                BenillaWhoFrameColumn_SetWidth(120, BenillaWhoFrameColumnHeader2)
-                UIDropDownMenu_SetWidth(95, BenillaWhoFrameDropDown)
+                WhoFrameColumn_SetWidth(120, WhoFrameColumnHeader2)
+                UIDropDownMenu_SetWidth(95, WhoFrameDropDown)
             end
 
-            BenillaFauxScrollFrame_Update(BenillaWhoListScrollFrame, numWhos, WHOS_TO_DISPLAY,
+            FauxScrollFrame_Update(WhoListScrollFrame, numWhos, WHOS_TO_DISPLAY,
                 FRIENDS_FRAME_WHO_HEIGHT)
         end
 
         -- Ref WhoFrameColumn_SetWidth l.605-611: the header's middle slice carries the width less
         -- the two 9px end caps.
-        function BenillaWhoFrameColumn_SetWidth(width, frame)
+        function WhoFrameColumn_SetWidth(width, frame)
             frame:SetWidth(width)
             getglobal(frame:GetName() .. "Middle"):SetWidth(width - 9)
         end
 
         -- ── The who column dropdown (ref WhoFrameDropDown_* l.613-633) ─────────────────────────
-        function BenillaWhoFrameDropDown_Initialize()
+        function WhoFrameDropDown_Initialize()
             for i = 1, table.getn(WHOFRAME_DROPDOWN_LIST) do
                 local info = {}
                 info.text = WHOFRAME_DROPDOWN_LIST[i].name
-                info.func = BenillaWhoFrameDropDownButton_OnClick
+                info.func = WhoFrameDropDownButton_OnClick
                 UIDropDownMenu_AddButton(info)
             end
         end
 
-        function BenillaWhoFrameDropDown_OnLoad()
-            UIDropDownMenu_Initialize(this, BenillaWhoFrameDropDown_Initialize)
+        function WhoFrameDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, WhoFrameDropDown_Initialize)
             UIDropDownMenu_SetWidth(80, this)
             UIDropDownMenu_SetButtonWidth(24, this)
             UIDropDownMenu_JustifyText("LEFT", this)
         end
 
-        function BenillaWhoFrameDropDownButton_OnClick()
-            UIDropDownMenu_SetSelectedID(BenillaWhoFrameDropDown, this:GetID())
+        function WhoFrameDropDownButton_OnClick()
+            UIDropDownMenu_SetSelectedID(WhoFrameDropDown, this:GetID())
             -- The ref sorts on the dropdown's OnMouseUp; doing it on the pick is the same intent
             -- with one fewer hook, and keeps the column and its sort in step.
             local entry = WHOFRAME_DROPDOWN_LIST[this:GetID()]
             if entry and entry.sortType then
                 SortWho(entry.sortType)
             end
-            BenillaWhoList_Update()
+            WhoList_Update()
         end
 
         -- ── Events (ref FriendsFrame_OnEvent l.635-662) ────────────────────────────────────────
-        function BenillaFriendsFrame_OnEvent()
+        function FriendsFrame_OnEvent()
             if event == "FRIENDLIST_SHOW" then
-                BenillaFriendsList_Update()
-                BenillaFriendsFrame_Update()
+                FriendsList_Update()
+                FriendsFrame_Update()
             elseif event == "FRIENDLIST_UPDATE" then
-                BenillaFriendsList_Update()
+                FriendsList_Update()
             elseif event == "IGNORELIST_UPDATE" then
-                BenillaIgnoreList_Update()
+                IgnoreList_Update()
             elseif event == "WHO_LIST_UPDATE" then
                 -- A fresh answer drops the old selection: row 3 of the last query is not row 3 of
                 -- this one, and the ref's own Refresh button clears it for exactly that reason.
-                BenillaWhoFrame.selectedWho = nil
-                BenillaWhoList_Update()
+                WhoFrame.selectedWho = nil
+                WhoList_Update()
             end
         end
 
-        function BenillaFriendsFrame_OnLoad()
+        function FriendsFrame_OnLoad()
             PanelTemplates_SetNumTabs(this, 3)
             this.selectedTab = 1
             this.showFriendsList = 1
@@ -381,8 +381,8 @@
             this:RegisterEvent("WHO_LIST_UPDATE")
         end
 
-        function BenillaFriendsFrame_OnShow()
-            BenillaFriendsFrame_Update()
+        function FriendsFrame_OnShow()
+            FriendsFrame_Update()
             -- Guarded, the house idiom (CharacterFrame/QuestLogFrame do the same): MicroMenu.xml
             -- loads before this file in the real manifest, but a window must stay loadable on its
             -- own for its tests.
@@ -390,7 +390,7 @@
             PlaySound("igMainMenuOpen")
         end
 
-        function BenillaFriendsFrame_OnHide()
+        function FriendsFrame_OnHide()
             if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igMainMenuClose")
             for i = 1, table.getn(BENILLA_FRIENDS_SUBFRAMES) do
@@ -399,59 +399,59 @@
         end
 
         -- ── Row clicks (ref l.664-688) ─────────────────────────────────────────────────────────
-        function BenillaFriendsFrameFriendButton_OnClick(button)
+        function FriendsFrameFriendButton_OnClick(button)
             if button == "RightButton" then
                 local name, _, _, _, connected = GetFriendInfo(this:GetID())
                 BenillaFriendsFrame_ShowDropdown(name, connected)
                 return
             end
             SetSelectedFriend(this:GetID())
-            BenillaFriendsList_Update()
+            FriendsList_Update()
         end
 
-        function BenillaFriendsFrameIgnoreButton_OnClick()
+        function FriendsFrameIgnoreButton_OnClick()
             SetSelectedIgnore(this:GetID())
-            BenillaIgnoreList_Update()
+            IgnoreList_Update()
         end
 
-        function BenillaFriendsFrameWhoButton_OnClick(button)
+        function FriendsFrameWhoButton_OnClick(button)
             local name = getglobal(this:GetName() .. "Name"):GetText()
             if button == "RightButton" then
                 -- A /who hit is online by construction, so the menu is never gated shut here.
                 BenillaFriendsFrame_ShowDropdown(name, 1)
                 return
             end
-            BenillaWhoFrame.selectedWho = this.whoIndex
-            BenillaWhoFrame.selectedName = name
-            BenillaWhoList_Update()
+            WhoFrame.selectedWho = this.whoIndex
+            WhoFrame.selectedName = name
+            WhoList_Update()
         end
 
         -- ── The buttons (ref l.714-739) ────────────────────────────────────────────────────────
-        function BenillaFriendsFrame_UnIgnore()
-            local name = GetIgnoreName(BenillaFriendsFrame.selectedIgnore)
+        function FriendsFrame_UnIgnore()
+            local name = GetIgnoreName(FriendsFrame.selectedIgnore)
             if name then
                 DelIgnore(name)
             end
         end
 
-        function BenillaFriendsFrame_RemoveFriend()
-            if BenillaFriendsFrame.selectedFriend and BenillaFriendsFrame.selectedFriend > 0 then
-                RemoveFriend(BenillaFriendsFrame.selectedFriend)
+        function FriendsFrame_RemoveFriend()
+            if FriendsFrame.selectedFriend and FriendsFrame.selectedFriend > 0 then
+                RemoveFriend(FriendsFrame.selectedFriend)
             end
         end
 
         -- The ref opens the chat edit box prefilled "/w <name> " (l.726-734). benilla's chat edit
         -- box is app-side, so the same intent goes through `ChatFrame_SendTell`, the whisper-target
         -- queue the unit popup's WHISPER row already feeds.
-        function BenillaFriendsFrame_SendMessage()
-            local name = GetFriendInfo(BenillaFriendsFrame.selectedFriend)
+        function FriendsFrame_SendMessage()
+            local name = GetFriendInfo(FriendsFrame.selectedFriend)
             if name and name ~= "" then
                 ChatFrame_SendTell(name)
             end
         end
 
-        function BenillaFriendsFrame_GroupInvite()
-            local name = GetFriendInfo(BenillaFriendsFrame.selectedFriend)
+        function FriendsFrame_GroupInvite()
+            local name = GetFriendInfo(FriendsFrame.selectedFriend)
             if name and name ~= "" then
                 InviteByName(name)
             end
@@ -462,42 +462,42 @@
         -- closes the window (the ref's own second branch).
         function ToggleFriendsFrame(tab)
             if not tab then
-                if BenillaFriendsFrame:IsVisible() then
-                    HideUIPanel(BenillaFriendsFrame)
+                if FriendsFrame:IsVisible() then
+                    HideUIPanel(FriendsFrame)
                 else
-                    ShowUIPanel(BenillaFriendsFrame)
+                    ShowUIPanel(FriendsFrame)
                 end
                 return
             end
-            if tab == PanelTemplates_GetSelectedTab(BenillaFriendsFrame)
-                and BenillaFriendsFrame:IsVisible() then
-                HideUIPanel(BenillaFriendsFrame)
+            if tab == PanelTemplates_GetSelectedTab(FriendsFrame)
+                and FriendsFrame:IsVisible() then
+                HideUIPanel(FriendsFrame)
                 return
             end
-            PanelTemplates_SetTab(BenillaFriendsFrame, tab)
-            if BenillaFriendsFrame:IsVisible() then
-                BenillaFriendsFrame_OnShow()
+            PanelTemplates_SetTab(FriendsFrame, tab)
+            if FriendsFrame:IsVisible() then
+                FriendsFrame_OnShow()
             else
-                ShowUIPanel(BenillaFriendsFrame)
+                ShowUIPanel(FriendsFrame)
             end
         end
 
         function ShowWhoPanel()
-            PanelTemplates_SetTab(BenillaFriendsFrame, 2)
-            if BenillaFriendsFrame:IsVisible() then
-                BenillaFriendsFrame_OnShow()
+            PanelTemplates_SetTab(FriendsFrame, 2)
+            if FriendsFrame:IsVisible() then
+                FriendsFrame_OnShow()
             else
-                ShowUIPanel(BenillaFriendsFrame)
+                ShowUIPanel(FriendsFrame)
             end
         end
 
         function ShowIgnorePanel()
-            BenillaFriendsFrame.showFriendsList = nil
-            PanelTemplates_SetTab(BenillaFriendsFrame, 1)
-            if BenillaFriendsFrame:IsVisible() then
-                BenillaFriendsFrame_OnShow()
+            FriendsFrame.showFriendsList = nil
+            PanelTemplates_SetTab(FriendsFrame, 1)
+            if FriendsFrame:IsVisible() then
+                FriendsFrame_OnShow()
             else
-                ShowUIPanel(BenillaFriendsFrame)
+                ShowUIPanel(FriendsFrame)
             end
         end
 
@@ -513,9 +513,9 @@
                 .. minLevel .. "-" .. (level + 3)
         end
 
-        function BenillaWhoFrameEditBox_OnEnterPressed()
-            SendWho(BenillaWhoFrameEditBox:GetText())
-            BenillaWhoFrameEditBox:ClearFocus()
+        function WhoFrameEditBox_OnEnterPressed()
+            SendWho(WhoFrameEditBox:GetText())
+            WhoFrameEditBox:ClearFocus()
         end
 
         -- ── The slash bodies (ref ChatFrame.lua SlashCmdList l.1013-1062, verbatim) ────────────
@@ -526,7 +526,7 @@
                 msg = WhoFrame_GetDefaultWhoCommand()
                 ShowWhoPanel()
             end
-            BenillaWhoFrameEditBox:SetText(msg)
+            WhoFrameEditBox:SetText(msg)
             SendWho(msg)
         end
 
@@ -634,7 +634,7 @@
             <!-- Both buttons, ref-verbatim (`RegisterForClicks("LeftButtonUp","RightButtonUp")`):
                  left selects, right opens the FRIEND menu. arg1 is the button name. -->
             <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp")</OnLoad>
-            <OnClick>BenillaFriendsFrameFriendButton_OnClick(arg1); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
+            <OnClick>FriendsFrameFriendButton_OnClick(arg1); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
         </Scripts>
         <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
     </Button>
@@ -649,7 +649,7 @@
             </Layer>
         </Layers>
         <Scripts>
-            <OnClick>BenillaFriendsFrameIgnoreButton_OnClick(); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
+            <OnClick>FriendsFrameIgnoreButton_OnClick(); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
         </Scripts>
         <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
     </Button>
@@ -679,7 +679,7 @@
         </Layers>
         <Scripts>
             <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp")</OnLoad>
-            <OnClick>BenillaFriendsFrameWhoButton_OnClick(arg1); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
+            <OnClick>FriendsFrameWhoButton_OnClick(arg1); PlaySound("igMainMenuOptionCheckBoxOn")</OnClick>
         </Scripts>
         <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
     </Button>
@@ -727,7 +727,7 @@
     </Button>
 
     <!-- ── The window (ref l.506-607) ───────────────────────────────────────────────────────── -->
-    <Frame name="BenillaFriendsFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+    <Frame name="FriendsFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-104"/></Offset></Anchor></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
@@ -739,25 +739,25 @@
                 </Texture>
             </Layer>
             <Layer level="ARTWORK">
-                <Texture name="BenillaFriendsFrameTopLeft" file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
+                <Texture name="FriendsFrameTopLeft" file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
                     <Size><AbsDimension x="256" y="256"/></Size>
                     <Anchors><Anchor point="TOPLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaFriendsFrameTopRight" file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
+                <Texture name="FriendsFrameTopRight" file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
                     <Size><AbsDimension x="128" y="256"/></Size>
                     <Anchors><Anchor point="TOPRIGHT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaFriendsFrameBottomLeft" file="Interface\FriendsFrame\UI-FriendsFrame-BotLeft">
+                <Texture name="FriendsFrameBottomLeft" file="Interface\FriendsFrame\UI-FriendsFrame-BotLeft">
                     <Size><AbsDimension x="256" y="256"/></Size>
                     <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaFriendsFrameBottomRight" file="Interface\FriendsFrame\UI-FriendsFrame-BotRight">
+                <Texture name="FriendsFrameBottomRight" file="Interface\FriendsFrame\UI-FriendsFrame-BotRight">
                     <Size><AbsDimension x="128" y="256"/></Size>
                     <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
                 </Texture>
             </Layer>
             <Layer level="OVERLAY">
-                <FontString name="BenillaFriendsFrameTitleText" inherits="GameFontNormal">
+                <FontString name="FriendsFrameTitleText" inherits="GameFontNormal">
                     <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>
@@ -771,7 +771,7 @@
             <!-- Close: the ref's own UIPanelCloseButton seat (TOPRIGHT -30,-8) on the
                  minimize-button art every close button in this house uses — no UIPanelCloseButton
                  template ships (CharacterFrame/Gossip/Bag say the same). -->
-            <Button name="BenillaFriendsFrameCloseButton">
+            <Button name="FriendsFrameCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
@@ -779,32 +779,32 @@
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
                 <Scripts>
                     <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
-                    <OnClick>HideUIPanel(BenillaFriendsFrame)</OnClick>
+                    <OnClick>HideUIPanel(FriendsFrame)</OnClick>
                 </Scripts>
             </Button>
 
             <!-- ── Tab 1a: the friends list ─────────────────────────────────────────────────── -->
-            <Frame name="BenillaFriendsListFrame" hidden="true" setAllPoints="true">
+            <Frame name="FriendsListFrame" hidden="true" setAllPoints="true">
                 <Frames>
-                    <Button name="BenillaFriendsFrameToggleTab1" inherits="TabButtonTemplate" text="Friends" id="1">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="70" y="-39"/></Offset></Anchor></Anchors>
+                    <Button name="FriendsFrameToggleTab1" inherits="TabButtonTemplate" text="Friends" id="1">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="70" y="-39"/></Offset></Anchor></Anchors>
                         <Scripts><OnLoad>PanelTemplates_SelectTab(this)</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaFriendsFrameToggleTab2" inherits="TabButtonTemplate" text="Ignore" id="2">
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaFriendsFrameToggleTab1" relativePoint="RIGHT"/></Anchors>
+                    <Button name="FriendsFrameToggleTab2" inherits="TabButtonTemplate" text="Ignore" id="2">
+                        <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameToggleTab1" relativePoint="RIGHT"/></Anchors>
                         <Scripts>
                             <OnShow>PanelTemplates_DeselectTab(this)</OnShow>
                             <OnClick>
-                                BenillaFriendsFrame.showFriendsList = nil
-                                BenillaFriendsFrame_Update()
+                                FriendsFrame.showFriendsList = nil
+                                FriendsFrame_Update()
                                 PlaySound("igCharacterInfoTab")
                             </OnClick>
                         </Scripts>
                     </Button>
 
-                    <Button name="BenillaFriendsFrameAddFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Add Friend">
+                    <Button name="FriendsFrameAddFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Add Friend">
                         <Size><AbsDimension x="131" y="21"/></Size>
-                        <Anchors><Anchor point="BOTTOMLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="17" y="107"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="BOTTOMLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="17" y="107"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <!-- Ref l.656-662: a friendly player target is befriended straight
                                  away; otherwise the name-entry dialog opens. -->
@@ -819,29 +819,29 @@
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaFriendsFrameRemoveFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Remove Friend">
+                    <Button name="FriendsFrameRemoveFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Remove Friend">
                         <Size><AbsDimension x="131" y="21"/></Size>
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameAddFriendButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameAddFriendButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
-                            <OnClick>BenillaFriendsFrame_RemoveFriend()</OnClick>
+                            <OnClick>FriendsFrame_RemoveFriend()</OnClick>
                             <OnEnter>GameTooltip_AddNewbieTip(self, REMOVE_FRIEND, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_REMOVEFRIEND, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaFriendsFrameSendMessageButton" inherits="BenillaFriendsPanelButtonTemplate" text="Send Message">
+                    <Button name="FriendsFrameSendMessageButton" inherits="BenillaFriendsPanelButtonTemplate" text="Send Message">
                         <Size><AbsDimension x="131" y="21"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaFriendsFrameAddFriendButton" relativePoint="RIGHT"><Offset><AbsDimension x="66" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameAddFriendButton" relativePoint="RIGHT"><Offset><AbsDimension x="66" y="0"/></Offset></Anchor></Anchors>
                         <Scripts>
-                            <OnClick>BenillaFriendsFrame_SendMessage()</OnClick>
+                            <OnClick>FriendsFrame_SendMessage()</OnClick>
                             <OnEnter>GameTooltip_AddNewbieTip(self, SEND_MESSAGE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_SENDMESSAGE, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaFriendsFrameGroupInviteButton" inherits="BenillaFriendsPanelButtonTemplate" text="Group Invite">
+                    <Button name="FriendsFrameGroupInviteButton" inherits="BenillaFriendsPanelButtonTemplate" text="Group Invite">
                         <Size><AbsDimension x="131" y="21"/></Size>
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameSendMessageButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameSendMessageButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
-                            <OnClick>BenillaFriendsFrame_GroupInvite()</OnClick>
+                            <OnClick>FriendsFrame_GroupInvite()</OnClick>
                             <OnEnter>GameTooltip_AddNewbieTip(self, GROUP_INVITE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_GROUPINVITE, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
@@ -849,289 +849,289 @@
 
                     <!-- The ten rows: the first at (23,-76) off the window, the rest chained
                          TOP→BOTTOM with no gap (ref l.740-829). -->
-                    <Button name="BenillaFriendsFrameFriendButton1" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="23" y="-76"/></Offset></Anchor></Anchors>
+                    <Button name="FriendsFrameFriendButton1" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="23" y="-76"/></Offset></Anchor></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton2" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton1" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton2" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton1" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton3" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton2" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton3" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton2" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton4" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton3" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton4" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton3" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton5" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton4" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton5" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton4" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton6" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton5" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton6" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton5" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton7" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton6" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton7" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton6" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton8" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton7" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton8" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton7" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton9" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton8" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton9" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton8" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameFriendButton10" inherits="BenillaFriendsFrameButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameFriendButton9" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameFriendButton10" inherits="BenillaFriendsFrameButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameFriendButton9" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="BenillaFriendsFrameFriendsScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                    <Frame name="FriendsFrameFriendsScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="304"/></Size>
-                        <Anchors><Anchor point="TOPRIGHT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = BenillaFriendsList_Update</OnLoad></Scripts>
+                        <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>self.updateFunc = FriendsList_Update</OnLoad></Scripts>
                     </Frame>
                 </Frames>
                 <Scripts>
-                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(BenillaFriendsFrameFriendsScrollFrame, arg1)</OnMouseWheel>
+                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameFriendsScrollFrame, arg1)</OnMouseWheel>
                 </Scripts>
             </Frame>
 
             <!-- ── Tab 1b: the ignore list (ref l.879-1193) ─────────────────────────────────── -->
-            <Frame name="BenillaIgnoreListFrame" hidden="true" setAllPoints="true">
+            <Frame name="IgnoreListFrame" hidden="true" setAllPoints="true">
                 <Frames>
-                    <Button name="BenillaIgnoreFrameToggleTab1" inherits="TabButtonTemplate" text="Friends" id="1">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="70" y="-39"/></Offset></Anchor></Anchors>
+                    <Button name="IgnoreFrameToggleTab1" inherits="TabButtonTemplate" text="Friends" id="1">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="70" y="-39"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnShow>PanelTemplates_DeselectTab(this)</OnShow>
                             <OnClick>
-                                BenillaFriendsFrame.showFriendsList = 1
-                                BenillaFriendsFrame_Update()
+                                FriendsFrame.showFriendsList = 1
+                                FriendsFrame_Update()
                                 PlaySound("igCharacterInfoTab")
                             </OnClick>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaIgnoreFrameToggleTab2" inherits="TabButtonTemplate" text="Ignore" id="2">
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaIgnoreFrameToggleTab1" relativePoint="RIGHT"/></Anchors>
+                    <Button name="IgnoreFrameToggleTab2" inherits="TabButtonTemplate" text="Ignore" id="2">
+                        <Anchors><Anchor point="LEFT" relativeTo="IgnoreFrameToggleTab1" relativePoint="RIGHT"/></Anchors>
                         <Scripts><OnShow>PanelTemplates_SelectTab(this)</OnShow></Scripts>
                     </Button>
 
-                    <Button name="BenillaFriendsFrameIgnorePlayerButton" inherits="BenillaFriendsPanelButtonTemplate" text="Ignore Player">
+                    <Button name="FriendsFrameIgnorePlayerButton" inherits="BenillaFriendsPanelButtonTemplate" text="Ignore Player">
                         <Size><AbsDimension x="131" y="21"/></Size>
                         <!-- (17,81), NOT the friends list's (17,107): the ignore pane has two
                              buttons where that one has four, so its row sits lower (ref l.919-925). -->
-                        <Anchors><Anchor point="BOTTOMLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="17" y="81"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="BOTTOMLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="17" y="81"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnClick>StaticPopup_Show("ADD_IGNORE")</OnClick>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaFriendsFrameStopIgnoreButton" inherits="BenillaFriendsPanelButtonTemplate" text="Remove Player">
+                    <Button name="FriendsFrameStopIgnoreButton" inherits="BenillaFriendsPanelButtonTemplate" text="Remove Player">
                         <Size><AbsDimension x="131" y="21"/></Size>
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaFriendsFrameIgnorePlayerButton" relativePoint="RIGHT"><Offset><AbsDimension x="62" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameIgnorePlayerButton" relativePoint="RIGHT"><Offset><AbsDimension x="62" y="0"/></Offset></Anchor></Anchors>
                         <Scripts>
-                            <OnClick>BenillaFriendsFrame_UnIgnore()</OnClick>
+                            <OnClick>FriendsFrame_UnIgnore()</OnClick>
                         </Scripts>
                     </Button>
 
-                    <Button name="BenillaFriendsFrameIgnoreButton1" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                    <Button name="FriendsFrameIgnoreButton1" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
                         <!-- -80, not the friends list's -76 (ref l.965-971). -->
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="23" y="-80"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="FriendsFrame"><Offset><AbsDimension x="23" y="-80"/></Offset></Anchor></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton2" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton1" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton2" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton1" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton3" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton2" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton3" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton2" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton4" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton3" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton4" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton3" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton5" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton4" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton5" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton4" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton6" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton5" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton6" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton5" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton7" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton6" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton7" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton6" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton8" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton7" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton8" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton7" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton9" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton8" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton9" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton8" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton10" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton9" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton10" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton9" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton11" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton10" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton11" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton10" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton12" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton11" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton12" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton11" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton13" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton12" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton13" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton12" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton14" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton13" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton14" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton13" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton15" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton14" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton15" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton14" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton16" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton15" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton16" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton15" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton17" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton16" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton17" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton16" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton18" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton17" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton18" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton17" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton19" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton18" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton19" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton18" relativePoint="BOTTOM"/></Anchors>
                     </Button>
-                    <Button name="BenillaFriendsFrameIgnoreButton20" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaFriendsFrameIgnoreButton19" relativePoint="BOTTOM"/></Anchors>
+                    <Button name="FriendsFrameIgnoreButton20" inherits="BenillaFriendsFrameIgnoreButtonTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="FriendsFrameIgnoreButton19" relativePoint="BOTTOM"/></Anchors>
                     </Button>
 
-                    <Frame name="BenillaFriendsFrameIgnoreScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                    <Frame name="FriendsFrameIgnoreScrollFrame" inherits="FauxScrollFrameTemplate">
                         <!-- 332 tall, not the friends list's 304: 20 short rows reach further
                              down than 10 tall ones (ref l.1146-1148). -->
                         <Size><AbsDimension x="296" y="332"/></Size>
-                        <Anchors><Anchor point="TOPRIGHT" relativeTo="BenillaFriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = BenillaIgnoreList_Update</OnLoad></Scripts>
+                        <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame"><Offset><AbsDimension x="-67" y="-75"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>self.updateFunc = IgnoreList_Update</OnLoad></Scripts>
                     </Frame>
                 </Frames>
                 <Scripts>
-                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(BenillaFriendsFrameIgnoreScrollFrame, arg1)</OnMouseWheel>
+                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(FriendsFrameIgnoreScrollFrame, arg1)</OnMouseWheel>
                 </Scripts>
             </Frame>
 
             <!-- ── Tab 2: /who (ref l.1194-1718) ────────────────────────────────────────────── -->
-            <Frame name="BenillaWhoFrame" hidden="true" setAllPoints="true">
+            <Frame name="WhoFrame" hidden="true" setAllPoints="true">
                 <Layers>
                     <Layer level="ARTWORK">
-                        <FontString name="BenillaWhoFrameTotals" inherits="GameFontNormalSmall">
+                        <FontString name="WhoFrameTotals" inherits="GameFontNormalSmall">
                             <Size><AbsDimension x="298" y="16"/></Size>
                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-10" y="127"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Button name="BenillaWhoFrameColumnHeader1" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Name">
+                    <Button name="WhoFrameColumnHeader1" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Name">
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-70"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>BenillaWhoFrameColumn_SetWidth(83, this); this.sortType = "name"</OnLoad></Scripts>
+                        <Scripts><OnLoad>WhoFrameColumn_SetWidth(83, this); this.sortType = "name"</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaWhoFrameColumnHeader2" inherits="BenillaWhoFrameColumnHeaderTemplate">
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaWhoFrameColumnHeader1" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                    <Button name="WhoFrameColumnHeader2" inherits="BenillaWhoFrameColumnHeaderTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="WhoFrameColumnHeader1" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
                         <Frames>
                             <!-- The variable column IS a dropdown sitting in its own header
                                  (ref l.1326-1375). -->
-                            <Frame name="BenillaWhoFrameDropDown" inherits="UIDropDownMenuTemplate" id="1">
+                            <Frame name="WhoFrameDropDown" inherits="UIDropDownMenuTemplate" id="1">
                                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-15" y="0"/></Offset></Anchor></Anchors>
                                 <Scripts>
-                                    <OnLoad>BenillaWhoFrameDropDown_OnLoad()</OnLoad>
+                                    <OnLoad>WhoFrameDropDown_OnLoad()</OnLoad>
                                     <OnShow>
-                                        UIDropDownMenu_Initialize(BenillaWhoFrameDropDown, BenillaWhoFrameDropDown_Initialize)
-                                        UIDropDownMenu_SetSelectedID(BenillaWhoFrameDropDown, 1)
+                                        UIDropDownMenu_Initialize(WhoFrameDropDown, WhoFrameDropDown_Initialize)
+                                        UIDropDownMenu_SetSelectedID(WhoFrameDropDown, 1)
                                     </OnShow>
                                 </Scripts>
                             </Frame>
                         </Frames>
-                        <Scripts><OnLoad>BenillaWhoFrameColumn_SetWidth(105, this)</OnLoad></Scripts>
+                        <Scripts><OnLoad>WhoFrameColumn_SetWidth(105, this)</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaWhoFrameColumnHeader3" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Lvl">
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaWhoFrameColumnHeader2" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>BenillaWhoFrameColumn_SetWidth(32, this); this.sortType = "level"</OnLoad></Scripts>
+                    <Button name="WhoFrameColumnHeader3" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Lvl">
+                        <Anchors><Anchor point="LEFT" relativeTo="WhoFrameColumnHeader2" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>WhoFrameColumn_SetWidth(32, this); this.sortType = "level"</OnLoad></Scripts>
                     </Button>
-                    <Button name="BenillaWhoFrameColumnHeader4" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Class">
-                        <Anchors><Anchor point="LEFT" relativeTo="BenillaWhoFrameColumnHeader3" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>BenillaWhoFrameColumn_SetWidth(92, this); this.sortType = "class"</OnLoad></Scripts>
-                    </Button>
-
-                    <Button name="BenillaWhoFrameButton1" inherits="BenillaFriendsFrameWhoButtonTemplate" id="1">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrame"><Offset><AbsDimension x="15" y="-95"/></Offset></Anchor></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton2" inherits="BenillaFriendsFrameWhoButtonTemplate" id="2">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton1" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton3" inherits="BenillaFriendsFrameWhoButtonTemplate" id="3">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton2" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton4" inherits="BenillaFriendsFrameWhoButtonTemplate" id="4">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton3" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton5" inherits="BenillaFriendsFrameWhoButtonTemplate" id="5">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton4" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton6" inherits="BenillaFriendsFrameWhoButtonTemplate" id="6">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton5" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton7" inherits="BenillaFriendsFrameWhoButtonTemplate" id="7">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton6" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton8" inherits="BenillaFriendsFrameWhoButtonTemplate" id="8">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton7" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton9" inherits="BenillaFriendsFrameWhoButtonTemplate" id="9">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton8" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton10" inherits="BenillaFriendsFrameWhoButtonTemplate" id="10">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton9" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton11" inherits="BenillaFriendsFrameWhoButtonTemplate" id="11">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton10" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton12" inherits="BenillaFriendsFrameWhoButtonTemplate" id="12">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton11" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton13" inherits="BenillaFriendsFrameWhoButtonTemplate" id="13">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton12" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton14" inherits="BenillaFriendsFrameWhoButtonTemplate" id="14">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton13" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton15" inherits="BenillaFriendsFrameWhoButtonTemplate" id="15">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton14" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton16" inherits="BenillaFriendsFrameWhoButtonTemplate" id="16">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton15" relativePoint="BOTTOMLEFT"/></Anchors>
-                    </Button>
-                    <Button name="BenillaWhoFrameButton17" inherits="BenillaFriendsFrameWhoButtonTemplate" id="17">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaWhoFrameButton16" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <Button name="WhoFrameColumnHeader4" inherits="BenillaWhoFrameColumnHeaderTemplate" text="Class">
+                        <Anchors><Anchor point="LEFT" relativeTo="WhoFrameColumnHeader3" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>WhoFrameColumn_SetWidth(92, this); this.sortType = "class"</OnLoad></Scripts>
                     </Button>
 
-                    <Button name="BenillaWhoFrameGroupInviteButton" inherits="BenillaFriendsPanelButtonTemplate" text="Group Invite">
+                    <Button name="WhoFrameButton1" inherits="BenillaFriendsFrameWhoButtonTemplate" id="1">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrame"><Offset><AbsDimension x="15" y="-95"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton2" inherits="BenillaFriendsFrameWhoButtonTemplate" id="2">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton1" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton3" inherits="BenillaFriendsFrameWhoButtonTemplate" id="3">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton2" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton4" inherits="BenillaFriendsFrameWhoButtonTemplate" id="4">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton3" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton5" inherits="BenillaFriendsFrameWhoButtonTemplate" id="5">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton4" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton6" inherits="BenillaFriendsFrameWhoButtonTemplate" id="6">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton5" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton7" inherits="BenillaFriendsFrameWhoButtonTemplate" id="7">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton6" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton8" inherits="BenillaFriendsFrameWhoButtonTemplate" id="8">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton7" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton9" inherits="BenillaFriendsFrameWhoButtonTemplate" id="9">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton8" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton10" inherits="BenillaFriendsFrameWhoButtonTemplate" id="10">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton9" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton11" inherits="BenillaFriendsFrameWhoButtonTemplate" id="11">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton10" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton12" inherits="BenillaFriendsFrameWhoButtonTemplate" id="12">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton11" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton13" inherits="BenillaFriendsFrameWhoButtonTemplate" id="13">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton12" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton14" inherits="BenillaFriendsFrameWhoButtonTemplate" id="14">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton13" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton15" inherits="BenillaFriendsFrameWhoButtonTemplate" id="15">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton14" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton16" inherits="BenillaFriendsFrameWhoButtonTemplate" id="16">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton15" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+                    <Button name="WhoFrameButton17" inherits="BenillaFriendsFrameWhoButtonTemplate" id="17">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="WhoFrameButton16" relativePoint="BOTTOMLEFT"/></Anchors>
+                    </Button>
+
+                    <Button name="WhoFrameGroupInviteButton" inherits="BenillaFriendsPanelButtonTemplate" text="Group Invite">
                         <Size><AbsDimension x="120" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-40" y="82"/></Offset></Anchor></Anchors>
-                        <Scripts><OnClick>InviteByName(BenillaWhoFrame.selectedName)</OnClick></Scripts>
+                        <Scripts><OnClick>InviteByName(WhoFrame.selectedName)</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaWhoFrameAddFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Add Friend">
+                    <Button name="WhoFrameAddFriendButton" inherits="BenillaFriendsPanelButtonTemplate" text="Add Friend">
                         <Size><AbsDimension x="120" y="22"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativeTo="BenillaWhoFrameGroupInviteButton" relativePoint="LEFT"/></Anchors>
-                        <Scripts><OnClick>AddFriend(BenillaWhoFrame.selectedName)</OnClick></Scripts>
+                        <Anchors><Anchor point="RIGHT" relativeTo="WhoFrameGroupInviteButton" relativePoint="LEFT"/></Anchors>
+                        <Scripts><OnClick>AddFriend(WhoFrame.selectedName)</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaWhoFrameWhoButton" inherits="BenillaFriendsPanelButtonTemplate" text="Refresh">
+                    <Button name="WhoFrameWhoButton" inherits="BenillaFriendsPanelButtonTemplate" text="Refresh">
                         <Size><AbsDimension x="85" y="22"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativeTo="BenillaWhoFrameAddFriendButton" relativePoint="LEFT"/></Anchors>
+                        <Anchors><Anchor point="RIGHT" relativeTo="WhoFrameAddFriendButton" relativePoint="LEFT"/></Anchors>
                         <Scripts>
                             <OnClick>
-                                BenillaWhoFrameEditBox_OnEnterPressed()
-                                BenillaWhoFrame.selectedWho = nil
+                                WhoFrameEditBox_OnEnterPressed()
+                                WhoFrame.selectedWho = nil
                             </OnClick>
                         </Scripts>
                     </Button>
 
-                    <EditBox name="BenillaWhoFrameEditBox" autoFocus="false" historyLines="32">
+                    <EditBox name="WhoFrameEditBox" autoFocus="false" historyLines="32">
                         <Size><AbsDimension x="296" y="32"/></Size>
                         <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-20" y="100"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnShow>this:ClearFocus()</OnShow>
-                            <OnEnterPressed>BenillaWhoFrameEditBox_OnEnterPressed()</OnEnterPressed>
+                            <OnEnterPressed>WhoFrameEditBox_OnEnterPressed()</OnEnterPressed>
                             <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
                         </Scripts>
                         <FontString inherits="ChatFontNormal"/>
                     </EditBox>
 
-                    <Frame name="BenillaWhoListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                    <Frame name="WhoListScrollFrame" inherits="FauxScrollFrameTemplate">
                         <Size><AbsDimension x="296" y="287"/></Size>
-                        <Anchors><Anchor point="TOPRIGHT" relativeTo="BenillaFriendsFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-96"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self.updateFunc = BenillaWhoList_Update</OnLoad></Scripts>
+                        <Anchors><Anchor point="TOPRIGHT" relativeTo="FriendsFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-67" y="-96"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>self.updateFunc = WhoList_Update</OnLoad></Scripts>
                     </Frame>
                 </Frames>
                 <Scripts>
@@ -1140,41 +1140,41 @@
                     <OnLoad>SetWhoToUI(0)</OnLoad>
                     <OnShow>SetWhoToUI(1)</OnShow>
                     <OnHide>SetWhoToUI(0)</OnHide>
-                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(BenillaWhoListScrollFrame, arg1)</OnMouseWheel>
+                    <OnMouseWheel>BenillaFauxScrollFrame_OnMouseWheel(WhoListScrollFrame, arg1)</OnMouseWheel>
                 </Scripts>
             </Frame>
 
             <!-- ── The tab strip (ref l.3439-3540) ──────────────────────────────────────────── -->
-            <Button name="BenillaFriendsFrameTab1" inherits="CharacterFrameTabButtonTemplate" id="1" text="Friends">
+            <Button name="FriendsFrameTab1" inherits="CharacterFrameTabButtonTemplate" id="1" text="Friends">
                 <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="11" y="47"/></Offset></Anchor></Anchors>
                 <Scripts>
                     <OnClick>
-                        PanelTemplates_SetTab(BenillaFriendsFrame, this:GetID())
-                        BenillaFriendsFrame_OnShow()
+                        PanelTemplates_SetTab(FriendsFrame, this:GetID())
+                        FriendsFrame_OnShow()
                         PlaySound("igCharacterInfoTab")
                     </OnClick>
                 </Scripts>
             </Button>
-            <Button name="BenillaFriendsFrameTab2" inherits="CharacterFrameTabButtonTemplate" id="2" text="Who">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaFriendsFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
+            <Button name="FriendsFrameTab2" inherits="CharacterFrameTabButtonTemplate" id="2" text="Who">
+                <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
                 <Scripts>
                     <OnClick>
-                        PanelTemplates_SetTab(BenillaFriendsFrame, this:GetID())
-                        BenillaFriendsFrame_OnShow()
+                        PanelTemplates_SetTab(FriendsFrame, this:GetID())
+                        FriendsFrame_OnShow()
                         PlaySound("igCharacterInfoTab")
                     </OnClick>
                 </Scripts>
             </Button>
             <!-- Disabled for a guildless character, which we always are (header SCOPE note). -->
-            <Button name="BenillaFriendsFrameTab3" inherits="CharacterFrameTabButtonTemplate" id="3" text="Guild">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaFriendsFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
+            <Button name="FriendsFrameTab3" inherits="CharacterFrameTabButtonTemplate" id="3" text="Guild">
+                <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-14" y="0"/></Offset></Anchor></Anchors>
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaFriendsFrame_OnLoad()</OnLoad>
-            <OnShow>BenillaFriendsFrame_OnShow()</OnShow>
-            <OnHide>BenillaFriendsFrame_OnHide()</OnHide>
-            <OnEvent>BenillaFriendsFrame_OnEvent()</OnEvent>
+            <OnLoad>FriendsFrame_OnLoad()</OnLoad>
+            <OnShow>FriendsFrame_OnShow()</OnShow>
+            <OnHide>FriendsFrame_OnHide()</OnHide>
+            <OnEvent>FriendsFrame_OnEvent()</OnEvent>
         </Scripts>
     </Frame>
 </Ui>

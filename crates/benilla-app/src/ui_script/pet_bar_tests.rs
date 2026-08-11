@@ -23,7 +23,7 @@ fn load_xml(s: &UiScript, file: &str) {
 
 /// The pet bar's own load prerequisites, in manifest order: UiPanels (`SetDesaturation`, the
 /// disabled-bar grey), UIParent (the managed bottom stack its OnShow/OnHide re-fires), Cooldown
-/// (`CooldownFrame_SetTimer`), ActionBar (the `BenillaActionBar` anchor target) — then the bar.
+/// (`CooldownFrame_SetTimer`), ActionBar (the `MainMenuBar` anchor target) — then the bar.
 fn load_pet_bar(s: &UiScript) {
     for file in [
         "UiPanels.xml",
@@ -190,8 +190,8 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "4 emitters x 8 trail stars, on the one autocasting slot"
     );
 
-    // Geometry, quoted from the ref: the bar's TOPLEFT is BenillaActionBar's BOTTOMLEFT +(36,97),
-    // and BenillaActionBar is the 1024x53 frame at screen BOTTOM ⇒ its BOTTOMLEFT is (0,0), so the
+    // Geometry, quoted from the ref: the bar's TOPLEFT is MainMenuBar's BOTTOMLEFT +(36,97),
+    // and MainMenuBar is the 1024x53 frame at screen BOTTOM ⇒ its BOTTOMLEFT is (0,0), so the
     // frame spans y[54,97]. Button 1 sits at the frame's own BOTTOMLEFT +(36,2) ⇒ x[72,102]
     // y[56,86] — the same 72 the reference lands on (its PETACTIONBAR_XPOS 36 + the button's 36).
     let attack =
@@ -284,7 +284,7 @@ fn a_click_drops_the_ring_and_the_repaint_restores_it() {
     declare_token_strings(&s);
 
     let checked = |s: &UiScript| {
-        s.eval::<bool>("return BenillaPetActionButton1:GetChecked()")
+        s.eval::<bool>("return PetActionButton1:GetChecked()")
             .unwrap()
     };
 
@@ -440,11 +440,9 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
     s.resolve();
 
     // Slot 5 is empty, so its button is hidden — until the grid comes up.
-    assert!(!s
-        .eval::<bool>("return BenillaPetActionButton5:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return PetActionButton5:IsShown()").unwrap());
 
-    s.run("BenillaPetActionButton_OnDragStart(BenillaPetActionButton4)")
+    s.run("this = PetActionButton4; PetActionButton_OnDragStart()")
         .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -455,17 +453,15 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
     s.tick(0.01);
     s.resolve();
     assert_eq!(
-        s.eval::<i64>("return BenillaPetActionBarFrame.showgrid")
-            .unwrap(),
+        s.eval::<i64>("return PetActionBarFrame.showgrid").unwrap(),
         1
     );
     assert!(
-        s.eval::<bool>("return BenillaPetActionButton5:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return PetActionButton5:IsShown()").unwrap(),
         "the grid reveals the empty slots to drop onto"
     );
 
-    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+    s.run("this = PetActionButton5; PetActionButton_OnReceiveDrag()")
         .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert_eq!(
@@ -475,8 +471,7 @@ fn dragging_a_pet_spell_between_slots_moves_it_through_the_shipped_handlers() {
     );
     s.tick(0.01);
     assert_eq!(
-        s.eval::<i64>("return BenillaPetActionBarFrame.showgrid")
-            .unwrap(),
+        s.eval::<i64>("return PetActionBarFrame.showgrid").unwrap(),
         0,
         "the grid goes down with the payload"
     );
@@ -498,7 +493,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
     s.resolve();
 
     s.run(r#"LOCK_ACTIONBAR = "1""#).unwrap();
-    s.run("BenillaPetActionButton_OnDragStart(BenillaPetActionButton4)")
+    s.run("this = PetActionButton4; PetActionButton_OnDragStart()")
         .unwrap();
     assert!(
         s.take_pet_set_actions().is_empty(),
@@ -508,7 +503,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
 
     // Shift-click is still the way through, and then the drop is refused too while locked.
     s.set_modifiers(true, false, false);
-    s.run("BenillaPetActionButton_OnClick(BenillaPetActionButton4, \"LeftButton\")")
+    s.run("this = PetActionButton4; PetActionButton_OnClick(\"LeftButton\")")
         .unwrap();
     s.set_modifiers(false, false, false);
     assert_eq!(
@@ -516,7 +511,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
         vec![vec![(3, CLAW_WORD & 0xFFFF_0000)]],
         "shift-click picked it up despite the lock"
     );
-    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+    s.run("this = PetActionButton5; PetActionButton_OnReceiveDrag()")
         .unwrap();
     assert!(
         s.take_pet_set_actions().is_empty(),
@@ -524,7 +519,7 @@ fn the_lock_stops_the_pet_bar_drag_but_not_its_shift_click() {
     );
 
     s.run(r#"LOCK_ACTIONBAR = "0""#).unwrap();
-    s.run("BenillaPetActionButton_OnReceiveDrag(BenillaPetActionButton5)")
+    s.run("this = PetActionButton5; PetActionButton_OnReceiveDrag()")
         .unwrap();
     assert_eq!(
         s.take_pet_set_actions(),
@@ -548,7 +543,8 @@ fn shift_clicking_a_pet_button_picks_it_up_rather_than_casting() {
 
     s.run(
         "IsShiftKeyDown = function() return 1 end \
-         BenillaPetActionButton_OnClick(BenillaPetActionButton4, 'RightButton')",
+         this = PetActionButton4 \
+         PetActionButton_OnClick('RightButton')",
     )
     .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -588,12 +584,12 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     s.resolve();
 
     let state = |s: &UiScript| {
-        s.eval::<String>("return BenillaPetActionButton1:GetButtonState()")
+        s.eval::<String>("return PetActionButton1:GetButtonState()")
             .unwrap()
     };
 
     // Down shows the pushed art and fires nothing (the ref's runOnUp shape).
-    s.run("BenillaPetActionButtonDown(1)").unwrap();
+    s.run("PetActionButtonDown(1)").unwrap();
     assert_eq!(state(&s), "PUSHED");
     assert!(
         s.take_pet_actions().is_empty(),
@@ -603,7 +599,7 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     // Up releases the art and casts — slot 1 is Attack and the view says the order is live, so a
     // LEFT CLICK here would call it off instead (a possess bar's case; see the header). The key
     // has no such fork.
-    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    s.run("PetActionButtonUp(1)").unwrap();
     assert_eq!(state(&s), "NORMAL");
     assert_eq!(s.take_pet_actions(), vec![1]);
     assert_eq!(
@@ -614,20 +610,20 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 
     // The state guard is the whole re-entrancy story: an up with nothing pushed does nothing
     // (a focus-stolen release, a stuck-latch sweep), and a second down does not re-fire.
-    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    s.run("PetActionButtonUp(1)").unwrap();
     assert!(
         s.take_pet_actions().is_empty(),
         "an unmatched release fires nothing"
     );
-    s.run("BenillaPetActionButtonDown(1) BenillaPetActionButtonDown(1)")
+    s.run("PetActionButtonDown(1) PetActionButtonDown(1)")
         .unwrap();
     assert_eq!(state(&s), "PUSHED");
-    s.run("BenillaPetActionButtonUp(1)").unwrap();
+    s.run("PetActionButtonUp(1)").unwrap();
     assert_eq!(s.take_pet_actions(), vec![1], "one press, one cast");
 
     // An EMPTY slot is inert through the same path (CastPetAction's own guard): slot 2 of the
     // hunter bar carries no name, and its button is hidden.
-    s.run("BenillaPetActionButtonDown(2) BenillaPetActionButtonUp(2)")
+    s.run("PetActionButtonDown(2) PetActionButtonUp(2)")
         .unwrap();
     assert!(
         s.take_pet_actions().is_empty(),

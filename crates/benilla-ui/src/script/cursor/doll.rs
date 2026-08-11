@@ -365,9 +365,7 @@ mod tests {
         s.set_inventory_slots(doll_slots());
         s.set_container(0, Some(one_fitting_bag_item()));
 
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert_eq!(s.cursor_item().unwrap().equip_slots, vec![1]);
 
         assert!(s.eval::<bool>("return PickupInventoryItem(1)").unwrap());
@@ -390,7 +388,7 @@ mod tests {
         s.set_inventory_slots(doll_slots());
         // The bag item only fits HeadSlot (1); try placing it on NeckSlot (2).
         s.set_container(0, Some(one_fitting_bag_item()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
 
         assert!(!s.eval::<bool>("return PickupInventoryItem(2)").unwrap());
         let held = s.cursor_item().expect("kept — doesn't fit slot 2");
@@ -512,7 +510,7 @@ mod tests {
                 slots,
             }),
         );
-        s.run("C_Container.PickupContainerItem(0, 3)").unwrap();
+        s.run("PickupContainerItem(0, 3)").unwrap();
         assert!(s.eval::<bool>("return CursorCanGoInSlot(21)").unwrap());
 
         assert!(s.eval::<bool>("return PickupInventoryItem(21)").unwrap());
@@ -539,7 +537,7 @@ mod tests {
 
         // Item arm: true only for a slot its equip_slots names.
         s.set_container(0, Some(one_fitting_bag_item()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.eval::<bool>("return CursorCanGoInSlot(1)").unwrap());
         assert!(!s.eval::<bool>("return CursorCanGoInSlot(2)").unwrap());
         s.run("ClearCursor()").unwrap();
@@ -566,7 +564,7 @@ mod tests {
     fn auto_equip_cursor_item_queues_source_and_clears() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(one_fitting_bag_item()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
 
         assert!(s.eval::<bool>("return AutoEquipCursorItem()").unwrap());
         assert!(s.cursor_item().is_none());
@@ -629,7 +627,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_inventory_slots(doll_slots());
         s.set_container(0, Some(one_fitting_bag_item()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
 
         assert!(s.eval::<bool>("return EquipCursorItem(1)").unwrap());
         assert!(s.cursor_item().is_none());
@@ -663,7 +661,7 @@ mod tests {
 
         // Armed but HOLDING: the payload wins, exactly as the reference orders it.
         s.set_item_pick_armed(true);
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(
             s.take_item_picks().is_empty(),
             "a click while carrying an item is a place, not a bind"
@@ -674,9 +672,7 @@ mod tests {
         s.run("ClearCursor()").unwrap();
         assert!(s.cursor_item().is_none());
         assert!(!s.eval::<bool>("return PickupInventoryItem(1)").unwrap());
-        assert!(!s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(!s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert_eq!(
             s.take_item_picks(),
             vec![(EQUIPMENT_BAG, 1), (0, 1)],

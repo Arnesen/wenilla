@@ -335,6 +335,10 @@ impl Plugin for TargetPlugin {
                     // touching `Selection` at all.
                     (
                         by_name::target_by_name_requests,
+                        // The Lua binding's own by-name asks (11 corpus addons call
+                        // `TargetByName`), beside the chat layer's — same resolver, same commit,
+                        // one extra argument the slash command cannot supply.
+                        by_name::script_target_by_name_requests,
                         by_name::assist_requests,
                         by_name::follow_requests,
                     )

@@ -26,13 +26,18 @@ use crate::ui_unit::UnitFeed;
 use benilla_assets::LockRecover;
 use benilla_world::schedule::WorldStage;
 
+/// The addon folder: discovery, manifests, the enable file, and the load walk. `pub(crate)`
+/// because the AddOns screens read the same folder without a VM (decision 1196).
+pub(crate) mod addons;
 mod content;
 mod extract;
 mod input;
 mod manifest;
 
 // The manifest's loaders read as `ui_script::…` at every call site, including the tests' `super::`.
-#[cfg(test)]
+// `load_default_ui` is no longer test-only: the addon harness (1188 phase 6) loads the whole
+// shipped interface under each surveyed addon, because roughly half of what an addon calls is
+// FrameXML's Lua rather than the engine's (decision 1190).
 pub(crate) use manifest::load_default_ui;
 pub(crate) use manifest::{load_font_registry, load_ingame_ui};
 
@@ -170,6 +175,12 @@ impl Default for UiClock {
 /// mid-chunk on a missing `EditBox:SetTextColor` every single frame and nothing ever said so
 /// (the /w caret bug). A chunk failure is always an app or engine defect; this is the mandatory
 /// form for any run whose `Result` isn't otherwise consumed.
+/// The FrameXML digest of the interface this process loads — see [`content::digest`]. Re-exported
+/// so the corpus harness can stamp every report with the tree it measured.
+pub(crate) fn framexml_digest() -> String {
+    content::digest()
+}
+
 pub(crate) fn run_or_warn(script: &benilla_ui::script::UiScript, chunk: &str) {
     if let Err(e) = script.run(chunk) {
         warn!("ui_script: chunk failed: {e}");
@@ -239,6 +250,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
             .init_resource::<IngameUiLoaded>()
+            .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open` so the patch chain exists at boot: the VM's first load is
             // the real `GlobalStrings.lua` (the reference's own FrameXML order), which the
             // cast-fail display (0427) resolves its messages from.
@@ -249,6 +261,17 @@ impl Plugin for UiScriptPlugin {
                 OnEnter(crate::char_select::ClientState::InWorld),
                 load_ingame_ui_on_world_entry,
             )
+            // The whole shutdown tail — events then writes, in the reference's order. See
+            // [`shutdown_ui_state`]; the two edges here are its five roots as far as our session
+            // has them.
+            .add_systems(
+                OnExit(crate::char_select::ClientState::InWorld),
+                shutdown_on_session_end,
+            )
+            .add_systems(Update, shutdown_on_exit)
+            // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
+            // handler reads this frame's number rather than the previous one's.
+            .add_systems(Update, feed_framerate.before(UiInput))
             // `drive_script` resolves layout; `feed_ui_input` hit-tests against those rects, so they
             // chain (also required because both take the single `NonSend` VM). The pair runs before
             // `WorldStage::Input` so the hover result reaches the pointer arbiter in time. The input
@@ -364,7 +387,20 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
         warn!("ui_script: entering the world with no VM — the in-game UI will not load");
         return;
     };
-    let _ = load_ingame_ui(&script);
+    // The character whose AddOn enable state applies. Resolved before the load because the
+    // enable file gates which addons run at all.
+    let identity = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(crate::ui_macro::identity);
+    // The realm name goes in BEFORE the UI loads, because `GetRealmName()` is read at addon file
+    // scope — `MyAddonDB[GetRealmName()] = …` is the corpus idiom, and 24 addons stop on it
+    // (decision 1195). The roster carries the auth realm-list entry this session connected to.
+    let realm = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
+        .unwrap_or_default();
+    script.set_realm_name(&realm);
+    let _ = load_ingame_ui(&mut script, identity.as_ref());
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
     // minimap reset path copying each CVar object's int into its live index (decision 1131). Once
@@ -376,9 +412,126 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
     // any consumer reads them — then `VARIABLES_LOADED`. That is the reference's own load order
     // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
     // always win and nothing can ever be remembered.
-    crate::ui_saved::load_saved_variables(&mut script);
+    finish_ui_load(&mut script);
     world.insert_non_send_resource(script);
+    world.insert_resource(AddOnIdentity(identity));
     world.resource_mut::<IngameUiLoaded>().0 = true;
+}
+
+/// `GetFramerate()`'s host half: push a **smoothed** frames-per-second into the VM each frame
+/// (decision 1195).
+///
+/// Smoothed, not `1.0 / delta`, for the reason the reference smooths it too: 71 corpus addons put
+/// this number on a panel, and a raw per-frame reciprocal reads as a flickering three-digit mess
+/// that nobody can take a value off. The pole is a one-second time constant — fast enough that a
+/// real stall is visible within a frame or two, slow enough to read.
+///
+/// `Time<Real>` deliberately, the same choice `drive_script` documents: this is a *frame rate*, and
+/// a virtual clock that clamps its delta would report a rate the machine is not achieving.
+fn feed_framerate(
+    script: Option<NonSendMut<UiScript>>,
+    time: Res<Time<bevy::time::Real>>,
+    mut smoothed: Local<f64>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let dt = time.delta_secs_f64();
+    if dt <= 0.0 {
+        return; // the first frame, and any paused one — nothing to average in
+    }
+    let instant = 1.0 / dt;
+    // One-pole IIR with a 1 s time constant, frame-rate independent.
+    let alpha = (dt / 1.0).min(1.0);
+    *smoothed = if *smoothed <= 0.0 {
+        instant
+    } else {
+        *smoothed + alpha * (instant - *smoothed)
+    };
+    script.set_framerate(*smoothed);
+}
+
+/// The character the loaded AddOn enable state belongs to, remembered so the shutdown write goes
+/// back to the file it came from — the roster's pick can be gone by then.
+#[derive(Resource, Default)]
+pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
+
+/// **The UI shutdown, in the reference's own order** — `0x490bd0`, whose ordered tail wow-5875-re
+/// carves as (`system/ui/ui.md`):
+///
+/// > `PLAYER_LEAVING_WORLD` (273) → **`PLAYER_LOGOUT`** (271, `0x490c2a`) → `layout-cache.txt` →
+/// > **the flat saved file** (`0x490c7e`) → **the per-addon files** (`0x490c83`) → `AddOns.txt` →
+/// > destroy the Lua state
+///
+/// **`PLAYER_LOGOUT` fires before any write, and that is the point**: it is an addon's last chance
+/// to mutate a saved global, so a handler that stores "where I left off" runs while the write is
+/// still ahead of it. Firing it after would make the event useless and the bug invisible.
+///
+/// One function, called from every root, because the steps are ordered *against each other* —
+/// three independent Bevy systems on one state edge cannot express that, and until this landed the
+/// flat write and the `AddOns.txt` write were exactly that.
+///
+/// **There is no autosave**, deliberately: the reference has none (decision 1128, and
+/// `ds:0xb4b3f4` has three references image-wide). These are a handful of scalars a player toggles
+/// a few times a session, and every file is written whole from the live globals.
+pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String, String)>) {
+    script.fire_event("PLAYER_LEAVING_WORLD", vec![]);
+    script.fire_event("PLAYER_LOGOUT", vec![]);
+    crate::ui_saved::save(script);
+    addons::save_addon_variables(script, identity);
+    addons::save_enable_state(script, identity);
+}
+
+/// `OnExit(InWorld)`: a `/logout` back to the glue, or a disconnect — two of the reference's five
+/// roots.
+fn shutdown_on_session_end(script: Option<NonSendMut<UiScript>>, id: Res<AddOnIdentity>) {
+    if let Some(mut script) = script {
+        shutdown_ui_state(&mut script, id.0.as_ref());
+    }
+}
+
+/// `AppExit`: quitting the client — the quit / application-exit roots. Reads the message rather
+/// than a state edge because a quit from in-world never leaves `InWorld`.
+fn shutdown_on_exit(
+    script: Option<NonSendMut<UiScript>>,
+    id: Res<AddOnIdentity>,
+    mut exits: MessageReader<AppExit>,
+) {
+    if exits.read().next().is_none() {
+        return;
+    }
+    if let Some(mut script) = script {
+        shutdown_ui_state(&mut script, id.0.as_ref());
+    }
+}
+
+/// The UI-init sequence's ordered tail, once every file — ours and every addon's — has loaded:
+/// the saved-variables chunk and `VARIABLES_LOADED`, then `PLAYER_LOGIN`.
+///
+/// **The order is the reference's**, byte-verified in wow-5875-re (`system/ui/ui.md`, and the
+/// cascade in `system/ui/scratch/mail-pending-countdown.md`). Inside `UI_Init 0x48fbf0`, in
+/// straight-line address order:
+///
+/// | | |
+/// |---|---|
+/// | `0x4900a3` → `0x51f600` | load every non-LoadOnDemand addon — each fires its own **`ADDON_LOADED`** (429, `0x51f5ad`) |
+/// | `0x4900b2` → `0x4913b0` | read the flat saved file, fire **`VARIABLES_LOADED`** (430) |
+/// | `0x490168` → `0x4908c0` | the world-enter cascade: **`PLAYER_LOGIN`** (`0x49094b`, `0x10e`) then **`PLAYER_ENTERING_WORLD`** (`0x490965`, `0x110`) |
+///
+/// So every non-LoD addon's `ADDON_LOADED` precedes `VARIABLES_LOADED`, which precedes
+/// `PLAYER_LOGIN`. It is one function rather than three inline calls because that sequence is the
+/// mechanism — an addon restores state on `ADDON_LOADED` and expects the saved chunk to have run,
+/// and a window that waits on `PLAYER_LOGIN` expects both — so it is worth being able to assert.
+///
+/// **`PLAYER_LOGIN` is the conditional one; `PLAYER_ENTERING_WORLD` is not.** The cascade fires
+/// the former only when `[0xb4e260]` is set, and only the FrameXML-loader path sets it, clearing
+/// it immediately after — so it means "the UI came up", once, which is exactly the
+/// [`IngameUiLoaded`] latch this sits behind. `PLAYER_ENTERING_WORLD` keeps its own per-entry
+/// latch in [`crate::ui_unit`] and still lands after this, since it waits on the self descriptor
+/// arriving over the wire.
+pub(crate) fn finish_ui_load(script: &mut UiScript) {
+    crate::ui_saved::load_saved_variables(script);
+    script.fire_event("PLAYER_LOGIN", vec![]);
 }
 
 /// Execute the real `Interface\FrameXML\GlobalStrings.lua` off the patch chain into the VM —
@@ -717,6 +870,30 @@ mod panel_tests;
 mod merchant_tests;
 
 #[cfg(test)]
+mod money_frame_tests;
+
+#[cfg(test)]
+mod faux_scroll_tests;
+
+/// The reference's shared widget kit (UIPanelTemplates.xml + OptionsFrameTemplates.xml), driven
+/// through `CreateFrame`'s fourth argument the way an addon drives it — decision 1203's queue.
+#[cfg(test)]
+mod panel_template_tests;
+
+/// The reference's BasicControls.xml — TEXT/message/_ERRORMESSAGE and the ScriptErrors dialog,
+/// none of which benilla itself calls: every test enters from Lua the way an addon does.
+#[cfg(test)]
+mod basic_controls_tests;
+
+#[cfg(test)]
+mod color_picker_tests;
+
+/// `UIParent.xml`'s loose addon-facing helpers (`MouseIsOver` and kin) — the panel and ESC halves
+/// of that file live in `panel_tests` / `escape_tests`.
+#[cfg(test)]
+mod uiparent_tests;
+
+#[cfg(test)]
 mod trainer_tests;
 
 #[cfg(test)]
@@ -745,8 +922,16 @@ mod tooltip_anchor_tests;
 #[cfg(test)]
 mod tooltip_compare_tests;
 
+/// `GameTooltipTemplate` as an ADDON sees it — the corpus's most-wanted template, driven through
+/// `inherits=` and `CreateFrame` the way the 27 addons that name it do.
+#[cfg(test)]
+mod tooltip_template_tests;
+
 #[cfg(test)]
 mod escape_tests;
+
+#[cfg(test)]
+mod addon_list_tests;
 
 #[cfg(test)]
 mod game_menu_tests;

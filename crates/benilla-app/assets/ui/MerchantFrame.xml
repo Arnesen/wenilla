@@ -3,8 +3,8 @@
         benilla's vendor window (decision 0081 phase 4), RE-SKINNED to the real 1.12 merchant window
         (dressing arc, decision 0084): the geometry and art below are QUOTED from the real
         `MerchantFrame.xml` (scratchpad `ref-MerchantFrame.xml`; line citations inline), turned onto our
-        own feeds/intents. The name `BenillaMerchantFrame`, its panel registration
-        (UiPanels.xml's UIPanelWindows["BenillaMerchantFrame"], area="left"), the Era vendor feeds
+        own feeds/intents. The name `MerchantFrame`, its panel registration
+        (UiPanels.xml's UIPanelWindows["MerchantFrame"], area="left"), the Era vendor feeds
         (GetMerchantNumItems/GetMerchantItemInfo/BuyMerchantItem/CloseMerchant, GetMoney), and the
         intent functions are UNCHANGED — only the window's dressing is real now.
 
@@ -199,14 +199,14 @@
         -- The merchant-list index a row button shows on the current page (ref index arithmetic,
         -- MerchantFrame.lua l.74).
         function BenillaMerchantFrame_ItemIndex(button)
-            return ((BenillaMerchantFrame.page or 1) - 1) * BENILLA_MERCHANT_MAX + button.merchantIndex
+            return ((MerchantFrame.page or 1) - 1) * BENILLA_MERCHANT_MAX + button.merchantIndex
         end
 
         function BenillaMerchantItem_OnClick(button, mouseButton)
             -- Buyback tab: either click buys the slot back (ref MerchantItemButton_OnClick's else
             -- arm, l.358-361) — and, as there, with NO modifier branch of any kind: 1.12 ships no
             -- GetBuybackItemLink, so a buyback row carries no link at all (ui_merchant.rs).
-            if BenillaMerchantFrame.selectedTab == 2 then
+            if MerchantFrame.selectedTab == 2 then
                 BuybackItem(button.merchantIndex)
                 return
             end
@@ -254,7 +254,7 @@
         -- offset back to the icon's TOPRIGHT (37 − 153 = −116). No buy-price line — the price is
         -- on the row, and the real vendor tooltip doesn't repeat it.
         function BenillaMerchantItem_OnEnter(button)
-            if BenillaMerchantFrame.selectedTab == 2 then
+            if MerchantFrame.selectedTab == 2 then
                 if not GetBuybackItemInfo(button.merchantIndex) then return end
                 GameTooltip:SetOwner(button, "ANCHOR_RIGHT", -116, 0)
                 GameTooltip:SetBuybackItem(button.merchantIndex)
@@ -272,14 +272,14 @@
             -- Buy tab: remember the row so the frame's OnUpdate arms the coin every frame — Buy
             -- vs the grayed UnableBuy by affordability, or the Inspect magnifier while Ctrl is held
             -- (ref MerchantFrame.itemHover + OnUpdate l.82/725-731).
-            BenillaMerchantFrame.itemHover = index
+            MerchantFrame.itemHover = index
         end
 
         function BenillaMerchantItem_OnLeave(button)
             GameTooltip:Hide()
             -- Drop the coin/inspect override and stop the OnUpdate arming (ref OnLeave l.87-90).
             ResetCursor()
-            BenillaMerchantFrame.itemHover = nil
+            MerchantFrame.itemHover = nil
         end
 
         -- One row's item fill — the shape both pages share (ref fills name/texture/count/money
@@ -337,13 +337,13 @@
         -- The merchant page (ref MerchantFrame_UpdateMerchantInfo l.66-193): the paged 10 rows,
         -- the repair pair, the single most-recent buyback slot, the page buttons, the merchant
         -- bottom border — and the buyback page's pieces hidden.
-        function BenillaMerchantFrame_UpdateMerchantInfo()
-            local frame = BenillaMerchantFrame
+        function MerchantFrame_UpdateMerchantInfo()
+            local frame = MerchantFrame
             local page = frame.page or 1
             local numItems = GetMerchantNumItems()
 
             for i = 1, BENILLA_MERCHANT_MAX do
-                local button = getglobal("BenillaMerchantItem" .. i)
+                local button = getglobal("MerchantItem" .. i)
                 local index = (page - 1) * BENILLA_MERCHANT_MAX + i
                 if index <= numItems then
                     local name, texture, price, quantity, numAvailable, isUsable = GetMerchantItemInfo(index)
@@ -355,32 +355,32 @@
 
             -- Rows back to the merchant spacing (ref l.188-192; the buyback page spreads them to
             -- -15). SetPoint replaces the same-point anchor, the real client's semantics.
-            getglobal("BenillaMerchantItem3"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem1"), "BOTTOMLEFT", 0, -8)
-            getglobal("BenillaMerchantItem5"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem3"), "BOTTOMLEFT", 0, -8)
-            getglobal("BenillaMerchantItem7"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem5"), "BOTTOMLEFT", 0, -8)
-            getglobal("BenillaMerchantItem9"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem7"), "BOTTOMLEFT", 0, -8)
+            getglobal("MerchantItem3"):SetPoint("TOPLEFT", getglobal("MerchantItem1"), "BOTTOMLEFT", 0, -8)
+            getglobal("MerchantItem5"):SetPoint("TOPLEFT", getglobal("MerchantItem3"), "BOTTOMLEFT", 0, -8)
+            getglobal("MerchantItem7"):SetPoint("TOPLEFT", getglobal("MerchantItem5"), "BOTTOMLEFT", 0, -8)
+            getglobal("MerchantItem9"):SetPoint("TOPLEFT", getglobal("MerchantItem7"), "BOTTOMLEFT", 0, -8)
 
             -- Buyback-page-only pieces off (ref l.180-186), merchant-only pieces on (ref l.175-178).
-            getglobal("BenillaMerchantItem11"):Hide()
-            getglobal("BenillaMerchantItem12"):Hide()
-            getglobal("BenillaBuybackFrameTopLeft"):Hide()
-            getglobal("BenillaBuybackFrameTopRight"):Hide()
-            getglobal("BenillaBuybackFrameBotLeft"):Hide()
-            getglobal("BenillaBuybackFrameBotRight"):Hide()
-            getglobal("BenillaMerchantFrameBottomLeftBorder"):Show()
-            getglobal("BenillaMerchantFrameBottomRightBorder"):Show()
+            getglobal("MerchantItem11"):Hide()
+            getglobal("MerchantItem12"):Hide()
+            getglobal("BuybackFrameTopLeft"):Hide()
+            getglobal("BuybackFrameTopRight"):Hide()
+            getglobal("BuybackFrameBotLeft"):Hide()
+            getglobal("BuybackFrameBotRight"):Hide()
+            getglobal("MerchantFrameBottomLeftBorder"):Show()
+            getglobal("MerchantFrameBottomRightBorder"):Show()
 
             -- The repair pair shows iff this vendor repairs (ref l.121-130); the all-button
             -- enables iff there is damage to pay for (ref MerchantFrame_OnShow l.37-46 — our
             -- vertex-color gray stands in for its SetDesaturation, which the engine lacks).
             if CanMerchantRepair() then
-                getglobal("BenillaMerchantRepairText"):Show()
-                local allButton = getglobal("BenillaMerchantRepairAllButton")
-                local itemButton = getglobal("BenillaMerchantRepairItemButton")
+                getglobal("MerchantRepairText"):Show()
+                local allButton = getglobal("MerchantRepairAllButton")
+                local itemButton = getglobal("MerchantRepairItemButton")
                 allButton:Show()
                 itemButton:Show()
                 local repairAllCost, canRepair = GetRepairAllCost()
-                local icon = getglobal("BenillaMerchantRepairAllIcon")
+                local icon = getglobal("MerchantRepairAllIcon")
                 if canRepair then
                     icon:SetVertexColor(1, 1, 1)
                     allButton:Enable()
@@ -389,14 +389,14 @@
                     allButton:Disable()
                 end
             else
-                getglobal("BenillaMerchantRepairText"):Hide()
-                getglobal("BenillaMerchantRepairAllButton"):Hide()
-                getglobal("BenillaMerchantRepairItemButton"):Hide()
+                getglobal("MerchantRepairText"):Hide()
+                getglobal("MerchantRepairAllButton"):Hide()
+                getglobal("MerchantRepairItemButton"):Hide()
             end
 
             -- The single buyback slot: the MOST RECENT sale (ref l.132-152 —
             -- GetBuybackItemInfo(GetNumBuybackItems())).
-            local slot = getglobal("BenillaMerchantBuyBackItem")
+            local slot = getglobal("MerchantBuyBackItem")
             local bbName, bbTexture, bbPrice, bbQuantity = GetBuybackItemInfo(GetNumBuybackItems())
             if bbName then
                 slot.icon:SetTexture(bbTexture or BENILLA_FALLBACK_ICON)
@@ -406,13 +406,13 @@
                 else
                     slot.count:SetText("")
                 end
-                BenillaMoney_Set("BenillaMerchantBuyBackItemPrice", bbPrice, true)
+                BenillaMoney_Set("MerchantBuyBackItemPrice", bbPrice, true)
                 slot.slot:SetVertexColor(1, 1, 1)
             else
                 slot.icon:SetTexture(nil)
                 slot.name:SetText("")
                 slot.count:SetText("")
-                BenillaMoney_Clear("BenillaMerchantBuyBackItemPrice")
+                BenillaMoney_Clear("MerchantBuyBackItemPrice")
                 slot.slot:SetVertexColor(0.4, 0.4, 0.4)
                 -- Hide the tooltip upon sale of the last slot (ref l.148-151).
                 if GameTooltip:IsOwned(slot) then
@@ -422,9 +422,9 @@
             slot:Show()
 
             -- Paging (ref l.154-173): buttons + label only when the stock overflows one page.
-            local prevButton = getglobal("BenillaMerchantPrevPageButton")
-            local nextButton = getglobal("BenillaMerchantNextPageButton")
-            local pageText = getglobal("BenillaMerchantPageText")
+            local prevButton = getglobal("MerchantPrevPageButton")
+            local nextButton = getglobal("MerchantNextPageButton")
+            local pageText = getglobal("MerchantPageText")
             if numItems > BENILLA_MERCHANT_MAX then
                 pageText:SetText(string.format("Page %d", page)) -- PAGE_NUMBER
                 if page == 1 then prevButton:Disable() else prevButton:Enable() end
@@ -445,34 +445,34 @@
             -- Title + portrait back to the vendor (ref l.67-68): re-bind the "npc" model bake the
             -- buyback page's raw SetTexture(UI-BuyBack-Icon) dropped.
             BenillaMerchantFrame_SetTitle(frame.vendorName)
-            SetPortraitTexture(getglobal("BenillaMerchantFramePortrait"), "npc")
+            SetPortraitTexture(getglobal("MerchantFramePortrait"), "npc")
         end
 
         -- The buyback page (ref MerchantFrame_UpdateBuybackInfo l.195-273): 12 rows over the
         -- buyback slots, the wider -15 row spacing, the buyback corner art — and every
         -- merchant-only piece hidden.
-        function BenillaMerchantFrame_UpdateBuybackInfo()
-            getglobal("BenillaMerchantNameText"):SetText("Merchant Buyback") -- MERCHANT_BUYBACK
+        function MerchantFrame_UpdateBuybackInfo()
+            getglobal("MerchantNameText"):SetText("Merchant Buyback") -- MERCHANT_BUYBACK
             -- The buyback icon is drawn for the portrait ring — the ref sets it RAW (SetTexture,
             -- l.197), not through the portrait mask.
-            getglobal("BenillaMerchantFramePortrait"):SetTexture("Interface\\MerchantFrame\\UI-BuyBack-Icon")
+            getglobal("MerchantFramePortrait"):SetTexture("Interface\\MerchantFrame\\UI-BuyBack-Icon")
 
-            getglobal("BenillaMerchantItem11"):Show()
-            getglobal("BenillaMerchantItem12"):Show()
-            getglobal("BenillaBuybackFrameTopLeft"):Show()
-            getglobal("BenillaBuybackFrameTopRight"):Show()
-            getglobal("BenillaBuybackFrameBotLeft"):Show()
-            getglobal("BenillaBuybackFrameBotRight"):Show()
+            getglobal("MerchantItem11"):Show()
+            getglobal("MerchantItem12"):Show()
+            getglobal("BuybackFrameTopLeft"):Show()
+            getglobal("BuybackFrameTopRight"):Show()
+            getglobal("BuybackFrameBotLeft"):Show()
+            getglobal("BuybackFrameBotRight"):Show()
 
             -- The wider buyback row spacing (ref l.208-211).
-            getglobal("BenillaMerchantItem3"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem1"), "BOTTOMLEFT", 0, -15)
-            getglobal("BenillaMerchantItem5"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem3"), "BOTTOMLEFT", 0, -15)
-            getglobal("BenillaMerchantItem7"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem5"), "BOTTOMLEFT", 0, -15)
-            getglobal("BenillaMerchantItem9"):SetPoint("TOPLEFT", getglobal("BenillaMerchantItem7"), "BOTTOMLEFT", 0, -15)
+            getglobal("MerchantItem3"):SetPoint("TOPLEFT", getglobal("MerchantItem1"), "BOTTOMLEFT", 0, -15)
+            getglobal("MerchantItem5"):SetPoint("TOPLEFT", getglobal("MerchantItem3"), "BOTTOMLEFT", 0, -15)
+            getglobal("MerchantItem7"):SetPoint("TOPLEFT", getglobal("MerchantItem5"), "BOTTOMLEFT", 0, -15)
+            getglobal("MerchantItem9"):SetPoint("TOPLEFT", getglobal("MerchantItem7"), "BOTTOMLEFT", 0, -15)
 
             local numBuyback = GetNumBuybackItems()
             for i = 1, BENILLA_BUYBACK_MAX do
-                local button = getglobal("BenillaMerchantItem" .. i)
+                local button = getglobal("MerchantItem" .. i)
                 if i <= numBuyback then
                     local name, texture, price, quantity, numAvailable, isUsable = GetBuybackItemInfo(i)
                     -- Never soldOut here: the ref's buyback sold-out leg tests its merchant-page
@@ -485,45 +485,45 @@
             end
 
             -- Merchant-only pieces off (ref l.263-272).
-            getglobal("BenillaMerchantRepairText"):Hide()
-            getglobal("BenillaMerchantRepairAllButton"):Hide()
-            getglobal("BenillaMerchantRepairItemButton"):Hide()
-            getglobal("BenillaMerchantBuyBackItem"):Hide()
-            getglobal("BenillaMerchantPrevPageButton"):Hide()
-            getglobal("BenillaMerchantNextPageButton"):Hide()
-            getglobal("BenillaMerchantPageText"):Hide()
-            getglobal("BenillaMerchantFrameBottomLeftBorder"):Hide()
-            getglobal("BenillaMerchantFrameBottomRightBorder"):Hide()
+            getglobal("MerchantRepairText"):Hide()
+            getglobal("MerchantRepairAllButton"):Hide()
+            getglobal("MerchantRepairItemButton"):Hide()
+            getglobal("MerchantBuyBackItem"):Hide()
+            getglobal("MerchantPrevPageButton"):Hide()
+            getglobal("MerchantNextPageButton"):Hide()
+            getglobal("MerchantPageText"):Hide()
+            getglobal("MerchantFrameBottomLeftBorder"):Hide()
+            getglobal("MerchantFrameBottomRightBorder"):Hide()
         end
 
-        function BenillaMerchantFrame_Update()
+        function MerchantFrame_Update()
             -- The tab dispatch (ref MerchantFrame_Update l.57-64) + the purse (the ref's money
             -- frame updates itself on PLAYER_MONEY; ours repaints with the window).
-            if BenillaMerchantFrame.selectedTab == 2 then
-                BenillaMerchantFrame_UpdateBuybackInfo()
+            if MerchantFrame.selectedTab == 2 then
+                MerchantFrame_UpdateBuybackInfo()
             else
-                BenillaMerchantFrame_UpdateMerchantInfo()
+                MerchantFrame_UpdateMerchantInfo()
             end
-            BenillaMoney_Set("BenillaMerchantMoney", GetMoney())
+            BenillaMoney_Set("MerchantMoney", GetMoney())
         end
 
         -- The tab pair (ref MerchantFrameTab1/2 OnClick l.682-685/704-707): select + repaint.
         function BenillaMerchantFrameTab_OnClick(id)
-            PanelTemplates_SetTab(BenillaMerchantFrame, id)
-            BenillaMerchantFrame_Update()
+            PanelTemplates_SetTab(MerchantFrame, id)
+            MerchantFrame_Update()
         end
 
         -- Paging clicks (ref MerchantPrevPageButton_OnClick/Next l.275-285).
-        function BenillaMerchantPrevPageButton_OnClick()
+        function MerchantPrevPageButton_OnClick()
             PlaySound("igMainMenuOptionCheckBoxOn")
-            BenillaMerchantFrame.page = (BenillaMerchantFrame.page or 1) - 1
-            BenillaMerchantFrame_Update()
+            MerchantFrame.page = (MerchantFrame.page or 1) - 1
+            MerchantFrame_Update()
         end
 
-        function BenillaMerchantNextPageButton_OnClick()
+        function MerchantNextPageButton_OnClick()
             PlaySound("igMainMenuOptionCheckBoxOn")
-            BenillaMerchantFrame.page = (BenillaMerchantFrame.page or 1) + 1
-            BenillaMerchantFrame_Update()
+            MerchantFrame.page = (MerchantFrame.page or 1) + 1
+            MerchantFrame_Update()
         end
 
         -- The single buyback slot's handlers (ref MerchantBuyBackItemItemButton l.516-541): a
@@ -558,7 +558,8 @@
             end
         end
 
-        function BenillaMerchantFrame_OnLoad(frame)
+        function MerchantFrame_OnLoad()
+            local frame = this
             -- The NPC portrait: the "npc" unit token → the vendor's live model bake
             -- (crates/benilla/src/portrait, InteractNpc). The buyback page overrides this ring with a
             -- raw SetTexture (which drops the binding); the vendor page restores it (see below).
@@ -582,26 +583,27 @@
             if name == nil or name == "" then
                 name = "Merchant"
             end
-            getglobal("BenillaMerchantNameText"):SetText(name)
+            getglobal("MerchantNameText"):SetText(name)
         end
 
-        function BenillaMerchantFrame_OnEvent(frame)
+        function MerchantFrame_OnEvent()
+            local frame = this
             if event == "PLAYER_MONEY" then
-                BenillaMoney_Set("BenillaMerchantMoney", GetMoney())
+                BenillaMoney_Set("MerchantMoney", GetMoney())
             elseif event == "MERCHANT_SHOW" then
                 -- Fresh session: first page, merchant tab (ref OnEvent l.29 / OnShow l.47).
                 frame.page = 1
                 frame.vendorName = arg1
                 PanelTemplates_SetTab(frame, 1)
                 BenillaMerchantFrame_SetTitle(arg1)
-                BenillaMerchantFrame_Update()
+                MerchantFrame_Update()
                 ShowUIPanel(frame)
             elseif event == "MERCHANT_UPDATE" then
                 frame.vendorName = arg1
                 if frame.selectedTab ~= 2 then
                     BenillaMerchantFrame_SetTitle(arg1)
                 end
-                BenillaMerchantFrame_Update()
+                MerchantFrame_Update()
             elseif event == "MERCHANT_CLOSED" then
                 HideUIPanel(frame)
             end
@@ -611,7 +613,7 @@
             -- vanilla's client-side close sends no packet; the app clears the merchant on this intent
             -- (which fires MERCHANT_CLOSED), and we hide immediately so there's no one-frame lag.
             CloseMerchant()
-            HideUIPanel(getglobal("BenillaMerchantFrame"))
+            HideUIPanel(getglobal("MerchantFrame"))
         end
     ]]></Script>
 
@@ -622,7 +624,7 @@
         the icon, and the dark label plate $parentNameFrame (Interface\MerchantFrame\UI-Merchant-
         LabelSlots, 128×78, LEFT of the slot -9,-18 — ref l.22-33) behind the name+price. Every one of
         the 10 slots always renders these; an empty slot dims the socket to 0.4 and clears its item
-        (BenillaMerchantFrame_Update, ref MerchantFrame.lua l.112-118). The name (GameFontNormalSmall,
+        (MerchantFrame_Update, ref MerchantFrame.lua l.112-118). The name (GameFontNormalSmall,
         LEFT — ref l.34) sits above the price coins, the real name-over-money stack. The pushed-state
         depress ring the ref repair buttons use (l.419) is a square-button texture that would smear
         across our wide whole-row button, so it is OMITTED; the highlight is the square ADD glow.
@@ -786,7 +788,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="BenillaMerchantFrame" hidden="true">
+    <Frame name="MerchantFrame" hidden="true">
         <!-- The real 384×512 window (ref l.117-119). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
              this to the left slot on open. -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -830,20 +832,20 @@
                      OnEvent handler sets it here, falling back to "Merchant" until it lands. CENTER +
                      the (unsized, single-point) ~zero-width rect keeps the name centered on the
                      window regardless of length. -->
-                <FontString name="BenillaMerchantNameText" inherits="GameFontNormal" justifyH="CENTER" text="Merchant">
+                <FontString name="MerchantNameText" inherits="GameFontNormal" justifyH="CENTER" text="Merchant">
                     <Anchors>
                         <Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
                 <!-- "Repair Items" label beside the repair pair (ref MerchantRepairText l.199-207,
                      REPAIR_ITEMS); shown/hidden with the pair by Update. -->
-                <FontString name="BenillaMerchantRepairText" inherits="GameFontHighlightSmall" text="Repair Items" hidden="true">
+                <FontString name="MerchantRepairText" inherits="GameFontHighlightSmall" text="Repair Items" hidden="true">
                     <Anchors>
                         <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="26" y="103"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
                 <!-- "Page N" between the page buttons (ref MerchantPageText l.187-198). -->
-                <FontString name="BenillaMerchantPageText" inherits="GameFontNormal" justifyH="CENTER" hidden="true">
+                <FontString name="MerchantPageText" inherits="GameFontNormal" justifyH="CENTER" hidden="true">
                     <Size><AbsDimension x="104" y="0"/></Size>
                     <Anchors>
                         <Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-14" y="150"/></Offset></Anchor>
@@ -853,34 +855,34 @@
             <!-- The buyback page's parchment (ref BuybackFrame* l.210-245): four slabs over the
                  merchant page's item-grid art, shown only on the buyback tab. -->
             <Layer level="ARTWORK">
-                <Texture name="BenillaBuybackFrameTopLeft" file="Interface\MerchantFrame\UI-BuyBack-TopLeft" hidden="true">
+                <Texture name="BuybackFrameTopLeft" file="Interface\MerchantFrame\UI-BuyBack-TopLeft" hidden="true">
                     <Size><AbsDimension x="256" y="256"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-71"/></Offset></Anchor></Anchors>
                 </Texture>
-                <Texture name="BenillaBuybackFrameTopRight" file="Interface\MerchantFrame\UI-BuyBack-TopRight" hidden="true">
+                <Texture name="BuybackFrameTopRight" file="Interface\MerchantFrame\UI-BuyBack-TopRight" hidden="true">
                     <Size><AbsDimension x="64" y="256"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBuybackFrameTopLeft" relativePoint="TOPRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BuybackFrameTopLeft" relativePoint="TOPRIGHT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaBuybackFrameBotLeft" file="Interface\MerchantFrame\UI-BuyBack-BotLeft" hidden="true">
+                <Texture name="BuybackFrameBotLeft" file="Interface\MerchantFrame\UI-BuyBack-BotLeft" hidden="true">
                     <Size><AbsDimension x="256" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBuybackFrameTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BuybackFrameTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaBuybackFrameBotRight" file="Interface\MerchantFrame\UI-BuyBack-BotRight" hidden="true">
+                <Texture name="BuybackFrameBotRight" file="Interface\MerchantFrame\UI-BuyBack-BotRight" hidden="true">
                     <Size><AbsDimension x="64" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBuybackFrameTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BuybackFrameTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
                 </Texture>
             </Layer>
             <!-- The bottom band's engraved border over the repair/buyback strip (ref
                  MerchantFrameBottomLeftBorder/RightBorder l.248-269) — merchant tab only. -->
             <Layer level="OVERLAY">
-                <Texture name="BenillaMerchantFrameBottomLeftBorder" file="Interface\MerchantFrame\UI-Merchant-BottomBorder">
+                <Texture name="MerchantFrameBottomLeftBorder" file="Interface\MerchantFrame\UI-Merchant-BottomBorder">
                     <Size><AbsDimension x="256" y="61"/></Size>
                     <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="14" y="85"/></Offset></Anchor></Anchors>
                     <TexCoords left="0" right="1" top="0" bottom="0.4765625"/>
                 </Texture>
-                <Texture name="BenillaMerchantFrameBottomRightBorder" file="Interface\MerchantFrame\UI-Merchant-BottomBorder">
+                <Texture name="MerchantFrameBottomRightBorder" file="Interface\MerchantFrame\UI-Merchant-BottomBorder">
                     <Size><AbsDimension x="76" y="61"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="BenillaMerchantFrameBottomLeftBorder" relativePoint="RIGHT"/></Anchors>
+                    <Anchors><Anchor point="LEFT" relativeTo="MerchantFrameBottomLeftBorder" relativePoint="RIGHT"/></Anchors>
                     <TexCoords left="0" right="0.296875" top="0.4765625" bottom="0.953125"/>
                 </Texture>
             </Layer>
@@ -892,8 +894,8 @@
                  starts at iconWidth — MoneyFrame.lua l.219), so the COIN edge the ref frame anchor
                  implies is -40-13 = -53, bottom 67. Three position-slots chained right-to-left with
                  the real 4px spacing, shrunk to content by the same BenillaMoney_Set fill as the row
-                 prices (prefix "BenillaMerchantMoney") — copper-first, right-flush off Coin1. -->
-            <Frame name="BenillaMerchantMoneyCoin1">
+                 prices (prefix "MerchantMoney") — copper-first, right-flush off Coin1. -->
+            <Frame name="MerchantMoneyCoin1">
                 <Size><AbsDimension x="13" y="13"/></Size>
                 <Anchors>
                     <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-53" y="67"/></Offset></Anchor>
@@ -912,10 +914,10 @@
                     </Layer>
                 </Layers>
             </Frame>
-            <Frame name="BenillaMerchantMoneyCoin2">
+            <Frame name="MerchantMoneyCoin2">
                 <Size><AbsDimension x="13" y="13"/></Size>
                 <Anchors>
-                    <Anchor point="RIGHT" relativeTo="BenillaMerchantMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                    <Anchor point="RIGHT" relativeTo="MerchantMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
@@ -931,10 +933,10 @@
                     </Layer>
                 </Layers>
             </Frame>
-            <Frame name="BenillaMerchantMoneyCoin3">
+            <Frame name="MerchantMoneyCoin3">
                 <Size><AbsDimension x="13" y="13"/></Size>
                 <Anchors>
-                    <Anchor point="RIGHT" relativeTo="BenillaMerchantMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                    <Anchor point="RIGHT" relativeTo="MerchantMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
@@ -953,54 +955,54 @@
             <!-- The real 2-column × 5-row grid (ref l.273-362): item 1 at (24, -80); the right column
                  anchors to its left neighbour's TOPRIGHT +12; each new row to the left item's
                  BOTTOMLEFT -8. Odd rows = left column, even rows = right column. -->
-            <Button name="BenillaMerchantItem1" inherits="BenillaMerchantItemTemplate">
+            <Button name="MerchantItem1" inherits="BenillaMerchantItemTemplate">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="24" y="-80"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 1)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem2" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem2" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 2)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem3" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem3" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 3)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem4" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem4" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 4)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem5" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem5" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 5)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem6" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem6" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 6)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem7" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem7" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 7)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem8" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem7" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem8" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem7" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 8)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem9" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem9" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-8"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 9)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem10" inherits="BenillaMerchantItemTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem10" inherits="BenillaMerchantItemTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 10)</OnLoad></Scripts>
             </Button>
             <!-- Rows 11/12 exist for the BUYBACK page only (ref MerchantItem11/12 l.363-380; the
                  merchant page hides them, the buyback page's 12 slots need them). -->
-            <Button name="BenillaMerchantItem11" inherits="BenillaMerchantItemTemplate" hidden="true">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem11" inherits="BenillaMerchantItemTemplate" hidden="true">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 11)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaMerchantItem12" inherits="BenillaMerchantItemTemplate" hidden="true">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem11" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+            <Button name="MerchantItem12" inherits="BenillaMerchantItemTemplate" hidden="true">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="MerchantItem11" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaMerchantItem_OnLoad(self, 12)</OnLoad></Scripts>
             </Button>
             <!-- The repair pair (ref MerchantRepairAllButton l.381-421 / MerchantRepairItemButton
@@ -1008,14 +1010,14 @@
                  UI-Merchant-RepairIcons sheet. Shown only when the vendor repairs. The ref's
                  anchor: the ALL button's BOTTOMRIGHT at frame BOTTOMLEFT +(172,91); the ITEM
                  button chains LEFT of it (-2). -->
-            <Button name="BenillaMerchantRepairAllButton" hidden="true">
+            <Button name="MerchantRepairAllButton" hidden="true">
                 <Size><AbsDimension x="36" y="36"/></Size>
                 <Anchors>
                     <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="172" y="91"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="BORDER">
-                        <Texture name="BenillaMerchantRepairAllIcon" file="Interface\MerchantFrame\UI-Merchant-RepairIcons">
+                        <Texture name="MerchantRepairAllIcon" file="Interface\MerchantFrame\UI-Merchant-RepairIcons">
                             <TexCoords left="0.28125" right="0.5625" top="0" bottom="0.5625"/>
                         </Texture>
                     </Layer>
@@ -1036,10 +1038,10 @@
                     <OnLeave>GameTooltip:Hide()</OnLeave>
                 </Scripts>
             </Button>
-            <Button name="BenillaMerchantRepairItemButton" hidden="true">
+            <Button name="MerchantRepairItemButton" hidden="true">
                 <Size><AbsDimension x="36" y="36"/></Size>
                 <Anchors>
-                    <Anchor point="RIGHT" relativeTo="BenillaMerchantRepairAllButton" relativePoint="LEFT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor>
+                    <Anchor point="RIGHT" relativeTo="MerchantRepairAllButton" relativePoint="LEFT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="BORDER">
@@ -1064,10 +1066,10 @@
                  MerchantBuyBackItem l.460-559): the same socket+plate row shape at 153×37, the
                  shorter 64-tall label plate, anchored under row 10 (0,-53). One wide click
                  button, our whole-row model. -->
-            <Button name="BenillaMerchantBuyBackItem" hidden="true">
+            <Button name="MerchantBuyBackItem" hidden="true">
                 <Size><AbsDimension x="153" y="37"/></Size>
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="BenillaMerchantItem10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-53"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="MerchantItem10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-53"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="BACKGROUND">
@@ -1190,7 +1192,7 @@
             <!-- Page turners (ref MerchantPrevPageButton l.569-610 / MerchantNextPageButton
                  l.611-656): the spellbook page-corner buttons over the page background disc, with
                  the Prev/Next labels beside them. Shown only when the stock overflows a page. -->
-            <Button name="BenillaMerchantPrevPageButton" hidden="true">
+            <Button name="MerchantPrevPageButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="37" y="156"/></Offset></Anchor>
@@ -1211,10 +1213,10 @@
                 <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
                 <Scripts>
-                    <OnClick>BenillaMerchantPrevPageButton_OnClick()</OnClick>
+                    <OnClick>MerchantPrevPageButton_OnClick()</OnClick>
                 </Scripts>
             </Button>
-            <Button name="BenillaMerchantNextPageButton" hidden="true">
+            <Button name="MerchantNextPageButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="324" y="156"/></Offset></Anchor>
@@ -1235,7 +1237,7 @@
                 <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
                 <Scripts>
-                    <OnClick>BenillaMerchantNextPageButton_OnClick()</OnClick>
+                    <OnClick>MerchantNextPageButton_OnClick()</OnClick>
                 </Scripts>
             </Button>
             <!-- The Merchant / Buyback tab pair at the window's bottom edge (ref MerchantFrameTab1/2
@@ -1259,7 +1261,7 @@
             </Button>
             <!-- Close: the real UIPanelCloseButton position (TOPRIGHT -30, -8; ref l.657-664), on the
                  minimize-button art UIPanelCloseButton itself uses (pin § "The re-skin pass"). -->
-            <Button name="BenillaMerchantCloseButton">
+            <Button name="MerchantCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor>
@@ -1273,19 +1275,19 @@
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaMerchantFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaMerchantFrame_OnEvent(self)</OnEvent>
+            <OnLoad>MerchantFrame_OnLoad()</OnLoad>
+            <OnEvent>MerchantFrame_OnEvent()</OnEvent>
             <!-- While a buy-tab row is hovered, re-arm its cursor every frame (ref MerchantFrame
                  OnUpdate l.725-731): the Inspect magnifier while Ctrl is held, else the coin —
                  Buy if affordable, the grayed UnableBuy if not (ShowMerchantSellCursor's own gate).
                  Polling (not a one-shot on enter) is what makes the Ctrl swap and a live money
                  change track under a stationary cursor. The buyback slot arms in its OnEnter. -->
             <OnUpdate>
-                if BenillaMerchantFrame.itemHover then
+                if MerchantFrame.itemHover then
                     if IsControlKeyDown() then
                         ShowInspectCursor()
                     else
-                        ShowMerchantSellCursor(BenillaMerchantFrame.itemHover)
+                        ShowMerchantSellCursor(MerchantFrame.itemHover)
                     end
                 end
             </OnUpdate>
@@ -1307,7 +1309,7 @@
             <OnShow>OpenBackpack(); PlaySound("igCharacterInfoOpen")</OnShow>
             <!-- HideRepairCursor: closing the window must drop the repair-mode latch (the ref's
                  OnHide ResetCursor, l.54 — its cursor semantics land with the sell-cursor slice). -->
-            <OnHide>CloseMerchant(); CloseBackpack(); HideRepairCursor(); ResetCursor(); BenillaMerchantFrame.itemHover = nil; PlaySound("igCharacterInfoClose")</OnHide>
+            <OnHide>CloseMerchant(); CloseBackpack(); HideRepairCursor(); ResetCursor(); MerchantFrame.itemHover = nil; PlaySound("igCharacterInfoClose")</OnHide>
         </Scripts>
     </Frame>
 </Ui>

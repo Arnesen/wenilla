@@ -165,84 +165,84 @@ pub(crate) static SPECS: &[Spec] = &[
     spec!(
         "ACTIONBUTTON1",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(1)", "BenillaActionButtonUp(1)"),
+        Kind::EdgeUpDown("ActionButtonDown(1)", "ActionButtonUp(1)"),
         Some("1"),
         None
     ),
     spec!(
         "ACTIONBUTTON2",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(2)", "BenillaActionButtonUp(2)"),
+        Kind::EdgeUpDown("ActionButtonDown(2)", "ActionButtonUp(2)"),
         Some("2"),
         None
     ),
     spec!(
         "ACTIONBUTTON3",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(3)", "BenillaActionButtonUp(3)"),
+        Kind::EdgeUpDown("ActionButtonDown(3)", "ActionButtonUp(3)"),
         Some("3"),
         None
     ),
     spec!(
         "ACTIONBUTTON4",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(4)", "BenillaActionButtonUp(4)"),
+        Kind::EdgeUpDown("ActionButtonDown(4)", "ActionButtonUp(4)"),
         Some("4"),
         None
     ),
     spec!(
         "ACTIONBUTTON5",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(5)", "BenillaActionButtonUp(5)"),
+        Kind::EdgeUpDown("ActionButtonDown(5)", "ActionButtonUp(5)"),
         Some("5"),
         None
     ),
     spec!(
         "ACTIONBUTTON6",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(6)", "BenillaActionButtonUp(6)"),
+        Kind::EdgeUpDown("ActionButtonDown(6)", "ActionButtonUp(6)"),
         Some("6"),
         None
     ),
     spec!(
         "ACTIONBUTTON7",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(7)", "BenillaActionButtonUp(7)"),
+        Kind::EdgeUpDown("ActionButtonDown(7)", "ActionButtonUp(7)"),
         Some("7"),
         None
     ),
     spec!(
         "ACTIONBUTTON8",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(8)", "BenillaActionButtonUp(8)"),
+        Kind::EdgeUpDown("ActionButtonDown(8)", "ActionButtonUp(8)"),
         Some("8"),
         None
     ),
     spec!(
         "ACTIONBUTTON9",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(9)", "BenillaActionButtonUp(9)"),
+        Kind::EdgeUpDown("ActionButtonDown(9)", "ActionButtonUp(9)"),
         Some("9"),
         None
     ),
     spec!(
         "ACTIONBUTTON10",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(10)", "BenillaActionButtonUp(10)"),
+        Kind::EdgeUpDown("ActionButtonDown(10)", "ActionButtonUp(10)"),
         Some("0"),
         None
     ),
     spec!(
         "ACTIONBUTTON11",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(11)", "BenillaActionButtonUp(11)"),
+        Kind::EdgeUpDown("ActionButtonDown(11)", "ActionButtonUp(11)"),
         Some("-"),
         None
     ),
     spec!(
         "ACTIONBUTTON12",
         ACTIONBAR,
-        Kind::EdgeUpDown("BenillaActionButtonDown(12)", "BenillaActionButtonUp(12)"),
+        Kind::EdgeUpDown("ActionButtonDown(12)", "ActionButtonUp(12)"),
         Some("="),
         None
     ),
@@ -252,7 +252,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON1",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton1"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton1"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F1"),
         None
@@ -261,7 +261,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON2",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton2"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton2"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F2"),
         None
@@ -270,7 +270,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON3",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton3"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton3"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F3"),
         None
@@ -279,7 +279,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON4",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton4"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton4"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F4"),
         None
@@ -288,7 +288,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON5",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton5"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton5"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F5"),
         None
@@ -297,7 +297,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON6",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton6"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton6"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F6"),
         None
@@ -306,7 +306,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON7",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton7"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton7"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F7"),
         None
@@ -315,7 +315,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON8",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton8"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton8"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F8"),
         None
@@ -324,7 +324,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON9",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton9"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton9"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F9"),
         None
@@ -333,7 +333,7 @@ pub(crate) static SPECS: &[Spec] = &[
         "SHAPESHIFTBUTTON10",
         ACTIONBAR,
         Kind::Edge(
-            r#"local b = getglobal("BenillaShapeshiftButton10"); if b and b:IsVisible() then b:Click() end"#
+            r#"local b = getglobal("ShapeshiftButton10"); if b and b:IsVisible() then b:Click() end"#
         ),
         Some("CTRL-F10"),
         None
@@ -349,100 +349,70 @@ pub(crate) static SPECS: &[Spec] = &[
     spec!(
         "BONUSACTIONBUTTON1",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(1)",
-            "BenillaPetActionButtonUp(1)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(1)", "PetActionButtonUp(1)"),
         Some("CTRL-1"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON2",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(2)",
-            "BenillaPetActionButtonUp(2)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(2)", "PetActionButtonUp(2)"),
         Some("CTRL-2"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON3",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(3)",
-            "BenillaPetActionButtonUp(3)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(3)", "PetActionButtonUp(3)"),
         Some("CTRL-3"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON4",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(4)",
-            "BenillaPetActionButtonUp(4)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(4)", "PetActionButtonUp(4)"),
         Some("CTRL-4"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON5",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(5)",
-            "BenillaPetActionButtonUp(5)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(5)", "PetActionButtonUp(5)"),
         Some("CTRL-5"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON6",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(6)",
-            "BenillaPetActionButtonUp(6)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(6)", "PetActionButtonUp(6)"),
         Some("CTRL-6"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON7",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(7)",
-            "BenillaPetActionButtonUp(7)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(7)", "PetActionButtonUp(7)"),
         Some("CTRL-7"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON8",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(8)",
-            "BenillaPetActionButtonUp(8)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(8)", "PetActionButtonUp(8)"),
         Some("CTRL-8"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON9",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(9)",
-            "BenillaPetActionButtonUp(9)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(9)", "PetActionButtonUp(9)"),
         Some("CTRL-9"),
         None
     ),
     spec!(
         "BONUSACTIONBUTTON10",
         ACTIONBAR,
-        Kind::EdgeUpDown(
-            "BenillaPetActionButtonDown(10)",
-            "BenillaPetActionButtonUp(10)"
-        ),
+        Kind::EdgeUpDown("PetActionButtonDown(10)", "PetActionButtonUp(10)"),
         Some("CTRL-0"),
         None
     ),
@@ -580,7 +550,7 @@ pub(crate) static SPECS: &[Spec] = &[
     spec!(
         "TOGGLECHARACTER0",
         INTERFACE,
-        Kind::Edge(r#"ToggleCharacter("BenillaPaperDollFrame")"#),
+        Kind::Edge(r#"ToggleCharacter("PaperDollFrame")"#),
         Some("C"),
         None
     ),
@@ -597,7 +567,7 @@ pub(crate) static SPECS: &[Spec] = &[
     spec!(
         "TOGGLECHARACTER1",
         INTERFACE,
-        Kind::Edge(r#"ToggleCharacter("BenillaSkillFrame")"#),
+        Kind::Edge(r#"ToggleCharacter("SkillFrame")"#),
         Some("K"),
         None
     ),
@@ -610,7 +580,7 @@ pub(crate) static SPECS: &[Spec] = &[
     spec!(
         "TOGGLECHARACTER3",
         INTERFACE,
-        Kind::Edge(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#),
+        Kind::Edge(r#"ToggleCharacter("PetPaperDollFrame")"#),
         Some("SHIFT-P"),
         None
     ),
@@ -769,8 +739,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON1",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 1)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 1)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 1)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 1)"#
         ),
         None,
         None
@@ -779,8 +749,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON2",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 2)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 2)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 2)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 2)"#
         ),
         None,
         None
@@ -789,8 +759,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON3",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 3)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 3)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 3)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 3)"#
         ),
         None,
         None
@@ -799,8 +769,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON4",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 4)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 4)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 4)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 4)"#
         ),
         None,
         None
@@ -809,8 +779,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON5",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 5)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 5)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 5)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 5)"#
         ),
         None,
         None
@@ -819,8 +789,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON6",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 6)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 6)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 6)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 6)"#
         ),
         None,
         None
@@ -829,8 +799,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON7",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 7)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 7)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 7)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 7)"#
         ),
         None,
         None
@@ -839,8 +809,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON8",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 8)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 8)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 8)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 8)"#
         ),
         None,
         None
@@ -849,8 +819,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON9",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 9)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 9)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 9)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 9)"#
         ),
         None,
         None
@@ -859,8 +829,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON10",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 10)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 10)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 10)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 10)"#
         ),
         None,
         None
@@ -869,8 +839,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON11",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 11)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 11)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 11)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 11)"#
         ),
         None,
         None
@@ -879,8 +849,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR1BUTTON12",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomLeft", 12)"#,
-            r#"BenillaMultiActionButtonUp("BottomLeft", 12)"#
+            r#"MultiActionButtonDown("MultiBarBottomLeft", 12)"#,
+            r#"MultiActionButtonUp("MultiBarBottomLeft", 12)"#
         ),
         None,
         None
@@ -889,8 +859,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON1",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 1)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 1)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 1)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 1)"#
         ),
         None,
         None
@@ -899,8 +869,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON2",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 2)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 2)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 2)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 2)"#
         ),
         None,
         None
@@ -909,8 +879,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON3",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 3)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 3)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 3)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 3)"#
         ),
         None,
         None
@@ -919,8 +889,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON4",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 4)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 4)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 4)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 4)"#
         ),
         None,
         None
@@ -929,8 +899,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON5",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 5)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 5)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 5)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 5)"#
         ),
         None,
         None
@@ -939,8 +909,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON6",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 6)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 6)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 6)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 6)"#
         ),
         None,
         None
@@ -949,8 +919,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON7",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 7)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 7)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 7)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 7)"#
         ),
         None,
         None
@@ -959,8 +929,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON8",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 8)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 8)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 8)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 8)"#
         ),
         None,
         None
@@ -969,8 +939,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON9",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 9)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 9)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 9)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 9)"#
         ),
         None,
         None
@@ -979,8 +949,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON10",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 10)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 10)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 10)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 10)"#
         ),
         None,
         None
@@ -989,8 +959,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON11",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 11)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 11)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 11)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 11)"#
         ),
         None,
         None
@@ -999,8 +969,8 @@ pub(crate) static SPECS: &[Spec] = &[
         "MULTIACTIONBAR2BUTTON12",
         MULTIACTIONBAR,
         Kind::EdgeUpDown(
-            r#"BenillaMultiActionButtonDown("BottomRight", 12)"#,
-            r#"BenillaMultiActionButtonUp("BottomRight", 12)"#
+            r#"MultiActionButtonDown("MultiBarBottomRight", 12)"#,
+            r#"MultiActionButtonUp("MultiBarBottomRight", 12)"#
         ),
         None,
         None

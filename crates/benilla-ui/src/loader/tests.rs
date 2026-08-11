@@ -7,12 +7,100 @@ mod loader_tests {
     use crate::script::{QuadContent, UiScript};
 
     /// No-provider `files` closure (for docs with no `<Include>`/`<Script file=>`).
-    fn no_files(_: &str) -> Option<String> {
+    fn no_files(_: &str) -> Option<Vec<u8>> {
         None
     }
 
     fn parse(text: &str) -> framexml::ParsedDocument {
         framexml::parse(text).expect("valid FrameXML")
+    }
+
+    /// **`parent="Name"` attaches a top-level element** — the reference's own way of doing it,
+    /// because its FrameXML is flat (decision 1211). 79 corpus addons, 708 sites.
+    ///
+    /// Three claims in one document: the attribute supplies the parent when there is no lexical
+    /// one; an anchor with no `relativeTo` then measures from THAT parent rather than the screen
+    /// (the silent half — a frame in the wrong place with nothing to report); and a name that
+    /// resolves to nothing warns and falls back instead of raising.
+    #[test]
+    fn a_top_level_parent_attribute_attaches_and_anchors() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Host">
+                    <Size><AbsDimension x="200" y="100"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT">
+                            <Offset><AbsDimension x="100" y="-50"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </Frame>
+                <Frame name="Attached" parent="Host">
+                    <Size><AbsDimension x="20" y="20"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT">
+                            <Offset><AbsDimension x="5" y="-5"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </Frame>
+                <Frame name="Orphan" parent="NoSuchFrame">
+                    <Size><AbsDimension x="10" y="10"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        s.resolve();
+
+        assert_eq!(
+            s.eval::<String>("return Attached:GetParent():GetName()")
+                .unwrap(),
+            "Host",
+            "the attribute supplied the parent"
+        );
+        // Host's TOPLEFT is screen (100, 550) in y-up; Attached hangs 5 in and 5 down from it.
+        assert_eq!(
+            s.eval::<(f64, f64)>("return Attached:GetLeft(), Attached:GetTop()")
+                .unwrap(),
+            (105.0, 545.0),
+            "a relativeTo-less anchor measures from the PARENT, not the screen"
+        );
+
+        // The miss: a warning, a usable frame, and no parent — never an error.
+        assert!(s.eval::<bool>("return Orphan ~= nil").unwrap());
+        assert!(s.eval::<bool>("return Orphan:GetParent() == nil").unwrap());
+        assert!(
+            report.warnings.iter().any(|w| w.contains("NoSuchFrame")),
+            "the unresolvable parent is named in a warning: {:?}",
+            report.warnings
+        );
+
+        // And a name that exists but is NOT a frame is the same miss, not a raise. `_G` is one
+        // namespace and an addon's own `MyAddon = {}` lives in it — the corpus writes
+        // `parent="TheoryCraft"` where the addon owns that name. Handing a plain table to
+        // CreateFrame would kill the element and its whole subtree.
+        s.run("NotAFrame = { some = 'table' }").unwrap();
+        let doc2 = parse(
+            r#"<Ui>
+                <Frame name="Confused" parent="NotAFrame">
+                    <Size><AbsDimension x="10" y="10"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Frame>
+            </Ui>"#,
+        );
+        let report2 = load(&s, &doc2, &no_files);
+        assert!(report2.errors.is_empty(), "{:?}", report2.errors);
+        assert!(s.eval::<bool>("return Confused ~= nil").unwrap());
+        assert!(s
+            .eval::<bool>("return Confused:GetParent() == nil")
+            .unwrap());
+        assert!(
+            report2.warnings.iter().any(|w| w.contains("NotAFrame")),
+            "a non-frame global of the right name is named too: {:?}",
+            report2.warnings
+        );
     }
 
     /// End-to-end: a virtual template, an instance inheriting it (with `<Size>`, screen `<Anchors>`,
@@ -163,9 +251,9 @@ mod loader_tests {
     #[test]
     fn include_resolves_through_provider() {
         let s = UiScript::new().unwrap();
-        let provider = |path: &str| -> Option<String> {
+        let provider = |path: &str| -> Option<Vec<u8>> {
             match path {
-                "Sub.xml" => Some(r#"<Ui><Frame name="FromInclude"/></Ui>"#.to_string()),
+                "Sub.xml" => Some(br#"<Ui><Frame name="FromInclude"/></Ui>"#.to_vec()),
                 _ => None,
             }
         };
@@ -183,14 +271,39 @@ mod loader_tests {
             .unwrap());
     }
 
-    /// A missing include is a warning, not an error; the rest of the load proceeds.
+    /// A missing include is an **error**, and the rest of the load still proceeds.
+    ///
+    /// It was a warning until decision 1186. The load-and-continue half is unchanged and faithful
+    /// (0068: the client logs and carries on) — what changed is the *reporting*, because a warning
+    /// is not in the value callers assert on. Bagnon missed all eleven of its references and came
+    /// back with zero errors, which read as a clean load of an addon that had built nothing.
     #[test]
-    fn missing_include_warns_and_continues() {
+    fn missing_include_errors_and_continues() {
         let s = UiScript::new().unwrap();
         let doc = parse(r#"<Ui><Include file="Nope.xml"/><Frame name="Still"/></Ui>"#);
         let report = load(&s, &doc, &no_files);
-        assert!(report.errors.is_empty());
-        assert!(report.warnings.iter().any(|w| w.contains("Nope.xml")));
+        assert!(
+            report.errors.iter().any(|e| e.contains("Nope.xml")),
+            "an unresolved include drops a whole document: {:?}",
+            report.errors
+        );
+        assert!(
+            s.eval::<bool>("return Still ~= nil").unwrap(),
+            "and the load continues past it"
+        );
+    }
+
+    /// So is a missing `<Script file=>` — it drops every handler the file would have defined.
+    #[test]
+    fn missing_script_file_errors_and_continues() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(r#"<Ui><Script file="Nope.lua"/><Frame name="Still"/></Ui>"#);
+        let report = load(&s, &doc, &no_files);
+        assert!(
+            report.errors.iter().any(|e| e.contains("Nope.lua")),
+            "{:?}",
+            report.errors
+        );
         assert!(s.eval::<bool>("return Still ~= nil").unwrap());
     }
 
@@ -311,11 +424,11 @@ mod loader_tests {
             .unwrap_or_default();
         // Provider: resolve an XML/Lua reference against the file's directory, trying the path as
         // given and by basename (Blizzard paths use backslashes and are dir-relative).
-        let provider = move |req: &str| -> Option<String> {
+        let provider = move |req: &str| -> Option<Vec<u8>> {
             let norm = req.replace('\\', "/");
             let base = norm.rsplit('/').next().unwrap_or(&norm);
-            std::fs::read_to_string(dir.join(&norm))
-                .or_else(|_| std::fs::read_to_string(dir.join(base)))
+            std::fs::read(dir.join(&norm))
+                .or_else(|_| std::fs::read(dir.join(base)))
                 .ok()
         };
 
@@ -976,7 +1089,7 @@ mod layer_blend_tests {
     use crate::loader::*;
     use crate::script::{QuadContent, UiScript};
 
-    fn no_files(_: &str) -> Option<String> {
+    fn no_files(_: &str) -> Option<Vec<u8>> {
         None
     }
 
@@ -1026,7 +1139,7 @@ mod region_template_tests {
     use crate::loader::*;
     use crate::script::{QuadContent, UiScript};
 
-    fn no_files(_: &str) -> Option<String> {
+    fn no_files(_: &str) -> Option<Vec<u8>> {
         None
     }
 
@@ -1122,4 +1235,34 @@ mod region_template_tests {
         );
         assert_eq!(s.eval::<String>("return Label:GetText()").unwrap(), "hello");
     }
+}
+
+/// [`super::join_ref`] — the FrameXML path rule (decision 1186).
+///
+/// A reference is relative to the directory of the file containing it, `\` and `/` are the same
+/// separator, and `..` walks up. The escape case is the load-bearing one: a `..` above the root is
+/// KEPT as a leading `..` rather than clamped away, because the provider has to be able to SEE the
+/// escape to refuse it. Clamping would silently hand it a path that looks contained.
+#[test]
+fn join_ref_resolves_relative_framexml_paths() {
+    use super::join_ref;
+    // Relative to the including file's own directory.
+    assert_eq!(
+        join_ref("Bagnon/src", "templates.xml"),
+        "Bagnon/src/templates.xml"
+    );
+    // Backslashes are separators, and `..` walks up — this is how a library addon is reached.
+    assert_eq!(
+        join_ref("Bagnon/src", "..\\..\\BagBrother\\core\\core.xml"),
+        "BagBrother/core/core.xml"
+    );
+    // At the root, a bare name stays bare (the builtin's flat tree).
+    assert_eq!(join_ref("", "Fonts.xml"), "Fonts.xml");
+    // `.` is a no-op; redundant separators collapse.
+    assert_eq!(join_ref("a/b", "./c//d.xml"), "a/b/c/d.xml");
+    // An escape above the root SURVIVES, so the provider can refuse it.
+    assert_eq!(join_ref("a", "../../secret"), "../secret");
+    assert_eq!(join_ref("", "../secret"), "../secret");
+    // A leading `/` re-roots rather than meaning the filesystem root.
+    assert_eq!(join_ref("a/b", "/c.xml"), "c.xml");
 }

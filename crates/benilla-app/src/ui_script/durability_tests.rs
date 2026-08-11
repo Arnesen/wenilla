@@ -404,7 +404,7 @@ fn the_quest_tracker_stacks_below_the_durability_guy() {
     s.resolve();
 
     let dur_bottom: f32 = s.eval("return DurabilityFrame:GetBottom()").unwrap();
-    let watch_top: f32 = s.eval("return BenillaQuestWatchFrame:GetTop()").unwrap();
+    let watch_top: f32 = s.eval("return QuestWatchFrame:GetTop()").unwrap();
     assert!(
         (watch_top - dur_bottom).abs() <= 0.5,
         "tracker top {watch_top} must sit flush under the durability bottom {dur_bottom}"

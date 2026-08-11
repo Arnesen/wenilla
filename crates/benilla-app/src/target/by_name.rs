@@ -420,6 +420,48 @@ pub(super) fn target_by_name_requests(
     }
 }
 
+/// Drain the **Lua** `TargetByName(name, exactMatch)` asks — the binding half of the same
+/// resolver [`target_by_name_requests`] runs for `/target`.
+///
+/// A separate system rather than a second writer of [`TargetByNameRequest`] because the binding
+/// carries a second argument the slash command has no way to supply: `0x489d8e` fetches Lua arg #2
+/// with default 0 and hands it to `0x493aa0` as the **exact-only** flag (`ctx+0x0c`, consumed at
+/// `0x493cab`). Shipped FrameXML never passes it — its own usage string documents one argument —
+/// so a stock `/target` and a stock addon call both run with prefix matching live; an addon that
+/// already knows the exact name can turn tier 2 off, exactly as `UnitPopup.lua` does for
+/// `FollowByName(name, 1)`.
+///
+/// Everything else is identical to the slash path, deliberately: typemask 8 (creatures *and*
+/// players), filter mode 0 (accept unconditionally — no range, cone, dead, reaction or
+/// self-exclusion test), commit through [`SelectCommit`], and a miss that leaves the current
+/// target untouched and says nothing (the reference's two game-message ids are `0x127`/`0xb8`,
+/// whose strings are runtime-populated BSS and are not statically recoverable — the known
+/// deviation this path already carries).
+pub(super) fn script_target_by_name_requests(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    scan_params: ByNameScan,
+    mut commit: SelectCommit,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for (name, exact) in script.take_target_by_name_requests() {
+        let Some((entity, guid, _)) = scan_params.resolve(
+            &name,
+            NameSearch::AnyUnit,
+            Filter::AcceptAll,
+            if exact {
+                Match::ExactOnly
+            } else {
+                Match::PrefixOk
+            },
+        ) else {
+            continue;
+        };
+        commit.commit(entity, guid);
+    }
+}
+
 /// Drain `/assist [name]`: find the **basis** unit, read its `UNIT_FIELD_TARGET` (+0x28 off the unit
 /// block — wow-re proved the offset arithmetic against HEALTH and DYNAMIC_FLAGS on the same line),
 /// and select whatever it is pointing at.

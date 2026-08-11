@@ -144,5 +144,40 @@ mod tests {
         assert_eq!((short.base_ms, short.per_level_ms), (10_000, 0));
 
         assert_eq!(durations.len(), 82, "5875 ships 82 SpellDuration rows");
+
+        // Row 427 is the reason [`SpellDuration::is_permanent`]'s one-field test is not obviously
+        // safe: it carries a NEGATIVE base (`-600_000`) with a positive per-level term, and the
+        // client's own permanence test is the two-field `Duration < 0 && DurationPerLevel <= 0`
+        // (byte-verified at `0x4e456e`-`0x4e457a`, the buff cache's `untilCancelled` derivation —
+        // see `benilla::ui_aura`). Row 427 must therefore read NOT permanent under both.
+        let scaling = durations.get(427).expect("row 427");
+        assert_eq!((scaling.base_ms, scaling.per_level_ms), (-600_000, 60_000));
+        assert!(!scaling.is_permanent());
+    }
+
+    /// The shared helper against the **client's own** predicate, over every shipped row.
+    ///
+    /// `is_permanent()` tests one field (`base_ms == -1`); the binary tests two
+    /// (`Duration < 0 && DurationPerLevel <= 0`, `0x4e456e`-`0x4e457a`). Those are different
+    /// functions in general — a row like `{-5, 0}` would split them — so "they agree" is a fact
+    /// about the shipped 5875 data, not a theorem, and it is exactly the kind of fact that a data
+    /// change would silently invalidate. Assert it on the real file rather than assume it.
+    #[test]
+    fn is_permanent_matches_the_clients_two_field_test_on_every_shipped_row() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let durations = load_spell_durations(&mut chain).expect("load SpellDuration");
+
+        let disagree: Vec<_> = durations
+            .durations
+            .iter()
+            .filter(|(_, d)| d.is_permanent() != (d.base_ms < 0 && d.per_level_ms <= 0))
+            .map(|(id, d)| (*id, d.base_ms, d.per_level_ms))
+            .collect();
+        assert!(
+            disagree.is_empty(),
+            "rows where base_ms == -1 disagrees with the client's \
+             (Duration < 0 && DurationPerLevel <= 0): {disagree:?}"
+        );
     }
 }

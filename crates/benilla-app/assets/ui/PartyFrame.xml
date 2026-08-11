@@ -144,14 +144,14 @@
             frame.healthBar:SetMinMaxValues(0, UnitHealthMax(unit))
             frame.healthBar:SetValue(UnitHealth(unit))
 
-            local maxPower = UnitPowerMax(unit)
+            local maxPower = UnitManaMax(unit)
             if maxPower > 0 then
                 frame.manaBar:Show()
                 local _, token = UnitPowerType(unit)
                 local c = BENILLA_POWER_COLORS[token] or BENILLA_POWER_COLORS.MANA
                 frame.manaBar:SetStatusBarColor(c.r, c.g, c.b)
                 frame.manaBar:SetMinMaxValues(0, maxPower)
-                frame.manaBar:SetValue(UnitPower(unit))
+                frame.manaBar:SetValue(UnitMana(unit))
             else
                 frame.manaBar:Hide()
             end
@@ -201,7 +201,7 @@
             end
             local hp, hpMax = UnitHealth(unit), UnitHealthMax(unit)
             if hpMax > 0 and hp > 0 and hp / hpMax <= 0.2 then
-                local t = math.fmod(frame.flashTimer + elapsed, 1.0)
+                local t = mod(frame.flashTimer + elapsed, 1.0)
                 frame.flashTimer = t
                 local a
                 if t < 0.5 then

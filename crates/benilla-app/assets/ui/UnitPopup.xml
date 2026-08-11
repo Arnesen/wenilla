@@ -624,7 +624,7 @@
             elseif ( button == "PET_ABANDON" ) then
                 StaticPopup_Show("ABANDON_PET");
             elseif ( button == "PET_PAPERDOLL" ) then
-                ToggleCharacter("BenillaPetPaperDollFrame");
+                ToggleCharacter("PetPaperDollFrame");
             elseif ( button == "PET_RENAME" ) then
                 StaticPopup_Show("RENAME_PET");
             end

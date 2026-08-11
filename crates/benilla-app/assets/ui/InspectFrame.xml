@@ -136,7 +136,7 @@
 
         -- ref InspectFrame_OnHide (l.53-59): drop the token, play the close sound, and tell the
         -- engine to stop inspecting (which stops the app's per-frame slot resolve). No subframe
-        -- hide-loop is needed (unlike BenillaCharacterFrame_OnHide's): the one page is a true
+        -- hide-loop is needed (unlike CharacterFrame_OnHide's): the one page is a true
         -- engine child of this frame, so it hides on the parent's cascade.
         function BenillaInspectFrame_OnHide(frame)
             frame.unit = nil

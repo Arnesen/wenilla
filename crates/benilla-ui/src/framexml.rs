@@ -358,6 +358,28 @@ fn merge(base: &Element, over: &Element) -> Element {
     }
 }
 
+/// The synthetic element a **runtime** `CreateFrame(kind, name, parent, "A, B")` expands: a bare
+/// node of the caller's own `tag` carrying nothing but the `inherits=` list.
+///
+/// Handing this to [`expand`] is what makes the Lua path and the XML path *the same* path — one
+/// comma-split, one chain resolution, one cycle guard, one unknown-template warning, one splice
+/// order. Nothing about `inherits=` is written twice.
+///
+/// And because [`merge`] takes the **overriding** node's tag, the expanded result carries `tag` —
+/// the kind `CreateFrame` was actually given — whatever the templates were declared as. That is
+/// the honest answer to `CreateFrame("Frame", n, p, "SomeButtonTemplate")`: the frame already
+/// exists as a Frame, so the template's `<Button>` tag cannot retype it, and the loader's per-kind
+/// passes (which every one of them gate on the element tag) skip the parts that could not apply
+/// anyway.
+pub fn inherits_node(tag: &str, inherits: &str) -> Element {
+    Element {
+        tag: tag.to_string(),
+        attrs: vec![("inherits".to_string(), inherits.to_string())],
+        children: Vec::new(),
+        body: String::new(),
+    }
+}
+
 /// The literal fallback base name (rf27-parent-name-token.md, rule 5): when a `$parent`-prefixed
 /// name has no named ancestor to substitute (e.g. a top-level element), the real client seeds the
 /// result with the literal string `"Top"` (VA `0x8788ac`) rather than leaving the token literal,

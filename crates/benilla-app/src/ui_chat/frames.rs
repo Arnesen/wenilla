@@ -11,7 +11,7 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::channel_notice as notice;
 
-use super::event::{default_color, group_kinds, ChatEvent, ChatEventKind, ChatGroup};
+use super::event::{default_color, event_name, group_kinds, ChatEvent, ChatEventKind, ChatGroup};
 
 /// How long after a received whisper the `TellMessage` alert stays silent
 /// (`CHAT_TELL_ALERT_TIME = 300` — ref ChatFrame.lua l.4: only a tell arriving ≥5 min after the
@@ -72,10 +72,34 @@ impl ChatWindows {
     }
 }
 
-/// Route one event: compose it once, then AddMessage into every subscribed window. Whisper
-/// receipt side-effects (the throttled `TellMessage` chime + the unselected-tab flash — ref
-/// ChatFrame_OnEvent l.1470-1477) fire through the script seam. A kind-less event (an
-/// unmodeled wire type) drops with a warn — never silently.
+/// Route one event: compose it once and AddMessage it into every subscribed window, then fire the
+/// real `CHAT_MSG_*` at the VM. Whisper receipt side-effects (the throttled `TellMessage` chime +
+/// the unselected-tab flash — ref ChatFrame_OnEvent l.1470-1477) ride the render half. A kind-less
+/// event (an unmodeled wire type) drops with a warn — never silently.
+///
+/// **Two consumers, one event, no double-print.** In the reference, C fires `CHAT_MSG_<TYPE>` and
+/// *Lua* — `ChatFrame_OnEvent` — is what turns it into a line; here the composer below IS that
+/// handler, transcribed into Rust (0288 §1). So the fire is additive: it exists for **addons**,
+/// and our windows keep rendering exactly as they did. Nothing prints twice because our shipped
+/// `ChatFrame.xml` handles exactly one event, `EXECUTE_CHAT_LINE` (assets/ui/ChatFrame.xml, its
+/// `<OnEvent>`) — an addon may `ChatFrame1:RegisterEvent("CHAT_MSG_SAY")` for its own reasons and
+/// our frame's handler will simply not match it.
+/// `ui_chat::tests::an_addon_registering_our_own_chat_frame_does_not_double_print` is the guard.
+///
+/// **Render first, then fire — that ordering is the reference's, not a convenience.** The client
+/// dispatches an event to its listeners in registration order (FIFO, wow-re
+/// `event-dispatch-order.md`, and [`benilla_ui::script::UiScript::fire_event`] transcribes it), and
+/// ChatFrame1 registers at FrameXML load — before any addon exists. So in the real client the line
+/// is already in the window by the time an addon's handler runs, and an addon that reads
+/// `GetNumMessages()` or re-reads the last line from its own `CHAT_MSG_*` handler depends on that.
+/// Our Rust composer stands in for ChatFrame1's handler, so it has to go first for the same reason.
+///
+/// **The fire is unconditional; the render is not.** The client's `SignalEvent` does not consult
+/// any window's message-group registration — that is `ChatFrame_OnEvent`'s job, per frame — so an
+/// event reaches Lua even when neither of our windows wants it. What does *not* reach here is a
+/// notice the reference declines to make an event out of at all: MODE_CHANGE is dropped upstream,
+/// at the feed, exactly as the client's `0x0C` arm returns without firing
+/// (`ui_chat::tests::a_mode_change_notice_never_becomes_an_event`).
 pub(crate) fn route(
     script: &mut benilla_ui::script::UiScript,
     windows: &mut ChatWindows,
@@ -85,27 +109,30 @@ pub(crate) fn route(
         warn!("chat: unroutable event (no kind): {:?}", event.text);
         return;
     };
-    let Some(line) = compose(event, kind) else {
-        return; // composed to nothing (a silent notice)
-    };
-    let color = default_color(kind);
-    for idx in 0..2 {
-        if windows.wants(idx, kind) {
-            add(script, &format!("ChatFrame{}", idx + 1), &line, color);
+    // ── our own window: the transcribed ChatFrame_OnEvent, i.e. the first-registered listener ──
+    if let Some(line) = compose(event, kind) {
+        let color = default_color(kind);
+        for idx in 0..2 {
+            if windows.wants(idx, kind) {
+                add(script, &format!("ChatFrame{}", idx + 1), &line, color);
+            }
+        }
+        if kind == ChatEventKind::Whisper {
+            // The tell chime, throttled to one per 5 minutes (CHAT_TELL_ALERT_TIME), and the tab
+            // flash when the receiving window (1) isn't the selected dock tab. Inside this half
+            // because the reference does them inside ChatFrame_OnEvent too (l.1470-1477).
+            if windows.tell_alert_left <= 0.0 {
+                crate::ui_script::run_or_warn(script, "PlaySound(\"TellMessage\")");
+            }
+            windows.tell_alert_left = TELL_ALERT_SECS;
+            crate::ui_script::run_or_warn(
+                script,
+                "if BenillaFCF.selected ~= 1 then BenillaFCF_FlashTab(1) end",
+            );
         }
     }
-    if kind == ChatEventKind::Whisper {
-        // The tell chime, throttled to one per 5 minutes (CHAT_TELL_ALERT_TIME), and the tab
-        // flash when the receiving window (1) isn't the selected dock tab.
-        if windows.tell_alert_left <= 0.0 {
-            crate::ui_script::run_or_warn(script, "PlaySound(\"TellMessage\")");
-        }
-        windows.tell_alert_left = TELL_ALERT_SECS;
-        crate::ui_script::run_or_warn(
-            script,
-            "if BenillaFCF.selected ~= 1 then BenillaFCF_FlashTab(1) end",
-        );
-    }
+    // ── everyone else: the addons, after the default UI, exactly as registration order says ──
+    script.fire_event(event_name(kind), event.script_args());
 }
 
 /// Add one composed line, converting the `0..255` table color to the seam's `0..1` floats.
@@ -241,7 +268,7 @@ pub(crate) fn compose_notice(event: &ChatEvent) -> Option<String> {
     let chan = strip_zone(&event.channel);
     let a = &event.sender; // the notice's first name (actor / affected)
     let b = &event.target; // the second name (kicked-by style)
-    let n: u8 = event.notice.parse().unwrap_or(0xFF);
+    let n: u8 = event.notice_byte().unwrap_or(0xFF);
     Some(match n {
         notice::YOU_JOINED => format!("Joined Channel: [{chan}]"),
         notice::YOU_LEFT => format!("Left Channel: [{chan}]"),

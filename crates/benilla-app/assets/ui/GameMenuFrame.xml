@@ -81,9 +81,14 @@
         - The Options label stays a literal "Options": 1.12 GlobalStrings has no era
           GAMEMENU_OPTIONS (checked; its OPTIONS_MENU is "Options Menu", a different string).
         - The ref frame is `toplevel="true" movable="true" parent="UIParent"`. Dropped: this engine has
-          no cross-file `parent=` attachment (SkillFrame.xml's header comment), no frame-level raise,
-          and `movable` is inert in the ref too (GameMenuFrame defines no drag scripts, so it never
-          actually moves). `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
+          no cross-file `parent=` attachment (SkillFrame.xml's header comment), and `movable` is inert
+          in the ref too (GameMenuFrame defines no drag scripts, so it never actually moves).
+          `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
+          **The "no frame-level raise" half of that reason is gone**: the raise law is built
+          (`script::object::toplevel`, wow-re `ui/scratch/toplevel-raise.md`) and the loader honours
+          `toplevel="true"`. Re-adding it here is a one-word change and would make the Esc menu come
+          to the front over any other DIALOG-strata frame it overlaps; left off pending the
+          director's call on the look, not on the mechanism.
     -->
     <Script><![CDATA[
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
@@ -179,23 +184,14 @@
         <FontHeight><AbsValue val="13"/></FontHeight>
     </Font>
 
-    <!-- Era MainMenuFrameButtonTemplate (Classic/Frame/MainMenuFrameTemplates.xml l.11-16) =
-         UIPanelButtonTemplate at 144x21 with a white/white/grey label trio — byte-for-byte the
-         1.12 GameMenuButtonTemplate (UIPanelTemplates.xml l.403-410): same art, same trio, same
-         size. UIPanelButtonTemplate itself is not transcribed as a shared virtual (no other
-         benilla file inherits it — each open-codes the same four-state art, e.g. QuestFrame.xml
-         l.753); its textures are inlined here with the ref TexCoords. -->
-    <Button name="GameMenuButtonTemplate" virtual="true">
-        <Size><AbsDimension x="144" y="21"/></Size>
-        <ButtonText name="$parentText"/>
-        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
-        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
-        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
-        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
-        <NormalFont inherits="GameFontHighlight"/>
-        <HighlightFont inherits="GameFontHighlight"/>
-        <DisabledFont inherits="GameFontDisable"/>
-    </Button>
+    <!-- `GameMenuButtonTemplate` MOVED OUT, to UIPanelTemplates.xml — the reference's own file for
+         it (ref UIPanelTemplates.xml l.403-410), and now ColorPickerFrame.xml's Okay/Cancel need it
+         too, from far above this file's LAST-in-the-toc seat. It lived here, with its four state
+         textures inlined, only because `UIPanelButtonTemplate` had not been transcribed yet; it now
+         has been, so the reference's actual body (`inherits="UIPanelButtonTemplate"`, 144x21, the
+         white/white/grey label trio) replaces the private copy verbatim. Era's
+         MainMenuFrameButtonTemplate (Classic/Frame/MainMenuFrameTemplates.xml l.11-16) is that same
+         button — same art, same trio, same size — so the header's ART BYTES note is unchanged. -->
 
     <Frame name="GameMenuFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
         <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
@@ -257,7 +253,18 @@
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, ADDONS)</OnLoad></Scripts>
+                <!-- LIVE since decision 1197 (AddonList.xml). The Macros entry's own body shape:
+                     hide the menu, show the window. This entry has no reference — 1.12's ESC menu
+                     has no AddOns row, its list is glue-side only — so it is a deliberate benilla
+                     addition, and AddonList.xml's header says so rather than implying otherwise. -->
+                <Scripts>
+                    <OnLoad>self:SetText(ADDONS)</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOption")
+                        HideUIPanel(getglobal("GameMenuFrame"))
+                        AddonList_Toggle()
+                    </OnClick>
+                </Scripts>
             </Button>
             <Button name="GameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
                 <Anchors>

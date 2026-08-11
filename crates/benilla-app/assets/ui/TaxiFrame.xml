@@ -29,7 +29,7 @@
            demand. `BENILLA_TAXI_MAX_NODES = 50` below comfortably covers the real 5875
            `TaxiNodes.dbc`'s per-continent max (43 nodes on Eastern Kingdoms, 39 on Kalimdor —
            counted this session, `crate::ui_taxi`'s module doc). The route-line textures stay
-           genuinely dynamic (`BenillaTaxiRouteMap:CreateTexture(...)`, ref l.101/142) — plain
+           genuinely dynamic (`TaxiRouteMap:CreateTexture(...)`, ref l.101/142) — plain
            region creation carries no template/inherits, so THAT half of the reference runs
            completely unmodified.
         2. THE TITLE READS AN EVENT ARG, not `UnitName("npc")` (ref TaxiFrame.lua:27). This
@@ -41,13 +41,13 @@
         3. THE "NO SINGLE-HOP DESTINATION" REFUSAL (`DrawOneHopLines`, ref l.161-164) calls
            `BenillaErrorsFrame_AddMessage` (`ErrorsFrame.xml`'s real Lua-callable seam, byte-exact
            `ERR_TAXINOPATHS` text below) rather than the reference's `UIErrorsFrame:AddMessage` —
-           this engine's error toast is `BenillaErrorsFrame`, not an intrinsic `MessageFrame`
+           this engine's error toast is `UIErrorsFrame`, not an intrinsic `MessageFrame`
            object, so the ref's OO call becomes the plain function call. `ErrorsFrame.xml` loads
            well before this file in the shipped list (`ui_script/mod.rs`), so the global already
            exists by the time this ever runs.
 
         `<TaxiRouteFrame>` (an intrinsic type this engine doesn't have) becomes a plain `<Frame>`
-        (`BenillaTaxiRouteMap`) per the house rule for every non-shipped intrinsic (decision 0246's
+        (`TaxiRouteMap`) per the house rule for every non-shipped intrinsic (decision 0246's
         patch-chain rule; the `Cooldown`/`GameTooltip`/etc. precedents) — it carries no behavior of
         its own beyond being a Frame that owns child regions/buttons, so the plain type loses
         nothing.
@@ -86,7 +86,8 @@
         -- (U+2019, "don\226\128\153t"), not a straight one.
         local ERR_TAXINOPATHS = "You don\226\128\153t know any flight locations connected to this one."
 
-        function BenillaTaxiFrame_OnLoad(frame)
+        function TaxiFrame_OnLoad()
+            local frame = this
             -- The "npc" portrait token (decision 0421): the open taxi session's flight master
             -- bakes into the ring, resolved exactly like Gossip/Merchant/Trainer's own OnLoad.
             SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
@@ -97,29 +98,30 @@
         -- Deviation 2 above: the flight master's name rides TAXIMAP_OPENED's arg1 (the app
         -- resolves it through the NameCache) rather than a live UnitName("npc") read.
         function BenillaTaxiFrame_SetTitle(name)
-            getglobal("BenillaTaxiNameText"):SetText(name or "")
+            getglobal("TaxiNameText"):SetText(name or "")
         end
 
         -- ref TaxiFrame.lua:24-80, restructured only at the node-button loop (deviation 1 — a
         -- fixed pool walked 1..BENILLA_TAXI_MAX_NODES instead of grown via CreateFrame).
-        function BenillaTaxiFrame_OnEvent(frame)
+        function TaxiFrame_OnEvent(event)
+            local frame = this
             if event == "TAXIMAP_OPENED" then
                 BenillaTaxiFrame_SetTitle(arg1)
 
                 -- Set the texture coords on the map, then hand the region to the app's art pick.
-                BenillaTaxiMap:SetTexCoord(0, 1, 0, 1)
-                SetTaxiMap(BenillaTaxiMap)
+                TaxiMap:SetTexCoord(0, 1, 0, 1)
+                SetTaxiMap(TaxiMap)
 
                 -- Draw nodes: every pool slot up to the pushed count shows its type's icon at its
                 -- pushed position; the rest hide (ref l.44-63, the static-pool shape).
                 local num_nodes = NumTaxiNodes()
                 for index = 1, BENILLA_TAXI_MAX_NODES do
-                    local button = getglobal("BenillaTaxiButton" .. index)
+                    local button = getglobal("TaxiButton" .. index)
                     local ntype = TaxiNodeGetType(index)
                     if index <= num_nodes and ntype ~= "NONE" then
                         local x, y = TaxiNodePosition(button:GetID())
                         button:ClearAllPoints()
-                        button:SetPoint("CENTER", "BenillaTaxiMap", "BOTTOMLEFT", x * TAXI_MAP_WIDTH, y * TAXI_MAP_HEIGHT)
+                        button:SetPoint("CENTER", "TaxiMap", "BOTTOMLEFT", x * TAXI_MAP_WIDTH, y * TAXI_MAP_HEIGHT)
                         button:SetNormalTexture(TaxiButtonTypes[ntype].file)
                         button:Show()
                     else
@@ -153,8 +155,8 @@
             local numRoutes = GetNumRoutes(index)
             local line
             local sX, sY, dX, dY
-            local w = BenillaTaxiRouteMap:GetWidth()
-            local h = BenillaTaxiRouteMap:GetHeight()
+            local w = TaxiRouteMap:GetWidth()
+            local h = TaxiRouteMap:GetHeight()
 
             local ntype = TaxiNodeGetType(index)
             if ntype == "REACHABLE" then
@@ -163,7 +165,7 @@
 
                 if numRoutes > NUM_TAXI_ROUTES then
                     for i = NUM_TAXI_ROUTES + 1, numRoutes do
-                        line = BenillaTaxiRouteMap:CreateTexture("TaxiRoute" .. i, "BACKGROUND")
+                        line = TaxiRouteMap:CreateTexture("TaxiRoute" .. i, "BACKGROUND")
                         line:SetTexture("Interface\\TaxiFrame\\UI-Taxi-Line")
                     end
                     NUM_TAXI_ROUTES = numRoutes
@@ -176,7 +178,7 @@
                         sY = TaxiGetSrcY(index, i) * h
                         dX = TaxiGetDestX(index, i) * w
                         dY = TaxiGetDestY(index, i) * h
-                        DrawRouteLine(line, "BenillaTaxiRouteMap", sX, sY, dX, dY, 32)
+                        DrawRouteLine(line, "TaxiRouteMap", sX, sY, dX, dY, 32)
                         line:Show()
                     else
                         line:Hide()
@@ -193,14 +195,14 @@
         NUM_TAXI_ROUTES = 0
 
         -- Draw all flightpaths within one hop of current location — ref TaxiFrame.lua:129-165,
-        -- verbatim except the canvas name ("TaxiRouteMap" -> "BenillaTaxiRouteMap") and the
+        -- verbatim except the canvas name ("TaxiRouteMap" -> "TaxiRouteMap") and the
         -- no-single-hop refusal (deviation 3 above: BenillaErrorsFrame_AddMessage, not
         -- UIErrorsFrame:AddMessage).
         function DrawOneHopLines()
             local line
             local sX, sY, dX, dY
-            local w = BenillaTaxiRouteMap:GetWidth()
-            local h = BenillaTaxiRouteMap:GetHeight()
+            local w = TaxiRouteMap:GetWidth()
+            local h = TaxiRouteMap:GetHeight()
             local numNodes = NumTaxiNodes()
             local numLines = 0
             local numSingleHops = 0
@@ -209,7 +211,7 @@
                     numSingleHops = numSingleHops + 1
                     numLines = numLines + 1
                     if numLines > NUM_TAXI_ROUTES then
-                        line = BenillaTaxiRouteMap:CreateTexture("TaxiRoute" .. numLines, "BACKGROUND")
+                        line = TaxiRouteMap:CreateTexture("TaxiRoute" .. numLines, "BACKGROUND")
                         line:SetTexture("Interface\\TaxiFrame\\UI-Taxi-Line")
                         NUM_TAXI_ROUTES = numLines
                     else
@@ -220,7 +222,7 @@
                         sY = TaxiGetSrcY(i, 1) * h
                         dX = TaxiGetDestX(i, 1) * w
                         dY = TaxiGetDestY(i, 1) * h
-                        DrawRouteLine(line, "BenillaTaxiRouteMap", sX, sY, dX, dY, 32)
+                        DrawRouteLine(line, "TaxiRouteMap", sX, sY, dX, dY, 32)
                         line:Show()
                     end
                 end
@@ -230,7 +232,7 @@
             end
             if numSingleHops == 0 then
                 BenillaErrorsFrame_AddMessage(ERR_TAXINOPATHS, 1.0, 0.1, 0.1)
-                HideUIPanel(BenillaTaxiFrame)
+                HideUIPanel(TaxiFrame)
             end
         end
 
@@ -303,7 +305,7 @@
             -- vanilla's client-side close sends no packet; the app clears TaxiState on this
             -- intent (which fires TAXIMAP_CLOSED), and we hide immediately so there's no lag.
             CloseTaxiMap()
-            HideUIPanel(BenillaTaxiFrame)
+            HideUIPanel(TaxiFrame)
         end
     ]]></Script>
 
@@ -347,7 +349,7 @@
         </HighlightTexture>
     </Button>
 
-    <Frame name="BenillaTaxiFrame" hidden="true">
+    <Frame name="TaxiFrame" hidden="true">
         <!-- The real 384×512 window (ref l.34-36). No <Anchors> — ShowUIPanel/SetLeftFrame
              SetPoints this to the left slot on open, exactly like Gossip/Merchant/Trainer. -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -384,7 +386,7 @@
                 </Texture>
                 <!-- The flight master's name banner (ref TaxiMerchant, l.104-115): GameFontNormal,
                      CENTER, TOP -17, 192 wide — deviation 2 above (arg1, not UnitName("npc")). -->
-                <FontString name="BenillaTaxiNameText" inherits="GameFontNormal" justifyH="CENTER">
+                <FontString name="TaxiNameText" inherits="GameFontNormal" justifyH="CENTER">
                     <Size><AbsDimension x="192" y="0"/></Size>
                     <Anchors>
                         <Anchor point="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor>
@@ -394,7 +396,7 @@
             <!-- The continent map art (ref TaxiMap, l.117-129): 316×352, TOP -13,-75. No file —
                  SetTaxiMap assigns the app's TAXIMAP<continentId> pick (byte-verified — decision 0496). -->
             <Layer level="OVERLAY">
-                <Texture name="BenillaTaxiMap">
+                <Texture name="TaxiMap">
                     <Size><AbsDimension x="316" y="352"/></Size>
                     <Anchors>
                         <Anchor point="TOP"><Offset><AbsDimension x="-13" y="-75"/></Offset></Anchor>
@@ -406,7 +408,7 @@
             <!-- Close: the real UIPanelCloseButton position (TOPRIGHT -29,-8; ref l.133-141), on
                  the minimize-button art (this engine ships no UIPanelCloseButton — the Gossip/
                  Trainer/Merchant precedent). -->
-            <Button name="BenillaTaxiCloseButton">
+            <Button name="TaxiCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor>
@@ -419,73 +421,73 @@
 
             <!-- `<TaxiRouteFrame>` (ref l.142-153) — an intrinsic type this engine doesn't have —
                  becomes a plain <Frame> (see the header note): 316×352, TOP -13,-75, exactly
-                 overlaid on BenillaTaxiMap. Houses the node-button pool + the dynamically-created
+                 overlaid on TaxiMap. Houses the node-button pool + the dynamically-created
                  route-line textures, both parented here exactly like the reference (ref l.39,101). -->
-            <Frame name="BenillaTaxiRouteMap">
+            <Frame name="TaxiRouteMap">
                 <Size><AbsDimension x="316" y="352"/></Size>
                 <Anchors>
                     <Anchor point="TOP"><Offset><AbsDimension x="-13" y="-75"/></Offset></Anchor>
                 </Anchors>
                 <Frames>
-                <Button name="BenillaTaxiButton1" inherits="BenillaTaxiButtonTemplate" id="1"/>
-                <Button name="BenillaTaxiButton2" inherits="BenillaTaxiButtonTemplate" id="2"/>
-                <Button name="BenillaTaxiButton3" inherits="BenillaTaxiButtonTemplate" id="3"/>
-                <Button name="BenillaTaxiButton4" inherits="BenillaTaxiButtonTemplate" id="4"/>
-                <Button name="BenillaTaxiButton5" inherits="BenillaTaxiButtonTemplate" id="5"/>
-                <Button name="BenillaTaxiButton6" inherits="BenillaTaxiButtonTemplate" id="6"/>
-                <Button name="BenillaTaxiButton7" inherits="BenillaTaxiButtonTemplate" id="7"/>
-                <Button name="BenillaTaxiButton8" inherits="BenillaTaxiButtonTemplate" id="8"/>
-                <Button name="BenillaTaxiButton9" inherits="BenillaTaxiButtonTemplate" id="9"/>
-                <Button name="BenillaTaxiButton10" inherits="BenillaTaxiButtonTemplate" id="10"/>
-                <Button name="BenillaTaxiButton11" inherits="BenillaTaxiButtonTemplate" id="11"/>
-                <Button name="BenillaTaxiButton12" inherits="BenillaTaxiButtonTemplate" id="12"/>
-                <Button name="BenillaTaxiButton13" inherits="BenillaTaxiButtonTemplate" id="13"/>
-                <Button name="BenillaTaxiButton14" inherits="BenillaTaxiButtonTemplate" id="14"/>
-                <Button name="BenillaTaxiButton15" inherits="BenillaTaxiButtonTemplate" id="15"/>
-                <Button name="BenillaTaxiButton16" inherits="BenillaTaxiButtonTemplate" id="16"/>
-                <Button name="BenillaTaxiButton17" inherits="BenillaTaxiButtonTemplate" id="17"/>
-                <Button name="BenillaTaxiButton18" inherits="BenillaTaxiButtonTemplate" id="18"/>
-                <Button name="BenillaTaxiButton19" inherits="BenillaTaxiButtonTemplate" id="19"/>
-                <Button name="BenillaTaxiButton20" inherits="BenillaTaxiButtonTemplate" id="20"/>
-                <Button name="BenillaTaxiButton21" inherits="BenillaTaxiButtonTemplate" id="21"/>
-                <Button name="BenillaTaxiButton22" inherits="BenillaTaxiButtonTemplate" id="22"/>
-                <Button name="BenillaTaxiButton23" inherits="BenillaTaxiButtonTemplate" id="23"/>
-                <Button name="BenillaTaxiButton24" inherits="BenillaTaxiButtonTemplate" id="24"/>
-                <Button name="BenillaTaxiButton25" inherits="BenillaTaxiButtonTemplate" id="25"/>
-                <Button name="BenillaTaxiButton26" inherits="BenillaTaxiButtonTemplate" id="26"/>
-                <Button name="BenillaTaxiButton27" inherits="BenillaTaxiButtonTemplate" id="27"/>
-                <Button name="BenillaTaxiButton28" inherits="BenillaTaxiButtonTemplate" id="28"/>
-                <Button name="BenillaTaxiButton29" inherits="BenillaTaxiButtonTemplate" id="29"/>
-                <Button name="BenillaTaxiButton30" inherits="BenillaTaxiButtonTemplate" id="30"/>
-                <Button name="BenillaTaxiButton31" inherits="BenillaTaxiButtonTemplate" id="31"/>
-                <Button name="BenillaTaxiButton32" inherits="BenillaTaxiButtonTemplate" id="32"/>
-                <Button name="BenillaTaxiButton33" inherits="BenillaTaxiButtonTemplate" id="33"/>
-                <Button name="BenillaTaxiButton34" inherits="BenillaTaxiButtonTemplate" id="34"/>
-                <Button name="BenillaTaxiButton35" inherits="BenillaTaxiButtonTemplate" id="35"/>
-                <Button name="BenillaTaxiButton36" inherits="BenillaTaxiButtonTemplate" id="36"/>
-                <Button name="BenillaTaxiButton37" inherits="BenillaTaxiButtonTemplate" id="37"/>
-                <Button name="BenillaTaxiButton38" inherits="BenillaTaxiButtonTemplate" id="38"/>
-                <Button name="BenillaTaxiButton39" inherits="BenillaTaxiButtonTemplate" id="39"/>
-                <Button name="BenillaTaxiButton40" inherits="BenillaTaxiButtonTemplate" id="40"/>
-                <Button name="BenillaTaxiButton41" inherits="BenillaTaxiButtonTemplate" id="41"/>
-                <Button name="BenillaTaxiButton42" inherits="BenillaTaxiButtonTemplate" id="42"/>
-                <Button name="BenillaTaxiButton43" inherits="BenillaTaxiButtonTemplate" id="43"/>
-                <Button name="BenillaTaxiButton44" inherits="BenillaTaxiButtonTemplate" id="44"/>
-                <Button name="BenillaTaxiButton45" inherits="BenillaTaxiButtonTemplate" id="45"/>
-                <Button name="BenillaTaxiButton46" inherits="BenillaTaxiButtonTemplate" id="46"/>
-                <Button name="BenillaTaxiButton47" inherits="BenillaTaxiButtonTemplate" id="47"/>
-                <Button name="BenillaTaxiButton48" inherits="BenillaTaxiButtonTemplate" id="48"/>
-                <Button name="BenillaTaxiButton49" inherits="BenillaTaxiButtonTemplate" id="49"/>
-                <Button name="BenillaTaxiButton50" inherits="BenillaTaxiButtonTemplate" id="50"/>
+                <Button name="TaxiButton1" inherits="BenillaTaxiButtonTemplate" id="1"/>
+                <Button name="TaxiButton2" inherits="BenillaTaxiButtonTemplate" id="2"/>
+                <Button name="TaxiButton3" inherits="BenillaTaxiButtonTemplate" id="3"/>
+                <Button name="TaxiButton4" inherits="BenillaTaxiButtonTemplate" id="4"/>
+                <Button name="TaxiButton5" inherits="BenillaTaxiButtonTemplate" id="5"/>
+                <Button name="TaxiButton6" inherits="BenillaTaxiButtonTemplate" id="6"/>
+                <Button name="TaxiButton7" inherits="BenillaTaxiButtonTemplate" id="7"/>
+                <Button name="TaxiButton8" inherits="BenillaTaxiButtonTemplate" id="8"/>
+                <Button name="TaxiButton9" inherits="BenillaTaxiButtonTemplate" id="9"/>
+                <Button name="TaxiButton10" inherits="BenillaTaxiButtonTemplate" id="10"/>
+                <Button name="TaxiButton11" inherits="BenillaTaxiButtonTemplate" id="11"/>
+                <Button name="TaxiButton12" inherits="BenillaTaxiButtonTemplate" id="12"/>
+                <Button name="TaxiButton13" inherits="BenillaTaxiButtonTemplate" id="13"/>
+                <Button name="TaxiButton14" inherits="BenillaTaxiButtonTemplate" id="14"/>
+                <Button name="TaxiButton15" inherits="BenillaTaxiButtonTemplate" id="15"/>
+                <Button name="TaxiButton16" inherits="BenillaTaxiButtonTemplate" id="16"/>
+                <Button name="TaxiButton17" inherits="BenillaTaxiButtonTemplate" id="17"/>
+                <Button name="TaxiButton18" inherits="BenillaTaxiButtonTemplate" id="18"/>
+                <Button name="TaxiButton19" inherits="BenillaTaxiButtonTemplate" id="19"/>
+                <Button name="TaxiButton20" inherits="BenillaTaxiButtonTemplate" id="20"/>
+                <Button name="TaxiButton21" inherits="BenillaTaxiButtonTemplate" id="21"/>
+                <Button name="TaxiButton22" inherits="BenillaTaxiButtonTemplate" id="22"/>
+                <Button name="TaxiButton23" inherits="BenillaTaxiButtonTemplate" id="23"/>
+                <Button name="TaxiButton24" inherits="BenillaTaxiButtonTemplate" id="24"/>
+                <Button name="TaxiButton25" inherits="BenillaTaxiButtonTemplate" id="25"/>
+                <Button name="TaxiButton26" inherits="BenillaTaxiButtonTemplate" id="26"/>
+                <Button name="TaxiButton27" inherits="BenillaTaxiButtonTemplate" id="27"/>
+                <Button name="TaxiButton28" inherits="BenillaTaxiButtonTemplate" id="28"/>
+                <Button name="TaxiButton29" inherits="BenillaTaxiButtonTemplate" id="29"/>
+                <Button name="TaxiButton30" inherits="BenillaTaxiButtonTemplate" id="30"/>
+                <Button name="TaxiButton31" inherits="BenillaTaxiButtonTemplate" id="31"/>
+                <Button name="TaxiButton32" inherits="BenillaTaxiButtonTemplate" id="32"/>
+                <Button name="TaxiButton33" inherits="BenillaTaxiButtonTemplate" id="33"/>
+                <Button name="TaxiButton34" inherits="BenillaTaxiButtonTemplate" id="34"/>
+                <Button name="TaxiButton35" inherits="BenillaTaxiButtonTemplate" id="35"/>
+                <Button name="TaxiButton36" inherits="BenillaTaxiButtonTemplate" id="36"/>
+                <Button name="TaxiButton37" inherits="BenillaTaxiButtonTemplate" id="37"/>
+                <Button name="TaxiButton38" inherits="BenillaTaxiButtonTemplate" id="38"/>
+                <Button name="TaxiButton39" inherits="BenillaTaxiButtonTemplate" id="39"/>
+                <Button name="TaxiButton40" inherits="BenillaTaxiButtonTemplate" id="40"/>
+                <Button name="TaxiButton41" inherits="BenillaTaxiButtonTemplate" id="41"/>
+                <Button name="TaxiButton42" inherits="BenillaTaxiButtonTemplate" id="42"/>
+                <Button name="TaxiButton43" inherits="BenillaTaxiButtonTemplate" id="43"/>
+                <Button name="TaxiButton44" inherits="BenillaTaxiButtonTemplate" id="44"/>
+                <Button name="TaxiButton45" inherits="BenillaTaxiButtonTemplate" id="45"/>
+                <Button name="TaxiButton46" inherits="BenillaTaxiButtonTemplate" id="46"/>
+                <Button name="TaxiButton47" inherits="BenillaTaxiButtonTemplate" id="47"/>
+                <Button name="TaxiButton48" inherits="BenillaTaxiButtonTemplate" id="48"/>
+                <Button name="TaxiButton49" inherits="BenillaTaxiButtonTemplate" id="49"/>
+                <Button name="TaxiButton50" inherits="BenillaTaxiButtonTemplate" id="50"/>
                 </Frames>
             </Frame>
         </Frames>
         <Scripts>
             <OnLoad>
-                BenillaTaxiFrame_OnLoad(self)
+                TaxiFrame_OnLoad()
             </OnLoad>
             <OnEvent>
-                BenillaTaxiFrame_OnEvent(self)
+                TaxiFrame_OnEvent(event)
             </OnEvent>
             <!-- ref l.162-169, verbatim: the MainMenu sound kit (not Merchant/Trainer's
                  CharacterInfo kit — the reference genuinely uses a different pair here). -->

@@ -20,6 +20,11 @@
 # The named virtual Font objects (decision 0084) — must load first so any FontString's
 # `inherits="GameFontNormal"` resolves against a registered object.
 Fonts.xml
+# The reference's own second file, in its own position: TEXT/message/_ERRORMESSAGE, the
+# ScriptErrors dialog, and the DialogBoxFrame + DialogButton*Texture kit it is built from.
+# Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
+# DialogButtonNormalText/HighlightText) and everything above it in FrameXML.toc is engine.
+BasicControls.xml
 # The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
@@ -32,7 +37,10 @@ UiPanels.xml
 UIParent.xml
 # The tooltip: a hover window the bag/merchant/loot/unit frames drive. Loaded before them so
 # `GameTooltip` + its verbs exist when their OnEnter handlers fire (runtime, so order
-# is not strictly required — but it keeps the dependency legible).
+# is not strictly required — but it keeps the dependency legible). It also declares the two
+# virtual templates (GameTooltipTemplate, ShoppingTooltipTemplate), which IS an order
+# requirement: ItemRef.xml below expands one, and so do the 27 corpus addons that name
+# GameTooltipTemplate in an XML inherits=.
 GameTooltip.xml
 # The dropdown kit (0203 phase 2's closing sub-slice, widened for 0434 phase 5):
 # UIDropDownMenuTemplate + DropDownList1/2 + the UIDropDownMenu_* API — before its
@@ -43,9 +51,11 @@ UIDropDownMenu.xml
 # children's OnLoad initialize into it.
 UnitPopup.xml
 # The chat-link click router (SetItemRef): item links → ItemRefTooltip:SetHyperlink; a
-# player name → left-click whisper / right-click FRIEND dropdown. After GameTooltip.xml
-# (GameTooltip_OnLoad) AND the dropdown kit + UnitPopup — its FriendsDropDown inherits
-# UIDropDownMenuTemplate and opens a UnitPopup FRIEND menu.
+# player name → left-click whisper / right-click FRIEND dropdown. After GameTooltip.xml —
+# ItemRefTooltip inherits=GameTooltipTemplate, so this order is now REQUIRED, not just legible
+# (GameTooltip_OnLoad was the old, runtime-only reason) — AND after the dropdown kit +
+# UnitPopup, since its FriendsDropDown inherits UIDropDownMenuTemplate and opens a UnitPopup
+# FRIEND menu.
 ItemRef.xml
 # The shared status-bar numerals machinery (decision 1082): TextStatusBar_* + the opt-in
 # template — before its customers (the XP bar in ActionBar.xml today; the unit-frame
@@ -53,7 +63,7 @@ ItemRef.xml
 # loads TextStatusBar right before its unit frames, same seat as here.
 TextStatusBar.xml
 UnitFrames.xml
-# The combo-point dots (decision 0869) — anchored to BenillaTargetFrame, so after
+# The combo-point dots (decision 0869) — anchored to TargetFrame, so after
 # UnitFrames.xml; its fade chain needs UiPanels.xml's UIFrameFade above.
 ComboFrame.xml
 # The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
@@ -79,26 +89,26 @@ Cooldown.xml
 ActionBar.xml
 # The two always-on bottom multibars (actions 61-72 / 49-60): pure XML/Lua over
 # ActionBar.xml's shared button template + handler set — loads right after it
-# (inherits BenillaActionButtonTemplate, anchors to BenillaActionButton1, and its
+# (inherits BenillaActionButtonTemplate, anchors to ActionButton1, and its
 # buttons join the BENILLA_ACTION_BUTTONS roster ActionBar.xml declares).
 MultiBars.xml
 # The stance/shapeshift bar: hidden until `crate::ui_shapeshift`'s feed pushes a
 # non-empty form list (a formless class never shows it). After Cooldown.xml
-# (CooldownFrame_SetTimer) + ActionBar.xml (BENILLA_FALLBACK_ICON, the BenillaActionBar
+# (CooldownFrame_SetTimer) + ActionBar.xml (BENILLA_FALLBACK_ICON, the MainMenuBar
 # anchor target).
 StanceBar.xml
 # The pet action bar (decision 0982): hidden until `crate::ui_pet`'s feed reports a bar,
 # i.e. until the server sends `SMSG_PET_SPELLS` for a live pet or charm — so a class that
 # never has one never sees it. Right after the stance bar, whose row it shares (either
 # one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
-# (CooldownFrame_SetTimer), ActionBar.xml (the `BenillaActionBar` anchor target) and
+# (CooldownFrame_SetTimer), ActionBar.xml (the `MainMenuBar` anchor target) and
 # GameTooltip.xml (its hover). It is also the pet ARC's file, so decision 1066's three
 # right-click-menu dialogs (ABANDON_PET / RENAME_PET / PETRENAMECONFIRM) register here —
 # which adds UiPanels.xml to its dependency set, already far above.
 PetActionBar.xml
 # The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
 # loads MainMenuBarMicroButtons right after MainMenuBar). After ActionBar.xml: it anchors
-# into BenillaActionBarArtFrame by name and seats itself with that file's
+# into MainMenuBarArtFrame by name and seats itself with that file's
 # BenillaActionBarArt_SeatAbove. It must come BEFORE the panels it toggles, because each of
 # their OnShow/OnHide calls the `UpdateMicroButtons` this file defines (the panel frames
 # themselves are read back through getglobal, so the reverse dependency is call-time).
@@ -117,9 +127,47 @@ GameTime.xml
 # other consumer of the zone-text host globals.
 ZoneText.xml
 # The faux-scroll kit (decisions 0247/0250/0251): BenillaScrollBarTemplate (the draggable
-# Slider scroll bar) + BenillaFauxScrollFrameTemplate + the BenillaFauxScrollFrame_* API —
+# Slider scroll bar) + FauxScrollFrameTemplate + the reference's own FauxScrollFrame_*
+# API (Update/GetOffset/SetOffset/OnVerticalScroll + ScrollFrame_OnLoad) —
 # before its first customer (the trainer list) below.
 ScrollTemplates.xml
+# The reference's SHARED widget kit (decision 1203's queue): UIPanelButtonTemplate,
+# UICheckButtonTemplate, UIPanelCloseButton, InputBoxTemplate, the UIPanelScroll* family and
+# their siblings, under the reference's own names — the templates a third-party addon names in
+# `CreateFrame(kind, name, parent, "Template")`, which nothing in benilla's own XML consumes
+# yet (each of our windows still carries its private copy; see the file's header). After
+# ScrollTemplates.xml because UIPanelScrollFrameTemplate's OnLoad is that file's
+# ScrollFrame_OnLoad, and this file supplies the two remaining handlers of that same kit
+# (ScrollFrameTemplate_OnMouseWheel, ScrollFrame_OnScrollRangeChanged).
+UIPanelTemplates.xml
+# The reference's shared OPTIONS widgets: OptionsCheckButtonTemplate /
+# UIOptionsCheckButtonTemplate / OptionsSliderTemplate / OptionsButtonTemplate /
+# OptionFrameBoxTemplate. Straight after UIPanelTemplates.xml — two of them inherit its
+# UICheckButtonTemplate and UIPanelButtonTemplate. Not benilla's own options window
+# (OptionsFrame.xml, far below): these are the shared names addons build panels out of.
+OptionsFrameTemplates.xml
+# The reference's money-frame kit: MoneyFrameTemplate/SmallMoneyFrameTemplate + MoneyTypeInfo
+# + the MoneyFrame_* API. Needs only Fonts (NumberFontNormal/NumberFontNormalLarge), and
+# nothing benilla ships consumes it yet — our own eight coin displays run on MerchantFrame.xml's
+# BenillaMoney_* slot kit, and MoneyFrame.xml's header is where the two are reconciled. Seated
+# beside the scroll kit (the other shared widget kit) and ahead of every window that shows
+# coins, which is where the reference's own TOC puts it too.
+MoneyFrame.xml
+# The shared colour dialog + its opacity slider (`ColorPickerFrame`, `OpacitySliderFrame`,
+# `ColorPickerOkayButton`, `ColorPickerCancelButton`). Last of the "shared FrameXML surface with no
+# benilla consumer yet" cluster that runs from UIPanelTemplates.xml down — the same posture as
+# MoneyFrame.xml above, and for the same reason: 86 of the 218 corpus addons reach this window (64
+# of those files are `Dewdrop-2.0.lua`, which drives THIS one rather than rolling its own), and
+# nothing we ship opens it. The seat is a REQUIREMENT, not tidiness: its Okay/Cancel buttons
+# `inherits="GameMenuButtonTemplate"`, which is resolved at LOAD, and that template lives in
+# UIPanelTemplates.xml six lines up (it moved there from GameMenuFrame.xml — the reference's own
+# file for it — precisely because GameMenuFrame.xml is deliberately LAST). Everything else it needs
+# is far above (Fonts' GameFontNormal/…Small trio; UiPanels' ShowUIPanel/HideUIPanel, its
+# UISpecialFrames entry and the ESC rung that cancel-clicks it). UIDropDownMenu.xml, which owns the
+# colour-swatch row that OPENS this window, sits above too — but that direction is call-time only
+# (`UIDropDownMenuButton_OpenColorPicker` reaches `ColorPickerFrame` by name when the swatch is
+# clicked), so the two could sit either way round.
+ColorPickerFrame.xml
 # The fullscreen world map (decision 0203 phase 2), over the worldmap host API
 # (`crate::ui_world_map` feeds it); the 'M' binding (ui_script/input.rs) calls its
 # ToggleWorldMap().
@@ -160,8 +208,8 @@ PetPaperDollFrame.xml
 # The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
 # top-level file (SkillFrame.xml's own header comment — this engine has no cross-file
 # `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
-# "BenillaCharacterFrame">` instead). Loaded immediately after CharacterFrame.xml so it
-# paints ON TOP of it (later file = higher z) and so `BenillaCharacterFrame` already exists
+# "CharacterFrame">` instead). Loaded immediately after CharacterFrame.xml so it
+# paints ON TOP of it (later file = higher z) and so `CharacterFrame` already exists
 # for that anchor to resolve against.
 SkillFrame.xml
 # The inspect window (decision 0631): another player's paper doll. Beside the character
@@ -218,7 +266,7 @@ ItemTextFrame.xml
 # session windows below.
 TrainerFrame.xml
 # The bank window (decision 0604 phase 4): the vault, purchase ladder, and the 6 bank-bag
-# popouts, over the C_Container feed already carrying container -1/5..10 (ui_items.rs) +
+# popouts, over the container feed already carrying container -1/5..10 (ui_items.rs) +
 # the bank Lua surface (benilla-ui/src/script/bank.rs) + crate::ui_bank's feed/drain.
 # Loaded AFTER MerchantFrame.xml (reuses its BenillaMoney_* coin helpers for the purchase
 # row + purse) and AFTER BagFrame.xml, already above (its BenillaBagSlotTemplate/
@@ -289,6 +337,10 @@ KeyBindingsPage.xml
 # (all far above); sits right before GameMenuFrame so the menu — which reaches it by
 # name at click time — stays the last, outermost layer.
 OptionsFrame.xml
+# The in-game AddOns list (decision 1197) — the ESC menu's AddOns entry. Before GameMenuFrame,
+# which reaches AddonList_Toggle by name at click time; it depends only on the AddOn API verbs
+# (1191) and defines its own templates, so it can sit anywhere after the fonts.
+AddonList.xml
 # The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
 # event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
 # everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's

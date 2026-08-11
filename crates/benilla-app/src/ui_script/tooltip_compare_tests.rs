@@ -156,8 +156,7 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
     s.set_modifiers(false, false, false);
 
     // Open the window; the shift edge now seats the compare on the head slot.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
     s.run("BenillaBagSlot_OnEnter(BENILLA_TEST_BTN)").unwrap();
     s.set_modifiers(true, false, false);
@@ -168,7 +167,7 @@ fn shift_compare_over_a_bag_item_seats_on_the_doll_slot() {
              return ShoppingTooltip1:IsShown() \
                and ShoppingTooltip1TextLeft1:GetText() == \"Currently Equipped\" \
                and ShoppingTooltip1TextLeft2:GetText() == \"Test Helm\" \
-               and rel:GetName() == \"BenillaCharacterHeadSlot\" and p == \"BOTTOMLEFT\"",
+               and rel:GetName() == \"CharacterHeadSlot\" and p == \"BOTTOMLEFT\"",
         )
         .unwrap();
     assert!(ok, "the compare plate seats on the head doll slot");
@@ -294,12 +293,11 @@ fn doll_hover_renders_the_live_instance_and_never_self_compares() {
          BenillaBagSlot_OnEnter(BENILLA_TEST_BTN)",
     )
     .unwrap();
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     s.take_sounds();
 
     // The doll hover: the live pair, not the template's 40/40.
-    s.run("BenillaPaperDollSlot_OnEnter(BenillaCharacterHeadSlot)")
+    s.run("BenillaPaperDollSlot_OnEnter(CharacterHeadSlot)")
         .unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let found: String = s

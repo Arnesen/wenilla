@@ -100,11 +100,9 @@ fn shipped_gossip_frame_drives_end_to_end() {
 
     // The window is shown (ShowUIPanel put it on the left slot), the greeting painted, the vendor
     // row's icon rendered.
-    assert!(s
-        .eval::<bool>("return BenillaGossipFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return GossipFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaGossipGreetingText:GetText()")
+        s.eval::<String>("return GossipGreetingText:GetText()")
             .unwrap(),
         "Greetings, traveler. How may I help you?"
     );
@@ -112,8 +110,8 @@ fn shipped_gossip_frame_drives_end_to_end() {
     // so the shared pool starts filling from option 1 at row 1 — decision 0088 §3).
     let states: (bool, bool, bool, bool) = s
         .eval(
-            "return BenillaGossipRow1:IsVisible(), BenillaGossipRow1:IsEnabled(),\n\
-                        BenillaGossipRow2:IsEnabled(), BenillaGossipRow3:IsVisible()",
+            "return GossipRow1:IsVisible(), GossipRow1:IsEnabled(),\n\
+                        GossipRow2:IsEnabled(), GossipRow3:IsVisible()",
         )
         .unwrap();
     assert_eq!(
@@ -212,9 +210,7 @@ fn shipped_gossip_frame_drives_end_to_end() {
     // through HideUIPanel, which vacates the left slot.
     s.run("BenillaGossipCloseButton_OnClick()").unwrap();
     assert!(s.take_gossip_close());
-    assert!(!s
-        .eval::<bool>("return BenillaGossipFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return GossipFrame:IsVisible()").unwrap());
     assert!(
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
         "HideUIPanel vacated the left slot"
@@ -271,10 +267,10 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
         bool,
     ) = s
         .eval(
-            "return BenillaGossipRow1Label:GetText(), BenillaGossipRow1:IsVisible(),\n\
-                        BenillaGossipRow2Label:GetText(), BenillaGossipRow2:IsVisible(),\n\
-                        BenillaGossipRow3Label:GetText(), BenillaGossipRow3:IsVisible(),\n\
-                        BenillaGossipRow4:IsVisible()",
+            "return GossipRow1Label:GetText(), GossipRow1:IsVisible(),\n\
+                        GossipRow2Label:GetText(), GossipRow2:IsVisible(),\n\
+                        GossipRow3Label:GetText(), GossipRow3:IsVisible(),\n\
+                        GossipRow4:IsVisible()",
         )
         .unwrap();
     assert_eq!((r1_text.as_str(), r1_vis), ("Report to Goldshire", true));
@@ -325,8 +321,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     // Click quest row 2 (available, "A Threat Within") → SelectGossipQuest(2) queues the seam's
     // 1-based quest-row position; the app maps it to the quest id + guid and sends
     // CMSG_QUESTGIVER_QUERY_QUEST (decision 0088 §3).
-    s.run("BenillaGossipRow_OnClick(BenillaGossipRow2)")
-        .unwrap();
+    s.run("BenillaGossipRow_OnClick(GossipRow2)").unwrap();
     assert_eq!(s.take_gossip_quest_selects(), vec![2]);
     assert!(
         s.take_gossip_selects().is_empty(),
@@ -412,8 +407,8 @@ fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
 
     let row = |i: u32| -> (f32, f32, f32) {
         s.eval::<(f32, f32, f32)>(&format!(
-            "return BenillaGossipRow{i}:GetTop(), BenillaGossipRow{i}:GetBottom(), \
-             BenillaGossipRow{i}Label:GetStringHeight()"
+            "return GossipRow{i}:GetTop(), GossipRow{i}:GetBottom(), \
+             GossipRow{i}Label:GetStringHeight()"
         ))
         .unwrap()
     };
@@ -509,8 +504,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     s.fire_event("GOSSIP_SHOW", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return BenillaGossipFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
         "gossip opened onto the (empty) left slot"
     );
     s.resolve();
@@ -540,13 +534,10 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     // Gossip is hidden (both pushable=0 ⇒ SetLeftFrame replaced it); merchant now holds the left
     // slot at the same anchor.
     assert!(
-        !s.eval::<bool>("return BenillaGossipFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
         "opening merchant replaced gossip at the left slot"
     );
-    assert!(s
-        .eval::<bool>("return BenillaMerchantFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return MerchantFrame:IsVisible()").unwrap());
     s.resolve();
     let win = frame_rect(&s.extract(), 384.0, 512.0);
     assert_eq!(
@@ -555,7 +546,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
         "merchant took the left slot gossip vacated"
     );
     assert!(s
-        .eval::<bool>("return GetLeftFrame():GetName() == \"BenillaMerchantFrame\"")
+        .eval::<bool>("return GetLeftFrame():GetName() == \"MerchantFrame\"")
         .unwrap());
 
     // Merchant's own close vacates the slot entirely.
@@ -632,7 +623,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     // frame), so the stand-in hides itself first too.
     s.run(
         r#"
-            local loot = CreateFrame("Frame", "BenillaLootFrame")
+            local loot = CreateFrame("Frame", "LootFrame")
             loot:Hide()
             loot:SetSize(50, 50)
             ShowUIPanel(loot)
@@ -641,7 +632,7 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     .unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaLootFrame\"")
+        s.eval::<bool>("return GetLeftFrame():GetName() == \"LootFrame\"")
             .unwrap(),
         "loot took the empty left slot"
     );
@@ -670,12 +661,12 @@ fn shipped_panel_slot_pushable_promotes_to_center() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
-        s.eval::<bool>("return GetCenterFrame():GetName() == \"BenillaLootFrame\"")
+        s.eval::<bool>("return GetCenterFrame():GetName() == \"LootFrame\"")
             .unwrap(),
         "loot was pushed to center, not replaced"
     );
     assert!(
-        s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaMerchantFrame\"")
+        s.eval::<bool>("return GetLeftFrame():GetName() == \"MerchantFrame\"")
             .unwrap(),
         "merchant took the left slot loot vacated"
     );
@@ -734,7 +725,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         }));
         s.fire_event("GOSSIP_SHOW", vec![]);
         assert!(s
-            .eval::<bool>("return GetLeftFrame():GetName() == \"BenillaGossipFrame\"")
+            .eval::<bool>("return GetLeftFrame():GetName() == \"GossipFrame\"")
             .unwrap());
 
         // The option is picked; SMSG_SHOW_BANK lands and the app both opens the bank AND clears
@@ -753,15 +744,12 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
         assert!(
-            !s.eval::<bool>("return BenillaGossipFrame:IsVisible()")
-                .unwrap(),
+            !s.eval::<bool>("return GossipFrame:IsVisible()").unwrap(),
             "the gossip menu is gone once the vault is up (bank_first={bank_first})"
         );
-        assert!(s
-            .eval::<bool>("return BenillaBankFrame:IsVisible()")
-            .unwrap());
+        assert!(s.eval::<bool>("return BankFrame:IsVisible()").unwrap());
         assert!(
-            s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaBankFrame\"")
+            s.eval::<bool>("return GetLeftFrame():GetName() == \"BankFrame\"")
                 .unwrap(),
             "the bank ends at the LEFT slot, not parked at center (bank_first={bank_first})"
         );
@@ -833,8 +821,8 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // The child grew past the 334 px frame, so there is a range to scroll …
     let (child_h, range): (f32, f32) = s
         .eval(
-            "return BenillaGossipGreetingScrollChild:GetHeight(), \
-             BenillaGossipGreetingScroll:GetVerticalScrollRange()",
+            "return GossipGreetingScrollChild:GetHeight(), \
+             GossipGreetingScroll:GetVerticalScrollRange()",
         )
         .unwrap();
     assert!(
@@ -844,7 +832,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // … and the bar is up for it (it stays hidden when everything fits — the fit case is covered by
     // `shipped_gossip_frame_drives_end_to_end`'s two-option menu).
     assert!(
-        s.eval::<bool>("return BenillaGossipGreetingScrollBar:IsVisible()")
+        s.eval::<bool>("return GossipGreetingScrollBar:IsVisible()")
             .unwrap(),
         "the scrollbar shows once the menu overflows"
     );
@@ -855,9 +843,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // out with: it must be the scroll frame's own rect, and rows past the bottom must be entirely
     // outside it (nothing of them survives the clip).
     let (frame_top, frame_bottom): (f32, f32) = s
-        .eval(
-            "return BenillaGossipGreetingScroll:GetTop(), BenillaGossipGreetingScroll:GetBottom()",
-        )
+        .eval("return GossipGreetingScroll:GetTop(), GossipGreetingScroll:GetBottom()")
         .unwrap();
     let painted_rows =
         |s: &mut UiScript| -> Vec<(benilla_ui::layout::Rect, benilla_ui::layout::Rect)> {
@@ -890,9 +876,9 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     // Scrolling pans the content up under that clip by exactly the scroll amount. Rects are y-up
     // (`ExtractedQuad::rect`), so "up" means row 1's top EDGE VALUE grows as it slides off the top.
     let first_top =
-        |s: &mut UiScript| -> f32 { s.eval::<f32>("return BenillaGossipRow1:GetTop()").unwrap() };
+        |s: &mut UiScript| -> f32 { s.eval::<f32>("return GossipRow1:GetTop()").unwrap() };
     let before = first_top(&mut s);
-    s.run("BenillaScroll_Step(BenillaGossipGreetingScroll, 100)")
+    s.run("BenillaScroll_Step(GossipGreetingScroll, 100)")
         .unwrap();
     s.resolve();
     let after = first_top(&mut s);
@@ -902,7 +888,7 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
     );
     // The bar followed the scroll (SyncBar off OnVerticalScroll), and the rows are still clipped.
     assert_eq!(
-        s.eval::<f32>("return BenillaGossipGreetingScrollBar:GetValue()")
+        s.eval::<f32>("return GossipGreetingScrollBar:GetValue()")
             .unwrap(),
         100.0,
         "the bar seats at the scroll offset"
@@ -913,5 +899,83 @@ fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
             "a scrolled row still clips to the frame, got {clip:?}"
         );
     }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+// ── the panel manager as an ADDON reaches it (1206's audit, finished) ─────────────────────────
+
+/// **An addon's own window, registered in `UIPanelWindows`, gets the left slot** — the same slot,
+/// at the same anchor, as one of ours.
+///
+/// `UIPanelWindows["MyFrame"] = { area = "left", pushable = 1 }` is the 1.12 way an addon asks to
+/// be a panel rather than a floating box, and **20 corpus addons write that line**. The table has
+/// been present since the manager landed, so nothing would have raised — but a table an addon can
+/// write to and a manager that honours what it wrote are different claims, and only the second one
+/// is worth anything (1203's lesson: a capability absent without a failure is the quiet kind).
+///
+/// The assertion is deliberately the *same* rect the shipped panels are asserted at
+/// (`(0.0, 664.0)` for a 384x512 at 1024x768), so an addon's window is not merely "somewhere" —
+/// it is where a client window would be.
+#[test]
+fn an_addons_own_frame_registered_in_uipanelwindows_takes_the_left_slot() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "GossipFrame.xml");
+
+    // The addon's three lines, in the order an addon writes them.
+    s.run(
+        r#"AddonPanel = CreateFrame("Frame", "AddonPanel", UIParent)
+           AddonPanel:SetWidth(384) AddonPanel:SetHeight(512)
+           AddonPanel:Hide()
+           UIPanelWindows["AddonPanel"] = { area = "left", pushable = 1 }
+           ShowUIPanel(AddonPanel)"#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return AddonPanel:IsVisible()").unwrap(),
+        "ShowUIPanel showed the addon's frame"
+    );
+    s.resolve();
+    let win = frame_rect(&s.extract(), 384.0, 512.0);
+    assert_eq!(
+        (win.left, win.top),
+        (0.0, 664.0),
+        "the addon's panel is at the left slot, where a client panel would be"
+    );
+
+    // ...and it takes part in the pushable arbitration like one of ours. The reference's own
+    // branch (UIParent.lua l.725-741): left is the addon at pushable=1, nothing in center, and a
+    // pushable=0 window arrives — `leftInfo.pushable > info.pushable`, so the addon's frame is
+    // MOVED TO CENTER and the client window takes left. Both stay visible.
+    //
+    // Worth spelling out because the obvious expectation is the opposite one, and it is what this
+    // test asserted first: "a pushable=0 window replaces what is holding the slot" is only true
+    // when BOTH are pushable=0 (l.728-731). Getting this wrong for an addon means either losing
+    // its window or leaving two panels on top of each other.
+    s.set_gossip(Some(GossipMenu {
+        greeting: Some("Well met.".into()),
+        quests: Vec::new(),
+        options: Vec::new(),
+    }));
+    s.fire_event("GOSSIP_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(s.eval::<bool>("return GossipFrame:IsVisible()").unwrap());
+    assert!(
+        s.eval::<bool>("return AddonPanel:IsVisible()").unwrap(),
+        "the addon's pushable=1 panel was PUSHED, not closed"
+    );
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| q
+            .rect
+            .is_some_and(|r| (r.left - 384.0).abs() < 0.5 && (r.top - 664.0).abs() < 0.5)),
+        "and it is at the center slot (UIParent TOPLEFT +384, -104)"
+    );
+
+    // HideUIPanel on an addon frame that is not currently in a slot must be a no-op, not an error.
+    s.run("HideUIPanel(AddonPanel)").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

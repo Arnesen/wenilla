@@ -1,0 +1,366 @@
+<Ui>
+    <!--
+        The in-game AddOns list (decision 1197) — the ESC-menu half of the AddOns UI, and the
+        button `GameMenuFrame.xml` has been carrying as `GameMenuButton_Pending(self, ADDONS)`
+        since 0997 ("goes live by deleting one Pending call and writing its OnClick").
+
+        SCOPE — this frame has no reference. 1.12 ships an AddOns list only on the GLUE side
+        (`GlueXML/AddonList.xml/.lua`, opened by CharacterSelectAddonsButton); in-world there is
+        no such window and the ESC menu has no such entry. This is a deliberate benilla addition
+        the director asked for, so nothing here is transcribed and nothing pretends to be. What IS
+        borrowed from the reference is the BEHAVIOUR of its glue twin, because it is the same job:
+
+          - the row shape and count: ADDON_BUTTON_HEIGHT = 16, MAX_ADDONS_DISPLAYED = 19
+          - AddonList_Update's three-colour title rule — gold loadable, red enabled-but-broken,
+            grey disabled (SetTextColor 1/0.78/0, 1/0.1/0.1, 0.5/0.5/0.5)
+          - the status column carrying `reason` (our GetAddOnInfo returns the reference's own
+            token set — decision 1191 §6)
+          - Okay saves, Cancel discards (SaveAddOns / ResetAddOns)
+
+        It is written entirely against the ELEVEN AddOn API verbs 1191 landed — GetNumAddOns,
+        GetAddOnInfo, GetAddOnDependencies, EnableAddOn, DisableAddOn, IsAddOnLoaded — with no
+        host support of its own. That is the point of it as much as the window is: if this panel
+        works, the addon API an addon author would use works, and it is exercised by anyone who
+        opens the ESC menu rather than by a test nobody runs.
+
+        WHEN CHANGES TAKE EFFECT — next login, not now. Enabling an addon mid-session would mean
+        running its files into a VM that has already fired ADDON_LOADED/VARIABLES_LOADED/
+        PLAYER_LOGIN, which is not a state the reference's own loader has a path for; disabling
+        one cannot unload it at all. The panel says so on its face rather than leaving a player to
+        discover it. The enable state is written at the session's end by the shutdown tail
+        (decision 1191 §7, the reference's own last step at 0x490bd0).
+    -->
+    <Script><![CDATA[
+        -- Strings. The `X = X or "..."` idiom is MicroMenu.xml's: a real GlobalStrings table
+        -- loaded later wins, and these are the fallbacks for a run without one.
+        ADDONS = ADDONS or "AddOns"
+        ADDON_LIST_ENABLE_ALL = ADDON_LIST_ENABLE_ALL or "Enable All"
+        ADDON_LIST_DISABLE_ALL = ADDON_LIST_DISABLE_ALL or "Disable All"
+        ADDON_LIST_APPLY_NOTE = ADDON_LIST_APPLY_NOTE or "Changes take effect at your next login."
+        OKAY = OKAY or "Okay"
+        CANCEL = CANCEL or "Cancel"
+
+        ADDON_BUTTON_HEIGHT = 16
+        MAX_ADDONS_DISPLAYED = 19
+
+        -- The staged edit. `AddonList.original` is the enable state as the panel found it, so
+        -- Cancel can put it back — the reference's `ResetAddOns` over the client's own records,
+        -- which we do not have an engine verb for (SaveAddOns/ResetAddOns are GLUE-namespace
+        -- globals and deliberately absent in-world, decision 1191 §6).
+        AddonList = { offset = 0, original = {} }
+
+        function AddonList_Toggle()
+            if AddonListFrame:IsVisible() then
+                AddonList_OnCancel()
+            else
+                AddonList_Show()
+            end
+        end
+
+        function AddonList_Show()
+            AddonList.offset = 0
+            AddonList.original = {}
+            for i = 1, GetNumAddOns() do
+                local name, _, _, _, loadable, reason = GetAddOnInfo(i)
+                -- "enabled" is everything except the player's own DISABLED — a dependency problem
+                -- is not a checkbox state, it is a status line.
+                AddonList.original[name] = not (reason == "DISABLED")
+            end
+            AddonListFrame:Show()
+            AddonList_Update()
+        end
+
+        -- One row's worth of facts, so the row painter below reads as a list of assignments
+        -- rather than as a pile of GetAddOnInfo returns.
+        local function rowFacts(index)
+            local name, title, notes, url, loadable, reason = GetAddOnInfo(index)
+            local enabled = not (reason == "DISABLED")
+            return name, (title or name), loadable, reason, enabled, notes, url
+        end
+
+        function AddonList_Update()
+            local total = GetNumAddOns()
+            -- Clamp first: a Disable All that shortens nothing still must not leave the offset
+            -- past the end after the list is re-read.
+            local maxOffset = total - MAX_ADDONS_DISPLAYED
+            if maxOffset < 0 then maxOffset = 0 end
+            if AddonList.offset > maxOffset then AddonList.offset = maxOffset end
+            if AddonList.offset < 0 then AddonList.offset = 0 end
+
+            for i = 1, MAX_ADDONS_DISPLAYED do
+                local entry = getglobal("AddonListEntry" .. i)
+                local index = AddonList.offset + i
+                if index > total then
+                    entry:Hide()
+                else
+                    local name, title, loadable, reason, enabled = rowFacts(index)
+                    entry:SetID(index)
+
+                    local check = getglobal("AddonListEntry" .. i .. "Check")
+                    check:SetChecked(enabled)
+
+                    -- AddonList_Update's own colour rule, its own three values.
+                    local label = getglobal("AddonListEntry" .. i .. "Title")
+                    label:SetText(title)
+                    if loadable then
+                        label:SetTextColor(1.0, 0.78, 0.0)
+                    elseif enabled and reason ~= "DEP_DISABLED" then
+                        label:SetTextColor(1.0, 0.1, 0.1)
+                    else
+                        label:SetTextColor(0.5, 0.5, 0.5)
+                    end
+
+                    -- The status column: the reference splices its token into a GlobalStrings
+                    -- lookup (`getglobal("ADDON_"..reason)`), which is why the token spelling is
+                    -- load-bearing (1191 §6). A token with no string falls back to the token, so
+                    -- a player sees something rather than a blank.
+                    local status = getglobal("AddonListEntry" .. i .. "Status")
+                    if reason then
+                        status:SetText(getglobal("ADDON_" .. reason) or reason)
+                    else
+                        status:SetText("")
+                    end
+                    entry:Show()
+                end
+            end
+
+            -- The scroll pair exists only while the list overflows — the reference's own
+            -- GlueScrollFrame_Update condition.
+            if total > MAX_ADDONS_DISPLAYED then
+                AddonListScrollUp:Show()
+                AddonListScrollDown:Show()
+            else
+                AddonListScrollUp:Hide()
+                AddonListScrollDown:Hide()
+            end
+        end
+
+        function AddonList_Scroll(delta)
+            AddonList.offset = AddonList.offset + delta
+            AddonList_Update()
+        end
+
+        function AddonList_ToggleEntry(entryIndex)
+            local name, _, _, _, _, reason = GetAddOnInfo(entryIndex)
+            if reason == "DISABLED" then
+                EnableAddOn(name)
+            else
+                DisableAddOn(name)
+            end
+            AddonList_Update()
+        end
+
+        function AddonList_SetAll(on)
+            if on then EnableAllAddOns() else DisableAllAddOns() end
+            AddonList_Update()
+        end
+
+        function AddonList_OnOk()
+            PlaySound("igMainMenuOption")
+            AddonListFrame:Hide()
+        end
+
+        -- Cancel restores what the panel found, addon by addon — `ResetAddOns` written out,
+        -- because that verb is glue-only and this window is not the glue.
+        function AddonList_OnCancel()
+            PlaySound("igMainMenuQuit")
+            for i = 1, GetNumAddOns() do
+                local name = GetAddOnInfo(i)
+                local was = AddonList.original[name]
+                if was == true then
+                    EnableAddOn(name)
+                elseif was == false then
+                    DisableAddOn(name)
+                end
+            end
+            AddonListFrame:Hide()
+        end
+
+        -- The hover tooltip: title, notes, dependencies — AddonTooltip_Update's three lines in
+        -- its order, on the shared GameTooltip rather than a private frame.
+        function AddonList_RowEnter(row)
+            local name, title, loadable, reason, enabled, notes = rowFacts(row:GetID())
+            GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(title)
+            if notes and notes ~= "" then
+                GameTooltip:AddLine(notes, 1, 1, 1)
+            end
+            local deps = ""
+            local list = { GetAddOnDependencies(row:GetID()) }
+            for i = 1, getn(list) do
+                if i == 1 then
+                    deps = (ADDON_DEPENDENCIES or "Dependencies: ") .. list[i]
+                else
+                    deps = deps .. ", " .. list[i]
+                end
+            end
+            if deps ~= "" then
+                GameTooltip:AddLine(deps, 1, 0.82, 0)
+            end
+            GameTooltip:Show()
+        end
+
+        function AddonList_RowLeave()
+            GameTooltip:Hide()
+        end
+    ]]></Script>
+
+    <!-- The panel button face. This engine ships no shared UIPanelButtonTemplate — every panel
+         defines its own (the MacroFrame/TrainerFrame precedent), and a local one also keeps this
+         window independent of any other file's template names. -->
+    <Button name="AddonListPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="90" y="22"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <!-- The two scroll arrows, the client's own `UI-ScrollBar-ScrollUpButton-*` art. -->
+    <Button name="AddonListScrollUpTemplate" virtual="true">
+        <Size><AbsDimension x="16" y="16"/></Size>
+        <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+        <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+    </Button>
+    <Button name="AddonListScrollDownTemplate" virtual="true">
+        <Size><AbsDimension x="16" y="16"/></Size>
+        <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+        <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+    </Button>
+
+    <!-- One row: a checkbox, a title, a status column. 16 tall, the reference's own
+         ADDON_BUTTON_HEIGHT. -->
+    <Button name="AddonListEntryTemplate" virtual="true">
+        <Size><AbsDimension x="440" y="16"/></Size>
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString name="$parentTitle" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="LEFT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="$parentStatus" inherits="GameFontDisableSmall" justifyH="RIGHT">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <CheckButton name="$parentCheck">
+                <Size><AbsDimension x="20" y="20"/></Size>
+                <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
+                <CheckedTexture file="Interface\Buttons\UI-CheckBox-Check"/>
+                <Scripts>
+                    <OnClick>AddonList_ToggleEntry(this:GetParent():GetID())</OnClick>
+                </Scripts>
+            </CheckButton>
+        </Frames>
+        <Scripts>
+            <OnEnter>AddonList_RowEnter(this)</OnEnter>
+            <OnLeave>AddonList_RowLeave()</OnLeave>
+            <OnClick>AddonList_ToggleEntry(this:GetID())</OnClick>
+        </Scripts>
+    </Button>
+
+    <Frame name="AddonListFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="480" y="420"/></Size>
+        <Anchors><Anchor point="CENTER"/></Anchors>
+        <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background"
+                  edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+            <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+            <TileSize><AbsValue val="32"/></TileSize>
+            <EdgeSize><AbsValue val="32"/></EdgeSize>
+        </Backdrop>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentTitle" inherits="GameFontNormalLarge">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentNote" inherits="GameFontDisableSmall">
+                    <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="60"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="AddonListEntry1" inherits="AddonListEntryTemplate">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-46"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="AddonListEntry2" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry3" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry4" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry5" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry6" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry7" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry8" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry9" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry10" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry11" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry12" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry11" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry13" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry12" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry14" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry13" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry15" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry14" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry16" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry15" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry17" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry16" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry18" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry17" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="AddonListEntry19" inherits="AddonListEntryTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="AddonListEntry18" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+            <Button name="AddonListScrollUp" inherits="AddonListScrollUpTemplate" hidden="true">
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-2" y="-42"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>AddonList_Scroll(-1)</OnClick></Scripts>
+            </Button>
+            <Button name="AddonListScrollDown" inherits="AddonListScrollDownTemplate" hidden="true">
+                <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="86"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>AddonList_Scroll(1)</OnClick></Scripts>
+            </Button>
+
+            <Button name="AddonListEnableAll" inherits="AddonListPanelButtonTemplate">
+                <Size><AbsDimension x="104" y="22"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="20" y="20"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(ADDON_LIST_ENABLE_ALL)</OnLoad>
+                    <OnClick>AddonList_SetAll(1)</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="AddonListDisableAll" inherits="AddonListPanelButtonTemplate">
+                <Size><AbsDimension x="104" y="22"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="AddonListEnableAll" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(ADDON_LIST_DISABLE_ALL)</OnLoad>
+                    <OnClick>AddonList_SetAll(nil)</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="AddonListOkay" inherits="AddonListPanelButtonTemplate">
+                <Size><AbsDimension x="90" y="22"/></Size>
+                <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-20" y="20"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(OKAY)</OnLoad>
+                    <OnClick>AddonList_OnOk()</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="AddonListCancel" inherits="AddonListPanelButtonTemplate">
+                <Size><AbsDimension x="90" y="22"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="AddonListOkay" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(CANCEL)</OnLoad>
+                    <OnClick>AddonList_OnCancel()</OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                AddonListFrameTitle:SetText(ADDONS)
+                AddonListFrameNote:SetText(ADDON_LIST_APPLY_NOTE)
+            </OnLoad>
+            <OnShow>AddonList_Update()</OnShow>
+            <OnMouseWheel>AddonList_Scroll(-arg1)</OnMouseWheel>
+        </Scripts>
+    </Frame>
+</Ui>

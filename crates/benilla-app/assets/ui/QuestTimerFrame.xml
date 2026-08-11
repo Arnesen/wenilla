@@ -24,14 +24,18 @@
           getglobal(name), and the ref's own Lua below reaches its rows by
           getglobal("QuestTimer"..i.."Text"). Prefixing would silently unseat the frame and break
           the row lookup at once.
-        - Lua 5.0 `arg`/`arg.n` varargs replaced with select("#", ...)/select(i, ...) —
-          LUA_COMPAT_VARARG isn't shipped (TalentFrame.xml / WorldMapFrame.xml's precedent).
+        - Lua 5.0 `arg`/`arg.n` varargs written as select("#", ...)/select(i, ...), the 5.1-native
+          spelling and this tree's house style (TalentFrame.xml / WorldMapFrame.xml's precedent).
         - The ref's XML anchor (TOPRIGHT of MinimapCluster +10,0) is transcribed and, like every
           managed HUD frame, DEAD ON ARRIVAL: UIParent_ManageFramePositions re-seats it at
           -CONTAINER_OFFSET_X on every pass. Kept verbatim anyway so the file reads as the ref's.
-        - `toplevel="true"` is dropped: it is the ref's raise-on-click behaviour for movable
-          dialogs, which this engine has no verb for and this frame never uses (it is not movable
-          and its click opens the quest log rather than raising anything).
+        - `toplevel="true"` is dropped, and the reason given here was half wrong: the raise's real
+          triggers are **Show**, drag-start and mouse-down, not "raise-on-click for movable dialogs"
+          (wow-re `ui/scratch/toplevel-raise.md`). The verb now exists (`script::object::toplevel`),
+          so the standing reason is only the second one — this frame is a managed HUD strip that
+          UIParent_ManageFramePositions re-seats and that overlaps nothing in its own stratum, so
+          the occlusion gate would decline every raise anyway. Re-adding it is one word if that
+          stops being true.
         - QuestTimerFrame_OnShow/OnHide call the manage pass, as the ref does — that is what lets
           the durability guy and the quest tracker drop below this window when a timer appears.
         - The ref's own commented-out QuestTimerFrame_UpdatePosition (its pre-manage-pass
@@ -112,7 +116,7 @@
             if not index then
                 return
             end
-            ShowUIPanel(getglobal("BenillaQuestLogFrame"))
+            ShowUIPanel(getglobal("QuestLogFrame"))
             SelectQuestLogEntry(index)
             BenillaQuestLogFrame_Update()
         end

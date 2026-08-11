@@ -411,31 +411,40 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             set_spell_by_id(lua, &this, spell_id, name, SpellRenderOpts::default(), None)
         })?,
     )?;
-    // GameTooltip:SetPlayerBuff(index [, filter]) — the buff-bar hover: the aura variant (white
+    // GameTooltip:SetPlayerBuff(buffIndex) — the buff-bar hover: the aura variant (white
     // AuraDescription) + the duration-remaining line only this entry point appends
     // (byte-verified; remaining computed live off the aura's GetTime expiry — the TEXT shape is
-    // INTERIM until a live capture pins SPELL_TIME_REMAINING's exact number formatting). The
-    // index counts within the FILTERED list (HELPFUL default / HARMFUL), the same convention
-    // the UnitBuff/UnitDebuff bindings and the buff buttons use.
+    // INTERIM until a live capture pins SPELL_TIME_REMAINING's exact number formatting).
+    //
+    // **The argument is a 1.12 CACHE POSITION, not a filtered ordinal** — the same 0-based handle
+    // `GetPlayerBuff` returns and every `GetPlayerBuff*` sibling consumes (see
+    // `super::aura`'s header). `ref-BuffFrame.lua:105` is the pin: `GameTooltip:SetPlayerBuff(buffIndex)`
+    // where `buffIndex` came straight out of `GetPlayerBuff`, never from the button's own id.
+    //
+    // This corrects a real defect: the binding previously read a 1-based index within the
+    // sign-filtered list, so of the corpus's 21 call sites — all of which pass a cache position —
+    // every position >= 1 resolved one aura too early, no debuff was ever reachable (the sign
+    // defaulted to helpful), and `SetPlayerBuff(-1)` showed the FIRST buff instead of nothing.
+    // That last one is load-bearing: `BigWigs/Raids/Naxxramas/Loatheb.lua:260-271` feeds an
+    // unchecked `GetPlayerBuff(i, "HARMFUL")` straight in and terminates its scan on the tooltip's
+    // first line going nil.
+    //
+    // A miss (out of range, negative, empty cache) routes through the shared entry with spell id 0,
+    // exactly like SetUnitBuff's: content clears and the plate hides, never a stale tooltip left
+    // showing. Any surplus argument is ignored — `CT_BuffMod/CT_BuffFrame.lua:151` passes a filter
+    // string the reference's own binding never reads.
     m.set(
         "SetPlayerBuff",
-        lua.create_function(|lua, (this, index, filter): (Table, i64, Option<String>)| {
+        lua.create_function(|lua, (this, index): (Table, i64)| {
             let now = {
                 let g = lua.globals();
                 g.get::<f64>("__benilla_now").unwrap_or(0.0)
             };
-            let helpful = !filter
-                .as_deref()
-                .unwrap_or("")
-                .split('|')
-                .any(|s| s.trim().eq_ignore_ascii_case("HARMFUL"));
             let (spell_id, name, remaining) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
-                let idx = usize::try_from(index.max(1) - 1).unwrap_or(0);
-                let hit = model
-                    .auras
-                    .get("player")
-                    .and_then(|a| a.iter().filter(|a| a.helpful == helpful).nth(idx));
+                let hit = usize::try_from(index)
+                    .ok()
+                    .and_then(|pos| model.auras.get("player").and_then(|a| a.get(pos)));
                 match hit {
                     Some(a) => {
                         let left = a.expiration_time - now;
@@ -448,7 +457,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         });
                         (a.spell_id, a.name.clone(), rem)
                     }
-                    None => return Ok(()),
+                    // The miss clears rather than leaving the previous plate up — the same shape
+                    // SetUnitBuff uses, and the one Loatheb's scan depends on: it breaks its loop
+                    // when TextLeft1 reads nil, so a stale line would never let it terminate.
+                    None => (0, None, None),
                 }
             };
             set_spell_by_id(

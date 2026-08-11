@@ -238,9 +238,69 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitAffectingCombat(unit) → the number 1 in combat, else nil (`0x517e10`).
+    //
+    // The unusual half is the miss shape: **false and "no such unit" are the SAME arm**
+    // (`0x517e48 je 0x517e73` joins `0x517e5c je 0x517e73`), so an unresolvable token is
+    // indistinguishable from a peaceful one. Reproduced deliberately — an addon cannot use this
+    // binding to probe whether a unit exists, and ours must not let it either.
+    //
+    // A **bad or missing argument raises**, unlike its `UnitInRaid` neighbour: the guard here is
+    // `0x6f3510` (number-or-string, and NULL for an absent argument) with the usage literal at
+    // `0x851070` behind `0x6f4940`, which does not return. A *number* is accepted and stringified
+    // — `UnitAffectingCombat(5)` resolves the token `"5"`, finds nothing, and answers nil.
+    g.set(
+        "UnitAffectingCombat",
+        lua.create_function(|lua, token: Value| {
+            let token = super::super::binding_abi::string_arg(
+                lua,
+                token,
+                "Usage: UnitAffectingCombat(\"unit\")",
+            )?;
+            let hot = with_unit(lua, &Some(token), false, |u| u.exists && u.in_combat);
+            Ok(if hot { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
+    // UnitInRaid(unit) → **the constant number 1** on a hit, nil on a miss. NOT an index, and
+    // never a raise (`0x516350`, wow-re `raid-roster-bindings.md` §1, §5-cross-checked).
+    //
+    // Three things about this binding are the opposite of the obvious guess, and all three are
+    // read off its 83 bytes:
+    //
+    //  * **The hit value is a hard-coded `1.0`** — `0x51637e push 0x3ff00000; push 0` into the
+    //    push-number helper. The membership helper underneath (`0x4baee0`) only ever returns
+    //    `mov eax,1` / `xor eax,eax`; it never exposes its loop counter, so there is no index to
+    //    be 0- or 1-based about. An addon doing `local i = UnitInRaid(u)` and then
+    //    `GetRaidRosterInfo(i)` reads member 1 on the real client too.
+    //  * **It never raises.** `0x6f3690` hands back NULL for a missing or uncoercible argument
+    //    instead of erroring, `0x515970` maps NULL/empty to GUID `0:0`, and `0x4baee0`
+    //    short-circuits `0:0` to false at its entry (`or eax,esi; je`). So a missing, wrong-typed
+    //    or unresolvable unit answers `nil`, not an error — hence `Option<String>` and no usage
+    //    string, unlike its `GetRaidRosterInfo` sibling.
+    //  * **The player is in the roster array**, so no `t == "player"` special case is needed here
+    //    — unlike `UnitInParty` below, whose roster excludes the recipient.
+    g.set(
+        "UnitInRaid",
+        lua.create_function(|lua, token: Option<String>| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let hit = token
+                .as_ref()
+                .and_then(|t| model.units.get(t))
+                .filter(|u| u.exists && u.guid != 0)
+                .is_some_and(|u| {
+                    model
+                        .party
+                        .raid
+                        .iter()
+                        .any(|m| m.guid != 0 && m.guid == u.guid)
+                });
+            Ok(if hit { Value::Integer(1) } else { Value::Nil })
+        })?,
+    )?;
+
     // UnitInParty(unit) → 1 when the unit is the player-in-a-group or one of the party1..4
-    // members (a party token directly, or any token whose guid matches the roster's). Raid
-    // membership waits for the raid arc (the party.rs module doc's stated v1 gap).
+    // members (a party token directly, or any token whose guid matches the roster's).
     g.set(
         "UnitInParty",
         lua.create_function(|lua, token: Option<String>| {
@@ -440,26 +500,27 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitPower/UnitPowerMax(unit [, powerType]) — the snapshot carries the *active* power only
-    // (the app feeds `POWER<active>`), so an explicit `powerType` argument serves the active type's
-    // value and `0` for any other: stated v1 shape, not hidden (a druid's mana-in-bear-form needs
-    // the full 5-slot feed later).
+    // **`UnitMana`/`UnitManaMax(unit)`, not `UnitPower`** (1188 phase 5, decision 1190's list).
+    // These carried Era's names — `UnitPower`/`UnitPowerMax` do not exist in 1.12 at all, which
+    // `reference/1.12-globals.tsv` says outright — and an addon feature-detecting `if UnitPower`
+    // would have taken a path this client cannot honour.
+    //
+    // The rename is exact, not approximate: 1.12's verbs take **one argument** and return the
+    // current/max of whatever power the unit actually uses (`UnitFrame.lua`: `local currValue =
+    // UnitMana(unit)`), which is precisely what the Era pair did when called without a type — and
+    // every one of our own call sites called it that way. The type-filtering second argument goes
+    // with the name: 1.12 has no such parameter, and asking "how much *mana* does a rage user
+    // have" is spelled `UnitPowerType(unit)` first, which we already provide and which IS 1.12.
     g.set(
-        "UnitPower",
-        lua.create_function(|lua, (token, ty): (Option<String>, Option<i64>)| {
-            Ok(with_unit(lua, &token, 0i64, |u| match ty {
-                Some(t) if t != i64::from(u.power_type) => 0,
-                _ => i64::from(u.power),
-            }))
+        "UnitMana",
+        lua.create_function(|lua, token: Option<String>| {
+            Ok(with_unit(lua, &token, 0i64, |u| i64::from(u.power)))
         })?,
     )?;
     g.set(
-        "UnitPowerMax",
-        lua.create_function(|lua, (token, ty): (Option<String>, Option<i64>)| {
-            Ok(with_unit(lua, &token, 0i64, |u| match ty {
-                Some(t) if t != i64::from(u.power_type) => 0,
-                _ => i64::from(u.max_power),
-            }))
+        "UnitManaMax",
+        lua.create_function(|lua, token: Option<String>| {
+            Ok(with_unit(lua, &token, 0i64, |u| i64::from(u.max_power)))
         })?,
     )?;
 
@@ -621,6 +682,53 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 model.target_requests.push(token);
             }
+            Ok(())
+        })?,
+    )?;
+
+    // TargetByName(name [, exactMatch]) — select by NAME through the shared resolver `0x493aa0`
+    // (`0x489d60`; wow-re `object-layer/scratch/targeting-by-name.md`, a §5 trio + two pairs).
+    // The app already owns that resolver for `/target` (decision 0886, `crate::target::by_name`);
+    // this is the binding half, which 11 corpus addons call and the slash command bypassed.
+    //
+    // The four things this signature is not:
+    //
+    //  * **not exact by default** — tier 1 is a whole-string case-insensitive compare, tier 2 is
+    //    the longest common PREFIX (anchored at 0, never a substring), and tier 2 is live
+    //    whenever Lua arg #2 is absent or 0. `TargetByName("Rag")` selects Ragnaros.
+    //  * **not nearest** — a tier-1 hit returns 0 from the walk callback and *terminates the
+    //    enumeration*, so among whole-string matches the winner is the first in enumeration
+    //    order, not the closest. Our resolver ranks exact-then-longest-prefix-then-nearest
+    //    instead; the deviation and its cost are argued at length in `by_name`'s module header,
+    //    which is the one place to change if that judgement is ever reversed.
+    //  * **not players-only** — typemask 8 is UNIT, i.e. creatures *and* players (contrast
+    //    `AssistByName`/`FollowByName`, which pass `0x10`). And with filter mode 0 there is no
+    //    dead, reaction, attackability, range, cone or scene-attach gate, and **no
+    //    self-exclusion**: `TargetByName(UnitName("player"))` self-targets.
+    //  * **not silent on a miss** — the reference emits game-message `0x127` (named, nothing
+    //    matched) or `0xb8` (null/empty name) and leaves the current target untouched. We keep
+    //    the target untouched and say nothing: the id→string table is runtime-populated BSS that
+    //    wow-re could not statically recover, and inventing a line is worse than omitting one.
+    //    Same known deviation the slash path already carries.
+    //
+    // A missing or wrong-typed first argument RAISES (`0x489d69 call 0x6f3510` → `0x489de1` →
+    // `0x6f4940`, usage literal `0x842698`); a number is accepted and stringified.
+    g.set(
+        "TargetByName",
+        lua.create_function(|lua, (name, exact): (Value, Option<Value>)| {
+            let name =
+                super::super::binding_abi::string_arg(lua, name, "Usage: TargetByName(\"name\")")?;
+            // Arg #2 is fetched with `0x6f1c10(idx=2, default 0)` — it never raises, and a
+            // numeric 0 is the same as absent. Matches `FollowByName`'s reading of its own
+            // arg #2, which reaches the identical `ctx+0x0c` slot.
+            let exact = match exact {
+                None | Some(Value::Nil) | Some(Value::Boolean(false)) => false,
+                Some(Value::Integer(n)) => n != 0,
+                Some(Value::Number(n)) => n != 0.0,
+                Some(_) => true,
+            };
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.target_by_name_requests.push((name, exact));
             Ok(())
         })?,
     )?;

@@ -333,6 +333,13 @@ fn other_unit_auras(
                 expiration_time: 0.0,
                 helpful: a.slot < UNIT_AURA_POSITIVE_SLOTS,
                 cancelable: a.flags & AURA_FLAG_CANCELABLE != 0,
+                // `untilCancelled` is a field of the PLAYER cache record (`0xbc6040`+0xc) and
+                // `GetPlayerBuff` is the only reader; no other unit has a cache, and no binding can
+                // reach this flag through a non-player token. A self-target does not come through
+                // here at all — it mirrors the player list (decision 0257 §2).
+                until_cancelled: false,
+                channeled: display
+                    .is_some_and(|d| d.attributes_ex & SPELL_ATTR_EX_IS_CHANNELED != 0),
             }
         })
         .collect()
@@ -381,6 +388,59 @@ fn buffs_visible_on(
 
 /// `UNIT_FLAG_AURAS_VISIBLE` — see [`buffs_visible_on`].
 const UNIT_FLAG_AURAS_VISIBLE: u32 = 0x0800_0000;
+
+/// `Spell.dbc` `AttributesEx & 0x4` — `SPELL_ATTR_EX_IS_CHANNELED` (vmangos `SpellDefines.h`), the
+/// DBC arm of the cancel gate (`benilla_ui::script::aura`'s `cancel_authorized`, `0x4e4a10`).
+const SPELL_ATTR_EX_IS_CHANNELED: u32 = 0x4;
+
+/// The cache record's **`untilCancelled`** flag — `GetPlayerBuff`'s second return, `+0xc` of a
+/// `0xbc6040` record. "This aura has no finite duration to display."
+///
+/// Byte-verified against `BuildBuffRecord 0x4e44b0`'s tail (`0x4e452e`-`0x4e45c5`), which is two
+/// clauses ORed in sequence:
+///
+/// 1. **The DBC duration row.** `SpellRec+0x78` (`DurationIndex`) resolves a `SpellDuration.dbc` row;
+///    the flag is set when the row says *infinite* — `Duration < 0 && DurationPerLevel <= 0`
+///    (`0x4e456e`-`0x4e457a`) — or when the index resolves to no row at all (`jl`/`jg`/NULL all fall
+///    into the same `mov ecx,1` at `0x4e4580`).
+/// 2. **The area-aura override.** Only for a *non*-cancelable aura (`test [edi+0xa],0x1; jne` at
+///    `0x4e4588` returns early otherwise): if any of the spell's three effects is one of
+///    `{0x23, 0x77, 0x80, 0x81}` — the persistent/area-aura effects, which have no per-application
+///    timer because they last while you stand in them — the flag is **forced** to 1
+///    (`0x4e458e`-`0x4e45be`).
+///
+/// This closes the gap this module's header named ("the reference avoids this via a DBC 'until
+/// cancelled' flag we don't parse"). It matters because it is answerable from the *spell*, on the
+/// frame the aura appears: `ref-BuffFrame.lua:124` returns before ever calling
+/// `GetPlayerBuffTimeLeft` when it reads 1, so a permanent aura never flashes a `0 s` countdown
+/// while waiting for a duration packet that is never coming.
+///
+/// **The one inference.** When the catalog cannot resolve the spell at all, the reference leaves
+/// `+0xc` holding whatever the record's previous occupant left there (its early-outs at `0x4e4533`/
+/// `0x4e4550` skip the write) — stale memory, not a mechanism. We answer from the only evidence we
+/// still have: no expiry stamp joined ⇒ nothing finite to display. A catalog miss already costs the
+/// aura its icon and name, so this only decides whether a nameless icon also shows `0 s`.
+fn until_cancelled(
+    display: Option<&benilla_formats::SpellDisplay>,
+    duration_row: Option<&benilla_formats::SpellDuration>,
+    cancelable: bool,
+    expiration_time: f64,
+) -> bool {
+    let Some(d) = display else {
+        return expiration_time == 0.0;
+    };
+    let permanent = match duration_row {
+        Some(row) => row.base_ms < 0 && row.per_level_ms <= 0,
+        // No row — a `DurationIndex` that is negative, out of range, or resolves to nothing. The
+        // reference funnels all three into the same `mov ecx,1` at `0x4e4580`.
+        None => true,
+    };
+    permanent
+        || (!cancelable
+            && d.effects
+                .iter()
+                .any(|e| matches!(e, 0x23 | 0x77 | 0x80 | 0x81)))
+}
 
 /// The reference's aura display filter (decisions 0268 + 0417): an aura is shown iff its spell is
 /// *not* flagged never-display (`SPELL_ATTR_DO_NOT_DISPLAY` / `SPELL_ATTR_EX_NO_AURA_ICON`, via
@@ -480,6 +540,9 @@ fn feed_auras(
 
     let bevy_now = time.elapsed_secs_f64();
     let catalog = spells.as_ref().map(|s| &s.catalog);
+    // `SpellDuration.dbc`, for the cache record's `untilCancelled` flag ([`until_cancelled`]) — the
+    // same catalog the `$d` tooltip token resolves against, so nothing new is loaded for this.
+    let spell_durations = spells.as_ref().map(|s| &s.durations);
     let occupied: Vec<UnitAuraSlot> = store.0.unit_auras().collect();
     // The reference's DISPLAY FILTER (byte-verified sites `0x4e42b6`–`0x4e42c8`; decisions
     // 0268 + 0385, and 0417 for the target frame): a slot whose spell carries
@@ -531,6 +594,14 @@ fn feed_auras(
                 expiration_time,
                 helpful: c.slot < UNIT_AURA_POSITIVE_SLOTS,
                 cancelable: c.flags & AURA_FLAG_CANCELABLE != 0,
+                until_cancelled: until_cancelled(
+                    display,
+                    display.and_then(|d| spell_durations.and_then(|c| c.get(d.duration_index))),
+                    c.flags & AURA_FLAG_CANCELABLE != 0,
+                    expiration_time,
+                ),
+                channeled: display
+                    .is_some_and(|d| d.attributes_ex & SPELL_ATTR_EX_IS_CHANNELED != 0),
             }
         })
         .collect();
@@ -678,8 +749,9 @@ fn feed_auras(
     if changed {
         script.fire_event("UNIT_AURA", vec![ScriptValue::Str("player".into())]);
         // The reference's own event for the same rebuild — PLAYER_AURAS_CHANGED, no args — which
-        // the verbatim-transcribed 1.12 frames register (MiniMapTrackingFrame). Fired beside the
-        // Era-shaped UNIT_AURA the adapted BuffFrame listens on: one rebuild, both dialects.
+        // the verbatim-transcribed 1.12 frames register: MiniMapTrackingFrame, the buff bar since
+        // it came onto the `GetPlayerBuff` family, and every corpus aura addon. Fired beside the
+        // Era-shaped UNIT_AURA the unit frames listen on: one rebuild, both dialects.
         script.fire_event("PLAYER_AURAS_CHANGED", vec![]);
     }
     if pet_changed {
@@ -1165,5 +1237,75 @@ mod tests {
             ),
             "activePlayer.CHARMEDBY != 0 → no buffs on anyone"
         );
+    }
+
+    /// [`until_cancelled`] — `GetPlayerBuff`'s second return, against the two clauses the reference
+    /// derives it from (`0x4e452e`-`0x4e45c5`). Every case here is one the corpus reads as a
+    /// **number** compared to `1` (`CT_BuffMod/CT_BuffFrame.lua:175,232` and three more), so a wrong
+    /// answer shows or hides a countdown rather than erroring.
+    #[test]
+    fn until_cancelled_follows_the_duration_row_and_the_area_aura_override() {
+        use benilla_formats::{SpellDisplay, SpellDuration};
+
+        let row = |base_ms: i32, per_level_ms: i32| SpellDuration {
+            base_ms,
+            per_level_ms,
+            max_ms: base_ms,
+        };
+        // The shapes the shipped file actually holds (asserted on the real DBC in
+        // `benilla_formats::spells::duration`'s tests): row 21 `{-1, 0}` = permanent, row 30
+        // `{1_800_000, 0}` = Frost Armor's 30 minutes, row 427 `{-600_000, 60_000}` = the one that
+        // makes this a TWO-field test, since a negative base alone is not permanence.
+        let permanent_row = row(-1, 0);
+        let timed_row = row(1_800_000, 0);
+        let scaling_row = row(-600_000, 60_000);
+
+        let spell = |effects: [u32; 3]| SpellDisplay {
+            effects,
+            ..SpellDisplay::default()
+        };
+        let ordinary = spell([6, 0, 0]);
+        // 0x23 = the persistent-area-aura effect, one of the four in the override set.
+        let area = spell([0x23, 0, 0]);
+
+        // Clause 1 — the DBC duration row decides, cancelable or not.
+        assert!(!until_cancelled(
+            Some(&ordinary),
+            Some(&timed_row),
+            true,
+            0.0
+        ));
+        assert!(!until_cancelled(
+            Some(&ordinary),
+            Some(&timed_row),
+            false,
+            0.0
+        ));
+        assert!(until_cancelled(
+            Some(&ordinary),
+            Some(&permanent_row),
+            true,
+            0.0
+        ));
+        assert!(
+            !until_cancelled(Some(&ordinary), Some(&scaling_row), true, 0.0),
+            "a negative base with a positive per-level term is a SCALING duration, not permanence"
+        );
+        // No row at all is the reference's `mov ecx,1` branch — permanent.
+        assert!(until_cancelled(Some(&ordinary), None, true, 0.0));
+
+        // Clause 2 — the area-aura override applies ONLY to a non-cancelable aura (`test
+        // [edi+0xa],0x1; jne` returns early at 0x4e4588). This asymmetry is the whole clause: the
+        // same spell answers differently depending on the wire's cancelable nibble.
+        assert!(until_cancelled(Some(&area), Some(&timed_row), false, 0.0));
+        assert!(
+            !until_cancelled(Some(&area), Some(&timed_row), true, 0.0),
+            "a CANCELABLE aura skips the effect scan entirely"
+        );
+
+        // The stated inference: the catalog cannot resolve the spell, so answer from the joined
+        // expiry — the only evidence left.
+        assert!(until_cancelled(None, None, false, 0.0));
+        assert!(!until_cancelled(None, None, false, 1234.0));
     }
 }

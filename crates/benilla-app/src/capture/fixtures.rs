@@ -346,10 +346,10 @@ pub(super) fn seed_ui_fixture(
             // frames — the window's OnUpdate polls, flag-guarded, exactly once).
             if let Some(s) = script.as_mut() {
                 if let Err(e) = s.run(
-                    "BenillaBankFrame:SetScript(\"OnUpdate\", function()\n\
-                         if not benillaBankPopoutDone and C_Container.GetContainerNumSlots(5) > 0 then\n\
+                    "BankFrame:SetScript(\"OnUpdate\", function()\n\
+                         if not benillaBankPopoutDone and GetContainerNumSlots(5) > 0 then\n\
                              benillaBankPopoutDone = 1\n\
-                             BenillaBankBagButton_OnClick(getglobal(\"BenillaBankBagButton1\"))\n\
+                             BenillaBankBagButton_OnClick(getglobal(\"BankBagButton1\"))\n\
                          end\n\
                      end)",
                 ) {
@@ -866,7 +866,7 @@ pub(super) fn seed_ui_fixture(
             // Open the window (the C binding's path). The feed pushes on the following frames of
             // the settle window; OnShow + the UNIT_* events repaint exactly as live.
             if let Some(s) = script.as_mut() {
-                if let Err(e) = s.run("ToggleCharacter(\"BenillaPaperDollFrame\")") {
+                if let Err(e) = s.run("ToggleCharacter(\"PaperDollFrame\")") {
                     warn!("capture: ui-char seed failed to open the window: {e}");
                 }
             }
@@ -1138,7 +1138,7 @@ pub(super) fn seed_ui_fixture(
             // opaque-gray selection highlight (ctor 0xFF606060) under the glyphs AND the white
             // caret at the selection's end — the whole text-UI overlay stack in one golden.
             // …then pin the hover-revealed chrome: in-game the tab + the black window textures
-            // follow the OS cursor (BenillaFCF_OnUpdate), which a headless capture can't hover —
+            // follow the OS cursor (FCF_OnUpdate), which a headless capture can't hover —
             // replace the OnUpdate with a fixed-reveal one so the golden also locks the window
             // tint (chat-cache COLOR 0 0 0) and the text-sized tab (BenillaFCF_TabResize, which
             // must keep retrying until the label's measure lands).
@@ -1261,7 +1261,7 @@ pub(super) fn seed_ui_fixture(
 }
 
 /// Seed + open the backpack window with a fixed item set — shared by the `Bag` and `Tooltip`
-/// fixtures. The bag is a standalone addon (no `ShowUIPanel` path): drive the `C_Container` snapshot
+/// fixtures. The bag is a standalone addon (no `ShowUIPanel` path): drive the container snapshot
 /// and purse directly, then open and paint. The feed (`crate::ui_items`) leaves bag 0 alone when
 /// there is no `SelfPlayer` (net is disabled in capture), so this manual snapshot is not clobbered.
 fn seed_bag_window(

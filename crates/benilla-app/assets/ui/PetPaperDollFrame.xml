@@ -7,7 +7,7 @@
 
         **Its own top-level file, loaded straight after `CharacterFrame.xml`** — the SkillFrame.xml
         precedent: this engine reads no XML `parent=` attribute, so a page ships as a sibling pinned
-        to `BenillaCharacterFrame`'s TOPLEFT by name, and `BENILLA_CHARACTERFRAME_SUBFRAMES` (which
+        to `CharacterFrame`'s TOPLEFT by name, and `BENILLA_CHARACTERFRAME_SUBFRAMES` (which
         this page joins as entry 2) is what hides it when the whole window closes.
 
         **Almost none of the page's Lua lives here, and that is the point.** The reference's own
@@ -19,10 +19,10 @@
         l.470-473/l.541-544 — the pet page has no ranged rows, so the ref no-ops rather than
         nil-indexing). So this file adds only what is genuinely pet-only: the stats/resistances pair
         that reads the pet's own frames, the XP bar, loyalty, training points and the diet icon.
-        `prefix` here is `"BenillaPet"`, so `prefix.."ArmorFrame"` resolves `BenillaPetArmorFrame`,
-        exactly as `"BenillaCharacter"` resolves the sibling page's.
+        `prefix` here is `"Pet"`, so `prefix.."ArmorFrame"` resolves `PetArmorFrame`,
+        exactly as `"Character"` resolves the sibling page's.
 
-        **The tab is conditional, and `BenillaPetTab_Update` is the whole mechanism** (ref
+        **The tab is conditional, and `PetTab_Update` is the whole mechanism** (ref
         `PetPaperDollFrame.lua:189-198`): no pet UI ⇒ tab 2 hides and tab 3 re-anchors onto tab 2's
         LEFT, closing the gap; a pet ⇒ tab 2 shows and tab 3 goes back to the -16 chain. Ours is the
         ref's arithmetic unchanged; only WHICH page tab 3 is differs (Skills here, Reputation there —
@@ -55,7 +55,7 @@
             below dropped their existence guards. The ref's OWN `if ( UnitCreatureFamily("pet") )`
             guard stays — nil is still reachable (a template with no family; the creature query not
             yet answered) and a blank level line is the ref's answer to it.
-          - `BenillaPetPaperDollFrame_SetResistances` reads the school ids from the shared
+          - `PetPaperDollFrame_SetResistances` reads the school ids from the shared
             `BENILLA_MAGICRES_IDS` table where the ref reads each frame's own `id=` attr
             (`frame:GetID()`, ref l.112). Same five ids in the same order (6/2/3/4/5); the table is
             what the sibling page already uses, and one convention across the two pages beats
@@ -90,12 +90,13 @@
         -- page's OnLoad carries the why: this engine's template expansion APPENDS children, so a
         -- re-declared $parentLabel makes a second anchorless FontString instead of merging).
         -- `SetTextStatusBarTextPrefix(…, XP)` is dropped with the bar's numerals (header).
-        function BenillaPetPaperDollFrame_OnLoad(frame)
-            getglobal("BenillaPetAttackFrameLabel"):SetText(ATTACK_COLON)
-            getglobal("BenillaPetDamageFrameLabel"):SetText(DAMAGE_COLON)
-            getglobal("BenillaPetAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
-            getglobal("BenillaPetDefenseFrameLabel"):SetText(DEFENSE_COLON)
-            getglobal("BenillaPetArmorFrameLabel"):SetText(ARMOR_COLON)
+        function PetPaperDollFrame_OnLoad()
+            local frame = this
+            getglobal("PetAttackFrameLabel"):SetText(ATTACK_COLON)
+            getglobal("PetDamageFrameLabel"):SetText(DAMAGE_COLON)
+            getglobal("PetAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
+            getglobal("PetDefenseFrameLabel"):SetText(DEFENSE_COLON)
+            getglobal("PetArmorFrameLabel"):SetText(ARMOR_COLON)
             frame:RegisterEvent("PET_UI_UPDATE")
             frame:RegisterEvent("PET_BAR_UPDATE")
             frame:RegisterEvent("PET_UI_CLOSE")
@@ -113,55 +114,56 @@
             frame:RegisterEvent("UNIT_DEFENSE")
             frame:RegisterEvent("UNIT_ATTACK")
             frame:RegisterEvent("UNIT_PET_TRAINING_POINTS")
-            BenillaPetTab_Update()
+            PetTab_Update()
         end
 
         -- ref PetPaperDollFrame_OnEvent (l.31-48), all four arms. NOTE the shape: unlike the
         -- character page, this one does NOT gate on visibility — the first arm has to run while the
         -- page is HIDDEN, because that is what keeps the tab itself in step with whether a pet
         -- exists. Only the last arm (a plain "the pet's numbers moved") is unit-token gated.
-        function BenillaPetPaperDollFrame_OnEvent(frame)
+        function PetPaperDollFrame_OnEvent()
+            local frame = this
             if event == "PET_UI_UPDATE" or event == "PET_BAR_UPDATE"
                 or (event == "UNIT_PET" and arg1 == "player") then
                 -- The pet left while its own page was open: close the window (ToggleCharacter on
                 -- the visible page is the ref's own way of saying HideUIPanel), then re-fit the tab.
                 if frame:IsVisible() and not HasPetUI() then
-                    ToggleCharacter("BenillaPetPaperDollFrame")
+                    ToggleCharacter("PetPaperDollFrame")
                 end
-                BenillaPetTab_Update()
-                BenillaPetPaperDollFrame_Update()
+                PetTab_Update()
+                PetPaperDollFrame_Update()
             elseif event == "PET_UI_CLOSE" then
                 if frame:IsVisible() then
-                    ToggleCharacter("BenillaPetPaperDollFrame")
+                    ToggleCharacter("PetPaperDollFrame")
                 end
-                BenillaPetTab_Update()
+                PetTab_Update()
             elseif event == "UNIT_PET_EXPERIENCE" then
-                BenillaPetExpBar_Update()
+                PetExpBar_Update()
             elseif arg1 == "pet" then
-                BenillaPetPaperDollFrame_Update()
+                PetPaperDollFrame_Update()
             end
         end
 
         -- ref PetPaperDollFrame_OnShow/_OnHide (l.50-60): the window's ONE name line is shared —
         -- the pet page borrows it and puts the player's back on the way out.
-        function BenillaPetPaperDollFrame_OnShow()
-            getglobal("BenillaCharacterNameText"):Hide()
-            local petName = getglobal("BenillaPetNameText")
+        function PetPaperDollFrame_OnShow()
+            getglobal("CharacterNameText"):Hide()
+            local petName = getglobal("PetNameText")
             petName:Show()
             petName:SetText(UnitName("pet"))
-            BenillaPetPaperDollFrame_Update()
+            PetPaperDollFrame_Update()
         end
 
-        function BenillaPetPaperDollFrame_OnHide()
-            getglobal("BenillaCharacterNameText"):Show()
-            getglobal("BenillaPetNameText"):Hide()
+        function PetPaperDollFrame_OnHide()
+            getglobal("CharacterNameText"):Show()
+            getglobal("PetNameText"):Hide()
         end
 
         -- ref PetPaperDollFrame_Update (l.62-94). The `hasPetUI` early-out is load-bearing, not
         -- defensive: every setter below reads the "pet" token, and with no pet those all answer the
         -- absent shape — repainting from it would blank a page the ref leaves showing its last state
         -- until the tab itself goes.
-        function BenillaPetPaperDollFrame_Update()
+        function PetPaperDollFrame_Update()
             local hasPetUI, canGainXP = HasPetUI()
             if not hasPetUI then return end
             -- ref l.67 `PetModelFrame:SetUnit("pet")` — no analogue: the app's `petdoll` booth
@@ -174,34 +176,34 @@
             -- the binding twice for one answer.
             local family = UnitCreatureFamily("pet")
             if family then
-                getglobal("BenillaPetLevelText"):SetText(
+                getglobal("PetLevelText"):SetText(
                     format(UNIT_LEVEL_TEMPLATE, UnitLevel("pet")) .. " " .. family)
             end
-            getglobal("BenillaPetLoyaltyText"):SetText(GetPetLoyalty())
-            BenillaPetExpBar_Update()
-            BenillaPetPaperDollFrame_SetResistances()
-            BenillaPetPaperDollFrame_SetStats()
-            BenillaPaperDollFrame_SetDamage("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetRangedDamage("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetAttackPower("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetRangedAttackPower("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetArmor("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetAttackBothHands("pet", "BenillaPet")
-            BenillaPaperDollFrame_SetDefense("pet", "BenillaPet")
+            getglobal("PetLoyaltyText"):SetText(GetPetLoyalty())
+            PetExpBar_Update()
+            PetPaperDollFrame_SetResistances()
+            PetPaperDollFrame_SetStats()
+            PaperDollFrame_SetDamage("pet", "Pet")
+            PaperDollFrame_SetRangedDamage("pet", "Pet")
+            PaperDollFrame_SetAttackPower("pet", "Pet")
+            PaperDollFrame_SetRangedAttackPower("pet", "Pet")
+            PaperDollFrame_SetArmor("pet", "Pet")
+            PaperDollFrame_SetAttackBothHands("pet", "Pet")
+            PaperDollFrame_SetDefense("pet", "Pet")
 
             -- The hunter-only block (ref l.83-93): the diet icon and the training-point line are
             -- the two things a warlock's minion never has. `canGainXP` is HasPetUI's second return.
             if canGainXP then
-                getglobal("BenillaPetPaperDollPetInfo"):Show()
+                getglobal("PetPaperDollPetInfo"):Show()
                 local totalPoints, spent = GetPetTrainingPoints()
-                local text = getglobal("BenillaPetTrainingPointText")
+                local text = getglobal("PetTrainingPointText")
                 text:SetText(totalPoints - spent)
                 text:Show()
-                getglobal("BenillaPetTrainingPointLabel"):Show()
+                getglobal("PetTrainingPointLabel"):Show()
             else
-                getglobal("BenillaPetPaperDollPetInfo"):Hide()
-                getglobal("BenillaPetTrainingPointText"):Hide()
-                getglobal("BenillaPetTrainingPointLabel"):Hide()
+                getglobal("PetPaperDollPetInfo"):Hide()
+                getglobal("PetTrainingPointText"):Hide()
+                getglobal("PetTrainingPointLabel"):Hide()
             end
         end
 
@@ -209,11 +211,11 @@
         -- version: the pet's has no resistance-quality subtext (no `RESISTANCE_TOOLTIP_SUBTEXT`
         -- line at all) and colours the NUMBER off its own sign rather than off pos-vs-neg
         -- magnitude — two real differences in the reference, transcribed rather than unified.
-        function BenillaPetPaperDollFrame_SetResistances()
+        function PetPaperDollFrame_SetResistances()
             for i = 1, BENILLA_NUM_PET_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
-                local text = getglobal("BenillaPetMagicResText" .. i)
-                local frame = getglobal("BenillaPetMagicResFrame" .. i)
+                local text = getglobal("PetMagicResText" .. i)
+                local frame = getglobal("PetMagicResFrame" .. i)
                 local base, resistance, positive, negative = UnitResistance("pet", resistId)
                 frame.tooltip = getglobal("RESISTANCE" .. resistId .. "_NAME")
                 -- Resistances can be negative: red below zero, green above, plain white at zero.
@@ -241,11 +243,11 @@
         -- _SetStats with the pet's own frame names and the "pet" token (the ref carries the same
         -- duplication; unifying them would mean inventing a prefix the reference's own
         -- `PetStatFrame`/`CharacterStatFrame` naming doesn't share).
-        function BenillaPetPaperDollFrame_SetStats()
+        function PetPaperDollFrame_SetStats()
             for i = 1, BENILLA_NUM_PET_STATS do
-                local label = getglobal("BenillaPetStatFrame" .. i .. "Label")
-                local text = getglobal("BenillaPetStatFrame" .. i .. "StatText")
-                local frame = getglobal("BenillaPetStatFrame" .. i)
+                local label = getglobal("PetStatFrame" .. i .. "Label")
+                local text = getglobal("PetStatFrame" .. i .. "StatText")
+                local frame = getglobal("PetStatFrame" .. i)
                 local statName = getglobal("SPELL_STAT" .. (i - 1) .. "_NAME")
                 label:SetText(statName .. ":")
                 local stat, effectiveStat, posBuff, negBuff = UnitStat("pet", i)
@@ -279,9 +281,9 @@
 
         -- ref PetExpBar_Update (l.183-187). `min(0, currXP)` is the ref's own; XP can't be negative,
         -- so it is just 0 — quoted, not simplified.
-        function BenillaPetExpBar_Update()
+        function PetExpBar_Update()
             local currXP, nextXP = GetPetExperience()
-            local bar = getglobal("BenillaPetPaperDollFrameExpBar")
+            local bar = getglobal("PetPaperDollFrameExpBar")
             bar:SetMinMaxValues(math.min(0, currXP), nextXP)
             bar:SetValue(currXP)
         end
@@ -289,27 +291,27 @@
         -- ref PetTab_Update (l.189-198) — the conditional tab, whole. The re-anchor is what keeps
         -- the row gapless: with tab 2 hidden, tab 3 sits at tab 2's own LEFT (i.e. exactly where
         -- tab 2 would have started) instead of -16 past its RIGHT.
-        function BenillaPetTab_Update()
-            local tab2 = getglobal("BenillaCharacterFrameTab2")
-            local tab3 = getglobal("BenillaCharacterFrameTab3")
+        function PetTab_Update()
+            local tab2 = getglobal("CharacterFrameTab2")
+            local tab3 = getglobal("CharacterFrameTab3")
             -- Nil-guarded like CharacterFrame_ShowSubFrame's own loop: a test subset may load this
             -- file without the window's tab row.
             if not tab2 or not tab3 then return end
             if not HasPetUI() then
                 tab2:Hide()
-                tab3:SetPoint("LEFT", "BenillaCharacterFrameTab2", "LEFT", 0, 0)
+                tab3:SetPoint("LEFT", "CharacterFrameTab2", "LEFT", 0, 0)
             else
                 tab2:Show()
-                tab3:SetPoint("LEFT", "BenillaCharacterFrameTab2", "RIGHT", -16, 0)
+                tab3:SetPoint("LEFT", "CharacterFrameTab2", "RIGHT", -16, 0)
             end
         end
     ]]></Script>
 
-    <Frame name="BenillaPetPaperDollFrame" enableMouse="true" parent="BenillaCharacterFrame" hidden="true" id="2">
+    <Frame name="PetPaperDollFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="2">
         <!-- The real 384×512 page (ref l.4, `setAllPoints="true"`); pinned to the window's TOPLEFT
              by name, the SkillFrame.xml precedent (no cross-file `parent=` in this engine). -->
         <Size><AbsDimension x="384" y="512"/></Size>
-        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFrame" relativePoint="TOPLEFT"/></Anchors>
+        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFrame" relativePoint="TOPLEFT"/></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="75"/></HitRectInsets>
         <Layers>
             <!-- The quadrant background (ref l.9-57): the "General" top halves every
@@ -334,28 +336,28 @@
                 </Texture>
                 <!-- The pet's name (ref l.58-69), sitting exactly where the window's own player
                      name line does — the two swap on this page's Show/Hide. -->
-                <FontString name="BenillaPetNameText" inherits="GameFontHighlight">
+                <FontString name="PetNameText" inherits="GameFontHighlight">
                     <Size><AbsDimension x="109" y="16"/></Size>
                     <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="232"/></Offset></Anchor></Anchors>
                 </FontString>
                 <!-- "Level %d <Family>" (ref l.70-78) and the loyalty level under it (l.79-87). -->
-                <FontString name="BenillaPetLevelText" inherits="GameFontNormalSmall">
+                <FontString name="PetLevelText" inherits="GameFontNormalSmall">
                     <Anchors>
-                        <Anchor point="TOP" relativeTo="BenillaPetNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
+                        <Anchor point="TOP" relativeTo="PetNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
-                <FontString name="BenillaPetLoyaltyText" inherits="GameFontNormalSmall">
+                <FontString name="PetLoyaltyText" inherits="GameFontNormalSmall">
                     <Anchors>
-                        <Anchor point="TOP" relativeTo="BenillaPetLevelText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                        <Anchor point="TOP" relativeTo="PetLevelText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
                 <!-- Unspent training points (ref l.88-105) — shown for hunter pets only. -->
-                <FontString name="BenillaPetTrainingPointText" inherits="GameFontHighlightSmall">
+                <FontString name="PetTrainingPointText" inherits="GameFontHighlightSmall">
                     <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-135" y="86"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaPetTrainingPointLabel" inherits="GameFontNormalSmall" text="TRAINING_POINTS">
+                <FontString name="PetTrainingPointLabel" inherits="GameFontNormalSmall" text="TRAINING_POINTS">
                     <Anchors>
-                        <Anchor point="RIGHT" relativeTo="BenillaPetTrainingPointText" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
+                        <Anchor point="RIGHT" relativeTo="PetTrainingPointText" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
             </Layer>
@@ -367,19 +369,19 @@
             <!-- No `enableMouse`: the ref's bar takes the mouse only to show its numerals on hover
                  (l.166-172), and those are the deferral above — a mouse-enabled bar with nothing to
                  show would just eat clicks. It comes back with the numerals. -->
-            <StatusBar name="BenillaPetPaperDollFrameExpBar">
+            <StatusBar name="PetPaperDollFrameExpBar">
                 <Size><AbsDimension x="319" y="11"/></Size>
                 <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="23" y="105"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
-                        <Texture name="BenillaPetPaperDollXPBar1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                        <Texture name="PetPaperDollXPBar1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
                             <Size><AbsDimension x="160" y="13"/></Size>
                             <Anchors><Anchor point="TOPLEFT"/></Anchors>
                             <TexCoords left="0.203125" right="0.8046875" top="0.2890625" bottom="0.33984375"/>
                         </Texture>
                         <Texture file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
                             <Size><AbsDimension x="159" y="13"/></Size>
-                            <Anchors><Anchor point="LEFT" relativeTo="BenillaPetPaperDollXPBar1" relativePoint="RIGHT"/></Anchors>
+                            <Anchors><Anchor point="LEFT" relativeTo="PetPaperDollXPBar1" relativePoint="RIGHT"/></Anchors>
                             <TexCoords left="0.203125" right="0.8046875" top="0.2890625" bottom="0.33984375"/>
                         </Texture>
                     </Layer>
@@ -390,14 +392,14 @@
                     <!-- The ref's OnEvent is the TextStatusBar CVar hook plus PetExpBar_Update; only
                          the latter has anything to do here, and the page's own UNIT_PET_EXPERIENCE
                          arm already drives it, so no per-bar registration ships. -->
-                    <OnLoad>BenillaPetExpBar_Update()</OnLoad>
+                    <OnLoad>PetExpBar_Update()</OnLoad>
                 </Scripts>
             </StatusBar>
 
             <!-- The model pane (ref PlayerModel PetModelFrame, l.177-244): 318×224 at TOPLEFT
                  (25,-78) — wider than the character page's 233 because there is no equipment column
                  beside it. A plain Frame sampling the `petdoll` booth bake (header). -->
-            <Frame name="BenillaPetModelFrame">
+            <Frame name="PetModelFrame">
                 <Size><AbsDimension x="318" y="224"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="25" y="-78"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -423,26 +425,26 @@
                     <!-- Rotate buttons (ref l.201-242): 35×35. NOTE the ref anchors the left one to
                          the PAGE, not to the pane (l.206) — (23,-76), two pixels up and left of the
                          pane's own corner — and the right one chains off its TOPRIGHT. -->
-                    <Button name="BenillaPetModelFrameRotateLeftButton">
+                    <Button name="PetModelFrameRotateLeftButton">
                         <Size><AbsDimension x="35" y="35"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-76"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-76"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
                         <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                         <Scripts>
                             <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                            <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("BenillaPetModelFrame"))</OnClick>
+                            <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("PetModelFrame"))</OnClick>
                         </Scripts>
                     </Button>
-                    <Button name="BenillaPetModelFrameRotateRightButton">
+                    <Button name="PetModelFrameRotateRightButton">
                         <Size><AbsDimension x="35" y="35"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
                         <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                         <Scripts>
                             <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
-                            <OnClick>BenillaPaperDollModel_RotateRight(getglobal("BenillaPetModelFrame"))</OnClick>
+                            <OnClick>BenillaPaperDollModel_RotateRight(getglobal("PetModelFrame"))</OnClick>
                         </Scripts>
                     </Button>
                 </Frames>
@@ -467,10 +469,10 @@
                  (its tooltip lists what it eats), not a happiness readout; the happiness face that
                  does move lives on the pet unit frame (decision 1005/0990). Shown for hunter pets
                  only. -->
-            <Frame name="BenillaPetPaperDollPetInfo">
+            <Frame name="PetPaperDollPetInfo">
                 <Size><AbsDimension x="24" y="23"/></Size>
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="BenillaPetModelFrameRotateLeftButton" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="PetModelFrameRotateLeftButton" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Layers>
                     <Layer level="BACKGROUND">
@@ -505,7 +507,7 @@
 
             <!-- The page's own Close button (ref PetPaperDollCloseButton, l.276-292) — the panel
                  button art/size/font inline, since no UIPanelButtonTemplate ships (header). -->
-            <Button name="BenillaPetPaperDollCloseButton" text="CLOSE">
+            <Button name="PetPaperDollCloseButton" text="CLOSE">
                 <Size><AbsDimension x="80" y="22"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="305" y="-422"/></Offset></Anchor></Anchors>
                 <NormalFont inherits="GameFontNormal"/>
@@ -519,7 +521,7 @@
                          cross-file parenting, so the page is not really the window's child (header).
                          CLOSE is the ref's own literal `text="CLOSE"` attribute — the GlobalStrings
                          key, resolved by the loader's text lookup like every other one here. -->
-                    <OnClick>HideUIPanel(getglobal("BenillaCharacterFrame"))</OnClick>
+                    <OnClick>HideUIPanel(getglobal("CharacterFrame"))</OnClick>
                 </Scripts>
             </Button>
 
@@ -527,7 +529,7 @@
                  (67,-300), two 114×78 stat-background plates side by side. The pet's plate is the
                  SIMPLE two-column one — the character page's is three stacked 3-piece columns
                  because it also carries a ranged block, which a pet has none of. -->
-            <Frame name="BenillaPetAttributesFrame">
+            <Frame name="PetAttributesFrame">
                 <Size><AbsDimension x="230" y="78"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="67" y="-300"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -547,51 +549,51 @@
                 <Frames>
                     <!-- The 5 primaries (ref l.335-419): TOPLEFT (6,-5), chained BOTTOMLEFT with a
                          1px gap. Labels are the template's $parentLabel, filled by _SetStats. -->
-                    <Frame name="BenillaPetStatFrame1" inherits="BenillaStatRowTemplate">
+                    <Frame name="PetStatFrame1" inherits="BenillaStatRowTemplate">
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
-                            <OnEnter>BenillaPaperDollStatTooltip(self, "STRENGTH", "pet")</OnEnter>
+                            <OnEnter>PaperDollStatTooltip("pet", "STRENGTH")</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetStatFrame2" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetStatFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetStatFrame2" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetStatFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
-                            <OnEnter>BenillaPaperDollStatTooltip(self, "AGILITY", "pet")</OnEnter>
+                            <OnEnter>PaperDollStatTooltip("pet", "AGILITY")</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetStatFrame3" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetStatFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetStatFrame3" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetStatFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
-                            <OnEnter>BenillaPaperDollStatTooltip(self, "STAMINA", "pet")</OnEnter>
+                            <OnEnter>PaperDollStatTooltip("pet", "STAMINA")</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetStatFrame4" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetStatFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetStatFrame4" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetStatFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
-                            <OnEnter>BenillaPaperDollStatTooltip(self, "INTELLECT", "pet")</OnEnter>
+                            <OnEnter>PaperDollStatTooltip("pet", "INTELLECT")</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetStatFrame5" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetStatFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetStatFrame5" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetStatFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
-                            <OnEnter>BenillaPaperDollStatTooltip(self, "SPIRIT", "pet")</OnEnter>
+                            <OnEnter>PaperDollStatTooltip("pet", "SPIRIT")</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
                     <!-- The right-hand column (ref l.420-514): attack rating, attack power, damage,
                          defense, armor — the second plate's own chain, rooted at (122,-5) of the
                          attributes frame. -->
-                    <Frame name="BenillaPetAttackFrame" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetAttributesFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="122" y="-5"/></Offset></Anchor></Anchors>
+                    <Frame name="PetAttackFrame" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetAttributesFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="122" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <!-- ref l.429-433: the pet's attack row shows the BARE tooltip title, with
@@ -605,8 +607,8 @@
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetAttackPowerFrame" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetAttackPowerFrame" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <OnEnter>
@@ -618,19 +620,19 @@
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetDamageFrame" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetDamageFrame" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <!-- ref l.468-470: the pet's damage row reuses the CHARACTER damage
                                  hover verbatim — it reads `self.damage`/`self.dps`, which
                                  _SetDamage filled with the pet's numbers. -->
-                            <OnEnter>BenillaCharacterDamageFrame_OnEnter(self)</OnEnter>
+                            <OnEnter>CharacterDamageFrame_OnEnter()</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetDefenseFrame" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetDamageFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetDefenseFrame" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetDamageFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <OnEnter>
@@ -641,8 +643,8 @@
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Frame>
-                    <Frame name="BenillaPetArmorFrame" inherits="BenillaStatRowTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPetDefenseFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Frame name="PetArmorFrame" inherits="BenillaStatRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="PetDefenseFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <OnEnter>
@@ -662,72 +664,72 @@
                  297, because the pet page's wider model pane pushes it out. The five icons carry
                  their own texcoords into the shared ResistanceIcons sheet, in the ref's own school
                  order (arcane/fire/nature/frost/shadow = BENILLA_MAGICRES_IDS). -->
-            <Frame name="BenillaPetResistanceFrame">
+            <Frame name="PetResistanceFrame">
                 <Size><AbsDimension x="32" y="160"/></Size>
                 <Anchors>
-                    <Anchor point="TOPRIGHT" relativeTo="BenillaPetPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="347" y="-77"/></Offset></Anchor>
+                    <Anchor point="TOPRIGHT" relativeTo="PetPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="347" y="-77"/></Offset></Anchor>
                 </Anchors>
                 <Frames>
-                    <Frame name="BenillaPetMagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaPetResistanceFrame" relativePoint="TOP"/></Anchors>
+                    <Frame name="PetMagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="PetResistanceFrame" relativePoint="TOP"/></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                     <TexCoords left="0" right="1.0" top="0.2265625" bottom="0.33984375"/>
                                 </Texture>
-                                <FontString name="BenillaPetMagicResText1" inherits="GameFontHighlightSmall" text="X">
+                                <FontString name="PetMagicResText1" inherits="GameFontHighlightSmall" text="X">
                                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
                         </Layers>
                     </Frame>
-                    <Frame name="BenillaPetMagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaPetMagicResFrame1" relativePoint="BOTTOM"/></Anchors>
+                    <Frame name="PetMagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="PetMagicResFrame1" relativePoint="BOTTOM"/></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                     <TexCoords left="0" right="1.0" top="0" bottom="0.11328125"/>
                                 </Texture>
-                                <FontString name="BenillaPetMagicResText2" inherits="GameFontHighlightSmall" text="X">
+                                <FontString name="PetMagicResText2" inherits="GameFontHighlightSmall" text="X">
                                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
                         </Layers>
                     </Frame>
-                    <Frame name="BenillaPetMagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaPetMagicResFrame2" relativePoint="BOTTOM"/></Anchors>
+                    <Frame name="PetMagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="PetMagicResFrame2" relativePoint="BOTTOM"/></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                     <TexCoords left="0" right="1.0" top="0.11328125" bottom="0.2265625"/>
                                 </Texture>
-                                <FontString name="BenillaPetMagicResText3" inherits="GameFontHighlightSmall" text="X">
+                                <FontString name="PetMagicResText3" inherits="GameFontHighlightSmall" text="X">
                                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
                         </Layers>
                     </Frame>
-                    <Frame name="BenillaPetMagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaPetMagicResFrame3" relativePoint="BOTTOM"/></Anchors>
+                    <Frame name="PetMagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="PetMagicResFrame3" relativePoint="BOTTOM"/></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                     <TexCoords left="0" right="1.0" top="0.33984375" bottom="0.453125"/>
                                 </Texture>
-                                <FontString name="BenillaPetMagicResText4" inherits="GameFontHighlightSmall" text="X">
+                                <FontString name="PetMagicResText4" inherits="GameFontHighlightSmall" text="X">
                                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
                         </Layers>
                     </Frame>
-                    <Frame name="BenillaPetMagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
-                        <Anchors><Anchor point="TOP" relativeTo="BenillaPetMagicResFrame4" relativePoint="BOTTOM"/></Anchors>
+                    <Frame name="PetMagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
+                        <Anchors><Anchor point="TOP" relativeTo="PetMagicResFrame4" relativePoint="BOTTOM"/></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
                                     <TexCoords left="0" right="1.0" top="0.453125" bottom="0.56640625"/>
                                 </Texture>
-                                <FontString name="BenillaPetMagicResText5" inherits="GameFontHighlightSmall" text="X">
+                                <FontString name="PetMagicResText5" inherits="GameFontHighlightSmall" text="X">
                                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
@@ -737,10 +739,10 @@
             </Frame>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaPetPaperDollFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaPetPaperDollFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaPetPaperDollFrame_OnShow()</OnShow>
-            <OnHide>BenillaPetPaperDollFrame_OnHide()</OnHide>
+            <OnLoad>PetPaperDollFrame_OnLoad()</OnLoad>
+            <OnEvent>PetPaperDollFrame_OnEvent()</OnEvent>
+            <OnShow>PetPaperDollFrame_OnShow()</OnShow>
+            <OnHide>PetPaperDollFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

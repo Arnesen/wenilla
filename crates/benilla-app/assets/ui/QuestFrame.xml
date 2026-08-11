@@ -8,13 +8,13 @@
         real 1.12 `QuestFrame.xml`/`QuestFrameTemplates.xml` (scratchpad `ref-framexml/QuestFrame.*`;
         `file:line` cites below are into those extracted files) structurally, not just its numbers:
 
-          QUEST_GREETING → BenillaQuestGreetingPanel (SMSG_QUESTGIVER_QUEST_LIST): greeting text +
+          QUEST_GREETING → QuestGreetingPanel (SMSG_QUESTGIVER_QUEST_LIST): greeting text +
                            active/available quest title buttons (SelectActiveQuest/SelectAvailableQuest).
-          QUEST_DETAIL   → BenillaQuestDetailPanel (SMSG_QUESTGIVER_QUEST_DETAILS): title/description/
+          QUEST_DETAIL   → QuestDetailPanel (SMSG_QUESTGIVER_QUEST_DETAILS): title/description/
                            objectives + rewards on offer, Accept/Decline.
-          QUEST_PROGRESS → BenillaQuestProgressPanel (SMSG_QUESTGIVER_REQUEST_ITEMS): title, request
+          QUEST_PROGRESS → QuestProgressPanel (SMSG_QUESTGIVER_REQUEST_ITEMS): title, request
                            text, required items/money, Continue (enabled iff completable)/Goodbye.
-          QUEST_COMPLETE → BenillaQuestRewardPanel (SMSG_QUESTGIVER_OFFER_REWARD): title, reward text,
+          QUEST_COMPLETE → QuestRewardPanel (SMSG_QUESTGIVER_OFFER_REWARD): title, reward text,
                            choose reward + fixed rewards + money, Complete Quest/Cancel.
           QUEST_ITEM_UPDATE → in-place refresh of the visible panel's rows (async name landing).
           QUEST_FINISHED → hide the window (turn-in result / interaction end).
@@ -25,7 +25,7 @@
         constraint; the resolver now runs to a true change-driven fixpoint and a dedicated test
         (`child_frame_layers_regions_render_after_the_fixpoint`, `benilla-ui`) pins that a shown child
         frame's own Layers/buttons render correctly. So the ref's actual frame tree — one always-shown
-        `BenillaQuestFrame` chrome (portrait/name/close) hosting four independent child panels, each
+        `QuestFrame` chrome (portrait/name/close) hosting four independent child panels, each
         shown/hidden by its own event, each carrying its own art + a real ScrollFrame — is expressible
         again, and is what ships here. The reward/choice item grids still use a RUNTIME `SetPoint` chain
         (not a static XML relativeTo chain) for the SAME reason the quest log's rewards do
@@ -49,7 +49,7 @@
         v1 dressing follow-up"); the budget only means the scroll RANGE is generous, never that content
         is cut off — everything still resolves, scrolls, and clips correctly at whatever size it is.
 
-        Item row visuals (`BenillaQuestItemTemplate`) are UNCHANGED from before this pass — they were
+        Item row visuals (`QuestItemTemplate`) are UNCHANGED from before this pass — they were
         already a capture-verified port of the quest log's own item row shape (ring-slot art), not the
         ref's plainer inline `QuestItemTemplate` (`QuestFrameTemplates.xml` l.85-166) — kept for visual
         consistency across the quest windows, not a fidelity regression introduced here.
@@ -57,7 +57,7 @@
         Docks the left UIPanel slot (`pushable=0`, `UiPanels.xml`) exactly as before — untouched by this
         pass. The window-sound convention (decision 0090/0095/0096) and the Lua seam
         (`benilla-ui` `script/quest.rs`'s `GetTitleText`/`AcceptQuest`/`GetQuestReward`/… — untouched by
-        this pass, see that module's doc) live on the OUTER `BenillaQuestFrame` only, matching the ref's
+        this pass, see that module's doc) live on the OUTER `QuestFrame` only, matching the ref's
         own `QuestFrame_OnShow`/`OnHide` (l.284-295) — a panel switch never re-plays a kit, only the
         window opening/closing does.
 
@@ -180,40 +180,40 @@
 
         -- Per-panel resize candidates: every element that can be the LOWEST visible thing.
         BENILLA_QUEST_PANEL_WIDGETS = {
-            ["BenillaQuestGreetingScroll"] = (function()
-                local t = { "BenillaQuestGreetingText", "BenillaQuestActiveHeader", "BenillaQuestAvailableHeader" }
-                for i = 1, BENILLA_QUEST_MAX_TITLES do table.insert(t, "BenillaQuestTitleButton" .. i) end
+            ["QuestGreetingScroll"] = (function()
+                local t = { "QuestGreetingText", "QuestActiveHeader", "QuestAvailableHeader" }
+                for i = 1, BENILLA_QUEST_MAX_TITLES do table.insert(t, "QuestTitleButton" .. i) end
                 return t
             end)(),
-            ["BenillaQuestDetailScroll"] = (function()
-                local t = { "BenillaQuestDetailBody", "BenillaQuestDetailObjective", "BenillaQuestDetailRewardTitleText",
-                            "BenillaQuestDetailItemChooseText", "BenillaQuestDetailItemReceiveText" }
+            ["QuestDetailScroll"] = (function()
+                local t = { "QuestDetailBody", "QuestDetailObjective", "QuestDetailRewardTitleText",
+                            "QuestDetailItemChooseText", "QuestDetailItemReceiveText" }
                 for i = 1, BENILLA_QUEST_MAX_ITEMS do
-                    table.insert(t, "BenillaQuestDetailChoice" .. i)
-                    table.insert(t, "BenillaQuestDetailReward" .. i)
+                    table.insert(t, "QuestDetailChoice" .. i)
+                    table.insert(t, "QuestDetailReward" .. i)
                 end
-                for i = 1, 3 do table.insert(t, "BenillaQuestDetailMoneyCoin" .. i) end
+                for i = 1, 3 do table.insert(t, "QuestDetailMoneyCoin" .. i) end
                 return t
             end)(),
-            ["BenillaQuestProgressScroll"] = { "BenillaQuestProgressBody", "BenillaQuestProgressRequiredText",
-                                              "BenillaQuestProgressRequiredMoneyText",
-                                              "BenillaQuestProgressMoneyCoin1", "BenillaQuestProgressMoneyCoin2",
-                                              "BenillaQuestProgressMoneyCoin3" },
-            ["BenillaQuestRewardScroll"] = (function()
-                local t = { "BenillaQuestRewardBody", "BenillaQuestRewardRewardTitleText",
-                            "BenillaQuestRewardItemChooseText", "BenillaQuestRewardItemReceiveText" }
+            ["QuestProgressScroll"] = { "QuestProgressBody", "QuestProgressRequiredText",
+                                              "QuestProgressRequiredMoneyText",
+                                              "QuestProgressMoneyCoin1", "QuestProgressMoneyCoin2",
+                                              "QuestProgressMoneyCoin3" },
+            ["QuestRewardScroll"] = (function()
+                local t = { "QuestRewardBody", "QuestRewardRewardTitleText",
+                            "QuestRewardItemChooseText", "QuestRewardItemReceiveText" }
                 for i = 1, BENILLA_QUEST_MAX_ITEMS do
-                    table.insert(t, "BenillaQuestRewardChoice" .. i)
-                    table.insert(t, "BenillaQuestRewardReward" .. i)
+                    table.insert(t, "QuestRewardChoice" .. i)
+                    table.insert(t, "QuestRewardReward" .. i)
                 end
-                for i = 1, 3 do table.insert(t, "BenillaQuestRewardMoneyCoin" .. i) end
+                for i = 1, 3 do table.insert(t, "QuestRewardMoneyCoin" .. i) end
                 return t
             end)(),
         }
 
         BENILLA_QUEST_PANEL_SCROLLS = {
-            greeting = "BenillaQuestGreetingScroll", detail = "BenillaQuestDetailScroll",
-            progress = "BenillaQuestProgressScroll", reward = "BenillaQuestRewardScroll",
+            greeting = "QuestGreetingScroll", detail = "QuestDetailScroll",
+            progress = "QuestProgressScroll", reward = "QuestRewardScroll",
         }
 
         -- The convergence driver: while the window shows, keep re-measuring the ACTIVE panel
@@ -221,11 +221,11 @@
         -- The greeting panel's title rows fit FIRST, so the panel sum below already sees their
         -- final bottoms in this same pass.
         function BenillaQuestFrame_OnUpdate()
-            local frame = getglobal("BenillaQuestFrame")
+            local frame = getglobal("QuestFrame")
             if not frame:IsVisible() or not frame.panel then return end
             if frame.panel == "greeting" then
                 for i = 1, BENILLA_QUEST_MAX_TITLES do
-                    local button = getglobal("BenillaQuestTitleButton" .. i)
+                    local button = getglobal("QuestTitleButton" .. i)
                     if button:IsShown() then
                         BenillaQuestTitleButton_Resize(button)
                     end
@@ -238,7 +238,8 @@
         end
 
         -- ── Greeting panel (ref QuestFrameGreetingPanel_OnShow, QuestFrame.lua:219-282) ──────────────
-        function BenillaQuestTitleButton_OnClick(button)
+        function QuestTitleButton_OnClick()
+            local button = this
             if button.isActive then SelectActiveQuest(button.titleIndex) else SelectAvailableQuest(button.titleIndex) end
             PlaySound("igQuestListSelect") -- ref QuestTitleButton_OnClick, QuestFrame.lua:303
         end
@@ -258,15 +259,15 @@
         end
 
         function BenillaQuestGreetingPanel_OnShow()
-            getglobal("BenillaQuestDetailPanel"):Hide()
-            getglobal("BenillaQuestProgressPanel"):Hide()
-            getglobal("BenillaQuestRewardPanel"):Hide()
+            getglobal("QuestDetailPanel"):Hide()
+            getglobal("QuestProgressPanel"):Hide()
+            getglobal("QuestRewardPanel"):Hide()
 
-            local greetingText = getglobal("BenillaQuestGreetingText")
+            local greetingText = getglobal("QuestGreetingText")
             greetingText:SetText(GetGreetingText() or "")
-            local activeHeader = getglobal("BenillaQuestActiveHeader")
-            local availableHeader = getglobal("BenillaQuestAvailableHeader")
-            local hbreak = getglobal("BenillaQuestGreetingBreak")
+            local activeHeader = getglobal("QuestActiveHeader")
+            local availableHeader = getglobal("QuestAvailableHeader")
+            local hbreak = getglobal("QuestGreetingBreak")
             local numActive = math.min(GetNumActiveQuests(), BENILLA_QUEST_MAX_TITLES)
             local numAvailable = math.min(GetNumAvailableQuests(), BENILLA_QUEST_MAX_TITLES - numActive)
 
@@ -277,7 +278,7 @@
                 activeHeader:SetText("Current Quests")
                 activeHeader:SetPoint("TOPLEFT", greetingText, "BOTTOMLEFT", 0, -10)
                 for i = 1, numActive do
-                    local button = getglobal("BenillaQuestTitleButton" .. i)
+                    local button = getglobal("QuestTitleButton" .. i)
                     button.isActive = true
                     button.titleIndex = i
                     button:SetText(GetActiveTitle(i))
@@ -286,7 +287,7 @@
                     if i == 1 then
                         button:SetPoint("TOPLEFT", activeHeader, "BOTTOMLEFT", -10, -5)
                     else
-                        button:SetPoint("TOPLEFT", getglobal("BenillaQuestTitleButton" .. (i - 1)), "BOTTOMLEFT", 0, 0)
+                        button:SetPoint("TOPLEFT", getglobal("QuestTitleButton" .. (i - 1)), "BOTTOMLEFT", 0, 0)
                     end
                 end
             end
@@ -295,7 +296,7 @@
             -- shows only when BOTH lists are non-empty (l.256-260).
             if numActive > 0 and numAvailable > 0 then
                 hbreak:SetTexture("Interface\\QuestFrame\\UI-HorizontalBreak")
-                hbreak:SetPoint("TOPLEFT", getglobal("BenillaQuestTitleButton" .. numActive), "BOTTOMLEFT", 22, -10)
+                hbreak:SetPoint("TOPLEFT", getglobal("QuestTitleButton" .. numActive), "BOTTOMLEFT", 22, -10)
             else
                 hbreak:SetTexture(nil)
             end
@@ -309,7 +310,7 @@
                     availableHeader:SetPoint("TOPLEFT", greetingText, "BOTTOMLEFT", 0, -10)
                 end
                 for i = numActive + 1, numActive + numAvailable do
-                    local button = getglobal("BenillaQuestTitleButton" .. i)
+                    local button = getglobal("QuestTitleButton" .. i)
                     button.isActive = false
                     button.titleIndex = i - numActive
                     button:SetText(GetAvailableTitle(i - numActive))
@@ -318,35 +319,35 @@
                     if i == numActive + 1 then
                         button:SetPoint("TOPLEFT", availableHeader, "BOTTOMLEFT", -10, -5)
                     else
-                        button:SetPoint("TOPLEFT", getglobal("BenillaQuestTitleButton" .. (i - 1)), "BOTTOMLEFT", 0, 0)
+                        button:SetPoint("TOPLEFT", getglobal("QuestTitleButton" .. (i - 1)), "BOTTOMLEFT", 0, 0)
                     end
                 end
             end
             for i = numActive + numAvailable + 1, BENILLA_QUEST_MAX_TITLES do
-                getglobal("BenillaQuestTitleButton" .. i):Hide()
+                getglobal("QuestTitleButton" .. i):Hide()
             end
 
-            getglobal("BenillaQuestGreetingScroll"):SetVerticalScroll(0)
+            getglobal("QuestGreetingScroll"):SetVerticalScroll(0)
             -- The action button inherits `hidden="true"` from `BenillaQuestPanelButtonTemplate`
             -- (a virtual template — never itself drawn — declared hidden so a bare `inherits=` alone
             -- doesn't imply "visible"); every panel must :Show() its own buttons explicitly, the same
             -- way BenillaQuestItem_Set already does for item/title rows.
-            getglobal("BenillaQuestGreetingGoodbyeButton"):Show()
+            getglobal("QuestGreetingGoodbyeButton"):Show()
             if QUEST_FADING_DISABLE == "0" then -- ref l.223-226: instant text skips the fade-in
-                UIFrameFadeIn(getglobal("BenillaQuestGreetingScrollChild"), QUESTINFO_FADE_IN)
+                UIFrameFadeIn(getglobal("QuestGreetingScrollChild"), QUESTINFO_FADE_IN)
             end
         end
 
         function BenillaQuestGreetingGoodbyeButton_OnClick()
             -- ref l.749-752: no DeclineQuest() call here — the greeting has no in-progress panel to
             -- decline yet. The window's own OnHide (CloseQuest()) still ends the giver session.
-            HideUIPanel(getglobal("BenillaQuestFrame"))
+            HideUIPanel(getglobal("QuestFrame"))
         end
 
         -- ── The shared reward/choice grid (ref's `QuestFrameItems_Update`, QuestFrame.lua:311-522) —
         -- ported line-for-line, the SAME idiom `QuestLogFrame.xml`'s `BenillaQuestLogRewards_Update`
         -- already proved: 2-per-row, odd index starts a new row under the row two back, even index
-        -- sits beside the previous. `prefix` is "BenillaQuestDetail" or "BenillaQuestReward" — both
+        -- sits beside the previous. `prefix` is "QuestDetail" or "QuestReward" — both
         -- panels read the SAME giver getters (`GetNumQuestChoices`/`GetQuestItemInfo`/`GetRewardMoney`
         -- are giver-global, not panel-specific — `benilla-ui`'s `quest.rs`), only the widget names
         -- differ (the ref's own two panels are likewise fed by the one shared function). ──────────────
@@ -425,27 +426,27 @@
 
         -- ── Detail panel (ref QuestFrameDetailPanel_OnShow, QuestFrame.lua:524-552) ──────────────────
         function BenillaQuestDetailPanel_OnShow()
-            getglobal("BenillaQuestGreetingPanel"):Hide()
-            getglobal("BenillaQuestProgressPanel"):Hide()
-            getglobal("BenillaQuestRewardPanel"):Hide()
+            getglobal("QuestGreetingPanel"):Hide()
+            getglobal("QuestProgressPanel"):Hide()
+            getglobal("QuestRewardPanel"):Hide()
 
-            getglobal("BenillaQuestDetailTitle"):SetText(GetTitleText() or "")
-            getglobal("BenillaQuestDetailBody"):SetText(GetQuestText() or "")
-            getglobal("BenillaQuestDetailObjectiveHeader"):SetText("Quest Objectives")
-            getglobal("BenillaQuestDetailObjective"):SetText(GetObjectiveText() or "")
-            BenillaQuestItems_Update("BenillaQuestDetail")
-            getglobal("BenillaQuestDetailScroll"):SetVerticalScroll(0)
-            getglobal("BenillaQuestAcceptButton"):Show()
-            getglobal("BenillaQuestDeclineButton"):Show()
+            getglobal("QuestDetailTitle"):SetText(GetTitleText() or "")
+            getglobal("QuestDetailBody"):SetText(GetQuestText() or "")
+            getglobal("QuestDetailObjectiveHeader"):SetText("Quest Objectives")
+            getglobal("QuestDetailObjective"):SetText(GetObjectiveText() or "")
+            BenillaQuestItems_Update("QuestDetail")
+            getglobal("QuestDetailScroll"):SetVerticalScroll(0)
+            getglobal("QuestAcceptButton"):Show()
+            getglobal("QuestDeclineButton"):Show()
 
             -- Arm the write-on (ref l.538-551): objectives/rewards invisible and Accept dead
             -- until the description has finished writing itself onto the parchment.
-            getglobal("BenillaQuestDetailTextAlphaFrame"):SetAlpha(0)
-            getglobal("BenillaQuestAcceptButton"):Disable()
-            local panel = getglobal("BenillaQuestDetailPanel")
+            getglobal("QuestDetailTextAlphaFrame"):SetAlpha(0)
+            getglobal("QuestAcceptButton"):Disable()
+            local panel = getglobal("QuestDetailPanel")
             panel.fading = 1
             panel.fadingProgress = 0
-            getglobal("BenillaQuestDetailBody"):SetAlphaGradient(0, QUEST_DESCRIPTION_GRADIENT_LENGTH)
+            getglobal("QuestDetailBody"):SetAlphaGradient(0, QUEST_DESCRIPTION_GRADIENT_LENGTH)
             -- Instant text (ref l.549-551): the write-on still arms, but the reveal edge starts
             -- past any quest text's end — the first OnUpdate tick scratches the quill once, runs
             -- the gradient off, and wakes everything on the spot.
@@ -465,30 +466,30 @@
             if panel.fading then
                 panel.fadingProgress = panel.fadingProgress + (elapsed * QUEST_DESCRIPTION_GRADIENT_CPS)
                 PlaySound("WriteQuest")
-                if not getglobal("BenillaQuestDetailBody"):SetAlphaGradient(panel.fadingProgress, QUEST_DESCRIPTION_GRADIENT_LENGTH) then
+                if not getglobal("QuestDetailBody"):SetAlphaGradient(panel.fadingProgress, QUEST_DESCRIPTION_GRADIENT_LENGTH) then
                     panel.fading = nil
                     if QUEST_FADING_DISABLE == "0" then
-                        UIFrameFadeIn(getglobal("BenillaQuestDetailTextAlphaFrame"), QUESTINFO_FADE_IN)
+                        UIFrameFadeIn(getglobal("QuestDetailTextAlphaFrame"), QUESTINFO_FADE_IN)
                     else
                         -- instant: the block snaps on, no fade (ref l.561-564)
-                        getglobal("BenillaQuestDetailTextAlphaFrame"):SetAlpha(1)
+                        getglobal("QuestDetailTextAlphaFrame"):SetAlpha(1)
                     end
-                    getglobal("BenillaQuestAcceptButton"):Enable()
+                    getglobal("QuestAcceptButton"):Enable()
                 end
             end
         end
 
-        function BenillaQuestDetailAcceptButton_OnClick()
+        function QuestDetailAcceptButton_OnClick()
             AcceptQuest()
         end
 
-        function BenillaQuestDetailDeclineButton_OnClick()
+        function QuestDetailDeclineButton_OnClick()
             -- vanilla's client-side decline sends no packet; hide immediately (no one-frame lag,
             -- the same convention every NPC window's close button already uses — e.g.
             -- BenillaMerchantCloseButton_OnClick).
             DeclineQuest()
             PlaySound("igQuestCancel") -- ref QuestDetailDeclineButton_OnClick, QuestFrame.lua:577
-            HideUIPanel(getglobal("BenillaQuestFrame"))
+            HideUIPanel(getglobal("QuestFrame"))
         end
 
         -- ── Progress panel (ref QuestFrameProgressPanel_OnShow/Items_Update, QuestFrame.lua:143-217)
@@ -498,49 +499,49 @@
         -- the resolver's fixpoint keeps correctly re-propagated as item1 moves — no Lua needed for
         -- them at all. ─────────────────────────────────────────────────────────────────────────────
         function BenillaQuestProgressPanel_OnShow()
-            getglobal("BenillaQuestGreetingPanel"):Hide()
-            getglobal("BenillaQuestDetailPanel"):Hide()
-            getglobal("BenillaQuestRewardPanel"):Hide()
+            getglobal("QuestGreetingPanel"):Hide()
+            getglobal("QuestDetailPanel"):Hide()
+            getglobal("QuestRewardPanel"):Hide()
 
-            getglobal("BenillaQuestProgressTitle"):SetText(GetTitleText() or "")
-            getglobal("BenillaQuestProgressBody"):SetText(GetProgressText() or "")
+            getglobal("QuestProgressTitle"):SetText(GetTitleText() or "")
+            getglobal("QuestProgressBody"):SetText(GetProgressText() or "")
 
             local numItems = math.min(GetNumQuestItems(), BENILLA_QUEST_MAX_ITEMS)
             local money = GetQuestMoneyToGet()
-            local reqText = getglobal("BenillaQuestProgressRequiredText")
-            local moneyText = getglobal("BenillaQuestProgressRequiredMoneyText")
-            local item1 = getglobal("BenillaQuestProgressRequired1")
+            local reqText = getglobal("QuestProgressRequiredText")
+            local moneyText = getglobal("QuestProgressRequiredMoneyText")
+            local item1 = getglobal("QuestProgressRequired1")
             if numItems > 0 or (money and money > 0) then
                 reqText:SetText("Items Needed:")
                 if money and money > 0 then
                     moneyText:SetText("Required Money:")
-                    BenillaMoney_Set("BenillaQuestProgressMoney", money, true)
+                    BenillaMoney_Set("QuestProgressMoney", money, true)
                     item1:SetPoint("TOPLEFT", moneyText, "BOTTOMLEFT", 0, -10)
                 else
                     moneyText:SetText("")
-                    BenillaMoney_Clear("BenillaQuestProgressMoney")
+                    BenillaMoney_Clear("QuestProgressMoney")
                     item1:SetPoint("TOPLEFT", reqText, "BOTTOMLEFT", -3, -5)
                 end
             else
                 reqText:SetText("")
                 moneyText:SetText("")
-                BenillaMoney_Clear("BenillaQuestProgressMoney")
+                BenillaMoney_Clear("QuestProgressMoney")
             end
             for i = 1, BENILLA_QUEST_MAX_ITEMS do
                 if i <= numItems then
-                    BenillaQuestItem_Set(getglobal("BenillaQuestProgressRequired" .. i), "required", i)
+                    BenillaQuestItem_Set(getglobal("QuestProgressRequired" .. i), "required", i)
                 else
-                    getglobal("BenillaQuestProgressRequired" .. i):Hide()
+                    getglobal("QuestProgressRequired" .. i):Hide()
                 end
             end
 
-            local continueButton = getglobal("BenillaQuestProgressContinueButton")
+            local continueButton = getglobal("QuestProgressContinueButton")
             if IsQuestCompletable() then continueButton:Enable() else continueButton:Disable() end
             continueButton:Show()
-            getglobal("BenillaQuestProgressGoodbyeButton"):Show()
-            getglobal("BenillaQuestProgressScroll"):SetVerticalScroll(0)
+            getglobal("QuestProgressGoodbyeButton"):Show()
+            getglobal("QuestProgressScroll"):SetVerticalScroll(0)
             if QUEST_FADING_DISABLE == "0" then -- ref l.159-162: instant text skips the fade-in
-                UIFrameFadeIn(getglobal("BenillaQuestProgressScrollChild"), QUESTINFO_FADE_IN)
+                UIFrameFadeIn(getglobal("QuestProgressScrollChild"), QUESTINFO_FADE_IN)
             end
         end
 
@@ -551,27 +552,27 @@
         function BenillaQuestProgressGoodbyeButton_OnClick()
             DeclineQuest()
             PlaySound("igQuestCancel") -- ref QuestGoodbyeButton_OnClick, QuestFrame.lua:112
-            HideUIPanel(getglobal("BenillaQuestFrame"))
+            HideUIPanel(getglobal("QuestFrame"))
         end
 
         -- ── Reward panel (ref QuestFrameRewardPanel_OnShow + reward-item clicks, QuestFrame.lua:72-141)
         function BenillaQuestRewardPanel_OnShow()
-            getglobal("BenillaQuestGreetingPanel"):Hide()
-            getglobal("BenillaQuestDetailPanel"):Hide()
-            getglobal("BenillaQuestProgressPanel"):Hide()
+            getglobal("QuestGreetingPanel"):Hide()
+            getglobal("QuestDetailPanel"):Hide()
+            getglobal("QuestProgressPanel"):Hide()
 
-            getglobal("BenillaQuestRewardTitle"):SetText(GetTitleText() or "")
-            getglobal("BenillaQuestRewardBody"):SetText(GetRewardText() or "")
-            getglobal("BenillaQuestFrame").itemChoice = 0
-            getglobal("BenillaQuestRewardChoiceHighlight"):Hide()
-            BenillaQuestItems_Update("BenillaQuestReward")
-            getglobal("BenillaQuestRewardScroll"):SetVerticalScroll(0)
-            getglobal("BenillaQuestRewardCompleteButton"):Show()
-            getglobal("BenillaQuestRewardCancelButton"):Show()
+            getglobal("QuestRewardTitle"):SetText(GetTitleText() or "")
+            getglobal("QuestRewardBody"):SetText(GetRewardText() or "")
+            getglobal("QuestFrame").itemChoice = 0
+            getglobal("QuestRewardChoiceHighlight"):Hide()
+            BenillaQuestItems_Update("QuestReward")
+            getglobal("QuestRewardScroll"):SetVerticalScroll(0)
+            getglobal("QuestRewardCompleteButton"):Show()
+            getglobal("QuestRewardCancelButton"):Show()
             -- ref l.85-88: the whole parchment content fades in — unless the text is instant.
             if QUEST_FADING_DISABLE == "0" then
-                getglobal("BenillaQuestRewardScrollChild"):SetAlpha(0)
-                UIFrameFadeIn(getglobal("BenillaQuestRewardScrollChild"), QUESTINFO_FADE_IN)
+                getglobal("QuestRewardScrollChild"):SetAlpha(0)
+                UIFrameFadeIn(getglobal("QuestRewardScrollChild"), QUESTINFO_FADE_IN)
             end
         end
 
@@ -592,7 +593,8 @@
         -- One benilla-only guard: `link` is nil until the ask-once item template lands (a state the
         -- reference's synchronous item cache never has), and EditBox:Insert takes a string. The ref
         -- already carries the twin of this guard inside DressUpItemLink (ref DressUpFrame.lua:11-13).
-        function BenillaQuestItem_OnClick(button)
+        function QuestItem_OnClick()
+            local button = this
             if IsControlKeyDown() then
                 if button.rewardType ~= "spell" then
                     DressUpItemLink(GetQuestItemLink(button.kind, button.index))
@@ -611,7 +613,8 @@
         -- QuestItem_OnClick's verbatim (only the shift arm's spell guard differs — the ref drops it
         -- here, l.133); the choice SELECT is the THIRD arm, so a ctrl- or shift-click must NOT also
         -- pick the reward. That ordering is the whole point of the fork.
-        function BenillaQuestRewardItem_OnClick(button)
+        function QuestRewardItem_OnClick()
+            local button = this
             if IsControlKeyDown() then
                 if button.rewardType ~= "spell" then
                     DressUpItemLink(GetQuestItemLink(button.kind, button.index))
@@ -623,7 +626,7 @@
             elseif button.kind == "choice" then
                 -- ref l.136's own `this.type == "choice"` test. The ref needs it because its reward
                 -- panel packs choices AND fixed rewards into ONE QuestRewardItem1..10 pool; ours
-                -- keeps two pools and hangs this template only on BenillaQuestRewardChoice*, so the
+                -- keeps two pools and hangs this template only on QuestRewardChoice*, so the
                 -- test is belt-and-braces — kept because it is the ref's, and because it is what
                 -- makes the template safe to reuse if the pools are ever merged.
                 BenillaQuestRewardChoice_OnClick(button)
@@ -632,32 +635,33 @@
 
         -- The third arm alone (ref l.136-139): only a REWARD-panel choice row is selectable — the
         -- detail panel's rows and both panels' FIXED reward rows ride the plain
-        -- `BenillaQuestItemTemplate`, whose OnClick has no select arm at all, matching the ref's
+        -- `QuestItemTemplate`, whose OnClick has no select arm at all, matching the ref's
         -- separate QuestRewardItemTemplate vs QuestItemTemplate.
         function BenillaQuestRewardChoice_OnClick(button)
-            getglobal("BenillaQuestFrame").itemChoice = button.index
+            getglobal("QuestFrame").itemChoice = button.index
             -- Ref QuestRewardItem_OnClick l.137-138 verbatim: the glow frame seats at (-8,7) on
             -- the clicked row's TOPLEFT.
-            local hl = getglobal("BenillaQuestRewardChoiceHighlight")
+            local hl = getglobal("QuestRewardChoiceHighlight")
             hl:SetPoint("TOPLEFT", button, "TOPLEFT", -8, 7)
             hl:Show()
         end
 
-        function BenillaQuestRewardCompleteButton_OnClick()
-            local choice = getglobal("BenillaQuestFrame").itemChoice or 0
+        function QuestRewardCompleteButton_OnClick()
+            local choice = getglobal("QuestFrame").itemChoice or 0
             if GetNumQuestChoices() > 0 and choice == 0 then return end -- must pick a choice first
             GetQuestReward(math.max(choice - 1, 0)) -- 1-based row -> 0-based wire index
             PlaySound("igQuestListComplete") -- ref QuestRewardCompleteButton_OnClick, QuestFrame.lua:101
         end
 
-        function BenillaQuestRewardCancelButton_OnClick()
+        function QuestRewardCancelButton_OnClick()
             DeclineQuest()
             PlaySound("igQuestCancel") -- ref QuestRewardCancelButton_OnClick, QuestFrame.lua:93
-            HideUIPanel(getglobal("BenillaQuestFrame"))
+            HideUIPanel(getglobal("QuestFrame"))
         end
 
         -- ── Window lifecycle (ref QuestFrame_OnLoad/OnEvent, QuestFrame.lua:8-70) ────────────────────
-        function BenillaQuestFrame_OnLoad(frame)
+        function QuestFrame_OnLoad()
+            local frame = this
             -- The NPC portrait: the "npc" unit token → the questgiver's live model bake
             -- (crates/benilla/src/portrait, InteractNpc) — the same binding MerchantFrame/GossipFrame use.
             SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
@@ -683,7 +687,8 @@
             elseif panel == "reward" then BenillaQuestRewardPanel_OnShow() end
         end
 
-        function BenillaQuestFrame_OnEvent(frame)
+        function QuestFrame_OnEvent(event)
+            local frame = this
             if event == "QUEST_FINISHED" then
                 HideUIPanel(frame)
                 frame.panel = nil
@@ -693,12 +698,12 @@
                 -- The in-place refresh also carries the NPC name (arg1) — in live play the ask-once
                 -- name often lands one frame AFTER the panel opened, arriving exactly here; dropping
                 -- it left the title bar blank (caught reviewing the ui-quest capture).
-                if arg1 and arg1 ~= "" then getglobal("BenillaQuestNpcNameText"):SetText(arg1) end
+                if arg1 and arg1 ~= "" then getglobal("QuestNpcNameText"):SetText(arg1) end
                 if frame:IsVisible() and frame.panel then BenillaQuestFrame_Repaint(frame.panel) end
                 return
             end
 
-            getglobal("BenillaQuestNpcNameText"):SetText(arg1 or "")
+            getglobal("QuestNpcNameText"):SetText(arg1 or "")
             if event == "QUEST_GREETING" then frame.panel = "greeting"
             elseif event == "QUEST_DETAIL" then frame.panel = "detail"
             elseif event == "QUEST_PROGRESS" then frame.panel = "progress"
@@ -709,8 +714,8 @@
             -- (which hides the other three siblings + repaints itself), even on a same-panel refresh
             -- (e.g. re-QUERY_QUEST on the same NPC while Detail is already open).
             local names = {
-                greeting = "BenillaQuestGreetingPanel", detail = "BenillaQuestDetailPanel",
-                progress = "BenillaQuestProgressPanel", reward = "BenillaQuestRewardPanel",
+                greeting = "QuestGreetingPanel", detail = "QuestDetailPanel",
+                progress = "QuestProgressPanel", reward = "QuestRewardPanel",
             }
             local target = getglobal(names[frame.panel])
             target:Hide()
@@ -719,7 +724,7 @@
 
         function BenillaQuestCloseButton_OnClick()
             CloseQuest()
-            HideUIPanel(getglobal("BenillaQuestFrame"))
+            HideUIPanel(getglobal("QuestFrame"))
         end
     ]]></Script>
 
@@ -732,7 +737,7 @@
         `BenillaQuestLogItemTemplate` (per-window test-isolation duplication, that template's own
         comment).
     -->
-    <Button name="BenillaQuestItemTemplate" virtual="true" hidden="true">
+    <Button name="QuestItemTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="147" y="41"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
@@ -757,7 +762,7 @@
         </Layers>
         <!-- NO hover art: the ref QuestItemTemplate carries no HighlightTexture — reward rows
              don't glow on hover; only the reward panel's CHOICE click seats the selection glow
-             (BenillaQuestRewardChoiceHighlight). The old ButtonHilight-Square here was our own
+             (QuestRewardChoiceHighlight). The old ButtonHilight-Square here was our own
              addition (the director's img-18). -->
         <Scripts>
             <OnLoad>
@@ -777,17 +782,17 @@
             <!-- ref QuestItemTemplate's own OnClick (QuestFrameTemplates.xml:162-164): the CTRL
                  dressing-room preview + the SHIFT chat-link post, and nothing else — a plain click
                  on one of these rows is inert (decisions 1059/1060). -->
-            <OnClick>BenillaQuestItem_OnClick(self)</OnClick>
+            <OnClick>QuestItem_OnClick()</OnClick>
         </Scripts>
     </Button>
 
     <!-- A REWARD-panel choice row: the same visual, plus the ref's `QuestRewardItemTemplate` click
          (QuestFrameTemplates.xml:167-173) — the ctrl/shift arms shared with the base template, then
          the choose highlight as the THIRD arm. The detail panel's rows and both panels' FIXED reward
-         rows stay on plain `BenillaQuestItemTemplate`, whose OnClick has no select arm (ref: only
+         rows stay on plain `QuestItemTemplate`, whose OnClick has no select arm (ref: only
          reward-panel CHOICE rows select). -->
-    <Button name="BenillaQuestRewardItemTemplate" inherits="BenillaQuestItemTemplate" virtual="true" hidden="true">
-        <Scripts><OnClick>BenillaQuestRewardItem_OnClick(self)</OnClick></Scripts>
+    <Button name="BenillaQuestRewardItemTemplate" inherits="QuestItemTemplate" virtual="true" hidden="true">
+        <Scripts><OnClick>QuestRewardItem_OnClick()</OnClick></Scripts>
     </Button>
 
     <!-- A greeting quest-title button (ref QuestTitleButtonTemplate, QuestFrameTemplates.xml l.174-213):
@@ -803,7 +808,7 @@
             </Layer>
         </Layers>
         <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
-        <Scripts><OnClick>BenillaQuestTitleButton_OnClick(self)</OnClick></Scripts>
+        <Scripts><OnClick>QuestTitleButton_OnClick()</OnClick></Scripts>
         <!-- QuestFont (13px BLACK on parchment), LEFT, x+20 beside the bullet. We anchor LEFT (the
              row's vertical centre), NOT the reference's TOPLEFT: the round UI-Quest-BulletPoint is
              cell-centred, so a top-anchored title hangs its centreline ABOVE the bullet and reads
@@ -846,7 +851,7 @@
          `QuestFrame_SetMaterial`) are omitted — no such Lua surface exists in this engine (this
          window's header comment). Fills the whole window (384×512, TOPLEFT the parent panel's own
          TOPLEFT — each concrete panel below inherits this and is itself anchored to fill
-         `BenillaQuestFrame`). -->
+         `QuestFrame`). -->
     <Frame name="BenillaQuestPanelTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
@@ -860,7 +865,7 @@
         </Layers>
     </Frame>
 
-    <Frame name="BenillaQuestFrame" hidden="true">
+    <Frame name="QuestFrame" hidden="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Layers>
             <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref QuestFramePortrait l.20-33). Drawn on the OUTER
@@ -883,11 +888,11 @@
                  ui-quest capture caught; the engine z-order honors frame level exactly like the
                  client's). frameLevel="3" is the static equivalent of the ref's GetFrameLevel()+2
                  (outer 0, panels 1). -->
-            <Frame name="BenillaQuestNpcNameFrame" frameLevel="3">
+            <Frame name="QuestNpcNameFrame" frameLevel="3">
                 <Size><AbsDimension x="300" y="14"/></Size>
                 <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-23"/></Offset></Anchor></Anchors>
                 <Layers><Layer level="BACKGROUND">
-                    <FontString name="BenillaQuestNpcNameText" inherits="GameFontHighlight" justifyH="CENTER">
+                    <FontString name="QuestNpcNameText" inherits="GameFontHighlight" justifyH="CENTER">
                         <Size><AbsDimension x="235" y="20"/></Size>
                         <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
                     </FontString>
@@ -897,7 +902,7 @@
                  GossipFrame.xml's own close button uses, since quest and gossip are the same "list"
                  window family in the real client) on the minimize-button art this engine's windows all
                  substitute for the real UIPanelCloseButton (that art rides the tooltip/dialog arc). -->
-            <Button name="BenillaQuestCloseButton">
+            <Button name="QuestCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-42" y="-31"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
@@ -907,7 +912,7 @@
             </Button>
 
             <!-- ══════════════════════════ Greeting panel (ref l.719-1002) ══════════════════════════ -->
-            <Frame name="BenillaQuestGreetingPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
+            <Frame name="QuestGreetingPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
                 <Layers>
                     <Layer level="ARTWORK">
                         <!-- Ref QuestFrame.xml:722-733: the greeting layout has no bottom-LEFT
@@ -921,12 +926,12 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Button name="BenillaQuestGreetingGoodbyeButton" inherits="BenillaQuestPanelButtonTemplate" text="Goodbye">
+                    <Button name="QuestGreetingGoodbyeButton" inherits="BenillaQuestPanelButtonTemplate" text="Goodbye">
                         <Size><AbsDimension x="78" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="73"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BenillaQuestGreetingGoodbyeButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <ScrollFrame name="BenillaQuestGreetingScroll">
+                    <ScrollFrame name="QuestGreetingScroll">
                         <Size><AbsDimension x="300" y="334"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-81"/></Offset></Anchor></Anchors>
                         <Scripts>
@@ -936,42 +941,42 @@
                             <OnScrollRangeChanged>BenillaQuestScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <Frame name="BenillaQuestGreetingScrollChild">
+                            <Frame name="QuestGreetingScrollChild">
                                 <Size><AbsDimension x="300" y="700"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                 <Layers>
                                     <Layer level="ARTWORK">
-                                        <FontString name="BenillaQuestGreetingText" inherits="QuestFont" justifyH="LEFT">
+                                        <FontString name="QuestGreetingText" inherits="QuestFont" justifyH="LEFT">
                                             <Size><AbsDimension x="270" y="0"/></Size>
                                             <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestActiveHeader" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestActiveHeader" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="300" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <Texture name="BenillaQuestGreetingBreak" file="Interface\QuestFrame\UI-HorizontalBreak">
+                                        <Texture name="QuestGreetingBreak" file="Interface\QuestFrame\UI-HorizontalBreak">
                                             <Size><AbsDimension x="256" y="32"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="12" y="-10"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="12" y="-10"/></Offset></Anchor></Anchors>
                                         </Texture>
-                                        <FontString name="BenillaQuestAvailableHeader" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestAvailableHeader" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="300" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Button name="BenillaQuestTitleButton1" inherits="BenillaQuestTitleButtonTemplate">
-                                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestActiveHeader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-5"/></Offset></Anchor></Anchors>
+                                    <Button name="QuestTitleButton1" inherits="BenillaQuestTitleButtonTemplate">
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestActiveHeader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-5"/></Offset></Anchor></Anchors>
                                     </Button>
-                                    <Button name="BenillaQuestTitleButton2" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton3" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton4" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton5" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton6" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton7" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton8" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton9" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
-                                    <Button name="BenillaQuestTitleButton10" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton2" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton3" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton4" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton5" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton6" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton7" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton8" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton9" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                                    <Button name="QuestTitleButton10" inherits="BenillaQuestTitleButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestTitleButton9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
                                 </Frames>
                             </Frame>
                         </Frames>
@@ -979,9 +984,9 @@
                     <!-- The minimal visual scrollbar (the log's kit, name-derived: see
                          BenillaQuestScroll_SyncBar; hidden while nothing overflows; no thumb drag
                          — the Slider deferral, QuestLogFrame.xml's own comment). -->
-                    <Frame name="BenillaQuestGreetingScrollBar" hidden="true">
+                    <Frame name="QuestGreetingScrollBar" hidden="true">
                         <Size><AbsDimension x="16" y="334"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestGreetingScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestGreetingScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Frames>
                             <Button name="$parentUp">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -990,7 +995,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestGreetingScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestGreetingScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Button name="$parentDown">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -999,13 +1004,13 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestGreetingScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestGreetingScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Frame name="$parentTrack">
                                 <Size><AbsDimension x="16" y="302"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestGreetingScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestGreetingScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Layers><Layer level="OVERLAY">
-                                    <Texture name="BenillaQuestGreetingScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
+                                    <Texture name="QuestGreetingScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
                                         <Size><AbsDimension x="16" y="16"/></Size>
                                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                         <!-- Center-quarter knob crop, the ref's own TexCoords (see the log's thumb). -->
@@ -1020,19 +1025,19 @@
             </Frame>
 
             <!-- ══════════════════════════ Detail panel (ref l.472-718) ═════════════════════════════ -->
-            <Frame name="BenillaQuestDetailPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
+            <Frame name="QuestDetailPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
                 <Frames>
-                    <Button name="BenillaQuestAcceptButton" inherits="BenillaQuestPanelButtonTemplate" text="Accept">
+                    <Button name="QuestAcceptButton" inherits="BenillaQuestPanelButtonTemplate" text="Accept">
                         <Size><AbsDimension x="77" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="23" y="72"/></Offset></Anchor></Anchors>
-                        <Scripts><OnClick>BenillaQuestDetailAcceptButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>QuestDetailAcceptButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaQuestDeclineButton" inherits="BenillaQuestPanelButtonTemplate" text="Decline">
+                    <Button name="QuestDeclineButton" inherits="BenillaQuestPanelButtonTemplate" text="Decline">
                         <Size><AbsDimension x="78" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="72"/></Offset></Anchor></Anchors>
-                        <Scripts><OnClick>BenillaQuestDetailDeclineButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>QuestDetailDeclineButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <ScrollFrame name="BenillaQuestDetailScroll">
+                    <ScrollFrame name="QuestDetailScroll">
                         <Size><AbsDimension x="300" y="334"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-81"/></Offset></Anchor></Anchors>
                         <Scripts>
@@ -1042,18 +1047,18 @@
                             <OnScrollRangeChanged>BenillaQuestScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <Frame name="BenillaQuestDetailScrollChild">
+                            <Frame name="QuestDetailScrollChild">
                                 <Size><AbsDimension x="300" y="700"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                 <Layers>
                                     <Layer level="ARTWORK">
-                                        <FontString name="BenillaQuestDetailTitle" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestDetailTitle" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="285" y="0"/></Size>
                                             <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="5" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestDetailBody" inherits="QuestFont" justifyH="LEFT">
+                                        <FontString name="QuestDetailBody" inherits="QuestFont" justifyH="LEFT">
                                             <Size><AbsDimension x="270" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
@@ -1064,50 +1069,50 @@
                                          the child item buttons/coins (wow-re propagation.md,
                                          CORRECTED), so the whole block hides while the text writes
                                          and fades in as one. -->
-                                    <Frame name="BenillaQuestDetailTextAlphaFrame">
+                                    <Frame name="QuestDetailTextAlphaFrame">
                                         <Size><AbsDimension x="1" y="1"/></Size>
-                                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         <Layers>
                                             <Layer level="ARTWORK">
-                                                <FontString name="BenillaQuestDetailObjectiveHeader" inherits="QuestTitleFont" justifyH="LEFT">
+                                                <FontString name="QuestDetailObjectiveHeader" inherits="QuestTitleFont" justifyH="LEFT">
                                                     <Size><AbsDimension x="285" y="18"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                                                 </FontString>
-                                                <FontString name="BenillaQuestDetailObjective" inherits="QuestFont" justifyH="LEFT">
+                                                <FontString name="QuestDetailObjective" inherits="QuestFont" justifyH="LEFT">
                                                     <Size><AbsDimension x="270" y="0"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailObjectiveHeader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailObjectiveHeader" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                                 </FontString>
-                                                <FontString name="BenillaQuestDetailRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
+                                                <FontString name="QuestDetailRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
                                                     <Size><AbsDimension x="285" y="18"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailObjective" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailObjective" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                                                 </FontString>
-                                                <FontString name="BenillaQuestDetailItemChooseText" inherits="QuestFont" justifyH="LEFT">
+                                                <FontString name="QuestDetailItemChooseText" inherits="QuestFont" justifyH="LEFT">
                                                     <Size><AbsDimension x="295" y="0"/></Size>
-                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                                 </FontString>
-                                                <FontString name="BenillaQuestDetailItemReceiveText" inherits="QuestFont" justifyH="LEFT">
-                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-5"/></Offset></Anchor></Anchors>
+                                                <FontString name="QuestDetailItemReceiveText" inherits="QuestFont" justifyH="LEFT">
+                                                    <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="3" y="-5"/></Offset></Anchor></Anchors>
                                                 </FontString>
                                             </Layer>
                                         </Layers>
                                         <Frames>
-                                    <Button name="BenillaQuestDetailChoice1" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailItemChooseText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailChoice2" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailChoice1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailChoice3" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailChoice1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailChoice4" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailChoice3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailChoice5" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailChoice3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailChoice6" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailChoice5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice1" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailItemChooseText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice2" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailChoice1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice3" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailChoice1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice4" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailChoice3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice5" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailChoice3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailChoice6" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailChoice5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
 
-                                    <Button name="BenillaQuestDetailReward1" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailItemReceiveText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailReward2" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailReward1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailReward3" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailReward1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailReward4" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailReward3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailReward5" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailReward3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestDetailReward6" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailReward5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward1" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailItemReceiveText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward2" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailReward1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward3" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailReward1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward4" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailReward3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward5" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailReward3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestDetailReward6" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailReward5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
 
-                                    <Frame name="BenillaQuestDetailMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestDetailItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestDetailMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestDetailMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestDetailMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestDetailMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestDetailMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestDetailMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestDetailMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestDetailMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
                                         </Frames>
                                     </Frame>
                                 </Frames>
@@ -1117,9 +1122,9 @@
                     <!-- The minimal visual scrollbar (the log's kit, name-derived: see
                          BenillaQuestScroll_SyncBar; hidden while nothing overflows; no thumb drag
                          — the Slider deferral, QuestLogFrame.xml's own comment). -->
-                    <Frame name="BenillaQuestDetailScrollBar" hidden="true">
+                    <Frame name="QuestDetailScrollBar" hidden="true">
                         <Size><AbsDimension x="16" y="334"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Frames>
                             <Button name="$parentUp">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1128,7 +1133,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestDetailScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestDetailScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Button name="$parentDown">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1137,13 +1142,13 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestDetailScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestDetailScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Frame name="$parentTrack">
                                 <Size><AbsDimension x="16" y="302"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestDetailScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestDetailScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Layers><Layer level="OVERLAY">
-                                    <Texture name="BenillaQuestDetailScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
+                                    <Texture name="QuestDetailScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
                                         <Size><AbsDimension x="16" y="16"/></Size>
                                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                         <!-- Center-quarter knob crop, the ref's own TexCoords (see the log's thumb). -->
@@ -1161,19 +1166,19 @@
             </Frame>
 
             <!-- ══════════════════════════ Progress panel (ref l.290-471) ═══════════════════════════ -->
-            <Frame name="BenillaQuestProgressPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
+            <Frame name="QuestProgressPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
                 <Frames>
-                    <Button name="BenillaQuestProgressContinueButton" inherits="BenillaQuestPanelButtonTemplate" text="Continue">
+                    <Button name="QuestProgressContinueButton" inherits="BenillaQuestPanelButtonTemplate" text="Continue">
                         <Size><AbsDimension x="120" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="22" y="72"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BenillaQuestProgressContinueButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaQuestProgressGoodbyeButton" inherits="BenillaQuestPanelButtonTemplate" text="Goodbye">
+                    <Button name="QuestProgressGoodbyeButton" inherits="BenillaQuestPanelButtonTemplate" text="Goodbye">
                         <Size><AbsDimension x="78" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="73"/></Offset></Anchor></Anchors>
                         <Scripts><OnClick>BenillaQuestProgressGoodbyeButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <ScrollFrame name="BenillaQuestProgressScroll">
+                    <ScrollFrame name="QuestProgressScroll">
                         <Size><AbsDimension x="300" y="334"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-81"/></Offset></Anchor></Anchors>
                         <Scripts>
@@ -1183,42 +1188,42 @@
                             <OnScrollRangeChanged>BenillaQuestScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <Frame name="BenillaQuestProgressScrollChild">
+                            <Frame name="QuestProgressScrollChild">
                                 <Size><AbsDimension x="300" y="700"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                 <Layers>
                                     <Layer level="ARTWORK">
-                                        <FontString name="BenillaQuestProgressTitle" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestProgressTitle" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="285" y="0"/></Size>
                                             <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="5" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestProgressBody" inherits="QuestFont" justifyH="LEFT">
+                                        <FontString name="QuestProgressBody" inherits="QuestFont" justifyH="LEFT">
                                             <Size><AbsDimension x="270" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestProgressRequiredText" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestProgressRequiredText" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="295" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestProgressRequiredMoneyText" inherits="QuestFontNormalSmall" justifyH="LEFT">
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressRequiredText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                        <FontString name="QuestProgressRequiredMoneyText" inherits="QuestFontNormalSmall" justifyH="LEFT">
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressRequiredText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Frame name="BenillaQuestProgressMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressRequiredMoneyText" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestProgressMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestProgressMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestProgressMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequiredMoneyText" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestProgressMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestProgressMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
 
                                     <!-- The 2-col×3-row grid (ref l.407-460): item1 is Lua-repositioned
                                          (money-line vs header-line); items 2-6 are a STATIC chain off
                                          1/3/5 the resolver's fixpoint re-propagates automatically. -->
-                                    <Button name="BenillaQuestProgressRequired1" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressRequiredText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestProgressRequired2" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressRequired1" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestProgressRequired3" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOP" relativeTo="BenillaQuestProgressRequired1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestProgressRequired4" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressRequired3" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestProgressRequired5" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOP" relativeTo="BenillaQuestProgressRequired3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestProgressRequired6" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestProgressRequired5" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired1" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressRequiredText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired2" inherits="QuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequired1" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired3" inherits="QuestItemTemplate"><Anchors><Anchor point="TOP" relativeTo="QuestProgressRequired1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired4" inherits="QuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequired3" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired5" inherits="QuestItemTemplate"><Anchors><Anchor point="TOP" relativeTo="QuestProgressRequired3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestProgressRequired6" inherits="QuestItemTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestProgressRequired5" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors></Button>
                                 </Frames>
                             </Frame>
                         </Frames>
@@ -1226,9 +1231,9 @@
                     <!-- The minimal visual scrollbar (the log's kit, name-derived: see
                          BenillaQuestScroll_SyncBar; hidden while nothing overflows; no thumb drag
                          — the Slider deferral, QuestLogFrame.xml's own comment). -->
-                    <Frame name="BenillaQuestProgressScrollBar" hidden="true">
+                    <Frame name="QuestProgressScrollBar" hidden="true">
                         <Size><AbsDimension x="16" y="334"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Frames>
                             <Button name="$parentUp">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1237,7 +1242,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestProgressScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestProgressScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Button name="$parentDown">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1246,13 +1251,13 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestProgressScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestProgressScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Frame name="$parentTrack">
                                 <Size><AbsDimension x="16" y="302"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestProgressScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestProgressScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Layers><Layer level="OVERLAY">
-                                    <Texture name="BenillaQuestProgressScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
+                                    <Texture name="QuestProgressScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
                                         <Size><AbsDimension x="16" y="16"/></Size>
                                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                         <!-- Center-quarter knob crop, the ref's own TexCoords (see the log's thumb). -->
@@ -1267,19 +1272,19 @@
             </Frame>
 
             <!-- ══════════════════════════ Reward panel (ref l.71-289) ══════════════════════════════ -->
-            <Frame name="BenillaQuestRewardPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
+            <Frame name="QuestRewardPanel" inherits="BenillaQuestPanelTemplate" hidden="true">
                 <Frames>
-                    <Button name="BenillaQuestRewardCompleteButton" inherits="BenillaQuestPanelButtonTemplate" text="Complete Quest">
+                    <Button name="QuestRewardCompleteButton" inherits="BenillaQuestPanelButtonTemplate" text="Complete Quest">
                         <Size><AbsDimension x="120" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="22" y="72"/></Offset></Anchor></Anchors>
-                        <Scripts><OnClick>BenillaQuestRewardCompleteButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>QuestRewardCompleteButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaQuestRewardCancelButton" inherits="BenillaQuestPanelButtonTemplate" text="Cancel">
+                    <Button name="QuestRewardCancelButton" inherits="BenillaQuestPanelButtonTemplate" text="Cancel">
                         <Size><AbsDimension x="78" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="73"/></Offset></Anchor></Anchors>
-                        <Scripts><OnClick>BenillaQuestRewardCancelButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>QuestRewardCancelButton_OnClick()</OnClick></Scripts>
                     </Button>
-                    <ScrollFrame name="BenillaQuestRewardScroll">
+                    <ScrollFrame name="QuestRewardScroll">
                         <Size><AbsDimension x="300" y="334"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-81"/></Offset></Anchor></Anchors>
                         <Scripts>
@@ -1289,56 +1294,56 @@
                             <OnScrollRangeChanged>BenillaQuestScroll_SyncBar(this)</OnScrollRangeChanged>
                         </Scripts>
                         <Frames>
-                            <Frame name="BenillaQuestRewardScrollChild">
+                            <Frame name="QuestRewardScrollChild">
                                 <Size><AbsDimension x="300" y="700"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                 <Layers>
                                     <Layer level="ARTWORK">
-                                        <FontString name="BenillaQuestRewardTitle" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestRewardTitle" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="285" y="0"/></Size>
                                             <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="5" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestRewardBody" inherits="QuestFont" justifyH="LEFT">
+                                        <FontString name="QuestRewardBody" inherits="QuestFont" justifyH="LEFT">
                                             <Size><AbsDimension x="275" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestRewardRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
+                                        <FontString name="QuestRewardRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
                                             <Size><AbsDimension x="285" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardBody" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestRewardItemChooseText" inherits="QuestFont" justifyH="LEFT">
+                                        <FontString name="QuestRewardItemChooseText" inherits="QuestFont" justifyH="LEFT">
                                             <Size><AbsDimension x="295" y="0"/></Size>
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         </FontString>
-                                        <FontString name="BenillaQuestRewardItemReceiveText" inherits="QuestFont" justifyH="LEFT">
-                                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                        <FontString name="QuestRewardItemReceiveText" inherits="QuestFont" justifyH="LEFT">
+                                            <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                                         </FontString>
                                     </Layer>
                                 </Layers>
                                 <Frames>
-                                    <Button name="BenillaQuestRewardChoice1" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardItemChooseText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardChoice2" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardChoice1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardChoice3" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardChoice1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardChoice4" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardChoice3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardChoice5" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardChoice3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardChoice6" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardChoice5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice1" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardItemChooseText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice2" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardChoice1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice3" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardChoice1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice4" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardChoice3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice5" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardChoice3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardChoice6" inherits="BenillaQuestRewardItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardChoice5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
 
-                                    <Button name="BenillaQuestRewardReward1" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardItemReceiveText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardReward2" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardReward1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardReward3" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardReward1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardReward4" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardReward3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardReward5" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardReward3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
-                                    <Button name="BenillaQuestRewardReward6" inherits="BenillaQuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardReward5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward1" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardItemReceiveText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-3" y="-5"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward2" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardReward1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward3" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardReward1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward4" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardReward3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward5" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardReward3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></Button>
+                                    <Button name="QuestRewardReward6" inherits="QuestItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardReward5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor></Anchors></Button>
 
-                                    <Frame name="BenillaQuestRewardMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestRewardItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestRewardMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestRewardMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
-                                    <Frame name="BenillaQuestRewardMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaQuestRewardMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestRewardMoneyCoin1" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestRewardMoneyCoin2" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
+                                    <Frame name="QuestRewardMoneyCoin3" inherits="BenillaQuestMoneyCoinTemplate"><Anchors><Anchor point="LEFT" relativeTo="QuestRewardMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors></Frame>
 
                                     <!-- The choice-selection glow (moved onto the clicked choice
                                          row; ref QuestRewardItemHighlight, QuestFrame.xml:254-278
                                          VERBATIM: the 256x64 UI-QuestItemHighlight ADD card, one
                                          frame level above the rows). -->
-                                    <Frame name="BenillaQuestRewardChoiceHighlight" hidden="true" frameLevel="3">
+                                    <Frame name="QuestRewardChoiceHighlight" hidden="true" frameLevel="3">
                                         <Size><AbsDimension x="256" y="64"/></Size>
                                         <Anchors><Anchor point="TOPLEFT"/></Anchors>
                                         <Layers><Layer level="BACKGROUND">
@@ -1355,9 +1360,9 @@
                     <!-- The minimal visual scrollbar (the log's kit, name-derived: see
                          BenillaQuestScroll_SyncBar; hidden while nothing overflows; no thumb drag
                          — the Slider deferral, QuestLogFrame.xml's own comment). -->
-                    <Frame name="BenillaQuestRewardScrollBar" hidden="true">
+                    <Frame name="QuestRewardScrollBar" hidden="true">
                         <Size><AbsDimension x="16" y="334"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                         <Frames>
                             <Button name="$parentUp">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1366,7 +1371,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestRewardScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestRewardScroll"), -BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Button name="$parentDown">
                                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -1375,13 +1380,13 @@
                                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("BenillaQuestRewardScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
+                                <Scripts><OnClick>BenillaQuestScroll_Step(getglobal("QuestRewardScroll"), BENILLA_QUEST_SCROLL_STEP)</OnClick></Scripts>
                             </Button>
                             <Frame name="$parentTrack">
                                 <Size><AbsDimension x="16" y="302"/></Size>
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestRewardScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="QuestRewardScrollBarUp" relativePoint="BOTTOMLEFT"/></Anchors>
                                 <Layers><Layer level="OVERLAY">
-                                    <Texture name="BenillaQuestRewardScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
+                                    <Texture name="QuestRewardScrollBarThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
                                         <Size><AbsDimension x="16" y="16"/></Size>
                                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
                                         <!-- Center-quarter knob crop, the ref's own TexCoords (see the log's thumb). -->
@@ -1396,8 +1401,8 @@
             </Frame>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaQuestFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaQuestFrame_OnEvent(self)</OnEvent>
+            <OnLoad>QuestFrame_OnLoad()</OnLoad>
+            <OnEvent>QuestFrame_OnEvent(event)</OnEvent>
             <OnUpdate>BenillaQuestFrame_OnUpdate()</OnUpdate>
             <!-- OnShow/OnHide, quoted from the real QuestFrame.lua QuestFrame_OnShow/OnHide (kits
                  igQuestListOpen l.285 / igQuestListClose l.294, wired via QuestFrame.xml l.1012/1015).
@@ -1411,10 +1416,10 @@
                  so a re-open always starts from a clean panel state. -->
             <OnShow>PlaySound("igQuestListOpen")</OnShow>
             <OnHide>
-                getglobal("BenillaQuestGreetingPanel"):Hide()
-                getglobal("BenillaQuestDetailPanel"):Hide()
-                getglobal("BenillaQuestProgressPanel"):Hide()
-                getglobal("BenillaQuestRewardPanel"):Hide()
+                getglobal("QuestGreetingPanel"):Hide()
+                getglobal("QuestDetailPanel"):Hide()
+                getglobal("QuestProgressPanel"):Hide()
+                getglobal("QuestRewardPanel"):Hide()
                 CloseQuest()
                 PlaySound("igQuestListClose")
             </OnHide>

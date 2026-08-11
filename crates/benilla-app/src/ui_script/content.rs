@@ -5,8 +5,9 @@
 //! here instead of touching `std::fs`.
 //!
 //! Until 1175 they read `concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui")` — the *build*
-//! machine's source tree. On a player's machine those 61 files resolve to nothing and the client
-//! boots with no interface at all: not a crash, just an empty screen and 61 log lines nobody sees.
+//! machine's source tree. On a player's machine every one of those files resolves to nothing and
+//! the client boots with no interface at all: not a crash, just an empty screen and one log line
+//! per manifest entry that nobody sees.
 //! `assets/ui` is our own content (MIT/Apache, not Blizzard's — the contract's hard rule is
 //! untouched), so it can simply be part of the program.
 //!
@@ -23,7 +24,7 @@
 //!
 //! ## Why not the asset server
 //!
-//! [`super::manifest::MANIFEST`] is a 61-entry **dependency-ordered** manifest loaded synchronously
+//! [`super::manifest::MANIFEST`] is a **dependency-ordered** manifest loaded synchronously
 //! at a known point (a template must exist before the frame that inherits it), and the asset server
 //! is async. Serving these through it would mean re-deriving a dependency graph that a hand-ordered
 //! list already encodes correctly. This stays a byte lookup.
@@ -34,8 +35,10 @@
 //! *not* built here (1175 "Rejected"), but the shape leaves room for it: it would be one more arm
 //! at the front of [`read`]. Building it now would be a mod system with no mods.
 
-/// The shipped UI tree, compiled in: `benilla.toc` and the 61 files it names, ~2.8 MB — under
-/// 2.5 % of the release binary, and what it buys is "the interface cannot be missing".
+/// The shipped UI tree, compiled in: `benilla.toc` and every file it names, a few MB — a small
+/// single-digit % of the release binary, and what it buys is "the interface cannot be missing".
+/// (A hard file count lived here until it had silently drifted by four; the manifest is the
+/// authority on how many there are, and `manifest::tests` is what keeps the two agreeing.)
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/ui");
 
 /// The text of one shipped UI file, by path relative to `assets/ui` — `None` if we do not ship it.
@@ -61,6 +64,40 @@ pub(super) fn read(req: &str) -> Option<String> {
 fn read_source_tree(req: &str) -> Option<String> {
     let dir = crate::run_mode::dev_source_dir()?.join("assets/ui");
     std::fs::read_to_string(dir.join(req)).ok()
+}
+
+/// A digest of the FrameXML **this process will actually load** — the manifest plus every file it
+/// names, hashed in load order, as eight hex digits.
+///
+/// It exists because a number taken from the corpus harness is meaningless without it. In a dev
+/// build [`read`] prefers the SOURCE TREE, so editing an `assets/ui` file changes what a survey
+/// loads **with no rebuild** — and this repo's worktrees are routinely shared by several agents at
+/// once. Three separate measurements this arc were taken across a moving tree and one of them
+/// landed a wrong attribution in a decision record: 87/218 was credited to a single table when a
+/// controlled A/B later put it at 75, with the other twelve belonging to a neighbour's uncommitted
+/// files. The stamp does not prevent that; it makes it visible, which is all an instrument can do.
+///
+/// FNV-1a, no dependency, not cryptographic and not meant to be: the only question it answers is
+/// *were these two runs looking at the same interface*.
+pub(crate) fn digest() -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+    };
+    eat(super::manifest::MANIFEST.as_bytes());
+    if let Some(toc) = read(super::manifest::MANIFEST) {
+        eat(toc.as_bytes());
+    }
+    for name in super::addons::Addon::builtin().toc.files {
+        eat(name.as_bytes());
+        if let Some(text) = read(&name) {
+            eat(text.as_bytes());
+        }
+    }
+    format!("{:08x}", h as u32)
 }
 
 /// Every shipped file's path, relative to `assets/ui`. The compiled-in set is the authority —

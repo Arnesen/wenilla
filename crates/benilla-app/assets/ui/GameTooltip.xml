@@ -4,14 +4,23 @@
         SetOwner anchor law, auto-size + right-flush, IsOwned, FadeOut, and the OnTooltipCleared/
         OnTooltipAddMoney script protocol all live engine-side (benilla-ui script/tooltip.rs); the
         line pairs are engine-created named regions (GameTooltipTextLeftN/RightN — real globals,
-        like the template pairs reference Lua addresses by name). This file declares the INSTANCE:
-        the plate (backdrop art + colors QUOTED from ref-GameTooltip.xml/.lua, line cites inline),
-        the money coin trio, and the Lua that is genuinely FrameXML's in the real client
-        (GameTooltip_SetDefaultAnchor, GameTooltip_AddNewbieTip, SetTooltipMoney) — plus the P0 item-stat renderer, which
+        like the template pairs reference Lua addresses by name). This file declares the two
+        TEMPLATES and their instances: the plate (backdrop art + colors QUOTED from
+        ref-GameTooltip.xml/.lua, line cites inline), the money coin trio, and the Lua that is
+        genuinely FrameXML's in the real client (GameTooltip_SetDefaultAnchor,
+        GameTooltip_AddNewbieTip, SetTooltipMoney) — plus the P0 item-stat renderer, which
         moves engine-side in 0274 P1 with the full template feed.
 
         The frame's global name is the real one — GameTooltip — so transcribed reference code
         (MinimapCluster's zone hover, UnitFrame's TextLeft1 recolor) works verbatim.
+
+        The reference splits this across two files — Interface\FrameXML\GameTooltipTemplate.xml
+        holds the virtual GameTooltipTemplate (l.3-627) and ShoppingTooltipTemplate (l.628-1217);
+        GameTooltip.xml <Include>s it and declares only the instances. Both templates live here
+        instead, ABOVE their instances, because that is the whole of their reach: the tooltip file
+        already loads before every window that hovers, and keeping them in one file means the
+        template is registered by the time the instances (and, later, ItemRef.xml's) expand it
+        without a second manifest entry to keep in order. Same registry, same splice, one file.
     -->
     <Script><![CDATA[
         -- Tooltip default colours (VERIFIED, ref-GameTooltip.lua l.3-4). The border is white, the
@@ -114,7 +123,14 @@
         -- ref GameTooltip_OnHide (ref-GameTooltip.lua l.100-104, quoted): the plate colours
         -- reset for the next owner and the default-corner flag drops. The ref's OnHide also
         -- hides ShoppingTooltip1/2 - that pair lands with the compare-tooltip slice (0274 P4).
+        --
+        -- `self or this`: the corpus calls this the REFERENCE way, with no argument at all
+        -- (TipBuddy.xml l.1412, atsw.xml l.3420, and TipBuddy.lua l.2520 which REPLACES the global
+        -- and calls the saved original bare). The signature note above explains the corpus-wide
+        -- shift to a leading parameter; nothing lets us edit an addon, and `this` is exactly what
+        -- the reference reads here, so the two spellings mean the same thing.
         function GameTooltip_OnHide(self)
+            self = self or this
             self:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
             self:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
             self.default = nil
@@ -147,6 +163,7 @@
         -- ships in MerchantFrame.xml (the money kit's home) — guard for engine tests that load
         -- this file alone; in the app every file is loaded.
         function GameTooltip_ClearMoney(frame)
+            frame = frame or this
             if BenillaMoney_Clear then
                 BenillaMoney_Clear(frame:GetName() .. "Money")
             end
@@ -214,23 +231,57 @@
             this:SetStatusBarColor(r, g, b)
         end
 
+        -- `self or this` for the same reason as GameTooltip_OnHide: an addon inheriting
+        -- GameTooltipTemplate re-declares <OnLoad> to add its own line and opens it with the
+        -- reference's bare `GameTooltip_OnLoad();` (TipBuddy.xml l.1402, atsw.xml l.3417) — a nil
+        -- self there is a load ERROR, and the plate it was about to tint never gets its colours.
+        -- The body is the ref's two lines and NOTHING else. It used to end with a `self:Hide()` we
+        -- had added, which the reference (l.79-82, the whole function) does not have — inert for
+        -- our four tooltips, since every one of them carries `hidden="true"` and the loader's
+        -- attribute pass runs Hide() long before OnLoad fires, but NOT inert for an addon: two of
+        -- the 27 declare `hidden="false"` on purpose (PowerAuras.xml l.20, SimpleActionSets.xml
+        -- l.349) and never call Show(), so the extra line hid a tooltip the real client leaves up.
+        -- A helper that quietly does more than the reference's is exactly the kind of thing that
+        -- only shows up when someone else's code calls it.
         function GameTooltip_OnLoad(self)
+            self = self or this
             -- The plate colours (ref GameTooltip_OnLoad, ref-GameTooltip.lua l.79-82).
             self:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
             self:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
-            self:Hide()
         end
     ]]></Script>
 
-    <GameTooltip name="GameTooltip" frameStrata="TOOLTIP" hidden="true">
-        <!-- A default size so the plate resolves the first frame it is shown; the engine's
-             auto-size pass takes over once the lines are measured (one frame's latency). NO
-             load-time anchor (the ref instance carries none): every show path seats the plate
-             first - SetOwner's anchor law for owned hovers, OnTooltipSetDefaultAnchor for world
-             hovers - and a leftover static anchor is exactly what parked the world tooltip at
-             screen center when the default-anchor script wasn't wired. -->
-        <Size><AbsDimension x="120" y="32"/></Size>
-        <!-- The tooltip plate (ref-GameTooltip.xml l.33-43 / ref-GameTooltipTemplate.xml l.4-14):
+    <!--
+        GameTooltipTemplate (ref-GameTooltipTemplate.xml l.3-627) — the shared tooltip SHAPE, and
+        the single most-wanted template in the addon corpus: 27 addons name it in an XML
+        `inherits=` (TipBuddy, AtlasLoot, CT_BarMod, MikScrollingBattleText, TheoryCraft, …) and
+        two more reach it through CreateFrame("GameTooltip", name, nil, "GameTooltipTemplate").
+        Every one of those declarations is a <GameTooltip> element, so the template's job is to
+        hand them the PLATE and the STATUS BAR; the line pairs they then read
+        (`getglobal(tip:GetName().."TextLeft1")`) are engine-created per instance and can never
+        carry the template's name.
+
+        What is here is what the reference's template carries and all our instances shared, moved
+        verbatim from the GameTooltip instance below: the backdrop plate, the Thicken deviation
+        (its rationale note travels WITH it — this is the shared plate, not one window's), the
+        $parentStatusBar, and the OnLoad/OnHide pair (ref l.611-616).
+
+        What is deliberately NOT here, and stays on the GameTooltip instance:
+        - The money coin trio and the OnTooltipAddMoney/OnTooltipCleared pair. The reference's
+          template carries a $parentMoneyFrame (l.598-608, a SmallMoneyFrameTemplate), so its
+          handler is safe on every instance; ours is a bespoke three-coin row that only
+          GameTooltip declares, so a templated OnTooltipAddMoney would index a MoneyCoin1 that
+          does not exist. Moving the row up would give ItemRefTooltip and every addon tooltip a
+          coin line they render today without — a visible change, so it waits for the director.
+        - OnTooltipSetDefaultAnchor (ref l.617-619). The engine fires it by name on `GameTooltip`
+          alone (script/tooltip_unit.rs looks the frame up), so on any other instance it is dead
+          weight.
+        `clampedToScreen="true"` is the reference's own attribute and is a no-op for us: decision
+        0352 made the flag default-ON for every GameTooltip-kind frame, because the reference plate
+        observably clamps though its XML never sets it. Kept because it is what the reference says.
+    -->
+    <GameTooltip name="GameTooltipTemplate" frameStrata="TOOLTIP" clampedToScreen="true" hidden="true" virtual="true">
+        <!-- The tooltip plate (ref-GameTooltipTemplate.xml l.4-14 / ref-GameTooltip.xml l.33-43):
              UI-Tooltip-Background tiled, UI-Tooltip-Border edge, EdgeSize 16, TileSize 16, insets
              5/5/5/5. Colours are set in OnLoad (SetBackdropColor/BorderColor) — no <Color> here, so
              the plate starts ctor-white and OnLoad tints it. -->
@@ -255,6 +306,46 @@
                 </Texture>
             </Layer>
         </Layers>
+        <Frames>
+            <!-- The mouseover health bar (ref-GameTooltipTemplate.xml l.575-597, quoted): 8px
+                 tall, hanging below the plate, UI-TargetingFrame-BarFill, colored by
+                 HealthBar_OnValueChanged. The ENGINE drives min/max/value from the live unit
+                 snapshot (the byte law's HEALTH watcher — SetUnit + every set_unit push), finding
+                 it by the `<name>StatusBar` global — so it has to be the TEMPLATE's, not one
+                 instance's: TipBuddy replaces the whole unit tooltip and both `parent=` and
+                 `relativeTo=` a `TipBuddyTooltipStatusBar` it never declares
+                 (TipBuddy.xml l.2320, l.2591) — a name only this element can publish. -->
+            <StatusBar name="$parentStatusBar" hidden="true">
+                <Size><AbsDimension x="0" y="8"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnValueChanged>HealthBar_OnValueChanged(arg1)</OnValueChanged>
+                </Scripts>
+                <BarTexture name="$parentTexture" file="Interface\TargetingFrame\UI-TargetingFrame-BarFill"/>
+            </StatusBar>
+        </Frames>
+        <Scripts>
+            <!-- ref-GameTooltipTemplate.xml l.611-616. An instance that needs more re-declares the
+                 handler and calls the same helper first (the reference's own shape, and ours:
+                 GameTooltip adds its event registration, ItemRefTooltip its padding) — the loader
+                 walks every <Scripts> block in splice order, so the instance's SetScript lands
+                 last and wins. -->
+            <OnLoad>GameTooltip_OnLoad(self)</OnLoad>
+            <OnHide>GameTooltip_OnHide(this)</OnHide>
+        </Scripts>
+    </GameTooltip>
+
+    <GameTooltip name="GameTooltip" inherits="GameTooltipTemplate" frameStrata="TOOLTIP" hidden="true">
+        <!-- A default size so the plate resolves the first frame it is shown; the engine's
+             auto-size pass takes over once the lines are measured (one frame's latency). NO
+             load-time anchor (the ref instance carries none): every show path seats the plate
+             first - SetOwner's anchor law for owned hovers, OnTooltipSetDefaultAnchor for world
+             hovers - and a leftover static anchor is exactly what parked the world tooltip at
+             screen center when the default-anchor script wasn't wired. -->
+        <Size><AbsDimension x="120" y="32"/></Size>
         <Frames>
             <!-- The money row's coin trio (the real $parentMoneyFrame — GameTooltipTemplate.xml,
                  patch.MPQ — as our shared coin-slot shape; MerchantFrame.xml's BenillaMoney_Set
@@ -315,21 +406,6 @@
                     </Layer>
                 </Layers>
             </Frame>
-            <!-- The mouseover health bar (ref-GameTooltipTemplate.xml l.575-597, quoted): 8px
-                 tall, hanging below the plate, UI-TargetingFrame-BarFill, colored by
-                 HealthBar_OnValueChanged. The ENGINE drives min/max/value from the live unit
-                 snapshot (the byte law's HEALTH watcher — SetUnit + every set_unit push). -->
-            <StatusBar name="$parentStatusBar" hidden="true">
-                <Size><AbsDimension x="0" y="8"/></Size>
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor>
-                    <Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="-1"/></Offset></Anchor>
-                </Anchors>
-                <Scripts>
-                    <OnValueChanged>HealthBar_OnValueChanged(arg1)</OnValueChanged>
-                </Scripts>
-                <BarTexture name="$parentTexture" file="Interface\TargetingFrame\UI-TargetingFrame-BarFill"/>
-            </StatusBar>
         </Frames>
         <Scripts>
             <OnLoad>
@@ -363,15 +439,25 @@
         </Scripts>
     </GameTooltip>
 
-    <!-- The shopping-compare pair (ref GameTooltip.xml l.25-26 / ShoppingTooltipTemplate,
-         GameTooltipTemplate.xml l.628+): two more GameTooltip widgets the engine seats on the
-         paperdoll slot when SHOW_COMPARE_TOOLTIP fires (CharacterFrame.xml's listener). The
-         declared TextLeft/Right1-4 pairs are the template's own small-font ladder, faces quoted
-         verbatim (including its odd GameFontNormal cells) — the engine ADOPTS declared pairs and
-         clones the last pair's faces for lines it grows past them (tooltip.rs ensure_lines).
-         Same plate as the main tooltip, including the Thicken deviation (its rationale is on the
-         GameTooltip instance above); no coin trio — the compare cut ends before money. -->
-    <GameTooltip name="ShoppingTooltip1" frameStrata="TOOLTIP" hidden="true">
+    <!--
+        ShoppingTooltipTemplate (ref-GameTooltipTemplate.xml l.628-1217) — the shopping-compare
+        pair's own template, a SEPARATE virtual from GameTooltipTemplate exactly as the reference
+        has it (its instances, ref-GameTooltip.xml l.24-25, inherit this and not the main one).
+        It repeats the plate rather than inheriting it because the reference's does, and because
+        inheriting GameTooltipTemplate would hand the compare plates its OnHide, its status bar and
+        (later) its money row — none of which the compare cut has.
+
+        The declared TextLeft/Right1-4 pairs are this template's own small-font ladder, faces
+        quoted verbatim (including its odd GameFontNormal cells) — the engine ADOPTS declared pairs
+        and clones the last pair's faces for lines it grows past them (tooltip.rs ensure_lines).
+        Same plate as the main tooltip, including the Thicken deviation (its rationale is on
+        GameTooltipTemplate above); no coin trio — the compare cut ends before money.
+
+        No addon in the corpus names this template (0 of 218, against GameTooltipTemplate's 27), so
+        it earns its keep as OUR de-duplication, not as an addon surface: the two instances below
+        were byte-identical apart from the name.
+    -->
+    <GameTooltip name="ShoppingTooltipTemplate" frameStrata="TOOLTIP" hidden="true" virtual="true">
         <Size><AbsDimension x="120" y="32"/></Size>
         <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
             <EdgeSize><AbsValue val="16"/></EdgeSize>
@@ -403,36 +489,10 @@
             <OnLoad>GameTooltip_OnLoad(self)</OnLoad>
         </Scripts>
     </GameTooltip>
-    <GameTooltip name="ShoppingTooltip2" frameStrata="TOOLTIP" hidden="true">
-        <Size><AbsDimension x="120" y="32"/></Size>
-        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
-            <EdgeSize><AbsValue val="16"/></EdgeSize>
-            <TileSize><AbsValue val="16"/></TileSize>
-            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
-        </Backdrop>
-        <Layers>
-            <Layer level="BACKGROUND">
-                <Texture name="$parentThicken">
-                    <Anchors>
-                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
-                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
-                    </Anchors>
-                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
-                </Texture>
-            </Layer>
-            <Layer level="ARTWORK">
-                <FontString name="$parentTextLeft1" inherits="GameFontNormalSmall" hidden="true"/>
-                <FontString name="$parentTextRight1" inherits="GameFontNormal" hidden="true"/>
-                <FontString name="$parentTextLeft2" inherits="GameFontNormal" hidden="true"/>
-                <FontString name="$parentTextRight2" inherits="GameFontHighlightSmall" hidden="true"/>
-                <FontString name="$parentTextLeft3" inherits="GameFontHighlightSmall" hidden="true"/>
-                <FontString name="$parentTextRight3" inherits="GameFontHighlightSmall" hidden="true"/>
-                <FontString name="$parentTextLeft4" inherits="GameTooltipTextSmall" hidden="true"/>
-                <FontString name="$parentTextRight4" inherits="GameFontHighlightSmall" hidden="true"/>
-            </Layer>
-        </Layers>
-        <Scripts>
-            <OnLoad>GameTooltip_OnLoad(self)</OnLoad>
-        </Scripts>
-    </GameTooltip>
+
+    <!-- The shopping-compare pair (ref GameTooltip.xml l.24-25, quoted down to the one-line shape):
+         two more GameTooltip widgets the engine seats on the paperdoll slot when
+         SHOW_COMPARE_TOOLTIP fires (CharacterFrame.xml's listener). -->
+    <GameTooltip name="ShoppingTooltip1" inherits="ShoppingTooltipTemplate" frameStrata="TOOLTIP" hidden="true"/>
+    <GameTooltip name="ShoppingTooltip2" inherits="ShoppingTooltipTemplate" frameStrata="TOOLTIP" hidden="true"/>
 </Ui>

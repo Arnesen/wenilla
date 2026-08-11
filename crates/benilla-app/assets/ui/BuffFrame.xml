@@ -1,56 +1,110 @@
 <Ui>
     <!--
-        The player buff/debuff bar (decisions 0255/0257 — the player aura arc). Geometry, textures,
-        colours, and every timing constant are QUOTED from the real 1.12 BuffFrame (extracted
-        Interface\FrameXML\BuffFrame.xml/.lua), turned onto benilla's own aura feed. Same shape as
-        UnitFrames.xml: the reference's data path was two 1.12-only calls (GetPlayerBuff +
-        GetPlayerBuffTexture/…Applications/…DispelType/…TimeLeft) that we did NOT implement; our
-        engine exposes the one Era aura function instead (decision 0068), so the handlers here read
-        UnitBuff/UnitDebuff and the countdown rides GetTime(), exactly as the cast bar does.
+        The player buff/debuff bar and the temporary-weapon-enchant row (decisions 0255/0257 — the
+        player aura arc). Geometry, textures, colours, every timing constant AND now the data path
+        are the real 1.12 BuffFrame's (extracted Interface\FrameXML\BuffFrame.xml/.lua).
 
-        SCOPE (decision 0255): the LOCAL PLAYER only. The reference's temporary-weapon-enchant frame
-        (TemporaryEnchantFrame / TempEnchant1-2) is deliberately out — there is no weapon-enchant wire
-        yet — so the bar is anchored to the reference's *no-enchant* steady state: 16 buff buttons
-        (two rows of 8) above 8 debuff buttons, right-aligned under the minimap at UIParent TOPRIGHT
-        (-175,-13), the point the reference's BuffFrame snaps to when no temp enchant is present
-        (BuffFrame_Enchant_OnUpdate's no-enchant branch).
+        THE INDEX SPACE — the thing to understand before touching a handler. There are TWO numbers
+        here and they are not the same number:
 
-        DURATIONS ARE A SETTING NOW (decision 1139). 0255 shipped the durations-shown geometry
+          * a button's `id` is a 0-BASED ORDINAL WITHIN ITS OWN FILTER. BuffButton0..15 are
+            id="0".."15" under HELPFUL; BuffButton16..23 are id="0".."7" under HARMFUL. It is a
+            loop counter and nothing else.
+          * `GetPlayerBuff(id, filter)` turns that ordinal into a CACHE POSITION — the aura's
+            physical index in the player's display cache — plus `untilCancelled`. **Every** sibling
+            verb (GetPlayerBuffTexture/…DispelType/…Applications/…TimeLeft, CancelPlayerBuff,
+            GameTooltip:SetPlayerBuff) consumes that position, never the button's id.
+
+        So a button is a two-step: enumerate to a position on the event, then read the position. The
+        position is ABSOLUTE — the number a "HARMFUL" walk hands back is the number an unfiltered
+        walk would — which is why a debuff button's handle can never resolve against the buff list,
+        structurally, with no filter argument threaded through the read path. A miss is `-1`, never
+        nil, and the accessors all tolerate `-1` directly (byte-verified; the family's signature
+        table and the traps are `benilla_ui::script::aura`'s module header).
+
+        This file used to read the Era `UnitBuff`/`UnitDebuff` pair because the 1.12 verbs did not
+        exist. They landed in b2ede294, so the adaptation is gone: the handlers below are the
+        reference's, on the reference's numbers.
+
+        SCOPE. The LOCAL PLAYER's auras, plus the reference's two temporary-weapon-enchant slots.
+        0255 left TemporaryEnchantFrame out ("there is no weapon-enchant wire yet"); there is —
+        `ITEM_FIELD_ENCHANTMENT`'s TEMP slot for the charges and `SMSG_ITEM_ENCHANT_TIME_UPDATE`
+        for the countdown, both already feeding the item tooltip (decisions 0915/0920) — so
+        `GetWeaponEnchantInfo` reads them and the row is here. The bar's resting place is
+        unchanged: right-aligned under the minimap at UIParent TOPRIGHT (-175,-13), which is where
+        BuffFrame_Enchant_OnUpdate's no-enchant branch parks it. With an enchant equipped the TOP
+        buff row alone slides left to clear the enchant icons (BuffFrame re-anchors to
+        TemporaryEnchantFrame's TOPLEFT); rows 2 and 3 hang off TempEnchant1/TemporaryEnchantFrame
+        and do not move. That is the reference's behaviour, not a choice made here.
+
+        DURATIONS ARE A SETTING (decision 1139). 0255 shipped the durations-shown geometry
         unconditionally — the director's call, and there was no panel to hang a switch on — and said
         in as many words that "if a CVar system later arrives, the geometry is already the branch it
         would select". It arrived, as the saved-variable store rather than a CVar (1134): the store
         below is SHOW_BUFF_DURATIONS, the Interface page's Buff Durations row drives it, and BOTH of
         the reference's geometries are live again — rows at y = 0/−45/−90 with timers, 0/−35/−70
-        without (BenillaBuffButtons_UpdatePositions). Our default is "1", the reference's "0": the
+        without (BuffButtons_UpdatePositions). Our default is "1", the reference's "0": the
         director's look is what the bar comes up wearing, and what Defaults walks it back to.
 
-        ORDER IS STATE. The list UnitBuff/UnitDebuff enumerate is the app's insertion-ordered display
-        cache (crate::ui_aura, decision 0257): a new aura appends at the end, a dropped one repacks —
-        NOT ascending slot. Button N simply shows the Nth buff/debuff of that list; the bar's identity
-        is the app's, not this file's.
+        ORDER IS STATE. The player's list the app pushes (crate::ui_aura, decision 0257) IS the
+        reference's insertion-ordered display cache: a new aura appends at the end, a dropped one
+        repacks — NOT ascending slot. That is precisely why a "cache position" needs no structure of
+        its own on our side; position N of that list is position N of the reference's cache.
 
-        DURATION / PERMANENCE. expirationTime (UnitBuff's 6th return) is 0 for a permanent aura — the
-        1.12 wire sends no duration packet for one (byte-verified, decision 0257), which is exactly the
-        reference's "until cancelled". So `expirationTime > 0` is our untilCancelled test: a timed aura
-        counts down and flashes under 31s; a permanent one shows no timer and never flashes.
+        DURATION / PERMANENCE is `untilCancelled`, GetPlayerBuff's second return — NOT
+        "expirationTime is 0", which is what this file tested before the verbs landed. They are
+        different questions and the difference is visible: untilCancelled is derived from the
+        SPELL (SpellDuration.dbc's infinite row, plus the area-aura override —
+        `benilla::ui_aura::until_cancelled`, byte-verified at 0x4e452e-0x4e45c5), so it is right on
+        the frame an aura appears, BEFORE any duration packet has landed. An aura that really is
+        timed but whose duration has not arrived yet therefore behaves as the reference does — it
+        counts from "0 s" and pulses for the frame or two before the stamp joins — instead of
+        silently showing no timer at all, which is what an expirationTime test cannot tell apart
+        from a permanent aura.
 
-        THE COUNTDOWN IS A POLL, NOT A CACHE. The aura EVENT is the discrete-change edge (icon, stacks,
-        dispel class); the remaining time is re-read from UnitBuff/UnitDebuff in OnUpdate, every frame,
-        by every visible button. That is the reference's own division of labour — BuffButton_Update
-        caches the buff INDEX on PLAYER_AURAS_CHANGED, BuffButton_OnUpdate calls GetPlayerBuffTimeLeft
-        with it each frame (ref BuffFrame.lua l.128-130) — and caching the expiry on the event instead
-        is what made refreshed buffs freeze at "0 s" and freshly cast ones show no timer (0846).
+        THE COUNTDOWN IS A POLL, NOT A CACHE. The aura EVENT is the discrete-change edge (icon,
+        stacks, dispel class); the remaining time is re-read every frame by every visible button.
+        That is the reference's own division of labour and it is now literally its code —
+        BuffButton_Update caches the buff POSITION on PLAYER_AURAS_CHANGED, BuffButton_OnUpdate
+        calls GetPlayerBuffTimeLeft with it each frame (ref BuffFrame.lua l.128-130) — and caching
+        the expiry on the event instead is what made refreshed buffs freeze at "0 s" and freshly
+        cast ones show no timer (decision 0846).
 
-        RIGHT-CLICK CANCEL. RegisterForClicks("RightButtonUp") + CancelUnitBuff (the Era name for the
-        reference's CancelPlayerBuff) — resolved within the button's own filter so a debuff button's id
-        never resolves against the buff list. The server cancels by spell id and refuses anything the
-        wire's cancelable bit didn't allow, so a debuff right-click is a silent no-op, as in 1.12.
+        RIGHT-CLICK CANCEL. RegisterForClicks("RightButtonUp") + CancelPlayerBuff(this.buffIndex).
+        The server cancels by spell id and refuses anything the wire's cancelable bit didn't allow,
+        so a debuff right-click is a silent no-op, as in 1.12. `CancelUnitBuff` (the Era name) is
+        the same verb over the same cache behind the same gate and the same CMSG_CANCEL_AURA queue;
+        this file simply no longer needs the Era spelling.
 
-        DEVIATIONS from the reference .lua (noted, not bugs):
+        DEVIATIONS from the reference .lua/.xml (noted, not bugs):
         - The count FontString is BLANKED ("") rather than hidden — an empty string draws nothing,
           same look. A site that predates region Show/Hide; equivalent either way. (The DURATION
           strings used the same shortcut until 1139 and no longer do: a hidden setting has to hide
           a region, not write an empty string into a visible one.)
+        - The dispel-class lookup sits INSIDE the `if (debuffSlot)` guard. The reference runs
+          `GetPlayerBuffDispelType(GetPlayerBuff(this:GetID(), "HARMFUL"))` for all 24 buttons and
+          then throws the answer away for the 16 helpful ones, which have no $parentBorder to tint.
+          Provably invisible (the value's only consumer is that SetVertexColor), and it drops 16
+          cache walks per aura event.
+        - The colour is `DebuffTypeColor[debuffType] or DebuffTypeColor["none"]` where the
+          reference branches on `if (debuffType)`. Same answer for the five known classes; ours also
+          survives a dispel name the table has no row for, where the reference indexes nil.
+        - An icon path we cannot resolve falls back to BENILLA_FALLBACK_ICON rather than
+          SetTexture(nil) — carried forward from 0255, and the same fallback the action bar uses.
+          The reference has no such art; ours would otherwise draw an invisible button.
+        - BuffButtons_UpdatePositions is CALLED ONCE AT LOAD (from TemporaryEnchantFrame's OnLoad,
+          the first moment every frame it names exists). The reference never calls it at load
+          because its default is "0" and its static XML anchors already ARE the "0" geometry; ours
+          defaults to "1", so the load-time call is what makes the default honest.
+        - TempEnchant1/2 ship `hidden="true"`. The reference leaves them shown and lets the first
+          BuffFrame_Enchant_OnUpdate hide them — one frame of two empty enchant borders at the top
+          right, which is a flicker worth not having.
+        - BuffButtonTempEnchant is STANDALONE rather than inheriting BuffButtonTemplate and blanking
+          its handlers with empty elements — our loader keeps the inherited handler where the
+          reference clears it. Measured, not assumed; see the template's own note.
+        - `hasEnchant = 1` (ref BuffFrame.lua l.185/208) is dropped: a leaked local that becomes a
+          global, is never cleared, and is read by nothing.
+        - GameTooltip is nil-guarded. Engine tests load file subsets without GameTooltip.xml.
     -->
     <Script><![CDATA[
         -- The timer switch (ref uvar, UIOptionsFrame.lua l.21/104 — its `default = "0"`). This
@@ -70,7 +124,8 @@
         BUFF_DURATION_WARNING_TIME = 60
 
         -- The dispel-class border tints (BuffFrame.lua l.9-14); "none" is the undispellable red the
-        -- debuff overlay wears by default. UnitDebuff's debuffType return keys this table.
+        -- debuff overlay wears by default. GetPlayerBuffDispelType's return keys this table — it
+        -- hands back the SpellDispelType.dbc name, or nil, never "" and never "none".
         DebuffTypeColor = {
             ["none"]    = { r = 0.80, g = 0.00, b = 0.00 },
             ["Magic"]   = { r = 0.20, g = 0.60, b = 1.00 },
@@ -102,36 +157,27 @@
         -- The frame-wide flash pulse (BuffFrame_OnLoad / _OnUpdate, BuffFrame.lua l.17-56). One
         -- BUFF_ALPHA_VALUE is computed per frame and every low-on-time button reads it, so they blink
         -- in unison. The bar also seats each duration string under its button here.
-        function BenillaBuffFrame_OnLoad(frame)
+        function BuffFrame_OnLoad()
+            BuffFrameUpdateTime = 0
             BuffFrameFlashTime = 0
             BuffFrameFlashState = 1
             BUFF_ALPHA_VALUE = 1
             for i = 0, 23 do
                 getglobal("BuffButton" .. i .. "Duration"):SetPoint("TOP", "BuffButton" .. i, "BOTTOM", 0, 0)
             end
-            BenillaBuffButtons_UpdatePositions()
         end
 
-        -- BuffButtons_UpdatePositions (BuffFrame.lua l.152-160): the ROW PITCH depends on whether a
-        -- timer sits under each icon. Shown, the three rows land at y = 0/−45/−90 (a 30px icon + a
-        -- 15px gutter); hidden, at 0/−35/−70 — the icons close up to the same 5px the columns use.
-        -- The reference reaches those two geometries by re-anchoring through its TempEnchant chain,
-        -- which we do not have; same two numbers, our own anchors, and SetPoint on a point already
-        -- held overwrites it (layout.rs — the client's own SetPoint law).
-        --
-        -- This is the Buff Durations row's `applyFunc`, and the ONLY thing the setting needs applied:
-        -- the timer text itself is re-decided every frame by the poll below, so a click changes what
-        -- the next frame draws without anyone telling it. Geometry is the part that is stated once.
-        function BenillaBuffButtons_UpdatePositions()
-            local gutter = -5
-            if SHOW_BUFF_DURATIONS == "1" then
-                gutter = -15
+        function BuffFrame_OnUpdate(elapsed)
+            -- The tooltip re-poll's throttle (ref l.29-33): oscillates around zero with a
+            -- TOOLTIP_UPDATE_TIME period, and BuffButton_OnUpdate refreshes a hovered plate only on
+            -- the frames it is non-positive. ActionBar.xml declares TOOLTIP_UPDATE_TIME and loads
+            -- first (benilla.toc), so it is always a number by the time this runs.
+            if BuffFrameUpdateTime > 0 then
+                BuffFrameUpdateTime = BuffFrameUpdateTime - elapsed
+            else
+                BuffFrameUpdateTime = BuffFrameUpdateTime + TOOLTIP_UPDATE_TIME
             end
-            BuffButton8:SetPoint("TOP", "BuffButton0", "BOTTOM", 0, gutter)
-            BuffButton16:SetPoint("TOPRIGHT", "BuffButton8", "BOTTOMRIGHT", 0, gutter)
-        end
 
-        function BenillaBuffFrame_OnUpdate(elapsed)
             BuffFrameFlashTime = BuffFrameFlashTime - elapsed
             if BuffFrameFlashTime < 0 then
                 local overtime = -BuffFrameFlashTime
@@ -155,148 +201,250 @@
             BUFF_ALPHA_VALUE = (BUFF_ALPHA_VALUE * (1 - BUFF_MIN_ALPHA)) + BUFF_MIN_ALPHA
         end
 
-        -- A button caches its filter (set in the template OnLoad), its per-filter id (the XML `id`,
-        -- 1-based to match our UnitBuff/UnitDebuff index), takes right-clicks, and listens for the
-        -- aura change. The first paint hides it until the feed reports an aura.
-        function BenillaBuffButton_OnLoad(button)
-            button:RegisterForClicks("RightButtonUp")
-            button:RegisterEvent("UNIT_AURA")
-            BenillaBuffButton_Update(button)
-        end
-
-        function BenillaBuffButton_OnEvent(button)
-            if arg1 == "player" then
-                BenillaBuffButton_Update(button)
-            end
-        end
-
-        -- The button's aura: the Nth of its own filter, in the app's display order. The ONE lookup
-        -- both handlers use — the ref's BuffButton_Update and BuffButton_OnUpdate likewise resolve
-        -- the same buffIndex, one on the event and one per frame.
-        function BenillaBuffButton_Aura(button)
-            local id = button:GetID()
-            if button.buffFilter == "HARMFUL" then
-                return UnitDebuff("player", id)
-            end
-            return UnitBuff("player", id)
-        end
-
-        -- Pull the button's aura and repaint the discrete parts: icon, stack count, debuff-border
-        -- tint. Those are what the aura-change event exists for. The countdown is NOT cached here —
-        -- see BenillaBuffButton_OnUpdate. No aura ⇒ hide the button (which hides its icon/border
-        -- with it) and blank its duration string.
-        -- BuffFrame_UpdateDuration (BuffFrame.lua l.247-259), gate and all: the timer draws only when
-        -- the setting is on AND there is a live one. `timeLeft` nil covers both of the other cases —
-        -- no aura in this slot, and a permanent aura (no duration on the wire). Hidden, not blanked:
-        -- see the header's deviation note.
-        function BenillaBuffButton_SetDuration(button, timeLeft)
-            local durationText = getglobal(button:GetName() .. "Duration")
-            if SHOW_BUFF_DURATIONS ~= "1" or not timeLeft then
-                durationText:Hide()
-                return
-            end
-            durationText:SetText(SecondsToTimeAbbrev(timeLeft))
-            if timeLeft < BUFF_DURATION_WARNING_TIME then
-                durationText:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+        -- BuffButtons_UpdatePositions (BuffFrame.lua l.152-160): the ROW PITCH depends on whether a
+        -- timer sits under each icon. Shown, the three rows land at y = 0/−45/−90 (a 30px icon + a
+        -- 15px gutter); hidden, at 0/−35/−70 — the icons close up to the same 5px the columns use.
+        -- The anchors are the reference's own, through the TempEnchant chain: row 2 hangs off
+        -- TempEnchant1 and row 3 off TemporaryEnchantFrame, which is what keeps them still while the
+        -- top row slides left to clear an equipped enchant. SetPoint on a point already held
+        -- overwrites it (layout.rs — the client's own SetPoint law).
+        --
+        -- This is the Buff Durations row's `applyFunc`, and the ONLY thing the setting needs applied:
+        -- the timer text itself is re-decided every frame by the poll below, so a click changes what
+        -- the next frame draws without anyone telling it. Geometry is the part that is stated once.
+        function BuffButtons_UpdatePositions()
+            if SHOW_BUFF_DURATIONS == "1" then
+                BuffButton8:SetPoint("TOP", "TempEnchant1", "BOTTOM", 0, -15)
+                BuffButton16:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, -90)
             else
-                durationText:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                BuffButton8:SetPoint("TOP", "TempEnchant1", "BOTTOM", 0, -5)
+                BuffButton16:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, -70)
             end
-            durationText:Show()
         end
 
-        function BenillaBuffButton_Update(button)
-            local name, icon, count, debuffType = BenillaBuffButton_Aura(button)
+        -- The button's aura, resolved on the discrete-change edge and CACHED AS A POSITION
+        -- (ref BuffButton_Update, l.58-107). `this:GetID()` is the 0-based ordinal within
+        -- this.buffFilter; buffIndex is the cache position every read below uses.
+        function BuffButton_Update()
+            local buffIndex, untilCancelled = GetPlayerBuff(this:GetID(), this.buffFilter)
+            this.buffIndex = buffIndex
+            this.untilCancelled = untilCancelled
+            local buffDuration = getglobal(this:GetName() .. "Duration")
 
-            if not name then
-                button:Hide()
-                BenillaBuffButton_SetDuration(button, nil)
+            -- -1, not nil: the miss sentinel the whole family agrees on.
+            if buffIndex < 0 then
+                this:Hide()
+                buffDuration:Hide()
                 return
             end
-            button:SetAlpha(1.0)
-            button:Show()
+            this:SetAlpha(1.0)
+            this:Show()
+            if SHOW_BUFF_DURATIONS == "1" then
+                buffDuration:Show()
+            else
+                buffDuration:Hide()
+            end
 
-            getglobal(button:GetName() .. "Icon"):SetTexture(icon or BENILLA_FALLBACK_ICON)
+            getglobal(this:GetName() .. "Icon"):SetTexture(GetPlayerBuffTexture(buffIndex) or BENILLA_FALLBACK_ICON)
 
             -- Debuff border, tinted by dispel class (harmful buttons only — helpful ones have no
-            -- $parentBorder, so getglobal is nil and we skip it).
-            local border = getglobal(button:GetName() .. "Border")
-            if border then
+            -- $parentBorder, so getglobal is nil and the whole lookup is skipped; see the header).
+            local debuffSlot = getglobal(this:GetName() .. "Border")
+            if debuffSlot then
+                local debuffType = GetPlayerBuffDispelType(GetPlayerBuff(this:GetID(), "HARMFUL"))
                 local color = DebuffTypeColor[debuffType] or DebuffTypeColor["none"]
-                border:SetVertexColor(color.r, color.g, color.b)
+                debuffSlot:SetVertexColor(color.r, color.g, color.b)
             end
 
-            -- Stack count, shown only above 1 (BuffButton_Update l.95-102).
-            local countText = getglobal(button:GetName() .. "Count")
-            if count and count > 1 then
-                countText:SetText(count)
+            -- Stack count, shown only above 1 (ref l.94-102). GetPlayerBuffApplications is a NUMBER
+            -- on every path — 1 for an absent position — so `> 1` needs no nil guard.
+            local buffCount = getglobal(this:GetName() .. "Count")
+            local count = GetPlayerBuffApplications(buffIndex)
+            if count > 1 then
+                buffCount:SetText(count)
             else
-                countText:SetText("")
+                buffCount:SetText("")
+            end
+
+            if GameTooltip and GameTooltip:IsOwned(this) then
+                GameTooltip:SetPlayerBuff(buffIndex)
             end
         end
 
-        -- Per-frame: RE-READ the expiration (never a cached one), count it down against GetTime(),
-        -- flash in the last 31s, and write the abbreviated timer (highlight-white under 60s).
-        -- expirationTime == 0 is a permanent aura (no duration on the wire) — our "until
-        -- cancelled": no timer, no flash.
+        -- A button takes right-clicks and listens for the aura rebuild. The first paint hides it
+        -- until the feed reports an aura. PLAYER_AURAS_CHANGED is the reference's event and the app
+        -- fires it beside the Era-shaped UNIT_AURA on the same rebuild (`ui_aura`).
+        function BuffButton_OnLoad()
+            -- Valid tokens for "buffFilter": HELPFUL, HARMFUL, CANCELABLE, NOT_CANCELABLE. Note the
+            -- mask starts at ZERO once a filter string is given, so a bare "CANCELABLE" would match
+            -- nothing — the sign must always be named.
+            BuffButton_Update()
+            this:RegisterForClicks("RightButtonUp")
+            this:RegisterEvent("PLAYER_AURAS_CHANGED")
+        end
+
+        function BuffButton_OnEvent(event)
+            if event == "PLAYER_AURAS_CHANGED" then
+                BuffButton_Update()
+            end
+        end
+
+        -- Per-frame: RE-READ the remaining time from the cached POSITION (never a cached duration),
+        -- flash in the last 31s, write the abbreviated timer, and tick a hovered tooltip.
         --
-        -- The re-read every frame is the reference's own shape, and it is load-bearing: ref
-        -- BuffFrame.lua l.128-130 calls GetPlayerBuffTimeLeft(this.buffIndex) inside
-        -- BuffButton_OnUpdate, caching only the INDEX on PLAYER_AURAS_CHANGED. A duration that
-        -- changes without any discrete change — a recast, a DoT reapplied, cast pushback, the
+        -- The re-read every frame is the reference's own shape, and it is load-bearing: a duration
+        -- that changes without any discrete change — a recast, a DoT reapplied, cast pushback, the
         -- server's replay of every duration at world entry — fires no aura event, so a button that
         -- cached its expiry on the event would keep counting the OLD one down, sit at "0 s" while
         -- the buff is still live, and never show a timer for an aura whose duration landed after
         -- its icon did. Both were live defects; the poll is what makes them unrepresentable
         -- (decision 0846).
-        function BenillaBuffButton_OnUpdate(button)
-            local name, _, _, _, _, expirationTime = BenillaBuffButton_Aura(button)
-            if not name or not expirationTime or expirationTime <= 0 then
-                button:SetAlpha(1.0)
-                BenillaBuffButton_SetDuration(button, nil)
+        --
+        -- The untilCancelled early-out (ref l.124-127) is what keeps a permanent aura from flashing
+        -- a "0 s" countdown while waiting for a duration packet that is never coming: it is answered
+        -- from the SPELL, so it is right before any packet arrives. This frame runs only on visible
+        -- frames (`UiScript::tick`), exactly as the client's does, so a hidden button's stale
+        -- buffIndex is never read.
+        function BuffButton_OnUpdate()
+            local buffDuration = getglobal(this:GetName() .. "Duration")
+            if this.untilCancelled == 1 then
+                buffDuration:Hide()
                 return
             end
 
-            local timeLeft = expirationTime - GetTime()
-            if timeLeft < 0 then
-                timeLeft = 0
-            end
-            -- The flash is NOT gated on the setting: the reference pulses a button in its last 31s
-            -- from BuffButton_OnUpdate, whether or not a timer is drawn under it (l.128-138), and
-            -- with the timers off it is the only thing left saying "about to drop".
+            local buffIndex = this.buffIndex
+            local timeLeft = GetPlayerBuffTimeLeft(buffIndex)
+            -- The flash is NOT gated on the timer setting: the reference pulses a button in its last
+            -- 31s whether or not a number is drawn under it, and with the timers off it is the only
+            -- thing left saying "about to drop".
             if timeLeft < BUFF_WARNING_TIME then
-                button:SetAlpha(BUFF_ALPHA_VALUE)
+                this:SetAlpha(BUFF_ALPHA_VALUE)
             else
-                button:SetAlpha(1.0)
+                this:SetAlpha(1.0)
             end
-            BenillaBuffButton_SetDuration(button, timeLeft)
+
+            BuffFrame_UpdateDuration(this, timeLeft)
+
+            if BuffFrameUpdateTime > 0 then
+                return
+            end
+            if GameTooltip and GameTooltip:IsOwned(this) then
+                GameTooltip:SetPlayerBuff(buffIndex)
+            end
         end
 
-        -- Right-click cancels (BuffButton_OnClick → CancelPlayerBuff). Resolve within the button's own
-        -- filter so a debuff button's id can't reach into the buff list; the app sends CMSG_CANCEL_AURA
-        -- for a cancelable buff and drops the rest.
-        -- Hover: the aura tooltip through the engine channel (decision 0274 P2 — the verified
-        -- aura variant: white AuraDescription + the SetPlayerBuff-only remaining line). The
-        -- OnUpdate re-poll keeps the remaining line ticking while hovered. Anchor: the ref's
-        -- BuffButton hangs the plate BELOW-left (ref BuffFrame.xml l.37 ANCHOR_BOTTOMLEFT —
-        -- the buff row sits at the screen's top-right, so the tooltip drops under it).
-        function BenillaBuffButton_OnEnter(button)
-            if not GameTooltip then return end -- engine tests load file subsets
-            GameTooltip:SetOwner(button, "ANCHOR_BOTTOMLEFT")
-            GameTooltip:SetPlayerBuff(button:GetID(), button.buffFilter)
+        -- Right-click cancels by CACHE POSITION (ref l.148-150). The app sends CMSG_CANCEL_AURA for
+        -- a cancelable aura and drops the rest, so a debuff right-click is a silent no-op.
+        function BuffButton_OnClick()
+            CancelPlayerBuff(this.buffIndex)
         end
 
-        function BenillaBuffButton_OnLeave(button)
-            GameTooltip:Hide()
+        -- The temporary-weapon-enchant row (ref l.162-233). GetWeaponEnchantInfo is the whole data
+        -- path: two flags, two remaining-MILLISECOND counts, two charge counts. Off hand takes
+        -- TempEnchant1 and main hand the next free slot, so with both enchanted the main hand sits
+        -- to the LEFT of the off hand — the reference's own ordering.
+        function BuffFrame_Enchant_OnUpdate(elapsed)
+            local hasMainHandEnchant, mainHandExpiration, mainHandCharges, hasOffHandEnchant, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
+
+            -- No enchants, kick out early — and park BuffFrame back on its resting point.
+            if not hasMainHandEnchant and not hasOffHandEnchant then
+                TempEnchant1:Hide()
+                TempEnchant1Duration:Hide()
+                TempEnchant2:Hide()
+                TempEnchant2Duration:Hide()
+                BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, 0)
+                return
+            end
+
+            local enchantButton
+            local textureName
+            local enchantIndex = 0
+            if hasOffHandEnchant then
+                enchantIndex = enchantIndex + 1
+                textureName = GetInventoryItemTexture("player", 17)
+                TempEnchant1:SetID(17)
+                TempEnchant1Icon:SetTexture(textureName or BENILLA_FALLBACK_ICON)
+                TempEnchant1:Show()
+
+                if offHandExpiration then
+                    offHandExpiration = offHandExpiration / 1000
+                end
+                BuffFrame_UpdateDuration(TempEnchant1, offHandExpiration)
+
+                if offHandExpiration and offHandExpiration < BUFF_WARNING_TIME then
+                    TempEnchant1:SetAlpha(BUFF_ALPHA_VALUE)
+                else
+                    TempEnchant1:SetAlpha(1.0)
+                end
+            end
+            if hasMainHandEnchant then
+                enchantIndex = enchantIndex + 1
+                enchantButton = getglobal("TempEnchant" .. enchantIndex)
+                textureName = GetInventoryItemTexture("player", 16)
+                enchantButton:SetID(16)
+                getglobal(enchantButton:GetName() .. "Icon"):SetTexture(textureName or BENILLA_FALLBACK_ICON)
+                enchantButton:Show()
+
+                if mainHandExpiration then
+                    mainHandExpiration = mainHandExpiration / 1000
+                end
+                BuffFrame_UpdateDuration(enchantButton, mainHandExpiration)
+
+                if mainHandExpiration and mainHandExpiration < BUFF_WARNING_TIME then
+                    enchantButton:SetAlpha(BUFF_ALPHA_VALUE)
+                else
+                    enchantButton:SetAlpha(1.0)
+                end
+            end
+            -- Hide unused enchants
+            for i = enchantIndex + 1, 2 do
+                getglobal("TempEnchant" .. i):Hide()
+                getglobal("TempEnchant" .. i .. "Duration"):Hide()
+            end
+
+            -- Position buff frame: the row is `enchantIndex` icons wide, and the bar starts one
+            -- 5px gutter to its left.
+            TemporaryEnchantFrame:SetWidth(enchantIndex * 32)
+            BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPLEFT", -5, 0)
         end
 
-        function BenillaBuffButton_OnClick(button)
-            CancelUnitBuff("player", button:GetID(), button.buffFilter)
+        function BuffFrame_EnchantButton_OnUpdate()
+            if GameTooltip and GameTooltip:IsOwned(this) then
+                BuffFrame_EnchantButton_OnEnter()
+            end
+        end
+
+        -- The enchant hover is the ITEM's tooltip, not an aura's — the plate hangs below-left like
+        -- the buff buttons' (ref l.242-245).
+        function BuffFrame_EnchantButton_OnEnter()
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT")
+            GameTooltip:SetInventoryItem("player", this:GetID())
+        end
+
+        -- BuffFrame_UpdateDuration (ref l.247-260), gate and all: the timer draws only when the
+        -- setting is on AND there is a live one. `timeLeft` nil is the enchant row's "no countdown
+        -- known" case. Hidden, not blanked — see the header's deviation note.
+        function BuffFrame_UpdateDuration(buffButton, timeLeft)
+            local duration = getglobal(buffButton:GetName() .. "Duration")
+            if SHOW_BUFF_DURATIONS == "1" and timeLeft then
+                duration:SetText(SecondsToTimeAbbrev(timeLeft))
+                if timeLeft < BUFF_DURATION_WARNING_TIME then
+                    duration:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                else
+                    duration:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                end
+                duration:Show()
+            else
+                duration:Hide()
+            end
         end
     ]]></Script>
 
-    <!-- 30x30 icon + a bottom-right stack count. BuffButtonTemplate, BuffFrame.xml l.4-44 (minus the
-         tooltip OnEnter/OnLeave — a later arc). -->
-    <Button name="BenillaBuffButtonTemplate" virtual="true">
+    <!-- 30x30 icon + a bottom-right stack count (ref BuffButtonTemplate, BuffFrame.xml l.4-44).
+         The base template's own filter is the reference's HELPFUL|HARMFUL; the two concrete
+         variants below pin one sign each. -->
+    <Button name="BuffButtonTemplate" virtual="true">
         <Size><AbsDimension x="30" y="30"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
@@ -309,27 +457,38 @@
             </Layer>
         </Layers>
         <Scripts>
-            <OnEvent>BenillaBuffButton_OnEvent(this)</OnEvent>
-            <OnUpdate>BenillaBuffButton_OnUpdate(this)</OnUpdate>
-            <OnClick>BenillaBuffButton_OnClick(this)</OnClick>
-            <OnEnter>BenillaBuffButton_OnEnter(this)</OnEnter>
-            <OnLeave>BenillaBuffButton_OnLeave(this)</OnLeave>
+            <OnLoad>
+                this.buffFilter = "HELPFUL|HARMFUL"
+                BuffButton_OnLoad()
+            </OnLoad>
+            <OnEvent>BuffButton_OnEvent(event)</OnEvent>
+            <OnUpdate>BuffButton_OnUpdate()</OnUpdate>
+            <OnClick>BuffButton_OnClick()</OnClick>
+            <OnEnter>
+                if GameTooltip then
+                    GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT")
+                    GameTooltip:SetPlayerBuff(this.buffIndex)
+                end
+            </OnEnter>
+            <OnLeave>
+                if GameTooltip then GameTooltip:Hide() end
+            </OnLeave>
         </Scripts>
     </Button>
 
-    <!-- Helpful variant: filter HELPFUL, no border (BuffButtonHelpful, l.50-57). -->
-    <Button name="BenillaBuffButtonHelpful" inherits="BenillaBuffButtonTemplate" virtual="true">
+    <!-- Helpful variant: filter HELPFUL, no border (ref l.50-57). -->
+    <Button name="BuffButtonHelpful" inherits="BuffButtonTemplate" virtual="true">
         <Scripts>
             <OnLoad>
                 this.buffFilter = "HELPFUL"
-                BenillaBuffButton_OnLoad(this)
+                BuffButton_OnLoad()
             </OnLoad>
         </Scripts>
     </Button>
 
-    <!-- Harmful variant: filter HARMFUL + the dispel-tinted border overlay (BuffButtonHarmful,
-         l.58-82). 33x32 UI-Debuff-Overlays, the exact reference TexCoords, tint set at runtime. -->
-    <Button name="BenillaBuffButtonHarmful" inherits="BenillaBuffButtonTemplate" virtual="true">
+    <!-- Harmful variant: filter HARMFUL + the dispel-tinted border overlay (ref l.58-82).
+         33x32 UI-Debuff-Overlays, the exact reference TexCoords, tint set at runtime. -->
+    <Button name="BuffButtonHarmful" inherits="BuffButtonTemplate" virtual="true">
         <Layers>
             <Layer level="OVERLAY">
                 <Texture name="$parentBorder" file="Interface\Buttons\UI-Debuff-Overlays">
@@ -344,23 +503,69 @@
         <Scripts>
             <OnLoad>
                 this.buffFilter = "HARMFUL"
-                BenillaBuffButton_OnLoad(this)
+                BuffButton_OnLoad()
             </OnLoad>
         </Scripts>
     </Button>
 
+    <!-- Temp-enchant slot: the same 30x30 icon under a 32x32 UI-TempEnchant-Border (ref l.83-117).
+         It carries no filter and no buffIndex — its data is GetWeaponEnchantInfo and its hover is
+         the ITEM's tooltip.
+
+         **STANDALONE, where the reference inherits BuffButtonTemplate and then blanks the four aura
+         handlers with empty `<OnLoad></OnLoad>` / `<OnEvent>` / `<OnClick>` elements.** Our loader
+         does not implement that idiom: `Loader::compile_handler` returns None for an empty body, so
+         `apply_scripts` skips the SetScript entirely and the INHERITED handler survives. Written
+         the reference's way and MEASURED, TempEnchant1 ran `BuffButton_OnLoad`, registered
+         PLAYER_AURAS_CHANGED, and painted the player's first buff in the corner — and a right-click
+         on it would have cancelled that aura. Writing the three regions out removes the dependence
+         on a loader semantic we have not byte-verified; the engine gap is real and worth closing on
+         its own evidence, not silently here. -->
+    <Button name="BuffButtonTempEnchant" virtual="true">
+        <Size><AbsDimension x="30" y="30"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+                <FontString name="$parentCount" inherits="NumberFontNormal">
+                    <Anchors>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="$parentBorder" file="Interface\Buttons\UI-TempEnchant-Border">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnUpdate>BuffFrame_EnchantButton_OnUpdate()</OnUpdate>
+            <OnEnter>BuffFrame_EnchantButton_OnEnter()</OnEnter>
+            <OnLeave>
+                if GameTooltip then GameTooltip:Hide() end
+            </OnLeave>
+        </Scripts>
+    </Button>
+
     <!-- The duration text under a button: the ref routes these through a virtual FontString
-         template (BuffButtonDurationTemplate, l.45-49 — GameFontNormalSmall + a bare TOP anchor),
-         but region TEMPLATES are not in the v1 loader's object model (inherits= on a FontString
-         resolves Font objects only), and the anchor is re-seated by BenillaBuffFrame_OnLoad
-         anyway — so each instance inherits the Font object directly. Same resolved font, no
-         indirection; the loader gap is the named v1 limit, warned once if reintroduced. -->
+         template (BuffButtonDurationTemplate, l.45-49 — GameFontNormalSmall + a bare TOP anchor).
+         Region templates DO exist in the loader now (Loader::expand_region), but chaining to a FONT
+         OBJECT through one does not: `framexml::merge` lets the instance's own `inherits=` win, so
+         the spliced element still reads `inherits="BuffButtonDurationTemplate"` and
+         `apply_fontstring_font` looks that up in the FONT registry — a separate namespace — and
+         misses. Each instance therefore names GameFontNormalSmall directly; the anchor is re-seated
+         by BuffFrame_OnLoad / TemporaryEnchantFrame's OnLoad anyway. Same resolved font, no
+         indirection. -->
     <!--
-        The bar. Right-aligned under the minimap (UIParent TOPRIGHT -175,-13). 16 helpful buttons in
-        two rows of 8 (ids 1-16), then 8 harmful (ids 1-8), rows 45px apart: button0 top-right;
-        buttons 1-7 step left (-5 gap); button8 opens row 2 under button0 (-15 gutter for the timer);
-        button16 opens the debuff row under button8. The 24 duration strings live in the frame's
-        ARTWORK layer (over the icons' BACKGROUND), named to pair with their button.
+        The bar. Right-aligned under the minimap (UIParent TOPRIGHT -175,-13 — the reference's XML
+        says -205 and lets the first Enchant_OnUpdate snap it here; ours starts where it rests, so
+        the bar is never one frame out of place). 16 helpful buttons in two rows of 8 (ids 0-15),
+        then 8 harmful (ids 0-7). The 24 duration strings live in the frame's ARTWORK layer (over the
+        icons' BACKGROUND), named to pair with their button. BuffButton8's and BuffButton16's static
+        anchors here are the no-timer geometry; BuffButtons_UpdatePositions re-seats both at load.
     -->
     <Frame name="BuffFrame" parent="UIParent" frameStrata="LOW" toplevel="true">
         <Size><AbsDimension x="50" y="50"/></Size>
@@ -398,85 +603,127 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- Row 0: helpful buttons 0-7, right to left. -->
-            <Button name="BuffButton0" inherits="BenillaBuffButtonHelpful" id="1">
+            <!-- Row 0: helpful ordinals 0-7, right to left. -->
+            <Button name="BuffButton0" inherits="BuffButtonHelpful" id="0">
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton1" inherits="BenillaBuffButtonHelpful" id="2">
+            <Button name="BuffButton1" inherits="BuffButtonHelpful" id="1">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton0" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton2" inherits="BenillaBuffButtonHelpful" id="3">
+            <Button name="BuffButton2" inherits="BuffButtonHelpful" id="2">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton1" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton3" inherits="BenillaBuffButtonHelpful" id="4">
+            <Button name="BuffButton3" inherits="BuffButtonHelpful" id="3">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton2" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton4" inherits="BenillaBuffButtonHelpful" id="5">
+            <Button name="BuffButton4" inherits="BuffButtonHelpful" id="4">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton3" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton5" inherits="BenillaBuffButtonHelpful" id="6">
+            <Button name="BuffButton5" inherits="BuffButtonHelpful" id="5">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton4" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton6" inherits="BenillaBuffButtonHelpful" id="7">
+            <Button name="BuffButton6" inherits="BuffButtonHelpful" id="6">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton5" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton7" inherits="BenillaBuffButtonHelpful" id="8">
+            <Button name="BuffButton7" inherits="BuffButtonHelpful" id="7">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton6" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <!-- Row 1: helpful buttons 8-15. Button8 opens the row under button0, with the 15px timer gutter. -->
-            <Button name="BuffButton8" inherits="BenillaBuffButtonHelpful" id="9">
-                <Anchors><Anchor point="TOP" relativeTo="BuffButton0" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+            <!-- Row 1: helpful ordinals 8-15. Re-anchored to TempEnchant1 by BuffButtons_UpdatePositions. -->
+            <Button name="BuffButton8" inherits="BuffButtonHelpful" id="8">
+                <Anchors><Anchor point="TOP" relativeTo="BuffButton0" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton9" inherits="BenillaBuffButtonHelpful" id="10">
+            <Button name="BuffButton9" inherits="BuffButtonHelpful" id="9">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton8" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton10" inherits="BenillaBuffButtonHelpful" id="11">
+            <Button name="BuffButton10" inherits="BuffButtonHelpful" id="10">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton9" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton11" inherits="BenillaBuffButtonHelpful" id="12">
+            <Button name="BuffButton11" inherits="BuffButtonHelpful" id="11">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton10" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton12" inherits="BenillaBuffButtonHelpful" id="13">
+            <Button name="BuffButton12" inherits="BuffButtonHelpful" id="12">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton11" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton13" inherits="BenillaBuffButtonHelpful" id="14">
+            <Button name="BuffButton13" inherits="BuffButtonHelpful" id="13">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton12" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton14" inherits="BenillaBuffButtonHelpful" id="15">
+            <Button name="BuffButton14" inherits="BuffButtonHelpful" id="14">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton13" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton15" inherits="BenillaBuffButtonHelpful" id="16">
+            <Button name="BuffButton15" inherits="BuffButtonHelpful" id="15">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton14" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <!-- Row 2: harmful buttons 16-23. Button16 opens the debuff row under button8, right-aligned. -->
-            <Button name="BuffButton16" inherits="BenillaBuffButtonHarmful" id="1">
-                <Anchors><Anchor point="TOPRIGHT" relativeTo="BuffButton8" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+            <!-- Row 2: harmful ordinals 0-7. Re-anchored to TemporaryEnchantFrame by
+                 BuffButtons_UpdatePositions. (The reference's static anchor here names
+                 relativePoint="BOTTOM" against a TOPRIGHT point — a typo it never notices because
+                 UpdatePositions overwrites it; BOTTOMRIGHT is what it meant.) -->
+            <Button name="BuffButton16" inherits="BuffButtonHarmful" id="0">
+                <Anchors><Anchor point="TOPRIGHT" relativeTo="BuffButton8" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton17" inherits="BenillaBuffButtonHarmful" id="2">
+            <Button name="BuffButton17" inherits="BuffButtonHarmful" id="1">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton16" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton18" inherits="BenillaBuffButtonHarmful" id="3">
+            <Button name="BuffButton18" inherits="BuffButtonHarmful" id="2">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton17" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton19" inherits="BenillaBuffButtonHarmful" id="4">
+            <Button name="BuffButton19" inherits="BuffButtonHarmful" id="3">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton18" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton20" inherits="BenillaBuffButtonHarmful" id="5">
+            <Button name="BuffButton20" inherits="BuffButtonHarmful" id="4">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton19" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton21" inherits="BenillaBuffButtonHarmful" id="6">
+            <Button name="BuffButton21" inherits="BuffButtonHarmful" id="5">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton20" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton22" inherits="BenillaBuffButtonHarmful" id="7">
+            <Button name="BuffButton22" inherits="BuffButtonHarmful" id="6">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton21" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
-            <Button name="BuffButton23" inherits="BenillaBuffButtonHarmful" id="8">
+            <Button name="BuffButton23" inherits="BuffButtonHarmful" id="7">
                 <Anchors><Anchor point="RIGHT" relativeTo="BuffButton22" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaBuffFrame_OnLoad(this)</OnLoad>
-            <OnUpdate>BenillaBuffFrame_OnUpdate(arg1)</OnUpdate>
+            <OnLoad>BuffFrame_OnLoad()</OnLoad>
+            <OnUpdate>BuffFrame_OnUpdate(arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+
+    <!-- The temporary-weapon-enchant row (ref BuffFrame.xml l.385-431). It owns the top-right
+         corner; BuffFrame hangs off it, which is why the bar's own anchor above is this frame's
+         point. Two slots, right to left, so with both weapons enchanted the main hand sits left of
+         the off hand.
+
+         Declared AFTER BuffFrame so that by the time this OnLoad runs every name
+         BuffButtons_UpdatePositions touches exists — the reference gets away with never calling it
+         at load because its default is the geometry its static anchors already hold; ours is not. -->
+    <Frame name="TemporaryEnchantFrame" parent="UIParent" frameStrata="LOW" toplevel="true">
+        <Size><AbsDimension x="36" y="36"/></Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="UIParent" relativePoint="TOPRIGHT">
+                <Offset><AbsDimension x="-175" y="-13"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="TempEnchant1Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="TempEnchant2Duration" inherits="GameFontNormalSmall"/>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="TempEnchant1" inherits="BuffButtonTempEnchant" hidden="true">
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="TempEnchant2" inherits="BuffButtonTempEnchant" hidden="true">
+                <Anchors><Anchor point="RIGHT" relativeTo="TempEnchant1" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                TempEnchant1Duration:SetPoint("TOP", "TempEnchant1", "BOTTOM", 0, 0)
+                TempEnchant2Duration:SetPoint("TOP", "TempEnchant2", "BOTTOM", 0, 0)
+                BuffButtons_UpdatePositions()
+            </OnLoad>
+            <OnUpdate>BuffFrame_Enchant_OnUpdate(arg1)</OnUpdate>
         </Scripts>
     </Frame>
 </Ui>

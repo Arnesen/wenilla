@@ -1,4 +1,4 @@
-//! The game-state `UnitAura`/`UnitBuff`/`UnitDebuff` bindings (decisions 0255, 0257).
+//! The game-state aura bindings — **two dialects over one list** (decisions 0255, 0257).
 //!
 //! Same engine-free seam as [`super::unit`]: the app pushes a per-token, **already ordered** list of
 //! [`AuraState`] via [`UiScript::set_auras`], and these globals index it. This module deliberately
@@ -11,6 +11,72 @@
 //! Decision 0257 resolves that split toward the player-bar law for the local player under every token,
 //! since the Era API has one aura function where 1.12 had two.
 //!
+//! # The two dialects
+//!
+//! **Era** — `UnitAura`/`UnitBuff`/`UnitDebuff`/`CancelUnitBuff`: a token plus a **1-based** index
+//! *within the sign-filtered list*, terminated by a bare `nil`. This is the shape our own transcribed
+//! frames use.
+//!
+//! **1.12** — the `GetPlayerBuff*` family plus `CancelPlayerBuff`: the player only, no token, a
+//! **0-based** index, and — the part no documentation gets right — `GetPlayerBuff` does not return the
+//! aura. It returns a **handle**: the aura's *physical position* in the cache, `-1` past the end. Every
+//! sibling (`GetPlayerBuffTexture`, `…TimeLeft`, `…DispelType`, `…Applications`, `CancelPlayerBuff`,
+//! and `GameTooltip:SetPlayerBuff`) takes that position, **not** the loop counter. So the family is a
+//! two-step: enumerate to get a position, then read the position.
+//!
+//! That two-step is what makes the index space *absolute*: the position a filtered enumeration hands
+//! back is the same number an unfiltered one would, which is exactly what the corpus relies on
+//! (`CT_BuffMod/CT_BuffFrame.lua:73-79` obtains an index under `"HARMFUL"` and compares it for
+//! equality against one obtained under `"HELPFUL|HARMFUL"`; `Zorlen/Zorlen.lua:2798` intersects the
+//! filtered and unfiltered walks at the same counter).
+//!
+//! Because [`AuraState`] lists are pushed in the app's display order and the player's list **is** the
+//! reference's `0xbc6040` insertion-ordered cache (`benilla::ui_aura`), a cache position is simply a
+//! 0-based index into `model.auras["player"]`. No second structure exists, and none is needed.
+//!
+//! # Byte-verified signatures (`~/dev/wow-5875-re/WoW/WoW.exe`, `system/ui/ledger.tsv`)
+//!
+//! Read off the disassembly, not off a wiki — a later client changed every one of these shapes, and a
+//! wrong shape fails *silently*.
+//!
+//! | verb | addr | returns | miss |
+//! |---|---|---|---|
+//! | `GetPlayerBuff(index [, "filter"])` | `0x4e45d0` | **always 2** numbers: `pos`, `untilCancelled` | `(-1, 0)` |
+//! | `GetPlayerBuffTexture(pos)` | `0x4e4740` | 1: icon path or nil | nil |
+//! | `GetPlayerBuffDispelType(pos)` | `0x4e4800` | 1: dispel-class name or nil | nil |
+//! | `GetPlayerBuffApplications(pos)` | `0x4e48b0` | 1: number | **`1`** |
+//! | `GetPlayerBuffTimeLeft(pos)` | `0x4e4930` | 1: **seconds** | `0` |
+//! | `CancelPlayerBuff(pos)` | `0x4e49a0` | **0** values | — |
+//!
+//! The traps, each with the site that pins it:
+//!
+//! - **`-1`, never nil.** `GetPlayerBuff` seeds its out-parameter to `-1` (`mov DWORD PTR [ebp-4],
+//!   0xffffffff`, `0x4e46ea`) and pushes it unconditionally, then pushes `record+0xc` or `0`
+//!   (`0x4e46f6`/`0x4e4728`), returning `mov eax,0x2` on **both** paths. The corpus terminates on the
+//!   number — `while GetPlayerBuff(counter) >= 0 do` (`_LazyPig/LazyPig.lua:1174`) — so a nil past the
+//!   end is `attempt to compare nil with number`, and *zero* returns is the same crash.
+//! - **0-based.** `lua_tonumber` → `__ftol` → used raw, with **no `dec`** (`0x4e460a`-`0x4e4616`);
+//!   contrast `UnitBuff 0x519500`, which does `dec eax` at `0x519579`. Every enumerating call site in
+//!   the corpus starts at `0`; the reference's own buttons are `BuffButton0`..`BuffButton23` with
+//!   `id="0"` upward (`ref-BuffFrame.xml:159`).
+//! - **The default filter is `HELPFUL|HARMFUL`, not `HELPFUL`.** `mov esi,0x3` at `0x4e4618`, kept
+//!   when the `lua_isstring` check on arg 2 fails. This is the one that would have failed silently:
+//!   `Zorlen/Zorlen.lua:2797-2801` walks *unfiltered* and feeds each index to
+//!   `GetPlayerBuffDispelType` looking for `"Poison"`/`"Disease"` (`Zorlen_Other.lua:94,98`) — a
+//!   debuff-only concept. Under a `HELPFUL` default that check never matches, and nothing errors.
+//! - **`untilCancelled` is the number `0`/`1`.** Five corpus sites compare it to the *number* `1`
+//!   (`CT_BuffMod/CT_BuffFrame.lua:175,232`; `_LazyPig/LazyPig.lua:2071`; `Zorlen/Zorlen.lua:2800`;
+//!   `ElkBuffBar/ElkBuffBar.lua:502`), as does `ref-BuffFrame.lua:124`. A boolean breaks all six:
+//!   `true ~= 1`.
+//! - **`PASSIVE` is not a token here.** The parser knows exactly four (`stricmp` against `0x84bc34`
+//!   `HELPFUL`=`0x1`, `0x84bc2c` `HARMFUL`=`0x2`, `0x84bc20` `CANCELABLE`=`0x10`, `0x84bc10`
+//!   `NOT_CANCELABLE`=`0x20`; `0x4e4661`-`0x4e46cf`). A `"PASSIVE"` string does exist in the binary at
+//!   `0x806a30`, but `0x4e45d0` never references it — and no corpus addon passes it.
+//! - **The mask starts at ZERO once a filter string is given** (`xor esi,esi`, `0x4e4639`). So
+//!   `GetPlayerBuff(0, "CANCELABLE")` matches *nothing* — neither sign bit is set — where
+//!   [`super::unit`]-style parsing would have defaulted the sign to helpful. Delimiters are
+//!   `" |"` (`0x84bc3c`), i.e. space **or** pipe.
+//!
 //! **Stated gaps, not hidden.** `source` (the caster) is always nil and `duration`/`expirationTime`
 //! are `0` for every unit but the player: the 1.12 wire carries no aura caster at all, and no duration
 //! for anyone but yourself (byte-verified, decision 0257 B6/B10). The reference's own target and party
@@ -19,6 +85,8 @@
 use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
+
+mod player_buff;
 
 /// One aura on one unit, as the Era `UnitAura` family reports it. Plain data (no mlua handles, no ECS
 /// types), pushed by the app's [`crate::script::UiScript::set_auras`] feed each frame.
@@ -46,6 +114,20 @@ pub struct AuraState {
     /// Whether right-clicking it will be honoured (the wire's `AFLAG_CANCELABLE`) — the
     /// `CANCELABLE`/`NOT_CANCELABLE` filter's discriminator.
     pub cancelable: bool,
+    /// **`GetPlayerBuff`'s second return** — the reference's cache record `+0xc`: "this aura has no
+    /// finite duration to display."
+    ///
+    /// DBC-derived at cache-build time, and deliberately **not** the same question as
+    /// `expiration_time == 0.0`: it is computed from the spell, so it is right on the frame an aura
+    /// appears, before any `SMSG_UPDATE_AURA_DURATION` has arrived. That is the whole point of it —
+    /// `ref-BuffFrame.lua:124` returns *before* calling `GetPlayerBuffTimeLeft` when it is `1`, so a
+    /// permanent aura never flickers a `0 s` timer. The app fills it (`benilla::ui_aura`) from the
+    /// byte-verified derivation at `0x4e452e`-`0x4e45c5`; see there for the two clauses.
+    pub until_cancelled: bool,
+    /// `Spell.dbc` `AttributesEx & 0x4` (`SPELL_ATTR_EX_IS_CHANNELED`) — the **second** arm of the
+    /// cancel gate, and the only one that can authorise cancelling a *negative* aura. See
+    /// [`cancel_authorized`].
+    pub channeled: bool,
 }
 
 /// The player's active tracking aura — the engine mirror of the reference's tracking global
@@ -93,6 +175,24 @@ impl Filter {
     fn matches(&self, a: &AuraState) -> bool {
         a.helpful == self.helpful && self.cancelable.is_none_or(|c| a.cancelable == c)
     }
+}
+
+/// May this aura be cancelled? **One law, two entry points** — `CancelUnitBuff` (the Era name) and
+/// `CancelPlayerBuff` (the 1.12 name) are the same verb over the same cache, so they share the gate
+/// and the queue rather than growing a second mechanism.
+///
+/// Byte-verified, `CancelPlayerBuff 0x4e49a0` (`0x4e49fb`-`0x4e4a14`) — an **OR** of two arms:
+///
+/// 1. the **wire** arm: the aura sits in the positive half (`record.slot < 0x20`, i.e. helpful) AND
+///    carries `AFLAG_CANCELABLE` (`record+0xa & 0x1`), which vmangos sets iff the aura is positive
+///    and the spell lacks `SPELL_ATTR_NO_AURA_CANCEL`; OR
+/// 2. the **DBC** arm: the spell has `AttributesEx & 0x4` (`SPELL_ATTR_EX_IS_CHANNELED`) — the only
+///    way a *negative* aura becomes cancellable, which is how you break a channel being held on you.
+///
+/// Neither arm alone is the gate; reading only the first (the shape `CancelUnitBuff` shipped with)
+/// silently refuses the channeled case.
+pub(super) fn cancel_authorized(a: &AuraState) -> bool {
+    (a.helpful && a.cancelable) || a.channeled
 }
 
 /// `UnitAura`'s return tuple for a hit. Order and arity follow the Classic Era signature:
@@ -180,7 +280,8 @@ impl super::UiScript {
     }
 }
 
-/// Register `UnitAura`, `UnitBuff`, `UnitDebuff` and `CancelUnitBuff`.
+/// Register `UnitAura`, `UnitBuff`, `UnitDebuff` and `CancelUnitBuff`, plus the 1.12 `GetPlayerBuff*`
+/// family ([`player_buff`]).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
@@ -248,7 +349,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                                 .cloned()
                         })
                 };
-                if let Some(a) = hit.filter(|a| a.cancelable) {
+                if let Some(a) = hit.filter(cancel_authorized) {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     model.cancel_aura_requests.push(a.spell_id);
                 }
@@ -256,6 +357,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             },
         )?,
     )?;
+
+    player_buff::install(lua)?;
 
     // GetTrackingTexture() — the reference's `0x4e4a20`: the icon path of the active tracking
     // spell (the tracking global's occupant), or nil when none — `MiniMapTrackingFrame`'s
@@ -302,6 +405,8 @@ mod tests {
             expiration_time: 0.0,
             helpful,
             cancelable,
+            until_cancelled: false,
+            channeled: false,
         }
     }
 

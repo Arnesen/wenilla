@@ -111,9 +111,7 @@ fn shipped_merchant_frame_drives_end_to_end() {
 
     // The window is shown (ShowUIPanel put it on the left slot), both row icons rendered, a price
     // + the purse line painted.
-    assert!(s
-        .eval::<bool>("return BenillaMerchantFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return MerchantFrame:IsVisible()").unwrap());
     s.resolve();
     let quads = s.extract();
     assert!(has_icon(&quads, "INV_Drink_18"), "row 1 icon visible");
@@ -961,13 +959,17 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     // Merchant page: the buyback slot shows the MOST RECENT sale; the repair pair is up and the
     // all-button enabled (cost 76 > 0); the buyback page art is down.
     assert!(s
-        .eval::<bool>("return BenillaMerchantBuyBackItemName:GetText() == 'Cracked Sword'")
+        .eval::<bool>("return MerchantBuyBackItemName:GetText() == 'Cracked Sword'")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaMerchantRepairAllButton:IsShown() and BenillaMerchantRepairAllButton:IsEnabled()")
+        .eval::<bool>(
+            "return MerchantRepairAllButton:IsShown() and MerchantRepairAllButton:IsEnabled()"
+        )
         .unwrap());
     assert!(s
-        .eval::<bool>("return not BenillaMerchantItem11:IsShown() and BenillaBuybackFrameTopLeft:IsShown() == nil")
+        .eval::<bool>(
+            "return not MerchantItem11:IsShown() and BuybackFrameTopLeft:IsShown() == nil"
+        )
         .unwrap());
 
     // The slot click buys back the most recent sale (slot 2 of 2).
@@ -984,30 +986,30 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     s.run("BenillaMerchantFrameTab_OnClick(2)").unwrap();
     assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return BenillaMerchantNameText:GetText() == 'Merchant Buyback'")
+        .eval::<bool>("return MerchantNameText:GetText() == 'Merchant Buyback'")
         .unwrap());
     assert!(s
         .eval::<bool>(
-            "return BenillaMerchantItem1Name:GetText() == 'Bandit Cloak' \
-             and BenillaMerchantItem2Name:GetText() == 'Cracked Sword'",
+            "return MerchantItem1Name:GetText() == 'Bandit Cloak' \
+             and MerchantItem2Name:GetText() == 'Cracked Sword'",
         )
         .unwrap());
     assert!(s
         .eval::<bool>(
-            "return BenillaBuybackFrameTopLeft:IsShown() == 1 \
-             and not BenillaMerchantBuyBackItem:IsShown() \
-             and not BenillaMerchantRepairAllButton:IsShown()",
+            "return BuybackFrameTopLeft:IsShown() == 1 \
+             and not MerchantBuyBackItem:IsShown() \
+             and not MerchantRepairAllButton:IsShown()",
         )
         .unwrap());
     assert!(s
         .eval::<bool>(
-            "return BenillaMerchantFrameTab2LeftDisabled:IsShown() == 1 \
-             and BenillaMerchantFrameTab1LeftDisabled:IsShown() == nil",
+            "return MerchantFrameTab2LeftDisabled:IsShown() == 1 \
+             and MerchantFrameTab1LeftDisabled:IsShown() == nil",
         )
         .unwrap());
 
     // A row click on the buyback page buys that slot back.
-    s.run("BenillaMerchantItem_OnClick(BenillaMerchantItem1, 'LeftButton')")
+    s.run("BenillaMerchantItem_OnClick(MerchantItem1, 'LeftButton')")
         .unwrap();
     assert_eq!(s.take_merchant_buybacks(), vec![1]);
 
@@ -1015,8 +1017,8 @@ fn merchant_tabs_drive_buyback_page_and_repair_pair() {
     s.run("BenillaMerchantFrameTab_OnClick(1)").unwrap();
     assert!(s
         .eval::<bool>(
-            "return BenillaMerchantItem1Name:GetText() == 'Refreshing Spring Water' \
-             and BenillaBuybackFrameTopLeft:IsShown() == nil",
+            "return MerchantItem1Name:GetText() == 'Refreshing Spring Water' \
+             and BuybackFrameTopLeft:IsShown() == nil",
         )
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1056,13 +1058,13 @@ fn merchant_tabs_fit_their_labels() {
 
     // Tab width = text + 2×20 end slices; the middle slices carry exactly the text width.
     let (w1, w2): (f64, f64) = s
-        .eval("return BenillaMerchantFrameTab1:GetWidth(), BenillaMerchantFrameTab2:GetWidth()")
+        .eval("return MerchantFrameTab1:GetWidth(), MerchantFrameTab2:GetWidth()")
         .unwrap();
     assert_eq!((w1, w2), (98.0, 92.0), "text + 40, not the fixed 115");
     let (m1, m2): (f64, f64) = s
         .eval(
-            "return BenillaMerchantFrameTab1MiddleDisabled:GetWidth(), \
-             BenillaMerchantFrameTab2Middle:GetWidth()",
+            "return MerchantFrameTab1MiddleDisabled:GetWidth(), \
+             MerchantFrameTab2Middle:GetWidth()",
         )
         .unwrap();
     assert_eq!((m1, m2), (58.0, 52.0), "middle slices stretch to the text");
@@ -1116,8 +1118,7 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     assert_eq!(s.ui_cursor(), None, "no override before any hover");
 
     // Row 1 hover: OnEnter remembers the row, the frame's OnUpdate arms the coin — affordable → Buy.
-    s.run("BenillaMerchantItem_OnEnter(BenillaMerchantItem1)")
-        .unwrap();
+    s.run("BenillaMerchantItem_OnEnter(MerchantItem1)").unwrap();
     s.tick(0.016);
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     assert_eq!(
@@ -1137,14 +1138,12 @@ fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
     s.set_modifiers(false, false, false);
 
     // Leaving clears the override (OnLeave ResetCursor + the itemHover poll stops).
-    s.run("BenillaMerchantItem_OnLeave(BenillaMerchantItem1)")
-        .unwrap();
+    s.run("BenillaMerchantItem_OnLeave(MerchantItem1)").unwrap();
     s.tick(0.016);
     assert_eq!(s.ui_cursor(), None, "leaving the row resets the cursor");
 
     // Row 2 hover: 100c against a 50c purse → the grayed UnableBuy.
-    s.run("BenillaMerchantItem_OnEnter(BenillaMerchantItem2)")
-        .unwrap();
+    s.run("BenillaMerchantItem_OnEnter(MerchantItem2)").unwrap();
     s.tick(0.016);
     assert_eq!(
         s.ui_cursor(),

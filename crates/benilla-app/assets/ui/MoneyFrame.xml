@@ -1,0 +1,601 @@
+<Ui>
+    <!--
+        The reference's MONEY FRAME kit — `MoneyFrameTemplate` / `SmallMoneyFrameTemplate` plus the
+        `MoneyTypeInfo` table and the `MoneyFrame_*` API that drives them. Transcribed from the
+        extracted 1.12 `Interface\FrameXML\MoneyFrame.lua` (356 lines) and `MoneyFrame.xml` (297),
+        line numbers cited below as `l.N`.
+
+        WHY IT IS HERE: it is FrameXML's, not Rust's (decision 1190 — a name the shipped 1.12 UI
+        defines is transcribed, never hardcoded), and the corpus asks for it by name.
+        `MoneyFrame_SetType` is wanted by 11 addons, `MoneyFrame_Update` by 9, `SmallMoneyFrame_OnLoad`
+        by 9, and 13 declare a frame `inherits="SmallMoneyFrameTemplate"`. `MoneyTypeInfo` was one of
+        the top runtime walls the frame rename left standing.
+
+        ── THE OTHER COIN KIT, and why there are two ────────────────────────────────────────────────
+        benilla's own eight windows (merchant, bank, trade, mail, quest, quest log, taxi, trainer) do
+        NOT use this file. They render coins through `BenillaMoney_Set`/`_Clear`/`_SetColor` in
+        MerchantFrame.xml: a three-SLOT chain (`<prefix>Coin1..3`) that fills only the non-zero
+        denominations in display order and re-flows, rather than three fixed GoldButton/SilverButton/
+        CopperButton frames that hide themselves. That kit was quoted FROM this one (its header cites
+        these same line numbers for the coin TexCoords, the collapse and the shrink) and its layout is
+        the one the director has signed off across those eight windows.
+
+        So the two coexist deliberately, and the split is by AUDIENCE, not by accident:
+          · `BenillaMoney_*` + `<prefix>Coin1..3`  — what our own transcribed windows are laid out on.
+          · `MoneyFrame_*` + `MoneyTypeInfo` here  — the reference's names and structure, which is
+            what an addon writes against and what an addon's `inherits="SmallMoneyFrameTemplate"`
+            resolves to.
+        The reconciliation — migrating those eight windows onto `SmallMoneyFrameTemplate` +
+        `MoneyFrame_Update` and retiring `BenillaMoney_*` — is what the reference itself does and is
+        the right end state; it is a re-layout of hand-authored art in eight files (an approved look),
+        so it is named here rather than done in passing.
+
+        ── WHAT IS NOT CARRIED, and why (each is guarded at its own site below) ─────────────────────
+        · THE COIN PICKUP. `OpenCoinPickupFrame`/`UpdateCoinPickupFrame`/`CoinPickupFrame` live in the
+          reference's CoinPickupFrame.lua/.xml, which we do not ship — and the engine verbs underneath
+          it (`PickupPlayerMoney`, `DropCursorMoney`, `PickupTradeMoney`, `AddTradeMoney`) are not
+          built either, so a picked-up coin would have nowhere to go. The templates' `<OnClick>` is
+          the reference's, guarded on the function existing; a `canPickup` money frame therefore
+          enables its mouse (the reference's own state) and clicking it does nothing.
+        · `GetCursorMoney` (PLAYER's UpdateFunc, l.17) — the engine verb for coins held on the cursor.
+          With no coin pickup there is no cursor money, so its term is not approximated away: it is
+          structurally zero. Stated at the spot.
+        · `GetSendMailMoney` / `GetSendMailCOD` (l.73, l.90) — 1.12 engine verbs we have not built. We
+          ship their SETTERS (`SetSendMailMoney`/`SetSendMailCOD`, which MailFrame.xml drives); nothing
+          reads the amount back yet. Guarded to 0 rather than left as a nil call.
+        · `message()` (l.145, l.173, l.181) — the reference's one-line StaticPopup shim, which lives in
+          BasicControls.xml, a file family we have not transcribed. Guarded, so a misuse of the API
+          stays silent instead of erroring on the diagnostic.
+        · `Button:GetTextWidth()` (l.202 etc.) — our Button has no such method yet. The button's own
+          `<ButtonText name="$parentText">` FontString carries `GetStringWidth`, which is the same
+          measurement, and that is what is called.
+        · The four `Pickup*`/`Add*` mail verbs the reference's own MoneyTypeInfo closures name are not
+          in 1.12's `_G` either (they are absent from reference/1.12-globals.tsv) — so those bodies are
+          transcribed verbatim and are as unreachable here as they are there.
+    -->
+    <Script><![CDATA[
+        -- l.2-12, verbatim.
+        MONEY_ICON_WIDTH = 19
+        MONEY_ICON_WIDTH_SMALL = 13
+
+        MONEY_BUTTON_SPACING = -4
+        MONEY_BUTTON_SPACING_SMALL = -4
+
+        COPPER_PER_SILVER = 100
+        SILVER_PER_GOLD = 100
+        COPPER_PER_GOLD = COPPER_PER_SILVER * SILVER_PER_GOLD
+
+        COIN_BUTTON_WIDTH = 32
+
+        -- l.14-103: the money TYPES. A money frame carries no amount of its own — it carries a type,
+        -- and the type says where to read the number from (`UpdateFunc`, called with `this` set to the
+        -- frame), whether zero denominations collapse away, whether the smaller coins show anyway, and
+        -- whether the coins are click-to-pick-up. Addons read this table directly, so its shape is the
+        -- contract, not just its behaviour.
+        MoneyTypeInfo = { }
+        MoneyTypeInfo["PLAYER"] = {
+            UpdateFunc = function()
+                -- Reference l.17: `GetMoney() - GetCursorMoney() - GetPlayerTradeMoney()`. The
+                -- cursor term is dropped, not approximated: `GetCursorMoney` is the amount lifted onto
+                -- the cursor by the coin-pickup frame, and benilla ships neither that frame nor the
+                -- `PickupPlayerMoney` verb behind it, so it is structurally 0 here. The term returns
+                -- the moment either lands.
+                return GetMoney() - GetPlayerTradeMoney()
+            end,
+
+            PickupFunc = function(amount)
+                PickupPlayerMoney(amount)
+            end,
+
+            DropFunc = function()
+                DropCursorMoney()
+            end,
+
+            collapse = 1,
+            canPickup = 1,
+            showSmallerCoins = "Backpack"
+        }
+        MoneyTypeInfo["STATIC"] = {
+            UpdateFunc = function()
+                return this.staticMoney
+            end,
+
+            collapse = 1,
+        }
+        MoneyTypeInfo["AUCTION"] = {
+            UpdateFunc = function()
+                return this.staticMoney
+            end,
+            showSmallerCoins = "Backpack",
+            fixedWidth = 1,
+            collapse = 1,
+            truncateSmallCoins = nil,
+        }
+        MoneyTypeInfo["PLAYER_TRADE"] = {
+            UpdateFunc = function()
+                return GetPlayerTradeMoney()
+            end,
+
+            PickupFunc = function(amount)
+                PickupTradeMoney(amount)
+            end,
+
+            DropFunc = function()
+                AddTradeMoney()
+            end,
+
+            collapse = 1,
+            canPickup = 1,
+        }
+        MoneyTypeInfo["TARGET_TRADE"] = {
+            UpdateFunc = function()
+                return GetTargetTradeMoney()
+            end,
+
+            collapse = 1,
+        }
+        MoneyTypeInfo["SEND_MAIL"] = {
+            UpdateFunc = function()
+                -- `GetSendMailMoney` (ref l.73) is an engine verb we have not built — see the header.
+                if not GetSendMailMoney then return 0 end
+                return GetSendMailMoney()
+            end,
+
+            PickupFunc = function(amount)
+                PickupSendMailMoney(amount)
+            end,
+
+            DropFunc = function()
+                AddSendMailMoney()
+            end,
+
+            collapse = nil,
+            canPickup = 1,
+            showSmallerCoins = "Backpack",
+        }
+        MoneyTypeInfo["SEND_MAIL_COD"] = {
+            UpdateFunc = function()
+                -- `GetSendMailCOD` (ref l.90) — same gap as SEND_MAIL above.
+                if not GetSendMailCOD then return 0 end
+                return GetSendMailCOD()
+            end,
+
+            PickupFunc = function(amount)
+                PickupSendMailCOD(amount)
+            end,
+
+            DropFunc = function()
+                AddSendMailCOD()
+            end,
+
+            collapse = 1,
+            canPickup = 1,
+        }
+
+        -- l.105-122: the two OnLoads. Identical but for `this.small`, which is what picks the 13px
+        -- coin + tight spacing over the 19px one in MoneyFrame_Update below. Both then take type
+        -- PLAYER, so a frame that is never told otherwise shows the purse.
+        function MoneyFrame_OnLoad()
+            this:RegisterEvent("PLAYER_MONEY")
+            this:RegisterEvent("PLAYER_TRADE_MONEY")
+            this:RegisterEvent("TRADE_MONEY_CHANGED")
+            this:RegisterEvent("SEND_MAIL_MONEY_CHANGED")
+            this:RegisterEvent("SEND_MAIL_COD_CHANGED")
+            MoneyFrame_SetType("PLAYER")
+        end
+
+        function SmallMoneyFrame_OnLoad()
+            this:RegisterEvent("PLAYER_MONEY")
+            this:RegisterEvent("PLAYER_TRADE_MONEY")
+            this:RegisterEvent("TRADE_MONEY_CHANGED")
+            this:RegisterEvent("SEND_MAIL_MONEY_CHANGED")
+            this:RegisterEvent("SEND_MAIL_COD_CHANGED")
+            this.small = 1
+            MoneyFrame_SetType("PLAYER")
+        end
+
+        -- l.124-140, verbatim: every money frame hears every money event, and each decides for itself
+        -- whether the one that arrived is about the number IT is showing.
+        function MoneyFrame_OnEvent()
+            if ( not this.info or not this:IsVisible() ) then
+                return
+            end
+
+            if ( event == "PLAYER_MONEY" and this.moneyType == "PLAYER" ) then
+                MoneyFrame_UpdateMoney()
+            elseif ( event == "PLAYER_TRADE_MONEY" and (this.moneyType == "PLAYER" or this.moneyType == "PLAYER_TRADE") ) then
+                MoneyFrame_UpdateMoney()
+            elseif ( event == "TRADE_MONEY_CHANGED" and this.moneyType == "TARGET_TRADE" ) then
+                MoneyFrame_UpdateMoney()
+            elseif ( event == "SEND_MAIL_MONEY_CHANGED" and (this.moneyType == "PLAYER" or this.moneyType == "SEND_MAIL") ) then
+                MoneyFrame_UpdateMoney()
+            elseif ( event == "SEND_MAIL_COD_CHANGED" and (this.moneyType == "PLAYER" or this.moneyType == "SEND_MAIL_COD") ) then
+                MoneyFrame_UpdateMoney()
+            end
+        end
+
+        -- l.142-162: point a frame at a money type. Operates on `this`, not on a passed frame — the
+        -- reference's convention here, and what the eleven corpus callers write.
+        function MoneyFrame_SetType(type)
+            local info = MoneyTypeInfo[type]
+            if ( not info ) then
+                -- ref l.145 `message("Invalid money type: "..type)` — `message` is BasicControls.xml's
+                -- StaticPopup shim, not transcribed (see the header).
+                if ( message ) then message("Invalid money type: "..type) end
+                return
+            end
+            this.info = info
+            this.moneyType = type
+            local frameName = this:GetName()
+            if ( info.canPickup ) then
+                getglobal(frameName.."GoldButton"):EnableMouse(true)
+                getglobal(frameName.."SilverButton"):EnableMouse(true)
+                getglobal(frameName.."CopperButton"):EnableMouse(true)
+            else
+                getglobal(frameName.."GoldButton"):EnableMouse(false)
+                getglobal(frameName.."SilverButton"):EnableMouse(false)
+                getglobal(frameName.."CopperButton"):EnableMouse(false)
+            end
+
+            MoneyFrame_UpdateMoney()
+        end
+
+        -- l.164-175: re-read the number from the type and repaint. `this` again.
+        function MoneyFrame_UpdateMoney()
+            if ( this.info ) then
+                local money = this.info.UpdateFunc()
+                MoneyFrame_Update(this:GetName(), money)
+                -- ref l.169-171 also drives the coin-pickup frame while one is open. `hasPickup` is
+                -- only ever set by the templates' OnClick, which is guarded off (see the header), so
+                -- this branch is unreachable today rather than removed.
+                if ( this.hasPickup == 1 and UpdateCoinPickupFrame ) then
+                    UpdateCoinPickupFrame(money)
+                end
+            else
+                if ( message ) then message("Error moneyType not set") end
+            end
+        end
+
+        -- The button's laid-out text width. The reference calls `Button:GetTextWidth()` (l.202 and
+        -- kin); our Button has no such method, but the `<ButtonText name="$parentText">` FontString
+        -- the templates below name does carry `GetStringWidth`, which measures the same string with
+        -- the same font object. Falls back to 0 when the label has not resolved (headless, no atlas),
+        -- which leaves the coin at exactly its icon width — the same shape, without the digits.
+        local function moneyButtonTextWidth(buttonName)
+            local text = getglobal(buttonName.."Text")
+            if ( not text or not text.GetStringWidth ) then return 0 end
+            return text:GetStringWidth() or 0
+        end
+
+        -- l.177-270: THE PAINTER. Splits a copper amount into the three denominations, sizes each coin
+        -- to its own digits + icon, and then — if the type collapses — hides the leading zeros and
+        -- re-chains what is left so the group packs tight and the frame reports its true width.
+        --
+        -- Note that this one takes a frame NAME, not `this`: it is the only entry point in the family
+        -- an owner can call about a frame that is not the one currently dispatching (`MoneyFrame_Update
+        -- (frameName, money)` is how an addon paints a STATIC frame it just filled).
+        function MoneyFrame_Update(frameName, money)
+            local frame = getglobal(frameName)
+            local info = frame.info
+            if ( not info ) then
+                if ( message ) then message("Error moneyType not set") end
+            end
+
+            -- Breakdown the money into denominations
+            local gold = floor(money / (COPPER_PER_SILVER * SILVER_PER_GOLD))
+            local silver = floor((money - (gold * COPPER_PER_SILVER * SILVER_PER_GOLD)) / COPPER_PER_SILVER)
+            local copper = mod(money, COPPER_PER_SILVER)
+
+            local goldButton = getglobal(frameName.."GoldButton")
+            local silverButton = getglobal(frameName.."SilverButton")
+            local copperButton = getglobal(frameName.."CopperButton")
+
+            local iconWidth = MONEY_ICON_WIDTH
+            local spacing = MONEY_BUTTON_SPACING
+            if ( frame.small ) then
+                iconWidth = MONEY_ICON_WIDTH_SMALL
+                spacing = MONEY_BUTTON_SPACING_SMALL
+            end
+
+            -- Set values for each denomination
+            goldButton:SetText(gold)
+            goldButton:SetWidth(moneyButtonTextWidth(frameName.."GoldButton") + iconWidth)
+            goldButton:Show()
+            silverButton:SetText(silver)
+            silverButton:SetWidth(moneyButtonTextWidth(frameName.."SilverButton") + iconWidth)
+            silverButton:Show()
+            copperButton:SetText(copper)
+            copperButton:SetWidth(moneyButtonTextWidth(frameName.."CopperButton") + iconWidth)
+            copperButton:Show()
+
+            -- Store how much money the frame is displaying
+            frame.staticMoney = money
+
+            -- If not collapsable don't need to continue
+            if ( not info.collapse ) then
+                return
+            end
+
+            local width = iconWidth
+            local showLowerDenominations, truncateCopper
+            if ( gold > 0 ) then
+                width = width + goldButton:GetWidth()
+                if ( info.showSmallerCoins ) then
+                    showLowerDenominations = 1
+                end
+                if ( info.truncateSmallCoins ) then
+                    truncateCopper = 1
+                end
+            else
+                goldButton:Hide()
+            end
+
+            if ( silver > 0 or showLowerDenominations ) then
+                -- Exception if showLowerDenominations and fixedWidth
+                if ( showLowerDenominations and info.fixedWidth ) then
+                    silverButton:SetWidth(COIN_BUTTON_WIDTH)
+                end
+
+                width = width + silverButton:GetWidth()
+                goldButton:SetPoint("RIGHT", frameName.."SilverButton", "LEFT", spacing, 0)
+                if ( goldButton:IsVisible() ) then
+                    width = width - spacing
+                end
+                if ( info.showSmallerCoins ) then
+                    showLowerDenominations = 1
+                end
+            else
+                silverButton:Hide()
+                goldButton:SetPoint("RIGHT", frameName.."SilverButton", "RIGHT", 0, 0)
+            end
+
+            -- Used if we're not showing lower denominations
+            if ( (copper > 0 or showLowerDenominations or info.showSmallerCoins == "Backpack") and not truncateCopper) then
+                -- Exception if showLowerDenominations and fixedWidth
+                if ( showLowerDenominations and info.fixedWidth ) then
+                    copperButton:SetWidth(COIN_BUTTON_WIDTH)
+                end
+
+                width = width + copperButton:GetWidth()
+                silverButton:SetPoint("RIGHT", frameName.."CopperButton", "LEFT", spacing, 0)
+                if ( silverButton:IsVisible() ) then
+                    width = width - spacing
+                end
+            else
+                copperButton:Hide()
+                silverButton:SetPoint("RIGHT", frameName.."CopperButton", "RIGHT", 0, 0)
+            end
+
+            frame:SetWidth(width)
+        end
+
+        -- l.272-346: a NO-OP in 1.12 — the reference's whole body is inside a `--[[ ]]` block, an
+        -- earlier painter that MoneyFrame_Update replaced. Kept because the name is in the shipped
+        -- client's `_G` and an addon that calls it gets exactly this there: nothing.
+        function RefreshMoneyFrame(frameName, money, small, collapse, showSmallerCoins)
+        end
+
+        -- l.348-356, verbatim: recolour the DIGITS (the coin icons keep their own texture) — how the
+        -- reference reddens a price you cannot afford.
+        function SetMoneyFrameColor(frameName, r, g, b)
+            local goldButton = getglobal(frameName.."GoldButton")
+            local silverButton = getglobal(frameName.."SilverButton")
+            local copperButton = getglobal(frameName.."CopperButton")
+
+            goldButton:SetTextColor(r, g, b)
+            silverButton:SetTextColor(r, g, b)
+            copperButton:SetTextColor(r, g, b)
+        end
+    ]]></Script>
+
+    <!--
+        MoneyFrameTemplate (ref MoneyFrame.xml l.3-149) — the LARGE kit: 192x28, 19px coins, the
+        NumberFontNormalLarge digits. The three buttons chain RIGHT-to-LEFT from the copper end, which
+        is what lets MoneyFrame_Update above re-point them past a hidden denomination.
+
+        The `<OnClick>` bodies are the reference's, guarded on `OpenCoinPickupFrame` — the coin-pickup
+        frame is not transcribed (see the header). `<PushedTextOffset>` is carried for provenance; our
+        loader does not model it and ignores it.
+    -->
+    <Frame name="MoneyFrameTemplate" virtual="true">
+        <Size><AbsDimension x="192" y="28"/></Size>
+        <Frames>
+            <Button name="$parentCopperButton">
+                <Size><AbsDimension x="47" y="19"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(1, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="19" y="19"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormalLarge" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+            <Button name="$parentSilverButton">
+                <Size><AbsDimension x="47" y="19"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT" relativeTo="$parentCopperButton" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(COPPER_PER_SILVER, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="19" y="19"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormalLarge" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+            <Button name="$parentGoldButton">
+                <Size><AbsDimension x="47" y="19"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT" relativeTo="$parentSilverButton" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(COPPER_PER_GOLD, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="19" y="19"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.25" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormalLarge" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>MoneyFrame_OnLoad()</OnLoad>
+            <OnEvent>MoneyFrame_OnEvent()</OnEvent>
+            <OnShow>MoneyFrame_UpdateMoney()</OnShow>
+            <OnHide>
+                if ( this.hasPickup == 1 and CoinPickupFrame ) then
+                    CoinPickupFrame:Hide()
+                    this.hasPickup = 0
+                end
+            </OnHide>
+        </Scripts>
+    </Frame>
+
+    <!--
+        SmallMoneyFrameTemplate (ref MoneyFrame.xml l.150-296) — the same kit at 128x13 with 13px
+        coins and NumberFontNormal digits, and `SmallMoneyFrame_OnLoad` in place of `MoneyFrame_OnLoad`
+        so `this.small` is set. This is the one the shipped UI uses nearly everywhere (merchant prices,
+        the purse, mail postage, trade offers) and the one 13 corpus addons inherit.
+    -->
+    <Frame name="SmallMoneyFrameTemplate" virtual="true">
+        <Size><AbsDimension x="128" y="13"/></Size>
+        <Frames>
+            <Button name="$parentCopperButton">
+                <Size><AbsDimension x="32" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(1, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="13" y="13"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormal" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+            <Button name="$parentSilverButton">
+                <Size><AbsDimension x="32" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT" relativeTo="$parentCopperButton" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(COPPER_PER_SILVER, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="13" y="13"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormal" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+            <Button name="$parentGoldButton">
+                <Size><AbsDimension x="32" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT" relativeTo="$parentSilverButton" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        local parent = this:GetParent()
+                        if ( OpenCoinPickupFrame ) then
+                            OpenCoinPickupFrame(COPPER_PER_GOLD, MoneyTypeInfo[parent.moneyType].UpdateFunc(), parent)
+                            parent.hasPickup = 1
+                        end
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\MoneyFrame\UI-MoneyIcons">
+                    <Size><AbsDimension x="13" y="13"/></Size>
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.25" top="0" bottom="1"/>
+                </NormalTexture>
+                <ButtonText name="$parentText">
+                    <Anchors>
+                        <Anchor point="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </ButtonText>
+                <NormalFont inherits="NumberFontNormal" justifyH="RIGHT"/>
+                <PushedTextOffset><AbsDimension x="0" y="0"/></PushedTextOffset>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>SmallMoneyFrame_OnLoad()</OnLoad>
+            <OnEvent>MoneyFrame_OnEvent()</OnEvent>
+            <OnShow>MoneyFrame_UpdateMoney()</OnShow>
+            <OnHide>
+                if ( this.hasPickup == 1 and CoinPickupFrame ) then
+                    CoinPickupFrame:Hide()
+                    this.hasPickup = 0
+                end
+            </OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

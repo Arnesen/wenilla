@@ -39,7 +39,7 @@ fn harness(extra: &[&str]) -> UiScript {
     s
 }
 
-/// The meter's own paint quad (its `BenillaPerformanceBar` texture) and where it sits in the
+/// The meter's own paint quad (its `MainMenuBarPerformanceBar` texture) and where it sits in the
 /// painter's order.
 fn bar_quad(s: &mut UiScript) -> (usize, [f32; 4], Option<[f32; 4]>) {
     s.resolve();
@@ -71,8 +71,8 @@ fn the_meter_sits_in_the_bar_recess_the_reference_leaves_for_it() {
 
     let (left, bottom, w, h) = s
         .eval::<(f64, f64, f64, f64)>(
-            "return BenillaPerformanceBarFrame:GetLeft(), BenillaPerformanceBarFrame:GetBottom(), \
-             BenillaPerformanceBarFrame:GetWidth(), BenillaPerformanceBarFrame:GetHeight()",
+            "return MainMenuBarPerformanceBarFrame:GetLeft(), MainMenuBarPerformanceBarFrame:GetBottom(), \
+             MainMenuBarPerformanceBarFrame:GetWidth(), MainMenuBarPerformanceBarFrame:GetHeight()",
         )
         .unwrap();
     assert_eq!((w, h), (16.0, 64.0), "frame size");
@@ -115,12 +115,12 @@ fn the_meter_paints_under_the_bar_art_it_shows_through() {
     // And the hover button is above everything, the ref's own HIGH-strata split: the LOW frame
     // beneath the art can't take the mouse itself.
     assert_eq!(
-        s.eval::<String>("return BenillaPerformanceBarButton:GetFrameStrata()")
+        s.eval::<String>("return MainMenuBarPerformanceBarFrameButton:GetFrameStrata()")
             .unwrap(),
         "HIGH"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaPerformanceBarFrame:GetFrameStrata()")
+        s.eval::<String>("return MainMenuBarPerformanceBarFrame:GetFrameStrata()")
             .unwrap(),
         "LOW",
         "the parent's LOW must not have been dragged up by its HIGH child"
@@ -240,11 +240,11 @@ fn hovering_the_meter_shows_the_live_latency() {
 
     assert_eq!(
         s.hit_test_name(789.0, 20.0).as_deref(),
-        Some("BenillaPerformanceBarButton"),
+        Some("MainMenuBarPerformanceBarFrameButton"),
         "the button over the meter takes the mouse"
     );
 
-    s.run("BenillaPerformanceBar_OnEnter(BenillaPerformanceBarButton)")
+    s.run("BenillaPerformanceBar_OnEnter(MainMenuBarPerformanceBarFrameButton)")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -311,7 +311,10 @@ fn hovering_the_meter_shows_the_live_latency() {
 #[test]
 fn the_meter_adds_its_two_frames_to_the_bar() {
     let s = harness(&[]);
-    for name in ["BenillaPerformanceBarFrame", "BenillaPerformanceBarButton"] {
+    for name in [
+        "MainMenuBarPerformanceBarFrame",
+        "MainMenuBarPerformanceBarFrameButton",
+    ] {
         assert!(
             s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
             "{name} must exist"
@@ -319,9 +322,9 @@ fn the_meter_adds_its_two_frames_to_the_bar() {
     }
     // The button is the frame's child (the ref's `parent=` attribute, expressed as nesting).
     assert_eq!(
-        s.eval::<String>("return BenillaPerformanceBarButton:GetParent():GetName()")
+        s.eval::<String>("return MainMenuBarPerformanceBarFrameButton:GetParent():GetName()")
             .unwrap(),
-        "BenillaPerformanceBarFrame"
+        "MainMenuBarPerformanceBarFrame"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

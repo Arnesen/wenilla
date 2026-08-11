@@ -40,7 +40,7 @@
         BENILLA_STATIONERY_PATH = "Interface\\Stationery\\"  -- STATIONERY_PATH (ref l.5)
 
         -- The money entry uses the shared BenillaMoneyInput_* kit (MerchantFrame.xml, loaded first) —
-        -- the send tab's three numeric edit boxes are named BenillaSendMailMoneyGold/Silver/Copper.
+        -- the send tab's three numeric edit boxes are named SendMailMoneyGold/Silver/Copper.
 
         -- ── Load / event dispatch (ref MailFrame_Onload l.8-24 / MailFrame_OnEvent l.26-62) ──────
         function BenillaMailFrame_OnLoad(frame)
@@ -57,7 +57,8 @@
             frame:RegisterEvent("PLAYER_MONEY")
         end
 
-        function BenillaMailFrame_OnEvent(frame)
+        function MailFrame_OnEvent()
+            local frame = this
             if event == "MAIL_SHOW" then
                 ShowUIPanel(frame)
                 if not frame:IsVisible() then
@@ -65,96 +66,96 @@
                     return
                 end
                 OpenBackpack()
-                BenillaSendMailFrame_Update()
-                BenillaMailFrameTab_OnClick(1)
+                SendMailFrame_Update()
+                MailFrameTab_OnClick(1)
                 CheckInbox()   -- drains to CMSG_GET_MAIL_LIST (throttled app-side, wow-re §5)
             elseif event == "MAIL_INBOX_UPDATE" then
-                BenillaInboxFrame_Update()
-                BenillaOpenMail_Update()
+                InboxFrame_Update()
+                OpenMail_Update()
             elseif event == "MAIL_SEND_SUCCESS" then
                 -- Fires on a successful send AND, byte-verified, on window open (the compose-tab
                 -- reset side effect — wow-re §5); either way reset the form + play the page turn.
-                BenillaSendMailFrame_Reset()
+                SendMailFrame_Reset()
                 PlaySound("igAbiliityPageTurn")
-                if BenillaSendMailFrame.sendMode == "reply" then
-                    BenillaMailFrameTab_OnClick(1)
+                if SendMailFrame.sendMode == "reply" then
+                    MailFrameTab_OnClick(1)
                 end
             elseif event == "MAIL_FAILED" then
                 -- Fires on EVERY SMSG_SEND_MAIL_RESULT for a send (success included, wow-re §5): its
                 -- only job is to re-enable the button so the UI never stays blocked.
-                BenillaSendMailMailButton:Enable()
+                SendMailMailButton:Enable()
             elseif event == "MAIL_CLOSED" then
                 HideUIPanel(frame)
             elseif event == "PLAYER_MONEY" then
                 -- Repaints the purse AND recolors the postage cost (ref: both money frames
                 -- self-refresh on this event).
-                BenillaSendMailFrame_Update()
+                SendMailFrame_Update()
             end
         end
 
         -- The tab pair + the four corner-texture swaps (ref MailFrameTab_OnClick l.64-93).
-        function BenillaMailFrameTab_OnClick(tab)
+        function MailFrameTab_OnClick(tab)
             if not tab then tab = this:GetID() end
-            PanelTemplates_SetTab(BenillaMailFrame, tab)
+            PanelTemplates_SetTab(MailFrame, tab)
             if tab == 1 then
-                BenillaInboxFrame:Show()
-                BenillaSendMailFrame:Hide()
-                BenillaMailFrameTopLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-TopLeft")
-                BenillaMailFrameTopRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-TopRight")
-                BenillaMailFrameBotLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-BotLeft")
-                BenillaMailFrameBotRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-BotRight")
-                BenillaMailFrameTopLeft:SetPoint("TOPLEFT", "BenillaMailFrame", "TOPLEFT", 0, 0)
+                InboxFrame:Show()
+                SendMailFrame:Hide()
+                MailFrameTopLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-TopLeft")
+                MailFrameTopRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-TopRight")
+                MailFrameBotLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-BotLeft")
+                MailFrameBotRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-BotRight")
+                MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", 0, 0)
             else
-                BenillaInboxFrame:Hide()
-                BenillaSendMailFrame:Show()
-                BenillaMailFrameTopLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft")
-                BenillaMailFrameTopRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight")
-                BenillaMailFrameBotLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotLeft")
-                BenillaMailFrameBotRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotRight")
-                BenillaMailFrameTopLeft:SetPoint("TOPLEFT", "BenillaMailFrame", "TOPLEFT", 2, -1)
-                BenillaSendMailFrame_Update()
-                BenillaSendMailFrame.sendMode = "send"
+                InboxFrame:Hide()
+                SendMailFrame:Show()
+                MailFrameTopLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft")
+                MailFrameTopRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight")
+                MailFrameBotLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotLeft")
+                MailFrameBotRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotRight")
+                MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", 2, -1)
+                SendMailFrame_Update()
+                SendMailFrame.sendMode = "send"
             end
             PlaySound("igSpellBookOpen")
         end
 
         -- ── Inbox (ref InboxFrame_Update l.97-199): the row's clickable child is $parentButton, so
         --    every getglobal below reads MailItem<i>Button* / MailItem<i>Sender/Subject/ExpireTime. ─
-        function BenillaInboxFrame_Update()
+        function InboxFrame_Update()
             local numItems = GetInboxNumItems()
-            local index = ((BenillaMailFrame.pageNum - 1) * BENILLA_INBOXITEMS_TO_DISPLAY) + 1
+            local index = ((MailFrame.pageNum - 1) * BENILLA_INBOXITEMS_TO_DISPLAY) + 1
             for i = 1, BENILLA_INBOXITEMS_TO_DISPLAY do
                 if index <= numItems then
                     local packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft, hasItem, wasRead, x, y, z, isGM = GetInboxHeaderInfo(index)
                     local icon
                     if packageIcon and not isGM then icon = packageIcon else icon = stationeryIcon end
                     if not sender then sender = "Unknown" end   -- UNKNOWN
-                    local button = getglobal("BenillaMailItem"..i.."Button")
+                    local button = getglobal("MailItem"..i.."Button")
                     button:Show()
                     button.index = index
                     button.hasItem = hasItem
-                    getglobal("BenillaMailItem"..i.."ButtonIcon"):SetTexture(icon)
-                    local subjectText = getglobal("BenillaMailItem"..i.."Subject")
+                    getglobal("MailItem"..i.."ButtonIcon"):SetTexture(icon)
+                    local subjectText = getglobal("MailItem"..i.."Subject")
                     subjectText:SetText(subject)
-                    local senderText = getglobal("BenillaMailItem"..i.."Sender")
+                    local senderText = getglobal("MailItem"..i.."Sender")
                     senderText:SetText(sender)
                     -- Unread gold / read grey (ref l.130-141; the read icon's SetDesaturation is our
                     -- vertex-grey stand-in — the engine has no desaturation).
                     if wasRead then
                         senderText:SetTextColor(0.75, 0.75, 0.75)
                         subjectText:SetTextColor(0.75, 0.75, 0.75)
-                        getglobal("BenillaMailItem"..i.."ButtonSlot"):SetVertexColor(0.5, 0.5, 0.5)
-                        getglobal("BenillaMailItem"..i.."ButtonIcon"):SetVertexColor(0.5, 0.5, 0.5)
+                        getglobal("MailItem"..i.."ButtonSlot"):SetVertexColor(0.5, 0.5, 0.5)
+                        getglobal("MailItem"..i.."ButtonIcon"):SetVertexColor(0.5, 0.5, 0.5)
                     else
                         senderText:SetTextColor(1.0, 0.82, 0)     -- NORMAL_FONT_COLOR
                         subjectText:SetTextColor(1.0, 1.0, 1.0)   -- HIGHLIGHT_FONT_COLOR
-                        getglobal("BenillaMailItem"..i.."ButtonSlot"):SetVertexColor(1.0, 0.82, 0)
-                        getglobal("BenillaMailItem"..i.."ButtonIcon"):SetVertexColor(1, 1, 1)
+                        getglobal("MailItem"..i.."ButtonSlot"):SetVertexColor(1.0, 0.82, 0)
+                        getglobal("MailItem"..i.."ButtonIcon"):SetVertexColor(1, 1, 1)
                     end
                     -- Expiry: green whole days, red under a day (ref l.142-149: GetText("DAYS_ABBR")
                     -- pluralizes — DAYS_ABBR "Day" / DAYS_ABBR_P1 "Days", GlobalStrings l.895-896;
                     -- the sub-day SecondsToTime is approximated as "< 1 day").
-                    local expireTime = getglobal("BenillaMailItem"..i.."ExpireTime")
+                    local expireTime = getglobal("MailItem"..i.."ExpireTime")
                     if daysLeft >= 1 then
                         local days = math.floor(daysLeft)
                         expireTime:SetText(string.format("|cff20ff20%d %s|r", days, days == 1 and "Day" or "Days"))
@@ -170,58 +171,59 @@
                     expireTime:Show()
                     -- COD tag (ref l.157-164) + money field.
                     if CODAmount > 0 then
-                        getglobal("BenillaMailItem"..i.."ButtonCOD"):Show()
+                        getglobal("MailItem"..i.."ButtonCOD"):Show()
                         button.cod = CODAmount
                     else
-                        getglobal("BenillaMailItem"..i.."ButtonCOD"):Hide()
+                        getglobal("MailItem"..i.."ButtonCOD"):Hide()
                         button.cod = nil
                     end
                     if money > 0 then button.money = money else button.money = nil end
-                    if BenillaInboxFrame.openMailID == index then
+                    if InboxFrame.openMailID == index then
                         button:SetChecked(1)
                     else
                         button:SetChecked(nil)
                     end
                 else
-                    getglobal("BenillaMailItem"..i.."Button"):Hide()
-                    getglobal("BenillaMailItem"..i.."Sender"):SetText("")
-                    getglobal("BenillaMailItem"..i.."Subject"):SetText("")
-                    getglobal("BenillaMailItem"..i.."ExpireTime"):Hide()
+                    getglobal("MailItem"..i.."Button"):Hide()
+                    getglobal("MailItem"..i.."Sender"):SetText("")
+                    getglobal("MailItem"..i.."Subject"):SetText("")
+                    getglobal("MailItem"..i.."ExpireTime"):Hide()
                 end
                 index = index + 1
             end
             -- Page arrows (ref l.188-198).
-            if BenillaMailFrame.pageNum == 1 then
-                BenillaInboxPrevPageButton:Disable()
+            if MailFrame.pageNum == 1 then
+                InboxPrevPageButton:Disable()
             else
-                BenillaInboxPrevPageButton:Enable()
+                InboxPrevPageButton:Enable()
             end
-            if (BenillaMailFrame.pageNum * BENILLA_INBOXITEMS_TO_DISPLAY) < numItems then
-                BenillaInboxNextPageButton:Enable()
+            if (MailFrame.pageNum * BENILLA_INBOXITEMS_TO_DISPLAY) < numItems then
+                InboxNextPageButton:Enable()
             else
-                BenillaInboxNextPageButton:Disable()
+                InboxNextPageButton:Disable()
             end
             -- InboxCurrentPage is declared in the ref XML (l.329) but NO reference Lua ever writes
             -- it — the real 1.12 window shows nothing there, so neither do we.
         end
 
         -- Row click: open / close the letter (ref InboxFrame_OnClick l.201-213; this = the button).
-        function BenillaInboxFrame_OnClick(index)
+        function InboxFrame_OnClick(index)
             if this:GetChecked() then
-                BenillaInboxFrame.openMailID = index
-                BenillaOpenMail_Update()
-                ShowUIPanel(BenillaOpenMailFrame)
+                InboxFrame.openMailID = index
+                OpenMail_Update()
+                ShowUIPanel(OpenMailFrame)
                 PlaySound("igSpellBookOpen")
             else
-                BenillaInboxFrame.openMailID = 0
-                HideUIPanel(BenillaOpenMailFrame)
+                InboxFrame.openMailID = 0
+                HideUIPanel(OpenMailFrame)
             end
-            BenillaInboxFrame_Update()
+            InboxFrame_Update()
         end
 
         -- Row hover: the enclosed item (SetInboxItem) + the enclosed-money / COD lines (ref
         -- InboxFrameItem_OnEnter l.215-240; this = the button).
-        function BenillaInboxFrameItem_OnEnter(button)
+        function InboxFrameItem_OnEnter()
+            local button = this
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             if button.hasItem then
                 GameTooltip:SetInboxItem(button.index)
@@ -238,139 +240,139 @@
             GameTooltip:Show()
         end
 
-        function BenillaInboxNextPage()
+        function InboxNextPage()
             PlaySound("igMainMenuOptionCheckBoxOn")
-            BenillaMailFrame.pageNum = BenillaMailFrame.pageNum + 1
-            BenillaInboxFrame_Update()
+            MailFrame.pageNum = MailFrame.pageNum + 1
+            InboxFrame_Update()
         end
-        function BenillaInboxPrevPage()
+        function InboxPrevPage()
             PlaySound("igMainMenuOptionCheckBoxOn")
-            BenillaMailFrame.pageNum = BenillaMailFrame.pageNum - 1
-            BenillaInboxFrame_Update()
+            MailFrame.pageNum = MailFrame.pageNum - 1
+            InboxFrame_Update()
         end
 
         -- ── Open letter (ref OpenMailFrame_OnHide l.256-272 / OpenMail_Update l.274-432) ─────────
-        function BenillaOpenMailFrame_OnHide()
+        function OpenMailFrame_OnHide()
             StaticPopup_Hide("DELETE_MAIL")
-            if not BenillaInboxFrame.openMailID or BenillaInboxFrame.openMailID == 0 then
-                BenillaInboxFrame_Update()
+            if not InboxFrame.openMailID or InboxFrame.openMailID == 0 then
+                InboxFrame_Update()
                 PlaySound("igSpellBookClose")
                 return
             end
-            local pkg, sta, sender, subject, money, cod, days, itemID, wasRead, wasReturned, textCreated = GetInboxHeaderInfo(BenillaInboxFrame.openMailID)
+            local pkg, sta, sender, subject, money, cod, days, itemID, wasRead, wasReturned, textCreated = GetInboxHeaderInfo(InboxFrame.openMailID)
             if money == 0 and not itemID and textCreated then
-                DeleteInboxItem(BenillaInboxFrame.openMailID)
+                DeleteInboxItem(InboxFrame.openMailID)
             end
-            BenillaInboxFrame.openMailID = 0
-            BenillaInboxFrame_Update()
+            InboxFrame.openMailID = 0
+            InboxFrame_Update()
             PlaySound("igSpellBookClose")
         end
 
-        function BenillaOpenMail_Update()
-            local id = BenillaInboxFrame.openMailID
+        function OpenMail_Update()
+            local id = InboxFrame.openMailID
             if not id or id == 0 then return end
             local packageIcon, stationeryIcon, sender, subject, money, CODAmount, daysLeft, hasItem, wasRead, wasReturned, textCreated, canReply = GetInboxHeaderInfo(id)
             if not sender or not canReply then
-                BenillaOpenMailReplyButton:Disable()
+                OpenMailReplyButton:Disable()
             else
-                BenillaOpenMailReplyButton:Enable()
+                OpenMailReplyButton:Enable()
             end
             if not sender then sender = "Unknown" end
-            BenillaOpenMailSender:SetText(sender)
-            BenillaOpenMailSubject:SetText(subject)
-            BenillaOpenMailFrameIcon:SetTexture(stationeryIcon)   -- ref SetPortraitToTexture l.174
+            OpenMailSender:SetText(sender)
+            OpenMailSubject:SetText(subject)
+            OpenMailFrameIcon:SetTexture(stationeryIcon)   -- ref SetPortraitToTexture l.174
             local bodyText, texture, isTakeable, isInvoice = GetInboxText(id)
-            BenillaOpenMailBodyText:SetText(bodyText)
+            OpenMailBodyText:SetText(bodyText)
             if texture then
-                BenillaOpenStationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH..texture.."1")
-                BenillaOpenStationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH..texture.."2")
+                OpenStationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH..texture.."1")
+                OpenStationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH..texture.."2")
             end
             local hasAttachments
             -- The letter button — "make a permanent copy" (ref l.364-376): a takeable body not yet
             -- copied shows the stationery icon; the package button chains off its RIGHT, else
             -- collapses onto its LEFT so the row stays packed.
             if isTakeable and not textCreated then
-                getglobal("BenillaOpenMailLetterButtonIcon"):SetTexture(stationeryIcon)
-                BenillaOpenMailLetterButton:Enable()
-                BenillaOpenMailLetterButton:Show()
-                BenillaOpenMailPackageButton:SetPoint("LEFT", "BenillaOpenMailLetterButton", "RIGHT", 10, 0)
+                getglobal("OpenMailLetterButtonIcon"):SetTexture(stationeryIcon)
+                OpenMailLetterButton:Enable()
+                OpenMailLetterButton:Show()
+                OpenMailPackageButton:SetPoint("LEFT", "OpenMailLetterButton", "RIGHT", 10, 0)
                 hasAttachments = 1
             else
-                BenillaOpenMailLetterButton:Hide()
-                BenillaOpenMailPackageButton:SetPoint("LEFT", "BenillaOpenMailLetterButton", "LEFT", 0, 0)
+                OpenMailLetterButton:Hide()
+                OpenMailPackageButton:SetPoint("LEFT", "OpenMailLetterButton", "LEFT", 0, 0)
             end
             local name, itemTexture, count, quality, canUse = GetInboxItem(id)
             if name then
-                BenillaOpenMailFrame.itemName = name
-                getglobal("BenillaOpenMailPackageButtonIcon"):SetTexture(itemTexture)
+                OpenMailFrame.itemName = name
+                getglobal("OpenMailPackageButtonIcon"):SetTexture(itemTexture)
                 if (count or 1) > 1 then
-                    getglobal("BenillaOpenMailPackageButtonCount"):SetText(count)
+                    getglobal("OpenMailPackageButtonCount"):SetText(count)
                 else
-                    getglobal("BenillaOpenMailPackageButtonCount"):SetText("")
+                    getglobal("OpenMailPackageButtonCount"):SetText("")
                 end
                 if canUse then
-                    getglobal("BenillaOpenMailPackageButtonIcon"):SetVertexColor(1, 1, 1)
+                    getglobal("OpenMailPackageButtonIcon"):SetVertexColor(1, 1, 1)
                 else
-                    getglobal("BenillaOpenMailPackageButtonIcon"):SetVertexColor(1.0, 0.1, 0.1)
+                    getglobal("OpenMailPackageButtonIcon"):SetVertexColor(1.0, 0.1, 0.1)
                 end
-                BenillaOpenMailPackageButton:Enable()
-                BenillaOpenMailPackageButton:Show()
-                BenillaOpenMailMoneyButton:SetPoint("LEFT", "BenillaOpenMailPackageButton", "RIGHT", 10, 0)
+                OpenMailPackageButton:Enable()
+                OpenMailPackageButton:Show()
+                OpenMailMoneyButton:SetPoint("LEFT", "OpenMailPackageButton", "RIGHT", 10, 0)
                 hasAttachments = 1
             else
-                BenillaOpenMailFrame.itemName = nil
-                BenillaOpenMailPackageButton:Hide()
-                BenillaOpenMailMoneyButton:SetPoint("LEFT", "BenillaOpenMailPackageButton", "LEFT", 0, 0)
+                OpenMailFrame.itemName = nil
+                OpenMailPackageButton:Hide()
+                OpenMailMoneyButton:SetPoint("LEFT", "OpenMailPackageButton", "LEFT", 0, 0)
             end
-            if CODAmount > 0 then BenillaOpenMailFrame.cod = CODAmount else BenillaOpenMailFrame.cod = nil end
+            if CODAmount > 0 then OpenMailFrame.cod = CODAmount else OpenMailFrame.cod = nil end
             if money == 0 then
-                BenillaOpenMailMoneyButton:Hide()
-                BenillaOpenMailFrame.money = nil
+                OpenMailMoneyButton:Hide()
+                OpenMailFrame.money = nil
             else
-                getglobal("BenillaOpenMailMoneyButtonIcon"):SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
-                BenillaOpenMailMoneyButton:Enable()
-                BenillaOpenMailMoneyButton:Show()
-                BenillaOpenMailFrame.money = money
+                getglobal("OpenMailMoneyButtonIcon"):SetTexture("Interface\\Icons\\INV_Misc_Coin_01")
+                OpenMailMoneyButton:Enable()
+                OpenMailMoneyButton:Show()
+                OpenMailFrame.money = money
                 hasAttachments = 1
             end
             if InboxItemCanDelete(id) then
-                BenillaOpenMailDeleteButton:SetText("Delete")   -- DELETE
+                OpenMailDeleteButton:SetText("Delete")   -- DELETE
             else
-                BenillaOpenMailDeleteButton:SetText("Return")   -- MAIL_RETURN
+                OpenMailDeleteButton:SetText("Return")   -- MAIL_RETURN
             end
             -- The caption + its two positions (ref l.422-431: BOTTOM -68,123 attachments / -5,123 none).
             if hasAttachments then
-                BenillaOpenMailAttachmentText:SetText("Take Attachments:")   -- TAKE_ATTACHMENTS
-                BenillaOpenMailAttachmentText:SetTextColor(1, 1, 1)
-                BenillaOpenMailAttachmentText:SetPoint("BOTTOM", "BenillaOpenMailFrame", "BOTTOM", -68, 123)
+                OpenMailAttachmentText:SetText("Take Attachments:")   -- TAKE_ATTACHMENTS
+                OpenMailAttachmentText:SetTextColor(1, 1, 1)
+                OpenMailAttachmentText:SetPoint("BOTTOM", "OpenMailFrame", "BOTTOM", -68, 123)
             else
-                BenillaOpenMailAttachmentText:SetText("No Attachments")      -- NO_ATTACHMENTS
-                BenillaOpenMailAttachmentText:SetTextColor(0.5, 0.5, 0.5)
-                BenillaOpenMailAttachmentText:SetPoint("BOTTOM", "BenillaOpenMailFrame", "BOTTOM", -5, 123)
+                OpenMailAttachmentText:SetText("No Attachments")      -- NO_ATTACHMENTS
+                OpenMailAttachmentText:SetTextColor(0.5, 0.5, 0.5)
+                OpenMailAttachmentText:SetPoint("BOTTOM", "OpenMailFrame", "BOTTOM", -5, 123)
             end
         end
 
         -- Reply → Send tab, prefilled "RE: " (ref OpenMail_Reply l.434-447).
-        function BenillaOpenMail_Reply()
-            BenillaMailFrameTab_OnClick(2)
-            BenillaSendMailNameEditBox:SetText(BenillaOpenMailSender:GetText())
-            local subject = BenillaOpenMailSubject:GetText()
+        function OpenMail_Reply()
+            MailFrameTab_OnClick(2)
+            SendMailNameEditBox:SetText(OpenMailSender:GetText())
+            local subject = OpenMailSubject:GetText()
             local prefix = "RE: "   -- MAIL_REPLY_PREFIX.." "
             if string.sub(subject, 1, string.len(prefix)) ~= prefix then
                 subject = prefix..subject
             end
-            BenillaSendMailSubjectEditBox:SetText(subject)
-            BenillaSendMailBodyEditBox:SetFocus()
-            BenillaSendMailFrame.sendMode = "reply"
+            SendMailSubjectEditBox:SetText(subject)
+            SendMailBodyEditBox:SetFocus()
+            SendMailFrame.sendMode = "reply"
         end
 
-        function BenillaOpenMail_Delete()
-            local id = BenillaInboxFrame.openMailID
+        function OpenMail_Delete()
+            local id = InboxFrame.openMailID
             if InboxItemCanDelete(id) then
-                if BenillaOpenMailFrame.itemName then
-                    StaticPopup_Show("DELETE_MAIL", BenillaOpenMailFrame.itemName)
+                if OpenMailFrame.itemName then
+                    StaticPopup_Show("DELETE_MAIL", OpenMailFrame.itemName)
                     return
-                elseif BenillaOpenMailFrame.money then
+                elseif OpenMailFrame.money then
                     StaticPopup_Show("DELETE_MONEY")
                     return
                 else
@@ -380,19 +382,19 @@
                 ReturnInboxItem(id)
                 StaticPopup_Hide("COD_CONFIRMATION")
             end
-            BenillaInboxFrame.openMailID = 0
-            HideUIPanel(BenillaOpenMailFrame)
+            InboxFrame.openMailID = 0
+            HideUIPanel(OpenMailFrame)
         end
 
         function BenillaOpenMailMoneyButton_OnClick()
-            TakeInboxMoney(BenillaInboxFrame.openMailID)
+            TakeInboxMoney(InboxFrame.openMailID)
         end
         -- Hovering the coins shows the plain money tooltip (ref OpenMailMoneyButton OnEnter
         -- l.1823-1829: no header line, just the amount).
         function BenillaOpenMailMoneyButton_OnEnter(button)
-            if BenillaOpenMailFrame.money then
+            if OpenMailFrame.money then
                 GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-                SetTooltipMoney(GameTooltip, BenillaOpenMailFrame.money)
+                SetTooltipMoney(GameTooltip, OpenMailFrame.money)
                 GameTooltip:Show()
             end
         end
@@ -400,34 +402,35 @@
         -- l.1744-1747 → CMSG_MAIL_CREATE_TEXT_ITEM; the OK result stamps COPIED server-side, and
         -- the list re-sync hides the button via textCreated).
         function BenillaOpenMailLetterButton_OnClick()
-            TakeInboxTextItem(BenillaInboxFrame.openMailID)
+            TakeInboxTextItem(InboxFrame.openMailID)
             PlaySound("igMainMenuOptionCheckBoxOn")
         end
         -- Take the item; a COD parcel confirms first (ref OpenMailPackageButton OnClick l.1778-1787).
         function BenillaOpenMailPackageButton_OnClick()
-            if BenillaOpenMailFrame.cod then
+            if OpenMailFrame.cod then
                 StaticPopup_Show("COD_CONFIRMATION")
             else
-                TakeInboxItem(BenillaInboxFrame.openMailID)
+                TakeInboxItem(InboxFrame.openMailID)
             end
             PlaySound("igMainMenuOptionCheckBoxOn")
         end
-        function BenillaOpenMailPackage_OnEnter(button)
+        function OpenMailPackage_OnEnter()
+            local button = this
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-            GameTooltip:SetInboxItem(BenillaInboxFrame.openMailID)
-            if BenillaOpenMailFrame.cod then
-                SetTooltipMoney(GameTooltip, BenillaOpenMailFrame.cod)
+            GameTooltip:SetInboxItem(InboxFrame.openMailID)
+            if OpenMailFrame.cod then
+                SetTooltipMoney(GameTooltip, OpenMailFrame.cod)
             end
             GameTooltip:Show()
         end
 
         -- ── Send tab (ref SendMail* l.484-611 / l.936-960) ──────────────────────────────────────
-        function BenillaSendMailMailButton_OnClick()
-            local copper = BenillaMoneyInput_GetCopper("BenillaSendMailMoney")
-            if BenillaSendMailSendMoneyButton:GetChecked() then
+        function SendMailMailButton_OnClick()
+            local copper = BenillaMoneyInput_GetCopper("SendMailMoney")
+            if SendMailSendMoneyButton:GetChecked() then
                 SetSendMailCOD(0)
                 if copper > 0 then
-                    StaticPopup_Show("SEND_MONEY", BenillaSendMailNameEditBox:GetText())
+                    StaticPopup_Show("SEND_MONEY", SendMailNameEditBox:GetText())
                     this:Disable()
                     return
                 end
@@ -436,102 +439,102 @@
                 SetSendMailMoney(0)
                 SetSendMailCOD(copper)
             end
-            BenillaSendMailFrame_SendMail()
+            SendMailFrame_SendMail()
             this:Disable()
         end
 
-        function BenillaSendMailFrame_SendMail()
-            SendMail(BenillaSendMailNameEditBox:GetText(), BenillaSendMailSubjectEditBox:GetText(), BenillaSendMailBodyEditBox:GetText())
+        function SendMailFrame_SendMail()
+            SendMail(SendMailNameEditBox:GetText(), SendMailSubjectEditBox:GetText(), SendMailBodyEditBox:GetText())
         end
 
-        function BenillaSendMailFrame_Update()
+        function SendMailFrame_Update()
             local itemName, itemTexture, stackCount, quality = GetSendMailItem()
-            getglobal("BenillaSendMailPackageButtonIcon"):SetTexture(itemTexture)
+            getglobal("SendMailPackageButtonIcon"):SetTexture(itemTexture)
             if (stackCount or 1) <= 1 then stackCount = "" end
             if itemName then
-                BenillaSendMailCODButton:Enable()
-                BenillaSendMailCODButtonText:SetTextColor(1.0, 0.82, 0)
-                if BenillaSendMailSubjectEditBox:GetText() == "" or BenillaSendMailSubjectEditBox:GetText() == BenillaSendMailFrame.previousItem then
-                    BenillaSendMailSubjectEditBox:SetText(itemName)
-                    BenillaSendMailFrame.previousItem = itemName
+                SendMailCODButton:Enable()
+                SendMailCODButtonText:SetTextColor(1.0, 0.82, 0)
+                if SendMailSubjectEditBox:GetText() == "" or SendMailSubjectEditBox:GetText() == SendMailFrame.previousItem then
+                    SendMailSubjectEditBox:SetText(itemName)
+                    SendMailFrame.previousItem = itemName
                 end
             else
-                if BenillaSendMailSubjectEditBox:GetText() == BenillaSendMailFrame.previousItem then
-                    BenillaSendMailSubjectEditBox:SetText("")
+                if SendMailSubjectEditBox:GetText() == SendMailFrame.previousItem then
+                    SendMailSubjectEditBox:SetText("")
                 end
-                BenillaSendMailFrame.previousItem = ""
-                BenillaSendMailRadioButton_OnClick(1)
-                BenillaSendMailCODButton:Disable()
-                BenillaSendMailCODButtonText:SetTextColor(0.5, 0.5, 0.5)
+                SendMailFrame.previousItem = ""
+                SendMailRadioButton_OnClick(1)
+                SendMailCODButton:Disable()
+                SendMailCODButtonText:SetTextColor(0.5, 0.5, 0.5)
             end
-            getglobal("BenillaSendMailPackageButtonCount"):SetText(stackCount)
-            BenillaMoney_Set("BenillaSendMailMoneyFrame", GetMoney())
+            getglobal("SendMailPackageButtonCount"):SetText(stackCount)
+            BenillaMoney_Set("SendMailMoneyFrame", GetMoney())
             -- The 30c postage (ref l.542-547); red when it exceeds the purse.
-            BenillaMoney_Set("BenillaSendMailCost", GetSendMailPrice())
+            BenillaMoney_Set("SendMailCost", GetSendMailPrice())
             if GetSendMailPrice() > GetMoney() then
-                BenillaMoney_SetColor("BenillaSendMailCost", 1.0, 0.1, 0.1)
+                BenillaMoney_SetColor("SendMailCost", 1.0, 0.1, 0.1)
             else
-                BenillaMoney_SetColor("BenillaSendMailCost", 1.0, 1.0, 1.0)
+                BenillaMoney_SetColor("SendMailCost", 1.0, 1.0, 1.0)
             end
-            BenillaSendMailFrame_CanSend()
+            SendMailFrame_CanSend()
         end
 
-        function BenillaSendMailFrame_Reset()
-            BenillaSendMailNameEditBox:SetText("")
-            BenillaSendMailSubjectEditBox:SetText("")
-            BenillaSendMailBodyEditBox:SetText("")
-            BenillaMoneyInput_ResetMoney("BenillaSendMailMoney")
-            BenillaSendMailRadioButton_OnClick(1)
-            BenillaSendMailFrame_Update()
+        function SendMailFrame_Reset()
+            SendMailNameEditBox:SetText("")
+            SendMailSubjectEditBox:SetText("")
+            SendMailBodyEditBox:SetText("")
+            BenillaMoneyInput_ResetMoney("SendMailMoney")
+            SendMailRadioButton_OnClick(1)
+            SendMailFrame_Update()
         end
 
         -- SendMailFrame_CanSend (ref l.564-598): name + subject required (stationery is always the
         -- default here — the picker is omitted); a COD send additionally caps at 10,000g.
-        function BenillaSendMailFrame_CanSend()
+        function SendMailFrame_CanSend()
             local checks = 0
             local checksRequired = 2
-            if string.len(BenillaSendMailNameEditBox:GetText()) > 0 then checks = checks + 1 end
-            if string.len(BenillaSendMailSubjectEditBox:GetText()) > 0 then checks = checks + 1 end
-            if BenillaSendMailCODButton:GetChecked() then
+            if string.len(SendMailNameEditBox:GetText()) > 0 then checks = checks + 1 end
+            if string.len(SendMailSubjectEditBox:GetText()) > 0 then checks = checks + 1 end
+            if SendMailCODButton:GetChecked() then
                 checksRequired = 3
-                if BenillaMoneyInput_GetCopper("BenillaSendMailMoney") > BENILLA_MAX_COD_AMOUNT * 10000 then
-                    BenillaSendMailErrorText:Show()
-                    BenillaSendMailErrorCoin:Show()
+                if BenillaMoneyInput_GetCopper("SendMailMoney") > BENILLA_MAX_COD_AMOUNT * 10000 then
+                    SendMailErrorText:Show()
+                    SendMailErrorCoin:Show()
                 else
-                    BenillaSendMailErrorText:Hide()
-                    BenillaSendMailErrorCoin:Hide()
+                    SendMailErrorText:Hide()
+                    SendMailErrorCoin:Hide()
                     checks = checks + 1
                 end
             else
-                BenillaSendMailErrorText:Hide()
-                BenillaSendMailErrorCoin:Hide()
+                SendMailErrorText:Hide()
+                SendMailErrorCoin:Hide()
             end
             if checks == checksRequired then
-                BenillaSendMailMailButton:Enable()
+                SendMailMailButton:Enable()
             else
-                BenillaSendMailMailButton:Disable()
+                SendMailMailButton:Disable()
             end
         end
 
-        function BenillaSendMailRadioButton_OnClick(index)
+        function SendMailRadioButton_OnClick(index)
             if index == 1 then
-                BenillaSendMailSendMoneyButton:SetChecked(1)
-                BenillaSendMailCODButton:SetChecked(nil)
-                BenillaSendMailMoneyText:SetText("Amount to send:")   -- AMOUNT_TO_SEND
+                SendMailSendMoneyButton:SetChecked(1)
+                SendMailCODButton:SetChecked(nil)
+                SendMailMoneyText:SetText("Amount to send:")   -- AMOUNT_TO_SEND
             else
-                BenillaSendMailSendMoneyButton:SetChecked(nil)
-                BenillaSendMailCODButton:SetChecked(1)
-                BenillaSendMailMoneyText:SetText("Cash on Delivery Amount:")   -- COD_AMOUNT
+                SendMailSendMoneyButton:SetChecked(nil)
+                SendMailCODButton:SetChecked(1)
+                SendMailMoneyText:SetText("Cash on Delivery Amount:")   -- COD_AMOUNT
             end
             PlaySound("igMainMenuOptionCheckBoxOn")
-            BenillaSendMailFrame_CanSend()
+            SendMailFrame_CanSend()
         end
 
         -- The send item slot: a cursor drop (ref SendMailPackageButton_OnClick l.709-721; the cursor
         -- MONEY drop path is omitted with the cursor-money system).
-        function BenillaSendMailPackageButton_OnClick()
+        function SendMailPackageButton_OnClick()
             ClickSendMailItemButton()
-            BenillaSendMailFrame_Update()
+            SendMailFrame_Update()
         end
 
         -- ── The window-owned StaticPopups (ref StaticPopup.lua l.205/220/234/252; the DeathFrame.xml
@@ -540,7 +543,7 @@
             text = "Accepting this item will cost:",  -- COD_CONFIRMATION
             button1 = "Accept",
             button2 = "Cancel",
-            OnAccept = function() TakeInboxItem(BenillaInboxFrame.openMailID) end,
+            OnAccept = function() TakeInboxItem(InboxFrame.openMailID) end,
             timeout = 0,
             hideOnEscape = 1,
         }
@@ -549,9 +552,9 @@
             button1 = "Accept",
             button2 = "Cancel",
             OnAccept = function()
-                DeleteInboxItem(BenillaInboxFrame.openMailID)
-                BenillaInboxFrame.openMailID = 0
-                HideUIPanel(BenillaOpenMailFrame)
+                DeleteInboxItem(InboxFrame.openMailID)
+                InboxFrame.openMailID = 0
+                HideUIPanel(OpenMailFrame)
             end,
             showAlert = 1,
             timeout = 0,
@@ -562,9 +565,9 @@
             button1 = "Accept",
             button2 = "Cancel",
             OnAccept = function()
-                DeleteInboxItem(BenillaInboxFrame.openMailID)
-                BenillaInboxFrame.openMailID = 0
-                HideUIPanel(BenillaOpenMailFrame)
+                DeleteInboxItem(InboxFrame.openMailID)
+                InboxFrame.openMailID = 0
+                HideUIPanel(OpenMailFrame)
             end,
             showAlert = 1,
             timeout = 0,
@@ -575,11 +578,11 @@
             button1 = "Accept",
             button2 = "Cancel",
             OnAccept = function()
-                if SetSendMailMoney(BenillaMoneyInput_GetCopper("BenillaSendMailMoney")) then
-                    BenillaSendMailFrame_SendMail()
+                if SetSendMailMoney(BenillaMoneyInput_GetCopper("SendMailMoney")) then
+                    SendMailFrame_SendMail()
                 end
             end,
-            OnCancel = function() BenillaSendMailMailButton:Enable() end,
+            OnCancel = function() SendMailMailButton:Enable() end,
             timeout = 0,
             hideOnEscape = 1,
         }
@@ -657,8 +660,8 @@
                 </Layers>
                 <Scripts>
                     <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp")</OnLoad>
-                    <OnClick>BenillaInboxFrame_OnClick(this.index)</OnClick>
-                    <OnEnter>BenillaInboxFrameItem_OnEnter(self)</OnEnter>
+                    <OnClick>InboxFrame_OnClick(this.index)</OnClick>
+                    <OnEnter>InboxFrameItem_OnEnter()</OnEnter>
                     <OnLeave>GameTooltip:Hide()</OnLeave>
                 </Scripts>
                 <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
@@ -683,7 +686,7 @@
         </Layers>
     </CheckButton>
 
-    <Frame name="BenillaMailFrame" hidden="true">
+    <Frame name="MailFrame" hidden="true">
         <!-- ref MailFrame l.242-255: 384×512; ShowUIPanel slots it left. HitRectInsets quoted for
              fidelity (currently inert — the loader ignores it). -->
         <Size><AbsDimension x="384" y="512"/></Size>
@@ -718,45 +721,45 @@
         </Layers>
         <Frames>
             <!-- ── Inbox (ref InboxFrame l.308-474) ───────────────────────────────────────────── -->
-            <Frame name="BenillaInboxFrame">
+            <Frame name="InboxFrame">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT"/></Anchors>
                 <Layers>
                     <Layer level="ARTWORK">
-                        <FontString name="BenillaInboxTitleText" inherits="GameFontNormal" text="Inbox">
+                        <FontString name="InboxTitleText" inherits="GameFontNormal" text="Inbox">
                             <Size><AbsDimension x="224" y="14"/></Size>
                             <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="230"/></Offset></Anchor></Anchors>
                         </FontString>
-                        <FontString name="BenillaInboxCurrentPage" inherits="GameFontNormal">
+                        <FontString name="InboxCurrentPage" inherits="GameFontNormal">
                             <Size><AbsDimension x="192" y="0"/></Size>
                             <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-14" y="96"/></Offset></Anchor></Anchors>
                         </FontString>
                     </Layer>
                 </Layers>
                 <Frames>
-                    <Frame name="BenillaMailItem1" inherits="BenillaMailItemTemplate">
+                    <Frame name="MailItem1" inherits="BenillaMailItemTemplate">
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-80"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem2" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem2" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem3" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem3" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem4" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem4" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem5" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem5" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem6" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem6" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
-                    <Frame name="BenillaMailItem7" inherits="BenillaMailItemTemplate">
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMailItem6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Frame name="MailItem7" inherits="BenillaMailItemTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="MailItem6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     </Frame>
                     <!-- ref InboxPrevPageButton l.407-439 / InboxNextPageButton l.440-472. -->
-                    <Button name="BenillaInboxPrevPageButton">
+                    <Button name="InboxPrevPageButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="50" y="104"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -768,14 +771,14 @@
                         </Layers>
                         <Scripts>
                             <OnLoad>this:Disable()</OnLoad>
-                            <OnClick>BenillaInboxPrevPage()</OnClick>
+                            <OnClick>InboxPrevPage()</OnClick>
                         </Scripts>
                         <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
                         <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
                         <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
                     </Button>
-                    <Button name="BenillaInboxNextPageButton">
+                    <Button name="InboxNextPageButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="314" y="104"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -787,7 +790,7 @@
                         </Layers>
                         <Scripts>
                             <OnLoad>this:Disable()</OnLoad>
-                            <OnClick>BenillaInboxNextPage()</OnClick>
+                            <OnClick>InboxNextPage()</OnClick>
                         </Scripts>
                         <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
                         <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>
@@ -798,12 +801,12 @@
             </Frame>
 
             <!-- ── Send Mail (ref SendMailFrame l.476-1053) ───────────────────────────────────── -->
-            <Frame name="BenillaSendMailFrame" hidden="true">
+            <Frame name="SendMailFrame" hidden="true">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT"/></Anchors>
                 <Layers>
                     <Layer level="BACKGROUND">
-                        <FontString name="BenillaSendMailTitleText" inherits="GameFontNormal" text="Send Mail">
+                        <FontString name="SendMailTitleText" inherits="GameFontNormal" text="Send Mail">
                             <Size><AbsDimension x="224" y="14"/></Size>
                             <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="230"/></Offset></Anchor></Anchors>
                         </FontString>
@@ -812,23 +815,23 @@
                              OnLoad (ref l.1040), because MoneyText is declared in a LATER child
                              frame and anchors resolve at SetPoint time (an XML forward reference
                              silently lands on the parent). Kept verbatim in our OnLoad below. -->
-                        <FontString name="BenillaSendMailErrorText" inherits="GameFontRedSmall" text="COD amount is too high." hidden="true">
+                        <FontString name="SendMailErrorText" inherits="GameFontRedSmall" text="COD amount is too high." hidden="true">
                             <Size><AbsDimension x="0" y="10"/></Size>
                         </FontString>
-                        <Texture name="BenillaSendMailErrorCoin" file="Interface\MoneyFrame\UI-MoneyIcons" hidden="true">
+                        <Texture name="SendMailErrorCoin" file="Interface\MoneyFrame\UI-MoneyIcons" hidden="true">
                             <Size><AbsDimension x="10" y="10"/></Size>
-                            <Anchors><Anchor point="LEFT" relativeTo="BenillaSendMailErrorText" relativePoint="RIGHT"><Offset><AbsDimension x="1" y="-1"/></Offset></Anchor></Anchors>
+                            <Anchors><Anchor point="LEFT" relativeTo="SendMailErrorText" relativePoint="RIGHT"><Offset><AbsDimension x="1" y="-1"/></Offset></Anchor></Anchors>
                             <TexCoords left="0" right="0.25" top="0" bottom="1"/>
                         </Texture>
                         <!-- ref SendMailHorizontalBar l.515-540. -->
-                        <Texture name="BenillaSendMailHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                        <Texture name="SendMailHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
                             <Size><AbsDimension x="256" y="16"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="15" y="-350"/></Offset></Anchor></Anchors>
                             <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
                         </Texture>
                         <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
                             <Size><AbsDimension x="75" y="16"/></Size>
-                            <Anchors><Anchor point="LEFT" relativeTo="BenillaSendMailHorizontalBarLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                            <Anchors><Anchor point="LEFT" relativeTo="SendMailHorizontalBarLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                             <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
                         </Texture>
                     </Layer>
@@ -837,18 +840,18 @@
                     <!-- ref SendMailScrollFrame l.544-661: the 296×257 scroll region at (21,-97) with
                          the stationery backdrop + scrollbar art; the body is a plain EditBox inside (no
                          live scrollbar — the render approximation). -->
-                    <Frame name="BenillaSendMailScrollFrame">
+                    <Frame name="SendMailScrollFrame">
                         <Size><AbsDimension x="296" y="257"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-97"/></Offset></Anchor></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
-                                <Texture name="BenillaStationeryBackgroundLeft">
+                                <Texture name="StationeryBackgroundLeft">
                                     <Size><AbsDimension x="252" y="256"/></Size>
                                     <Anchors><Anchor point="TOPLEFT"/></Anchors>
                                 </Texture>
-                                <Texture name="BenillaStationeryBackgroundRight">
+                                <Texture name="StationeryBackgroundRight">
                                     <Size><AbsDimension x="64" y="256"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaStationeryBackgroundLeft" relativePoint="TOPRIGHT"/></Anchors>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="StationeryBackgroundLeft" relativePoint="TOPRIGHT"/></Anchors>
                                 </Texture>
                             </Layer>
                             <Layer level="ARTWORK">
@@ -890,14 +893,14 @@
                         </Layers>
                         <Frames>
                             <!-- ref SendMailBodyEditBox l.616-649: 270×200 at (20,-10), 500 letters. -->
-                            <EditBox name="BenillaSendMailBodyEditBox" letters="500" multiLine="true" enableMouse="true" autoFocus="false">
+                            <EditBox name="SendMailBodyEditBox" letters="500" multiLine="true" enableMouse="true" autoFocus="false">
                                 <Size><AbsDimension x="270" y="200"/></Size>
                                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-10"/></Offset></Anchor></Anchors>
                                 <FontString inherits="MailTextFontNormal"/>
                                 <Scripts>
                                     <OnMouseUp>
-                                        BenillaSendMailBodyEditBox:SetFocus()
-                                        if ( CursorHasItem() ) then BenillaSendMailPackageButton_OnClick() end
+                                        SendMailBodyEditBox:SetFocus()
+                                        if ( CursorHasItem() ) then SendMailPackageButton_OnClick() end
                                     </OnMouseUp>
                                     <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
                                 </Scripts>
@@ -906,7 +909,7 @@
                     </Frame>
                     <!-- ref SendMailNameEditBox l.662-738: 122×20 at (105,-46) + the To label +
                          Common-Input-Border art. -->
-                    <EditBox name="BenillaSendMailNameEditBox" letters="12" historyLines="0" autoFocus="false">
+                    <EditBox name="SendMailNameEditBox" letters="12" historyLines="0" autoFocus="false">
                         <Size><AbsDimension x="122" y="20"/></Size>
                         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="105" y="-46"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -932,18 +935,18 @@
                             </Layer>
                         </Layers>
                         <Scripts>
-                            <OnTabPressed>BenillaSendMailSubjectEditBox:SetFocus()</OnTabPressed>
+                            <OnTabPressed>SendMailSubjectEditBox:SetFocus()</OnTabPressed>
                             <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
-                            <OnEnterPressed>BenillaSendMailSubjectEditBox:SetFocus()</OnEnterPressed>
-                            <OnEscapePressed>BenillaSendMailNameEditBox:ClearFocus()</OnEscapePressed>
-                            <OnTextChanged>BenillaSendMailFrame_CanSend()</OnTextChanged>
+                            <OnEnterPressed>SendMailSubjectEditBox:SetFocus()</OnEnterPressed>
+                            <OnEscapePressed>SendMailNameEditBox:ClearFocus()</OnEscapePressed>
+                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
                         </Scripts>
                         <FontString inherits="ChatFontNormal"/>
                     </EditBox>
                     <!-- ref SendMailCostMoneyFrame l.739-767 (SmallMoneyFrameTemplate at TOPRIGHT
                          -46,-48; inlined as BenillaMoney coin slots, copper-first right-to-left, with
                          the SEND_MAIL_COST label). -->
-                    <Frame name="BenillaSendMailCost">
+                    <Frame name="SendMailCost">
                         <Size><AbsDimension x="13" y="13"/></Size>
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-46" y="-48"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -972,9 +975,9 @@
                         </Frames>
                     </Frame>
                     <!-- ref SendMailSubjectEditBox l.768-842: 237×20 below the name box, 64 letters. -->
-                    <EditBox name="BenillaSendMailSubjectEditBox" letters="64" historyLines="0" autoFocus="false">
+                    <EditBox name="SendMailSubjectEditBox" letters="64" historyLines="0" autoFocus="false">
                         <Size><AbsDimension x="237" y="20"/></Size>
-                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSendMailNameEditBox" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="SendMailNameEditBox" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
                         <Layers>
                             <Layer level="BACKGROUND">
                                 <FontString inherits="GameFontNormal" text="Subject:" justifyH="RIGHT">
@@ -998,16 +1001,16 @@
                             </Layer>
                         </Layers>
                         <Scripts>
-                            <OnTabPressed>BenillaSendMailBodyEditBox:SetFocus()</OnTabPressed>
-                            <OnEnterPressed>BenillaSendMailBodyEditBox:SetFocus()</OnEnterPressed>
-                            <OnEscapePressed>BenillaSendMailSubjectEditBox:ClearFocus()</OnEscapePressed>
-                            <OnTextChanged>BenillaSendMailFrame_CanSend()</OnTextChanged>
+                            <OnTabPressed>SendMailBodyEditBox:SetFocus()</OnTabPressed>
+                            <OnEnterPressed>SendMailBodyEditBox:SetFocus()</OnEnterPressed>
+                            <OnEscapePressed>SendMailSubjectEditBox:ClearFocus()</OnEscapePressed>
+                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
                         </Scripts>
                         <FontString inherits="ChatFontNormal"/>
                     </EditBox>
                     <!-- ref SendMailPackageButton l.843-962: 37×37 at BOTTOMLEFT (30,107), the
                          UI-Slot-Background plate, the SEND_MONEY label, the money input + radio pair. -->
-                    <Button name="BenillaSendMailPackageButton">
+                    <Button name="SendMailPackageButton">
                         <Size><AbsDimension x="37" y="37"/></Size>
                         <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="30" y="107"/></Offset></Anchor></Anchors>
                         <Layers>
@@ -1018,7 +1021,7 @@
                                     <TexCoords left="0" right="0.640625" top="0" bottom="0.640625"/>
                                 </Texture>
                                 <Texture name="$parentIcon"><Size><AbsDimension x="37" y="37"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture>
-                                <FontString name="BenillaSendMailMoneyText" inherits="GameFontNormalSmall" text="Amount to send:">
+                                <FontString name="SendMailMoneyText" inherits="GameFontNormalSmall" text="Amount to send:">
                                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="49" y="-5"/></Offset></Anchor></Anchors>
                                 </FontString>
                             </Layer>
@@ -1036,7 +1039,7 @@
                                  each box's L slice 8×20 at (-5,0), R slice at RIGHT (gold 0,
                                  silver/copper -10), M stretched between; coin 13×13 LEFT→RIGHT at
                                  +2 (gold) / -8 (silver, copper)). -->
-                            <Frame name="BenillaSendMailMoney">
+                            <Frame name="SendMailMoney">
                                 <Size><AbsDimension x="176" y="18"/></Size>
                                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="15" y="1"/></Offset></Anchor></Anchors>
                                 <Frames>
@@ -1074,7 +1077,7 @@
                                             <OnTabPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnTabPressed>
                                             <OnEnterPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnEnterPressed>
                                             <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>BenillaSendMailFrame_CanSend()</OnTextChanged>
+                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
                                             <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
                                             <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
                                         </Scripts>
@@ -1114,7 +1117,7 @@
                                             <OnTabPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnTabPressed>
                                             <OnEnterPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnEnterPressed>
                                             <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>BenillaSendMailFrame_CanSend()</OnTextChanged>
+                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
                                             <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
                                             <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
                                         </Scripts>
@@ -1152,7 +1155,7 @@
                                         </Layers>
                                         <Scripts>
                                             <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
-                                            <OnTextChanged>BenillaSendMailFrame_CanSend()</OnTextChanged>
+                                            <OnTextChanged>SendMailFrame_CanSend()</OnTextChanged>
                                             <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
                                             <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
                                         </Scripts>
@@ -1161,24 +1164,24 @@
                                 </Frames>
                             </Frame>
                             <!-- ref SendMailSendMoneyButton l.906-919 / SendMailCODButton l.920-933. -->
-                            <CheckButton name="BenillaSendMailSendMoneyButton" inherits="BenillaSendMailRadioButtonTemplate">
+                            <CheckButton name="SendMailSendMoneyButton" inherits="BenillaSendMailRadioButtonTemplate">
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="185" y="-6"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>getglobal(this:GetName().."Text"):SetText("Send Money")</OnLoad>
-                                    <OnClick>BenillaSendMailRadioButton_OnClick(1)</OnClick>
+                                    <OnClick>SendMailRadioButton_OnClick(1)</OnClick>
                                 </Scripts>
                             </CheckButton>
-                            <CheckButton name="BenillaSendMailCODButton" inherits="BenillaSendMailRadioButtonTemplate">
-                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSendMailSendMoneyButton" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                            <CheckButton name="SendMailCODButton" inherits="BenillaSendMailRadioButtonTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="SendMailSendMoneyButton" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
                                 <Scripts>
                                     <OnLoad>getglobal(this:GetName().."Text"):SetText("C.O.D.")</OnLoad>
-                                    <OnClick>BenillaSendMailRadioButton_OnClick(2)</OnClick>
+                                    <OnClick>SendMailRadioButton_OnClick(2)</OnClick>
                                 </Scripts>
                             </CheckButton>
                         </Frames>
                         <Scripts>
-                            <OnClick>BenillaSendMailPackageButton_OnClick()</OnClick>
-                            <OnReceiveDrag>BenillaSendMailPackageButton_OnClick()</OnReceiveDrag>
+                            <OnClick>SendMailPackageButton_OnClick()</OnClick>
+                            <OnReceiveDrag>SendMailPackageButton_OnClick()</OnReceiveDrag>
                             <OnEnter>
                                 GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
                                 if ( GetSendMailItem() ) then
@@ -1195,8 +1198,8 @@
                          BOTTOMRIGHT→BOTTOMLEFT 183,84) — it fills the recess authored into
                          UI-ClassTrainer-BotLeft left of the Send button (without it the recess reads
                          as a broken empty input box). Inlined as the BenillaMoney coin trio; fed
-                         GetMoney() by BenillaSendMailFrame_Update + the PLAYER_MONEY event. -->
-                    <Frame name="BenillaSendMailMoneyFrame">
+                         GetMoney() by SendMailFrame_Update + the PLAYER_MONEY event. -->
+                    <Frame name="SendMailMoneyFrame">
                         <Size><AbsDimension x="13" y="13"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="183" y="84"/></Offset></Anchor></Anchors>
                         <Frames>
@@ -1219,7 +1222,7 @@
                     </Frame>
                     <!-- ref SendMailCancelButton l.1002-1018 / SendMailMailButton l.1019-1035
                          (UIPanelButtonTemplate 80×22 at the ref offsets; inlined UI-Panel-Button art). -->
-                    <Button name="BenillaSendMailCancelButton" text="Cancel">
+                    <Button name="SendMailCancelButton" text="Cancel">
                         <Size><AbsDimension x="80" y="22"/></Size>
                         <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="80"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
@@ -1227,18 +1230,18 @@
                         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
                         <ButtonText name="$parentText"/>
                         <NormalFont inherits="GameFontNormalSmall"/><HighlightFont inherits="GameFontHighlightSmall"/><DisabledFont inherits="GameFontDisableSmall"/>
-                        <Scripts><OnClick>HideUIPanel(BenillaMailFrame)</OnClick></Scripts>
+                        <Scripts><OnClick>HideUIPanel(MailFrame)</OnClick></Scripts>
                     </Button>
-                    <Button name="BenillaSendMailMailButton" text="Send">
+                    <Button name="SendMailMailButton" text="Send">
                         <Size><AbsDimension x="80" y="22"/></Size>
-                        <Anchors><Anchor point="RIGHT" relativeTo="BenillaSendMailCancelButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                        <Anchors><Anchor point="RIGHT" relativeTo="SendMailCancelButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                         <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
                         <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
                         <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
                         <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
                         <ButtonText name="$parentText"/>
                         <NormalFont inherits="GameFontNormalSmall"/><HighlightFont inherits="GameFontHighlightSmall"/><DisabledFont inherits="GameFontDisableSmall"/>
-                        <Scripts><OnClick>BenillaSendMailMailButton_OnClick()</OnClick></Scripts>
+                        <Scripts><OnClick>SendMailMailButton_OnClick()</OnClick></Scripts>
                     </Button>
                 </Frames>
                 <Scripts>
@@ -1246,7 +1249,7 @@
                          because its target lives in a later-declared child frame (the OnLoad's
                          SetText sibling is inlined as the XML text= literal). -->
                     <OnLoad>
-                        BenillaSendMailErrorText:SetPoint("BOTTOMLEFT", "BenillaSendMailMoneyText", "TOPLEFT", 0, 2)
+                        SendMailErrorText:SetPoint("BOTTOMLEFT", "SendMailMoneyText", "TOPLEFT", 0, 2)
                     </OnLoad>
                     <!-- ref SendMailFrame OnShow l.1042-1047: StationeryPopupButton_OnClick(1)
                          selects the default stationery and paints the compose backdrop with its
@@ -1254,127 +1257,127 @@
                          the Stationery.dbc default, decision 0544). The picker itself is the named
                          omission; the default parchment is not. -->
                     <OnShow>
-                        BenillaStationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST1")
-                        BenillaStationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST2")
-                        BenillaSendMailNameEditBox:SetFocus()
-                        BenillaSendMailRadioButton_OnClick(1)
+                        StationeryBackgroundLeft:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST1")
+                        StationeryBackgroundRight:SetTexture(BENILLA_STATIONERY_PATH.."STATIONERYTEST2")
+                        SendMailNameEditBox:SetFocus()
+                        SendMailRadioButton_OnClick(1)
                     </OnShow>
                     <OnMouseUp>
-                        if ( CursorHasItem() ) then BenillaSendMailPackageButton_OnClick() end
+                        if ( CursorHasItem() ) then SendMailPackageButton_OnClick() end
                     </OnMouseUp>
                 </Scripts>
             </Frame>
 
             <!-- ref InboxCloseButton l.1055-1071 (UIPanelCloseButton at CENTER relativePoint TOPRIGHT
                  -45,-25; inlined UI-Panel-MinimizeButton art, the merchant precedent). -->
-            <Button name="BenillaMailCloseButton">
+            <Button name="MailCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-45" y="-25"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts><OnClick>HideUIPanel(BenillaMailFrame)</OnClick></Scripts>
+                <Scripts><OnClick>HideUIPanel(MailFrame)</OnClick></Scripts>
             </Button>
             <!-- ref MailFrameTab1 l.1072-1085 / MailFrameTab2 l.1086-1099 (FriendsFrameTabTemplate at
                  BOTTOMLEFT 24,44, chained LEFT -8,0; inherits benilla's CharacterFrameTabButtonTemplate). -->
             <Button name="$parentTab1" inherits="CharacterFrameTabButtonTemplate" text="Inbox">
                 <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="24" y="44"/></Offset></Anchor></Anchors>
-                <Scripts><OnClick>BenillaMailFrameTab_OnClick(1)</OnClick></Scripts>
+                <Scripts><OnClick>MailFrameTab_OnClick(1)</OnClick></Scripts>
             </Button>
             <Button name="$parentTab2" inherits="CharacterFrameTabButtonTemplate" text="Send Mail">
                 <Anchors><Anchor point="LEFT" relativeTo="$parentTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors>
-                <Scripts><OnClick>BenillaMailFrameTab_OnClick(2)</OnClick></Scripts>
+                <Scripts><OnClick>MailFrameTab_OnClick(2)</OnClick></Scripts>
             </Button>
         </Frames>
         <Scripts>
             <OnLoad>BenillaMailFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaMailFrame_OnEvent(self)</OnEvent>
+            <OnEvent>MailFrame_OnEvent()</OnEvent>
             <!-- ref MailFrame OnHide l.1108-1116 (StationeryPopupFrame omitted); OnShow adds
                  OpenBackpack + the panel sound (benilla's bag-with-window behavior). -->
             <OnShow>OpenBackpack(); PlaySound("igCharacterInfoOpen")</OnShow>
             <OnHide>
                 CloseMail()
                 CloseBackpack()
-                HideUIPanel(BenillaOpenMailFrame)
-                BenillaSendMailBodyEditBox:SetText("")
-                BenillaSendMailNameEditBox:SetText("")
-                BenillaSendMailSubjectEditBox:SetText("")
+                HideUIPanel(OpenMailFrame)
+                SendMailBodyEditBox:SetText("")
+                SendMailNameEditBox:SetText("")
+                SendMailSubjectEditBox:SetText("")
                 PlaySound("igCharacterInfoClose")
             </OnHide>
         </Scripts>
     </Frame>
 
     <!-- ── Open Mail (ref OpenMailFrame l.1306-1915) ──────────────────────────────────────────── -->
-    <Frame name="BenillaOpenMailFrame" hidden="true" enableMouse="true">
+    <Frame name="OpenMailFrame" hidden="true" enableMouse="true">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors>
-            <Anchor point="TOPLEFT" relativeTo="BenillaInboxFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor>
+            <Anchor point="TOPLEFT" relativeTo="InboxFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor>
         </Anchors>
         <Layers>
             <Layer level="BACKGROUND">
                 <!-- ref OpenMailFrameIcon l.1319-1330 (Mail-Icon; SetTexture'd to the stationery icon
-                     at runtime by BenillaOpenMail_Update). -->
-                <Texture name="BenillaOpenMailFrameIcon" file="Interface\MailFrame\Mail-Icon">
+                     at runtime by OpenMail_Update). -->
+                <Texture name="OpenMailFrameIcon" file="Interface\MailFrame\Mail-Icon">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="9" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>
             </Layer>
             <Layer level="BORDER">
                 <!-- ref OpenMailFrame corner slabs l.1333-1364. -->
-                <Texture name="BenillaOpenMailFrameTopLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft">
+                <Texture name="OpenMailFrameTopLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft">
                     <Size><AbsDimension x="256" y="256"/></Size>
                     <Anchors><Anchor point="TOPLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaOpenMailFrameTopRight" file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight">
+                <Texture name="OpenMailFrameTopRight" file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight">
                     <Size><AbsDimension x="128" y="256"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaOpenMailFrameTopLeft" relativePoint="TOPRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="OpenMailFrameTopLeft" relativePoint="TOPRIGHT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaOpenMailFrameBotLeft" file="Interface\MailFrame\UI-OpenMail-BotLeft">
+                <Texture name="OpenMailFrameBotLeft" file="Interface\MailFrame\UI-OpenMail-BotLeft">
                     <Size><AbsDimension x="256" y="256"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaOpenMailFrameTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="OpenMailFrameTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaOpenMailFrameBotRight" file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight">
+                <Texture name="OpenMailFrameBotRight" file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight">
                     <Size><AbsDimension x="128" y="256"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaOpenMailFrameTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="OpenMailFrameTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
                 </Texture>
             </Layer>
             <Layer level="ARTWORK">
-                <FontString name="BenillaOpenMailTitleText" inherits="GameFontNormal" text="Open Mail">
+                <FontString name="OpenMailTitleText" inherits="GameFontNormal" text="Open Mail">
                     <Size><AbsDimension x="224" y="24"/></Size>
                     <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="232"/></Offset></Anchor></Anchors>
                 </FontString>
-                <!-- ref OpenMailAttachmentText l.1379-1390 (moved by BenillaOpenMail_Update). -->
-                <FontString name="BenillaOpenMailAttachmentText" inherits="GameFontHighlightSmall" text="Take Attachments:">
+                <!-- ref OpenMailAttachmentText l.1379-1390 (moved by OpenMail_Update). -->
+                <FontString name="OpenMailAttachmentText" inherits="GameFontHighlightSmall" text="Take Attachments:">
                     <Size><AbsDimension x="120" y="0"/></Size>
                     <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="-68" y="123"/></Offset></Anchor></Anchors>
                 </FontString>
                 <!-- ref OpenMailSenderLabel/Sender l.1391-1414. -->
-                <FontString name="BenillaOpenMailSenderLabel" inherits="GameFontHighlight" text="From:">
+                <FontString name="OpenMailSenderLabel" inherits="GameFontHighlight" text="From:">
                     <Size><AbsDimension x="0" y="16"/></Size>
                     <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPLEFT"><Offset><AbsDimension x="114" y="-45"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaOpenMailSender" inherits="GameFontNormal" justifyH="LEFT">
+                <FontString name="OpenMailSender" inherits="GameFontNormal" justifyH="LEFT">
                     <Size><AbsDimension x="110" y="0"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="BenillaOpenMailSenderLabel" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="LEFT" relativeTo="OpenMailSenderLabel" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                 </FontString>
                 <!-- ref OpenMailSubjectLabel/Subject l.1415-1438. -->
-                <FontString name="BenillaOpenMailSubjectLabel" inherits="GameFontHighlight" text="Subject:">
+                <FontString name="OpenMailSubjectLabel" inherits="GameFontHighlight" text="Subject:">
                     <Size><AbsDimension x="0" y="16"/></Size>
                     <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPLEFT"><Offset><AbsDimension x="114" y="-65"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaOpenMailSubject" inherits="GameFontNormalSmall" justifyH="LEFT" justifyV="TOP">
+                <FontString name="OpenMailSubject" inherits="GameFontNormalSmall" justifyH="LEFT" justifyV="TOP">
                     <Size><AbsDimension x="225" y="16"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaOpenMailSubjectLabel" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="-4"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="OpenMailSubjectLabel" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="-4"/></Offset></Anchor></Anchors>
                 </FontString>
                 <!-- ref OpenMailHorizontalBar l.1439-1464. -->
-                <Texture name="BenillaOpenMailHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                <Texture name="OpenMailHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
                     <Size><AbsDimension x="256" y="16"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="15" y="-350"/></Offset></Anchor></Anchors>
                     <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
                 </Texture>
                 <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
                     <Size><AbsDimension x="75" y="16"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="BenillaOpenMailHorizontalBarLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="LEFT" relativeTo="OpenMailHorizontalBarLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                     <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
                 </Texture>
             </Layer>
@@ -1383,7 +1386,7 @@
             <!-- ref OpenMailScrollFrame l.1468-1731 (296×257 at 21,-97; stationery backdrop + scrollbar
                  art quoted, the body a plain FontString inside — the render approximation; the auction
                  INVOICE sub-frame l.1556-1727 is a named omission, dropped). -->
-            <Frame name="BenillaOpenMailScrollFrame">
+            <Frame name="OpenMailScrollFrame">
                 <Size><AbsDimension x="296" y="257"/></Size>
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-97"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -1418,16 +1421,16 @@
                         </Texture>
                     </Layer>
                     <Layer level="BACKGROUND">
-                        <Texture name="BenillaOpenStationeryBackgroundLeft">
+                        <Texture name="OpenStationeryBackgroundLeft">
                             <Size><AbsDimension x="252" y="256"/></Size>
                             <Anchors><Anchor point="TOPLEFT"/></Anchors>
                         </Texture>
-                        <Texture name="BenillaOpenStationeryBackgroundRight">
+                        <Texture name="OpenStationeryBackgroundRight">
                             <Size><AbsDimension x="64" y="256"/></Size>
-                            <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaOpenStationeryBackgroundLeft" relativePoint="TOPRIGHT"/></Anchors>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="OpenStationeryBackgroundLeft" relativePoint="TOPRIGHT"/></Anchors>
                         </Texture>
                         <!-- ref OpenMailBodyText l.1541-1552 (276 wide at 10,-10 in the scroll child). -->
-                        <FontString name="BenillaOpenMailBodyText" inherits="MailTextFontNormal" justifyH="LEFT" justifyV="TOP">
+                        <FontString name="OpenMailBodyText" inherits="MailTextFontNormal" justifyH="LEFT" justifyV="TOP">
                             <Size><AbsDimension x="276" y="240"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor></Anchors>
                         </FontString>
@@ -1438,9 +1441,9 @@
                  OpenMailMoneyButton l.1797-1835 (ItemButtonTemplate; inlined 37px icon + slot +
                  count). The row chains letter → package → money off the attachment caption;
                  OpenMail_Update re-points the two followers as their predecessors show/hide. -->
-            <Button name="BenillaOpenMailLetterButton" hidden="true">
+            <Button name="OpenMailLetterButton" hidden="true">
                 <Size><AbsDimension x="37" y="37"/></Size>
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaOpenMailAttachmentText" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="OpenMailAttachmentText" relativePoint="RIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="BACKGROUND"><Texture name="$parentSlot" file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="58" y="58"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
                     <Layer level="BORDER"><Texture name="$parentIcon"><Size><AbsDimension x="37" y="37"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
@@ -1453,9 +1456,9 @@
                     <OnLeave>GameTooltip:Hide()</OnLeave>
                 </Scripts>
             </Button>
-            <Button name="BenillaOpenMailPackageButton" hidden="true">
+            <Button name="OpenMailPackageButton" hidden="true">
                 <Size><AbsDimension x="37" y="37"/></Size>
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaOpenMailLetterButton" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="OpenMailLetterButton" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="BACKGROUND"><Texture name="$parentSlot" file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="58" y="58"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
                     <Layer level="BORDER"><Texture name="$parentIcon"><Size><AbsDimension x="37" y="37"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
@@ -1465,13 +1468,13 @@
                 <Scripts>
                     <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp")</OnLoad>
                     <OnClick>BenillaOpenMailPackageButton_OnClick()</OnClick>
-                    <OnEnter>BenillaOpenMailPackage_OnEnter(self)</OnEnter>
+                    <OnEnter>OpenMailPackage_OnEnter()</OnEnter>
                     <OnLeave>GameTooltip:Hide()</OnLeave>
                 </Scripts>
             </Button>
-            <Button name="BenillaOpenMailMoneyButton" hidden="true">
+            <Button name="OpenMailMoneyButton" hidden="true">
                 <Size><AbsDimension x="37" y="37"/></Size>
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaOpenMailPackageButton" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="OpenMailPackageButton" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="BACKGROUND"><Texture name="$parentSlot" file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="58" y="58"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
                     <Layer level="BORDER"><Texture name="$parentIcon"><Size><AbsDimension x="37" y="37"/></Size><Anchors><Anchor point="CENTER"/></Anchors></Texture></Layer>
@@ -1486,7 +1489,7 @@
             </Button>
             <!-- ref OpenMailCancelButton l.1836-1852 / OpenMailDeleteButton l.1853-1869 /
                  OpenMailReplyButton l.1870-1886 (UIPanelButtonTemplate 80/82×22 at the ref offsets). -->
-            <Button name="BenillaOpenMailCancelButton" text="Close">
+            <Button name="OpenMailCancelButton" text="Close">
                 <Size><AbsDimension x="80" y="22"/></Size>
                 <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-39" y="80"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
@@ -1496,40 +1499,40 @@
                 <NormalFont inherits="GameFontNormalSmall"/><HighlightFont inherits="GameFontHighlightSmall"/><DisabledFont inherits="GameFontDisableSmall"/>
                 <Scripts><OnClick>HideUIPanel(this:GetParent())</OnClick></Scripts>
             </Button>
-            <Button name="BenillaOpenMailDeleteButton" text="Delete">
+            <Button name="OpenMailDeleteButton" text="Delete">
                 <Size><AbsDimension x="82" y="22"/></Size>
-                <Anchors><Anchor point="RIGHT" relativeTo="BenillaOpenMailCancelButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailCancelButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
                 <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
                 <ButtonText name="$parentText"/>
                 <NormalFont inherits="GameFontNormalSmall"/><HighlightFont inherits="GameFontHighlightSmall"/><DisabledFont inherits="GameFontDisableSmall"/>
-                <Scripts><OnClick>BenillaOpenMail_Delete()</OnClick></Scripts>
+                <Scripts><OnClick>OpenMail_Delete()</OnClick></Scripts>
             </Button>
-            <Button name="BenillaOpenMailReplyButton" text="Reply">
+            <Button name="OpenMailReplyButton" text="Reply">
                 <Size><AbsDimension x="82" y="22"/></Size>
-                <Anchors><Anchor point="RIGHT" relativeTo="BenillaOpenMailDeleteButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="RIGHT" relativeTo="OpenMailDeleteButton" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
                 <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
                 <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
                 <ButtonText name="$parentText"/>
                 <NormalFont inherits="GameFontNormalSmall"/><HighlightFont inherits="GameFontHighlightSmall"/><DisabledFont inherits="GameFontDisableSmall"/>
-                <Scripts><OnClick>BenillaOpenMail_Reply()</OnClick></Scripts>
+                <Scripts><OnClick>OpenMail_Reply()</OnClick></Scripts>
             </Button>
             <!-- ref OpenMailCloseButton l.1887-1900 (UIPanelCloseButton at CENTER relativePoint
                  TOPRIGHT -47,-25; inlined UI-Panel-MinimizeButton art). -->
-            <Button name="BenillaOpenMailCloseButton">
+            <Button name="OpenMailCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-47" y="-25"/></Offset></Anchor></Anchors>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
-                <Scripts><OnClick>HideUIPanel(BenillaOpenMailFrame)</OnClick></Scripts>
+                <Scripts><OnClick>HideUIPanel(OpenMailFrame)</OnClick></Scripts>
             </Button>
         </Frames>
         <Scripts>
-            <OnHide>BenillaOpenMailFrame_OnHide()</OnHide>
+            <OnHide>OpenMailFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

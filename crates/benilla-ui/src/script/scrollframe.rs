@@ -184,6 +184,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let range = scroll_range(&model, h);
                 (model.frame_id(h), range)
             };
+            // That forced resolve can have MOVED sizes — this method exists precisely because the
+            // caller just resized its content — so drain the queue before the range notify: the
+            // reference fires `OnSizeChanged` from `ApplyRect`, i.e. during the layout, not after.
+            event::fire_size_changes(lua);
             if let Err(e) = event::fire_widget_handler(
                 lua,
                 id,

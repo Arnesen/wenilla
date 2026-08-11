@@ -4,10 +4,10 @@
 //! composer live in the parent module; this file owns only the per-frame bridge.
 
 use benilla_protocol::messages::{
-    member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo,
+    member_status, GroupLootInfo, GroupMemberEntry, PartyMemberStatsInfo, GROUP_MEMBER_ASSISTANT,
 };
 use benilla_ui::script::{
-    PartyMemberInfo, PartyRequest, PartyState, ScriptValue, UiScript, UnitState,
+    PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, ScriptValue, UiScript, UnitState,
 };
 use bevy::prelude::*;
 
@@ -31,10 +31,19 @@ pub(super) struct FedParty {
 
 const PARTY_TOKENS: [&str; 4] = ["party1", "party2", "party3", "party4"];
 
+/// `GROUPTYPE_RAID` — `SMSG_GROUP_LIST`'s first byte (`0` party, `1` raid; vmangos `Group.h:116`).
+const GROUPTYPE_RAID: u8 = 1;
+
+/// The subgroup index in a member's flags byte — bits 0-2 (`GroupMemberEntry::flags`'s own doc;
+/// the assistant bit `0x80` is its neighbour, and the `0x7f` mask `party_slots` uses is a
+/// different question, "same subgroup AND same assistant state").
+const GROUP_MEMBER_SUBGROUP: u8 = 0x07;
+
 /// Push the roster snapshot + the `party1..party4` unit snapshots into the VM and fire the party
 /// events on their edges. The per-member unit state is the 0434 §2 **merged view**: a streamed
 /// member's live descriptor wins; the `PARTY_MEMBER_STATS` snapshot covers the rest — and the
 /// roster status byte overlays both (the descriptor never carries connected/AFK/DND).
+#[allow(clippy::too_many_arguments)] // a Bevy system's param list IS its dependency set
 pub(super) fn feed_party(
     script: Option<NonSendMut<UiScript>>,
     group: Res<GroupState>,
@@ -42,6 +51,13 @@ pub(super) fn feed_party(
     stores: Query<&ObjectStore>,
     self_q: Query<(&Guid, &ObjectStore), With<SelfPlayer>>,
     factions: Option<Res<crate::target::Factions>>,
+    names: Res<NameCache>,
+    areas: Option<Res<crate::area::AreaTableRes>>,
+    // The leaf area under us, through the SAME accessor `crate::area`'s zone-text resolver uses.
+    // Deliberately not `terrain_stream::CurrentArea` directly: that item is named today only by
+    // the instruments, and naming it from a game module would push it across the world-API wall
+    // (`tests/world_api_wall.rs`, decision 1164) for a value this already answers.
+    here: benilla_world::world_point::WorldPoint,
     mut fed: Local<FedParty>,
 ) {
     let Some(mut script) = script else {
@@ -59,9 +75,10 @@ pub(super) fn feed_party(
     // the 0440 byte law) — in a plain party this is simply the roster.
     let slots: Vec<&GroupMemberEntry> = group.party_slots().collect();
 
-    // The roster-level snapshot (leader/master indices on the Lua scale: 0 = the player). A
-    // raid's other subgroups feed only the count (the engine contract's v1 gap; a leader in
-    // another subgroup reads as index 0 until the raid UI slice).
+    // The roster-level snapshot (leader/master indices on the Lua scale: 0 = the player). These
+    // indices are the PARTY view — our own subgroup's four slots — so in a raid a leader in
+    // another subgroup still reads as index 0 here; the whole-raid answer is `raid` below, which
+    // `GetRaidRosterInfo` reads and which does carry every subgroup.
     let members: Vec<PartyMemberInfo> = slots
         .iter()
         .map(|m| PartyMemberInfo {
@@ -100,14 +117,31 @@ pub(super) fn feed_party(
         }
         None => ("group".to_string(), None, 0),
     };
+    // The raid roster — `GetNumRaidMembers`/`GetRaidRosterInfo`/`UnitInRaid` all read this one
+    // list, so the count can never disagree with the array the way it would if we kept both.
+    let me = self_pair.map(|(g, store)| RaidSelf {
+        guid: g.0,
+        flags: group.own_flags,
+        level: store.0.unit_level().unwrap_or(0),
+        area: here.area(),
+        dead: store.0.unit_is_dead(),
+    });
+    let zone_name = |area: u32| {
+        let areas = areas.as_ref()?;
+        // The wire's per-member `zone` is already a top-level zone id; our own `CurrentArea` is
+        // the finest MCNK leaf, so it needs the parent walk first. `top_zone` is idempotent on a
+        // row that is already a zone, which is what lets one resolver serve both.
+        areas
+            .0
+            .name(areas.0.top_zone(area).unwrap_or(area))
+            .map(str::to_string)
+    };
+    let raid = raid_roster(&group, me.as_ref(), &names, &zone_name);
+
     script.set_party(PartyState {
         members,
         leader_index,
-        raid_members: if group.group_type == 1 {
-            group.members.len() as u32 + 1
-        } else {
-            0
-        },
+        raid,
         loot_method,
         master_looter,
         loot_threshold,
@@ -158,6 +192,116 @@ pub(super) fn feed_party(
         }
         fed.invite = group.pending_invite.clone();
     }
+}
+
+/// The player's own raid row — the one entry `GroupState` cannot supply, because
+/// `SMSG_GROUP_LIST` never lists the recipient.
+pub(super) struct RaidSelf {
+    pub(super) guid: u64,
+    /// Our own subgroup bits + the assistant flag, `SMSG_GROUP_LIST`'s second byte.
+    pub(super) flags: u8,
+    pub(super) level: u32,
+    /// The finest area under us (`WorldPoint::area()`), walked to a zone by the caller's resolver
+    /// — the reference reads a zone-id global here (`0xb4e314`) on the live-object arm.
+    pub(super) area: Option<u32>,
+    /// `UNIT_FIELD_HEALTH <= 0` — the reference's live-object arm for return 9, and *only* that:
+    /// deliberately `unit_is_dead` rather than `unit_reads_dead`, so a feigning hunter does not
+    /// take the arm a health test would not.
+    pub(super) dead: bool,
+}
+
+/// Build `GetRaidRosterInfo`'s array (decision 0434 §6's roster, wow-re
+/// `ui/scratch/raid-roster-bindings.md` §2). Empty outside a raid — `GroupState::group_type` is
+/// `1` only for one — which is what makes `GetNumRaidMembers()` answer `0` in a party.
+///
+/// **The player is row 1.** The reference's array contains the local player (it is why
+/// `UnitInRaid("player")` answers `1`), and the wire's list does not, so the recipient is spliced
+/// back in here. *Where* the real client puts itself is **not derived** — the note carves the
+/// binding, not the array's fill order — and nothing observed depends on it: every corpus consumer
+/// sweeps `1..GetNumRaidMembers()` (or `1..MAX_RAID_MEMBERS`) and keys the result by name.
+///
+/// A pure function over plain data so the shape is testable without a second account in a raid:
+/// the tuple this fills is the part a live raid could confirm and a unit test cannot, but the
+/// *mapping* — rank, subgroup, the online/dead bit pair — is the part that can be, and is below.
+fn raid_roster(
+    group: &GroupState,
+    me: Option<&RaidSelf>,
+    names: &NameCache,
+    zone_name: &dyn Fn(u32) -> Option<String>,
+) -> Vec<RaidMemberInfo> {
+    if group.group_type != GROUPTYPE_RAID {
+        return Vec::new();
+    }
+    // rank: 2 leader · 1 assistant · 0 member. The binding exposes `[edi+0xc]` unadjusted and
+    // wow-re could not derive the convention from its bytes; the corpus can and does —
+    // `ChatLog.lua:351-353` prints `@` for 2 and `*` for 1.
+    let rank_of = |guid: u64, flags: u8| {
+        if guid == group.leader {
+            2
+        } else if flags & GROUP_MEMBER_ASSISTANT != 0 {
+            1
+        } else {
+            0
+        }
+    };
+    let row = |guid: u64,
+               name: String,
+               flags: u8,
+               level: u32,
+               zone: Option<String>,
+               online: bool,
+               ninth: bool| {
+        let class = names
+            .player_traits(guid)
+            .and_then(|(_, class, _)| crate::ui_unit::class_names(class));
+        RaidMemberInfo {
+            name,
+            guid,
+            rank: rank_of(guid, flags),
+            // Stored 0-based; the binding adds the `0x4bb61a inc`.
+            subgroup: u32::from(flags & GROUP_MEMBER_SUBGROUP),
+            level,
+            class: class.map(|(n, _)| n.to_string()),
+            class_file: class.map(|(_, f)| f.to_string()),
+            zone,
+            online,
+            ninth,
+        }
+    };
+    let mut roster = Vec::with_capacity(group.members.len() + 1);
+    if let Some(me) = me {
+        roster.push(row(
+            me.guid,
+            // An unresolved name takes the reference's name-cache-miss arm at the binding: the
+            // whole 9-tuple becomes the fixed miss tuple, not a half-filled row.
+            names.peek(me.guid).unwrap_or_default().to_string(),
+            me.flags,
+            me.level,
+            me.area.and_then(zone_name),
+            true,
+            me.dead,
+        ));
+    }
+    for m in &group.members {
+        let stats = group.stats.get(&m.guid);
+        let online = m.status & member_status::ONLINE != 0;
+        roster.push(row(
+            m.guid,
+            m.name.clone(),
+            m.flags,
+            stats.and_then(|s| s.level).map_or(0, u32::from),
+            stats
+                .and_then(|s| s.zone)
+                .and_then(|z| zone_name(u32::from(z))),
+            online,
+            // The reference's cached arm: `[edi+0x18]` must carry BOTH `0x4` and `0x1`. Our wire
+            // spells those `member_status::DEAD` and `ONLINE` (vmangos `Group.cpp:45-63`), which
+            // is the corroboration recorded on `RaidMemberInfo::ninth` — an offline dead member
+            // answers nil there, and reproducing the conjunction is the point.
+            online && m.status & member_status::DEAD != 0,
+        ));
+    }
+    roster
 }
 
 /// One member's merged-view unit snapshot (see [`feed_party`]).
@@ -616,5 +760,89 @@ mod tests {
         synthetic_roster(&mut group, None);
         group.apply_list(0, 0, vec![], 0x123, None);
         assert!(!group.test, "the real wire always wins");
+    }
+
+    /// The raid roster mapping — the half a unit test can actually settle. The nine-value *shape*
+    /// is pinned in `benilla-ui`'s own tests; what is pinned here is which wire fact lands in
+    /// which slot, because that is what a live raid would otherwise be the only witness to.
+    #[test]
+    fn the_raid_roster_maps_the_wire_to_get_raid_roster_info() {
+        let mut names = NameCache::default();
+        names.insert_player(0x5E1F, "Me".into(), Some((4, 11, 0))); // Night Elf DRUID
+        names.insert_player(0xA11CE, "Alice".into(), Some((1, 1, 1))); // Human WARRIOR
+        names.insert_player(0xB0B, "Bob".into(), None); // no traits yet
+
+        let member = |guid: u64, name: &str, status: u8, flags: u8| GroupMemberEntry {
+            name: name.into(),
+            guid,
+            status,
+            flags,
+        };
+        let mut group = GroupState {
+            group_type: GROUPTYPE_RAID,
+            own_flags: 0,
+            leader: 0x5E1F,
+            members: vec![
+                // Alice: subgroup 2 (stored), an assistant, online and DEAD.
+                member(
+                    0xA11CE,
+                    "Alice",
+                    member_status::ONLINE | member_status::DEAD,
+                    2 | GROUP_MEMBER_ASSISTANT,
+                ),
+                // Bob: subgroup 0, offline — and offline-AND-dead, which must NOT set return 9.
+                member(0xB0B, "Bob", member_status::DEAD, 0),
+            ],
+            ..Default::default()
+        };
+        group.stats.insert(
+            0xA11CE,
+            PartyMemberStatsInfo {
+                level: Some(58),
+                zone: Some(1537),
+                ..Default::default()
+            },
+        );
+        let zone = |id: u32| (id == 1537).then(|| "Ironforge".to_string());
+        let me = RaidSelf {
+            guid: 0x5E1F,
+            flags: 0,
+            level: 60,
+            area: Some(1537),
+            dead: false,
+        };
+
+        let roster = raid_roster(&group, Some(&me), &names, &zone);
+        assert_eq!(roster.len(), 3, "the player is spliced back in");
+
+        // Row 1 — us. Leader (rank 2), subgroup stored 0, class from our own name-query traits.
+        assert_eq!(roster[0].name, "Me");
+        assert_eq!(roster[0].rank, 2);
+        assert_eq!(
+            roster[0].subgroup, 0,
+            "stored 0-based; the BINDING adds one"
+        );
+        assert_eq!(roster[0].level, 60);
+        assert_eq!(roster[0].class_file.as_deref(), Some("DRUID"));
+        assert_eq!(roster[0].zone.as_deref(), Some("Ironforge"));
+        assert!(roster[0].online && !roster[0].ninth);
+
+        // Row 2 — an assistant, and the online+dead pair the reference's cached arm tests.
+        assert_eq!((roster[1].rank, roster[1].subgroup), (1, 2));
+        assert_eq!(roster[1].level, 58);
+        assert_eq!(roster[1].class_file.as_deref(), Some("WARRIOR"));
+        assert!(roster[1].online && roster[1].ninth, "online AND dead");
+
+        // Row 3 — offline. Return 9 needs BOTH bits, so a dead-but-offline member is nil there,
+        // and an unresolved class is nil rather than a guess.
+        assert!(!roster[2].online, "offline");
+        assert!(!roster[2].ninth, "0x4 without 0x1 is not the arm");
+        assert_eq!(roster[2].class, None);
+        assert_eq!(roster[2].zone, None, "no stats packet, no zone");
+
+        // A PARTY is not a raid: the whole list is empty, so `GetNumRaidMembers()` answers 0
+        // while `IsRaidLeader()` still answers 1 — the pair that surprises people.
+        group.group_type = 0;
+        assert!(raid_roster(&group, Some(&me), &names, &zone).is_empty());
     }
 }

@@ -31,7 +31,7 @@
             the shipped 1.12.1 Blizzard_TrainerUI.lua:6-9's own values — restored from
             benilla/saved-variables.lua at load, and pushed into the engine on show because the list
             builder resets its mask on every packet.
-          - THE SCROLL BAR IS REAL. BenillaTrainerListScrollFrame (BenillaFauxScrollFrameTemplate): a
+          - THE SCROLL BAR IS REAL. BenillaTrainerListScrollFrame (FauxScrollFrameTemplate): a
             draggable Slider bar + up/down step arrows over the fixed 11 rows (the faux-scroll re-binds
             rows to a moving offset — it never really scrolls a child). The wheel still lives on the
             WINDOW (the engine bubbles a spin up the parent chain, so a spin over a row reaches here).
@@ -258,8 +258,8 @@
 
             -- The faux-scroll bar reconciles to the row count, then hands back the top-row offset.
             local scrollFrame = getglobal("BenillaTrainerListScrollFrame")
-            BenillaFauxScrollFrame_Update(scrollFrame, numServices, BENILLA_TRAINER_ROWS, BENILLA_TRAINER_ROW_HEIGHT)
-            local skillOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+            FauxScrollFrame_Update(scrollFrame, numServices, BENILLA_TRAINER_ROWS, BENILLA_TRAINER_ROW_HEIGHT)
+            local skillOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
             getglobal("BenillaTrainerSkillHighlight"):Hide()
 
@@ -445,7 +445,7 @@
             end
             setglobal("TRAINER_FILTER_" .. strupper(this.value), on)
             SetTrainerServiceTypeFilter(this.value, on)
-            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+            FauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
             BenillaTrainerFrame_Update()
         end
 
@@ -459,7 +459,7 @@
                 ExpandTrainerSkillLine(0)
             else
                 b.collapsed = 1
-                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+                FauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
                 CollapseTrainerSkillLine(0)
             end
             BenillaTrainerFrame_Update()
@@ -503,7 +503,7 @@
                 -- Fresh session: top of the list, a first selection (ref ClassTrainerFrame_Show).
                 BenillaTrainerFrame_ApplyFilter()
                 BenillaTrainerFrame_SetTitle(arg1)
-                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+                FauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
                 if GetTrainerSelectionIndex() == 0 then
                     selectFirstService()
                 end
@@ -750,11 +750,11 @@
             <Button name="BenillaTrainerService10" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
             <Button name="BenillaTrainerService11" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
 
-            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+            <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 11 rows; only its right-hand Slider scroll bar renders. Sized to the
                  11-row span so the bar sits in the window's right gutter. updateFunc is set in
                  BenillaTrainerFrame_OnLoad. -->
-            <Frame name="BenillaTrainerListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+            <Frame name="BenillaTrainerListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="176"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-100"/></Offset></Anchor></Anchors>
             </Frame>

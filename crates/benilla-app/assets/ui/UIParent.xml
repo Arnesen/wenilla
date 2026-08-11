@@ -18,6 +18,29 @@
     <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM"/>
 
     <!--
+        WorldFrame — the reference's full-screen, bottom-of-the-strata frame that the 3D world
+        renders into. **Ours renders nothing**: benilla draws the world through Bevy's render
+        graph, not through a FrameScript frame, so this is a NAMED HANDLE and nothing more. That
+        is a disclosed divergence, not a pretence — and it is what makes the two things addons
+        actually do with it work: `WorldFrame:GetWidth()`/`GetHeight()` (the screen rect, which
+        this frame really has) and `frame:SetParent(WorldFrame)` / `SetPoint(..., WorldFrame,
+        ...)` (parking a tooltip or an overlay under everything). Measured demand: 29 of the 218
+        vanilla-corpus addons die on their first load with `attempt to index global 'WorldFrame'`
+        without it (the corpus harness, `benilla_app::addon_harness`).
+
+        **No `enableMouse`, deliberately** — the same reason UIParent above ships without it, and
+        here it is load-bearing rather than incidental. benilla's `PointerOverUi` is "is the
+        topmost mouse-enabled frame under the cursor a UI frame", and it gates camera look, world
+        clicks and hover targeting (`player/camera.rs`, `target/hover.rs`); a full-screen
+        mouse-enabled plate would answer yes for every world pixel and kill all three. The
+        reference gets away with it because *its* WorldFrame IS the world, so a click landing
+        there is a world click by construction. Reproducing that here means teaching the arbiter
+        that a WorldFrame hit is not a UI hit — engine work with its own tests, not a rename — so
+        until then the addon-facing `OnMouseDown`/`OnMouseUp` hooks on this frame never fire.
+    -->
+    <Frame name="WorldFrame" setAllPoints="true" frameStrata="BACKGROUND"/>
+
+    <!--
         The UIParent bottom-stack position manager - UIPARENT_MANAGED_FRAME_POSITIONS and
         UIParent_ManageFramePositions(), transcribed from the extracted 1.12 UIParent.lua
         l.1560-1697 (patch-2.MPQ via mpqx, byte-diffed against this install's own chain;
@@ -36,17 +59,22 @@
           SHOW_MULTI_ACTIONBAR_1/2; benilla's bottom bars are always-on with no options state
           (decision 0270), so the flags read the bars' own visibility - identical values, no
           parallel global to drift.
-        - Frame names: our stance bar is BenillaShapeshiftBarFrame (0270) and our pet bar is
-          BenillaPetActionBarFrame (0982), both substituted in the pet-bar visibility check —
-          either one showing raises the stack by the ref's "pet" delta, which is the ref's own
-          rule (the two bars share that row). Rows whose frames don't exist here (GroupLootFrame1,
-          TutorialFrameParent, FramerateLabel, ChatFrame2, MultiBarBottomLeft - ours is
-          BenillaMultiBarBottomLeft, statically anchored per 0270, like ShapeshiftBarFrame)
-          no-op through the ref's own `if ( frame )` guard and self-activate if the frames
-          ever land under those names.
-        - MultiBarLeft/MultiBarRight (the vertical bars),
-          ReputationWatchBar, MainMenuExpBar, and MainMenuBarMaxLevelBar don't exist yet:
-          nil-guarded (the ref reads them bare only because it always creates them).
+        - Frame names: our stance bar, pet bar and bottom multibars wear the reference's own
+          names (ShapeshiftBarFrame, PetActionBarFrame, MultiBarBottomLeft/Right), so their
+          rows and flags in the table below are LIVE, not the no-ops they were while those
+          frames carried a `Benilla` prefix. That is the payoff the bare names buy — the same
+          one `group_loot_tests::managed_positions_engage_for_the_bare_frame_name` pins for
+          GroupLootFrame1 — and it costs nothing on screen: each frame's static XML anchor was
+          already written to the value the row computes (the stance bar's XML (30,45) is the
+          row's xOffset 30 + baseY 0 + bottomLeft 45, and MultiBarBottomLeft's XML (0,17) is
+          its row's baseY 17), so the pass now re-derives what the XML asserted. TutorialFrameParent
+          and FramerateLabel still have no frame here and no-op through the ref's `if ( frame )`.
+        - MultiBarLeft/MultiBarRight (the vertical bars) and ReputationWatchBar don't exist yet:
+          nil-guarded (the ref reads them bare only because it always creates them). MainMenuExpBar
+          and MainMenuBarMaxLevelBar DO exist now, so the `reputation` and `maxLevel` flags are
+          real reads — `reputation` still cannot fire (it needs ReputationWatchBar too) and
+          `maxLevel` fires exactly when the level-60 rail replaces the XP bar, which is the ref's
+          own rule.
         - No IsUserPlaced/IsObjectType/SIMPLE_CHAT legs on the SetPoint: benilla has no
           user-placed frames and no simple-chat option, so the ref's guarded SetPoint
           collapses to the plain one.
@@ -161,8 +189,8 @@
 
             -- Set up flags. Departure: the bottom flags read the always-on bars' visibility,
             -- not the ref's SHOW_MULTI_ACTIONBAR_1/2 option globals (0270 ships no such state).
-            local bottomLeftShown = BenillaMultiBarBottomLeft and BenillaMultiBarBottomLeft:IsShown()
-            local bottomRightShown = BenillaMultiBarBottomRight and BenillaMultiBarBottomRight:IsShown()
+            local bottomLeftShown = MultiBarBottomLeft and MultiBarBottomLeft:IsShown()
+            local bottomRightShown = MultiBarBottomRight and MultiBarBottomRight:IsShown()
             if ( bottomLeftShown or bottomRightShown ) then
                 table.insert(yOffsetFrames, "bottomEither")
             end
@@ -179,7 +207,7 @@
                 table.insert(xOffsetFrames, "rightRight")
             end
 
-            if ( ( BenillaPetActionBarFrame and BenillaPetActionBarFrame:IsShown() ) or ( BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) ) then
+            if ( ( PetActionBarFrame and PetActionBarFrame:IsShown() ) or ( ShapeshiftBarFrame and ShapeshiftBarFrame:IsShown() ) ) then
                 table.insert(yOffsetFrames, "pet")
             end
             if ( ReputationWatchBar and MainMenuExpBar and ReputationWatchBar:IsShown() and MainMenuExpBar:IsShown() ) then
@@ -280,21 +308,21 @@
             -- while the stance bar is up starts 20px past the last stance button. That case is
             -- rare but real — a possessed or charmed unit gives a pet bar to a class that also
             -- has forms.
-            local bottomLeftUp = BenillaMultiBarBottomLeft and BenillaMultiBarBottomLeft:IsShown()
-            if ( BenillaSlidingActionBarTexture0 and BenillaSlidingActionBarTexture1 ) then
+            local bottomLeftUp = MultiBarBottomLeft and MultiBarBottomLeft:IsShown()
+            if ( SlidingActionBarTexture0 and SlidingActionBarTexture1 ) then
                 if ( bottomLeftUp ) then
-                    BenillaSlidingActionBarTexture0:Hide()
-                    BenillaSlidingActionBarTexture1:Hide()
+                    SlidingActionBarTexture0:Hide()
+                    SlidingActionBarTexture1:Hide()
                 else
-                    BenillaSlidingActionBarTexture0:Show()
-                    BenillaSlidingActionBarTexture1:Show()
+                    SlidingActionBarTexture0:Show()
+                    SlidingActionBarTexture1:Show()
                 end
             end
-            if ( BenillaPetActionBarFrame ) then
+            if ( PetActionBarFrame ) then
                 PETACTIONBAR_XPOS = 36
                 local forms = GetNumShapeshiftForms and GetNumShapeshiftForms() or 0
-                if ( forms > 0 and BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) then
-                    local last = getglobal("BenillaShapeshiftButton"..forms)
+                if ( forms > 0 and ShapeshiftBarFrame and ShapeshiftBarFrame:IsShown() ) then
+                    local last = getglobal("ShapeshiftButton"..forms)
                     local right = last and last:GetRight()
                     if ( right ) then
                         PETACTIONBAR_XPOS = right + 20
@@ -303,7 +331,7 @@
                 -- The ref guards this on IsShown() because a hidden bar of its is mid-slide and
                 -- owns its own anchor; ours has no slide, so re-seating a hidden frame is a
                 -- no-op and the guard would only add an ordering trap (OnShow fires the pass).
-                BenillaPetActionBarFrame:SetPoint("TOPLEFT", "BenillaActionBar", "BOTTOMLEFT", PETACTIONBAR_XPOS, PETACTIONBAR_YPOS)
+                PetActionBarFrame:SetPoint("TOPLEFT", "MainMenuBar", "BOTTOMLEFT", PETACTIONBAR_XPOS, PETACTIONBAR_YPOS)
             end
 
             -- The under-minimap right stack (ref l.1740-1770): anchorY walks down capture bars →
@@ -339,10 +367,10 @@
             -- QuestWatchFrame is last in the ref's walk (l.1770), seated at the running anchorY so
             -- it drops below the durability guy when he shows instead of overlapping him (both
             -- anchor this same MinimapCluster corner — director-caught). benilla's tracker is
-            -- BenillaQuestWatchFrame; nil-guarded because the durability-only test harness (and
+            -- QuestWatchFrame; nil-guarded because the durability-only test harness (and
             -- any config without a quest log) ships no such frame.
-            if ( BenillaQuestWatchFrame ) then
-                BenillaQuestWatchFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
+            if ( QuestWatchFrame ) then
+                QuestWatchFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
             end
         end
 
@@ -429,8 +457,8 @@
         -- that can pass nothing (a warlock minion's empty diet) must be gated by its own UI, and
         -- it is — the diet icon is hunter-only. Quietly returning "" here would hide that.
         --
-        -- Lua-5.0 `arg`/`arg.n` has no equivalent (LUA_COMPAT_VARARG isn't shipped) —
-        -- `select("#", ...)`/`select(i, ...)`, TradeSkillFrame.xml's own substitution.
+        -- Lua-5.0 `arg`/`arg.n` written as `select("#", ...)`/`select(i, ...)`, the 5.1-native
+        -- spelling — TradeSkillFrame.xml's own substitution.
         function BuildListString(...)
             local n = select("#", ...);
             if ( n == 0 ) then
@@ -472,6 +500,72 @@
             end
             ChatFrameEditBox:Insert(link)
             return true
+        end
+
+        -- ── LowerFrameLevel / RaiseFrameLevel (ref UIParent.lua l.1890-1896), verbatim ────────
+        --
+        -- Two lines each, and the reason to have them is that they are FRAMEXML, not engine: an
+        -- addon calling `RaiseFrameLevel(f)` is calling a function the client's own UI defines, and
+        -- without it that is `attempt to call global` at load (BetterCharacterStats dies there).
+        -- Our own ActionBar.xml already describes this operation in prose at three sites while
+        -- doing it by hand; those can move onto the real name whenever that file is next opened.
+        function LowerFrameLevel(frame)
+            frame:SetFrameLevel(frame:GetFrameLevel() - 1)
+        end
+
+        function RaiseFrameLevel(frame)
+            frame:SetFrameLevel(frame:GetFrameLevel() + 1)
+        end
+
+        -- ── MouseIsOver (ref UIParent.lua l.1388-1417), verbatim ──────────────────────────────
+        --
+        -- "is the cursor inside this frame, optionally with per-edge padding" — the idiom every
+        -- hover-driven addon writes, and **9 corpus addons call it**. Missing, each is
+        -- `attempt to call global 'MouseIsOver'`.
+        --
+        -- Transcribed rather than approximated, including the two things that look like bugs and
+        -- are not:
+        --   · the offsets are ADDED to every edge, so a positive `bottomOffset` shrinks the box
+        --     from below while a positive `topOffset` grows it upward. The reference's own caller
+        --     proves the intent — `MouseIsOver(chatFrame, 45, -10, -5, 5)` means 45 up into the
+        --     tab strip, 10 in from the bottom, 5 out each side.
+        --   · a nil `topOffset` zeroes ALL FOUR, so `MouseIsOver(f, nil, 5)` silently ignores the 5.
+        --     That is the reference's `if ( not topOffset ) then` block exactly; an addon written
+        --     against 1.12 may depend on it.
+        -- The reference's `-- Hack to fix a symptom not the real issue` guard on an unresolved rect
+        -- is kept with its comment, because a frame that has never been laid out really does answer
+        -- nil here and returning nil is what callers expect.
+        --
+        -- ONE DIVERGENCE, and it is a no-op: the reference divides the cursor by
+        -- `frame:GetEffectiveScale()` because 1.12 hands Lua screen pixels. benilla's UI space is
+        -- 1:1 logical px and `GetEffectiveScale` is the constant 1 (`script/pointer.rs`,
+        -- `object.rs` l.271), so the division is written out rather than left in to divide by one
+        -- forever. If a real UI scale ever lands, this is one of the sites that needs it back.
+        function MouseIsOver(frame, topOffset, bottomOffset, leftOffset, rightOffset)
+            local x, y = GetCursorPosition()
+            local left = frame:GetLeft()
+            local right = frame:GetRight()
+            local top = frame:GetTop()
+            local bottom = frame:GetBottom()
+            if not topOffset then
+                topOffset = 0
+                bottomOffset = 0
+                leftOffset = 0
+                rightOffset = 0
+            end
+            -- Hack to fix a symptom not the real issue
+            if not left then
+                return
+            end
+            left = left + leftOffset
+            right = right + rightOffset
+            top = top + topOffset
+            bottom = bottom + bottomOffset
+            if (x > left and x < right) and (y > bottom and y < top) then
+                return 1
+            else
+                return nil
+            end
         end
     ]]></Script>
 </Ui>

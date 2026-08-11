@@ -578,7 +578,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     s.mouse_wheel(wx, wy, -1.0);
     assert!(s.errors().is_empty(), "wheel over a name: {:?}", s.errors());
     assert_eq!(
-        s.eval::<f64>(&format!("return BenillaFauxScrollFrame_GetOffset({SF})"))
+        s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
             .unwrap(),
         1.0
     );
@@ -605,7 +605,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     };
     s.mouse_wheel(cx, cy, -1.0);
     assert_eq!(
-        s.eval::<f64>(&format!("return BenillaFauxScrollFrame_GetOffset({SF})"))
+        s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
             .unwrap(),
         2.0
     );
@@ -615,7 +615,7 @@ fn the_wheel_bubbles_from_the_rows_and_the_bar_rides_the_gutter() {
     s.run(&format!("{ROW}2Key1Button:Click()")).unwrap();
     s.mouse_wheel(wx, wy, -1.0);
     assert_eq!(
-        s.eval::<f64>(&format!("return BenillaFauxScrollFrame_GetOffset({SF})"))
+        s.eval::<f64>(&format!("return FauxScrollFrame_GetOffset({SF})"))
             .unwrap(),
         2.0,
         "armed: the wheel must not scroll"

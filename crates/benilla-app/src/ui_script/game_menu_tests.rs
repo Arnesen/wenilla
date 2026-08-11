@@ -12,12 +12,17 @@ use benilla_ui::script::{
     ContainerSlot, ContainerState, LootRow, LootState, SessionRequest, SoundRequest, UiScript,
 };
 
-/// The engine the menu needs behind it: fonts, the panel manager + popup engine, and the menu.
-/// `extra` adds the files a given test wants in the way (a bag, a loot window).
+/// The engine the menu needs behind it: fonts, the panel manager + popup engine, the shared widget
+/// kit, and the menu. `extra` adds the files a given test wants in the way (a bag, a loot window).
+///
+/// `UIPanelTemplates.xml` is not optional and never was in production: `GameMenuButtonTemplate`
+/// lives there (the reference's own file for it) since the colour picker needed it from above
+/// GameMenuFrame.xml's deliberately-LAST seat in the manifest. Without it every rung comes out
+/// sizeless and the ladder geometry below reads nil — which is exactly how the move was caught.
 fn harness_with(extra: &[&str]) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    let files: Vec<&str> = ["Fonts.xml", "UiPanels.xml"]
+    let files: Vec<&str> = ["Fonts.xml", "UiPanels.xml", "UIPanelTemplates.xml"]
         .into_iter()
         .chain(extra.iter().copied())
         .chain(std::iter::once("GameMenuFrame.xml"))
@@ -104,20 +109,16 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The three entries with nothing behind them — AddOns, Edit Mode, Support — are DISABLED (the
-/// pending idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry).
-/// Everything else in the ladder is live. **Macros left this list in decision 0983**, when the
-/// macro window landed behind it.
+/// The two entries with nothing behind them — Edit Mode, Support — are DISABLED (the pending
+/// idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry). Everything
+/// else in the ladder is live. **Macros left this list in decision 0983**, when the macro window
+/// landed behind it; **AddOns left it in 1197**, when `AddonList.xml` did.
 #[test]
 fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
-    for name in [
-        "GameMenuButtonAddOns",
-        "GameMenuButtonEditMode",
-        "GameMenuButtonSupport",
-    ] {
+    for name in ["GameMenuButtonEditMode", "GameMenuButtonSupport"] {
         assert!(
             !s.eval::<bool>(&format!("return {name}:IsEnabled()"))
                 .unwrap(),
@@ -126,6 +127,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     }
     for name in [
         "GameMenuButtonOptions",
+        "GameMenuButtonAddOns",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
         "GameMenuButtonQuit",
@@ -137,7 +139,8 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
             "{name} is live"
         );
     }
-    // The pending labels read the era strings (AddOns through the ADDONS global).
+    // The labels read the era strings (AddOns through the ADDONS global — live now, and its
+    // label still has to come from the string rather than a literal).
     assert_eq!(
         s.eval::<String>("return GameMenuButtonAddOns:GetText()")
             .unwrap(),
@@ -256,7 +259,7 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     }));
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s
-        .eval::<bool>("return GetLeftFrame():GetName() == \"BenillaLootFrame\"")
+        .eval::<bool>("return GetLeftFrame():GetName() == \"LootFrame\"")
         .unwrap());
 
     s.run("ToggleGameMenu(1)").unwrap();
@@ -280,19 +283,16 @@ fn the_open_menu_takes_the_screen_and_refuses_every_other_panel() {
     );
 
     // The refusal itself: a panel asked to show while the menu is up simply doesn't.
-    s.run("ShowUIPanel(BenillaLootFrame)").unwrap();
+    s.run("ShowUIPanel(LootFrame)").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaLootFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return LootFrame:IsVisible()").unwrap(),
         "ShowUIPanel refuses a left-area panel behind the menu"
     );
 
     // …and works again the moment the menu goes down.
     s.run("HideUIPanel(GameMenuFrame)").unwrap();
-    s.run("ShowUIPanel(BenillaLootFrame)").unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaLootFrame:IsVisible()")
-        .unwrap());
+    s.run("ShowUIPanel(LootFrame)").unwrap();
+    assert!(s.eval::<bool>("return LootFrame:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -569,10 +569,9 @@ fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
     ]);
     s.run("ToggleWorldMap()").unwrap();
 
-    s.run("ShowUIPanel(BenillaLootFrame)").unwrap();
+    s.run("ShowUIPanel(LootFrame)").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaLootFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return LootFrame:IsVisible()").unwrap(),
         "a left-area panel must not open behind the full-screen map"
     );
 

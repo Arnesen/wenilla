@@ -1,0 +1,134 @@
+<Ui>
+    <!--
+        Interface\FrameXML\BasicControls.xml, transcribed — the reference's second file, right
+        after Fonts.xml, and one of the smallest in FrameXML. It carries four things an addon can
+        reach and we had none of:
+
+          TEXT(text)      the identity function 1.12 wraps every displayed string in. **26 corpus
+                          addons call it**, because half the shipped FrameXML does and they copied
+                          the idiom. Missing, it is `attempt to call global 'TEXT'`.
+          message(text)   the client's "show the player this" dialog. Its own popup, not a chat
+                          line. Present in 64 corpus files — but read the line before ranking it
+                          (1207): 55 of those are copies of `Dewdrop-2.0.lua`, and the genuine
+                          callers are about ten addons.
+          _ERRORMESSAGE   what `message` is implemented in terms of, and the reference's default
+                          error handler. Two corpus addons replace it outright (ImprovedErrorFrame
+                          is one), which they cannot do to a name that does not exist.
+          ScriptErrors    the dialog both of the above put text into, plus DialogBoxFrame and the
+                          DialogButton*Texture trio it is built from — three of which the corpus
+                          also inherits from directly (`inherits_demand`, 2 addons each).
+
+        The three fonts this needs — GameFontRedLarge, DialogButtonNormalText,
+        DialogButtonHighlightText — are already in Fonts.xml, so this file is self-contained
+        against the one that loads before it, exactly as it is in the reference's own toc order.
+    -->
+    <Script><![CDATA[
+        -- ── _ERRORMESSAGE / message (ref BasicControls.xml l.5-15) ─────────────────────────────
+        --
+        -- VERBATIM, including `debuginfo()`. That line was guarded here when this file landed,
+        -- because `debuginfo` was an engine global we lacked and whose behaviour was uncarved —
+        -- and declaring a no-op under a real 1.12 name is exactly the "capability absent without a
+        -- failure" class 1203 named. wow-re has since carved it (2026-08-11): `0x7027f0` is
+        -- `33 c0 c3` — `xor eax,eax; ret`, three bytes, no call, no memory write. It genuinely
+        -- does nothing and returns nothing, and five of its `debug*` siblings are byte-identical.
+        -- So the no-op in `stdlib.rs` is the REFERENCE's no-op, the guard was measuring our own
+        -- ignorance rather than a real branch, and it is gone.
+        function _ERRORMESSAGE(msg)
+            debuginfo()
+            if not ScriptErrors:IsVisible() then
+                ScriptErrors_Message:SetText(msg)
+                ScriptErrors:Show()
+            end
+            return msg
+        end
+
+        function message(text)
+            _ERRORMESSAGE(text)
+        end
+
+        -- ── AND ONE LINE OF THE REFERENCE DELIBERATELY NOT TRANSCRIBED ─────────────────────────
+        -- The reference ends this block with `seterrorhandler(_ERRORMESSAGE);`. We do not.
+        --
+        -- benilla's default handler is `__benilla_script_error` (decision 1195), which pushes into
+        -- `UiScript::errors()` — the channel the corpus harness's whole blocker table is built on,
+        -- and the only place a Lua fault is visible to any instrument we own. Installing
+        -- `_ERRORMESSAGE` would route every runtime error into a modal dialog instead and blind
+        -- `blockers`, `demand` and every A/B that depends on them, to buy a dialog nobody has asked
+        -- for yet.
+        --
+        -- The addon-facing behaviour is unchanged either way: `geterrorhandler()` still answers a
+        -- callable (the 1195 pair), `geterrorhandler()(msg)` still reports, and an addon that
+        -- installs its OWN handler with `seterrorhandler` still wins outright. What differs is only
+        -- which handler is installed when nobody has chosen — and that is ours to choose while the
+        -- error channel is load-bearing for the arc's instruments. Revisit when a player-facing
+        -- Lua-error surface exists; the one line is the whole change.
+
+        -- ── TEXT (ref l.22-26, verbatim) ──────────────────────────────────────────────────────
+        -- "This function is used to translate text (actually it's already translated as-is)" is
+        -- the reference's own comment. It really is the identity function: 1.12 shipped one
+        -- localisation per client and the hook was never used.
+        function TEXT(text)
+            return text
+        end
+    ]]></Script>
+
+    <!-- The dialog button faces (ref l.28-37). Same three-piece art as UIPanelButtonTemplate's,
+         with their own names because the reference's dialogs inherit these directly. -->
+    <Texture name="DialogButtonNormalTexture" file="Interface\Buttons\UI-Panel-Button-Up" virtual="true">
+        <TexCoords left="0" right="0.625" top="0" bottom="0.6875"/>
+    </Texture>
+    <Texture name="DialogButtonPushedTexture" file="Interface\Buttons\UI-Panel-Button-Down" virtual="true">
+        <TexCoords left="0" right="0.625" top="0" bottom="0.6875"/>
+    </Texture>
+    <Texture name="DialogButtonHighlightTexture" file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD" virtual="true">
+        <TexCoords left="0" right="0.625" top="0" bottom="0.6875"/>
+    </Texture>
+
+    <!-- DialogBoxFrame (ref l.38-77): a centered tooltip-bordered box with one OKAY button that
+         hides its parent. Virtual — ScriptErrors below is the only thing in shipped FrameXML that
+         inherits it, but two corpus addons inherit it too. -->
+    <Frame name="DialogBoxFrame" virtual="true" toplevel="true" frameStrata="DIALOG" hidden="true">
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+            <EdgeSize><AbsValue val="32"/></EdgeSize>
+            <TileSize><AbsValue val="32"/></TileSize>
+            <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+        </Backdrop>
+        <Frames>
+            <Button name="$parentButton">
+                <Size><AbsDimension x="128" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="16"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        this:GetParent():Hide()
+                    </OnClick>
+                </Scripts>
+                <NormalTexture inherits="DialogButtonNormalTexture"/>
+                <PushedTexture inherits="DialogButtonPushedTexture"/>
+                <HighlightTexture inherits="DialogButtonHighlightTexture"/>
+                <ButtonText text="OKAY"/>
+                <NormalFont inherits="DialogButtonNormalText"/>
+                <HighlightFont inherits="DialogButtonHighlightText"/>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <!-- "This is the general scripting error dialog" (ref l.79-100), verbatim. -->
+    <Frame name="ScriptErrors" inherits="DialogBoxFrame">
+        <Size><AbsDimension x="384" y="128"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="ScriptErrors_Message" inherits="GameFontRedLarge" justifyH="CENTER" justifyV="TOP" nonspacewrap="true">
+                    <Size><AbsDimension x="360" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP"><Offset><AbsDimension x="0" y="-16"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+    </Frame>
+</Ui>

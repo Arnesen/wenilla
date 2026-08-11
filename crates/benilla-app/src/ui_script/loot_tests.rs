@@ -132,20 +132,16 @@ fn shipped_loot_frame_drives_end_to_end() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     // Shown at the left slot; three rows visible (coin + 2 items), row 4 hidden.
-    assert!(s
-        .eval::<bool>("return BenillaLootFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return LootFrame:IsVisible()").unwrap());
     let vis: (bool, bool, bool, bool) = s
         .eval(
-            "return BenillaLootButton1:IsVisible(), BenillaLootButton2:IsVisible(),\n\
-                    BenillaLootButton3:IsVisible(), BenillaLootButton4:IsVisible()",
+            "return LootButton1:IsVisible(), LootButton2:IsVisible(),\n\
+                    LootButton3:IsVisible(), LootButton4:IsVisible()",
         )
         .unwrap();
     assert_eq!(vis, (true, true, true, false), "coin + 2 items, 4th hidden");
     // Only 3 items ⇒ no pager.
-    assert!(!s
-        .eval::<bool>("return BenillaLootDownButton:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return LootDownButton:IsVisible()").unwrap());
 
     s.resolve();
     let quads = s.extract();
@@ -226,8 +222,8 @@ fn shipped_loot_frame_drives_end_to_end() {
     s.fire_event("LOOT_UPDATE", vec![]);
     let vis2: (bool, bool, bool) = s
         .eval(
-            "return BenillaLootButton1:IsVisible(), BenillaLootButton2:IsVisible(),\n\
-                    BenillaLootButton3:IsVisible()",
+            "return LootButton1:IsVisible(), LootButton2:IsVisible(),\n\
+                    LootButton3:IsVisible()",
         )
         .unwrap();
     assert_eq!(vis2, (true, true, false), "the coin row cleared → two rows");
@@ -238,9 +234,7 @@ fn shipped_loot_frame_drives_end_to_end() {
         s.take_loot_close(),
         "closing the window releases the loot (OnHide → CloseLoot)"
     );
-    assert!(!s
-        .eval::<bool>("return BenillaLootFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return LootFrame:IsVisible()").unwrap());
     assert!(
         s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
         "HideUIPanel vacated the left slot"
@@ -370,27 +364,27 @@ fn shipped_loot_frame_pages_five_items() {
     // Page 1: 3 rows (the pager spends the 4th slot), Down shown, Up hidden.
     let page1: (bool, bool, bool, bool) = s
         .eval(
-            "return BenillaLootButton1:IsVisible(), BenillaLootButton2:IsVisible(),\n\
-                    BenillaLootButton3:IsVisible(), BenillaLootButton4:IsVisible()",
+            "return LootButton1:IsVisible(), LootButton2:IsVisible(),\n\
+                    LootButton3:IsVisible(), LootButton4:IsVisible()",
         )
         .unwrap();
     assert_eq!(page1, (true, true, true, false), "page 1 shows 3 rows");
     let pager1: (bool, bool) = s
-        .eval("return BenillaLootUpButton:IsVisible(), BenillaLootDownButton:IsVisible()")
+        .eval("return LootUpButton:IsVisible(), LootDownButton:IsVisible()")
         .unwrap();
     assert_eq!(pager1, (false, true), "page 1: Up hidden, Down shown");
 
     // Page down → page 2: 2 rows, Up shown, Down hidden.
-    s.run("BenillaLootFrame_PageDown()").unwrap();
+    s.run("LootFrame_PageDown()").unwrap();
     let page2: (bool, bool, bool) = s
         .eval(
-            "return BenillaLootButton1:IsVisible(), BenillaLootButton2:IsVisible(),\n\
-                    BenillaLootButton3:IsVisible()",
+            "return LootButton1:IsVisible(), LootButton2:IsVisible(),\n\
+                    LootButton3:IsVisible()",
         )
         .unwrap();
     assert_eq!(page2, (true, true, false), "page 2 shows the last 2 rows");
     let pager2: (bool, bool) = s
-        .eval("return BenillaLootUpButton:IsVisible(), BenillaLootDownButton:IsVisible()")
+        .eval("return LootUpButton:IsVisible(), LootDownButton:IsVisible()")
         .unwrap();
     assert_eq!(pager2, (true, false), "page 2: Up shown, Down hidden");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -414,7 +408,7 @@ fn shipped_loot_pushed_to_center_by_merchant() {
     s.fire_event("LOOT_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaLootFrame\"")
+        s.eval::<bool>("return GetLeftFrame():GetName() == \"LootFrame\"")
             .unwrap(),
         "loot took the empty left slot"
     );
@@ -438,12 +432,12 @@ fn shipped_loot_pushed_to_center_by_merchant() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
-        s.eval::<bool>("return GetCenterFrame():GetName() == \"BenillaLootFrame\"")
+        s.eval::<bool>("return GetCenterFrame():GetName() == \"LootFrame\"")
             .unwrap(),
         "loot was pushed to center, not replaced"
     );
     assert!(
-        s.eval::<bool>("return GetLeftFrame():GetName() == \"BenillaMerchantFrame\"")
+        s.eval::<bool>("return GetLeftFrame():GetName() == \"MerchantFrame\"")
             .unwrap(),
         "merchant took the left slot loot vacated"
     );

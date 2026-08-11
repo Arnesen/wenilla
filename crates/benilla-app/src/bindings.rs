@@ -21,6 +21,13 @@
 //! - [`Kind::Host`] lands in [`BindingsState::fired`] for engine consumers (chat open, TAB
 //!   targeting, nameplates, autorun, camera zoom, …).
 //!
+//! **An addon's `Bindings.xml` rows dispatch here too** (decision 1188 phase 4). They are not in
+//! [`SPECS`] — they are read off disk at addon load ([`benilla_ui::bindings_xml`]) — so a resolved
+//! chord names a [`Bound`], which is either a registry [`Cmd`] or an index into this frame's
+//! addon table. That enum is the whole design: an addon row is a *runtime* `String` body run with
+//! the reference's `keystate` global, and every `SPECS[cmd]` in this file would be a latent panic
+//! if it were instead an index past the end of the static table.
+//!
 //! While the Keybindings page (the Options window's category since 1008) has a capsule
 //! selected it arms the **capture seam** (`BenillaBindCapture`): raw input is swallowed here,
 //! canonicalized (`ALT-CTRL-SHIFT-<TOKEN>`), and handed back to the page's own capture handler
@@ -36,7 +43,7 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
-use benilla_ui::script::keybind::{KeybindCommand, KeybindRequest};
+use benilla_ui::script::keybind::{AddonBindingBody, KeybindCommand, KeybindRequest};
 use benilla_ui::script::UiScript;
 
 use crate::char_select::ClientState;
@@ -50,11 +57,32 @@ use chord::{BindKey, Chord};
 pub(crate) use commands::cmd;
 use commands::{Cmd, Kind, SPECS};
 
-/// The derived chord→command map — rebuilt whenever the engine table's generation moves. Probed
+/// What a bound chord names — a registry command, or an addon's `Bindings.xml` body
+/// (decision 1188 phase 4).
+///
+/// **An enum rather than one index space with a sentinel in it.** The tempting shape is
+/// "`Cmd(u16)`, and anything `>= SPECS.len()` is an addon" — which would turn every one of this
+/// file's eleven `SPECS[cmd.0 as usize]` reads into a panic waiting for the first addon binding to
+/// be pressed. The compiler is what should be enforcing that split, so it does: `state.fired` /
+/// `state.just` / `state.amounts` stay [`Cmd`]-typed (a host command is always a built-in and
+/// there is nothing for an addon to fire into), and only the map and the latches carry a `Bound`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bound {
+    /// A registry command — indexes [`SPECS`].
+    Spec(Cmd),
+    /// An addon-declared binding — indexes [`BindingDispatch::addons`].
+    Addon(u16),
+}
+
+/// The derived chord→binding map — rebuilt whenever the engine table's generation moves. Probed
 /// through [`BindingDispatch::resolve`], never directly: the lookup is two probes, not one.
 #[derive(Resource, Default)]
 struct BindingDispatch {
-    map: std::collections::HashMap<Chord, Cmd>,
+    map: std::collections::HashMap<Chord, Bound>,
+    /// The addon-declared bindings [`Bound::Addon`] indexes, in the engine table's registration
+    /// order — re-snapshotted with the map, so the two can never disagree about what an index
+    /// means. Empty in every session with no addon bindings, which is every session today.
+    addons: Vec<AddonBindingBody>,
     seen_generation: Option<u64>,
 }
 
@@ -76,9 +104,9 @@ impl BindingDispatch {
     /// there are untouched. Only the plane's fallback shadow is ours. Mouse and wheel are not
     /// suppressed — every dev instrument is a letter, so a modified click is nobody's but the
     /// game's.
-    fn resolve(&self, chord: Chord, dev_plane: bool) -> Option<Cmd> {
-        if let Some(&cmd) = self.map.get(&chord) {
-            return Some(cmd);
+    fn resolve(&self, chord: Chord, dev_plane: bool) -> Option<Bound> {
+        if let Some(&bound) = self.map.get(&chord) {
+            return Some(bound);
         }
         if dev_plane {
             return None;
@@ -90,9 +118,9 @@ impl BindingDispatch {
 /// This frame's binding activity — what the engine-side consumers read instead of raw keys.
 #[derive(Resource, Default)]
 pub(crate) struct BindingsState {
-    /// Live latches: (base key, command) — a [`Kind::Held`] or [`Kind::EdgeUpDown`] press that
-    /// has not released yet.
-    latched: Vec<(BindKey, Cmd)>,
+    /// Live latches: (base key, binding) — a [`Kind::Held`], [`Kind::EdgeUpDown`] or `runOnUp`
+    /// addon press that has not released yet.
+    latched: Vec<(BindKey, Bound)>,
     /// Commands whose first latch began this frame (the press edge).
     just: Vec<Cmd>,
     /// Host-edge commands fired this frame.
@@ -105,9 +133,11 @@ pub(crate) struct BindingsState {
 }
 
 impl BindingsState {
-    /// Is a held command latched right now? (The reference's held movement bit.)
+    /// Is a held command latched right now? (The reference's held movement bit.) Registry
+    /// commands only — an addon's latch exists to deliver its release half, and no engine system
+    /// reads it.
     pub(crate) fn pressed(&self, c: Cmd) -> bool {
-        self.latched.iter().any(|&(_, l)| l == c)
+        self.latched.iter().any(|&(_, l)| l == Bound::Spec(c))
     }
     /// Did this command's latch begin this frame? (The key-DOWN edge — the autorun cancel set.)
     pub(crate) fn just_pressed(&self, c: Cmd) -> bool {
@@ -289,24 +319,37 @@ fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<Bind
     }
     dispatch.seen_generation = Some(generation);
     dispatch.map.clear();
-    let by_name: std::collections::HashMap<&str, Cmd> = SPECS
+    // The addon table first: it is what the names the registry does not know resolve into. Before
+    // 1188 phase 4 an unknown name hit the `continue` below and the binding silently never fired
+    // — it registered, listed in the window, saved and loaded, and did nothing.
+    let addons = script.addon_binding_bodies();
+    let mut by_name: std::collections::HashMap<&str, Bound> = SPECS
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.name, Cmd(i as u16)))
+        .map(|(i, s)| (s.name, Bound::Spec(Cmd(i as u16))))
         .collect();
+    for (i, a) in addons.iter().enumerate() {
+        // A registry name is never overwritten — the engine table already refuses to register an
+        // addon row over one, so this only ever adds. The `try_from` is the honest form of the
+        // cast: 65k addon bindings is not a real case, and a wrapped index would dispatch the
+        // wrong body rather than none.
+        let Ok(i) = u16::try_from(i) else { break };
+        by_name.entry(a.name.as_str()).or_insert(Bound::Addon(i));
+    }
     for (name, keys) in script.keybind_snapshot() {
-        let Some(&cmd) = by_name.get(name.as_str()) else {
+        let Some(&bound) = by_name.get(name.as_str()) else {
             continue;
         };
         for key in keys {
             match Chord::parse(&key) {
                 Some(ch) => {
-                    dispatch.map.insert(ch, cmd);
+                    dispatch.map.insert(ch, bound);
                 }
                 None => warn!("bindings: {name}: unpressable chord '{key}' (unknown token)"),
             }
         }
     }
+    dispatch.addons = addons;
     script.fire_event("UPDATE_BINDINGS", vec![]);
 }
 
@@ -400,9 +443,12 @@ fn latch_and_dispatch(
     // the up of a pressed binding regardless).
     let typing = capture.0;
     if typing && !state.was_typing {
-        state
-            .latched
-            .retain(|&(_, c)| !matches!(SPECS[c.0 as usize].kind, Kind::Held));
+        state.latched.retain(|&(_, b)| match b {
+            Bound::Spec(c) => !matches!(SPECS[c.0 as usize].kind, Kind::Held),
+            // An addon's `runOnUp` latch is an EdgeUpDown pair by another name — its release half
+            // is a Lua body that must still run, so it stays armed for the same reason.
+            Bound::Addon(_) => true,
+        });
     }
     state.was_typing = typing;
 
@@ -424,12 +470,25 @@ fn latch_and_dispatch(
                     shift,
                     key: BindKey::Key(key),
                 };
-                if let Some(cmd) = dispatch.resolve(chord, dev_plane) {
-                    press(&mut state, &mut script, run_lua, cmd, BindKey::Key(key));
+                if let Some(bound) = dispatch.resolve(chord, dev_plane) {
+                    press(
+                        &mut state,
+                        &mut script,
+                        run_lua,
+                        &dispatch,
+                        bound,
+                        BindKey::Key(key),
+                    );
                 }
             }
             ButtonState::Released => {
-                release(&mut state, &mut script, run_lua, BindKey::Key(key));
+                release(
+                    &mut state,
+                    &mut script,
+                    run_lua,
+                    &dispatch,
+                    BindKey::Key(key),
+                );
             }
         }
     }
@@ -455,12 +514,25 @@ fn latch_and_dispatch(
                 shift,
                 key: BindKey::Mouse(b),
             };
-            if let Some(cmd) = dispatch.resolve(chord, false) {
-                press(&mut state, &mut script, run_lua, cmd, BindKey::Mouse(b));
+            if let Some(bound) = dispatch.resolve(chord, false) {
+                press(
+                    &mut state,
+                    &mut script,
+                    run_lua,
+                    &dispatch,
+                    bound,
+                    BindKey::Mouse(b),
+                );
             }
         }
         if buttons.just_released(b) {
-            release(&mut state, &mut script, run_lua, BindKey::Mouse(b));
+            release(
+                &mut state,
+                &mut script,
+                run_lua,
+                &dispatch,
+                BindKey::Mouse(b),
+            );
         }
     }
 
@@ -486,8 +558,8 @@ fn latch_and_dispatch(
             shift,
             key,
         };
-        if let Some(cmd) = dispatch.resolve(chord, false) {
-            match &SPECS[cmd.0 as usize].kind {
+        match dispatch.resolve(chord, false) {
+            Some(Bound::Spec(cmd)) => match &SPECS[cmd.0 as usize].kind {
                 Kind::Edge(lua) => run_lua(&mut script, lua, SPECS[cmd.0 as usize].name),
                 Kind::Host => {
                     state.fired.push(cmd);
@@ -496,7 +568,18 @@ fn latch_and_dispatch(
                 // Unreachable by construction (SetBinding refuses these); harmless if a
                 // hand-edited file smuggles one in.
                 Kind::Held | Kind::EdgeUpDown(..) => {}
+            },
+            // An addon binding on the wheel is a one-shot press, the `Kind::Edge` case. A
+            // `runOnUp` one cannot be here at all — its entry carries the same press+release flag
+            // a Held/EdgeUpDown command does, and the table's wheel refusal reads exactly that.
+            Some(Bound::Addon(i)) => {
+                if let Some(a) = dispatch.addons.get(i as usize) {
+                    if !a.run_on_up {
+                        run_addon(&mut script, a, "down");
+                    }
+                }
             }
+            None => {}
         }
     }
 
@@ -517,22 +600,28 @@ fn latch_and_dispatch(
         }
     }
     for k in stuck {
-        release(&mut state, &mut script, run_lua, k);
+        release(&mut state, &mut script, run_lua, &dispatch, k);
     }
 }
 
 #[cfg(test)]
 impl BindingDispatch {
-    /// A dispatch seeded straight from the registry defaults — the no-VM test seam.
+    /// A dispatch seeded straight from the registry defaults — the no-VM test seam. No addon
+    /// bindings: an addon body is Lua, and a harness with no VM could only assert it vacuously
+    /// (the with-VM harness below is where those live).
     fn test_defaults() -> Self {
         let mut map = std::collections::HashMap::new();
         for (i, s) in SPECS.iter().enumerate() {
             for d in [s.d1, s.d2].into_iter().flatten() {
-                map.insert(Chord::parse(d).expect("default parses"), Cmd(i as u16));
+                map.insert(
+                    Chord::parse(d).expect("default parses"),
+                    Bound::Spec(Cmd(i as u16)),
+                );
             }
         }
         Self {
             map,
+            addons: Vec::new(),
             seen_generation: None,
         }
     }
@@ -543,21 +632,37 @@ fn press(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
     run_lua: impl Fn(&mut Option<NonSendMut<UiScript>>, &str, &str),
-    cmd: Cmd,
+    dispatch: &BindingDispatch,
+    bound: Bound,
     key: BindKey,
 ) {
+    let cmd = match bound {
+        Bound::Spec(cmd) => cmd,
+        // An addon's press: run its one body with `keystate = "down"`, and latch it only if it
+        // asked for the release half — the `Kind::Edge` / `Kind::EdgeUpDown` fork, decided by the
+        // file's `runOnUp` instead of by our own registry.
+        Bound::Addon(i) => {
+            if let Some(a) = dispatch.addons.get(i as usize) {
+                run_addon(script, a, "down");
+                if a.run_on_up {
+                    state.latched.push((key, bound));
+                }
+            }
+            return;
+        }
+    };
     let spec = &SPECS[cmd.0 as usize];
     match &spec.kind {
         Kind::Held => {
             if !state.pressed(cmd) {
                 state.just.push(cmd);
             }
-            state.latched.push((key, cmd));
+            state.latched.push((key, bound));
         }
         Kind::Edge(lua) => run_lua(script, lua, spec.name),
         Kind::EdgeUpDown(down, _) => {
             run_lua(script, down, spec.name);
-            state.latched.push((key, cmd));
+            state.latched.push((key, bound));
         }
         Kind::Host => {
             state.fired.push(cmd);
@@ -575,18 +680,65 @@ fn release(
     state: &mut BindingsState,
     script: &mut Option<NonSendMut<UiScript>>,
     run_lua: impl Fn(&mut Option<NonSendMut<UiScript>>, &str, &str),
+    dispatch: &BindingDispatch,
     key: BindKey,
 ) {
     let mut i = 0;
     while i < state.latched.len() {
         if state.latched[i].0 == key {
-            let (_, cmd) = state.latched.remove(i);
-            if let Kind::EdgeUpDown(_, up) = &SPECS[cmd.0 as usize].kind {
-                run_lua(script, up, SPECS[cmd.0 as usize].name);
+            match state.latched.remove(i).1 {
+                Bound::Spec(cmd) => {
+                    if let Kind::EdgeUpDown(_, up) = &SPECS[cmd.0 as usize].kind {
+                        run_lua(script, up, SPECS[cmd.0 as usize].name);
+                    }
+                }
+                // The same body again, this time with `keystate = "up"` — the one law that makes
+                // an addon's `runOnUp` binding one chunk instead of two.
+                Bound::Addon(a) => {
+                    if let Some(a) = dispatch.addons.get(a as usize) {
+                        run_addon(script, a, "up");
+                    }
+                }
             }
         } else {
             i += 1;
         }
+    }
+}
+
+/// Run one addon binding's body with the reference's `keystate` global set **for the duration of
+/// the call, and restored after**.
+///
+/// A `Bindings.xml` body is **one Lua chunk read twice**: `runOnUp="true"` means it runs on the
+/// press and again on the release, and every shipped body forks on the bare global `keystate`
+/// (`if ( keystate == "down" ) then MoveForwardStart(); else MoveForwardStop(); end`). So the
+/// global is set in `_G` where the chunk will look for it — not prepended to the source, which
+/// would shift every line number in the addon's own error messages.
+///
+/// **Restoring it is not tidiness.** `keystate` is absent from the 1.12.1 client's in-world `_G`
+/// (`reference/1.12-globals.tsv`) even though its own `Bindings.xml` bodies read it as a bare
+/// global — which is only possible if the reference sets it transiently around the call, exactly
+/// as it does `this`/`event`/`arg1` (`invoke_with_globals`, RF-0025). Leaving it set would hand
+/// every addon a global the reference does not have, and an addon that feature-detects it would
+/// take a path we cannot honour — decision 1189's "a superset is not free", one call deeper.
+///
+/// Save-and-restore rather than set-and-delete, because these bodies nest: a binding whose Lua
+/// fires another binding must not clear the outer one's `keystate` on the way out.
+fn run_addon(script: &mut Option<NonSendMut<UiScript>>, bind: &AddonBindingBody, keystate: &str) {
+    let Some(s) = script.as_mut() else { return };
+    let globals = s.lua().globals();
+    // `Option<String>` rather than a raw Lua value: benilla-app does not depend on mlua, and
+    // `keystate` is a string or nothing — `None` converts back to nil on the way out.
+    let prior: Option<String> = globals.get("keystate").unwrap_or(None);
+    if let Err(e) = globals.set("keystate", keystate) {
+        warn!("bindings({}): setting keystate: {e}", bind.name);
+        return;
+    }
+    if let Err(e) = s.run(&bind.body) {
+        warn!("bindings({}): {e}", bind.name);
+    }
+    if let Err(e) = s.lua().globals().set("keystate", prior) {
+        warn!("bindings({}): restoring keystate: {e}", bind.name);
     }
 }
 
@@ -631,6 +783,190 @@ mod tests {
     }
     fn state(app: &App) -> &BindingsState {
         app.world().resource::<BindingsState>()
+    }
+
+    /// One addon's `Bindings.xml`, in the reference's own shape: a `runOnUp` binding whose single
+    /// body forks on `keystate`, and a one-shot beside it. Each half counts itself in a global, so
+    /// the assertions below read what the VM actually ran rather than what we told it to run.
+    const PROBE_BINDINGS: &str = r#"<Bindings>
+        <Binding name="PROBEHOLD" runOnUp="true" header="PROBE">
+            if ( keystate == "down" ) then
+                PROBE_DOWN = (PROBE_DOWN or 0) + 1;
+            else
+                PROBE_UP = (PROBE_UP or 0) + 1;
+            end
+            PROBE_LAST = keystate;
+        </Binding>
+        <Binding name="PROBEEDGE">
+            PROBE_EDGE = (PROBE_EDGE or 0) + 1;
+        </Binding>
+    </Bindings>"#;
+
+    /// The **with-VM** harness: a real engine table (the whole registry plus one addon's parsed
+    /// `Bindings.xml`) with the real [`sync_dispatch`] chained in front of [`latch_and_dispatch`].
+    ///
+    /// Deliberately not [`BindingDispatch::test_defaults`]: the bug 1188 phase 4 removes lived in
+    /// the *derivation* — `sync_dispatch` dropped every name it could not find in `SPECS`, so a
+    /// hand-built map would assert past exactly the code that was wrong.
+    fn vm_harness(script: UiScript) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
+            .init_resource::<UiKeyboardCapture>()
+            .init_resource::<PlayerUiHover>()
+            .init_resource::<PointerOverUi>()
+            .init_resource::<BindingsState>()
+            .init_resource::<BindingDispatch>()
+            .add_systems(Update, (sync_dispatch, latch_and_dispatch).chain());
+        app.insert_non_send_resource(script);
+        app
+    }
+
+    /// A counter a binding body left in the VM — `0` when the body never ran.
+    fn lua_count(app: &App, global: &str) -> i64 {
+        app.world()
+            .non_send_resource::<UiScript>()
+            .eval::<i64>(&format!("return {global} or 0"))
+            .expect("eval")
+    }
+
+    /// A string a binding body left in the VM — `""` when it never ran.
+    fn lua_str(app: &App, global: &str) -> String {
+        app.world()
+            .non_send_resource::<UiScript>()
+            .eval::<String>(&format!(r#"return {global} or """#))
+            .expect("eval")
+    }
+
+    /// **An addon's binding actually fires** (decision 1188 phase 4) — the assertion the whole
+    /// phase exists for. Before it, an addon's `Bindings.xml` registered, listed in the Key
+    /// Bindings window, saved and loaded, and then did *nothing*: `sync_dispatch` silently dropped
+    /// every name that was not in [`SPECS`], so no chord ever reached the body.
+    ///
+    /// The `runOnUp` half is the part that cannot be guessed from the built-in path, because it is
+    /// shaped differently: our own registry holds two Lua strings ([`Kind::EdgeUpDown`]), an
+    /// addon holds **one chunk run twice** with the global `keystate` set to `"down"` then
+    /// `"up"`. A dispatch that ran the body once, or twice with the same `keystate`, leaves the
+    /// player's key held down forever — which is what every shipped `runOnUp` body's `else` branch
+    /// is there to prevent.
+    #[test]
+    fn an_addon_binding_fires_its_lua_and_runs_again_on_release_when_it_asked_to() {
+        let mut script = UiScript::new().expect("VM");
+        script.register_bindings(&registry_commands());
+        script.register_addon_bindings(
+            "ProbeAddon",
+            &benilla_ui::bindings_xml::parse(PROBE_BINDINGS).expect("well-formed"),
+        );
+        // A `<Binding>` ships no default chord in 1.12 — the shipped defaults live in the engine's
+        // own table — so an addon binding starts unbound and the player binds it, which is what
+        // the Key Bindings window does through exactly this call.
+        script
+            .run(r#"SetBinding("J", "PROBEHOLD"); SetBinding("G", "PROBEEDGE")"#)
+            .expect("bind");
+        let mut app = vm_harness(script);
+
+        // Press: one run, `keystate == "down"`.
+        press_key(&mut app, KeyCode::KeyJ);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_DOWN"),
+            1,
+            "the press must reach the addon's body — this is the phase-4 bug"
+        );
+        assert_eq!(lua_str(&app, "PROBE_LAST"), "down");
+        assert_eq!(
+            lua_count(&app, "PROBE_UP"),
+            0,
+            "no release has happened yet"
+        );
+
+        // Release: the SAME body again, with `keystate == "up"`.
+        release_key(&mut app, KeyCode::KeyJ);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_UP"), 1);
+        assert_eq!(lua_str(&app, "PROBE_LAST"), "up");
+        assert_eq!(
+            lua_count(&app, "PROBE_DOWN"),
+            1,
+            "the release runs the chunk with keystate=up, not the down half a second time"
+        );
+
+        // The one-shot binding: press runs it, release does not — the `Kind::Edge` behaviour,
+        // decided here by the file's missing `runOnUp` rather than by our registry.
+        press_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_EDGE"), 1);
+        release_key(&mut app, KeyCode::KeyG);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_EDGE"),
+            1,
+            "no runOnUp, no second run — an addon that toggled here would toggle back"
+        );
+
+        // And the registry dispatches unchanged beside them: the enum routes, it does not divert.
+        press_key(&mut app, KeyCode::KeyW);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+        assert_eq!(
+            lua_count(&app, "PROBE_DOWN"),
+            1,
+            "a built-in press is nobody else's"
+        );
+
+        // **`keystate` does not outlive the call.** It is absent from the 1.12.1 client's in-world
+        // `_G` (`reference/1.12-globals.tsv`) even though its own binding bodies read it, so the
+        // reference sets it transiently — as it does `this`/`arg1`. Leaving it set would hand
+        // every addon a global the reference lacks, and one that feature-detects `if keystate`
+        // would take a branch we cannot honour (decision 1189's "a superset is not free").
+        assert_eq!(
+            lua_str(&app, "tostring(keystate)"),
+            "nil",
+            "keystate must be restored after a binding body runs, not left standing in _G"
+        );
+    }
+
+    /// A `runOnUp` addon latch survives a chat box taking focus, and its release half still runs.
+    ///
+    /// The typing edge clears [`Kind::Held`] latches (the reference's focus handler releasing the
+    /// direction bits) and deliberately leaves [`Kind::EdgeUpDown`] armed, because the up half of
+    /// a *pressed* binding is delivered regardless of focus. An addon's `runOnUp` binding is that
+    /// same pair wearing one chunk, so it must follow the same rule — dropped on the focus edge,
+    /// it would leave whatever its down half started running forever, with no key left to press
+    /// to stop it.
+    #[test]
+    fn a_run_on_up_addon_latch_survives_the_typing_edge_and_still_releases() {
+        let mut script = UiScript::new().expect("VM");
+        script.register_bindings(&registry_commands());
+        script.register_addon_bindings(
+            "ProbeAddon",
+            &benilla_ui::bindings_xml::parse(PROBE_BINDINGS).expect("well-formed"),
+        );
+        script.run(r#"SetBinding("J", "PROBEHOLD")"#).expect("bind");
+        let mut app = vm_harness(script);
+
+        press_key(&mut app, KeyCode::KeyW);
+        press_key(&mut app, KeyCode::KeyJ);
+        app.update();
+        assert!(state(&app).pressed(cmd::MOVE_FORWARD));
+        assert_eq!(lua_count(&app, "PROBE_DOWN"), 1);
+
+        // A box takes focus: movement stops, the addon's latch stays.
+        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
+        app.update();
+        assert!(!state(&app).pressed(cmd::MOVE_FORWARD));
+        assert_eq!(
+            lua_count(&app, "PROBE_UP"),
+            0,
+            "the focus edge is not a release — nothing has run the up half yet"
+        );
+
+        release_key(&mut app, KeyCode::KeyJ);
+        app.update();
+        assert_eq!(
+            lua_count(&app, "PROBE_UP"),
+            1,
+            "the up half is delivered even while typing, like every other pressed binding's"
+        );
     }
 
     #[test]
@@ -755,7 +1091,7 @@ mod tests {
         // is 0585's original "one key did two things" bug, reborn one strip further along...
         assert_eq!(
             dispatch.resolve(plane_p, false),
-            Some(pet_paper_doll),
+            Some(Bound::Spec(pet_paper_doll)),
             "without the plane rule the retry does reach SHIFT-P — this is what is being blocked"
         );
         // ...so on the plane, the retry is what it costs.
@@ -764,15 +1100,18 @@ mod tests {
         // shipped default proves it (1.12's own two, CTRL-SHIFT-TAB and CTRL-SHIFT-PAGEDOWN,
         // belong to commands the honest tree doesn't carry yet), so the entry is made here: this
         // is the case a player creates the moment they bind anything on the plane.
-        dispatch.map.insert(plane_p, pet_paper_doll);
+        dispatch.map.insert(plane_p, Bound::Spec(pet_paper_doll));
         assert_eq!(
             dispatch.resolve(plane_p, true),
-            Some(pet_paper_doll),
+            Some(Bound::Spec(pet_paper_doll)),
             "the plane spends the retry, never the exact probe"
         );
         // And SHIFT-P itself is still the pet paper doll: the plane costs nothing outside itself.
         let shift_p = Chord::parse("SHIFT-P").expect("parses");
-        assert_eq!(dispatch.resolve(shift_p, false), Some(pet_paper_doll));
+        assert_eq!(
+            dispatch.resolve(shift_p, false),
+            Some(Bound::Spec(pet_paper_doll))
+        );
     }
 
     /// **The pet lane routes on the CTRL digits, and the number row is untouched** (B218,
@@ -793,7 +1132,7 @@ mod tests {
             "the modifier decides: CTRL-1 is not the number row's"
         );
         // The runOnUp half: the latch drops on the BASE key's release (which is what runs
-        // BenillaPetActionButtonUp → CastPetAction in the app's VM), Ctrl still held.
+        // PetActionButtonUp → CastPetAction in the app's VM), Ctrl still held.
         release_key(&mut app, KeyCode::Digit1);
         app.update();
         assert!(!state(&app).pressed(by_name("BONUSACTIONBUTTON1")));

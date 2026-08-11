@@ -113,7 +113,7 @@ impl Loader<'_> {
     pub(super) fn fire_onload(&mut self, wrapper: &Table, func: &Function, dbg: &str) {
         // The RF-0025 `this`/`self` convention lives in one home (`UiScript::invoke_handler`); the
         // loader doesn't re-implement the set/restore, it just supplies the wrapper + captured func.
-        if let Err(e) = self.script.invoke_handler(wrapper, func) {
+        if let Err(e) = self.invoke_handler(wrapper, func) {
             self.report.errors.push(format!("{dbg}: OnLoad: {e}"));
         }
     }

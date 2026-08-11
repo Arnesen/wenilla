@@ -137,8 +137,31 @@ fn value_to_string(v: &Value) -> Option<String> {
     }
 }
 
-/// Register the `GetCVar`/`SetCVar`/`GetCVarDefault` globals.
+/// Register the `GetCVar`/`SetCVar`/`GetCVarDefault`/`RegisterCVar` globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // `RegisterCVar(name, value)` — declare a CVar the client does not ship (decision 1195).
+    //
+    // This is how an addon gets a persisted setting without a saved-variables file, and it is why
+    // `GetCVar` on an unknown name is a *warning* rather than an error: an addon that calls
+    // `RegisterCVar` at load and `GetCVar` after expects the second to answer. Registering an
+    // existing name is a **no-op, not an overwrite** — the reference will not let an addon reset a
+    // client CVar's live value by re-declaring it, and a re-run of the addon's own load must not
+    // wipe the player's setting either.
+    lua.globals().set(
+        "RegisterCVar",
+        lua.create_function(|lua, (name, value): (String, Option<Value>)| {
+            let value = value.as_ref().and_then(value_to_string).unwrap_or_default();
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let key = name.to_ascii_lowercase();
+            model.cvars.entry(key).or_insert(CvarSlot {
+                name,
+                value: value.clone(),
+                default: value,
+            });
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set(
         "GetCVar",
         lua.create_function(|lua, name: String| {

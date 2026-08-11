@@ -739,6 +739,17 @@ pub(super) fn drain_chat_input(
                 }
             }
             ParsedChat::Unknown => {
+                // Before the help line: an ADDON may claim it (decision 1195). The reference
+                // resolves `SlashCmdList` in the same pass as its own commands; ours runs after
+                // the boot table misses, which gives the same precedence — a shipped command can
+                // never be shadowed — without moving our handlers into Lua.
+                if let Some(rest) = msg.strip_prefix('/') {
+                    let rest = rest.trim();
+                    let (cmd, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+                    if script.run_slash_command(cmd, args.trim()) {
+                        continue;
+                    }
+                }
                 // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203).
                 chat_log.push_event(super::event::ChatEvent::text_only(
                     super::event::ChatEventKind::System,
@@ -839,4 +850,43 @@ pub(super) fn emote_send_eligible(emote_flags: u32, stand_state: u8, swimming: b
         return false;
     }
     true
+}
+
+/// Turn an addon's `SendChatMessage` calls into sends (decision 1199).
+///
+/// Its own system rather than a branch inside [`drain_chat_input`], for the reason
+/// `benilla_ui::script::chat_send`'s module doc gives: the box's drain runs the **slash grammar**
+/// and this path must not. An addon announcing `"/dance"` is saying six characters.
+///
+/// An unknown chat-type token is **reported, not guessed**. `SendChatMessage(msg, "RAID_WARNING")`
+/// silently going to /say is worse than not going: the addon believes it warned the raid.
+pub(super) fn drain_addon_chat_sends(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    commands: Res<NetCommands>,
+    mut chat_log: ResMut<super::feed::ChatLog>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for send in script.take_chat_sends() {
+        let Some(kind) = super::edit::SendType::from_token(&send.chat_type) else {
+            warn!(
+                "chat: SendChatMessage with unknown type {:?}",
+                send.chat_type
+            );
+            chat_log.push_event(super::event::ChatEvent::text_only(
+                super::event::ChatEventKind::System,
+                format!("Unknown chat type \"{}\".", send.chat_type),
+            ));
+            continue;
+        };
+        let cmd = ClientCommand::Chat {
+            kind: kind.wire(),
+            target: send.target,
+            text: send.text,
+        };
+        if commands.0.send(cmd).is_err() {
+            warn!("chat: not connected; addon line dropped");
+        }
+    }
 }

@@ -1,5 +1,5 @@
 //! The shipped `assets/ui/MicroMenu.xml` — the eight micro buttons in the main bar's right-hand
-//! recess — loaded behind `ActionBar.xml` (their anchor target `BenillaActionBarArtFrame` and the
+//! recess — loaded behind `ActionBar.xml` (their anchor target `MainMenuBarArtFrame` and the
 //! `BenillaActionBarArt_SeatAbove` seating helper) into a bare engine.
 //!
 //! What these guard, in order: the row's ref geometry (29×58 at art-frame BOTTOMLEFT +(552,2), a
@@ -174,7 +174,7 @@ fn a_micro_button_pushes_while_its_panel_is_open() {
     let s = harness();
     s.run(
         r#"
-        local f = CreateFrame("Frame", "BenillaCharacterFrame")
+        local f = CreateFrame("Frame", "CharacterFrame")
         f:SetPoint("CENTER", 0, 0); f:SetSize(100, 100); f:Hide()
     "#,
     )
@@ -187,11 +187,11 @@ fn a_micro_button_pushes_while_its_panel_is_open() {
     s.run("UpdateMicroButtons()").unwrap();
     assert_eq!(state(&s), "NORMAL", "closed panel ⇒ button up");
 
-    s.run("BenillaCharacterFrame:Show(); UpdateMicroButtons()")
+    s.run("CharacterFrame:Show(); UpdateMicroButtons()")
         .unwrap();
     assert_eq!(state(&s), "PUSHED", "open panel ⇒ button held down");
 
-    s.run("BenillaCharacterFrame:Hide(); UpdateMicroButtons()")
+    s.run("CharacterFrame:Hide(); UpdateMicroButtons()")
         .unwrap();
     assert_eq!(state(&s), "NORMAL", "closed again ⇒ button pops back");
 

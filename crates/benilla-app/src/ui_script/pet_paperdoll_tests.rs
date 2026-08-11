@@ -123,7 +123,7 @@ fn texts(s: &mut UiScript) -> Vec<String> {
 /// has no rect at all, and `GetLeft()` answers nil rather than a stale number.
 fn tab_left(s: &mut UiScript, tab: u32) -> f64 {
     s.resolve();
-    s.eval::<f64>(&format!("return BenillaCharacterFrameTab{tab}:GetLeft()"))
+    s.eval::<f64>(&format!("return CharacterFrameTab{tab}:GetLeft()"))
         .unwrap_or_else(|e| panic!("tab {tab} has no resolved rect: {e}"))
 }
 
@@ -149,7 +149,7 @@ fn shipped_pet_page_loads_clean() {
     assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
     // The page itself exists and starts down, like every other subframe.
     assert!(!s
-        .eval::<bool>("return BenillaPetPaperDollFrame:IsVisible()")
+        .eval::<bool>("return PetPaperDollFrame:IsVisible()")
         .unwrap());
 }
 
@@ -162,11 +162,10 @@ fn shipped_pet_page_loads_clean() {
 fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
     let mut s = load_pet_page();
     // The rects only exist while something lays the window out.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
 
     assert!(
-        !s.eval::<bool>("return BenillaCharacterFrameTab2:IsVisible()")
+        !s.eval::<bool>("return CharacterFrameTab2:IsVisible()")
             .unwrap(),
         "no pet: the Pet tab is down"
     );
@@ -174,7 +173,7 @@ fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
 
     give_pet(&mut s);
     assert!(
-        s.eval::<bool>("return BenillaCharacterFrameTab2:IsVisible()")
+        s.eval::<bool>("return CharacterFrameTab2:IsVisible()")
             .unwrap(),
         "a pet raises the Pet tab"
     );
@@ -191,7 +190,7 @@ fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
 
     take_pet(&mut s);
     assert!(
-        !s.eval::<bool>("return BenillaCharacterFrameTab2:IsVisible()")
+        !s.eval::<bool>("return CharacterFrameTab2:IsVisible()")
             .unwrap(),
         "the pet leaving lowers the tab again"
     );
@@ -205,22 +204,17 @@ fn the_pet_tab_rises_and_falls_with_the_pet_and_skills_closes_the_gap() {
 #[test]
 fn asking_for_the_pet_page_without_a_pet_does_nothing() {
     let s = load_pet_page();
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap(),
         "no pet: the window stays shut"
     );
 
     // …and with the window already open on the character page, the refusal leaves it open.
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(
-        s.eval::<bool>("return BenillaPaperDollFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return PaperDollFrame:IsVisible()").unwrap(),
         "the refusal must not switch pages or close the window"
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
@@ -233,10 +227,9 @@ fn asking_for_the_pet_page_without_a_pet_does_nothing() {
 fn the_page_reads_the_pets_own_snapshot() {
     let mut s = load_pet_page();
     give_pet(&mut s);
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(s
-        .eval::<bool>("return BenillaPetPaperDollFrame:IsVisible()")
+        .eval::<bool>("return PetPaperDollFrame:IsVisible()")
         .unwrap());
 
     let drawn = texts(&mut s);
@@ -262,25 +255,19 @@ fn the_page_borrows_the_windows_name_line_and_gives_it_back() {
     let mut s = load_pet_page();
     give_pet(&mut s);
 
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(!s
-        .eval::<bool>("return BenillaCharacterNameText:IsVisible()")
+        .eval::<bool>("return CharacterNameText:IsVisible()")
         .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaPetNameText:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return PetNameText:IsVisible()").unwrap());
 
-    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
     assert!(
-        s.eval::<bool>("return BenillaCharacterNameText:IsVisible()")
+        s.eval::<bool>("return CharacterNameText:IsVisible()")
             .unwrap(),
         "the player's name line comes back"
     );
-    assert!(!s
-        .eval::<bool>("return BenillaPetNameText:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return PetNameText:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
@@ -291,16 +278,12 @@ fn the_page_borrows_the_windows_name_line_and_gives_it_back() {
 fn the_pet_leaving_closes_the_page_under_it() {
     let mut s = load_pet_page();
     give_pet(&mut s);
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
-    assert!(s
-        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-        .unwrap());
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
+    assert!(s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap());
 
     take_pet(&mut s);
     assert!(
-        !s.eval::<bool>("return BenillaCharacterFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return CharacterFrame:IsVisible()").unwrap(),
         "the pet's page cannot outlive the pet"
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
@@ -316,21 +299,20 @@ fn a_minion_gets_the_page_without_the_hunter_furniture() {
     s.set_pet_combat_stats(Some(pet_combat_stats()));
     s.fire_event("PET_BAR_UPDATE", vec![]);
 
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(
-        s.eval::<bool>("return BenillaCharacterFrameTab2:IsVisible()")
+        s.eval::<bool>("return CharacterFrameTab2:IsVisible()")
             .unwrap(),
         "a minion still gets the tab"
     );
     assert!(!s
-        .eval::<bool>("return BenillaPetPaperDollPetInfo:IsVisible()")
+        .eval::<bool>("return PetPaperDollPetInfo:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaPetTrainingPointText:IsVisible()")
+        .eval::<bool>("return PetTrainingPointText:IsVisible()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaPetTrainingPointLabel:IsVisible()")
+        .eval::<bool>("return PetTrainingPointLabel:IsVisible()")
         .unwrap());
     // …and the stat rows still read the minion's own numbers.
     assert!(
@@ -371,8 +353,7 @@ fn the_level_line_names_the_family_and_is_blank_without_one() {
             },
         );
         s.fire_event("PET_BAR_UPDATE", vec![]);
-        s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-            .unwrap();
+        s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
         let drawn = texts(&mut s);
         assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
         drawn
@@ -405,10 +386,9 @@ fn the_level_line_names_the_family_and_is_blank_without_one() {
 fn hovering_the_diet_icon_lists_what_the_pet_eats() {
     let mut s = load_pet_page();
     give_pet(&mut s);
-    s.run(r#"ToggleCharacter("BenillaPetPaperDollFrame")"#)
-        .unwrap();
+    s.run(r#"ToggleCharacter("PetPaperDollFrame")"#).unwrap();
     assert!(
-        s.eval::<bool>("return BenillaPetPaperDollPetInfo:IsVisible()")
+        s.eval::<bool>("return PetPaperDollPetInfo:IsVisible()")
             .unwrap(),
         "the diet icon is shown for a hunter pet"
     );
@@ -459,7 +439,7 @@ fn hovering_the_diet_icon_lists_what_the_pet_eats() {
     );
 
     s.run(
-        "local f = BenillaPetPaperDollPetInfo \
+        "local f = PetPaperDollPetInfo \
          f:GetScript(\"OnEnter\")(f)",
     )
     .unwrap();

@@ -71,6 +71,10 @@ fn debuff(spell_id: u32, name: &str, count: u8, debuff_type: Option<&str>) -> Au
         expiration_time: 0.0,
         helpful: false,
         cancelable: false,
+        // Only the PLAYER cache carries `untilCancelled`, and only `GetPlayerBuff` reads it
+        // (decision 0257 / `benilla::ui_aura`); a target's rows have no such record.
+        until_cancelled: false,
+        channeled: false,
     }
 }
 
@@ -85,6 +89,8 @@ fn buff(spell_id: u32, name: &str) -> AuraState {
         expiration_time: 0.0,
         helpful: true,
         cancelable: false,
+        until_cancelled: false,
+        channeled: false,
     }
 }
 
@@ -120,45 +126,39 @@ fn a_hostile_target_draws_debuffs_first_with_tint_and_count() {
         ],
     );
 
-    assert!(shown(&s, "BenillaTargetFrameDebuff1"), "first debuff shows");
+    assert!(shown(&s, "TargetFrameDebuff1"), "first debuff shows");
+    assert!(shown(&s, "TargetFrameDebuff2"), "second debuff shows");
     assert!(
-        shown(&s, "BenillaTargetFrameDebuff2"),
-        "second debuff shows"
-    );
-    assert!(
-        !shown(&s, "BenillaTargetFrameDebuff3"),
+        !shown(&s, "TargetFrameDebuff3"),
         "no third debuff — button hides"
     );
-    assert!(shown(&s, "BenillaTargetFrameBuff1"), "the buff shows");
-    assert!(!shown(&s, "BenillaTargetFrameBuff2"), "no second buff");
+    assert!(shown(&s, "TargetFrameBuff1"), "the buff shows");
+    assert!(!shown(&s, "TargetFrameBuff2"), "no second buff");
 
     // Hostile: the debuff row opens at the frame's BOTTOMLEFT (5,32); buffs seat under Debuff7
     // (the not-shown target-of-target leg, ref l.329).
-    let (p, rel, rp, x, y) = anchor(&s, "BenillaTargetFrameDebuff1");
+    let (p, rel, rp, x, y) = anchor(&s, "TargetFrameDebuff1");
     assert_eq!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
-        ("TOPLEFT", "BenillaTargetFrame", "BOTTOMLEFT", 5.0, 32.0),
+        ("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5.0, 32.0),
         "hostile: debuffs first"
     );
-    let (_, rel, _, _, _) = anchor(&s, "BenillaTargetFrameBuff1");
-    assert_eq!(
-        rel, "BenillaTargetFrameDebuff7",
-        "hostile: buffs below row 2"
-    );
+    let (_, rel, _, _, _) = anchor(&s, "TargetFrameBuff1");
+    assert_eq!(rel, "TargetFrameDebuff7", "hostile: buffs below row 2");
 
     // Under the wrap (2 < 6): full 21px icons, 23px borders.
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1"), (21.0, 21.0));
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1Border"), (23.0, 23.0));
-    assert_eq!(size(&s, "BenillaTargetFrameBuff1"), (21.0, 21.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
+    assert_eq!(size(&s, "TargetFrameBuff1"), (21.0, 21.0));
 
     // Stack count shows only above 1.
     assert_eq!(
-        s.eval::<String>(r#"return tostring((BenillaTargetFrameDebuff2Count:GetText()) or "")"#)
+        s.eval::<String>(r#"return tostring((TargetFrameDebuff2Count:GetText()) or "")"#)
             .unwrap(),
         "3"
     );
     assert_eq!(
-        s.eval::<String>(r#"return tostring((BenillaTargetFrameDebuff1Count:GetText()) or "")"#)
+        s.eval::<String>(r#"return tostring((TargetFrameDebuff1Count:GetText()) or "")"#)
             .unwrap(),
         ""
     );
@@ -205,22 +205,16 @@ fn a_friendly_target_puts_the_buff_row_first() {
         ],
     );
 
-    let (p, rel, rp, x, y) = anchor(&s, "BenillaTargetFrameBuff1");
+    let (p, rel, rp, x, y) = anchor(&s, "TargetFrameBuff1");
     assert_eq!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
-        ("TOPLEFT", "BenillaTargetFrame", "BOTTOMLEFT", 5.0, 32.0),
+        ("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5.0, 32.0),
         "friendly: buffs first"
     );
-    let (p, rel, rp, x, y) = anchor(&s, "BenillaTargetFrameDebuff1");
+    let (p, rel, rp, x, y) = anchor(&s, "TargetFrameDebuff1");
     assert_eq!(
         (p.as_str(), rel.as_str(), rp.as_str(), x, y),
-        (
-            "TOPLEFT",
-            "BenillaTargetFrameBuff1",
-            "BOTTOMLEFT",
-            0.0,
-            -2.0
-        ),
+        ("TOPLEFT", "TargetFrameBuff1", "BOTTOMLEFT", 0.0, -2.0),
         "friendly: debuffs under the buff row"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -235,15 +229,15 @@ fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
     target(&mut s, 2, debuffs);
 
     // 6 debuffs ≥ wrap (6): 17px icons, 19px borders — the reference resizes only the FIRST row.
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1"), (17.0, 17.0));
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1Border"), (19.0, 19.0));
-    assert_eq!(size(&s, "BenillaTargetFrameBuff1"), (17.0, 17.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1"), (17.0, 17.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (19.0, 19.0));
+    assert_eq!(size(&s, "TargetFrameBuff1"), (17.0, 17.0));
 
     // Dropping below the wrap grows them back — the feed re-fires UNIT_AURA on the change.
     s.set_auras("target", Some(vec![debuff(1000, "D0", 1, None)]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1"), (21.0, 21.0));
-    assert_eq!(size(&s, "BenillaTargetFrameDebuff1Border"), (23.0, 23.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1"), (21.0, 21.0));
+    assert_eq!(size(&s, "TargetFrameDebuff1Border"), (23.0, 23.0));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -251,25 +245,22 @@ fn reaching_the_wrap_shrinks_the_first_row_to_17px() {
 fn clearing_the_list_or_the_target_hides_the_buttons() {
     let mut s = harness();
     target(&mut s, 2, vec![debuff(589, "Pain", 1, Some("Magic"))]);
-    assert!(shown(&s, "BenillaTargetFrameDebuff1"));
+    assert!(shown(&s, "TargetFrameDebuff1"));
 
     // The last debuff expires: the feed pushes the emptied list and re-fires.
     s.set_auras("target", Some(vec![]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("target".into())]);
     assert!(
-        !shown(&s, "BenillaTargetFrameDebuff1"),
+        !shown(&s, "TargetFrameDebuff1"),
         "an emptied list hides the button"
     );
 
     // Deselect: the frame (and every child button) hides; the token clears without a UNIT_AURA.
     target(&mut s, 2, vec![debuff(589, "Pain", 1, Some("Magic"))]);
-    assert!(shown(&s, "BenillaTargetFrameDebuff1"));
+    assert!(shown(&s, "TargetFrameDebuff1"));
     s.set_unit("target", None);
     s.set_auras("target", None);
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
-    assert!(
-        !shown(&s, "BenillaTargetFrameDebuff1"),
-        "no target, no buttons"
-    );
+    assert!(!shown(&s, "TargetFrameDebuff1"), "no target, no buttons");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

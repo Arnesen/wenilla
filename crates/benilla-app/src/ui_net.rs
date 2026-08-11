@@ -1,7 +1,7 @@
 //! The connection-telemetry feed — the app side of `benilla_ui::script::net_stats`' seam.
 //!
 //! One number: the latency `GetNetStats()` reports, which is the main bar's performance ("ping")
-//! meter's whole input (`ActionBar.xml`'s `BenillaPerformanceBarFrame` polls it every 10 s and
+//! meter's whole input (`ActionBar.xml`'s `MainMenuBarPerformanceBarFrame` polls it every 10 s and
 //! colors the bar green/yellow/red). The measurement itself belongs to the net drain — every
 //! `SMSG_PONG` lands a round trip in [`NetStatus::rtt_ring`], the reference's 16-deep RTT history —
 //! and this feed only carries its average across the engine boundary (decision 0068 §3: the engine

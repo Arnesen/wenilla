@@ -149,7 +149,66 @@ impl Plugin for UiUnitPlugin {
                 .before(UiInput),
         )
         .add_systems(Update, drain_pvp_toggles.after(UiInput))
-        .add_systems(PostStartup, load_exhaustion_rows);
+        .add_systems(Update, feed_default_language.in_set(UnitFeed))
+        .add_systems(PostStartup, (load_exhaustion_rows, load_default_languages));
+    }
+}
+
+/// The race → default-chat-language join, loaded once ([`benilla_formats::DefaultLanguages`]).
+/// Absent when the tables would not load — `GetDefaultLanguage()` then answers the reference's own
+/// zero-values shape rather than a made-up word.
+#[derive(Resource)]
+pub(crate) struct DefaultLanguagesRes(pub(crate) benilla_formats::DefaultLanguages);
+
+/// Load `Languages.dbc` × `ChrRaces.dbc` once at startup ([`load_exhaustion_rows`]'s shape).
+fn load_default_languages(
+    mut commands: Commands,
+    assets: Option<Res<benilla_assets::WorldAssets>>,
+) {
+    let Some(assets) = assets else { return };
+    let loaded = {
+        use benilla_assets::LockRecover;
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_default_languages(&mut chain)
+    };
+    match loaded {
+        Ok(langs) => {
+            info!("ui_unit: {} race → default-language rows", langs.len());
+            commands.insert_resource(DefaultLanguagesRes(langs));
+        }
+        // Not fatal: the binding's contract already has an answer for "no table".
+        Err(e) => warn!("ui_unit: default languages unavailable — {e:#}"),
+    }
+}
+
+/// Push `GetDefaultLanguage()`'s one string, on change only.
+///
+/// The reference resolves it per call from the live player object; we resolve it once per race
+/// change, which is the same answer with none of the per-frame churn — a race cannot change
+/// without a new world entry. `None` (no player object, or no table) is the reference's zero-value
+/// state, and that is what the VM stores.
+///
+/// **The locale column is 0.** `[0xc0e080]` is the client's locale slot; only enUS is populated in
+/// the 5875 data, and every other DBC catalog here reads column 0 for the same reason.
+fn feed_default_language(
+    script: Option<NonSendMut<UiScript>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    langs: Option<Res<DefaultLanguagesRes>>,
+    mut pushed: Local<Option<Option<String>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let name = self_q
+        .iter()
+        .next()
+        .and_then(|store| store.0.unit_race())
+        .zip(langs.as_ref())
+        .and_then(|(race, langs)| langs.0.name(u32::from(race), 0))
+        .map(str::to_string);
+    if pushed.as_ref() != Some(&name) {
+        script.set_default_language(name.clone());
+        *pushed = Some(name);
     }
 }
 
@@ -410,6 +469,11 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // UNIT_FIELD_FLAGS (vmangos UnitDefines.h: 0x1000 / 0x04000000, VERIFIED).
         pvp: store.0.unit_flags() & 0x1000 != 0,
         skinnable: store.0.unit_flags() & 0x0400_0000 != 0,
+        // `UnitAffectingCombat 0x517e10` — the SAME `UNIT_FIELD_FLAGS` word, bit 19
+        // (`shr ecx,0x13; test cl,1`). One flag for every token: wow-re's whole-image census of
+        // that idiom found the local-player readers reading this identical bit, so there is no
+        // player-specific combat latch to model beside it.
+        in_combat: store.0.unit_flags() & crate::player::UNIT_FLAG_IN_COMBAT != 0,
         // Free-for-all PvP (decision 0646 §1): `PLAYER_FLAGS` bit 7, the same field the ghost
         // predicate above reads (vmangos `Player.h:322` `PLAYER_FLAGS_FFA_PVP`, cross-read against
         // 0633's byte-level `[+0xe68]+8` bit-7). Zero on creatures, which have no PLAYER_FLAGS —

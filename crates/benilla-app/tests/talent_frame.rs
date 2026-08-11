@@ -28,11 +28,11 @@ const FILES: [&str; 5] = [
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
     // The app's provider shape: backslash paths, dir-relative, basename fallback.
-    let provider = |req: &str| -> Option<String> {
+    let provider = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
         let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read_to_string(dir.join(&norm))
-            .or_else(|_| std::fs::read_to_string(dir.join(base)))
+        std::fs::read(dir.join(&norm))
+            .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
     for file in FILES {

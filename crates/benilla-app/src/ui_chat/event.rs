@@ -11,6 +11,16 @@
 //! the group tables are `ChatTypeGroup` transcribed; the colors are the complete shipped default
 //! table (the ref client's own `chat-cache.txt` COLORS block ≡ wow-re's byte-verified
 //! `.rdata 0x804710` table, double-sourced in 0288's pin).
+//!
+//! This module also carries the **Lua face** of that currency: [`event_name`]
+//! (kind → the reference's `CHAT_MSG_*` event name) and [`ChatEvent::script_args`] (the ten
+//! positional args the client's own fire helper passes). 0288 §1 left that door open in its own
+//! words — *"a future 0068 addon-API phase can move it into the VM (fire CHAT_MSG_* events at Lua)
+//! without touching sources or sinks"* — and this is that phase: the router
+//! ([`super::frames::route`]) now fires the real event beside the Rust render, so an addon sees the
+//! same chat the window does.
+
+use benilla_ui::script::ScriptValue;
 
 /// The renderable chat-event kinds — `ChatTypeInfo`'s keys, minus the combat-log block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -55,13 +65,120 @@ pub(crate) enum ChatEventKind {
     BgSystemHorde,
 }
 
-/// One chat event — the reference's `CHAT_MSG_*` fire, typed. Field ↔ arg mapping (the 1.12
-/// handler's positional args, constrained by `ChatFrame_OnEvent`'s reads):
-/// `text`=arg1 · `sender`=arg2 · `language`=arg3 (already a *name*, empty = no header) ·
-/// `channel`=arg4 (the display form, "N. Name - Zone" when numbered) · `target`=arg5 (the second
-/// name of a two-name channel notice) · `flag`=arg6 ("AFK"/"DND"/"GM", empty none) ·
-/// `channel_number`=arg8 · `channel_base`=arg9 (the number-less name). `notice`=arg1 of the
-/// CHANNEL_NOTICE family (the token selecting the `CHAT_<X>_NOTICE` string).
+impl ChatEventKind {
+    /// Every kind, for the sweeps that must be exhaustive to be worth anything — chiefly
+    /// `ui_script::chat_tests::fired_event_names_are_all_chat_type_info_keys`, which checks each
+    /// name we fire against the live `ChatTypeInfo` table rather than against a second copy of the
+    /// same list. Adding a variant makes [`event_name`]'s match fail to compile; the length
+    /// assertion in `tests::every_kind_is_in_all` is what makes you add it here too.
+    ///
+    /// Test-only: the app itself never sweeps the kinds — it always has one in hand.
+    #[cfg(test)]
+    pub(crate) const ALL: &'static [ChatEventKind] = {
+        use ChatEventKind as K;
+        &[
+            K::Say,
+            K::Party,
+            K::Raid,
+            K::Guild,
+            K::Officer,
+            K::Yell,
+            K::Whisper,
+            K::WhisperInform,
+            K::Emote,
+            K::TextEmote,
+            K::System,
+            K::MonsterSay,
+            K::MonsterYell,
+            K::MonsterEmote,
+            K::MonsterWhisper,
+            K::Channel,
+            K::ChannelJoin,
+            K::ChannelLeave,
+            K::ChannelNotice,
+            K::ChannelNoticeUser,
+            K::ChannelList,
+            K::Afk,
+            K::Dnd,
+            K::Ignored,
+            K::Skill,
+            K::Loot,
+            K::Money,
+            K::CombatXpGain,
+            K::RaidLeader,
+            K::RaidWarning,
+            K::RaidBossEmote,
+            K::Battleground,
+            K::BattlegroundLeader,
+            K::BgSystemNeutral,
+            K::BgSystemAlliance,
+            K::BgSystemHorde,
+        ]
+    };
+}
+
+/// One chat event — the reference's `CHAT_MSG_*` fire, typed.
+///
+/// **The arg list is TEN wide, and its shape is byte-pinned.** The client's per-type fire helper
+/// `0x49b0b0` (reached from the chat chokepoint `0x49a870` at `0x49ac9a`) calls
+/// `FrameScript_SignalEvent 0x703f50` with the format string `"%s%s%s%s%s%s%d%d%s%d"`
+/// (`.rdata 0x844608`) — wow-re `system/ui/scratch/rested-xp-bindings.md` §9, VERIFIED there in
+/// the course of the rest-state RE. So **arg1..arg6 are strings, arg7 and arg8 are numbers, arg9
+/// is a string, arg10 is a number**, and not one of them is ever `nil`: `ChatFrame_OnEvent`
+/// compares `arg7 > 0` and `arg10 > 0` bare, which under Lua 5.0 errors on a nil. Every slot is
+/// always passed — zero or empty when unused.
+///
+/// Field ↔ arg mapping, each slot named by the consumer that reads it in the shipped
+/// `ChatFrame.lua` (0288's pin; line numbers are that file's):
+///
+/// | arg | field | what it is |
+/// |---|---|---|
+/// | 1 | `text` / `notice` | the message body; for the CHANNEL_NOTICE family instead the **notice token** selecting `CHAT_<token>_NOTICE` (l.1416/1424) |
+/// | 2 | `sender` | the speaker, or the notice's affected player (l.1404, l.1416) |
+/// | 3 | `language` | already a *name* ("Orcish"); empty = no header (l.1442) |
+//
+// (arg3's empty case, checked rather than assumed: l.1442 also guards `arg3 ~= "Universal"`, which
+// reads like the client passes that word for language 0. It does not — "Universal" is in neither
+// `Languages.dbc` (13 rows, ids 1-33, no 0) nor `WoW.exe` nor `GlobalStrings.lua`, so that arm is
+// vestigial in 1.12 and `strlen(arg3) > 0` is what actually suppresses the header. Our
+// [`language_name`] answering "" for 0 is therefore the right shape, not a shortcut.)
+/// | 4 | `channel` | the display form, "N. Name - Zone" when numbered (l.1373, l.1463) |
+/// | 5 | `target` | the second name of a two-name notice — "X kicked by Y" (l.1414-1416) |
+/// | 6 | `flag` | "AFK"/"DND"/"GM", empty none; read as `CHAT_FLAG_<flag>` (l.1431) |
+/// | 7 | `zone_channel_id` | the **`ChatChannels.dbc` ChannelID** behind a zone channel, 0 for a custom one — matched against `ChatFrame.zoneChannelList` (l.1379) |
+/// | 8 | `channel_number` | the client-local joined-channel slot; `ChatTypeInfo["CHANNEL"..arg8]` (l.1381) |
+/// | 9 | `channel_base` | the channel name **without** the leading number (l.1378's own comment) |
+/// | 10 | — (always 0) | the channel's **split/instance index**, appended as `arg4.." "..arg10` when `> 0` (l.1421-1423) |
+///
+/// **arg10 is deliberately not a field.** It is `slot+0x98`, the same value `GetChannelName`
+/// returns third, and its wire source is the **second** `u32` of `SMSG_CHANNEL_NOTIFY`'s YOU_JOINED
+/// tail — the one `Channel::MakeYouJoined` (`Chat/Channel.cpp:823-827`) hardcodes to 0 with the
+/// comment *"the non-zero number will be appended to the channel name"*, which is `ChatFrame.lua`
+/// l.1421-1423 exactly. (The *first* u32 of that tail is the channel flags, which the client reads
+/// and discards.) Our decode already drops the second for that reason
+/// (`ChannelNoticeTail::YouJoined`), so [`ChatEvent::script_args`] passes the literal 0 rather than
+/// carrying a field that can only ever hold it.
+///
+/// **arg4/arg7/arg8/arg9 are one record**, all `""`/`0`/`0`/`""` together when the channel is not
+/// in the local list — see [`super::edit::ChannelState::stamp_channel`], which is the only place
+/// they are written.
+///
+/// **KNOWN GAP — arg1 should be GARBLED, and ours is not.** The reference garbles the body
+/// client-side (`0x49b560` from `0x49aa7c`) and passes the wire text through only when the language
+/// is Universal, there is no local player, or the player's skill in that language is ≥ 300
+/// (`0x49b599 cmp esi,0x12c`). benilla speaks Common and does not model language skill at all
+/// (0288 §3 keeps garbling out with the language picker), so arg1 is always the ungarbled wire
+/// text. An addon reading a foreign-language line therefore sees more than the reference would give
+/// it. Also unmodeled: the profanity filter `0x4a1ca0` (`0x49ab23`), which in the reference can
+/// suppress the whole event for non-whisper types.
+///
+/// **Corrections on record.** This comment previously listed args 1-6, 8 and 9 only — arg7 and
+/// arg10 were absent, and arg7 is a real slot the reference's own channel routing turns on. The
+/// omission was ours. The whole map is now byte-verified end to end in wow-re
+/// `system/ui/scratch/chat-msg-event-args.md` (T2), which also **refutes** 0288's standing lead
+/// that rf77 had traced this marshaller: rf77's trace was opcode `0x92` = SMSG_GUILD_EVENT,
+/// misfiled. Real `SMSG_MESSAGECHAT` is `0x96` → `0x49d560` and matches vmangos branch for branch,
+/// which is what benilla's decode already did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ChatEvent {
     pub kind: Option<ChatEventKind>,
@@ -71,6 +188,9 @@ pub(crate) struct ChatEvent {
     pub channel: String,
     pub target: String,
     pub flag: String,
+    /// arg7 — the `ChatChannels.dbc` ChannelID behind a zone channel (1 General, 2 Trade,
+    /// 22 LocalDefense); 0 for a custom channel. Filled from [`super::edit::ChannelState`].
+    pub zone_channel_id: u32,
     pub channel_number: u32,
     pub channel_base: String,
     pub notice: String,
@@ -85,6 +205,151 @@ impl ChatEvent {
             ..Default::default()
         }
     }
+
+    /// The notice byte behind a CHANNEL_NOTICE(_USER) event, if this is one.
+    ///
+    /// `notice` carries the `SMSG_CHANNEL_NOTIFY` byte in decimal because the composer and the
+    /// event bridge both need it and the field predates both; this is the single parse.
+    pub(crate) fn notice_byte(&self) -> Option<u8> {
+        self.notice.parse().ok()
+    }
+
+    /// This event's `arg1..arg10`, in the reference's own order and types (see the struct doc's
+    /// table). Ten values, always — `nil` is not a legal value in any slot.
+    pub(crate) fn script_args(&self) -> Vec<ScriptValue> {
+        // arg1 is the notice TOKEN for the notice family and the body for everything else — the
+        // one slot whose meaning is type-dependent (`ChatFrame_OnEvent` l.1416/1424 vs l.1396).
+        let arg1 = match (self.kind, self.notice_byte()) {
+            (Some(ChatEventKind::ChannelNotice | ChatEventKind::ChannelNoticeUser), Some(byte)) => {
+                notice_token(byte).unwrap_or_default().to_string()
+            }
+            _ => self.text.clone(),
+        };
+        vec![
+            ScriptValue::Str(arg1),
+            ScriptValue::Str(self.sender.clone()),
+            ScriptValue::Str(self.language.clone()),
+            ScriptValue::Str(self.channel.clone()),
+            ScriptValue::Str(self.target.clone()),
+            ScriptValue::Str(self.flag.clone()),
+            ScriptValue::Int(i64::from(self.zone_channel_id)),
+            ScriptValue::Int(i64::from(self.channel_number)),
+            ScriptValue::Str(self.channel_base.clone()),
+            // arg10 — see the struct doc: always 0 off this server.
+            ScriptValue::Int(0),
+        ]
+    }
+}
+
+/// The reference's event NAME for a kind — `"CHAT_MSG_" ++ <the `ChatTypeInfo` key>`.
+///
+/// The key spellings are the reference's own (they are what `ChatFrame_OnEvent` recovers with
+/// `strsub(event, 10)` and looks up in `ChatTypeInfo`), so this table and the `ChatTypeInfo` the
+/// engine seeds are the same set by construction — asserted in
+/// `ui_script::chat_tests::every_fired_event_name_is_a_chat_type_info_key`.
+pub(crate) fn event_name(kind: ChatEventKind) -> &'static str {
+    use ChatEventKind as K;
+    match kind {
+        K::Say => "CHAT_MSG_SAY",
+        K::Party => "CHAT_MSG_PARTY",
+        K::Raid => "CHAT_MSG_RAID",
+        K::Guild => "CHAT_MSG_GUILD",
+        K::Officer => "CHAT_MSG_OFFICER",
+        K::Yell => "CHAT_MSG_YELL",
+        K::Whisper => "CHAT_MSG_WHISPER",
+        K::WhisperInform => "CHAT_MSG_WHISPER_INFORM",
+        K::Emote => "CHAT_MSG_EMOTE",
+        K::TextEmote => "CHAT_MSG_TEXT_EMOTE",
+        K::System => "CHAT_MSG_SYSTEM",
+        K::MonsterSay => "CHAT_MSG_MONSTER_SAY",
+        K::MonsterYell => "CHAT_MSG_MONSTER_YELL",
+        K::MonsterEmote => "CHAT_MSG_MONSTER_EMOTE",
+        K::MonsterWhisper => "CHAT_MSG_MONSTER_WHISPER",
+        K::Channel => "CHAT_MSG_CHANNEL",
+        K::ChannelJoin => "CHAT_MSG_CHANNEL_JOIN",
+        K::ChannelLeave => "CHAT_MSG_CHANNEL_LEAVE",
+        K::ChannelNotice => "CHAT_MSG_CHANNEL_NOTICE",
+        K::ChannelNoticeUser => "CHAT_MSG_CHANNEL_NOTICE_USER",
+        K::ChannelList => "CHAT_MSG_CHANNEL_LIST",
+        K::Afk => "CHAT_MSG_AFK",
+        K::Dnd => "CHAT_MSG_DND",
+        K::Ignored => "CHAT_MSG_IGNORED",
+        K::Skill => "CHAT_MSG_SKILL",
+        K::Loot => "CHAT_MSG_LOOT",
+        K::Money => "CHAT_MSG_MONEY",
+        K::CombatXpGain => "CHAT_MSG_COMBAT_XP_GAIN",
+        K::RaidLeader => "CHAT_MSG_RAID_LEADER",
+        K::RaidWarning => "CHAT_MSG_RAID_WARNING",
+        K::RaidBossEmote => "CHAT_MSG_RAID_BOSS_EMOTE",
+        K::Battleground => "CHAT_MSG_BATTLEGROUND",
+        K::BattlegroundLeader => "CHAT_MSG_BATTLEGROUND_LEADER",
+        K::BgSystemNeutral => "CHAT_MSG_BG_SYSTEM_NEUTRAL",
+        K::BgSystemAlliance => "CHAT_MSG_BG_SYSTEM_ALLIANCE",
+        K::BgSystemHorde => "CHAT_MSG_BG_SYSTEM_HORDE",
+    }
+}
+
+/// The notice TOKEN a `SMSG_CHANNEL_NOTIFY` byte becomes in `arg1` — the token
+/// `ChatFrame_OnEvent` splices into `getglobal("CHAT_"..arg1.."_NOTICE")` (l.1416/1424).
+///
+/// The token set is read off the shipped `GlobalStrings.lua`'s own `CHAT_<X>_NOTICE` keys
+/// (l.494-745 of the extracted file), paired to the vmangos notice byte that produces each line —
+/// the same pairing [`super::frames::compose_notice`] already renders, which is why the two tables
+/// are asserted against each other rather than left to drift
+/// (`ui_chat::tests::every_rendered_notice_has_a_token`).
+///
+/// Byte-for-byte identical to the client's own jump table (`0x49c60c`, 32 direct arms), verified
+/// arm by arm in wow-re `chat-msg-event-args.md` §9 — checked against that table after the fact,
+/// not derived from it.
+///
+/// `None` = a byte the reference passes no token for: `0x00`/`0x01` are the CHANNEL_JOIN /
+/// CHANNEL_LEAVE member lines (their arg1 is the empty string, not a token), `0x0C` MODE_CHANGE
+/// fires **no chat event at all** (`0x49c24d` calls `0x49e910` and returns — which is why
+/// [`super::feed::ChatLog::push_channel_notice`] drops it before it becomes an event), and anything
+/// past `0x1F` is outside vmangos's range.
+///
+/// **Two state-dependent tokens we do not model:** the client answers `"YOU_CHANGED"` for `0x02`
+/// and `"SUSPENDED"` for `0x03` when its own channel record is in the matching state
+/// (`rec+0x9c == 2` / `== 3`) — a per-channel state benilla keeps nothing equivalent to, so we
+/// always send the plain `YOU_JOINED` / `YOU_LEFT`. Both alternates are `CHAT_<X>_NOTICE` strings
+/// that exist in GlobalStrings (`CHAT_YOU_CHANGED_NOTICE`, `CHAT_SUSPENDED_NOTICE`).
+pub(crate) fn notice_token(byte: u8) -> Option<&'static str> {
+    use benilla_protocol::messages::channel_notice as n;
+    Some(match byte {
+        n::YOU_JOINED => "YOU_JOINED",
+        n::YOU_LEFT => "YOU_LEFT",
+        n::WRONG_PASSWORD => "WRONG_PASSWORD",
+        n::NOT_MEMBER => "NOT_MEMBER",
+        n::NOT_MODERATOR => "NOT_MODERATOR",
+        n::PASSWORD_CHANGED => "PASSWORD_CHANGED",
+        n::OWNER_CHANGED => "OWNER_CHANGED",
+        n::PLAYER_NOT_FOUND => "PLAYER_NOT_FOUND",
+        n::NOT_OWNER => "NOT_OWNER",
+        n::CHANNEL_OWNER => "CHANNEL_OWNER",
+        n::ANNOUNCEMENTS_ON => "ANNOUNCEMENTS_ON",
+        n::ANNOUNCEMENTS_OFF => "ANNOUNCEMENTS_OFF",
+        n::MODERATION_ON => "MODERATION_ON",
+        n::MODERATION_OFF => "MODERATION_OFF",
+        n::MUTED => "MUTED",
+        n::PLAYER_KICKED => "PLAYER_KICKED",
+        n::BANNED => "BANNED",
+        n::PLAYER_BANNED => "PLAYER_BANNED",
+        n::PLAYER_UNBANNED => "PLAYER_UNBANNED",
+        n::PLAYER_NOT_BANNED => "PLAYER_NOT_BANNED",
+        n::PLAYER_ALREADY_MEMBER => "PLAYER_ALREADY_MEMBER",
+        n::INVITE => "INVITE",
+        n::INVITE_WRONG_FACTION => "INVITE_WRONG_FACTION",
+        n::WRONG_FACTION => "WRONG_FACTION",
+        n::INVALID_NAME => "INVALID_NAME",
+        n::NOT_MODERATED => "NOT_MODERATED",
+        n::PLAYER_INVITED => "PLAYER_INVITED",
+        n::PLAYER_INVITE_BANNED => "PLAYER_INVITE_BANNED",
+        n::THROTTLED => "THROTTLED",
+        // MODE_CHANGE (0x0C) has no CHAT_*_NOTICE string in 1.12 — the reference renders nothing,
+        // so there is no token. JOINED/LEFT (0x00/0x01) are not notices at all: they are the
+        // CHANNEL_JOIN/CHANNEL_LEAVE member-line events.
+        _ => return None,
+    })
 }
 
 /// The message groups a window registers — `ChatTypeGroup`'s keys (transcribed; the chat-cache

@@ -23,7 +23,7 @@ fn load_xml(s: &UiScript, file: &str) -> usize {
 }
 
 /// The equipped-bag BAR icons must draw ABOVE the action-bar art, not under it. The bar buttons are
-/// relocated onto `BenillaActionBarArtFrame` but are top-level frames, so they default to a lower
+/// relocated onto `MainMenuBarArtFrame` but are top-level frames, so they default to a lower
 /// frame level than the bar's own child-hierarchy art (the ExpBar dwarf notches + metal/well art) —
 /// which would then paint over the centered icons, leaving the ring but no bag icon. The OnLoad
 /// `BenillaActionBarArt_SeatAbove` seats them one level above the art (the action buttons' level).
@@ -34,7 +34,7 @@ fn bag_bar_icons_draw_above_the_action_bar_art() {
     // The screen the client defaults to; the action bar centers here and the bag bar lands over its
     // right end, where the dwarf-notch strip overlaps — the exact geometry that reproduced the bug.
     s.set_screen_size(1600.0, 900.0);
-    // ActionBar.xml carries both the anchor target (BenillaActionBarArtFrame) and the occluder (the
+    // ActionBar.xml carries both the anchor target (MainMenuBarArtFrame) and the occluder (the
     // ExpBar dwarf art); MerchantFrame.xml is BagFrame's documented purse-helper dep.
     for file in [
         "Fonts.xml",
@@ -784,7 +784,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
 }
 
 /// A second bag window (decision 0216 slice 2): bag 1's snapshot feeds through the SAME
-/// C_Container/BenillaBagWindow_Update plumbing the backpack uses, opened via the bag-bar path
+/// container/BenillaBagWindow_Update plumbing the backpack uses, opened via the bag-bar path
 /// (`BenillaBagBarSlot_OnClick`, not the backpack toggle) and painting its own slot 1 icon.
 #[test]
 fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
@@ -981,28 +981,21 @@ fn shift_click_on_a_stack_opens_the_split_frame() {
     s.set_screen_size(1024.0, 768.0);
     let (x, y) = open_backpack_with_a_five_stack(&mut s);
 
-    assert!(!s
-        .eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
     s.set_modifiers(true, false, false);
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     s.set_modifiers(false, false, false);
     assert!(
-        s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "shift-click opened the split frame"
     );
     assert!(
         s.cursor_item().is_none(),
         "the shift fork never picks the stack up"
     );
-    assert_eq!(
-        s.eval::<i64>("return BenillaStackSplitFrame.maxStack")
-            .unwrap(),
-        5
-    );
+    assert_eq!(s.eval::<i64>("return StackSplitFrame.maxStack").unwrap(), 5);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -1018,22 +1011,15 @@ fn split_okay_then_a_placement_queues_the_split_move() {
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     s.set_modifiers(false, false, false);
-    assert!(s
-        .eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
     // Bump the spinner from 1 to 3, then Okay — the carry lands on the cursor.
     s.run("BenillaStackSplitRight_Click()").unwrap();
     s.run("BenillaStackSplitRight_Click()").unwrap();
-    assert_eq!(
-        s.eval::<i64>("return BenillaStackSplitFrame.split")
-            .unwrap(),
-        3
-    );
+    assert_eq!(s.eval::<i64>("return StackSplitFrame.split").unwrap(), 3);
     s.run("BenillaStackSplitOkay_Click()").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "Okay hides the spinner"
     );
     let held = s.cursor_item().expect("Okay picked up the split carry");
@@ -1078,9 +1064,7 @@ fn a_plain_click_hides_an_open_split_frame() {
     s.mouse_button(x, y, "LeftButton", true);
     s.mouse_button(x, y, "LeftButton", false);
     s.set_modifiers(false, false, false);
-    assert!(s
-        .eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap());
 
     s.run(
         "BENILLA_TEST_B9 = nil\n\
@@ -1092,8 +1076,7 @@ fn a_plain_click_hides_an_open_split_frame() {
     s.run("BenillaBagSlot_OnClick(BENILLA_TEST_B9, \"LeftButton\")")
         .unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
         "the plain click on an unrelated slot hid the spinner"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1321,10 +1304,9 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
 
     // Keyless: the button is hidden and the plate is the dwarf one.
     s.set_has_key(false);
-    s.run("BenillaMainMenuBar_UpdateKeyRing()").unwrap();
+    s.run("MainMenuBar_UpdateKeyRing()").unwrap();
     assert!(
-        !s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
         "no key ⇒ no keyring button"
     );
     assert_eq!(
@@ -1339,8 +1321,7 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
     s.set_container(-2, Some(keyring(8, true)));
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
     assert!(
-        s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
-            .unwrap(),
+        s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
         "the first key reveals the keyring button"
     );
     assert_eq!(
@@ -1349,8 +1330,8 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
         "exactly the two RIGHT-hand strips swap to the keyring plate"
     );
     for (strip, top, bottom) in [
-        ("BenillaActionBarTexture2", 0.6640625, 1.0),
-        ("BenillaActionBarTexture3", 0.1640625, 0.5),
+        ("MainMenuBarTexture2", 0.6640625, 1.0),
+        ("MainMenuBarTexture3", 0.1640625, 0.5),
     ] {
         let (t, b) = s
             .eval::<(f64, f64)>(&format!(
@@ -1367,10 +1348,8 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
     // edge at -234 from the bar's right; ours steps 36px buttons with -6 gaps and lands at -235.
     // Within a pixel of the real bar — which is the check that matters, because the socket the
     // button sits in is PAINTED INTO the keyring plate and cannot be nudged to meet it.
-    let bar_right = s.eval::<f64>("return BenillaActionBar:GetRight()").unwrap();
-    let button_left = s
-        .eval::<f64>("return BenillaKeyRingButton:GetLeft()")
-        .unwrap();
+    let bar_right = s.eval::<f64>("return MainMenuBar:GetRight()").unwrap();
+    let button_left = s.eval::<f64>("return KeyRingButton:GetLeft()").unwrap();
     assert!(
         (bar_right - button_left - 235.0).abs() < 1.5,
         "the keyring button must land in the plate's painted socket — the ref's own -234, got {}",
@@ -1379,9 +1358,9 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
 
     // The performance meter clears the new socket (ref l.180: -227 → -235).
     let perf_right = s
-        .eval::<f64>("return BenillaPerformanceBarFrame:GetRight()")
+        .eval::<f64>("return MainMenuBarPerformanceBarFrame:GetRight()")
         .unwrap();
-    let bar_right = s.eval::<f64>("return BenillaActionBar:GetRight()").unwrap();
+    let bar_right = s.eval::<f64>("return MainMenuBar:GetRight()").unwrap();
     assert!(
         (bar_right - perf_right - 235.0).abs() < 0.01,
         "the meter slid to -235 with the keyring up (got {})",
@@ -1389,12 +1368,11 @@ fn the_first_key_puts_the_keyring_on_the_bar() {
     );
 
     // And it reverts: destroying the last key takes the keyring back off the bar (our divergence
-    // from the ref's one-way saved-variable latch — see BenillaMainMenuBar_UpdateKeyRing).
+    // from the ref's one-way saved-variable latch — see MainMenuBar_UpdateKeyRing).
     s.set_has_key(false);
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
     assert!(
-        !s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
-            .unwrap(),
+        !s.eval::<bool>("return KeyRingButton:IsShown()").unwrap(),
         "losing the last key takes the button away again"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -1418,7 +1396,7 @@ fn the_keyring_button_opens_a_keyring_window() {
     assert!(!s
         .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
         .unwrap());
-    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
     assert!(
         s.eval::<bool>("return BenillaKeyRingFrame:IsShown()")
@@ -1451,12 +1429,12 @@ fn the_keyring_button_opens_a_keyring_window() {
     assert_eq!(shown, 8, "only the level-unlocked keyring slots are drawn");
     // The key is in the window (slot 1 of 8 is the LAST chain button — size - physIndex + 1).
     assert_eq!(
-        s.eval::<i64>("return C_Container.GetContainerItemID(KEYRING_CONTAINER, 1)")
+        s.eval::<i64>("return BenillaGetContainerItemID(KEYRING_CONTAINER, 1)")
             .unwrap(),
         7146
     );
 
-    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
     assert!(!s
         .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
@@ -1497,10 +1475,10 @@ fn a_key_dropped_on_the_button_files_itself() {
         }),
     );
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
-    s.run("C_Container.PickupContainerItem(0, 3)").unwrap();
+    s.run("PickupContainerItem(0, 3)").unwrap();
     assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
 
-    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
     assert_eq!(
         s.take_container_moves(),
@@ -1527,15 +1505,15 @@ fn a_key_dropped_on_the_button_files_itself() {
         );
     }
     s.set_container(-2, Some(full));
-    s.run("C_Container.PickupContainerItem(0, 3)").unwrap();
-    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+    s.run("PickupContainerItem(0, 3)").unwrap();
+    s.run("BenillaKeyRingButton_OnClick(KeyRingButton)")
         .unwrap();
     assert!(
         s.take_container_moves().is_empty(),
         "a full keyring queues no move"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
             .unwrap(),
         "Your keyring is full.",
         "and says so — the reference's own dangling string name prints nothing"
@@ -1591,11 +1569,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     };
 
     // Nothing is animating until a push arrives.
-    for b in [
-        "BenillaBagToggle",
-        "BenillaBagBarSlot2",
-        "BenillaKeyRingButton",
-    ] {
+    for b in ["BenillaBagToggle", "BenillaBagBarSlot2", "KeyRingButton"] {
         assert!(!shown(&s, b), "{b}'s card starts hidden");
     }
 
@@ -1609,11 +1583,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     );
     s.resolve();
     assert!(shown(&s, "BenillaBagBarSlot2"), "bag 2's card plays");
-    for b in [
-        "BenillaBagToggle",
-        "BenillaBagBarSlot1",
-        "BenillaKeyRingButton",
-    ] {
+    for b in ["BenillaBagToggle", "BenillaBagBarSlot1", "KeyRingButton"] {
         assert!(!shown(&s, b), "{b} took nothing, so {b} animates nothing");
     }
     // The pushed icon reaches the RENDERER, not just the Lua state — exactly one quad carries it.
@@ -1725,7 +1695,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
             benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Key_03".into()),
         ],
     );
-    assert!(shown(&s, "BenillaKeyRingButton"), "the keyring card plays");
+    assert!(shown(&s, "KeyRingButton"), "the keyring card plays");
     assert!(
         !shown(&s, "BenillaBagToggle"),
         "and the backpack's does not"

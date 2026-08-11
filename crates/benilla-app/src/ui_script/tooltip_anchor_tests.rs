@@ -9,7 +9,7 @@
 //! — engine tests stubbed the handler, so nothing asserted the real files' geometry. Everything
 //! here loads the shipped XMLs and asserts resolved rects / anchors, never a stub.
 
-use benilla_ui::script::{AuraState, ScriptValue, UiScript, UnitState};
+use benilla_ui::script::{AuraState, UiScript, UnitState};
 
 /// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the bag/panel
 /// tests' loader, duplicated so this file is self-contained).
@@ -107,15 +107,14 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
     // The kit + popups precede the unit frames (their DropDown children's OnLoad), app order.
     let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
     s.set_unit("target", Some(wolf()));
-    s.run("BenillaUnitFrame_OnEnter(BenillaTargetFrame)")
-        .unwrap();
+    s.run("BenillaUnitFrame_OnEnter(TargetFrame)").unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     s.resolve();
     let ok: bool = s
         .eval(
             "return GameTooltip:IsVisible() \
                and GameTooltip:GetRight() == 1011 and GameTooltip:GetBottom() == 70 \
-               and GameTooltip:IsOwned(BenillaTargetFrame)",
+               and GameTooltip:IsOwned(TargetFrame)",
         )
         .unwrap();
     assert!(
@@ -130,8 +129,7 @@ fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
         "a non-player target still gets the unit lines"
     );
     // Leave: gone on the spot, no ramp to wait out.
-    s.run("BenillaUnitFrame_OnLeave(BenillaTargetFrame)")
-        .unwrap();
+    s.run("BenillaUnitFrame_OnLeave(TargetFrame)").unwrap();
     let hidden: bool = s.eval("return not GameTooltip:IsShown()").unwrap();
     assert!(
         hidden,
@@ -153,8 +151,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
     let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
     s.set_unit("player", Some(wolf()));
 
-    s.run("BenillaUnitFrame_OnEnter(BenillaPlayerFrame)")
-        .unwrap();
+    s.run("BenillaUnitFrame_OnEnter(PlayerFrame)").unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -183,8 +180,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
             ..wolf()
         }),
     );
-    s.run("BenillaUnitFrame_OnEnter(BenillaTargetFrame)")
-        .unwrap();
+    s.run("BenillaUnitFrame_OnEnter(TargetFrame)").unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap(),
@@ -201,8 +197,7 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 #[test]
 fn action_button_hover_takes_the_default_corner() {
     let s = harness(&["Cooldown.xml", "ActionBar.xml"]);
-    s.run("BenillaActionButton_OnEnter(BenillaActionButton3)")
-        .unwrap();
+    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let ok: bool = s
         .eval(
@@ -235,11 +230,20 @@ fn buff_hover_hangs_below_left_of_the_button() {
             expiration_time: 1800.0,
             helpful: true,
             cancelable: true,
+            until_cancelled: false,
+            channeled: false,
         }]),
     );
-    s.fire_event("UNIT_AURA", vec![ScriptValue::Str("player".into())]);
+    // The reference's own event, which the buff buttons register for (`ui_aura` fires it beside
+    // the Era-shaped UNIT_AURA on the same rebuild).
+    s.fire_event("PLAYER_AURAS_CHANGED", vec![]);
     s.resolve();
-    s.run("BenillaBuffButton_OnEnter(BuffButton0)").unwrap();
+    // Through the template's real `<OnEnter>` — the reference keeps the SetOwner/SetPlayerBuff pair
+    // inline there rather than in a named function, so the handler body itself is what this drives.
+    // `this` is set by hand because the engine sets it only when it *fires* a handler (RF-0025);
+    // calling the compiled function directly does not, and the body reads `this`, not its argument.
+    s.run("this = BuffButton0; BuffButton0:GetScript(\"OnEnter\")(BuffButton0)")
+        .unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let ok: bool = s
         .eval(

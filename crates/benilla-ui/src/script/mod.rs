@@ -40,9 +40,12 @@ mod action;
 mod aura;
 mod backdrop;
 mod bank;
+mod binding_abi;
 mod button;
 mod char_stats;
+mod chat_send;
 mod clip;
+mod colorselect;
 mod container;
 mod cooldown;
 mod craft;
@@ -50,12 +53,15 @@ mod cursor;
 mod death;
 mod editbox;
 pub(crate) use editbox::adopt_text_region;
+pub(crate) mod addon;
+mod client;
 mod cvars;
 mod dressup;
 mod duel;
-mod event;
+pub(crate) mod event;
 mod extract;
 mod follow;
+pub(crate) mod font;
 mod gossip;
 mod inspect;
 mod item_stats;
@@ -64,6 +70,7 @@ pub mod keybind;
 mod layout;
 mod loot;
 mod loot_roll;
+mod lua50;
 mod macros;
 mod mail;
 mod merchant;
@@ -84,6 +91,7 @@ mod scrollframe;
 mod session;
 mod shapeshift;
 mod skills;
+mod slash;
 mod slider;
 mod social;
 mod sound;
@@ -103,9 +111,11 @@ mod tradeskill;
 mod trainer;
 mod types;
 mod unit;
+mod weapon_enchant;
 mod worldmap;
 
 pub use action::{ActionSlot, ActionState};
+pub use addon::AddOnInfo;
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
@@ -113,6 +123,7 @@ pub use char_stats::{
     weapon_subclass_skill, InvSlotView, InventorySlots, UnitCombatStats, INVENTORY_SLOT_COUNT,
     SKILL_DEFENSE, SKILL_UNARMED,
 };
+pub use chat_send::ChatSend;
 pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
 pub use craft::{CraftReagent, CraftRecipe, CraftState, CraftTooltip};
 pub use cursor::{
@@ -133,7 +144,7 @@ pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NA
 pub use mail::{MailInboxRow, MailSendRequest, MailState};
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
-pub use party::{PartyMemberInfo, PartyRequest, PartyState};
+pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo};
 pub use pet::{PetActionView, PetStats};
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
@@ -161,9 +172,10 @@ pub use types::{
 };
 pub(crate) use types::{MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
+pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{WorldMapContinentView, WorldMapOverlayView, WorldMapState, WorldMapZoneView};
 
-use mlua::{Function, Lua, Table};
+use mlua::Lua;
 
 use crate::layout::Rect;
 use crate::order::ZTarget;
@@ -193,7 +205,27 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// `OnVerticalScroll`/`OnScrollRangeChanged` are the ScrollFrame's own slots (decision 0112).
 /// `OnDragStart`/`OnDragStop`/`OnReceiveDrag` are the drag trio (decision 0216 §3) — driven by
 /// `RegisterForDrag` + the same mouse path as the six mouse handlers above, not a separate one.
-const SCRIPT_KINDS: [&str; 29] = [
+/// `OnColorSelect` is the ColorSelect's own slot (RF-28 `+0x338`), fired by its `SetColorRGB`.
+///
+/// **Every name here is FIRED by something.** A kind that the engine can accept but never raise is
+/// strictly worse than the `SetScript: unsupported script` error it replaces — the addon's handler
+/// silently never runs and nothing anywhere says so (the bug class decisions 1203/1205/1211 each
+/// record). So a script name earns its row here only together with the code that fires it, and the
+/// names the reference has that we do NOT fire stay OUT, with the reason recorded at
+/// [`crate::script::object::events_regions::set_script`].
+///
+/// **This list is FLAT; the reference's set is per widget type** (RF-0028's script-name→slot
+/// resolvers: base map `0x76a0d0` + the type's own additions — a `<Frame>` has no `OnClick`). That
+/// divergence is deliberate and measured: our own transcribed FrameXML relies on it in 9 places
+/// (`PlayerFrame`/`TargetFrame`/`PetFrame`/`PartyMemberFrame1-4` are mouse-enabled `<Frame>`s
+/// carrying `OnClick` — see the note at `assets/ui/UnitFrames.xml`'s `PlayerFrame_OnClick` — plus
+/// `ChatFrame1`/`ChatFrame2`), and the corpus in 21 more (20 `EditBox` + 1 `<Frame>`
+/// `OnEscapePressed`), all of which fire today ([`button::click_button`]'s "plain frames can carry
+/// one too" arm). Going per-type is the faithful shape and is what would give us `HasScript` (948
+/// corpus call sites across 91 addons), but it removes working behaviour from those 30 sites, so it
+/// is a change to make deliberately with FrameXML fixed first — not a side effect of widening this
+/// list.
+const SCRIPT_KINDS: [&str; 32] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -227,6 +259,23 @@ const SCRIPT_KINDS: [&str; 29] = [
     "OnTooltipAddMoney",
     "OnTooltipCleared",
     "OnTooltipSetDefaultAnchor",
+    // The ColorSelect's own slot (RF-28 `0x78b4f0` script-map, `+0x338`): `OnColorSelect(r, g, b)`
+    // — how the colour picker paints its preview swatch, and how TipBuddy's two private
+    // `<ColorSelect>` frames learn a colour changed.
+    "OnColorSelect",
+    // The Button/CheckButton double click (RF-28 script-map `0x778c50`, `+0x4d4`) —
+    // `OnDoubleClick(self, button)`, fired by [`pointer`]'s release-edge detector *instead of* the
+    // second `OnClick`, 300 ms (wow-re `ui/scratch/button-doubleclick-law.md`, a §5 cross-check
+    // dispatched from this work). **The corpus's
+    // single biggest script gap**: 250 call sites across 85 addons, and the *only* thing behind the
+    // harness's entire `SetScript: unsupported script` blocker row — 8 addons, 5 dying at load and
+    // 3 at session start, every one of them a FuBar plugin or a Titan panel button
+    // (`FuBarPlugin-2.0:CreateBasicPluginFrame` wires one, unguarded, on its panel Button).
+    "OnDoubleClick",
+    // The layout event (base map `0x76a0d0` `+0x120`), fired from the resolve pass by
+    // [`crate::layout::size_changed`]'s byte-verified epsilon test — see
+    // [`UiScript::resolve_layout`]. `OnSizeChanged(self, width, height)`.
+    "OnSizeChanged",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -247,17 +296,6 @@ const SCRIPT_KINDS: [&str; 29] = [
 /// [`pointer`]. What stays here is construction and the small host-facing state pushes/queries.
 pub struct UiScript {
     lua: Lua,
-    /// The FrameXML **template registry**, persisted across [`crate::loader::load`] calls — the
-    /// client's template table is global (`0x6ee500`, rf24), so a file may `inherits=` a template
-    /// an *earlier file* registered (the real MerchantFrame.xml inherits
-    /// CharacterFrameTemplates.xml's tab template). Register-before-use in load order, exactly
-    /// the client's rule; a per-document registry silently dropped every cross-file inherit.
-    pub(crate) framexml_templates:
-        std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
-    /// The FrameXML **font-element registry** (a separate namespace — a font inherits a font,
-    /// never a frame template), persisted for the same cross-file reason.
-    pub(crate) framexml_fonts:
-        std::cell::RefCell<std::collections::HashMap<String, crate::framexml::Element>>,
 }
 
 impl UiScript {
@@ -266,9 +304,17 @@ impl UiScript {
         let lua = Lua::new();
         lua.set_app_data(Model::new());
 
+        addon::install(&lua)?;
+        chat_send::install(&lua)?;
+        client::install(&lua)?;
         stdlib::sandbox(&lua)?;
+        // Before the stdlib layer, so its aliases bind the 5.0-shaped functions (decision 1194).
+        lua50::install(&lua)?;
         stdlib::install(&lua)?;
         object::install(&lua)?;
+        // After `object` (it reuses the frame side's `publish_global`), before any FrameXML is
+        // loaded — `Loader::do_font` publishes into the tables this builds.
+        font::install(&lua)?;
         unit::install(&lua)?;
         party::install(&lua)?;
         social::install(&lua)?;
@@ -306,6 +352,7 @@ impl UiScript {
         skills::install(&lua)?;
         item_stats::install(&lua)?;
         char_stats::install(&lua)?;
+        weapon_enchant::install(&lua)?;
         loot::install(&lua)?;
         loot_roll::install(&lua)?;
         quest::install(&lua)?;
@@ -313,17 +360,14 @@ impl UiScript {
         messageframe::install(&lua)?;
         scrollframe::install(&lua)?;
         slider::install(&lua)?;
+        colorselect::install(&lua)?;
         minimap::install(&lua)?;
         cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
         net_stats::install(&lua)?;
 
-        Ok(UiScript {
-            lua,
-            framexml_templates: Default::default(),
-            framexml_fonts: Default::default(),
-        })
+        Ok(UiScript { lua })
     }
 
     /// The embedded VM — for the Bevy plugin / TOC-XML loader to add the game-state API bindings
@@ -400,7 +444,22 @@ impl UiScript {
     /// caller (a *load-time* error is the caller's to see; *handler* errors during events go to
     /// [`UiScript::errors`]).
     pub fn run(&self, chunk: &str) -> mlua::Result<()> {
-        self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).exec()
+        self.run_chunk(chunk.as_bytes())
+    }
+
+    /// [`UiScript::run`] over a chunk that came off disk, which is **bytes** (decision 1193).
+    ///
+    /// The reference slurps the file and hands the buffer to `luaL_loadbuffer` with no conversion
+    /// (wow-5875-re `system/ui/ui.md`), and Lua 5.0 strings are byte strings — so a cp1252 locale
+    /// file runs there and its literals carry the raw bytes. Reading such a file as `String` is
+    /// what made 76 of a real corpus's `.lua` files read as *absent* rather than as text with an
+    /// odd glyph. The two front-door transforms the reference's own compiler applies — the UTF-8
+    /// BOM strip and the `#`-line skip — are applied here ([`crate::source::chunk`]).
+    pub fn run_chunk(&self, chunk: &[u8]) -> mlua::Result<()> {
+        self.lua
+            .load(crate::source::chunk(chunk))
+            .set_mode(mlua::ChunkMode::Text)
+            .exec()
     }
 
     /// Load and evaluate a Lua chunk, returning its result. Primarily for tests / one-shot queries.
@@ -502,16 +561,18 @@ impl UiScript {
     /// holds the `OnLoad` `Function` directly (to fire it bottom-up) rather than through the registry:
     /// this keeps the convention in one home instead of duplicating it. Errors are returned so the
     /// caller routes them (the loader records them in its own report).
-    pub(crate) fn invoke_handler(&self, wrapper: &Table, func: &Function) -> mlua::Result<()> {
-        event::invoke_with_globals(&self.lua, wrapper.clone(), func, None, Vec::new())
-    }
-
     /// Resolve every frame's rect: sync each frame's effective scale from the arena into its layout
     /// input, run the [`crate::layout`] graph (screen root as the external base), and cache the
     /// resolved rects. `GetWidth`/`GetHeight`/`extract` read this cache.
+    /// Frames whose size moved fire `OnSizeChanged` here, once the borrow is released
+    /// ([`event::fire_size_changes`]) — this is the drain the resolver's queue exists for, and the
+    /// one every per-frame host tick runs.
     pub fn resolve(&mut self) {
-        let mut model = self.model_mut();
-        Self::resolve_layout(&mut model);
+        {
+            let mut model = self.model_mut();
+            Self::resolve_layout(&mut model);
+        }
+        event::fire_size_changes(&self.lua);
     }
 
     /// Store host measurements for [`MeasureRequest`]s (`(id, w, h, natural_w, key)` — id/key
@@ -631,6 +692,12 @@ impl UiScript {
         let mut model = self.model_mut();
         model.drag = None;
         model.mouse_down_on.clear();
+        // [`Model::last_click`] is deliberately NOT cleared here. It looks like it belongs in this
+        // list, and the binary says otherwise: `[CButton+0x334]` has exactly three writers
+        // image-wide (the ctor, the fired-double zero, the fired-single stamp) and none of them is
+        // a hide, a disable, or a mouse-leave — so a half-finished double click really does survive
+        // the cursor leaving the window and coming back inside the 300 ms (wow-re
+        // `ui/scratch/button-doubleclick-law.md`, "state hygiene").
         // A thumb drag in progress when the pointer leaves is abandoned too (decision 0250 §5) —
         // the release that would end it is never fed, same leak as the drag gesture above.
         model.slider_drag = None;
@@ -698,6 +765,29 @@ impl UiScript {
         self.model_ref().layout_rounds
     }
 
+    /// Is `name` a registered FrameXML template — one `CreateFrame`'s fourth argument or an
+    /// `inherits=` can resolve (decision 1203)?
+    ///
+    /// A pure query on the VM's live registry, for the corpus harness: an addon naming a template
+    /// we have not transcribed gets a bare frame and **no load error**, so nothing else can see it.
+    pub fn has_framexml_template(&self, name: &str) -> bool {
+        self.model_ref()
+            .framexml_templates
+            .borrow()
+            .contains_key(name)
+    }
+
+    /// Is `name` a registered FONT object — the *other* thing an `inherits=` may legally name?
+    ///
+    /// [`Self::has_framexml_template`]'s twin, and only useful beside it: `inherits=` is one
+    /// attribute over two namespaces (`<FontString inherits="GameFontNormal">` names a font,
+    /// `<Button inherits="UIPanelButtonTemplate">` names a template — `loader::expand_region` is
+    /// where that fork lives). A census that asks only the template registry reports every font in
+    /// the corpus as a missing template.
+    pub fn has_font_object(&self, name: &str) -> bool {
+        self.model_ref().font_objects.contains_key(name)
+    }
+
     /// A snapshot of the script errors collected so far (from `pcall`'d handlers).
     pub fn errors(&self) -> Vec<String> {
         self.model_ref().errors.clone()
@@ -720,10 +810,15 @@ impl UiScript {
     }
 
     /// Register a named virtual [`FontObject`] (a resolved `<Font>`), overwriting any prior one of
-    /// the same name — the loader's join for top-level `<Font>` nodes. FontString `inherits=` and Lua
-    /// `SetFontObject` resolve against this registry.
+    /// the same name, **and publish it as the Lua global `name`** — the same pair
+    /// `Loader::do_font` performs, so a font registered from Rust is addressable from Lua exactly
+    /// like one declared in XML (`fs:SetFontObject(Name)`, `Name:GetFont()`). One registration act,
+    /// one outcome: the two paths cannot drift.
     pub fn register_font_object(&self, name: &str, font: FontObject) {
         self.model_mut().font_objects.insert(name.to_string(), font);
+        // Publishing cannot fail for a fresh table + a string key; a registry hiccup is not worth
+        // an unwrap in a host-facing setter, and the record is already in place either way.
+        let _ = font::publish(&self.lua, name);
     }
 
     /// Look up a registered [`FontObject`] by name (the resolved paint), if any. Used by tests and by

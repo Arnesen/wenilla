@@ -7,8 +7,8 @@
 //! The bank's *contents* never pass through here: bank slots are player-array slots the container
 //! seam already carries — the app feeds them as container `-1` (`BANK_CONTAINER`, the 24 generic
 //! slots) and containers `5..=10` (the six bank bags), the reference client's own id space
-//! (`BankFrame.lua:1-4`), so `C_Container.*`, the cursor drag-drop, and the stack split all work on
-//! bank slots with no bank-specific surface.
+//! (`BankFrame.lua:1-4`), so the container verbs, the cursor drag-drop, and the stack split all
+//! work on bank slots with no bank-specific surface.
 //!
 //! ## The 5875 API shape (the reference `BankFrame.lua`, read as behavior spec this session)
 //!

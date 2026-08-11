@@ -28,14 +28,16 @@ use bevy::prelude::*;
 
 use benilla_ui::script::UiScript;
 
-use crate::char_select::ClientState;
-
 pub(crate) struct UiSavedPlugin;
 
 impl Plugin for UiSavedPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnExit(ClientState::InWorld), save_on_session_end)
-            .add_systems(Update, save_on_exit);
+    fn build(&self, _app: &mut App) {
+        // **The write is no longer this plugin's own edge.** It is one step of the ordered
+        // shutdown tail in [`crate::ui_script::shutdown_ui_state`], because the reference has
+        // exactly one shutdown (`0x490bd0`) reached from five roots and its steps are ordered
+        // against each other: `PLAYER_LOGOUT` fires before any write, the flat file is written
+        // before the per-addon files, and `AddOns.txt` is last. Three independent systems on the
+        // same edge cannot express that.
     }
 }
 
@@ -70,11 +72,12 @@ pub(crate) fn load_saved_variables(script: &mut UiScript) {
     script.fire_event("VARIABLES_LOADED", vec![]);
 }
 
-/// Write the file from the live globals. No-op when nothing is registered — the UI never loaded
+/// Write the flat file from the live globals — step 3 of the shutdown tail
+/// ([`crate::ui_script::shutdown_ui_state`]). No-op when nothing is registered — the UI never loaded
 /// (a glue-only run, a capture), and an empty write would be a wipe rather than a save. The
 /// reference *does* delete the file when an addon declares nothing, which is a different case:
 /// there, the addon loaded and its declaration list is genuinely empty.
-fn save(script: &mut UiScript) {
+pub(crate) fn save(script: &mut UiScript) {
     let names = script.saved_variable_names();
     if names.is_empty() {
         return;
@@ -102,25 +105,6 @@ const HEADER: &str = "\
 -- benilla saved variables (decision 1128) — the UI's own remembered settings.
 -- Written at logout/exit from the live values; executed as a Lua chunk at UI load.
 ";
-
-/// `OnExit(InWorld)`: a `/logout` back to the glue, or a disconnect — the reference's
-/// logout-to-character-select and disconnect roots.
-fn save_on_session_end(script: Option<NonSendMut<UiScript>>) {
-    if let Some(mut script) = script {
-        save(&mut script);
-    }
-}
-
-/// `AppExit`: quitting the client — the reference's quit / application-exit roots. Reads the
-/// message rather than a state edge because a quit from in-world never leaves `InWorld`.
-fn save_on_exit(script: Option<NonSendMut<UiScript>>, mut exits: MessageReader<AppExit>) {
-    if exits.read().next().is_none() {
-        return;
-    }
-    if let Some(mut script) = script {
-        save(&mut script);
-    }
-}
 
 #[cfg(test)]
 mod tests {

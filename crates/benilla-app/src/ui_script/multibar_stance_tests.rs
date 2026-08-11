@@ -205,9 +205,15 @@ fn shipped_stance_bar_drives_end_to_end() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // Cooldown.xml + ActionBar.xml first: StanceBar.xml anchors to BenillaActionBar and calls
+    // Cooldown.xml + ActionBar.xml first: StanceBar.xml anchors to MainMenuBar and calls
     // CooldownFrame_SetTimer / BENILLA_FALLBACK_ICON (the runtime load order).
     load_action_bar(&s);
+    // MultiBars.xml too, and it is load-bearing for the geometry below: the stance bar's OnShow
+    // re-fires UIParent_ManageFramePositions, whose `ShapeshiftBarFrame` row computes the y as
+    // baseY 0 + bottomLeft 45 — the same +45 the XML anchor carries statically, but only while
+    // the always-on bottom multibar (0270) exists to raise the flag. Without this file the pass
+    // sees no bottom bar, drops the 45 and the bar sits on MainMenuBar's top edge.
+    load_xml(&s, "MultiBars.xml");
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/StanceBar.xml"),
     )
@@ -226,7 +232,7 @@ fn shipped_stance_bar_drives_end_to_end() {
 
     // No forms pushed (a mage): the frame is hidden.
     assert!(!s
-        .eval::<bool>("return BenillaShapeshiftBarFrame:IsShown()")
+        .eval::<bool>("return ShapeshiftBarFrame:IsShown()")
         .unwrap());
 
     // A warrior's two stances: battle active, defensive known but not castable.
@@ -253,7 +259,7 @@ fn shipped_stance_bar_drives_end_to_end() {
     s.resolve();
     let quads = s.extract();
 
-    // Geometry: the stance frame's BOTTOMLEFT = BenillaActionBar (1024×53, screen-bottom
+    // Geometry: the stance frame's BOTTOMLEFT = MainMenuBar (1024×53, screen-bottom
     // centered ⇒ left edge 0) TOPLEFT +(30,45) = (30,98); button 1 at frame BOTTOMLEFT +(11,3),
     // 30×30 ⇒ x[41,71] y[101,131]; button 2 chains +7 ⇒ left 78.
     let icon = |quads: &[benilla_ui::script::ExtractedQuad], path: &str| {
@@ -272,10 +278,10 @@ fn shipped_stance_bar_drives_end_to_end() {
 
     // The active form's checked ring; the not-castable grey on button 2's icon.
     assert!(s
-        .eval::<bool>("return BenillaShapeshiftButton1:GetChecked()")
+        .eval::<bool>("return ShapeshiftButton1:GetChecked()")
         .unwrap());
     assert!(!s
-        .eval::<bool>("return BenillaShapeshiftButton2:GetChecked()")
+        .eval::<bool>("return ShapeshiftButton2:GetChecked()")
         .unwrap());
     let grey = quads.iter().find_map(|q| match &q.content {
         QuadContent::Texture {
@@ -309,12 +315,12 @@ fn shipped_stance_bar_drives_end_to_end() {
     // pre-OnClick toggle (ref ShapeshiftButtonTemplate), leaving checked to the isActive
     // repaint: button 2 stays unchecked until the server actually shifts us…
     assert!(
-        !s.eval::<bool>("return BenillaShapeshiftButton2:GetChecked()")
+        !s.eval::<bool>("return ShapeshiftButton2:GetChecked()")
             .unwrap(),
         "a clicked non-active form must stay unchecked until the form byte confirms"
     );
     assert!(s
-        .eval::<bool>("return BenillaShapeshiftButton1:GetChecked()")
+        .eval::<bool>("return ShapeshiftButton1:GetChecked()")
         .unwrap());
 
     // …and clicking the ACTIVE form (the director's warrior bug: Battle Stance must not
@@ -324,7 +330,7 @@ fn shipped_stance_bar_drives_end_to_end() {
     s.mouse_button(56.0, 116.0, "LeftButton", false);
     assert_eq!(s.take_shapeshift_casts(), vec![2457]);
     assert!(
-        s.eval::<bool>("return BenillaShapeshiftButton1:GetChecked()")
+        s.eval::<bool>("return ShapeshiftButton1:GetChecked()")
             .unwrap(),
         "clicking the active stance must not untoggle its checked ring"
     );
@@ -357,7 +363,7 @@ fn shipped_stance_bar_drives_end_to_end() {
     s.mouse_button(56.0, 116.0, "LeftButton", false);
     let _ = s.take_shapeshift_casts();
     assert!(
-        s.eval::<bool>("return BenillaShapeshiftButton1:GetChecked()")
+        s.eval::<bool>("return ShapeshiftButton1:GetChecked()")
             .unwrap(),
         "and the active form stays lit through either"
     );
@@ -366,7 +372,7 @@ fn shipped_stance_bar_drives_end_to_end() {
     s.set_shapeshift_forms(vec![]);
     s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
     assert!(!s
-        .eval::<bool>("return BenillaShapeshiftBarFrame:IsShown()")
+        .eval::<bool>("return ShapeshiftBarFrame:IsShown()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -432,22 +438,22 @@ fn multibar_hover_renders_the_buttons_own_action() {
     };
 
     assert_eq!(
-        hover_name(&s, "BenillaActionButton1").as_deref(),
+        hover_name(&s, "ActionButton1").as_deref(),
         Some("Spell 100"),
         "the main bar still reads its own slot"
     );
     assert_eq!(
-        hover_name(&s, "BenillaMultiBarBottomLeftButton1").as_deref(),
+        hover_name(&s, "MultiBarBottomLeftButton1").as_deref(),
         Some("Spell 200"),
         "BottomLeft button 1 is action 61 — not main slot 1 (the spell below it)"
     );
     assert_eq!(
-        hover_name(&s, "BenillaMultiBarBottomRightButton1").as_deref(),
+        hover_name(&s, "MultiBarBottomRightButton1").as_deref(),
         Some("Spell 300"),
         "BottomRight button 1 is action 49"
     );
     assert_eq!(
-        hover_name(&s, "BenillaMultiBarBottomLeftButton2").as_deref(),
+        hover_name(&s, "MultiBarBottomLeftButton2").as_deref(),
         Some("Spell 400"),
         "an occupied multibar slot over an EMPTY main slot still renders (the no-tooltip half)"
     );
@@ -456,7 +462,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
     s.set_bonus_bar_offset(1);
     s.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
     assert_eq!(
-        hover_name(&s, "BenillaMultiBarBottomLeftButton1").as_deref(),
+        hover_name(&s, "MultiBarBottomLeftButton1").as_deref(),
         Some("Spell 200"),
         "a bonus page never re-pages a multibar hover"
     );

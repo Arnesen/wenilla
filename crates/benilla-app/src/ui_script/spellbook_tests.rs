@@ -142,44 +142,39 @@ fn shipped_spellbook_drives_end_to_end() {
 
     s.set_spellbook(book());
 
-    assert!(!s
-        .eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return SpellBookFrame:IsVisible()").unwrap());
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return SpellBookFrame:IsVisible()").unwrap());
 
     // Tab 1 ("Fire", selected by default — SpellBookFrame_OnLoad's own SkillLineTab_OnClick(1)):
-    // book id 1 (BenillaSpellButton1, id="1") shows Fireball; book id 2 (BenillaSpellButton3,
+    // book id 1 (SpellButton1, id="1") shows Fireball; book id 2 (SpellButton3,
     // id="2" — the SECOND row of column 1, not the second on-screen button) shows Fire Blast —
     // the ref's own column-major id assignment (`id="1"`/`"7"`/`"2"`/`"8"`/…, this file's grid
-    // comment), not left-to-right on-screen order. BenillaSpellButton2 (id="7", book id 7) is
+    // comment), not left-to-right on-screen order. SpellButton2 (id="7", book id 7) is
     // past this 2-spell tab's end and stays disabled/hidden.
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton1SpellName:GetText()")
+        s.eval::<String>("return SpellButton1SpellName:GetText()")
             .unwrap(),
         "Fireball"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton1SubSpellName:GetText()")
+        s.eval::<String>("return SpellButton1SubSpellName:GetText()")
             .unwrap(),
         "Rank 1"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton3SpellName:GetText()")
+        s.eval::<String>("return SpellButton3SpellName:GetText()")
             .unwrap(),
         "Fire Blast"
     );
     assert!(
-        !s.eval::<bool>("return BenillaSpellButton2:IsEnabled()")
-            .unwrap(),
+        !s.eval::<bool>("return SpellButton2:IsEnabled()").unwrap(),
         "book id 7 is past the 2-spell Fire tab — disabled"
     );
 
     s.resolve();
-    let (x1, y1) = center(&s, "BenillaSpellButton1");
+    let (x1, y1) = center(&s, "SpellButton1");
 
     // A plain click CASTS (drains the intent) — never picks up.
     s.mouse_button(x1, y1, "LeftButton", true);
@@ -208,7 +203,7 @@ fn shipped_spellbook_drives_end_to_end() {
     // (`cursor::bar::place_action`) a bar-to-bar drag uses: a plain click on an action button
     // routes through UseAction's checkCursor=1 fork to a place. Packs kind 0x00 (SPELL, decision
     // 0216 §1) with the spell id — `action_sets` is the app's own CMSG_SET_ACTION_BUTTON queue.
-    let (ax, ay) = center(&s, "BenillaActionButton1");
+    let (ax, ay) = center(&s, "ActionButton1");
     s.mouse_button(ax, ay, "LeftButton", true);
     s.mouse_button(ax, ay, "LeftButton", false);
     assert!(s.errors().is_empty(), "place errors: {:?}", s.errors());
@@ -248,7 +243,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     s.resolve();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     let sweep = s.extract().into_iter().find_map(|q| {
-        if s.quad_owner_name(q.target).as_deref() != Some("BenillaSpellButton1Cooldown") {
+        if s.quad_owner_name(q.target).as_deref() != Some("SpellButton1Cooldown") {
             return None;
         }
         match q.content {
@@ -256,7 +251,7 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
             _ => None,
         }
     });
-    let (fraction, flash) = sweep.expect("BenillaSpellButton1's Cooldown widget is showing");
+    let (fraction, flash) = sweep.expect("SpellButton1's Cooldown widget is showing");
     assert!(
         (fraction - 0.4).abs() < 1e-3,
         "4 s elapsed of 10 ⇒ the sweep sits at 40%, got {fraction}"
@@ -271,13 +266,13 @@ fn shipped_spellbook_shows_the_cooldown_pie() {
     s.resolve();
     let quads = s.extract();
     assert!(
-        !quads.iter().any(|q| {
-            s.quad_owner_name(q.target).as_deref() == Some("BenillaSpellButton1Cooldown")
-        }),
+        !quads
+            .iter()
+            .any(|q| { s.quad_owner_name(q.target).as_deref() == Some("SpellButton1Cooldown") }),
         "an on-hold cooldown draws no sweep"
     );
     let icon_color = quads.iter().find_map(|q| {
-        if s.quad_owner_name(q.target).as_deref() != Some("BenillaSpellButton1") {
+        if s.quad_owner_name(q.target).as_deref() != Some("SpellButton1") {
             return None;
         }
         match &q.content {
@@ -316,7 +311,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
 
     let mut slot5_paths: Vec<String> = Vec::new();
     for eq in s.extract() {
-        if s.quad_owner_name(eq.target).as_deref() == Some("BenillaSpellButton5") {
+        if s.quad_owner_name(eq.target).as_deref() == Some("SpellButton5") {
             if let benilla_ui::script::QuadContent::Texture { path: Some(p), .. } = &eq.content {
                 slot5_paths.push(p.clone());
             }
@@ -329,7 +324,7 @@ fn shipped_spellbook_empty_slot_draws_only_the_background() {
     );
     // The reference passes SetChecked(0) — numeric coercion, not Lua truthiness.
     assert!(!s
-        .eval::<bool>("return BenillaSpellButton5:GetChecked() and true or false")
+        .eval::<bool>("return SpellButton5:GetChecked() and true or false")
         .unwrap());
 }
 
@@ -354,8 +349,8 @@ fn set_checked_uses_blizzard_bool_coercion() {
     ] {
         let got = s
             .eval::<bool>(&format!(
-                "BenillaSpellButton1:SetChecked({arg}) \
-                 return BenillaSpellButton1:GetChecked() and true or false"
+                "SpellButton1:SetChecked({arg}) \
+                 return SpellButton1:GetChecked() and true or false"
             ))
             .unwrap();
         assert_eq!(got, want, "SetChecked({arg})");
@@ -420,48 +415,46 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
     assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaSpellBookFrameTabButton1:IsVisible()")
+        !s.eval::<bool>("return SpellBookFrameTabButton1:IsVisible()")
             .unwrap(),
         "with no pet spells the ref hides the whole toggle row"
     );
     s.run("ToggleSpellBook(BOOKTYPE_PET)").unwrap();
     assert!(
-        s.eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_SPELL")
+        s.eval::<bool>("return SpellBookFrame.bookType == BOOKTYPE_SPELL")
             .unwrap(),
         "asking for a pet book you have not got does nothing — not even close the window"
     );
-    assert!(s
-        .eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return SpellBookFrame:IsVisible()").unwrap());
 
     // ── A pet arrives: the row appears on the next repaint ────────────────────────────────────
     s.set_pet_book(pet_book());
     s.fire_event("SPELLS_CHANGED", vec![]);
     assert!(s.errors().is_empty(), "repaint errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return BenillaSpellBookFrameTabButton1:IsVisible()")
+        .eval::<bool>("return SpellBookFrameTabButton1:IsVisible()")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaSpellBookFrameTabButton2:GetText()")
+        s.eval::<String>("return SpellBookFrameTabButton2:GetText()")
             .unwrap(),
         "Pet",
         "the label is PET_TYPE_<token>, not the token"
     );
 
     // ── Click the pet tab ─────────────────────────────────────────────────────────────────────
-    click(&mut s, "BenillaSpellBookFrameTabButton2", "LeftButton");
+    click(&mut s, "SpellBookFrameTabButton2", "LeftButton");
     assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
     assert!(s
-        .eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_PET")
+        .eval::<bool>("return SpellBookFrame.bookType == BOOKTYPE_PET")
         .unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaSpellBookTitleText:GetText()")
+        s.eval::<String>("return SpellBookTitleText:GetText()")
             .unwrap(),
         "Pet",
         "the window title becomes the pet's, not SPELLBOOK"
     );
     assert!(
-        !s.eval::<bool>("return BenillaSpellBookSkillLineTab1:IsVisible()")
+        !s.eval::<bool>("return SpellBookSkillLineTab1:IsVisible()")
             .unwrap(),
         "the pet book has no skill lines — the whole strip hides (ref l.124)"
     );
@@ -469,42 +462,42 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     // The page: book ids are the button ids themselves on this book, so button 1 is Growl and
     // button 3 (id="2") is Claw — the same column-major id map the spell book uses.
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton1SpellName:GetText()")
+        s.eval::<String>("return SpellButton1SpellName:GetText()")
             .unwrap(),
         "Growl"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton3SpellName:GetText()")
+        s.eval::<String>("return SpellButton3SpellName:GetText()")
             .unwrap(),
         "Claw"
     );
     // The autocast overlay follows GetSpellAutocast's FIRST return (can it), not the second.
     assert!(s
-        .eval::<bool>("return BenillaSpellButton1AutoCastable:IsVisible()")
+        .eval::<bool>("return SpellButton1AutoCastable:IsVisible()")
         .unwrap());
     assert!(
-        !s.eval::<bool>("return BenillaSpellButton5AutoCastable:IsVisible()")
+        !s.eval::<bool>("return SpellButton5AutoCastable:IsVisible()")
             .unwrap(),
         "a passive is not autocastable"
     );
     // …and the sparkle follows the SECOND (is it on).
     assert!(s
-        .eval::<bool>("return BenillaSpellButton1.autocasting == 1")
+        .eval::<bool>("return SpellButton1.autocasting == 1")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaSpellButton3.autocasting == nil")
+        .eval::<bool>("return SpellButton3.autocasting == nil")
         .unwrap());
 
     // ── The clicks ────────────────────────────────────────────────────────────────────────────
     // Left: a pet cast, on the pet queue and NOT the player's.
-    click(&mut s, "BenillaSpellButton1", "LeftButton");
+    click(&mut s, "SpellButton1", "LeftButton");
     assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
     assert_eq!(s.take_pet_spell_casts(), vec![2649]);
     assert!(s.take_spell_casts().is_empty());
     assert!(s.take_pet_spell_autocasts().is_empty());
 
     // Right: autocast, never a cast (ref l.284-285).
-    click(&mut s, "BenillaSpellButton3", "RightButton");
+    click(&mut s, "SpellButton3", "RightButton");
     assert!(
         s.errors().is_empty(),
         "right-click errors: {:?}",
@@ -518,21 +511,16 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
 
     // ── The two reference QUIRKS, asserted on purpose (decisions 1030/1032) ───────────────────
     // The pet page ignores its page number: `SpellBook_GetSpellID`'s pet arm is a bare `return id`.
-    assert_eq!(
-        s.eval::<i64>("return BenillaSpellBook_GetSpellID(1)")
-            .unwrap(),
-        1
-    );
+    assert_eq!(s.eval::<i64>("return SpellBook_GetSpellID(1)").unwrap(), 1);
     s.run(r#"SPELLBOOK_PAGENUMBERS["pet"] = 2"#).unwrap();
     assert_eq!(
-        s.eval::<i64>("return BenillaSpellBook_GetSpellID(1)")
-            .unwrap(),
+        s.eval::<i64>("return SpellBook_GetSpellID(1)").unwrap(),
         1,
         "DO NOT FIX: the ref's pet arm has no page term (decision 1032)"
     );
     // …and the Next arrow writes the SPELL book's counter, leaving the pet page where it was.
     s.run(r#"SPELLBOOK_PAGENUMBERS["pet"] = 1"#).unwrap();
-    click(&mut s, "BenillaSpellBookNextPageButton", "LeftButton");
+    click(&mut s, "SpellBookNextPageButton", "LeftButton");
     assert!(s.errors().is_empty(), "page errors: {:?}", s.errors());
     assert_eq!(
         s.eval::<i64>(r#"return SPELLBOOK_PAGENUMBERS["pet"]"#)
@@ -541,7 +529,7 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
         "DO NOT FIX: the ref writes SPELLBOOK_PAGENUMBERS[selectedSkillLine] on both books"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaSpellButton1SpellName:GetText()")
+        s.eval::<String>("return SpellButton1SpellName:GetText()")
             .unwrap(),
         "Growl",
         "so the page does not turn"
@@ -552,11 +540,10 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     s.fire_event("SPELLS_CHANGED", vec![]);
     assert!(s.errors().is_empty(), "teardown errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaSpellBookFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return SpellBookFrame:IsVisible()").unwrap(),
         "a pet book with no pet closes rather than showing an empty page"
     );
     assert!(s
-        .eval::<bool>("return BenillaSpellBookFrame.bookType == BOOKTYPE_SPELL")
+        .eval::<bool>("return SpellBookFrame.bookType == BOOKTYPE_SPELL")
         .unwrap());
 }

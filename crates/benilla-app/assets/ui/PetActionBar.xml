@@ -25,7 +25,7 @@
         strips (256x44 at TOPLEFT with TexCoords 0..1 / 0.015625..0.359375, then 184x44 to its
         right with 0..0.71875 / 0.375..0.71875); buttons 30x30, button1 at frame BOTTOMLEFT +(36,2),
         chained +8 (with the ref's own +7 between 6 and 7); the 54x54 UI-Quickslot2 ring CENTER
-        (0,-1). The bar rides `BenillaActionBar` BOTTOMLEFT — our MainMenuBar, the same 1024x53
+        (0,-1). The bar rides `MainMenuBar` BOTTOMLEFT — our MainMenuBar, the same 1024x53
         frame at screen BOTTOM the ref anchors to — at the managed PETACTIONBAR_YPOS (UIParent.xml
         declares the row already).
 
@@ -222,13 +222,14 @@
         -- and the reference immediately clears that (`this:SetChecked(0)`) — nothing about this bar
         -- is locally latched, because the server owns every bit of it. Left = run the slot, unless
         -- the pet is already on the attack, in which case it calls off; right = flip autocast.
-        function BenillaPetActionButton_OnClick(button, mouseButton)
+        function PetActionButton_OnClick(mouseButton)
+            local button = this
             button:SetChecked(0)
             -- Shift outranks the button fork entirely (ref l.253-255): a shift-click on the pet bar
             -- is a pick-up whichever mouse button it came from, and it never toggles autocast.
             if IsShiftKeyDown() then
                 PickupPetAction(button.index)
-                BenillaPetActionBar_Update()
+                PetActionBar_Update()
             elseif mouseButton == "RightButton" then
                 TogglePetAutocast(button.index)
             elseif IsPetAttackActive(button.index) then
@@ -255,15 +256,15 @@
         -- latch lit, so click and key both simply order the attack. The split is visible on a
         -- POSSESS bar (Mind Control, Eye of Kilrogg, Eyes of the Beast): there a click sends
         -- PetStopAttack and CTRL-1 re-issues the order instead.
-        function BenillaPetActionButtonDown(id)
-            local button = getglobal("BenillaPetActionButton" .. id)
+        function PetActionButtonDown(id)
+            local button = getglobal("PetActionButton" .. id)
             if ( button:GetButtonState() == "NORMAL" ) then
                 button:SetButtonState("PUSHED")
             end
         end
 
-        function BenillaPetActionButtonUp(id)
-            local button = getglobal("BenillaPetActionButton" .. id)
+        function PetActionButtonUp(id)
+            local button = getglobal("PetActionButton" .. id)
             if ( button:GetButtonState() == "PUSHED" ) then
                 button:SetButtonState("NORMAL")
                 CastPetAction(id)
@@ -278,22 +279,25 @@
         -- Both also honour the lock (the ref wraps each body in `if LOCK_ACTIONBAR ~= "1" then …`).
         -- The shift-click in OnClick above is unguarded on this bar too, exactly as the reference
         -- leaves it (l.253-255): the lock stops the drag, shift-click stays the way through.
-        function BenillaPetActionButton_OnDragStart(button)
+        function PetActionButton_OnDragStart()
+            local button = this
             if LOCK_ACTIONBAR == "1" then return end
             PickupPetAction(button.index)
-            BenillaPetActionBar_Update()
+            PetActionBar_Update()
         end
 
-        function BenillaPetActionButton_OnReceiveDrag(button)
+        function PetActionButton_OnReceiveDrag()
+            local button = this
             if LOCK_ACTIONBAR == "1" then return end
             PickupPetAction(button.index)
-            BenillaPetActionBar_Update()
+            PetActionBar_Update()
         end
 
         -- Ref PetActionButton_OnEnter. A token slot has no spell to look up, so its tooltip is
         -- built from the two strings the info call already returned (the ref's own `isToken` fork);
         -- a spell slot goes through the engine's tooltip channel.
-        function BenillaPetActionButton_OnEnter(button)
+        function PetActionButton_OnEnter()
+            local button = this
             if not GameTooltip then return end -- engine tests load file subsets
             if not button.tooltipName then return end
             GameTooltip_SetDefaultAnchor(GameTooltip, button)
@@ -308,7 +312,8 @@
             end
         end
 
-        function BenillaPetActionButton_OnLeave(button)
+        function PetActionButton_OnLeave()
+            local button = this
             if GameTooltip then GameTooltip:Hide() end
         end
 
@@ -318,10 +323,10 @@
         -- header). Every branch below is the reference's, including the two that are easy to lose:
         -- an unnamed slot HIDES its button, and a slot with no texture swaps the button's ring from
         -- the filled UI-Quickslot2 to the empty UI-Quickslot.
-        function BenillaPetActionBar_Update()
+        function PetActionBar_Update()
             local usable = GetPetActionsUsable()
             for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
-                local button = getglobal("BenillaPetActionButton" .. i)
+                local button = getglobal("PetActionButton" .. i)
                 local name, subtext, texture, isToken, isActive, autoCastAllowed, autoCastEnabled = GetPetActionInfo(i)
                 button.isToken = isToken
                 button.tooltipSubtext = subtext
@@ -341,7 +346,7 @@
                 -- An unnamed slot hides — UNLESS the drop grid is up, which is the whole point of
                 -- the grid: while a pet action rides the cursor every slot shows, so you can see
                 -- where it may land (ref PetActionBar_Update l.122-128 + PetActionBar_ShowGrid).
-                if name or (BenillaPetActionBarFrame.showgrid or 0) > 0 then
+                if name or (PetActionBarFrame.showgrid or 0) > 0 then
                     button:Show()
                 else
                     button:Hide()
@@ -361,7 +366,8 @@
             end
         end
 
-        function BenillaPetActionBar_OnLoad(frame)
+        function PetActionBar_OnLoad()
+            local frame = this
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("PET_BAR_UPDATE")
             -- The drop grid (decision 1010). A counter rather than a flag, ref-verbatim
@@ -372,21 +378,26 @@
             frame:RegisterEvent("PET_BAR_HIDEGRID")
             frame.showgrid = 0
             frame.clock = 0
-            BenillaPetActionBar_OnEvent(frame)
+            PetActionBar_OnEvent()
         end
 
         -- The bar exists exactly while PetHasActionBar() does. Its show/hide re-fires the managed
         -- bottom-stack pass (UIParent.xml, decision 0272) — the pet term of that stack is what
         -- lifts the cast bar and the chat frame clear of it, which is the ref's own
         -- PetActionBarFrame.xml:205-210.
-        function BenillaPetActionBar_OnEvent(frame, eventName)
-            if eventName == "PET_BAR_SHOWGRID" then
+        -- Declares nothing and reads the ambient `event`, exactly as the reference does
+        -- (PetActionBarFrame.lua:33 / .xml's bare `PetActionBar_OnEvent();`). PetActionBar_OnLoad's
+        -- own tail call therefore lands with `event` nil, which is the no-grid-edge path — the same
+        -- thing the old explicit `eventName` argument did when omitted.
+        function PetActionBar_OnEvent()
+            local frame = this
+            if event == "PET_BAR_SHOWGRID" then
                 frame.showgrid = frame.showgrid + 1
-            elseif eventName == "PET_BAR_HIDEGRID" and frame.showgrid > 0 then
+            elseif event == "PET_BAR_HIDEGRID" and frame.showgrid > 0 then
                 frame.showgrid = frame.showgrid - 1
             end
             if PetHasActionBar() then
-                BenillaPetActionBar_Update()
+                PetActionBar_Update()
                 frame:Show()
             else
                 frame:Hide()
@@ -401,7 +412,7 @@
                 frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
             end
             for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
-                BenillaPetAutocast_Update(getglobal("BenillaPetActionButton" .. i), frame.clock)
+                BenillaPetAutocast_Update(getglobal("PetActionButton" .. i), frame.clock)
             end
         end
 
@@ -519,15 +530,15 @@
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>
-            <OnClick>BenillaPetActionButton_OnClick(self, arg1)</OnClick>
-            <OnDragStart>BenillaPetActionButton_OnDragStart(self)</OnDragStart>
-            <OnReceiveDrag>BenillaPetActionButton_OnReceiveDrag(self)</OnReceiveDrag>
-            <OnEnter>BenillaPetActionButton_OnEnter(self)</OnEnter>
-            <OnLeave>BenillaPetActionButton_OnLeave(self)</OnLeave>
+            <OnClick>PetActionButton_OnClick(arg1)</OnClick>
+            <OnDragStart>PetActionButton_OnDragStart()</OnDragStart>
+            <OnReceiveDrag>PetActionButton_OnReceiveDrag()</OnReceiveDrag>
+            <OnEnter>PetActionButton_OnEnter()</OnEnter>
+            <OnLeave>PetActionButton_OnLeave()</OnLeave>
         </Scripts>
     </CheckButton>
 
-    <Frame name="BenillaPetActionBarFrame" hidden="true">
+    <Frame name="PetActionBarFrame" hidden="true">
         <Size><AbsDimension x="509" y="43"/></Size>
         <!-- This anchor is the LOAD-TIME value only: UIParent_ManageFramePositions owns the real
              one and re-seats the frame on every pass (OnShow/OnHide below fire it), because the
@@ -540,68 +551,68 @@
              the same arriving seated as it does arriving in 90 ms (the stance bar's own posture,
              decision 0270). -->
         <Anchors>
-            <Anchor point="TOPLEFT" relativeTo="BenillaActionBar" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="97"/></Offset></Anchor>
+            <Anchor point="TOPLEFT" relativeTo="MainMenuBar" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="97"/></Offset></Anchor>
         </Anchors>
         <Layers>
             <Layer level="OVERLAY">
-                <Texture name="BenillaSlidingActionBarTexture0" file="Interface\PetActionBar\UI-PetBar">
+                <Texture name="SlidingActionBarTexture0" file="Interface\PetActionBar\UI-PetBar">
                     <Size><AbsDimension x="256" y="44"/></Size>
                     <Anchors><Anchor point="TOPLEFT"/></Anchors>
                     <TexCoords left="0" right="1.0" top="0.015625" bottom="0.359375"/>
                 </Texture>
-                <Texture name="BenillaSlidingActionBarTexture1" file="Interface\PetActionBar\UI-PetBar">
+                <Texture name="SlidingActionBarTexture1" file="Interface\PetActionBar\UI-PetBar">
                     <Size><AbsDimension x="184" y="44"/></Size>
-                    <Anchors><Anchor point="LEFT" relativeTo="BenillaSlidingActionBarTexture0" relativePoint="RIGHT"/></Anchors>
+                    <Anchors><Anchor point="LEFT" relativeTo="SlidingActionBarTexture0" relativePoint="RIGHT"/></Anchors>
                     <TexCoords left="0" right="0.71875" top="0.375" bottom="0.71875"/>
                 </Texture>
             </Layer>
         </Layers>
         <Frames>
-            <CheckButton name="BenillaPetActionButton1" inherits="BenillaPetActionButtonTemplate">
+            <CheckButton name="PetActionButton1" inherits="BenillaPetActionButtonTemplate">
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="2"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 1)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton2" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton2" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 2)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton3" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton3" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 3)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton4" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton4" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 4)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton5" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton5" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 5)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton6" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton6" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 6)</OnLoad></Scripts>
             </CheckButton>
             <!-- The ref's own +7 here, not +8 (PetActionBarFrame.xml l.158-166). -->
-            <CheckButton name="BenillaPetActionButton7" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton7" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 7)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton8" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton8" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 8)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton9" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton9" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 9)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaPetActionButton10" inherits="BenillaPetActionButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="PetActionButton10" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="PetActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 10)</OnLoad></Scripts>
             </CheckButton>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaPetActionBar_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaPetActionBar_OnEvent(self, event)</OnEvent>
+            <OnLoad>PetActionBar_OnLoad()</OnLoad>
+            <OnEvent>PetActionBar_OnEvent()</OnEvent>
             <OnUpdate>BenillaPetActionBar_OnUpdate(self, arg1)</OnUpdate>
             <OnShow>UIParent_ManageFramePositions()</OnShow>
             <OnHide>UIParent_ManageFramePositions()</OnHide>

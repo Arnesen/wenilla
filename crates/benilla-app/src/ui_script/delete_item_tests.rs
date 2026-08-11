@@ -72,7 +72,7 @@ fn setup() -> UiScript {
 /// `DELETE_ITEM_CONFIRM(name, quality)` the driver listens for.
 fn pick_up_and_drop_in_world(s: &mut UiScript) {
     s.set_container(0, Some(one_item_backpack()));
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(s.cursor_item().is_some(), "fixture: the item is held");
     // Off past every frame (the bag sits bottom-right; off-screen negative is always clear).
     s.mouse_button(-50.0, -50.0, "LeftButton", true);
@@ -153,7 +153,7 @@ fn delete_item_confirm_no_clears_without_destroying() {
         "the clear's ITEM_LOCK_CHANGED repaints the bag (the stuck-darkened slot, 0218)"
     );
     assert!(
-        !s.eval::<bool>("local i = C_Container.GetContainerItemInfo(0, 1) return i.isLocked")
+        !s.eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
             .unwrap(),
         "the source slot reads unlocked again"
     );

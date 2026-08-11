@@ -15,7 +15,7 @@
 //! interprets — the app decides what each maps to.
 //!
 //! v1 gaps, stated not hidden: the snapshot carries only the *active* power slot (see the
-//! `UnitPower` note below); `UnitIsDead` returns a Lua boolean rather than the client's `1`/nil
+//! `UnitMana` note below); `UnitIsDead` returns a Lua boolean rather than the client's `1`/nil
 //! (truthy either way — the shape a caller branches on is identical); `UnitIsConnected`'s backing
 //! field defaults `false`, and no app-side feed sets it `true` for live units yet (decision 0434
 //! §2's party-frame predicates land the binding first, the feed follows — see the field doc).
@@ -43,9 +43,9 @@ pub struct UnitState {
     /// The active power type (`UnitPowerType`): `0` mana, `1` rage, `2` focus, `3` energy,
     /// `4` happiness — the descriptor's `UNIT_FIELD_BYTES_0` byte 3.
     pub power_type: u8,
-    /// Current power of the active type (`UnitPower`).
+    /// Current power of the active type (`UnitMana`).
     pub power: u32,
-    /// Maximum power of the active type (`UnitPowerMax`).
+    /// Maximum power of the active type (`UnitManaMax`).
     pub max_power: u32,
     /// Whether the unit is dead (`UnitIsDead`). NB a released ghost is NOT dead by this
     /// predicate — its wire health is 1 (decision 0308 §1); the trio is dead / [`Self::ghost`] /
@@ -161,6 +161,18 @@ pub struct UnitState {
     /// mob/player is NOT a corpse). No feed sets it yet — corpse objects (a released player's
     /// remains) aren't selectable in benilla — a stated gap, not an oversight.
     pub corpse_object: bool,
+    /// In combat (`UnitAffectingCombat`) — `UNIT_FIELD_FLAGS` (descriptor index 46) **bit 19**,
+    /// mask `0x00080000` (`0x517e10`, wow-re `bag-language-combat-action-bindings.md` §3,
+    /// §5-cross-checked: `mov ecx,[eax+0xa0]; shr ecx,0x13; test cl,1`).
+    ///
+    /// **There is no player-specific combat latch**, stated as the explicit negative because it
+    /// is precisely what a client is tempted to invent: a whole-image census of the
+    /// `shr reg,0x13` + `test rl,1` idiom returns 7 hits, six of them this same field+bit — and
+    /// two of those six are hardcoded *local-player* readers taking no token at all. `"player"`
+    /// takes a fast path to the cached local-player GUID inside `0x515970` and then reads the
+    /// identical bit. One wire flag answers this for every token, which is what this one field
+    /// is; `benilla::ui_action::usable` already reads the same bit off the same descriptor.
+    pub in_combat: bool,
 }
 
 /// The grey-band table `0x80ae98` (a byte-identical twin at `0x81dda8` drives the nameplate's
@@ -320,6 +332,12 @@ impl super::UiScript {
     /// streamed entity and commits the selection (the reference's `TargetUnit` → SetSelection path).
     pub fn take_target_requests(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().target_requests)
+    }
+
+    /// Drain the `(name, exactMatch)` pairs `TargetByName` queued since the last call — the app
+    /// runs the shared by-name resolver (decision 0886) and commits the selection.
+    pub fn take_target_by_name_requests(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.model_mut().target_by_name_requests)
     }
 
     /// Drain the `ClearTarget()` trigger: `true` if it fired with a live target since the last

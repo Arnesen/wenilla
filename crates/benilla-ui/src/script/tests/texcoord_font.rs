@@ -71,8 +71,8 @@ fn set_tex_coord_changes_extracted_uv() {
 }
 
 /// `SetFontObject("Name")` copies a registered [`FontObject`]'s face/height/color onto the
-/// FontString; `GetFontObject` reads the name back; a later call re-points it (the resolved paint on
-/// the extracted quad follows). An unknown name errors.
+/// FontString; `GetFontObject` hands back the OBJECT (whose `GetName` round-trips); a later call
+/// re-points it (the resolved paint on the extracted quad follows). An unknown name errors.
 #[test]
 fn set_font_object_repoints_fontstring() {
     let mut s = script();
@@ -112,7 +112,8 @@ fn set_font_object_repoints_fontstring() {
     )
     .unwrap();
     assert_eq!(
-        s.eval::<String>("return fs:GetFontObject()").unwrap(),
+        s.eval::<String>("return fs:GetFontObject():GetName()")
+            .unwrap(),
         "Big"
     );
 
@@ -188,7 +189,16 @@ fn justify_v_defaults_middle_and_overrides() {
     s.resolve();
     assert_eq!(justify_v(&s), JustifyV::Bottom);
 
-    // A font object carrying justify_v re-points it.
+    // A font object carrying justify_v applies it — but ONLY on the axis this string has not
+    // already claimed for itself. `SetJustifyV` above severed the V axis, and §5-verified that
+    // severance is permanent: the reference clears the axis's inheritMask bit (`+0x124`, the
+    // per-axis justify mask — wow-re `system/ui/scratch/font-object-lua-surface.md`) and never
+    // restores it, so a later `SetFontObject` cannot take the axis back.
+    //
+    // This assertion used to read `Top`. That was our copy-everything model, not the client's; the
+    // shipped XML path is unaffected either way, because the loader applies `inherits=` BEFORE the
+    // element's own `justifyV=` (`Loader::apply_fontstring_font`), so the explicit attribute still
+    // wins.
     s.register_font_object(
         "TopFont",
         FontObject {
@@ -203,5 +213,29 @@ fn justify_v_defaults_middle_and_overrides() {
     );
     s.run("fs:SetFontObject('TopFont')").unwrap();
     s.resolve();
-    assert_eq!(justify_v(&s), JustifyV::Top);
+    assert_eq!(justify_v(&s), JustifyV::Bottom, "severance is permanent");
+
+    // A string that never claimed the axis DOES take the object's justification.
+    s.run(
+        r#"
+        fresh = f:CreateFontString(nil, "ARTWORK")
+        fresh:SetText("Fresh")
+        fresh:SetFontObject('TopFont')
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let fresh = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(ref t),
+                justify_v,
+                ..
+            } if t == "Fresh" => Some(justify_v),
+            _ => None,
+        })
+        .expect("a text quad");
+    assert_eq!(fresh, JustifyV::Top);
 }

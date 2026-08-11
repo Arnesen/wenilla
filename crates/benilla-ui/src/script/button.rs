@@ -244,22 +244,31 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // re-points the ButtonText to the current state's object each frame, so Enable/Disable and
     // hover swap the label's paint with no Lua involvement (the client's own behavior:
     // UIPanelButtonTemplate's gold/white/gray label states).
+    //
+    // Each takes the font OBJECT, its name, or nil, like `FontString:SetFontObject` — across the
+    // trio the corpus splits 5 object-form to 4 string-form, so accepting one shape only would
+    // break about half the callers, and nil clears the state back to the default. Because the
+    // state is stored as a NAME and re-resolved at every `extract`, a later mutation of that font
+    // object reaches these labels for free.
     m.set(
         "SetTextFontObject",
-        lua.create_function(|lua, (this, name): (Table, String)| {
-            with_button(lua, &this, |bs| bs.normal_font = Some(name))
+        lua.create_function(|lua, (this, font): (Table, Value)| {
+            let name = super::font::resolve("SetTextFontObject", &font)?;
+            with_button(lua, &this, |bs| bs.normal_font = name)
         })?,
     )?;
     m.set(
         "SetHighlightFontObject",
-        lua.create_function(|lua, (this, name): (Table, String)| {
-            with_button(lua, &this, |bs| bs.highlight_font = Some(name))
+        lua.create_function(|lua, (this, font): (Table, Value)| {
+            let name = super::font::resolve("SetHighlightFontObject", &font)?;
+            with_button(lua, &this, |bs| bs.highlight_font = name)
         })?,
     )?;
     m.set(
         "SetDisabledFontObject",
-        lua.create_function(|lua, (this, name): (Table, String)| {
-            with_button(lua, &this, |bs| bs.disabled_font = Some(name))
+        lua.create_function(|lua, (this, font): (Table, Value)| {
+            let name = super::font::resolve("SetDisabledFontObject", &font)?;
+            with_button(lua, &this, |bs| bs.disabled_font = name)
         })?,
     )?;
 

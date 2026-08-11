@@ -20,10 +20,20 @@
 //! The stored account/character sets live here too (seeded by the app from
 //! `benilla-config/bindings/…`, re-snapshotted on save), so `LoadBindings` is **synchronous** like the
 //! reference's — the window calls it and repaints in the same tick, no host round-trip.
+//!
+//! **Addons register into the same table** (decision 1188 phase 4). An addon's `Bindings.xml`
+//! ([`crate::bindings_xml`]) arrives through [`super::UiScript::register_addon_bindings`] and
+//! becomes ordinary rows: same names, same chords, same window, same save file. The one thing an
+//! addon row carries that a host row does not is a **body** — the Lua chunk the app's dispatch
+//! runs on the press (and, for `runOnUp`, again on the release with `keystate = "up"`) — because a
+//! host command's action is engine-side and has no Lua to hold. That body is the *only* asymmetry;
+//! everything downstream of registration treats the two identically.
 
 use std::collections::HashMap;
 
 use mlua::{Lua, MultiValue, Value};
+
+use crate::bindings_xml::AddonBinding;
 
 use super::Model;
 
@@ -37,6 +47,24 @@ pub struct KeybindCommand {
     pub run_on_up: bool,
     pub default1: Option<&'static str>,
     pub default2: Option<&'static str>,
+}
+
+/// One addon-declared binding's **runnable half** — what the app's dispatch needs to fire a row
+/// it cannot find in its own `SPECS` registry (decision 1188 phase 4).
+///
+/// The dispatch view is re-derived whenever [`super::UiScript::keybinds_generation`] moves, so
+/// this is a snapshot like [`super::UiScript::keybind_snapshot`] rather than a borrow — same
+/// reason: the app holds it across frames while Lua keeps editing the table underneath.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddonBindingBody {
+    /// The command name, exactly as registered — what a [`keybind_snapshot`] row is keyed by.
+    ///
+    /// [`keybind_snapshot`]: super::UiScript::keybind_snapshot
+    pub name: String,
+    /// Run the body a second time on the release, with `keystate = "up"` (`runOnUp="true"`).
+    pub run_on_up: bool,
+    /// The `<Binding>` element's Lua chunk, verbatim.
+    pub body: String,
 }
 
 /// A host request queued by Lua: persist the live table as set `1`/`2` (`Save`), on which the
@@ -56,6 +84,13 @@ struct Entry {
     /// The live bound chords, in bind order (the reference's per-command key list; the first two
     /// are what `GetBindingKey` and the window's Key 1/Key 2 columns show).
     keys: Vec<String>,
+    /// `hidden="true"` on an addon's `<Binding>` — bindable, saved and dispatched like any other
+    /// row, but absent from the window's enumeration ([`KeybindState::visible`]). Always `false`
+    /// for a host command: the registry is an honest tree, so there is nothing in it to hide.
+    hidden: bool,
+    /// An addon binding's Lua chunk; `None` for a host command, whose action is engine-side. This
+    /// is what makes a row an addon's — see the module doc.
+    body: Option<String>,
 }
 
 /// The table + the stored sets + the Lua→host seams. Lives in [`Model`].
@@ -66,6 +101,15 @@ pub(crate) struct KeybindState {
     /// Saved snapshots: `stored[0]` = account (set 1), `stored[1]` = character (set 2, `None`
     /// when no character-specific bindings exist). Each is per-entry key lists, entry order.
     stored: [Option<Vec<Vec<String>>>; 2],
+    /// The same two stored sets **by command name** (decision 1201).
+    ///
+    /// [`Self::stored`] is positional over [`Self::entries`], which is exactly right for the
+    /// commands that exist when a set is seeded and useless for the ones that do not: an addon's
+    /// `Bindings.xml` registers at world entry, long after the account set was seeded at boot, so
+    /// its row in the stored file had no slot to land in and its chord was silently dropped. The
+    /// binding registered, listed in the window, dispatched — and forgot its key every restart
+    /// (the defect 1192 §4 recorded). Keyed by the UPPERCASED name, like `by_name`.
+    stored_by_name: [HashMap<String, Vec<String>>; 2],
     /// `1` account, `2` character — which set the live table edits (`GetCurrentBindingSet`).
     current_set: u32,
     /// Bumped by every live-table mutation and every seed — the app's re-derive-dispatch signal.
@@ -77,6 +121,23 @@ pub(crate) struct KeybindState {
 }
 
 impl KeybindState {
+    /// The rows the Key Bindings window enumerates — everything except the `hidden="true"` ones
+    /// (decision 1188 phase 4).
+    ///
+    /// The filter lives at the *Lua enumeration* (`GetNumBindings`/`GetBinding`) rather than at
+    /// registration, because a hidden binding is a real binding everywhere else: `SetBinding` can
+    /// bind it, `GetBindingAction` reports it, the app dispatches it, and the save file carries
+    /// it. That is 1.12's own split — the shipped `Blizzard_BindingUI.lua` filters on nothing but
+    /// the `HEADER` prefix (l.87), so `hidden` can only be the engine's own exclusion from the
+    /// enumeration it walks, and the twelve hidden rows (the debug toggles, `TURNORACTION`,
+    /// `CAMERAORSELECTORMOVE`…) are exactly the ones no 1.12 Key Bindings window shows.
+    ///
+    /// Inert for everything shipped today: no host command is hidden, so the enumeration is
+    /// entry-for-entry what it was before addons could register.
+    fn visible(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|e| !e.hidden)
+    }
+
     /// Strip the reference's modifier prefixes; what remains is the base token (which may itself
     /// be `-` — `CTRL--` is Ctrl+minus, so the strip walks prefixes, never splits on `-`).
     fn base_token(chord: &str) -> &str {
@@ -188,6 +249,69 @@ impl KeybindState {
         self.current_set = which;
         self.requests.push(KeybindRequest::Save(which));
     }
+
+    /// Append one addon's parsed `Bindings.xml` (decision 1188 phase 4).
+    ///
+    /// **Append-only and idempotent per uppercased name**, exactly like [`super::UiScript::
+    /// register_bindings`] — which is also what makes a host command win outright: `MOVEFORWARD`
+    /// is already in the table when an addon declares it, so the addon's row is skipped and the
+    /// engine's real action keeps the name. Nothing is ever replaced, so an index handed out
+    /// earlier (the dispatch view's, the window's row) stays valid.
+    ///
+    /// **The section carry-forward** is applied here, where the addon's identity is known: a
+    /// `header` attribute opens a section that runs until the next one (the reference's list is
+    /// flat with `HEADER_*` pseudo-entries in it, so 13 headers cover its 228 bindings — and our
+    /// own `SPECS` table already encodes exactly that reading, giving `MOVEBACKWARD` the
+    /// `MOVEMENT` header its `<Binding>` never states).
+    ///
+    /// **A file whose first bindings declare no header at all gets the addon's own name** as
+    /// their section token, and that is a deliberate divergence: the reference would continue
+    /// whatever section the *previous file* ended in, which under our per-entry category (0997's
+    /// era-shaped `GetBinding`) would file an addon's keys under `BINDING_HEADER_CAMERA` and make
+    /// them unfindable. The window renders an unknown token literally
+    /// (`KeyBindings_String(token, token)`), so the section simply reads as the addon's name —
+    /// which is the honest answer to "where did these come from". A declared header keeps the
+    /// ecosystem's convention (`header="MYADDON"` → `BINDING_HEADER_MYADDON`, the global string
+    /// the addon defines in its own Lua).
+    fn register_addon(&mut self, addon: &str, bindings: &[AddonBinding]) {
+        let mut section = addon.to_string();
+        for b in bindings {
+            // Before the skip: a duplicate name still *closes* a section the same way, because the
+            // header is a property of the file's order, not of the row that survived it.
+            if let Some(h) = &b.header {
+                section = format!("BINDING_HEADER_{h}");
+            }
+            let key = b.name.to_ascii_uppercase();
+            if self.by_name.contains_key(&key) {
+                continue;
+            }
+            let idx = self.entries.len();
+            // The player's stored chord for this command, if they ever set one (decision 1201).
+            // The CURRENT set first, then the account set behind it — the same precedence `load`
+            // applies, so an addon binding restores exactly like a shipped one.
+            let stored = {
+                let cur = if self.current_set == 2 { 1 } else { 0 };
+                self.stored_by_name[cur]
+                    .get(&key)
+                    .or_else(|| self.stored_by_name[0].get(&key))
+                    .cloned()
+            };
+            self.by_name.insert(key, idx);
+            self.entries.push(Entry {
+                name: b.name.clone(),
+                category: section.clone(),
+                run_on_up: b.run_on_up,
+                // 1.12's `<Binding>` carries no default chord — the shipped defaults live in the
+                // engine's own table, which is why every addon binding starts unbound and the
+                // player binds it in the window.
+                defaults: [None, None],
+                keys: stored.unwrap_or_default(),
+                hidden: b.hidden,
+                body: Some(b.body.clone()),
+            });
+        }
+        self.generation += 1;
+    }
 }
 
 impl super::UiScript {
@@ -209,10 +333,46 @@ impl super::UiScript {
                 run_on_up: c.run_on_up,
                 keys: defaults.iter().flatten().cloned().collect(),
                 defaults,
+                hidden: false,
+                body: None,
             });
         }
         model.keybinds.current_set = 1;
         model.keybinds.generation += 1;
+    }
+
+    /// Register one addon's parsed `Bindings.xml` — the runtime-`String` sibling of
+    /// [`Self::register_bindings`] (decision 1188 phase 4), called at the reference's own position
+    /// in the addon load: after that addon's `.toc` files, before its saved variables
+    /// (`0x51f400`).
+    ///
+    /// Two methods rather than one because the two payloads are genuinely different: a host
+    /// command is `&'static str` all the way down (it names a Rust action and ships default
+    /// chords), an addon's is owned text read off disk this session (it names nothing and carries
+    /// a Lua body). The rules they register under are identical — see
+    /// [`KeybindState::register_addon`].
+    pub fn register_addon_bindings(&mut self, addon: &str, bindings: &[AddonBinding]) {
+        self.model_mut().keybinds.register_addon(addon, bindings);
+    }
+
+    /// Every addon-declared binding's runnable half, in registration order — the app's dispatch
+    /// derivation reads this beside [`Self::keybind_snapshot`] and indexes into it.
+    ///
+    /// Host commands are absent by construction (they have no body), which is what lets the app's
+    /// dispatch target be a two-armed enum rather than an index space with a sentinel in it.
+    pub fn addon_binding_bodies(&self) -> Vec<AddonBindingBody> {
+        self.model_mut()
+            .keybinds
+            .entries
+            .iter()
+            .filter_map(|e| {
+                e.body.as_ref().map(|body| AddonBindingBody {
+                    name: e.name.clone(),
+                    run_on_up: e.run_on_up,
+                    body: body.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Host-side seed of a stored set (`1` account / `2` character) — the loaded
@@ -223,8 +383,16 @@ impl super::UiScript {
     pub fn seed_binding_set(&mut self, set: u32, keys: Option<Vec<(String, Vec<String>)>>) {
         let mut model = self.model_mut();
         let kb = &mut model.keybinds;
+        // Keep the pairs BY NAME as well as positionally: a command that does not exist yet
+        // (an addon's, registered at world entry) has no position to occupy, and the by-name map
+        // is what `register_addon` consults when it finally does (decision 1201).
+        let mut by_name_owned: HashMap<String, Vec<String>> = HashMap::new();
         let snap = keys.map(|pairs| {
             let by_name: HashMap<_, _> = pairs.into_iter().collect();
+            by_name_owned = by_name
+                .iter()
+                .map(|(n, k)| (n.to_ascii_uppercase(), k.clone()))
+                .collect();
             kb.entries
                 .iter()
                 .map(|e| {
@@ -236,8 +404,14 @@ impl super::UiScript {
                 .collect()
         });
         match set {
-            1 => kb.stored[0] = snap,
-            2 => kb.stored[1] = snap,
+            1 => {
+                kb.stored[0] = snap;
+                kb.stored_by_name[0] = by_name_owned;
+            }
+            2 => {
+                kb.stored[1] = snap;
+                kb.stored_by_name[1] = by_name_owned;
+            }
             _ => {}
         }
     }
@@ -286,21 +460,40 @@ impl super::UiScript {
     }
 }
 
+/// Register one addon's parsed `Bindings.xml` from a bare `&Lua` — the `LoadAddOn` path
+/// ([`super::addon::load_addon`]) runs *inside* a Lua binding, synchronously, and has no
+/// [`super::UiScript`] to reach. The exact shape `load_saved_variables` already uses next door,
+/// and for the same reason: both halves of the addon load must do the same thing at the same
+/// position, whichever entered.
+pub(crate) fn register_addon_bindings(lua: &Lua, addon: &str, bindings: &[AddonBinding]) {
+    lua.app_data_mut::<Model>()
+        .expect("model app_data")
+        .keybinds
+        .register_addon(addon, bindings);
+}
+
 /// Register the binding globals (1.12 names; `GetBinding` returns the era 4-tuple —
 /// command, category token, key1, key2 — the categorized window's shape).
+///
+/// `GetNumBindings`/`GetBinding` walk [`KeybindState::visible`] — the table minus the
+/// `hidden="true"` rows — while every other verb here keys on name or chord and so sees the whole
+/// table (a hidden binding is bindable, saved and dispatched, just not listed).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetNumBindings",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_mut::<Model>().expect("model app_data");
-            Ok(model.keybinds.entries.len())
+            Ok(model.keybinds.visible().count())
         })?,
     )?;
     lua.globals().set(
         "GetBinding",
         lua.create_function(|lua, i: usize| {
             let model = lua.app_data_mut::<Model>().expect("model app_data");
-            let Some(e) = i.checked_sub(1).and_then(|i| model.keybinds.entries.get(i)) else {
+            let Some(e) = i
+                .checked_sub(1)
+                .and_then(|i| model.keybinds.visible().nth(i))
+            else {
                 return Ok(MultiValue::new());
             };
             let mut out = vec![
@@ -519,6 +712,117 @@ mod tests {
         assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
     }
 
+    /// **An addon's `Bindings.xml` becomes ordinary rows** (decision 1188 phase 4) — same table,
+    /// same window, same `SetBinding` laws — with exactly two things that only an addon row has:
+    /// a Lua body, and the `hidden` bit.
+    ///
+    /// What each assertion would catch, since this is the seam a real addon's keys arrive
+    /// through:
+    /// - **the count and the tuple**: a registration that lands somewhere the window cannot see
+    ///   (the whole symptom 1188 phase 4 exists to remove);
+    /// - **the carried header**: a per-row reading of `header`, which would leave 215 of the
+    ///   reference's own 228 bindings in a nameless category, and a doubled `BINDING_HEADER_`
+    ///   prefix if the parser's job were done twice;
+    /// - **the addon-name fallback**: a header-less file whose rows land in whatever section
+    ///   happened to be last — unfindable in the window, which is why we diverge here;
+    /// - **`MOVEFORWARD`**: an addon quietly *replacing* a host command by declaring its name,
+    ///   which would swap a real engine action for a Lua body;
+    /// - **the hidden row**: `hidden="true"` read as "do not register" rather than "do not list",
+    ///   which would make the binding unbindable and undispatchable;
+    /// - **the bodies**: a host row leaking into [`super::UiScript::addon_binding_bodies`], which
+    ///   is what makes the app's dispatch target a two-armed enum instead of a sentinel index.
+    #[test]
+    fn an_addons_bindings_xml_registers_as_ordinary_rows() {
+        let mut s = script();
+        let parsed = crate::bindings_xml::parse(
+            r#"<Bindings>
+                <Binding name="PROBEHOLD" runOnUp="true" header="PROBE">
+                    if ( keystate == "down" ) then Down(); else Up(); end
+                </Binding>
+                <Binding name="PROBEEDGE">Edge();</Binding>
+                <Binding name="PROBEHIDDEN" hidden="true">Hidden();</Binding>
+                <Binding name="MOVEFORWARD">Hijack();</Binding>
+            </Bindings>"#,
+        )
+        .expect("well-formed");
+        let g0 = s.keybinds_generation();
+        s.register_addon_bindings("ProbeAddon", &parsed);
+        assert!(
+            s.keybinds_generation() > g0,
+            "registration must move the generation — it is the app's re-derive-dispatch signal"
+        );
+
+        // Three host commands + the two listable addon rows. `MOVEFORWARD` did not register
+        // twice, and `PROBEHIDDEN` is registered but not listed.
+        assert_eq!(s.eval::<usize>("return GetNumBindings()").unwrap(), 5);
+        assert!(s
+            .eval::<bool>(
+                r#"local c, cat, k1 = GetBinding(4)
+                   return c == "PROBEHOLD" and cat == "BINDING_HEADER_PROBE" and k1 == nil"#
+            )
+            .unwrap());
+        assert!(
+            s.eval::<bool>(
+                r#"local c, cat = GetBinding(5)
+                   return c == "PROBEEDGE" and cat == "BINDING_HEADER_PROBE""#
+            )
+            .unwrap(),
+            "a row with no header of its own belongs to the section the last header opened"
+        );
+        // The host's own command kept its row, its keys and its engine action.
+        assert!(s
+            .eval::<bool>(
+                r#"local k1, k2 = GetBindingKey("MOVEFORWARD"); return k1 == "W" and k2 == "UP""#
+            )
+            .unwrap());
+
+        // The hidden row is absent from the enumeration…
+        assert!(s
+            .eval::<bool>(
+                r#"for i = 1, GetNumBindings() do
+                       if GetBinding(i) == "PROBEHIDDEN" then return false end
+                   end
+                   return true"#
+            )
+            .unwrap());
+        // …and is a binding in every other respect: bindable, and found by key.
+        assert!(s
+            .eval::<bool>(r#"return SetBinding("H", "PROBEHIDDEN") == 1"#)
+            .unwrap());
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("H")"#).unwrap(),
+            "PROBEHIDDEN"
+        );
+        // And it rides the same laws: the wheel refusal reads the addon row's `runOnUp` exactly
+        // as it reads a host command's press+release class.
+        assert!(s
+            .eval::<bool>(r#"return SetBinding("MOUSEWHEELUP", "PROBEHOLD") == nil"#)
+            .unwrap());
+        assert!(s
+            .eval::<bool>(r#"return SetBinding("MOUSEWHEELUP", "PROBEEDGE") == 1"#)
+            .unwrap());
+
+        // A second addon, declaring no header at all: its rows are its own section, named for it.
+        let parsed = crate::bindings_xml::parse(
+            r#"<Bindings><Binding name="LIBKEY">Lib();</Binding></Bindings>"#,
+        )
+        .expect("well-formed");
+        s.register_addon_bindings("ProbeLib", &parsed);
+        assert!(s
+            .eval::<bool>(
+                r#"local c, cat = GetBinding(6); return c == "LIBKEY" and cat == "ProbeLib""#
+            )
+            .unwrap());
+
+        // The runnable halves the app's dispatch indexes — addon rows only, in registration
+        // order, hidden included.
+        let bodies = s.addon_binding_bodies();
+        let names: Vec<&str> = bodies.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["PROBEHOLD", "PROBEEDGE", "PROBEHIDDEN", "LIBKEY"]);
+        assert!(bodies[0].run_on_up && !bodies[1].run_on_up);
+        assert!(bodies[0].body.contains(r#"keystate == "down""#));
+    }
+
     #[test]
     fn host_seeding_feeds_load_and_the_capture_arm_reads_back() {
         let mut s = script();
@@ -542,5 +846,104 @@ mod tests {
         let snap = s.keybind_snapshot();
         assert_eq!(snap[1].0, "JUMP");
         assert_eq!(snap[1].1, vec!["F".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod addon_persistence_tests {
+    use crate::bindings_xml::AddonBinding;
+    use crate::script::keybind::KeybindCommand;
+    use crate::script::UiScript;
+
+    fn binding(name: &str) -> AddonBinding {
+        AddonBinding {
+            name: name.into(),
+            header: None,
+            run_on_up: false,
+            hidden: false,
+            body: "AddonBindingRan = true".into(),
+        }
+    }
+
+    /// **An addon's binding remembers its key across a restart** — the defect decision 1192 §4
+    /// recorded and left open: "the binding registers, lists, dispatches, and forgets its key."
+    ///
+    /// The shape is the whole point, so it is reproduced literally: at BOOT the stored set is
+    /// seeded while only the host's own commands exist, and the addon's `Bindings.xml` registers
+    /// hours later at world entry. The stored row therefore has no slot to land in, which is why
+    /// the positional snapshot alone could never carry it.
+    #[test]
+    fn an_addon_binding_restores_its_stored_chord_registered_after_the_seed() {
+        let mut s = UiScript::new().unwrap();
+        // Boot: the host's commands, then the account set off disk — which already carries the
+        // player's chord for a command that does not exist in this VM yet.
+        s.register_bindings(&[KeybindCommand {
+            name: "JUMP",
+            category: "BINDING_HEADER_MOVEMENT",
+            run_on_up: false,
+            default1: Some("SPACE"),
+            default2: None,
+        }]);
+        s.seed_binding_set(
+            1,
+            Some(vec![
+                ("JUMP".into(), vec!["SPACE".into()]),
+                ("MYADDONTOGGLE".into(), vec!["CTRL-X".into()]),
+            ]),
+        );
+        s.load_binding_set(1);
+
+        // World entry: the addon's Bindings.xml registers.
+        s.register_addon_bindings("MyAddon", &[binding("MYADDONTOGGLE")]);
+
+        let bound = s
+            .keybind_snapshot()
+            .into_iter()
+            .find(|(n, _)| n == "MYADDONTOGGLE")
+            .expect("the addon's command is in the table");
+        assert_eq!(
+            bound.1,
+            vec!["CTRL-X".to_string()],
+            "the stored chord came back — this is the assertion 1192 §4 could not make"
+        );
+    }
+
+    /// A command the stored set says nothing about still registers **unbound**, which is 1.12's
+    /// own rule for an addon binding (its `<Binding>` carries no default chord).
+    #[test]
+    fn an_addon_binding_with_no_stored_chord_registers_unbound() {
+        let mut s = UiScript::new().unwrap();
+        s.seed_binding_set(1, Some(vec![("SOMETHINGELSE".into(), vec!["Q".into()])]));
+        s.load_binding_set(1);
+        s.register_addon_bindings("MyAddon", &[binding("MYADDONTOGGLE")]);
+        let bound = s
+            .keybind_snapshot()
+            .into_iter()
+            .find(|(n, _)| n == "MYADDONTOGGLE")
+            .expect("registered");
+        assert!(bound.1.is_empty());
+    }
+
+    /// The character set wins over the account set for an addon command too — the same precedence
+    /// `load` applies to every other command, so an addon binding restores like a shipped one.
+    #[test]
+    fn the_character_set_wins_for_an_addon_command() {
+        let mut s = UiScript::new().unwrap();
+        s.seed_binding_set(
+            1,
+            Some(vec![("MYADDONTOGGLE".into(), vec!["CTRL-X".into()])]),
+        );
+        s.seed_binding_set(
+            2,
+            Some(vec![("MYADDONTOGGLE".into(), vec!["ALT-Z".into()])]),
+        );
+        s.load_binding_set(2);
+        s.register_addon_bindings("MyAddon", &[binding("MYADDONTOGGLE")]);
+        let bound = s
+            .keybind_snapshot()
+            .into_iter()
+            .find(|(n, _)| n == "MYADDONTOGGLE")
+            .expect("registered");
+        assert_eq!(bound.1, vec!["ALT-Z".to_string()]);
     }
 }

@@ -106,6 +106,20 @@ pub(crate) use swim::swim_enter_depth;
 /// [`crate::creature_anim::MovementState::stunned`] (decision 0880).
 pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 
+/// `UNIT_FLAG_IN_COMBAT` — the same `UNIT_FIELD_FLAGS` word, **bit 19** (vmangos
+/// `UnitDefines.h`; the client reads it as `shr reg,0x13; test rl,1`).
+///
+/// Its readers are deliberately unrelated to each other — the spell-usability walk's leg 8, the
+/// probe preflight banner, and `UnitAffectingCombat`'s snapshot field — which is exactly why the
+/// constant lives here beside its neighbour rather than being declared a fourth time: three
+/// private copies of one bit is how a mask silently drifts.
+///
+/// **There is no player-specific combat latch to pair it with.** wow-re censused the
+/// `shr reg,0x13` + `test rl,1` idiom image-wide (7 hits, 6 on this field+bit) and found the two
+/// hardcoded *local-player* readers going through this same flag; `UnitAffectingCombat("player")`
+/// takes a GUID fast path and lands on the identical word.
+pub(crate) const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
+
 /// Ask for a **stand state** — the client's `SetStandState(newState)` (`0x5ed430`: send
 /// `CMSG_STANDSTATECHANGE` + apply locally through `0x6127b0`), as a message so every path that
 /// wants a posture funnels through the ONE setter in [`control`] (the [`crate::creature_anim::

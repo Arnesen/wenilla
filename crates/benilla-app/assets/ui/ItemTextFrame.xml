@@ -2,7 +2,7 @@
     <!--
         The item-text reader — letters, books, plaques (the mail arc's "permanent copy" lands
         here). Transcribed from the reference ItemTextFrame.xml (354 l) + ItemTextFrame.lua
-        (104 l); geometry/art quoted verbatim, names Benilla-prefixed. Driven by the engine's
+        (104 l); geometry/art quoted verbatim, names the reference's own. Driven by the engine's
         item-text seam (benilla-ui/src/script/item_text.rs) + crate::ui_item_text's feed/drain:
         the app fires the reference event flow ITEM_TEXT_BEGIN → ITEM_TEXT_READY → ITEM_TEXT_CLOSED.
 
@@ -45,7 +45,7 @@
             ["Bronze"] = {0.93, 0.82, 0}
         }
         -- ref UIParent.lua l.1880-1888.
-        function BenillaGetMaterialTextColors(material)
+        function GetMaterialTextColors(material)
             local textColor = BENILLA_MATERIAL_TEXT_COLOR_TABLE[material]
             local titleColor = BENILLA_MATERIAL_TITLETEXT_COLOR_TABLE[material]
             if not (textColor and titleColor) then
@@ -56,7 +56,7 @@
         end
 
         -- ref ItemTextFrame.lua l.1-8.
-        function BenillaItemTextFrame_OnLoad()
+        function ItemTextFrame_OnLoad()
             this:RegisterEvent("ITEM_TEXT_BEGIN")
             this:RegisterEvent("ITEM_TEXT_TRANSLATION")
             this:RegisterEvent("ITEM_TEXT_READY")
@@ -64,26 +64,26 @@
         end
 
         -- ref l.10-96.
-        function BenillaItemTextFrame_OnEvent(event)
+        function ItemTextFrame_OnEvent(event)
             if event == "ITEM_TEXT_BEGIN" then
-                BenillaItemTextTitleText:SetText(ItemTextGetItem())
-                BenillaItemTextScrollFrame:Hide()
-                BenillaItemTextCurrentPage:Hide()
-                BenillaItemTextStatusBar:Hide()
-                BenillaItemTextPrevPageButton:Hide()
-                BenillaItemTextNextPageButton:Hide()
+                ItemTextTitleText:SetText(ItemTextGetItem())
+                ItemTextScrollFrame:Hide()
+                ItemTextCurrentPage:Hide()
+                ItemTextStatusBar:Hide()
+                ItemTextPrevPageButton:Hide()
+                ItemTextNextPageButton:Hide()
                 local material = ItemTextGetMaterial()
                 if not material then material = "Parchment" end
-                local textColor = BenillaGetMaterialTextColors(material)
-                BenillaItemTextPageText:SetTextColor(textColor[1], textColor[2], textColor[3])
+                local textColor = GetMaterialTextColors(material)
+                ItemTextPageText:SetTextColor(textColor[1], textColor[2], textColor[3])
                 return
             end
             if event == "ITEM_TEXT_TRANSLATION" then
-                BenillaItemTextPrevPageButton:Hide()
-                BenillaItemTextNextPageButton:Hide()
+                ItemTextPrevPageButton:Hide()
+                ItemTextNextPageButton:Hide()
                 this.translationElapsed = 0
-                BenillaItemTextStatusBar:SetMinMaxValues(0, arg1)
-                BenillaItemTextStatusBar:Show()
+                ItemTextStatusBar:SetMinMaxValues(0, arg1)
+                ItemTextStatusBar:Show()
                 ShowUIPanel(this)
                 if not this:IsVisible() then CloseItemText() end
                 return
@@ -92,45 +92,45 @@
                 local creator = ItemTextGetCreator()
                 if creator then
                     creator = "\n\n".."From,".."\n"..creator.."\n\n"   -- ITEM_TEXT_FROM
-                    BenillaItemTextPageText:SetText("\n"..ItemTextGetText()..creator)
+                    ItemTextPageText:SetText("\n"..ItemTextGetText()..creator)
                 else
-                    BenillaItemTextPageText:SetText("\n"..ItemTextGetText().."\n")
+                    ItemTextPageText:SetText("\n"..ItemTextGetText().."\n")
                 end
-                BenillaItemTextScrollFrame:Show()
+                ItemTextScrollFrame:Show()
                 local page = ItemTextGetPage()
                 local next = ItemTextHasNextPage()
                 local material = ItemTextGetMaterial()
                 if not material then material = "Parchment" end
                 if material == "Parchment" then
-                    BenillaItemTextMaterialTopLeft:Hide()
-                    BenillaItemTextMaterialTopRight:Hide()
-                    BenillaItemTextMaterialBotLeft:Hide()
-                    BenillaItemTextMaterialBotRight:Hide()
+                    ItemTextMaterialTopLeft:Hide()
+                    ItemTextMaterialTopRight:Hide()
+                    ItemTextMaterialBotLeft:Hide()
+                    ItemTextMaterialBotRight:Hide()
                 else
-                    BenillaItemTextMaterialTopLeft:Show()
-                    BenillaItemTextMaterialTopRight:Show()
-                    BenillaItemTextMaterialBotLeft:Show()
-                    BenillaItemTextMaterialBotRight:Show()
-                    BenillaItemTextMaterialTopLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopLeft")
-                    BenillaItemTextMaterialTopRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopRight")
-                    BenillaItemTextMaterialBotLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotLeft")
-                    BenillaItemTextMaterialBotRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotRight")
+                    ItemTextMaterialTopLeft:Show()
+                    ItemTextMaterialTopRight:Show()
+                    ItemTextMaterialBotLeft:Show()
+                    ItemTextMaterialBotRight:Show()
+                    ItemTextMaterialTopLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopLeft")
+                    ItemTextMaterialTopRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopRight")
+                    ItemTextMaterialBotLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotLeft")
+                    ItemTextMaterialBotRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotRight")
                 end
                 if (page > 1) or next then
-                    BenillaItemTextCurrentPage:SetText(page)
-                    BenillaItemTextCurrentPage:Show()
+                    ItemTextCurrentPage:SetText(page)
+                    ItemTextCurrentPage:Show()
                     if page > 1 then
-                        BenillaItemTextPrevPageButton:Show()
+                        ItemTextPrevPageButton:Show()
                     else
-                        BenillaItemTextPrevPageButton:Hide()
+                        ItemTextPrevPageButton:Hide()
                     end
                     if next then
-                        BenillaItemTextNextPageButton:Show()
+                        ItemTextNextPageButton:Show()
                     else
-                        BenillaItemTextNextPageButton:Hide()
+                        ItemTextNextPageButton:Hide()
                     end
                 end
-                BenillaItemTextStatusBar:Hide()
+                ItemTextStatusBar:Hide()
                 ShowUIPanel(this)
                 if not this:IsVisible() then CloseItemText() end
                 return
@@ -142,15 +142,15 @@
         end
 
         -- ref l.98-104.
-        function BenillaItemTextFrame_OnUpdate(elapsed)
-            if BenillaItemTextStatusBar:IsVisible() then
+        function ItemTextFrame_OnUpdate(elapsed)
+            if ItemTextStatusBar:IsVisible() then
                 elapsed = this.translationElapsed + elapsed
-                BenillaItemTextStatusBar:SetValue(elapsed)
+                ItemTextStatusBar:SetValue(elapsed)
                 this.translationElapsed = elapsed
             end
         end
     ]]></Script>
-    <Frame name="BenillaItemTextFrame" toplevel="true" movable="true" enableMouse="true" hidden="true" parent="UIParent">
+    <Frame name="ItemTextFrame" toplevel="true" movable="true" enableMouse="true" hidden="true" parent="UIParent">
         <Size><AbsDimension x="384" y="512"/></Size>
         <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-104"/></Offset></Anchor></Anchors>
         <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="70"/></HitRectInsets>
@@ -182,29 +182,29 @@
             <Layer level="ARTWORK">
                 <!-- The non-parchment material corners (stone/marble/…): textures swapped in by
                      ITEM_TEXT_READY; hidden entirely for parchment (ref l.56-70). -->
-                <Texture name="BenillaItemTextMaterialTopLeft" hidden="true">
+                <Texture name="ItemTextMaterialTopLeft" hidden="true">
                     <Size><AbsDimension x="256" y="256"/></Size>
                     <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-75"/></Offset></Anchor></Anchors>
                 </Texture>
-                <Texture name="BenillaItemTextMaterialTopRight" hidden="true">
+                <Texture name="ItemTextMaterialTopRight" hidden="true">
                     <Size><AbsDimension x="64" y="256"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaItemTextMaterialTopLeft" relativePoint="TOPRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="ItemTextMaterialTopLeft" relativePoint="TOPRIGHT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaItemTextMaterialBotLeft" hidden="true">
+                <Texture name="ItemTextMaterialBotLeft" hidden="true">
                     <Size><AbsDimension x="256" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaItemTextMaterialTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="ItemTextMaterialTopLeft" relativePoint="BOTTOMLEFT"/></Anchors>
                 </Texture>
-                <Texture name="BenillaItemTextMaterialBotRight" hidden="true">
+                <Texture name="ItemTextMaterialBotRight" hidden="true">
                     <Size><AbsDimension x="64" y="128"/></Size>
-                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaItemTextMaterialTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="ItemTextMaterialTopLeft" relativePoint="BOTTOMRIGHT"/></Anchors>
                 </Texture>
             </Layer>
             <Layer level="OVERLAY">
-                <FontString name="BenillaItemTextTitleText" inherits="GameFontNormal">
+                <FontString name="ItemTextTitleText" inherits="GameFontNormal">
                     <Size><AbsDimension x="224" y="14"/></Size>
                     <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="230"/></Offset></Anchor></Anchors>
                 </FontString>
-                <FontString name="BenillaItemTextCurrentPage" inherits="GameFontNormal">
+                <FontString name="ItemTextCurrentPage" inherits="GameFontNormal">
                     <Size><AbsDimension x="192" y="0"/></Size>
                     <Anchors><Anchor point="TOP"><Offset><AbsDimension x="10" y="-50"/></Offset></Anchor></Anchors>
                 </FontString>
@@ -213,7 +213,7 @@
         <Frames>
             <!-- ref ItemTextScrollFrame l.145-219: the plain-Frame stand-in (see the header) with
                  the ref's own flanking scrollbar art kept verbatim. -->
-            <Frame name="BenillaItemTextScrollFrame" hidden="true">
+            <Frame name="ItemTextScrollFrame" hidden="true">
                 <Size><AbsDimension x="280" y="355"/></Size>
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-66" y="-76"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -222,28 +222,28 @@
                          SetPoint time — a target declared later falls back to the parent (and
                          the black track lands on the parchment). -->
                     <Layer level="ARTWORK">
-                        <Texture name="BenillaItemTextScrollFrameTop" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                        <Texture name="ItemTextScrollFrameTop" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
                             <Size><AbsDimension x="28" y="256"/></Size>
                             <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
                             <TexCoords left="0" right="0.484375" top="0" bottom="1.0"/>
                         </Texture>
-                        <Texture name="BenillaItemTextScrollFrameBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                        <Texture name="ItemTextScrollFrameBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
                             <Size><AbsDimension x="28" y="107"/></Size>
                             <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
                             <TexCoords left="0.515625" right="1.0" top="0" bottom="0.4140625"/>
                         </Texture>
                     </Layer>
                     <Layer level="BACKGROUND">
-                        <Texture name="BenillaItemTextScrollFrameMiddle">
+                        <Texture name="ItemTextScrollFrameMiddle">
                             <Size><AbsDimension x="25" y="365"/></Size>
-                            <Anchors><Anchor point="TOPRIGHT" relativeTo="BenillaItemTextScrollFrameTop"/></Anchors>
+                            <Anchors><Anchor point="TOPRIGHT" relativeTo="ItemTextScrollFrameTop"/></Anchors>
                             <Color r="0" g="0" b="0" a="0.8"/>
                         </Texture>
                     </Layer>
                     <Layer level="OVERLAY">
                         <!-- ref ItemTextPageText (SimpleHTML 270×304 at 0,-15 in the scroll child)
                              as a FontString at the same rect. -->
-                        <FontString name="BenillaItemTextPageText" inherits="ItemTextFontNormal" justifyH="LEFT" justifyV="TOP">
+                        <FontString name="ItemTextPageText" inherits="ItemTextFontNormal" justifyH="LEFT" justifyV="TOP">
                             <Size><AbsDimension x="270" y="304"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                         </FontString>
@@ -252,9 +252,9 @@
             </Frame>
             <!-- ref ItemTextStatusBar l.220-251 — the ITEM_TEXT_TRANSLATION progress bar; never
                  fires on our letters, kept for fidelity. -->
-            <StatusBar name="BenillaItemTextStatusBar" hidden="true">
+            <StatusBar name="ItemTextStatusBar" hidden="true">
                 <Size><AbsDimension x="250" y="21"/></Size>
-                <Anchors><Anchor point="BOTTOM" relativeTo="BenillaItemTextFrame"><Offset><AbsDimension x="-5" y="128"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="BOTTOM" relativeTo="ItemTextFrame"><Offset><AbsDimension x="-5" y="128"/></Offset></Anchor></Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
                         <Texture file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorder">
@@ -270,7 +270,7 @@
                 <BarTexture file="Interface\TargetingFrame\UI-TargetingFrame-BarFill"/>
                 <BarColor r="0.25" g="0.75" b="0.25"/>
             </StatusBar>
-            <Button name="BenillaItemTextPrevPageButton" hidden="true">
+            <Button name="ItemTextPrevPageButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPLEFT"><Offset><AbsDimension x="90" y="-56"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -291,7 +291,7 @@
                 <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
             </Button>
-            <Button name="BenillaItemTextNextPageButton" hidden="true">
+            <Button name="ItemTextNextPageButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-55" y="-56"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -312,11 +312,11 @@
                 <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
             </Button>
-            <Button name="BenillaItemTextCloseButton">
+            <Button name="ItemTextCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-45" y="-26"/></Offset></Anchor></Anchors>
                 <Scripts>
-                    <OnClick>HideUIPanel(BenillaItemTextFrame)</OnClick>
+                    <OnClick>HideUIPanel(ItemTextFrame)</OnClick>
                 </Scripts>
                 <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
@@ -324,9 +324,9 @@
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaItemTextFrame_OnLoad()</OnLoad>
-            <OnEvent>BenillaItemTextFrame_OnEvent(event)</OnEvent>
-            <OnUpdate>BenillaItemTextFrame_OnUpdate(arg1)</OnUpdate>
+            <OnLoad>ItemTextFrame_OnLoad()</OnLoad>
+            <OnEvent>ItemTextFrame_OnEvent(event)</OnEvent>
+            <OnUpdate>ItemTextFrame_OnUpdate(arg1)</OnUpdate>
             <OnShow>PlaySound("igMainMenuOpen")</OnShow>
             <OnHide>
                 CloseItemText()

@@ -15,9 +15,17 @@
     CloseDropDownMenus(level), Disable/EnableButton, SetButtonText, SetAnchor, JustifyText,
     GetCurrentDropDown, the 2-second hover-away auto-close counting through the level chain.
 
+    THE COLOR SWATCH ROW came in with the colour picker (ColorPickerFrame.xml): the full
+    `hasColorSwatch` / `r` / `g` / `b` / `swatchFunc` / `hasOpacity` / `opacity` / `opacityFunc` /
+    `cancelFunc` field set, the `$parentColorSwatch` button on the row template, and
+    `UIDropDownMenuButton_OpenColorPicker` (ref UIDropDownMenu.lua l.801-815). It is the second half
+    of one feature, not a separate one: `hasColorSwatch` draws the square, clicking the square is
+    the ONLY way the reference's colour picker ever opens, and `hasColorSwatch` is **145 files /
+    82 corpus addons**.
+
     OUT (each waits for its first customer): menu level 3 (UIDROPDOWNMENU_MAXLEVELS is 2 — the
-    unit popups' deepest law; the XML gains DropDownList3 the day a customer needs it), color
-    swatches + the color picker + opacity, info.textHeight's per-row SetFont, the newbie
+    unit popups' deepest law; the XML gains DropDownList3 the day a customer needs it),
+    info.textHeight's per-row SetFont, the newbie
     tooltips on rows (the ref gates them behind a default-off cvar), message() on the row/level
     overflow guards (no dev-error dialog surface; the guard returns silently). The uiScale
     correction came IN with its first scaled customer (0992, the options window's dropdown
@@ -41,8 +49,9 @@
     - MENU displayMode hides the capsule art trio when present but skips the ref's toggle-button
       texture blanking + re-anchor (every MENU customer here is a born-hidden 10x10 frame whose
       capsule never draws).
-    - The disabled-row InvisibleButton spans to the row's RIGHT (the ref stops it at the color
-      swatch, which is OUT).
+    - (Was: "the disabled-row InvisibleButton spans to the row's RIGHT — the ref stops it at the
+      color swatch, which is OUT". The swatch is IN now, so the ref's own anchor is restored:
+      `RIGHT relativeTo="$parentColorSwatch" relativePoint="LEFT"`.)
     - The list OnShow resets showTimer AND isCounting (the ref writes `showTime`, a field
       nothing reads — transcribed as the intent, not the typo).
 -->
@@ -97,8 +106,10 @@
         end
 
         -- The ref's width law, run from the list's OnUpdate (the header's WIDTH SETTLE): rows
-        -- measure text + 60, +10 for an arrow, +10 for an icon, -30 when notCheckable; the list
-        -- takes max + 15. Waits until every text row has a real (nonzero) measure.
+        -- measure text + 60, +10 for an arrow OR a colour swatch, +10 for an icon, -30 when
+        -- notCheckable; the list takes max + 15. Waits until every text row has a real (nonzero)
+        -- measure. (The ref's `if ( info.hasArrow or info.hasColorSwatch )` is ONE +10, not two —
+        -- the two ride the same right-hand slot, and a row never has both.)
         function UIDropDownMenu_SettleWidth(listFrame)
             local listFrameName = listFrame:GetName();
             if ( listFrame.fixedWidth ) then
@@ -116,7 +127,7 @@
                     if ( width > 0 ) then
                         seen = seen + 1;
                         width = width + 60;
-                        if ( button.hasArrow ) then
+                        if ( button.hasArrow or button.hasColorSwatch ) then
                             width = width + 10;
                         end
                         if ( button.notCheckable ) then
@@ -296,6 +307,15 @@
 
             button.func = info.func;
             button.owner = info.owner;
+            -- The colour-swatch half of the info table (ref l.229-233), passed to the row so the
+            -- swatch's OnClick can hand it all to ColorPickerFrame. `swatchFunc` becomes the
+            -- picker's `func`, which is why it is the picker's LIVE-preview callback and not an
+            -- on-accept one.
+            button.hasOpacity = info.hasOpacity;
+            button.opacity = info.opacity;
+            button.opacityFunc = info.opacityFunc;
+            button.cancelFunc = info.cancelFunc;
+            button.swatchFunc = info.swatchFunc;
             button.keepShownOnClick = info.keepShownOnClick;
             button.tooltipTitle = info.tooltipTitle;
             button.tooltipText = info.tooltipText;
@@ -375,6 +395,20 @@
                 getglobal(listFrameName.."Button"..index.."Check"):Hide();
             end
             button.checked = info.checked;
+
+            -- The colour square (ref l.318-328). Its NormalTexture is the swatch art, tinted to the
+            -- row's colour; the row keeps r/g/b so the swatch's OnClick can seed the picker.
+            local colorSwatch = getglobal(listFrameName.."Button"..index.."ColorSwatch");
+            if ( info.hasColorSwatch ) then
+                getglobal(colorSwatch:GetName().."NormalTexture"):SetVertexColor(info.r, info.g, info.b);
+                button.r = info.r;
+                button.g = info.g;
+                button.b = info.b;
+                colorSwatch:Show();
+            else
+                colorSwatch:Hide();
+            end
+            button.hasColorSwatch = info.hasColorSwatch;
 
             -- notClickable disables white; isTitle disables gold (ref order — title wins).
             if ( info.notClickable ) then
@@ -743,6 +777,26 @@
             return getglobal(this:GetName().."NormalText"):GetText();
         end
 
+        -- ref l.801-815, verbatim. THE entry point to the colour picker: every colour option in
+        -- every FrameXML dropdown and every Ace2/Dewdrop menu row lands here. Note what it does
+        -- that the picker itself does not — `previousValues` is captured HERE, and it is the table
+        -- `cancelFunc` is handed, so Cancel restoring the old colour is this line's doing.
+        function UIDropDownMenuButton_OpenColorPicker(button)
+            CloseMenus();
+            if ( not button ) then
+                button = this;
+            end
+            UIDROPDOWNMENU_MENU_VALUE = button.value;
+            ColorPickerFrame.func = button.swatchFunc;
+            ColorPickerFrame.hasOpacity = button.hasOpacity;
+            ColorPickerFrame.opacityFunc = button.opacityFunc;
+            ColorPickerFrame.opacity = button.opacity;
+            ColorPickerFrame:SetColorRGB(button.r, button.g, button.b);
+            ColorPickerFrame.previousValues = {r = button.r, g = button.g, b = button.b, opacity = button.opacity};
+            ColorPickerFrame.cancelFunc = button.cancelFunc;
+            ShowUIPanel(ColorPickerFrame);
+        end
+
         function UIDropDownMenu_DisableButton(level, id)
             getglobal("DropDownList"..level.."Button"..id):Disable();
         end
@@ -781,6 +835,41 @@
             </Layer>
         </Layers>
         <Frames>
+            <!-- ref UIDropDownMenuTemplates.xml l.38-83. The colour square: a 16x16 button whose
+                 NormalTexture is the ChatFrameColorSwatch art, tinted per row, over a 14x14
+                 `$parentSwatchBg` that the hover recolours (gold in, white out) — that background
+                 is the row's only hover feedback, since the square itself is the row's colour.
+                 Clicking it is the ONLY thing in the whole reference UI that opens the colour
+                 picker. -->
+            <Button name="$parentColorSwatch" hidden="true">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentSwatchBg">
+                            <Size><AbsDimension x="14" y="14"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                            <Color r="1.0" g="1.0" b="1.0"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnClick>
+                        CloseMenus();
+                        UIDropDownMenuButton_OpenColorPicker(this:GetParent());
+                    </OnClick>
+                    <OnEnter>
+                        CloseDropDownMenus(this:GetParent():GetParent():GetID() + 1);
+                        getglobal(this:GetName().."SwatchBg"):SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
+                        UIDropDownMenu_StopCounting(this:GetParent():GetParent());
+                    </OnEnter>
+                    <OnLeave>
+                        getglobal(this:GetName().."SwatchBg"):SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
+                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                    </OnLeave>
+                </Scripts>
+                <NormalTexture name="$parentNormalTexture" file="Interface\ChatFrame\ChatFrameColorSwatch"/>
+            </Button>
             <Button name="$parentExpandArrow" hidden="true">
                 <Size><AbsDimension x="16" y="16"/></Size>
                 <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
@@ -799,12 +888,13 @@
                 <NormalTexture file="Interface\ChatFrame\ChatFrameExpandArrow"/>
             </Button>
             <!-- Disabled rows don't get mouse events; this transparent cover keeps the hover
-                 alive (timeout + deeper-level close). Spans to the row's RIGHT (header note). -->
+                 alive (timeout + deeper-level close). It stops at the colour swatch's LEFT edge
+                 (ref l.111-113) so a disabled row's swatch is still clickable. -->
             <Button name="$parentInvisibleButton" hidden="true">
                 <Anchors>
                     <Anchor point="TOPLEFT"/>
                     <Anchor point="BOTTOMLEFT"/>
-                    <Anchor point="RIGHT"/>
+                    <Anchor point="RIGHT" relativeTo="$parentColorSwatch" relativePoint="LEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnEnter>

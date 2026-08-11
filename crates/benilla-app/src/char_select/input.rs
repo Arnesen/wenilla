@@ -34,13 +34,15 @@ pub(super) fn select_input(
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
     mut dialog: ResMut<DeleteDialog>,
+    mut panel: ResMut<super::addons::AddonsPanel>,
     mut next: ResMut<NextState<ClientState>>,
     mut sounds: MessageWriter<GlueSound>,
     mut intent: ResMut<crate::login::LoginIntent>,
     time: Res<Time>,
     mut last_click: Local<Option<(usize, f32)>>,
 ) {
-    if dialog.open {
+    // A modal owns the input while it is up — the delete confirm, or the AddOns list.
+    if dialog.open || panel.open {
         return;
     }
     let now = time.elapsed_secs();
@@ -75,6 +77,12 @@ pub(super) fn select_input(
             SelectAction::CreateChar => {
                 sounds.write(GlueSound("gsCharacterSelectionCreateNew"));
                 next.set(ClientState::CharCreate);
+            }
+            SelectAction::Addons => {
+                // The reference plays `gsCharacterSelectionOpen`-family click here; ours reuses
+                // the create-screen open sound rather than inventing a name the client lacks.
+                sounds.write(GlueSound("gsCharacterSelectionCreateNew"));
+                panel.open_for(crate::ui_macro::identity(&roster).as_ref());
             }
             SelectAction::Back => back_to_login = true,
             _ => {}

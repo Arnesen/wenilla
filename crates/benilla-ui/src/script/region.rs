@@ -209,8 +209,11 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                model.region_data.entry(rh).or_default().vertex_color =
-                    Some([r, g, b, a.unwrap_or(1.0)]);
+                let d = model.region_data.entry(rh).or_default();
+                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                // The same slot `SetTextColor` writes on a FontString, so it is the same explicit
+                // colour set as far as font-object inheritance is concerned.
+                d.font_explicit.color = true;
                 Ok(())
             },
         )?,
@@ -585,12 +588,10 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 "RIGHT" => JustifyH::Right,
                 _ => JustifyH::Center,
             };
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .region_data
-                .entry(rh)
-                .or_default()
-                .justify_h = jh;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let d = model.region_data.entry(rh).or_default();
+            d.justify_h = jh;
+            d.font_explicit.justify_h = true;
             Ok(())
         })?,
     )?;
@@ -605,12 +606,10 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 "BOTTOM" => JustifyV::Bottom,
                 _ => JustifyV::Middle,
             };
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .region_data
-                .entry(rh)
-                .or_default()
-                .justify_v = jv;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let d = model.region_data.entry(rh).or_default();
+            d.justify_v = jv;
+            d.font_explicit.justify_v = true;
             Ok(())
         })?,
     )?;
@@ -684,49 +683,64 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             Ok((l, r, t, b))
         })?,
     )?;
-    // SetFontObject("GameFontNormal") — re-point this FontString at a named virtual Font object: its
-    // resolved paint (face/height/color/outline) is copied into the region as the new default. An
-    // explicit SetFont/SetTextColor afterward overrides. An unknown name errors (never silently no-op).
+    // SetFontObject(GameFontNormal) — re-point this FontString at a Font object: its resolved paint
+    // (face/height/color/outline/shadow) becomes the region's, and the link is kept live, so a later
+    // `GameFontNormal:SetFont(…)` re-paints this region too ([`super::font`]'s module doc).
+    //
+    // All three argument forms the reference's own usage string names (`.rdata 0x87c5cc`:
+    // `SetFontObject(font or "font" or nil)`) — the **object**, which is what 3,180 of the corpus's
+    // 3,186 call sites pass (`Gratuity-2.0.lua:57`, every FuBar/Ace label); a **name string**, for
+    // our own shipped XML and the 6 sites that use it; and **nil**, which severs the link. A frame,
+    // a number, or an unknown name is an error — never a silent no-op (1203/1205/1211's class).
     m.set(
         "SetFontObject",
-        lua.create_function(|lua, (this, name): (Table, String)| {
+        lua.create_function(|lua, (this, font): (Table, Value)| {
+            let name = super::font::resolve("SetFontObject", &font)?;
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            let Some(font) = model.font_objects.get(&name).cloned() else {
+            // The nil form: unlink, and leave the paint standing (the reference stores a null
+            // parent; nothing re-reads and nothing is cleared).
+            let Some(name) = name else {
+                model.region_data.entry(rh).or_default().font_object = None;
+                return Ok(());
+            };
+            let Some(fo) = model.font_objects.get(&name).cloned() else {
                 return Err(mlua::Error::runtime(format!(
                     "SetFontObject: no font object named '{name}' is registered"
                 )));
             };
             let d = model.region_data.entry(rh).or_default();
             d.font_object = Some(name);
-            d.font_path = font.font;
-            d.font_height = font.height;
-            d.outline = font.outline;
-            d.font_shadow = font.shadow;
-            if let Some(c) = font.color {
-                d.vertex_color = Some(c);
-            }
-            if let Some(j) = font.justify_h {
-                d.justify_h = j;
-            }
-            if let Some(j) = font.justify_v {
-                d.justify_v = j;
-            }
+            // The severance mask is deliberately NOT reset here. §5-verified: the real "stop
+            // inheriting this property" signal is a CLEARED bit in the inheritMask at
+            // `FONTINSTANCE+0x2c` (FontString `+0xd4`, per-axis justify at `+0x124`), cleared by
+            // each local setter and never restored — "a FontString that set its own colour stays
+            // severed even across a later SetFontObject" (wow-re
+            // `system/ui/scratch/font-object-lua-surface.md`). This corrects our first cut, which
+            // reset it.
+            super::font::repaint(d, &fo);
             Ok(())
         })?,
     )?;
-    // GetFontObject() → the name of the last font object this FontString resolved (or nil).
+    // GetFontObject() → the font OBJECT this FontString last resolved (or nil).
+    //
+    // The object, not its name: `Dewdrop-2.0.lua:2181` is
+    // `button.text:SetTextColor(button.text:GetFontObject():GetTextColor())` — 65 sites across 62
+    // corpus addons that index the result immediately. A name string there raises.
     m.set(
         "GetFontObject",
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            match model
-                .region_data
-                .get(&rh)
-                .and_then(|d| d.font_object.clone())
-            {
-                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+            let name = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                model
+                    .region_data
+                    .get(&rh)
+                    .and_then(|d| d.font_object.clone())
+                    .filter(|n| model.font_objects.contains_key(n))
+            };
+            match name {
+                Some(n) => Ok(Value::Table(super::font::wrapper(lua, &n)?)),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -744,11 +758,15 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
+                // Each argument actually supplied is an EXPLICIT set: it must survive a later
+                // mutation of the font object this region inherits (`FontExplicit`).
                 if let Some(p) = path.filter(|p| !p.is_empty()) {
                     d.font_path = Some(p);
+                    d.font_explicit.face = true;
                 }
                 if let Some(h) = height {
                     d.font_height = Some(h);
+                    d.font_explicit.height = true;
                 }
                 if let Some(f) = flags {
                     d.outline = match f.to_ascii_uppercase() {
@@ -756,6 +774,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                         f if f.contains("OUTLINE") => Outline::Normal,
                         _ => Outline::None,
                     };
+                    d.font_explicit.outline = true;
                 }
                 Ok(true)
             },
@@ -804,15 +823,31 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(
             |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
                 let rh = region_handle_of(lua, &this)?;
-                lua.app_data_mut::<Model>()
-                    .expect("model")
-                    .region_data
-                    .entry(rh)
-                    .or_default()
-                    .vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let d = model.region_data.entry(rh).or_default();
+                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                d.font_explicit.color = true;
                 Ok(())
             },
         )?,
+    )?;
+    // GetTextColor() → r, g, b, a — `SetTextColor`'s missing pair, and a real binding in the same
+    // FontInstance family. 11 corpus sites read it off a FontString directly (`CustomNameplates`
+    // re-tints a level tag from the name's colour; `TipBuddy` snapshots every tooltip line), on top
+    // of the 65 that reach it through `GetFontObject()`. Never set = the white every region draws
+    // at, same convention as `GetVertexColor` (the same slot).
+    m.set(
+        "GetTextColor",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let c = model
+                .region_data
+                .get(&rh)
+                .and_then(|d| d.vertex_color)
+                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            Ok((c[0], c[1], c[2], c[3]))
+        })?,
     )?;
 
     lua.set_named_registry_value(REG_REGION_METHODS, m)?;

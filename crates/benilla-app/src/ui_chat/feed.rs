@@ -301,12 +301,24 @@ pub(super) fn feed_chat(
             Pending::Event(mut event) => {
                 // The joined-list upkeep (the client-side number law): YOU_JOINED appends,
                 // YOU_LEFT (and the suspend form) removes.
+                //
+                // Logged, because this edge is where "we asked to join" becomes "the server says
+                // we are in": [`super::channels`]'s walk only ever proves the request went out, and
+                // the round trip is what actually arms an addon (it is the `CHAT_MSG_CHANNEL_NOTICE`
+                // Ace2's whole init gate waits on). A join the server refuses is otherwise
+                // completely silent on this side.
                 if event.kind == Some(ChatEventKind::ChannelNotice) {
                     match event.notice.as_str() {
                         "2" if channels.number_of(&event.channel).is_none() => {
                             channels.joined.push(event.channel.clone());
+                            debug!(
+                                "chat: server confirms channel {:?} joined (slot {})",
+                                event.channel,
+                                channels.joined.len()
+                            );
                         }
                         "3" => {
+                            debug!("chat: server confirms channel {:?} left", event.channel);
                             channels
                                 .joined
                                 .retain(|c| !c.eq_ignore_ascii_case(&event.channel));
@@ -315,9 +327,7 @@ pub(super) fn feed_chat(
                     }
                 }
                 // A member-line / notice channel renders numbered when we know its slot.
-                if let Some(n) = channels.number_of(&event.channel) {
-                    event.channel = format!("{n}. {}", event.channel);
-                }
+                channels.stamp_channel(&mut event);
                 route(&mut script, &mut windows, &event);
             }
             Pending::Wire { msg, tries } => {
@@ -348,16 +358,9 @@ pub(super) fn feed_chat(
                     });
                     continue;
                 }
-                // The numbered display form ("1. General - Elwynn Forest") when the channel is
-                // one of ours — the client-built arg4 the composer strips/brackets.
-                let channel_disp = msg
-                    .channel
-                    .clone()
-                    .map(|c| match channels.number_of(&c) {
-                        Some(n) => format!("{n}. {c}"),
-                        None => c,
-                    })
-                    .unwrap_or_default();
+                // The channel's base name; the numbered display form, its slot number and its
+                // zone id are stamped on below ([`ChannelState::stamp_channel`]) — arg4/arg7-arg9.
+                let channel_base = msg.channel.clone().unwrap_or_default();
                 // `$`-macro expansion (decision 0754, corrected by 0759): the reference runs its one
                 // server-text expander over the monster/boss + BG-system types and nothing else,
                 // against the guid the line is ADDRESSED to. Every other type reaches the frame
@@ -416,7 +419,7 @@ pub(super) fn feed_chat(
                     None
                 };
                 let text = expanded.unwrap_or_else(|| msg.text.clone());
-                let event = ChatEvent {
+                let mut event = ChatEvent {
                     kind,
                     text: text.clone(),
                     sender: name.unwrap_or_else(|| {
@@ -427,10 +430,11 @@ pub(super) fn feed_chat(
                         }
                     }),
                     language: language_name(msg.language).to_string(),
-                    channel: channel_disp,
+                    channel: channel_base,
                     flag: flag_of_tag(msg.chat_tag).to_string(),
                     ..Default::default()
                 };
+                channels.stamp_channel(&mut event);
                 // A received whisper remembers its sender (`ChatEdit_SetLastTellTarget`,
                 // ChatFrame_OnEvent l.1471) — the `/r` + Tab-cycle ring.
                 if event.kind == Some(ChatEventKind::Whisper) && !event.sender.is_empty() {
@@ -469,6 +473,17 @@ pub(super) fn feed_chat(
                     });
                     continue;
                 }
+                // NOT stamped, deliberately — and this arm is inconsistent with the other two
+                // because of it. A guid-tail notice (a join/leave member line, a kick, a
+                // moderation change) reaches the composer with its channel name UNNUMBERED, so it
+                // renders "[World] Ann joined channel." where the same channel's speech renders
+                // "[1. World]". The reference numbers both: `ChatFrame_OnEvent` l.1463 strips only
+                // the " - Zone" tail from arg4, never the number.
+                //
+                // Adding `channels.stamp_channel(&mut event)` here fixes it in one line — and
+                // changes what the player sees, which this pass is not allowed to do. Left for the
+                // director's call; the cost of leaving it is that arg7/arg8/arg9 are 0/0/empty on
+                // these events alone.
                 let event = notice_event(
                     notice,
                     channel,

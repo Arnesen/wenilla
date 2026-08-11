@@ -247,7 +247,7 @@ fn player_buff_hover_is_the_aura_variant() {
             name: Some("Arcane Intellect".into()),
             duration: 1800.0,
             expiration_time: 100.0, // 90 s left at now = 10
-            helpful: true,          // the HELPFUL-default filter indexes buffs
+            helpful: true,
             ..Default::default()
         }]),
     );
@@ -256,7 +256,8 @@ fn player_buff_hover_is_the_aura_variant() {
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetPlayerBuff(1)
+        -- 0, not 1: SetPlayerBuff takes a 1.12 CACHE POSITION (see `script::aura`'s header).
+        tt:SetPlayerBuff(0)
         assert(tt:NumLines() == 3, "name + description + remaining, got " .. tt:NumLines())
         assert(TTTextLeft2:GetText() == "Intellect increased by 2.", "the AURA description column")
         assert(TTTextLeft3:GetText() == "2 minutes remaining", "got " .. TTTextLeft3:GetText())
@@ -313,7 +314,7 @@ fn player_buff_hover_names_the_dispel_class_in_gold() {
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
-        tt:SetPlayerBuff(1)
+        tt:SetPlayerBuff(0)
         assert(TTTextRight1:GetText() == "Magic",
             "the dispel class, got " .. tostring(TTTextRight1:GetText()))
     "#,
@@ -456,6 +457,91 @@ fn unit_buff_and_debuff_hover_render_the_aura_variant_without_remaining() {
     )
     .unwrap();
     assert!(s.take_errors().is_empty());
+}
+
+/// **`SetPlayerBuff` reads a 1.12 cache position, not an Era ordinal** — the index space the whole
+/// `GetPlayerBuff*` family shares (`script::aura`'s header; pinned by `ref-BuffFrame.lua:105`,
+/// which passes `GetPlayerBuff`'s return straight in).
+///
+/// Every assertion here is a case the previous 1-based, sign-filtered reading got wrong, and got
+/// wrong *silently* — the plate still rendered, just for the wrong aura:
+///
+/// - position 1 is the SECOND aura, not the first again;
+/// - a debuff is reachable at all (the old sign filter defaulted to helpful, so no position ever
+///   resolved to one);
+/// - `-1` clears instead of showing the first buff. `BigWigs/Raids/Naxxramas/Loatheb.lua:260-271`
+///   feeds an unchecked `GetPlayerBuff(i, "HARMFUL")` in and breaks its scan when line 1 goes nil,
+///   so "shows something" there is an addon that never stops scanning;
+/// - a surplus filter argument is ignored (`CT_BuffMod/CT_BuffFrame.lua:151` passes one).
+#[test]
+fn player_buff_hover_indexes_the_cache_position_not_a_filtered_ordinal() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    for (id, name, desc) in [
+        (1126, "Mark of the Wild", "Armor increased by 25."),
+        (2457, "Battle Stance", "A balanced combat stance."),
+        (589, "Shadow Word: Pain", "Suffering 12 Shadow damage."),
+    ] {
+        s.set_spell_tooltip(
+            id,
+            SpellTooltipView {
+                name: name.into(),
+                aura_description: desc.into(),
+                ..Default::default()
+            },
+        );
+    }
+    // The player's cache: two buffs then a debuff, ONE list, insertion-ordered (decision 0257).
+    s.set_auras(
+        "player",
+        Some(vec![
+            AuraState {
+                spell_id: 1126,
+                name: Some("Mark of the Wild".into()),
+                helpful: true,
+                ..Default::default()
+            },
+            AuraState {
+                spell_id: 2457,
+                name: Some("Battle Stance".into()),
+                helpful: true,
+                ..Default::default()
+            },
+            AuraState {
+                spell_id: 589,
+                name: Some("Shadow Word: Pain".into()),
+                helpful: false,
+                ..Default::default()
+            },
+        ]),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        local function at(i, extra)
+            tt:SetOwner(a, "ANCHOR_RIGHT")
+            tt:SetPlayerBuff(i, extra)
+            return TTTextLeft1 and TTTextLeft1:GetText()
+        end
+        assert(at(0) == "Mark of the Wild", "position 0 is the first aura, got " .. tostring(at(0)))
+        assert(at(1) == "Battle Stance", "position 1 is the SECOND, got " .. tostring(at(1)))
+        assert(at(2) == "Shadow Word: Pain", "the debuff shares the index space, got " .. tostring(at(2)))
+        -- The handle really is GetPlayerBuff's return, round-tripped.
+        assert(at(GetPlayerBuff(0, "HARMFUL")) == "Shadow Word: Pain", "round-trip through GetPlayerBuff")
+        -- A surplus filter argument is ignored, as the reference's binding ignores it.
+        assert(at(1, "HELPFUL|HARMFUL") == "Battle Stance", "surplus argument must be ignored")
+        -- Misses CLEAR (Loatheb's scan terminates on a nil first line) rather than leaving a plate.
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetPlayerBuff(3)
+        assert(tt:NumLines() == 0 and not tt:IsShown(), "past the cache: no plate")
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetPlayerBuff(-1)
+        assert(tt:NumLines() == 0 and not tt:IsShown(), "-1 must clear, not show the first buff")
+        tt:SetOwner(a, "ANCHOR_RIGHT"); tt:SetPlayerBuff(GetPlayerBuff(9, "HARMFUL"))
+        assert(tt:NumLines() == 0 and not tt:IsShown(), "an unguarded -1 from GetPlayerBuff clears")
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty(), "{:?}", s.take_errors());
 }
 
 /// SetAction delegates by payload kind: a SPELL slot renders the spell view; an empty slot shows

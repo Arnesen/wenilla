@@ -28,6 +28,23 @@
          the two color tables tooltip AddLine calls read. Defined here (the ref's own home, loaded
          first) so every window shares one verified set. -->
     <Script><![CDATA[
+        -- ── The four font-PATH globals (ref Fonts.xml l.4-7) ──────────────────────────────────
+        -- This file quoted the reference's colour block (l.8-19) and skipped the four lines above
+        -- it. `STANDARD_TEXT_FONT` is the one that matters: **68 corpus addons name it**, and per
+        -- 1207's rule that number is read rather than quoted — 64 of them are copies of
+        -- `Dewdrop-2.0.lua` and only 4 are addon code. But Dewdrop is *the* Ace2 menu library, and
+        -- it calls `button.text:SetFont(STANDARD_TEXT_FONT, height)` **unguarded** at two of its
+        -- three sites (l.207 and l.496; only l.2294 writes `STANDARD_TEXT_FONT or "Fonts\\..."`),
+        -- so a nil global is a failed SetFont on every menu button the Ace2 ecosystem draws.
+        --
+        -- The other three come with it because they are the same four-line block and cost nothing:
+        -- UNIT_NAME_FONT (0 corpus addons), DAMAGE_TEXT_FONT (1), NAMEPLATE_FONT (1). All four are
+        -- the same face in 1.12 — the reference assigns FRIZQT__ to every one — and that identity
+        -- is the reference's, not a simplification of ours.
+        STANDARD_TEXT_FONT = "Fonts\\FRIZQT__.TTF"   -- ref Fonts.xml l.4
+        UNIT_NAME_FONT = "Fonts\\FRIZQT__.TTF"       -- l.5
+        DAMAGE_TEXT_FONT = "Fonts\\FRIZQT__.TTF"     -- l.6
+        NAMEPLATE_FONT = "Fonts\\FRIZQT__.TTF"       -- l.7
         NORMAL_FONT_COLOR_CODE = "|cffffd200"    -- ref Fonts.xml l.8
         HIGHLIGHT_FONT_COLOR_CODE = "|cffffffff" -- l.9
         RED_FONT_COLOR_CODE = "|cffff2020"       -- l.10
@@ -43,19 +60,59 @@
         -- one color this file was missing: a passive spell's name text (SpellBookFrame.lua:385).
         PASSIVE_SPELL_FONT_COLOR = { r = 0.77, g = 0.64, b = 0 } -- l.20
 
-        -- The 1.12 item-quality palette (ref Constants.lua's ITEM_QUALITY_COLORS, the real
-        -- global name) — promoted here on its second customer (the unit popup's loot-threshold
-        -- rows; LootFrame.xml aliases its old private copy to this). Indexed 0..6; values match
-        -- GetItemQualityColor and ui_items.rs's quality_color.
-        ITEM_QUALITY_COLORS = {
-            [0] = { r = 0.62, g = 0.62, b = 0.62 }, -- Poor (gray)
-            [1] = { r = 1.00, g = 1.00, b = 1.00 }, -- Common (white)
-            [2] = { r = 0.12, g = 1.00, b = 0.00 }, -- Uncommon (green)
-            [3] = { r = 0.00, g = 0.44, b = 0.87 }, -- Rare (blue)
-            [4] = { r = 0.64, g = 0.21, b = 0.93 }, -- Epic (purple)
-            [5] = { r = 1.00, g = 0.50, b = 0.00 }, -- Legendary (orange)
-            [6] = { r = 0.90, g = 0.80, b = 0.50 }, -- Artifact (light gold)
+        -- The item-quality palette — **built from the engine verb, exactly as the reference
+        -- builds it** (ref UIParent.lua l.65-72, verbatim shape; decision 1199):
+        --
+        --     ITEM_QUALITY_COLORS = { }
+        --     for i = -1, 6 do … = GetItemQualityColor(i) end
+        --
+        -- It used to be seven hand-typed rows here. They were CLOSE and not exact — 0.62 where
+        -- the client's byte is 0x9d/255 = 0.6157, 0.64/0.21/0.93 where Epic is
+        -- 0xa3/0x35/0xee — and they carried no `.hex`, which the reference's table has and
+        -- which addons splice straight into a chat link. `GetItemQualityColor` is now a real
+        -- engine binding over wow-5875-re RF-0055's byte-verified table, so the rounding and
+        -- the second source both go.
+        --
+        -- The loop starts at -1 like the reference's: `UIParent.lua` reads one index before the
+        -- array there, and our binding answers Poor for it rather than reproducing that.
+        ITEM_QUALITY_COLORS = { }
+        for i = -1, 6 do
+            ITEM_QUALITY_COLORS[i] = { }
+            ITEM_QUALITY_COLORS[i].r,
+            ITEM_QUALITY_COLORS[i].g,
+            ITEM_QUALITY_COLORS[i].b,
+            ITEM_QUALITY_COLORS[i].hex = GetItemQualityColor(i)
+        end
+
+        -- ── RAID_CLASS_COLORS (ref Fonts.xml l.43-53), transcribed verbatim ───────────────────
+        --
+        -- The per-class colour every raid/party addon paints names with. **22 corpus addons** reach
+        -- it — nine of them through `Babble-Class-2.0`, but seven more by hand (KLHThreatMeter,
+        -- CT_RaidAssist, CT_ExpenseHistory, _LazyPig, FuBar_oRA2CooldownFu, and BigWigs in two
+        -- plugins) — and absent it is `bad argument #1 to 'pairs' (table expected, got nil)` at
+        -- file scope. That was the whole of the harness's remaining `table expected` row: three
+        -- addons, one missing table, found by asking the blocker table which addons were behind it.
+        --
+        -- TWO THINGS THAT LOOK WRONG AND ARE THE REFERENCE'S: `SHAMAN` carries the same pink as
+        -- `PALADIN` (shamans were Horde-only and paladins Alliance-only in 1.12, so the two never
+        -- shared a raid frame and Blizzard never gave shamans their own), and there is no `ROGUE`
+        -- yellow anywhere else in the client to reconcile it with. Transcribed as found; a later
+        -- client's palette is not this one's.
+        RAID_CLASS_COLORS = {
+            ["HUNTER"]  = { r = 0.67, g = 0.83, b = 0.45 },
+            ["WARLOCK"] = { r = 0.58, g = 0.51, b = 0.79 },
+            ["PRIEST"]  = { r = 1.0,  g = 1.0,  b = 1.0  },
+            ["PALADIN"] = { r = 0.96, g = 0.55, b = 0.73 },
+            ["MAGE"]    = { r = 0.41, g = 0.8,  b = 0.94 },
+            ["ROGUE"]   = { r = 1.0,  g = 0.96, b = 0.41 },
+            ["DRUID"]   = { r = 1.0,  g = 0.49, b = 0.04 },
+            ["SHAMAN"]  = { r = 0.96, g = 0.55, b = 0.73 },
+            ["WARRIOR"] = { r = 0.78, g = 0.61, b = 0.43 },
         }
+        -- The three OTHER tables the reference's Fonts.xml `<Script>` block carries —
+        -- CHAT_FONT_HEIGHTS, MATERIAL_TEXT_COLOR_TABLE, MATERIAL_TITLETEXT_COLOR_TABLE — are
+        -- deliberately not here: **zero corpus addons name any of them**, and nothing benilla ships
+        -- reads them. They cost nine lines each the day something does.
     ]]></Script>
 
     <!-- MasterFont: the shadow-only root the GameFont* families chain through (ref l.56). -->

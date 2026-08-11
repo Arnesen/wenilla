@@ -78,15 +78,15 @@
         -- bar to the form count (hide the whole frame at 0 — a formless class never shows it),
         -- then paint each button — icon, checked (active), the 1.0/0.4 castable tint (ref l.210-214),
         -- cooldown swipe (CooldownFrame_SetTimer, Cooldown.xml's shared transcription).
-        function BenillaShapeshiftBar_Update()
+        function ShapeshiftBar_Update()
             local numForms = GetNumShapeshiftForms()
             if numForms > 0 then
-                BenillaShapeshiftBarFrame:Show()
+                ShapeshiftBarFrame:Show()
             else
-                BenillaShapeshiftBarFrame:Hide()
+                ShapeshiftBarFrame:Hide()
             end
             for i = 1, NUM_SHAPESHIFT_SLOTS do
-                local button = getglobal("BenillaShapeshiftButton" .. i)
+                local button = getglobal("ShapeshiftButton" .. i)
                 if i <= numForms then
                     local texture, name, isActive, isCastable = GetShapeshiftFormInfo(i)
                     button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
@@ -109,14 +109,16 @@
             end
         end
 
-        function BenillaShapeshiftBar_OnLoad(frame)
+        function ShapeshiftBar_OnLoad()
+            local frame = this
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("UPDATE_SHAPESHIFT_FORMS")
-            BenillaShapeshiftBar_Update()
+            ShapeshiftBar_Update()
         end
 
-        function BenillaShapeshiftBar_OnEvent(frame)
-            BenillaShapeshiftBar_Update()
+        function ShapeshiftBar_OnEvent()
+            local frame = this
+            ShapeshiftBar_Update()
         end
     ]]></Script>
 
@@ -157,56 +159,56 @@
         </Scripts>
     </CheckButton>
 
-    <Frame name="BenillaShapeshiftBarFrame" hidden="true">
+    <Frame name="ShapeshiftBarFrame" hidden="true">
         <Size><AbsDimension x="29" y="32"/></Size>
         <Anchors>
-            <Anchor point="BOTTOMLEFT" relativeTo="BenillaActionBar" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="45"/></Offset></Anchor>
+            <Anchor point="BOTTOMLEFT" relativeTo="MainMenuBar" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="45"/></Offset></Anchor>
         </Anchors>
         <Frames>
-            <CheckButton name="BenillaShapeshiftButton1" inherits="BenillaShapeshiftButtonTemplate">
+            <CheckButton name="ShapeshiftButton1" inherits="BenillaShapeshiftButtonTemplate">
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="11" y="3"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 1)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton2" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton1" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton2" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton1" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 2)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton3" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton2" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton3" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton2" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 3)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton4" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton3" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton4" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton3" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 4)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton5" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton4" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton5" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton4" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 5)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton6" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton5" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton6" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton5" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 6)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton7" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton7" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 7)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton8" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton7" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton8" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton7" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 8)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton9" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton8" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton9" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton8" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 9)</OnLoad></Scripts>
             </CheckButton>
-            <CheckButton name="BenillaShapeshiftButton10" inherits="BenillaShapeshiftButtonTemplate">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton9" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+            <CheckButton name="ShapeshiftButton10" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftButton9" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 10)</OnLoad></Scripts>
             </CheckButton>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaShapeshiftBar_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaShapeshiftBar_OnEvent(self)</OnEvent>
+            <OnLoad>ShapeshiftBar_OnLoad()</OnLoad>
+            <OnEvent>ShapeshiftBar_OnEvent()</OnEvent>
             <!-- The stance bar is the pet/stance term of the managed bottom-stack positions
                  (UIParent.xml, decision 0272): its show/hide re-fires the pass, exactly the
                  ref's BonusActionBarFrame.xml:350-355. -->

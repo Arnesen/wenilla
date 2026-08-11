@@ -474,17 +474,15 @@ fn mail_probe(
                     // itself uses; encoded bag*100+slot (-1 = not there yet).
                     let found = script
                         .eval::<i64>(
-                            "for bag=0,4 do local n=C_Container.GetContainerNumSlots(bag) or 0 \
-                             for slot=1,n do local link=C_Container.GetContainerItemLink(bag,slot) \
+                            "for bag=0,4 do local n=GetContainerNumSlots(bag) or 0 \
+                             for slot=1,n do local link=GetContainerItemLink(bag,slot) \
                              if link and string.find(link,'item:8383',1,true) then return bag*100+slot end end end \
                              return -1",
                         )
                         .unwrap_or(-1);
                     if found >= 0 {
                         let (bag, lslot) = (found / 100, found % 100);
-                        if let Err(e) =
-                            script.run(&format!("C_Container.UseContainerItem({bag}, {lslot})"))
-                        {
+                        if let Err(e) = script.run(&format!("UseContainerItem({bag}, {lslot})")) {
                             error!("PROBE_MAIL: FAIL (b3) — UseContainerItem({bag}, {lslot}) errored: {e}");
                             probe.fails += 1;
                             probe.phase = Phase::TakeMoney {
@@ -510,23 +508,18 @@ fn mail_probe(
                 Some((bag, lslot)) => {
                     let painted = script
                         .eval::<bool>(
-                            "return BenillaItemTextFrame:IsShown() \
-                             and string.find(BenillaItemTextPageText:GetText() or '', 'hello', 1, true) ~= nil",
+                            "return ItemTextFrame:IsShown() \
+                             and string.find(ItemTextPageText:GetText() or '', 'hello', 1, true) ~= nil",
                         )
                         .unwrap_or(false);
                     if painted {
                         info!("PROBE_MAIL: PASS (b3) — the reader painted the letter body (title/creator/text via ITEM_TEXT_BEGIN→READY)");
                         probe.passes += 1;
                         // Cleanup: close the reader, destroy the copy (else bags gain one per run).
+                        crate::ui_script::run_or_warn(&script, "ItemTextCloseButton:Click()");
                         crate::ui_script::run_or_warn(
                             &script,
-                            "BenillaItemTextCloseButton:Click()",
-                        );
-                        crate::ui_script::run_or_warn(
-                            &script,
-                            &format!(
-                                "C_Container.PickupContainerItem({bag}, {lslot}) DeleteCursorItem()"
-                            ),
+                            &format!("PickupContainerItem({bag}, {lslot}) DeleteCursorItem()"),
                         );
                         probe.phase = Phase::TakeMoney {
                             since: now,

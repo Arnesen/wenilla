@@ -240,6 +240,321 @@ fn channel_notices_compose_by_the_notice_law() {
     );
 }
 
+// ── the Lua face: the real CHAT_MSG_* fire (0288 §1's addon-API phase) ────────────────────────
+//
+// These drive the REAL router into a REAL VM with our shipped ChatFrame.xml under it, because the
+// question they exist to answer — "does anything print twice now?" — cannot be answered by
+// reasoning about the composer in isolation. `route` both renders and fires; only a VM holding
+// our actual window can show that the two do not add up to two lines.
+
+/// A fresh VM with the shipped chat stack under it — the same files the app loads, so `ChatFrame1`
+/// here is the real window carrying its real `<OnEvent>`.
+fn chat_vm() -> benilla_ui::script::UiScript {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    for file in ["Fonts.xml", "ChatFrame.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    }
+    s.set_screen_size(1600.0, 900.0);
+    s.resolve();
+    s
+}
+
+/// An "addon" that records what a `CHAT_MSG_*` fire actually delivered — the count, the event
+/// name, and `arg1..arg10` joined with `|`. The concatenation is the point: a `nil` in any slot
+/// raises in Lua, so a passing read is itself the proof that all ten args arrived.
+const SPY: &str = r#"
+    SpyN, SpyEvent, SpyLine = 0, "", ""
+    Spy = CreateFrame("Frame", "BenillaChatSpy")
+    Spy:SetScript("OnEvent", function()
+        SpyN = SpyN + 1
+        SpyEvent = event
+        SpyLine = arg1.."|"..arg2.."|"..arg3.."|"..arg4.."|"..arg5.."|"..arg6..
+                  "|"..arg7.."|"..arg8.."|"..arg9.."|"..arg10
+    end)
+"#;
+
+/// How many lines `ChatFrame1` is holding (`GetNumMessages`).
+fn lines_in_window(s: &benilla_ui::script::UiScript) -> i64 {
+    s.eval::<i64>("return ChatFrame1:GetNumMessages()").unwrap()
+}
+
+/// **The double-print answer, proved rather than argued.**
+///
+/// In the reference, `CHAT_MSG_SAY` is what MAKES the line: C fires it, `ChatFrame_OnEvent` calls
+/// `AddMessage`. benilla composes and adds in Rust instead (0288 §1) and now fires the event as
+/// well — so the honest worry is that an addon registering the event on *our own* ChatFrame1 makes
+/// the line land twice. It does not, and the mechanism is that our shipped `ChatFrame.xml`
+/// `<OnEvent>` handles exactly one event (`EXECUTE_CHAT_LINE`) and ignores everything else.
+///
+/// The spy is a control, not decoration: without it a broken fire would pass this test.
+#[test]
+fn an_addon_registering_our_own_chat_frame_does_not_double_print() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(SPY).unwrap();
+    s.run(r#"BenillaChatSpy:RegisterEvent("CHAT_MSG_SAY")"#)
+        .unwrap();
+
+    assert_eq!(lines_in_window(&s), 0, "the window starts empty");
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "hi there", "Bob"));
+    assert_eq!(lines_in_window(&s), 1, "our window prints exactly once");
+    assert_eq!(
+        s.eval::<i64>("return SpyN").unwrap(),
+        1,
+        "the addon saw the fire — otherwise the count above proves nothing"
+    );
+
+    // Now the addon registers OUR window for the event, exactly as the reference's own
+    // FloatingChatFrame does. This is the double-print case if there is one.
+    s.run(r#"ChatFrame1:RegisterEvent("CHAT_MSG_SAY")"#)
+        .unwrap();
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "hi again", "Bob"));
+    assert_eq!(
+        lines_in_window(&s),
+        2,
+        "one more line, not two — ChatFrame1's own OnEvent does not render CHAT_MSG_*"
+    );
+    assert_eq!(s.eval::<i64>("return SpyN").unwrap(), 2);
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+}
+
+/// **The line is already in the window when an addon's handler runs.** The reference dispatches to
+/// listeners in registration order and ChatFrame1 registers at FrameXML load, before any addon
+/// exists — so an addon that reads `GetNumMessages()` (or re-reads the last line to recolour it)
+/// from its own `CHAT_MSG_*` handler sees the line, not the gap before it. Our Rust composer stands
+/// in for ChatFrame1's handler, so it has to run first for the same reason.
+#[test]
+fn an_addons_handler_sees_the_line_already_in_the_window() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(
+        r#"
+        SeenAtFireTime = -1
+        Spy = CreateFrame("Frame", "BenillaChatSpy")
+        Spy:SetScript("OnEvent", function()
+            SeenAtFireTime = ChatFrame1:GetNumMessages()
+        end)
+        BenillaChatSpy:RegisterEvent("CHAT_MSG_SAY")
+    "#,
+    )
+    .unwrap();
+
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "hi there", "Bob"));
+    assert_eq!(
+        s.eval::<i64>("return SeenAtFireTime").unwrap(),
+        1,
+        "the handler ran AFTER our window took the line, as registration order requires"
+    );
+}
+
+/// A player line fires `CHAT_MSG_SAY` with the reference's own arg positions — including the two
+/// slots our doc comment used to omit (arg7, arg10), both numbers, both zero for a non-channel
+/// line.
+#[test]
+fn a_say_line_fires_chat_msg_say_in_the_references_arg_positions() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(SPY).unwrap();
+    s.run(r#"BenillaChatSpy:RegisterEvent("CHAT_MSG_SAY")"#)
+        .unwrap();
+
+    let mut e = ev(K::Say, "throm-ka", "Grunk");
+    e.language = "Orcish".into();
+    e.flag = "GM".into();
+    super::frames::route(&mut s, &mut windows, &e);
+
+    assert_eq!(s.eval::<String>("return SpyEvent").unwrap(), "CHAT_MSG_SAY");
+    // arg1 is the RAW body, not the composed line — the reference's Lua is what adds
+    // "%s says: " and the |Hplayer link, so an addon must see what the wire sent.
+    assert_eq!(
+        s.eval::<String>("return SpyLine").unwrap(),
+        "throm-ka|Grunk|Orcish|||GM|0|0||0"
+    );
+}
+
+/// A channel notice fires the **token** in arg1 (not the rendered line), the numbered display form
+/// in arg4, and the three numeric slots the reference reads bare.
+///
+/// The last assertion runs `ChatFrame_OnEvent`'s own two comparisons — `arg7 > 0` and
+/// `arg10 > 0` — inside the handler. Under Lua 5.0 a `nil` there raises, so this is the test that
+/// would have caught passing nine args instead of ten.
+#[test]
+fn a_channel_notice_fires_its_token_and_the_reference_reads_arg7_and_arg10_bare() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(SPY).unwrap();
+    s.run(
+        r#"
+        SpyZone, SpySuffix = nil, nil
+        BenillaChatSpy:SetScript("OnEvent", function()
+            SpyN = SpyN + 1
+            SpyEvent = event
+            SpyLine = arg1.."|"..arg2.."|"..arg3.."|"..arg4.."|"..arg5.."|"..arg6..
+                      "|"..arg7.."|"..arg8.."|"..arg9.."|"..arg10
+            -- ChatFrame_OnEvent l.1379 and l.1421, verbatim shape.
+            if arg7 > 0 then SpyZone = arg7 end
+            if arg10 > 0 then SpySuffix = arg10 end
+        end)
+        BenillaChatSpy:RegisterEvent("CHAT_MSG_CHANNEL_NOTICE")
+    "#,
+    )
+    .unwrap();
+
+    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+    e.notice = "2".into(); // YOU_JOINED
+    e.channel = "1. General - Elwynn Forest".into();
+    e.channel_base = "General - Elwynn Forest".into();
+    e.channel_number = 1;
+    e.zone_channel_id = 1; // ChatChannels.dbc General
+    super::frames::route(&mut s, &mut windows, &e);
+
+    assert_eq!(s.eval::<i64>("return SpyN").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return SpyEvent").unwrap(),
+        "CHAT_MSG_CHANNEL_NOTICE"
+    );
+    assert_eq!(
+        s.eval::<String>("return SpyLine").unwrap(),
+        "YOU_JOINED|||1. General - Elwynn Forest|||1|1|General - Elwynn Forest|0"
+    );
+    assert_eq!(s.eval::<i64>("return SpyZone").unwrap(), 1);
+    assert!(s.errors().is_empty(), "handler errors: {:?}", s.errors());
+    // ...and the window still shows the one composed line it always did.
+    assert_eq!(lines_in_window(&s), 1);
+}
+
+/// **MODE_CHANGE produces no chat event at all** — not a silent one.
+///
+/// This test replaced an earlier one that asserted the opposite (that a notice the UI renders
+/// silently still reaches Lua, using MODE_CHANGE as the example). The byte-level carve settled it
+/// the other way: `0x49c24d`, the `0x0C` arm of the notice jump table, calls `0x49e910` and
+/// **returns** — it never reaches the fire (wow-re `chat-msg-event-args.md` §9). So the right
+/// behaviour is what our feed already does: drop it before it becomes an event, which is what this
+/// now asserts.
+#[test]
+fn a_mode_change_notice_never_becomes_an_event() {
+    use benilla_protocol::messages::{channel_notice, ChannelNoticeTail};
+
+    let mut log = super::feed::ChatLog::default();
+    log.push_channel_notice(
+        channel_notice::MODE_CHANGE,
+        "World".into(),
+        &ChannelNoticeTail::ModeChange {
+            guid: 42,
+            old_flags: 0,
+            new_flags: 1,
+        },
+    );
+    assert_eq!(
+        log.pending_len(),
+        0,
+        "MODE_CHANGE is dropped at the feed — the reference's 0x0C arm fires nothing"
+    );
+
+    // The control: a notice that DOES fire still gets queued, so the assertion above is about
+    // MODE_CHANGE and not about `push_channel_notice` being broken.
+    log.push_channel_notice(
+        channel_notice::YOU_JOINED,
+        "World".into(),
+        &ChannelNoticeTail::YouJoined { flags: 0 },
+    );
+    assert_eq!(log.pending_len(), 1);
+}
+
+/// A channel line whose channel we are **not** in leaves all four channel slots empty — arg4 falls
+/// back to the bare name and arg7/arg8/arg9 stay `0/0/""`. They are one record in the reference
+/// (`slot+0x00/+0x04/+0x94/+0x98`), so they are one record here (`chat-msg-event-args.md` §§4, 7-10).
+#[test]
+fn a_channel_we_are_not_in_fires_the_bare_name_and_zeroes() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    s.run(SPY).unwrap();
+    s.run(r#"BenillaChatSpy:RegisterEvent("CHAT_MSG_CHANNEL")"#)
+        .unwrap();
+
+    // An empty joined list: nothing is in the local channel record array.
+    let channels = super::edit::ChannelState::default();
+    let mut e = ev(K::Channel, "wts boar livers", "Bob");
+    e.channel = "SomeoneElsesChannel".into();
+    channels.stamp_channel(&mut e);
+    super::frames::route(&mut s, &mut windows, &e);
+
+    assert_eq!(
+        s.eval::<String>("return SpyLine").unwrap(),
+        "wts boar livers|Bob||SomeoneElsesChannel|||0|0||0",
+        "arg4 keeps the bare INCOMING name (the miss leg still has one); arg7/8/9/10 are the \
+         record we do not have, so 0/0/\"\"/0"
+    );
+}
+
+/// `stamp_channel` splits the wire's bare name into the reference's arg4/arg8/arg9 trio: the
+/// display form gets the number prefix, arg9 never does.
+#[test]
+fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
+    let mut channels = super::edit::ChannelState::default();
+    channels.joined.push("World".into());
+    channels.joined.push("General - Elwynn Forest".into());
+
+    let mut e = ev(K::Channel, "wts boar livers", "Bob");
+    e.channel = "General - Elwynn Forest".into();
+    channels.stamp_channel(&mut e);
+    assert_eq!(e.channel, "2. General - Elwynn Forest"); // arg4
+    assert_eq!(e.channel_number, 2); // arg8
+    assert_eq!(e.channel_base, "General - Elwynn Forest"); // arg9, " - Zone" tail intact
+
+    // A channel we are not in keeps its bare name in arg4 and leaves the whole rest of the record
+    // empty — the reference's miss leg `0x49aa86`, where there is no local record to read
+    // `slot+0x04/+0x94/+0x98` out of at all.
+    let mut other = ev(K::Channel, "hi", "Bob");
+    other.channel = "SomeoneElsesChannel".into();
+    channels.stamp_channel(&mut other);
+    assert_eq!(other.channel, "SomeoneElsesChannel"); // arg4: the bare incoming name
+    assert_eq!(other.channel_number, 0); // arg8
+    assert_eq!(other.channel_base, ""); // arg9 — NOT the name
+    assert_eq!(other.zone_channel_id, 0); // arg7
+}
+
+/// Every notice byte the composer renders has a token to fire, and vice versa — the two tables are
+/// the same set by assertion rather than by good intentions (they are read off the same
+/// `CHAT_<X>_NOTICE` GlobalStrings keys).
+#[test]
+fn every_rendered_notice_has_a_token() {
+    for byte in 0x00u8..=0x1F {
+        let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+        e.channel = "World".into();
+        e.notice = byte.to_string();
+        let rendered = super::frames::compose_notice(&e).is_some();
+        let token = super::event::notice_token(byte).is_some();
+        assert_eq!(
+            rendered, token,
+            "notice {byte:#04x}: renders={rendered} but token={token}"
+        );
+    }
+}
+
+/// The `ALL` sweep list really is every variant. A new kind fails [`super::event::event_name`]'s
+/// exhaustive match at compile time; this is what makes you add it to `ALL` as well.
+#[test]
+fn every_kind_is_in_all() {
+    let mut seen: Vec<&str> = K::ALL
+        .iter()
+        .map(|&k| super::event::event_name(k))
+        .collect();
+    let before = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), before, "a kind is listed twice in ALL");
+    assert_eq!(before, 36, "36 kinds — update this when the kind set grows");
+}
+
 #[test]
 fn colors_match_the_shipped_table() {
     assert_eq!(default_color(K::Say), [255, 255, 255]);

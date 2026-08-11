@@ -326,7 +326,7 @@
         function OptionsSearch_Words(text)
             local up = string.upper(text)
             local words = { up }
-            for w in string.gmatch(up, "([^, ]+)") do
+            for w in string.gfind(up, "([^, ]+)") do
                 table.insert(words, w)
             end
             return words
@@ -2373,7 +2373,7 @@
                                             <Scripts><OnLoad>
                                                 OptionsGlobalRow_OnLoad(self, "SHOW_BUFF_DURATIONS",
                                                     "Buff Durations", "OPTION_TOOLTIP_SHOW_BUFF_DURATION")
-                                                self.applyFunc = BenillaBuffButtons_UpdatePositions
+                                                self.applyFunc = BuffButtons_UpdatePositions
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowAutoQuestWatch" inherits="OptionsCheckboxRowTemplate">
@@ -2685,14 +2685,14 @@
                                              seating). The wheel handler is NOT here: a spin over a row
                                              bubbles up the PARENT chain (pointer.rs), and this frame is
                                              the rows' sibling — it lives on the body below. -->
-                                        <Frame name="$parentScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                                        <Frame name="$parentScrollFrame" inherits="FauxScrollFrameTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-47"/></Offset></Anchor>
                                                 <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-32" y="28"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts>
                                                 <OnLoad>
-                                                    BenillaFauxScrollFrame_OnLoad(this)
+                                                    ScrollFrame_OnLoad()
                                                     this.updateFunc = KeyBindingsPage_Update
                                                 </OnLoad>
                                             </Scripts>

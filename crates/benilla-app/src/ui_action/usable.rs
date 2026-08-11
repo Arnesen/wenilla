@@ -32,8 +32,8 @@ use crate::target::{can_attack, ring_reaction, Factions};
 
 use super::Spells;
 
-/// `UNIT_FLAG_IN_COMBAT` (vmangos `UnitDefines.h`, bit 19) — leg 8's caster unit-flag test.
-const UNIT_FLAG_IN_COMBAT: u32 = 0x0008_0000;
+/// Leg 8's caster unit-flag test — the shared bit, declared once ([`crate::player`]).
+use crate::player::UNIT_FLAG_IN_COMBAT;
 
 /// The implicit-target enums leg 10b forks on (`0x6e3f8a`/`0x6e3fa2`): 6 = single enemy →
 /// `CanAttack 0x606980`, 21 = single friend → `CanAssist 0x6066f0`.

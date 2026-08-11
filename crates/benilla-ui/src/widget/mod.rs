@@ -173,11 +173,11 @@ impl<T> Arena<T> {
 
 mod kinds;
 pub use kinds::{
-    ButtonState, CooldownState, EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind,
-    KindState, MessageLine, MinimapState, RegionKind, ScrollFrameState, ScrollingMessageState,
-    SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS, MINIMAP_DEFAULT_ZOOM,
-    MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
-    TOOLTIP_WRAP_WIDTH,
+    ButtonState, ColorSelectState, CooldownState, EditAction, EditBoxState, EditOutcome, EditUnit,
+    FrameKind, KindState, MessageLine, MinimapState, RegionKind, ScrollFrameState,
+    ScrollingMessageState, SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS,
+    MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS,
+    TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -225,6 +225,15 @@ pub struct Frame {
     /// [`crate::order::hit_test`]. (Keyboard focus / `EnableKeyboard` is a separate flag, out of
     /// scope in this crate for now.)
     pub mouse_enabled: bool,
+    /// Whether the frame accepts the **wheel** (`EnableMouseWheel` / XML `enableMouseWheel`) — a
+    /// flag of its own in the reference, and separate from [`Self::mouse_enabled`] there and here
+    /// (decision 1198).
+    ///
+    /// Default **false**, WoW's own default. The wheel dispatch bubbles to the nearest *enabled*
+    /// ancestor carrying an `OnMouseWheel`, which is how a scroll region hands the wheel to the
+    /// window behind it while keeping its handler installed — a frame with a handler it has not
+    /// enabled is deliberately transparent to the wheel.
+    pub mouse_wheel_enabled: bool,
     /// Clamp-to-screen (`SetClampedToScreen` / XML `clampedToScreen` — the client's geometry
     /// flags **bit4**, applied inside rect assembly `0x767a20`, wow-re `layout.md`): the layout
     /// resolve shifts this frame's assembled rect back inside the screen, size preserved.
@@ -241,6 +250,31 @@ pub struct Frame {
     /// occupies only the lower ~40 px, and a `top="18"` inset is what stops that empty header
     /// from swallowing hover and clicks aimed past the bar.
     pub hit_rect_insets: [f32; 4],
+    /// `SetMovable` / XML `movable` — whether `StartMoving()` may drag this frame. Default
+    /// **false**, and the flag is a *guard*, not a behaviour: nothing moves until a script calls
+    /// `StartMoving`, and `StartMoving` without this bit set raises instead of moving
+    /// ([`crate::script`]'s `object::movable` cluster).
+    pub movable: bool,
+    /// `SetResizable` / XML `resizable` — the sizing twin of [`Frame::movable`], guarding the
+    /// `StartSizing` half of the same family. Default false. benilla stores and reports the flag;
+    /// no resize *drag* is built (`StopMovingOrSizing` already covers the stop side of both).
+    pub resizable: bool,
+    /// `SetUserPlaced` — the client's "the user placed this frame; persist its position across
+    /// sessions" bit. Default false. Stored and readable (`IsUserPlaced`); **nothing consumes it
+    /// yet** — persisting a frame's position belongs with the layout cache, not with the drag that
+    /// moved it, so the flag lands here and the saving lands with the cache.
+    pub user_placed: bool,
+    /// `SetToplevel` / XML `toplevel` — flag word `[frame+0xb4]` **bit `0x1`**, the same word as
+    /// [`Frame::movable`] (`0x100`) and [`Frame::resizable`] (`0x200`), written by the same pure
+    /// bit-setter `0x76a3c0` (wow-re `ui/scratch/toplevel-raise.md`). Default false.
+    ///
+    /// The flag only **marks**: setting it performs no raise (`SetToplevel 0x775440` is
+    /// arg-marshal + `0x76a3c0` and returns). What reads it is the raise worker
+    /// `CSimpleTop::Raise 0x7650f0`, which resolves the nearest toplevel *self-or-ancestor* and
+    /// raises **that** — so a frame with this bit clear is never the subject of a raise, and a
+    /// frame with it set is what a click/show anywhere in its subtree lifts. The law, the gate and
+    /// the arithmetic live in [`crate::script::object::toplevel`].
+    pub toplevel: bool,
     /// This frame's own scale (`ownScale +0xb8`, default 1.0).
     pub scale: f32,
     /// `layoutScale` = `parentEffective * ownScale`, ε-gated (`effective_scale 0x76ac90`).
@@ -463,6 +497,14 @@ impl WidgetArena {
                     // is draggable in-game (decision 0250), so the enablement is by construction.
                     | FrameKind::Slider
             ),
+            // The two kinds whose ctor takes the WHEEL rather than the mouse generally — the same
+            // by-construction argument as above, narrowed to the flag it is actually about
+            // (decision 1198): a ScrollingMessageFrame and a ScrollFrame are wheel-interactive
+            // with no attribute, and nothing else is.
+            mouse_wheel_enabled: matches!(
+                kind,
+                FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame
+            ),
             // A tooltip clamps to the screen by construction (its XML never sets the attribute,
             // yet the reference plate observably never leaves the window — the class supplies
             // geometry flags bit4; decision 0352's law: no tooltip off-screen, ever).
@@ -470,6 +512,13 @@ impl WidgetArena {
             // No frame is born with an inset hit rect — `<HitRectInsets>`/SetHitRectInsets is the
             // only source (the client's ctor zeroes the four floats too).
             hit_rect_insets: [0.0; 4],
+            // No kind is born movable/resizable/user-placed/toplevel: every one of the four is
+            // opt-in from XML or a script, and a frame nobody opted in stays where its anchors put
+            // it, at the level it was created with.
+            movable: false,
+            resizable: false,
+            user_placed: false,
+            toplevel: false,
             scale,
             effective_scale: parent_scale * scale,
             ignore_parent_scale: false,
@@ -486,6 +535,9 @@ impl WidgetArena {
                 }
                 FrameKind::ScrollFrame => KindState::Scroll(kinds::ScrollFrameState::default()),
                 FrameKind::Slider => KindState::Slider(kinds::SliderState::default()),
+                FrameKind::ColorSelect => {
+                    KindState::ColorSelect(kinds::ColorSelectState::default())
+                }
                 FrameKind::Minimap => KindState::Minimap(kinds::MinimapState::default()),
                 FrameKind::Cooldown => KindState::Cooldown(kinds::CooldownState::default()),
                 FrameKind::GameTooltip => KindState::Tooltip(kinds::TooltipState::default()),

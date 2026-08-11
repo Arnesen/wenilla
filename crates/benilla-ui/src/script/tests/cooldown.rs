@@ -214,7 +214,7 @@ fn shapeshift_and_container_cooldowns_keep_their_anchors_too() {
         .eval::<bool>("local st = GetShapeshiftFormCooldown(1); return math.abs(st - 50) < 1e-3")
         .unwrap());
     assert!(s
-        .eval::<bool>("local st = C_Container.GetContainerItemCooldown(0, 1); return math.abs(st - 50) < 1e-3")
+        .eval::<bool>("local st = GetContainerItemCooldown(0, 1); return math.abs(st - 50) < 1e-3")
         .unwrap());
 
     // Re-push both with the SAME raw triples 5 s later: the anchors hold at 50.
@@ -225,6 +225,6 @@ fn shapeshift_and_container_cooldowns_keep_their_anchors_too() {
         .eval::<bool>("local st = GetShapeshiftFormCooldown(1); return math.abs(st - 50) < 1e-3")
         .unwrap());
     assert!(s
-        .eval::<bool>("local st = C_Container.GetContainerItemCooldown(0, 1); return math.abs(st - 50) < 1e-3")
+        .eval::<bool>("local st = GetContainerItemCooldown(0, 1); return math.abs(st - 50) < 1e-3")
         .unwrap());
 }

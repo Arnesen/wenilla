@@ -62,12 +62,24 @@
         may be `nil` while the item template is still in flight). `GetLootRollItemLink` DOES exist now
         (decision 1059) but is the click's, not the hover's: the tooltip wants the id, not the markup.
 
-        `toplevel="true"` (ref l.243) IS OMITTED — `SetToplevel` isn't in the v1 object model yet
-        (`loader/geometry.rs`'s `apply_attrs`: a warn-once "gap", same as `movable`/`resizable`); other
-        benilla toplevel popups (BuffFrame.xml, CastingBar.xml) carry the attribute anyway and simply
-        eat the warning, but it has ZERO engine effect either way today, so keeping this file's own
-        load warning-free (this assignment's own bar) costs nothing real — trivially re-added the day
-        `SetToplevel` lands.
+        `toplevel="true"` (ref l.243) IS STILL OMITTED, but for a NEW reason — the old one ("`SetToplevel`
+        isn't in the v1 object model yet ... trivially re-added the day `SetToplevel` lands") has expired.
+        `SetToplevel` landed: the loader calls the real method and the raise law — occlusion-gated,
+        confined to this frame's own stratum — is `script::object::toplevel` (wow-re
+        `ui/scratch/toplevel-raise.md`).
+
+        What adding it back does, measured rather than guessed: `GroupLootFrame1`'s rect
+        (390.5,60)-(633.5,144) overlaps `ExhaustionTick` — `ActionBar.xml` l.1111, `frameStrata="DIALOG"`
+        transcribed verbatim from ref-MainMenuBar.xml l.415-442 — in a ~2.5 px band, so showing roll
+        frame 1 raises its whole subtree to DIALOG level 3 while frame 2 (which overlaps nothing, the
+        four stack with a 15 px gap) stays at level 0. That is exactly what the reference does, and the
+        only pixels it moves are the sliver where the roll frame meets the tick. It does, however, break
+        `group_loot_tests::start_loot_roll_claims_frames_in_order_and_paints_the_roll`, whose
+        `quad_center("UI-GroupLoot-Dice-Up")` picks the FIRST dice quad in painter order as a stand-in
+        for "frame 1's Need button" — an unstated assumption that declaration order is draw order among
+        the four, which the raise legitimately ends. That is a fixture proxy, not the test's assertion
+        (the BoP-confirm gate it proves is untouched), so re-adding the attribute is one word plus a
+        two-line fix to that helper — a director's call on the look, not a blocked mechanism.
 
         NAMED FONT OBJECTS ARE SUPPORTED on this branch (the loader's top-level `<Font>` handling,
         `loader/mod.rs`'s `do_font`, plus the full `Fonts.xml` transcription, both landed since
@@ -75,9 +87,9 @@
         `inherits="GameFontNormalSmall"` below resolves for real; no stale caveat needed here.
 
         IN-FLIGHT ITEMS: `GetLootRollItemInfo`'s `name`/`texture`/`quality` are `nil` while the item
-        template query hasn't landed yet (`loot_roll.rs`). `BenillaGroupLootFrame_OnShow` falls back to
+        template query hasn't landed yet (`loot_roll.rs`). `GroupLootFrame_OnShow` falls back to
         `BENILLA_FALLBACK_ICON` / an empty name / common (quality 1) — the same fallback shape
-        `BenillaLootFrame_Update` uses for an in-flight loot row.
+        `LootFrame_Update` uses for an in-flight loot row.
 
         The Era API this drives (`benilla-ui/src/script/loot_roll.rs`, decision 0591):
         `GetLootRollItemInfo(rollID)` -> texture,name,count,quality,bindOnPickUp,itemID;
@@ -125,7 +137,7 @@
         -- of the four frames for a freshly opened roll, seed its rollID/rollTime, and prime the
         -- Timer StatusBar's max before showing it (fields set BEFORE Show(), so OnShow below can
         -- already read frame.rollID).
-        function BenillaGroupLootFrame_OpenNewFrame(rollId, rollTime)
+        function GroupLootFrame_OpenNewFrame(rollId, rollTime)
             for i = 1, BENILLA_NUM_GROUP_LOOT_FRAMES do
                 local frame = getglobal("GroupLootFrame" .. i)
                 if frame and not frame:IsVisible() then
@@ -143,7 +155,7 @@
         -- GroupLootFrame_OnShow's body (ref l.260-277): resolve the roll's display fields and paint
         -- the icon/name/backdrop. name/texture/quality may be nil while the item template query is
         -- still in flight (loot_roll.rs) — fall back to the fallback icon / blank name / common (1)
-        -- quality rather than erroring, the same fallback shape BenillaLootFrame_Update uses for an
+        -- quality rather than erroring, the same fallback shape LootFrame_Update uses for an
         -- in-flight loot row (LootFrame.xml).
         --
         -- SPLIT OUT OF OnShow, unlike the reference, because it must be re-runnable: the ref's
@@ -182,7 +194,8 @@
             nameText:SetVertexColor(color.r, color.g, color.b)
         end
 
-        function BenillaGroupLootFrame_OnShow(frame)
+        function GroupLootFrame_OnShow()
+            local frame = this
             BenillaGroupLootFrame_Paint(frame)
         end
 
@@ -195,7 +208,8 @@
             frame:RegisterEvent("UPDATE_LOOT_ROLL")
         end
 
-        function BenillaGroupLootFrame_OnEvent(frame)
+        function GroupLootFrame_OnEvent()
+            local frame = this
             if arg1 ~= frame.rollID then
                 return
             end
@@ -320,7 +334,7 @@
             </Layer>
             <Layer level="OVERLAY">
                 <!-- The gold BoP dragon flourish (ref l.287-298): hidden by default, shown only for a
-                     bind-on-pickup roll (BenillaGroupLootFrame_OnShow). -->
+                     bind-on-pickup roll (GroupLootFrame_OnShow). -->
                 <Texture name="$parentDecoration" file="Interface\DialogFrame\UI-DialogBox-Gold-Dragon" hidden="true">
                     <Size><AbsDimension x="120" y="120"/></Size>
                     <Anchors>
@@ -363,7 +377,7 @@
             </Button>
             <!-- Pass (ref $parentPassButton, l.364-384): the ref inherits UIPanelCloseButton, which
                  this engine ships no template for — reconstructed on the same minimize-button art
-                 BenillaLootFrame's own close button uses (LootFrame.xml's identical "no
+                 LootFrame's own close button uses (LootFrame.xml's identical "no
                  UIPanelCloseButton template ships" precedent), at the ref's own 32x32/position. -->
             <Button name="$parentPassButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
@@ -448,8 +462,8 @@
         </Backdrop>
         <Scripts>
             <OnLoad>BenillaGroupLootFrame_OnLoad(self)</OnLoad>
-            <OnShow>BenillaGroupLootFrame_OnShow(self)</OnShow>
-            <OnEvent>BenillaGroupLootFrame_OnEvent(self)</OnEvent>
+            <OnShow>GroupLootFrame_OnShow()</OnShow>
+            <OnEvent>GroupLootFrame_OnEvent()</OnEvent>
         </Scripts>
     </Frame>
 
@@ -495,7 +509,7 @@
             </OnLoad>
             <OnEvent>
                 if event == "START_LOOT_ROLL" then
-                    BenillaGroupLootFrame_OpenNewFrame(arg1, arg2)
+                    GroupLootFrame_OpenNewFrame(arg1, arg2)
                 elseif event == "CONFIRM_LOOT_ROLL" then
                     -- Ref UIParent.lua:517-524 verbatim, minus the central router: a Need/Greed on a
                     -- BIND-ON-PICKUP roll sends nothing and asks first (decision 0594). arg1 = rollID,

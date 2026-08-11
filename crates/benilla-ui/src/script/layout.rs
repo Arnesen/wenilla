@@ -131,6 +131,38 @@ fn layout_verify_enabled() -> bool {
     *ON.get_or_init(|| cfg!(test) || std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
 }
 
+/// `OnSizeChanged`'s "after": turn the entry-vs-now diff of the watched frames into queued
+/// `(id, width, height)` fires ([`Model::pending_size_changed`]).
+///
+/// The gate is [`crate::layout::size_changed`] — the byte-verified `ApplyRect 0x76b580` test
+/// (`|Δwidth| ≥ ε ∨ |Δheight| ≥ ε`, `ε = _DAT_008029d4`), not a plain `!=`, so a rect that merely
+/// *moved* never fires and a sub-ε float wobble never does either.
+///
+/// A frame with no rect at entry is compared against the ZERO rect, which is the client's own
+/// starting state (`CSimpleFrame`'s ctor zeroes the cached rect, so the first `ApplyRect` is a
+/// 0×0 → w×h change and does fire). A frame that LOSES its rect queues nothing: no rect was
+/// applied, so the reference had no `ApplyRect` to fire from.
+fn queue_size_changes(
+    watched: &[(FrameHandle, Option<Rect>)],
+    resolved: &HashMap<FrameHandle, Rect>,
+    frame_to_id: &HashMap<FrameHandle, u32>,
+    out: &mut Vec<(u32, f32, f32)>,
+) {
+    for &(h, before) in watched {
+        let Some(&now) = resolved.get(&h) else {
+            continue;
+        };
+        let before = before.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+        if !layout::size_changed(before, now) {
+            continue;
+        }
+        let Some(&id) = frame_to_id.get(&h) else {
+            continue;
+        };
+        out.push((id, now.right - now.left, now.top - now.bottom));
+    }
+}
+
 impl UiScript {
     /// [`UiScript::resolve`]'s body, taking `&mut Model` directly rather than `&mut self` — so a
     /// Lua binding holding only a `Model` borrow (via `lua.app_data_mut`, no `&Lua`-wrapping
@@ -160,6 +192,22 @@ impl UiScript {
         // sizes + right-column anchor offsets from the measure round-trip's cached extents, so
         // the graph below solves them like any other frame.
         super::tooltip::layout_tooltips(model);
+        // ── `OnSizeChanged`'s "before" ───────────────────────────────────────────────────────
+        // The client fires it from `ApplyRect 0x76b580`, per rect application. Ours is a batch
+        // fixpoint, so the faithful *mechanism* — "this frame's resolved size moved" — is the
+        // entry-vs-convergence diff, not a per-round one: an intermediate round's half-solved rect
+        // is an implementation detail of our solver, and firing on it would hand handlers sizes the
+        // reference never produces (and re-fire on the way to the same answer).
+        //
+        // Snapshotted only for frames that actually CARRY a handler (a handful, usually zero), and
+        // only past the tier-1 gate above — an idle frame returns before this line, so the change
+        // costs nothing on the quiet path decision 0740 exists to protect.
+        let watched: Vec<(FrameHandle, Option<Rect>)> = model
+            .scripts
+            .iter()
+            .filter(|(_, kinds)| kinds.contains("OnSizeChanged"))
+            .map(|(&h, _)| (h, model.resolved.get(&h).copied()))
+            .collect();
         let Model {
             arena,
             layout_inputs,
@@ -176,6 +224,7 @@ impl UiScript {
             layout_epoch_resolved,
             layout_solves,
             layout_rounds,
+            pending_size_changed,
             ..
         } = model;
 
@@ -569,6 +618,7 @@ impl UiScript {
                 if gate_skips {
                     *layout_epoch_resolved = Some(epoch_at_entry);
                 }
+                queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
                 return;
             }
             if round + 1 == round_cap {
@@ -578,6 +628,10 @@ impl UiScript {
                 ));
             }
         }
+        // The cycle bail (the loop ran out of rounds and warned above): the rects it leaves are
+        // still the ones every reader will see this frame, so the sizes that moved get their
+        // `OnSizeChanged` here exactly as on the converged path.
+        queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
     }
 
     /// FontStrings whose layout needs a host text measurement (an auto-sized axis — explicit

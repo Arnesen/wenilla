@@ -64,6 +64,25 @@
         -- repaint calls _Update below, which SetValue()s the thumb back to offset*itemHeight — a value
         -- that maps to the SAME offset, so this handler no-ops and the cycle stops after one hop (the
         -- Slider's own SetValue change-gate stops the value side, decision 0250).
+        --
+        -- THE SECOND HALF IS FOR ADDONS, and it is the reference's own wiring. The ref's
+        -- `UIPanelScrollBarTemplate` routes its value through the ScrollFrame it rides
+        -- (`<OnValueChanged>this:GetParent():SetVerticalScroll(arg1)</OnValueChanged>`,
+        -- ref-UIPanelTemplates.xml l.156-158), and that frame's `<OnVerticalScroll>` is where an
+        -- addon puts `FauxScrollFrame_OnVerticalScroll(itemHeight, MyUpdate)`. Our OWN faux frames
+        -- are plain `<Frame>`s (the 0251 divergence in the header above), so they have no
+        -- SetVerticalScroll and this line never fires for them — but an addon's is declared
+        -- `<ScrollFrame ... inherits="FauxScrollFrameTemplate">`, and the instance's own tag wins
+        -- over the template's on inherit (framexml.rs `merge`), so it really is one. Duck-typed for
+        -- exactly that reason.
+        --
+        -- GAP, stated where it bites: `SetVerticalScroll` clamps into `[0, GetVerticalScrollRange()]`
+        -- (scrollframe.rs), and that range comes from the frame's SCROLL CHILD — which the ref's
+        -- `FauxScrollFrameTemplate` declares as `<ScrollChild><Frame name="$parentScrollChildFrame">`
+        -- and our XML loader has no `<ScrollChild>` element for. Until it does, an addon frame's
+        -- range reads 0, so the handler fires with arg1 = 0 and its list stays at the top. The
+        -- offset our own kit computes above is unaffected — it comes straight off the Slider, which
+        -- is the whole point of 0251.
         function BenillaFauxScrollBar_OnValueChanged(scrollBar, value)
             local frame = scrollBar:GetParent()
             local step = scrollBar:GetValueStep()
@@ -74,25 +93,53 @@
                 if frame.updateFunc then frame.updateFunc() end
             end
             BenillaScrollBar_UpdateArrows(scrollBar)
+            if frame.SetVerticalScroll then frame:SetVerticalScroll(value) end
         end
 
-        -- OnLoad: a fresh faux frame is at the top with an empty range (ref ScrollFrame_OnLoad).
-        function BenillaFauxScrollFrame_OnLoad(frame)
-            frame.offset = 0
-            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+        -- OnLoad: a fresh scroll frame is at the top with an empty range and both arrows greyed
+        -- (ref UIPanelTemplates.lua l.244-252, verbatim but for the one added line). The ref's own
+        -- name, because this is the ref's own function: `FauxScrollFrameTemplate` inherits
+        -- `UIPanelScrollFrameTemplate`, whose `<OnLoad>` is exactly this.
+        --
+        -- The added line is `SetValueStep(1)`: our bar's step is also its ARROW/WHEEL step
+        -- (BenillaScrollBar_Step), so a bar that has not been through an _Update yet would step by
+        -- nothing. The ref has no such coupling — its arrows move by half the bar's height.
+        function ScrollFrame_OnLoad()
+            getglobal(this:GetName() .. "ScrollBarScrollDownButton"):Disable()
+            getglobal(this:GetName() .. "ScrollBarScrollUpButton"):Disable()
+
+            local scrollBar = getglobal(this:GetName() .. "ScrollBar")
             scrollBar:SetMinMaxValues(0, 0)
             scrollBar:SetValueStep(1)
             scrollBar:SetValue(0)
+            this.offset = 0
         end
 
-        -- The offset getters/setters the owner's list code reads (ref FauxScrollFrame_GetOffset /
-        -- _SetOffset). _SetOffset syncs the thumb too, so a programmatic reset (top-of-list on open)
-        -- moves the bar.
-        function BenillaFauxScrollFrame_GetOffset(frame)
+        -- The frame's `<OnVerticalScroll>` body, as the reference writes it (UIPanelTemplates.lua
+        -- l.228-233, verbatim): the frame scrolled, so seat the bar at the new pixel value, round it
+        -- to a row, and repaint. `this`/`arg1` are the handler globals our dispatcher sets
+        -- (script/event.rs `invoke_with_globals`), so the ref's body runs unchanged.
+        --
+        -- Nothing in benilla's own FrameXML calls this — our six faux lists take the offset straight
+        -- off the Slider (BenillaFauxScrollBar_OnValueChanged above). It is here because it is the
+        -- shape 27 corpus addons write into their own XML, and it is reached through the
+        -- SetVerticalScroll passthrough there, whose one gap is documented at that spot.
+        function FauxScrollFrame_OnVerticalScroll(itemHeight, updateFunction)
+            local scrollbar = getglobal(this:GetName() .. "ScrollBar")
+            scrollbar:SetValue(arg1)
+            this.offset = floor((arg1 / itemHeight) + 0.5)
+            updateFunction()
+        end
+
+        -- The offset getters/setters the owner's list code reads (ref UIPanelTemplates.lua
+        -- l.235-241). _SetOffset diverges by one line, deliberately: the ref writes `frame.offset`
+        -- and leaves the thumb where it was, which is a latent desync until the next _Update; ours
+        -- syncs the bar, so a programmatic reset (top-of-list on open) moves it there and then.
+        function FauxScrollFrame_GetOffset(frame)
             return frame.offset or 0
         end
 
-        function BenillaFauxScrollFrame_SetOffset(frame, offset)
+        function FauxScrollFrame_SetOffset(frame, offset)
             frame.offset = offset
             local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
             scrollBar:SetValue(offset * scrollBar:GetValueStep())
@@ -152,27 +199,93 @@
             end
         end
 
-        -- Reconcile the bar to a freshly-sized list (ref FauxScrollFrame_Update): clamp the offset into
-        -- range, set the pixel range + step, seat the thumb at the current offset, and show the bar only
-        -- when the list overflows the visible rows. Called by the owner's list-repaint each pass.
-        function BenillaFauxScrollFrame_Update(frame, numItems, numToDisplay, itemHeight)
-            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+        -- Reconcile the bar to a freshly-sized list — the reference's own `FauxScrollFrame_Update`
+        -- (UIPanelTemplates.lua l.160-226), whose signature and return value are transcribed whole
+        -- because 28 corpus addons call it with all ten arguments and read the result:
+        --
+        --   frame, numItems, numToDisplay, valueStep      the list itself (our four)
+        --   button, smallWidth, bigWidth                  a `<name>1..numToDisplay` row family to
+        --                                                 NARROW when the bar takes its gutter
+        --   highlightFrame, smallHighlightWidth,          and the moving highlight over them
+        --     bigHighlightWidth
+        --   → showScrollBar                               1 when the bar is up, nil when it is not
+        --
+        -- `valueStep` is what benilla called `itemHeight` before this landed; same number, the ref's
+        -- name. The shrink/widen tail is pure ref and no benilla window passes it — our lists are
+        -- laid out to their with-bar width from the start.
+        --
+        -- TWO DELIBERATE DIVERGENCES from the ref body, both named where they are:
+        --
+        -- 1 · The ref gates its whole middle section on `frame:IsVisible()` right after showing or
+        --     hiding the frame — reading back a state it just wrote. That is a quirk, not a
+        --     mechanism: it is true exactly when `showScrollBar` is, EXCEPT when an ancestor is
+        --     hidden, in which case the range/step/value silently do not get set and the bar is
+        --     stale the next time the window opens. benilla repaints lists while their window is
+        --     closed (a feed arriving is not a click), so we gate on `showScrollBar` — what the ref
+        --     means — and the offset clamp runs unconditionally.
+        -- 2 · The bar is shown/hidden through BenillaScrollBar_SetShown, not by the frame alone:
+        --     ours also carries the TROUGH (see its own note above; the ref has no trough in this
+        --     kit at all). The frame's own Show/Hide is kept as well, because it is what an addon
+        --     reads back — and because for us it is the same pixels either way, the bar being the
+        --     only thing a faux frame contains.
+        function FauxScrollFrame_Update(frame, numItems, numToDisplay, valueStep, button, smallWidth, bigWidth, highlightFrame, smallHighlightWidth, bigHighlightWidth)
+            local frameName = frame:GetName()
+            local scrollBar = getglobal(frameName .. "ScrollBar")
+
             local maxOffset = numItems - numToDisplay
             if maxOffset < 0 then maxOffset = 0 end
             if not frame.offset or frame.offset > maxOffset then frame.offset = maxOffset end
             if frame.offset < 0 then frame.offset = 0 end
 
-            scrollBar:SetValueStep(itemHeight)
-            scrollBar:SetMinMaxValues(0, maxOffset * itemHeight)
-            scrollBar:SetValue(frame.offset * itemHeight)
+            local showScrollBar
+            if numItems > numToDisplay then showScrollBar = 1 end
+
+            scrollBar:SetValueStep(valueStep)
+            scrollBar:SetMinMaxValues(0, maxOffset * valueStep)
+            scrollBar:SetValue(frame.offset * valueStep)
             BenillaScrollBar_UpdateArrows(scrollBar)
 
-            BenillaScrollBar_SetShown(scrollBar, numItems > numToDisplay)
+            if showScrollBar then frame:Show() else frame:Hide() end
+            BenillaScrollBar_SetShown(scrollBar, showScrollBar)
+
+            -- The ref sizes the scroll child to the whole list (l.179-191) — which is what gives a
+            -- real ScrollFrame its scroll range. GUARDED, because our loader has no `<ScrollChild>`
+            -- element, so `$parentScrollChildFrame` exists only if the owner declared one itself.
+            -- (This is the same gap BenillaFauxScrollBar_OnValueChanged documents; closing it is a
+            -- loader change, not a FrameXML one.)
+            local scrollChildFrame = getglobal(frameName .. "ScrollChildFrame")
+            if scrollChildFrame then
+                if numItems > 0 then
+                    scrollChildFrame:SetHeight(numItems * valueStep)
+                    scrollChildFrame:Show()
+                else
+                    scrollChildFrame:Hide()
+                end
+            end
+
+            -- Shrink because the bar is shown / widen because it is hidden (ref l.205-223).
+            if showScrollBar then
+                if highlightFrame then highlightFrame:SetWidth(smallHighlightWidth) end
+                if button then
+                    for i = 1, numToDisplay do getglobal(button .. i):SetWidth(smallWidth) end
+                end
+            else
+                if highlightFrame then highlightFrame:SetWidth(bigHighlightWidth) end
+                if button then
+                    for i = 1, numToDisplay do getglobal(button .. i):SetWidth(bigWidth) end
+                end
+            end
+
+            return showScrollBar
         end
 
         -- A wheel spin over the list → one row (WoW convention: +1 up, −1 down). Called from the
         -- owner window's OnMouseWheel (the engine bubbles the spin up the parent chain, so the handler
         -- lives on the window, not a child — TrainerFrame.xml's own note).
+        --
+        -- KEEPS the `Benilla` prefix on purpose: the reference has no faux-scroll wheel function to
+        -- take the name of. Its `ScrollFrameTemplate_OnMouseWheel` is the REAL-scroll one and moves
+        -- by half the bar's height; its faux owners each write a wheel body of their own inline.
         function BenillaFauxScrollFrame_OnMouseWheel(frame, delta)
             local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
             BenillaScrollBar_Step(scrollBar, -delta)
@@ -388,7 +501,7 @@
         UIPanelScrollFrameTemplate's scrollbar anchors). An owner instantiates this and, in its own
         OnLoad, sets `frame.updateFunc` to its list-repaint.
     -->
-    <Frame name="BenillaFauxScrollFrameTemplate" virtual="true">
+    <Frame name="FauxScrollFrameTemplate" virtual="true">
         <Frames>
             <Slider name="$parentScrollBar" inherits="BenillaScrollBarTemplate">
                 <Anchors>
@@ -398,7 +511,7 @@
             </Slider>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaFauxScrollFrame_OnLoad(self)</OnLoad>
+            <OnLoad>ScrollFrame_OnLoad()</OnLoad>
         </Scripts>
     </Frame>
 </Ui>

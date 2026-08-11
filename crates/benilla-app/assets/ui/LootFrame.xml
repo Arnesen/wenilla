@@ -2,7 +2,7 @@
     <!--
         benilla's loot window (decision 0084), RE-SKINNED to the real 1.12 loot window: the geometry
         and art below are QUOTED from the real `LootFrame.xml` (scratchpad `LootFrame.xml`; line
-        citations inline), turned onto our own feeds/intents. The name `BenillaLootFrame`, its panel
+        citations inline), turned onto our own feeds/intents. The name `LootFrame`, its panel
         registration (UiPanels.xml area="left", pushable=7), the loot feeds, the 4-rows-per-page +
         pager logic, and the intent functions are UNCHANGED — only the window's dressing is real now.
 
@@ -163,8 +163,8 @@
         end
 
         -- LootFrame_Update (LootFrame.lua l.67-119): fill the visible rows for the current page.
-        function BenillaLootFrame_Update()
-            local frame = getglobal("BenillaLootFrame")
+        function LootFrame_Update()
+            local frame = getglobal("LootFrame")
             local numItems = GetNumLootItems()
             -- Rows per page: 4, or 3 when there's a pager to make room for (l.70-73).
             local perPage = BENILLA_LOOT_NUMBUTTONS
@@ -185,7 +185,7 @@
             end
 
             for index = 1, BENILLA_LOOT_NUMBUTTONS do
-                local button = getglobal("BenillaLootButton" .. index)
+                local button = getglobal("LootButton" .. index)
                 local slot = (perPage * (frame.page - 1)) + index
                 if slot <= numItems and index <= perPage
                         and (LootSlotIsItem(slot) or LootSlotIsCoin(slot)) then
@@ -210,52 +210,54 @@
 
             -- Pager visibility (LootFrame.lua l.105-118): Up when past page 1, Down when more remain.
             if frame.page > 1 then
-                getglobal("BenillaLootUpButton"):Show()
+                getglobal("LootUpButton"):Show()
             else
-                getglobal("BenillaLootUpButton"):Hide()
+                getglobal("LootUpButton"):Hide()
             end
             if frame.page < maxPage then
-                getglobal("BenillaLootDownButton"):Show()
+                getglobal("LootDownButton"):Show()
             else
-                getglobal("BenillaLootDownButton"):Hide()
+                getglobal("LootDownButton"):Hide()
             end
         end
 
-        function BenillaLootFrame_PageDown()
-            local frame = getglobal("BenillaLootFrame")
+        function LootFrame_PageDown()
+            local frame = getglobal("LootFrame")
             frame.page = frame.page + 1
-            BenillaLootFrame_Update()
+            LootFrame_Update()
         end
 
-        function BenillaLootFrame_PageUp()
-            local frame = getglobal("BenillaLootFrame")
+        function LootFrame_PageUp()
+            local frame = getglobal("LootFrame")
             frame.page = frame.page - 1
-            BenillaLootFrame_Update()
+            LootFrame_Update()
         end
 
-        function BenillaLootFrame_OnLoad(frame)
+        function LootFrame_OnLoad()
+            local frame = this
             frame.page = 1
             frame:RegisterEvent("LOOT_OPENED")
             frame:RegisterEvent("LOOT_UPDATE")
             frame:RegisterEvent("LOOT_CLOSED")
         end
 
-        function BenillaLootFrame_OnEvent(frame)
+        function LootFrame_OnEvent(event)
+            local frame = this
             if event == "LOOT_OPENED" then
                 -- A fresh loot: reset to page 1, paint, show (LootFrame.lua l.14-16).
                 frame.page = 1
-                BenillaLootFrame_Update()
+                LootFrame_Update()
                 ShowUIPanel(frame)
             elseif event == "LOOT_UPDATE" then
                 -- A content change while open (name/quality landed, a row/coin removed): repaint,
                 -- keeping the current page.
-                BenillaLootFrame_Update()
+                LootFrame_Update()
             elseif event == "LOOT_CLOSED" then
                 HideUIPanel(frame)
             end
         end
 
-        function BenillaLootFrame_OnShow()
+        function LootFrame_OnShow()
             -- Open sound — the window-sound convention (decision 0090), wrapper form (this handler
             -- has real logic beyond the sound, so it can't be a bare inline PlaySound).
             -- (LootFrame.lua LootFrame_OnShow, l.131-141). ONLY the empty-roll fork and the fishing
@@ -267,16 +269,16 @@
             -- so we stay silent for it — there is no kit to guess. (DR 0086: vmangos masks the
             -- lootable flag for empty rolls, so a live empty window is rare — but the branch must
             -- exist.)
-            getglobal("BenillaLootPortraitOverlay"):SetTexture("Interface\\TargetingFrame\\TargetDead")
+            getglobal("LootPortraitOverlay"):SetTexture("Interface\\TargetingFrame\\TargetDead")
             if GetNumLootItems() == 0 then
                 PlaySound("LOOTWINDOWOPENEMPTY")
             elseif IsFishingLoot() then
                 PlaySound("FISHING REEL IN")
-                getglobal("BenillaLootPortraitOverlay"):SetTexture("Interface\\LootFrame\\FishingLoot-Icon")
+                getglobal("LootPortraitOverlay"):SetTexture("Interface\\LootFrame\\FishingLoot-Icon")
             end
         end
 
-        function BenillaLootFrame_OnHide()
+        function LootFrame_OnHide()
             -- Closing the window releases the loot (LootFrame.lua l.143-145). The app only sends the
             -- release when a loot is actually open, so a hide after the state already cleared is a
             -- harmless no-op. No close sound here: LootFrame_OnHide plays none (the loot-close kit is
@@ -286,7 +288,7 @@
 
         function BenillaLootCloseButton_OnClick()
             -- Hide immediately (client-authoritative); OnHide's CloseLoot() sends the release.
-            HideUIPanel(getglobal("BenillaLootFrame"))
+            HideUIPanel(getglobal("LootFrame"))
         end
     ]]></Script>
 
@@ -353,7 +355,7 @@
         </Scripts>
     </Button>
 
-    <Frame name="BenillaLootFrame" hidden="true">
+    <Frame name="LootFrame" hidden="true">
         <!-- The real 256×256 window (ref l.59-60). No <Anchors> here — ShowUIPanel SetPoints this to
              its slot. -->
         <Size><AbsDimension x="256" y="256"/></Size>
@@ -364,7 +366,7 @@
                  OnShow resets it to the skull and swaps a fishing loot to FishingLoot-Icon
                  (decision 1086), exactly as the ref's OnShow does (l.133-140). -->
             <Layer level="BORDER">
-                <Texture name="BenillaLootPortraitOverlay" file="Interface\TargetingFrame\TargetDead">
+                <Texture name="LootPortraitOverlay" file="Interface\TargetingFrame\TargetDead">
                     <Size><AbsDimension x="58" y="58"/></Size>
                     <Anchors>
                         <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="10" y="-8"/></Offset></Anchor>
@@ -376,7 +378,7 @@
             <Layer level="ARTWORK">
                 <Texture file="Interface\LootFrame\UI-LootPanel"/>
                 <!-- Title: the real ITEMS label (ref l.89-97) — GameFontNormal at CENTER +(-12,102). -->
-                <FontString name="BenillaLootTitle" inherits="GameFontNormal" text="Items">
+                <FontString name="LootTitle" inherits="GameFontNormal" text="Items">
                     <Anchors>
                         <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-12" y="102"/></Offset></Anchor>
                     </Anchors>
@@ -386,27 +388,27 @@
         <Frames>
             <!-- The real row stack (ref l.139-174): row 1 at the window TOPLEFT +(24,-80), each next
                  row centred on the prior row's BOTTOM -4. -->
-            <Button name="BenillaLootButton1" inherits="BenillaLootButtonTemplate">
+            <Button name="LootButton1" inherits="BenillaLootButtonTemplate">
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="24" y="-80"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaLootItem_OnLoad(self, 1)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaLootButton2" inherits="BenillaLootButtonTemplate">
-                <Anchors><Anchor point="TOP" relativeTo="BenillaLootButton1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+            <Button name="LootButton2" inherits="BenillaLootButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="LootButton1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaLootItem_OnLoad(self, 2)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaLootButton3" inherits="BenillaLootButtonTemplate">
-                <Anchors><Anchor point="TOP" relativeTo="BenillaLootButton2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+            <Button name="LootButton3" inherits="BenillaLootButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="LootButton2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaLootItem_OnLoad(self, 3)</OnLoad></Scripts>
             </Button>
-            <Button name="BenillaLootButton4" inherits="BenillaLootButtonTemplate">
-                <Anchors><Anchor point="TOP" relativeTo="BenillaLootButton3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+            <Button name="LootButton4" inherits="BenillaLootButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="LootButton3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaLootItem_OnLoad(self, 4)</OnLoad></Scripts>
             </Button>
 
             <!-- Pager (ref l.175-216): Up (page back) at the window BOTTOMLEFT +(25,16), Down (page
                  forward) at the Up button's RIGHT +86 — both in the bottom-left of the panel. The
                  ChatIcon scroll arrows are the real art (ref l.191-193, 212-214). -->
-            <Button name="BenillaLootUpButton" hidden="true">
+            <Button name="LootUpButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="25" y="16"/></Offset></Anchor>
@@ -415,24 +417,24 @@
                 <PushedTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollUp-Down"/>
                 <DisabledTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollUp-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
-                <Scripts><OnClick>BenillaLootFrame_PageUp()</OnClick></Scripts>
+                <Scripts><OnClick>LootFrame_PageUp()</OnClick></Scripts>
             </Button>
-            <Button name="BenillaLootDownButton" hidden="true">
+            <Button name="LootDownButton" hidden="true">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
-                    <Anchor point="LEFT" relativeTo="BenillaLootUpButton" relativePoint="RIGHT"><Offset><AbsDimension x="86" y="0"/></Offset></Anchor>
+                    <Anchor point="LEFT" relativeTo="LootUpButton" relativePoint="RIGHT"><Offset><AbsDimension x="86" y="0"/></Offset></Anchor>
                 </Anchors>
                 <NormalTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Up"/>
                 <PushedTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Down"/>
                 <DisabledTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Disabled"/>
                 <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
-                <Scripts><OnClick>BenillaLootFrame_PageDown()</OnClick></Scripts>
+                <Scripts><OnClick>LootFrame_PageDown()</OnClick></Scripts>
             </Button>
 
             <!-- Close: the real LootCloseButton position (CENTER on the window's TOPRIGHT, -81,-26;
                  ref l.119-129), on the minimize-button art it already used (the real LootCloseButton
                  uses this very art, ref l.135-137). -->
-            <Button name="BenillaLootCloseButton">
+            <Button name="LootCloseButton">
                 <Size><AbsDimension x="32" y="32"/></Size>
                 <Anchors>
                     <Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-81" y="-26"/></Offset></Anchor>
@@ -444,10 +446,10 @@
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaLootFrame_OnLoad(self)</OnLoad>
-            <OnEvent>BenillaLootFrame_OnEvent(self)</OnEvent>
-            <OnShow>BenillaLootFrame_OnShow()</OnShow>
-            <OnHide>BenillaLootFrame_OnHide()</OnHide>
+            <OnLoad>LootFrame_OnLoad()</OnLoad>
+            <OnEvent>LootFrame_OnEvent(event)</OnEvent>
+            <OnShow>LootFrame_OnShow()</OnShow>
+            <OnHide>LootFrame_OnHide()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

@@ -1,0 +1,127 @@
+<Ui>
+    <!--
+        The reference's shared OPTIONS widget kit — Interface\FrameXML\OptionsFrameTemplates.xml,
+        transcribed from the extracted 1.12.1 file (line numbers below are that file's), plus the
+        one template from UIOptionsFrame.xml that addons actually name.
+
+        These are UIPanelTemplates.xml's descendants: `OptionsCheckButtonTemplate` inherits
+        `UICheckButtonTemplate` and `OptionsButtonTemplate` inherits `UIPanelButtonTemplate`, so
+        this file must load after it (the .toc seats them together).
+
+        WHY THE UIOptionsFrame ONE LIVES HERE. `UIOptionsCheckButtonTemplate` is 8 `CreateFrame`
+        call sites in the corpus — the fourth most-wanted template we lacked — and in the reference
+        it is declared in UIOptionsFrame.xml (l.6-10) as a two-line size override on
+        `OptionsCheckButtonTemplate`. We do not transcribe UIOptionsFrame (benilla's own options
+        window is OptionsFrame.xml, a different design), so the one template that file contributes
+        to the shared namespace sits with its parent rather than in a file of its own. Its
+        provenance is on the declaration.
+
+        Every name here is in `reference/1.12-globals.tsv`; none is invented. What this supersedes
+        but does not delete: nothing — OptionsFrame.xml's own `Options*Template` family
+        (`OptionsRedButtonTemplate`, `OptionsCheckboxRowTemplate`, `OptionsSliderRowTemplate`, …)
+        are benilla's row widgets for benilla's window, distinct names and a distinct shape.
+    -->
+
+    <!-- ref l.3-34. The titled group box: a tooltip-border backdrop with its caption hung above the
+         top-left corner, greyed by its own OnLoad. -->
+    <Frame name="OptionFrameBoxTemplate" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentTitle" inherits="GameFontHighlight">
+                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="9" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+        </Backdrop>
+        <Scripts>
+            <OnLoad>
+                this:SetBackdropBorderColor(0.4, 0.4, 0.4)
+                this:SetBackdropColor(0.5, 0.5, 0.5)
+            </OnLoad>
+        </Scripts>
+    </Frame>
+
+    <!-- ref l.35-39. The panel button at the options window's own 90x21. -->
+    <Button name="OptionsButtonTemplate" inherits="UIPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="90" y="21"/></Size>
+    </Button>
+
+    <!-- ref l.40-66. The checkbox with the options window's manners: a 100px hit rect to the right
+         so the LABEL is clickable too, the on/off click sounds, and the tooltipText /
+         tooltipRequirement hover pair an instance sets as plain fields. -->
+    <CheckButton name="OptionsCheckButtonTemplate" inherits="UICheckButtonTemplate" virtual="true">
+        <HitRectInsets><AbsInset left="0" right="-100" top="0" bottom="0"/></HitRectInsets>
+        <Scripts>
+            <OnClick>
+                if (this:GetChecked()) then
+                    PlaySound("igMainMenuOptionCheckBoxOn")
+                else
+                    PlaySound("igMainMenuOptionCheckBoxOff")
+                end
+            </OnClick>
+            <OnEnter>
+                if (this.tooltipText) then
+                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(this.tooltipText, nil, nil, nil, nil, 1)
+                end
+                if (this.tooltipRequirement) then
+                    GameTooltip:AddLine(this.tooltipRequirement, "", 1.0, 1.0, 1.0)
+                    GameTooltip:Show()
+                end
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </CheckButton>
+
+    <!-- ref UIOptionsFrame.xml l.6-10 — see the header. A 26x26 override of the above, and the
+         template the corpus's nameplate addons build their whole options panel out of. -->
+    <CheckButton name="UIOptionsCheckButtonTemplate" inherits="OptionsCheckButtonTemplate" virtual="true">
+        <Size><AbsDimension x="26" y="26"/></Size>
+    </CheckButton>
+
+    <!-- ref l.67-132. The horizontal options slider: a SliderBar backdrop with three labels
+         (caption above, LOW/HIGH under the ends) and the horizontal knob. `text="LOW"`/`"HIGH"` are
+         global-string keys, resolved by the loader's `resolve_text` against GlobalStrings. -->
+    <Slider name="OptionsSliderTemplate" orientation="HORIZONTAL" virtual="true" enableMouse="true">
+        <Size><AbsDimension x="128" y="17"/></Size>
+        <HitRectInsets><AbsInset left="0" right="0" top="-10" bottom="-10"/></HitRectInsets>
+        <Backdrop bgFile="Interface\Buttons\UI-SliderBar-Background" edgeFile="Interface\Buttons\UI-SliderBar-Border" tile="true">
+            <EdgeSize><AbsValue val="8"/></EdgeSize>
+            <TileSize><AbsValue val="8"/></TileSize>
+            <BackgroundInsets><AbsInset left="3" right="3" top="6" bottom="6"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentText" inherits="GameFontNormalSmall">
+                    <Anchors><Anchor point="BOTTOM" relativePoint="TOP"/></Anchors>
+                </FontString>
+                <FontString name="$parentLow" inherits="GameFontHighlightSmall" text="LOW">
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="3"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentHigh" inherits="GameFontHighlightSmall" text="HIGH">
+                    <Anchors><Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="3"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>
+                if (this.tooltipText) then
+                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(this.tooltipText, nil, nil, nil, nil, 1)
+                end
+                if (this.tooltipRequirement) then
+                    GameTooltip:AddLine(this.tooltipRequirement, "", 1.0, 1.0, 1.0)
+                    GameTooltip:Show()
+                end
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+        <ThumbTexture name="$parentThumb" file="Interface\Buttons\UI-SliderBar-Button-Horizontal">
+            <Size><AbsDimension x="32" y="32"/></Size>
+        </ThumbTexture>
+    </Slider>
+</Ui>

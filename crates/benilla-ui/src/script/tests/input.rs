@@ -261,3 +261,365 @@ fn hit_rect_insets_default_to_zero() {
     assert_eq!((l, r, t, b), (0.0, 0.0, 0.0, 0.0), "no inset by default");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// `EnableMouseWheel`/`IsMouseWheelEnabled` round-trip, and the two kinds born wheel-enabled
+/// (decision 1198).
+///
+/// The flag is real and settable; **the dispatch is deliberately not gated on it yet** — see
+/// `object::frame_state`'s note for the 44 shipped `OnMouseWheel` sites that declare no
+/// `enableMouseWheel` and the concrete condition for flipping it. This test pins the flag's own
+/// behaviour so that flip is a one-line change with a test already standing behind it.
+#[test]
+fn the_mouse_wheel_flag_round_trips_and_the_scrolling_kinds_are_born_enabled() {
+    let s = script();
+    s.run(
+        r#"
+        Plain  = CreateFrame("Frame", "WheelPlain")
+        Scroll = CreateFrame("ScrollFrame", "WheelScroll")
+        Msg    = CreateFrame("ScrollingMessageFrame", "WheelMsg")
+    "#,
+    )
+    .unwrap();
+
+    // A plain frame is born wheel-deaf, like WoW's own default.
+    assert!(!s
+        .eval::<bool>("return Plain:IsMouseWheelEnabled()")
+        .unwrap());
+    // ...and the two kinds whose ctor takes the wheel are born enabled, the same by-construction
+    // argument `mouse_enabled` already makes for a Button.
+    assert!(s
+        .eval::<bool>("return Scroll:IsMouseWheelEnabled()")
+        .unwrap());
+    assert!(s.eval::<bool>("return Msg:IsMouseWheelEnabled()").unwrap());
+
+    s.run("Plain:EnableMouseWheel(true)").unwrap();
+    assert!(s
+        .eval::<bool>("return Plain:IsMouseWheelEnabled()")
+        .unwrap());
+    s.run("Plain:EnableMouseWheel(false)").unwrap();
+    assert!(!s
+        .eval::<bool>("return Plain:IsMouseWheelEnabled()")
+        .unwrap());
+    // Lua truthiness, like every other flag binding: `EnableMouseWheel(1)` is on.
+    s.run("Plain:EnableMouseWheel(1)").unwrap();
+    assert!(s
+        .eval::<bool>("return Plain:IsMouseWheelEnabled()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A closed-vocabulary attribute survives stray whitespace (decision 1204).
+///
+/// The corpus case: `zBar.xml:146` — a shipped, working 1.12 addon — declares
+/// `frameStrata="BACKGROUND "` with a trailing space. The real client took it; we refused, and the
+/// refusal took the frame's whole `<Frames>` subtree with it, so the addon never loaded at all.
+///
+/// The three parsers are covered together because the next one to meet a stray space should not
+/// need its own bug report.
+#[test]
+fn an_enum_attribute_tolerates_the_whitespace_a_real_addon_ships() {
+    let s = script();
+    s.run(
+        r#"
+        Padded = CreateFrame(" Frame ", "PaddedKind")
+        Padded:SetFrameStrata("BACKGROUND ")
+        Trailing = Padded:CreateTexture("PaddedTex", " OVERLAY")
+    "#,
+    )
+    .unwrap();
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert_eq!(
+        s.eval::<String>("return Padded:GetFrameStrata()").unwrap(),
+        "BACKGROUND",
+        "the frame took the strata, and reports it in the canonical spelling"
+    );
+    // ...and the padded frame KIND resolved too — an unknown kind raises from CreateFrame, so
+    // reaching this line at all is the assertion.
+    assert!(s.eval::<bool>("return PaddedKind ~= nil").unwrap());
+    assert!(s.eval::<bool>("return PaddedTex ~= nil").unwrap());
+}
+
+// ── OnDoubleClick — the corpus's biggest script gap (250 sites / 85 addons) ───────────────────
+//
+// Every rule below is byte-verified, from the §5 cross-check this work dispatched into wow-re
+// (`system/ui/scratch/button-doubleclick-law.md`): the interval is a hardcoded **300 ms**
+// (`0x77937b cmp ecx, 0x12c`), the fire site is the mouse-**UP** dispatcher `0x7792d0` alone, the
+// double leg **replaces** the second `OnClick` (`0x77939d jmp` past `call [edx+0x94]`), a completed
+// double **zeroes** the stamp so clicks pair up, the detector is armed only when the frame carries
+// an `OnDoubleClick` script (`[+0x4d4] != 0`), and it carries **no button identity** — what
+// normally confines it to the left button is `RegisterForClicks`, not the detector.
+
+/// Two fast clicks fire `OnDoubleClick(self, button)` — and the second `OnClick` does **not** fire,
+/// because the two legs are exclusive. (This was the interim implementation's mistake: it fired
+/// both, on the press edge, at 500 ms. All three were corrected at the bytes.)
+#[test]
+fn a_second_fast_click_fires_on_double_click_instead_of_the_second_on_click() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        clicks, doubles, dblbtn = 0, 0, nil
+        local b = CreateFrame("Button", "DblB")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetScript("OnClick", function(self, button) clicks = clicks + 1 end)
+        b:SetScript("OnDoubleClick", function(self, button) doubles = doubles + 1 dblbtn = button end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // Click one. Note the press alone does nothing: the fire site is the mouse-UP dispatcher.
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<i64>("return clicks").unwrap(),
+        0,
+        "the default RegisterForClicks is LeftButtonUp — a press fires no click at all"
+    );
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(s.eval::<i64>("return clicks").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return doubles").unwrap(),
+        0,
+        "one click is not a double click"
+    );
+
+    // Click two, inside the 300 ms.
+    s.tick(0.1);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<i64>("return doubles").unwrap(),
+        1,
+        "the second click inside the interval is a double click"
+    );
+    assert_eq!(
+        s.eval::<String>("return dblbtn").unwrap(),
+        "LeftButton",
+        "OnDoubleClick(self, button) — the same single button-name arg OnClick gets"
+    );
+    assert_eq!(
+        s.eval::<i64>("return clicks").unwrap(),
+        1,
+        "…and it REPLACED the second OnClick — the two legs are exclusive"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The gate that keeps rapid clicking from breaking every button in the UI.** The binary's chain
+/// tests `[+0x4d4] != 0`, so a widget with no `OnDoubleClick` script takes the single leg every
+/// time. Without that test, the exclusivity above would silently swallow every second `OnClick` on
+/// every frame in the game.
+#[test]
+fn a_frame_with_no_double_click_handler_keeps_every_rapid_on_click() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        clicks = 0
+        local b = CreateFrame("Button", "NoDbl")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetScript("OnClick", function() clicks = clicks + 1 end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    for _ in 0..4 {
+        s.mouse_button(50.0, 50.0, "LeftButton", true);
+        s.mouse_button(50.0, 50.0, "LeftButton", false);
+    }
+    assert_eq!(
+        s.eval::<i64>("return clicks").unwrap(),
+        4,
+        "no OnDoubleClick script ⇒ four rapid clicks are four clicks"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The boundary: too slow, a different frame, and the PAIRING rule (a completed double zeroes the
+/// stamp, so four rapid clicks read Click · Double · Click · Double — there is no triple-click and
+/// no run of doubles).
+#[test]
+fn the_double_click_boundary_is_time_and_frame_and_clicks_pair_up() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        clicks, doubles = 0, 0
+        local function watch(f)
+            f:SetScript("OnClick", function() clicks = clicks + 1 end)
+            f:SetScript("OnDoubleClick", function() doubles = doubles + 1 end)
+        end
+        local a = CreateFrame("Button", "DblA")
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(100, 100); a:EnableMouse(true); watch(a)
+        local b = CreateFrame("Button", "DblBB")
+        b:SetPoint("BOTTOMLEFT", 300, 0); b:SetSize(100, 100); b:EnableMouse(true); watch(b)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let click = |s: &mut crate::script::UiScript, x: f32| {
+        s.mouse_button(x, 50.0, "LeftButton", true);
+        s.mouse_button(x, 50.0, "LeftButton", false);
+    };
+
+    // (1) TOO SLOW — 0.35 s > 300 ms, so the second click is a fresh first half.
+    click(&mut s, 50.0);
+    s.tick(0.35);
+    click(&mut s, 50.0);
+    assert_eq!(s.eval::<i64>("return doubles").unwrap(), 0);
+    assert_eq!(s.eval::<i64>("return clicks").unwrap(), 2);
+
+    // (2) A DIFFERENT FRAME — fast, but the timestamp lives on the WIDGET, so B has its own.
+    s.run("clicks, doubles = 0, 0").unwrap();
+    s.tick(1.0);
+    click(&mut s, 50.0);
+    click(&mut s, 350.0);
+    assert_eq!(s.eval::<i64>("return doubles").unwrap(), 0);
+    assert_eq!(s.eval::<i64>("return clicks").unwrap(), 2);
+
+    // (3) PAIRING — four rapid clicks on one frame are Click · Double · Click · Double.
+    s.run("clicks, doubles = 0, 0").unwrap();
+    s.tick(1.0);
+    for _ in 0..4 {
+        click(&mut s, 50.0);
+    }
+    assert_eq!(
+        (
+            s.eval::<i64>("return clicks").unwrap(),
+            s.eval::<i64>("return doubles").unwrap()
+        ),
+        (2, 2),
+        "clicks pair up — the completed double zeroes the stamp, so there is no triple-click"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **The detector carries no button identity** — the surprising half of the law, and the one an
+/// implementation keyed by mouse button would get wrong. `[CButton+0x334]` is a bare timestamp, so
+/// a widget registered for two `…Up` types completes a double click across them, with `arg1` = the
+/// button of the SECOND click. A stock button never sees this only because `RegisterForClicks`
+/// defaults to `{"LeftButtonUp"}`.
+#[test]
+fn a_multi_registered_button_pairs_a_left_click_with_a_right_one() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        doubles, dblbtn = 0, nil
+        local b = CreateFrame("Button", "MixDbl")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        b:SetScript("OnDoubleClick", function(self, button) doubles = doubles + 1 dblbtn = button end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    s.tick(0.1);
+    s.mouse_button(50.0, 50.0, "RightButton", true);
+    s.mouse_button(50.0, 50.0, "RightButton", false);
+    assert_eq!(s.eval::<i64>("return doubles").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return dblbtn").unwrap(),
+        "RightButton",
+        "arg1 is the button of the completing click, not of the one that armed it"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **Nothing clears a half-finished double click** — not hide, not disable, not the cursor leaving
+/// the window. `[+0x334]` has three writers image-wide and none of them is any of those, so this
+/// pins the *absence* of the tidy-up that looks like it belongs in
+/// [`crate::script::UiScript::pointer_left_window`].
+#[test]
+fn a_half_finished_double_click_survives_the_cursor_leaving_the_window() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        doubles = 0
+        local b = CreateFrame("Button", "LeaveDbl")
+        b:SetPoint("BOTTOMLEFT", 0, 0); b:SetSize(200, 200); b:EnableMouse(true)
+        b:SetScript("OnDoubleClick", function() doubles = doubles + 1 end)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    s.pointer_left_window();
+    s.tick(0.1);
+    s.mouse_button(50.0, 50.0, "LeftButton", true);
+    s.mouse_button(50.0, 50.0, "LeftButton", false);
+    assert_eq!(
+        s.eval::<i64>("return doubles").unwrap(),
+        1,
+        "the pointer left and came back inside 300 ms — the reference still pairs them"
+    );
+}
+
+/// The load-bearing regression guard for the whole job: accepting `OnDoubleClick` in
+/// `SCRIPT_KINDS` without wiring the detector would make this test's `SetScript` succeed and its
+/// handler never run — the silent-capability trap. Asserting the *fire* is what makes the row real.
+#[test]
+fn set_script_on_double_click_is_accepted_because_something_fires_it() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        ran = false
+        Btn = CreateFrame("Button", "DblAccepted")
+        Btn:SetPoint("BOTTOMLEFT", 0, 0); Btn:SetSize(100, 100); Btn:EnableMouse(true)
+        Btn:SetScript("OnDoubleClick", function() ran = true end)
+    "#,
+    )
+    .unwrap();
+    assert!(
+        s.eval::<bool>(r#"return Btn:GetScript("OnDoubleClick") ~= nil"#)
+            .unwrap(),
+        "SetScript stored it"
+    );
+    s.resolve();
+    for _ in 0..2 {
+        s.mouse_button(50.0, 50.0, "LeftButton", true);
+        s.mouse_button(50.0, 50.0, "LeftButton", false);
+    }
+    assert!(s.eval::<bool>("return ran").unwrap(), "…and it FIRED");
+}
+
+/// The script names that deliberately still raise, and why each is out (the reasons live at
+/// `object::events_regions::set_script`). This is the other half of the rule "a name is accepted
+/// only once something fires it": a future widening has to delete a line here, which is exactly
+/// the moment to check something fires it.
+#[test]
+fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
+    let s = script();
+    s.run(r#"Raiser = CreateFrame("EditBox", "RaiserBox")"#)
+        .unwrap();
+    for name in [
+        // No keyboard index / `EnableKeyboard` yet (wow-re `scripts-auto-enable.md` kinds 0/1).
+        "OnKeyDown",
+        "OnKeyUp",
+        "OnChar",
+        // Caret geometry is host-side; its four float args would all be zero.
+        "OnCursorChanged",
+        // 2.0's secure-frame system — no such slot exists in any 1.12 resolver.
+        "OnAttributeChanged",
+        // Real 1.12 slots we do not fire, and zero corpus call sites.
+        "OnHorizontalScroll",
+        "OnHyperlinkEnter",
+        "OnMessageScrollChanged",
+        "OnUpdateModel",
+        "OnAnimFinished",
+        "OnInputLanguageChanged",
+    ] {
+        let err = s
+            .run(&format!(r#"Raiser:SetScript("{name}", function() end)"#))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(name),
+            "{name} must raise by name, got {err}"
+        );
+    }
+}

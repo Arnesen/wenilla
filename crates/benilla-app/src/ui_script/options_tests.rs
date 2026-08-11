@@ -2027,7 +2027,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
-    s.run("BenillaActionButton_OnDragStart(BenillaActionButton1)")
+    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
         .unwrap();
     assert!(
         s.cursor_payload().is_none(),
@@ -2037,7 +2037,7 @@ fn the_action_bars_page_locks_the_real_bar() {
     // Defaults walks it back to ActionBar.xml's own assignment, and the bar drags again.
     s.run("OptionsFrameContainerDefaults:Click()").unwrap();
     assert_eq!(s.eval::<String>("return LOCK_ACTIONBAR").unwrap(), "0");
-    s.run("BenillaActionButton_OnDragStart(BenillaActionButton1)")
+    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
         .unwrap();
     assert!(s.cursor_payload().is_some(), "unlocked again");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -2419,7 +2419,8 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
     // The bar needs a real span before it decides anything about its numerals (its update bails
     // on valueMax == 0 and hides the strip instead).
     s.set_player_xp(1000, 10000);
-    s.run("BenillaExpBar_Update(BenillaExpBar)").unwrap();
+    s.run("this = MainMenuExpBar; MainMenuExpBar_Update()")
+        .unwrap();
     // Shipped default: off, so the numerals only show while hovered.
     assert_eq!(
         s.eval::<String>("return GetCVar(\"statusBarText\")")
@@ -2427,7 +2428,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
         "0"
     );
     assert!(!s
-        .eval::<bool>("return BenillaExpBarText:IsShown()")
+        .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
 
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
@@ -2446,7 +2447,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
     // No repaint, no XP tick — only the CVAR_UPDATE the third argument queued.
     s.tick(0.0);
     assert!(
-        s.eval::<bool>("return BenillaExpBarText:IsShown()")
+        s.eval::<bool>("return MainMenuBarExpText:IsShown()")
             .unwrap(),
         "the watcher woke on the click, not on the next value change"
     );
@@ -2456,7 +2457,7 @@ fn the_status_bar_text_row_pins_the_numerals_the_moment_it_is_clicked() {
         .unwrap();
     s.tick(0.0);
     assert!(!s
-        .eval::<bool>("return BenillaExpBarText:IsShown()")
+        .eval::<bool>("return MainMenuBarExpText:IsShown()")
         .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

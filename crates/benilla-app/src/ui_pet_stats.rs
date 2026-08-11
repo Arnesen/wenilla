@@ -73,13 +73,13 @@ pub(crate) struct PetFamilyTables {
 /// the codebase's own "push before firing" rule (`crate::ui_unit`), which held *inside* every
 /// feed but not *between* them.
 ///
-/// It cost the Pet tab. `BenillaPetTab_Update` is edge-driven off `UNIT_PET` / `PET_BAR_UPDATE`
+/// It cost the Pet tab. `PetTab_Update` is edge-driven off `UNIT_PET` / `PET_BAR_UPDATE`
 /// and its whole predicate is `HasPetUI()`, which is this snapshot. With the three pet feeds
 /// merely unordered inside [`UnitFeed`], a cold first summon fired both edges while `HasPetUI()`
 /// still answered "no pet"; the push landed after, and since neither edge repeats, the tab stayed
 /// down for the rest of the session. Measured live, frame by frame: both events on frame 440 with
 /// `HasPetUI()=(nil,nil)`, the flip to `(1,nil)` on 441, and the tab still hidden 48 s later —
-/// while calling `BenillaPetTab_Update()` by hand raised it instantly.
+/// while calling `PetTab_Update()` by hand raised it instantly.
 ///
 /// A set rather than a pair of `.before()` calls because the constraint belongs to the *snapshot*,
 /// not to today's two consumers: anything that later fires a pet event inherits it by ordering
@@ -679,7 +679,7 @@ mod tests {
     /// ordering does. Driven through **one** `app.update()` on a cold pet — the exact live shape,
     /// where `feed_pet_unit` sees the guid appear and fires while `feed_pet_stats` has or has not
     /// yet pushed. A handler that reads `HasPetUI()` at that instant is what the shipped
-    /// `BenillaPetTab_Update` is, minus the frames.
+    /// `PetTab_Update` is, minus the frames.
     #[test]
     fn unit_pet_reaches_lua_with_has_pet_ui_already_true() {
         use crate::char_select::ClientState;

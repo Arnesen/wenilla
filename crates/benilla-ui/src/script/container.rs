@@ -1,7 +1,8 @@
-//! The container bindings (decision 0068 T2) — the `C_Container` namespace, the Era addon
-//! surface for bags (measured on the target addons: `GetContainerItemInfo` and
-//! `GetContainerNumSlots` dominate; Bagnon's data engine is built on exactly these). Same
-//! two-way seam as [`super::action`]: the app pushes a **container snapshot** per bag id
+//! The container bindings (decision 0068 T2) — the 1.12 bag verbs, every one of them a plain
+//! top-level global (decision 1198; measured on the corpus: `GetContainerItemLink`,
+//! `GetContainerNumSlots` and `GetContainerItemInfo` are the three most-wanted engine verbs of
+//! all, and Bagnon's data engine is built on exactly these). Same two-way seam as
+//! [`super::action`]: the app pushes a **container snapshot** per bag id
 //! ([`UiScript::set_container`] — slots already resolved to icon/count/quality by the app's
 //! item stores; the engine holds no item knowledge), and `UseContainerItem` queues an outbound
 //! **intent** the app drains into the wire ([`UiScript::take_container_uses`]).
@@ -12,7 +13,7 @@
 //! numeric FileDataID — 5875 has no FileDataIDs, and every measured consumer feeds the value
 //! straight to `SetTexture`, which takes both shapes in the live client.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, Value};
 
 use super::cursor::{self, CursorItem, CursorPayload};
 use super::Model;
@@ -338,11 +339,55 @@ fn queue_move(
     });
 }
 
-/// Register the `C_Container` namespace.
+/// Register the container verbs — **top-level globals, because that is where 1.12 puts them**
+/// (decision 1198). Every name below is `function engine` in `reference/1.12-globals.tsv` as a
+/// bare global: `GetContainerNumSlots`, never `C_Container.GetContainerNumSlots`. The
+/// `C_Container` namespace 1187 reached for while chasing an Era addon is a *Dragonflight*
+/// reorganisation, and an addon that feature-detects it concludes it is on Dragonflight.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
-    let c = lua.create_table()?;
+    // ContainerIDToInventoryID(containerID) → the equipment slot the bag is worn in.
+    //
+    // **Two linear arms, one signed compare, and nothing else** (`0x4f94e0`, 124 bytes; wow-re
+    // `bag-language-combat-action-bindings.md` §1, §5-cross-checked). Written as the reference's
+    // own three instructions — `t = id - 1`, `if t < 4` (SIGNED), then `+20` or `+60` — rather
+    // than as the two closed forms `id+19` / `id+59`, because the wrap at the `i32` edge is then
+    // reproduced rather than approximated.
+    //
+    // | containerID | slot |
+    // |---|---|
+    // | **−2 (keyring)** | **17** |
+    // | −1 | 18 |
+    // | **0 (backpack)** | **19** |
+    // | 1 · 2 · 3 · 4 | 20 · 21 · 22 · 23 |
+    // | **5** (first bank bag) | **64** |
+    // | 6 … 10 | 65 … 69 |
+    //
+    // **There is no special case for 0 or for −2** — the "backpack is 0, keyring is −2"
+    // convention is the *caller's*, and this arithmetic merely happens to land on 19 and 17.
+    // **And there is no range check of any kind**: the only guard in the function is the up-front
+    // type test, so an out-of-range id is not clamped, not rejected, and never nil — it returns
+    // `id+19` or `id+59` as an ordinary number, and whatever the receiving binding does with an
+    // invalid slot is that binding's business.
+    lua.globals().set(
+        "ContainerIDToInventoryID",
+        lua.create_function(|lua, id: Value| {
+            let id = super::binding_abi::number_arg(
+                lua,
+                id,
+                "Usage: ContainerIDToInventoryID(containerID)",
+            )?;
+            // `0x4f951b dec eax` · `0x4f951f cmp eax,4` · `0x4f9524 jl` — the compare is signed
+            // and lands on the `id <= 4` arm.
+            let t = id.wrapping_sub(1);
+            Ok(i64::from(if t < 4 {
+                t.wrapping_add(20)
+            } else {
+                t.wrapping_add(60)
+            }))
+        })?,
+    )?;
 
-    c.set(
+    lua.globals().set(
         "GetContainerNumSlots",
         lua.create_function(|lua, bag: i64| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
@@ -350,20 +395,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // → free, bagFamily (0 = a plain bag; profession-bag families aren't modeled).
-    c.set(
-        "GetContainerNumFreeSlots",
-        lua.create_function(|lua, bag: i64| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let free = model.containers.get(&bag).map_or(0, |c| {
-                c.num_slots
-                    .saturating_sub(c.slots.keys().filter(|&&s| s <= c.num_slots).count() as u32)
-            });
-            Ok((free, 0))
-        })?,
-    )?;
-
-    c.set(
+    lua.globals().set(
         "GetBagName",
         lua.create_function(|lua, bag: i64| {
             let name = {
@@ -377,27 +409,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    c.set(
-        "GetContainerItemID",
-        lua.create_function(|lua, (bag, slot): (i64, u32)| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            match model
-                .containers
-                .get(&bag)
-                .and_then(|c| c.slots.get(&slot))
-                .map(|s| s.item_id)
-            {
-                Some(id) if id != 0 => Ok(Value::Integer(i64::from(id))),
-                _ => Ok(Value::Nil),
-            }
-        })?,
-    )?;
-
     // The reference's `GetContainerItemCooldown(bag, slot)` — the bag twin of
     // `GetActionCooldown`, identical conventions: `GetTime`-clock `(start, duration, enable)`,
     // enable 0 = an on-hold record (parked, full duration), and the cold-at-expiry guard so an
     // event-driven re-feed can never replay the finish flash.
-    c.set(
+    lua.globals().set(
         "GetContainerItemCooldown",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
@@ -411,7 +427,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    c.set(
+    lua.globals().set(
         "GetContainerItemLink",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let link = {
@@ -429,8 +445,32 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // → containerInfo table (1.14 shape) or nil for an empty/unknown slot.
-    c.set(
+    // `GetContainerItemInfo(bag, slot)` → **`texture, itemCount, locked, quality, readable`**
+    // — the 1.12 shape, five values (decision 1199).
+    //
+    // It used to return a single 1.14-shaped `containerInfo` TABLE, inherited from decision 1187's
+    // reach for the Classic Era surface. That was wrong in a way neither instrument could see:
+    // **36 corpus addons call this and every one of them uses the 1.12 shape. Not one uses the
+    // table.** 34 destructure (`local texture, itemCount = GetContainerItemInfo(bag, slot)`), and
+    // the four that assign a single name take the *first return* — `local texture = …`, or
+    // `GetContainerItemInfo(bag, i) ~= nil` as an occupancy test. All 36 were getting
+    // `texture = <table>` and, where they destructured, `itemCount = nil`. They load clean, so the
+    // harness scores them as passes, and they misbehave silently in play.
+    //
+    // (Decision 1199 §1 says "only one uses the table shape" — that came from a first reading of
+    // the call sites and a recount disproves it. The corrected number makes the case stronger, not
+    // weaker; the record is a point-in-time snapshot and this is where the true count lives.)
+    //
+    // The shipped 1.12 FrameXML settles the shape: `ContainerFrame.lua:241` reads exactly these
+    // five names in exactly this order.
+    //
+    // **A signature is part of the API.** Decision 1198 §3 made that argument about *names*; this
+    // is the same argument one level down, and it is the more dangerous half, because a wrong name
+    // fails loudly and a wrong shape does not.
+    //
+    // `nil` for an empty or unknown slot — the reference returns no values there, and a caller's
+    // `if texture then` reads the same either way.
+    lua.globals().set(
         "GetContainerItemInfo",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let (info, held_here) = {
@@ -448,36 +488,52 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     held,
                 )
             };
-            let Some(s) = info else { return Ok(Value::Nil) };
-            let t: Table = lua.create_table()?;
-            match &s.texture {
-                Some(p) => t.set("iconFileID", p.as_str())?,
-                None => t.set("iconFileID", Value::Nil)?,
-            }
-            t.set("stackCount", s.count)?;
-            // The picked-up source slot reads locked (the real client dims it while the cursor
-            // carries the item) — derived from the cursor, not a mutated snapshot, so the app's
-            // per-frame re-push can't wipe it.
-            t.set("isLocked", s.locked || held_here)?;
-            match s.quality {
-                Some(q) => t.set("quality", q)?,
-                None => t.set("quality", Value::Nil)?,
-            }
-            t.set("isReadable", s.readable)?;
-            t.set("hasLoot", false)?;
-            match &s.link {
-                Some(l) => t.set("hyperlink", l.as_str())?,
-                None => t.set("hyperlink", Value::Nil)?,
-            }
-            t.set("isFiltered", false)?;
-            t.set("hasNoValue", false)?;
-            t.set("itemID", s.item_id)?;
-            t.set("isBound", false)?;
-            Ok(Value::Table(t))
+            let Some(s) = info else {
+                return Ok(mlua::MultiValue::new());
+            };
+            Ok(mlua::MultiValue::from_vec(vec![
+                match &s.texture {
+                    Some(p) => Value::String(lua.create_string(p.as_str())?),
+                    None => Value::Nil,
+                },
+                Value::Integer(i64::from(s.count)),
+                // The picked-up source slot reads locked (the real client dims it while the cursor
+                // carries the item) — derived from the cursor, not a mutated snapshot, so the
+                // app's per-frame re-push cannot wipe it.
+                Value::Boolean(s.locked || held_here),
+                match s.quality {
+                    Some(q) => Value::Integer(i64::from(q)),
+                    None => Value::Nil,
+                },
+                Value::Boolean(s.readable),
+            ]))
         })?,
     )?;
 
-    c.set(
+    // `BenillaGetContainerItemID(bag, slot)` — the item id behind a slot, for OUR OWN FrameXML.
+    //
+    // 1.12 has no such verb: an addon there takes the id out of `GetContainerItemLink`'s
+    // `|Hitem:12345:…` payload. Our tooltip and delete paths want the id directly, so it rides the
+    // `Benilla` host-bridge prefix — the sanctioned escape hatch for a verb only our own
+    // transcription calls, and the one `reference_surface` covers by prefix rather than by
+    // exception. An addon that wants it parses the link, exactly as it would on the real client.
+    lua.globals().set(
+        "BenillaGetContainerItemID",
+        lua.create_function(|lua, (bag, slot): (i64, u32)| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            // `nil` for an unresolved id, not `0` — a slot can carry an entry whose template has
+            // not landed yet, and `0` is a number a caller will happily index a table with.
+            Ok(model
+                .containers
+                .get(&bag)
+                .and_then(|c| c.slots.get(&slot))
+                .map(|s| s.item_id)
+                .filter(|&id| id != 0)
+                .map(i64::from))
+        })?,
+    )?;
+
+    lua.globals().set(
         "UseContainerItem",
         lua.create_function(|lua, (bag, slot, _rest): (i64, u32, mlua::MultiValue)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -490,7 +546,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // Returns whether the caller should repaint (the source-slot lock changed) — the OnClick calls
     // the bag's `_Update` on true so the picked slot dims / un-dims immediately (no server round
     // trip for the local cursor state).
-    c.set(
+    lua.globals().set(
         "PickupContainerItem",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -523,11 +579,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    lua.globals().set("C_Container", c)?;
-
     // The cursor globals (`GetCursorInfo`/`CursorHasItem`/`CursorHasSpell`/`ClearCursor`/
-    // `SplitContainerItem`/`DeleteCursorItem` — real client: all top-level, not in C_Container)
-    // live in [`super::cursor`], the one payload seam every surface routes through.
+    // `SplitContainerItem`/`DeleteCursorItem`) live in [`super::cursor`], the one payload seam
+    // every surface routes through — top-level there for exactly the same reason.
 
     // ShowContainerSellCursor(bag, slot) — arm the pouch cursor for a sellable hover (5875
     // `0x4fa460`, wow-re cursor-system.md §7: Buy(3) only when the slot actually holds an item —
@@ -676,68 +730,61 @@ mod tests {
     fn container_snapshot_reads() {
         let mut s = UiScript::new().unwrap();
         // No bag pushed: capacity 0, info nil.
-        assert_eq!(
-            s.eval::<i64>("return C_Container.GetContainerNumSlots(0)")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 0);
         assert!(s
-            .eval::<bool>("return C_Container.GetContainerItemInfo(0, 1) == nil")
+            .eval::<bool>("return GetContainerItemInfo(0, 1) == nil")
             .unwrap());
 
         s.set_container(0, Some(backpack()));
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
         assert_eq!(
-            s.eval::<i64>("return C_Container.GetContainerNumSlots(0)")
-                .unwrap(),
-            16
-        );
-        assert_eq!(
-            s.eval::<i64>("return (C_Container.GetContainerNumFreeSlots(0))")
-                .unwrap(),
-            13
-        );
-        assert_eq!(
-            s.eval::<String>("return C_Container.GetBagName(0)")
-                .unwrap(),
+            s.eval::<String>("return GetBagName(0)").unwrap(),
             "Backpack"
         );
-        assert_eq!(
-            s.eval::<i64>("return C_Container.GetContainerItemID(0, 1)")
-                .unwrap(),
-            117
-        );
-        let (icon, count, quality, item_id) = s
-            .eval::<(String, i64, i64, i64)>(
-                "local i = C_Container.GetContainerItemInfo(0, 1)\n\
-                 return i.iconFileID, i.stackCount, i.quality, i.itemID",
+        // The 1.12 five-value shape (decision 1199): texture, itemCount, locked, quality,
+        // readable — the names `ContainerFrame.lua:241` destructures into, in its order.
+        let (icon, count, quality) = s
+            .eval::<(String, i64, i64)>(
+                "local texture, itemCount, locked, quality = GetContainerItemInfo(0, 1)\n\
+                 return texture, itemCount, quality",
             )
             .unwrap();
         assert_eq!(icon, "Interface\\Icons\\INV_Misc_Food_16");
-        assert_eq!((count, quality, item_id), (5, 1, 117));
+        assert_eq!((count, quality), (5, 1));
+        // The item id is NOT one of the five — 1.12 has no verb for it, and an addon takes it out
+        // of the link. Ours rides the host-bridge prefix.
+        assert_eq!(
+            s.eval::<i64>("return BenillaGetContainerItemID(0, 1)")
+                .unwrap(),
+            117
+        );
         assert!(s
-            .eval::<bool>("return C_Container.GetContainerItemLink(0, 1) ~= nil")
+            .eval::<bool>("return GetContainerItemLink(0, 1) ~= nil")
             .unwrap());
         // isReadable mirrors the slot's readable bit (the letter in 4, not the jerky in 1).
         assert!(!s
-            .eval::<bool>("return C_Container.GetContainerItemInfo(0, 1).isReadable")
+            .eval::<bool>("local _, _, _, _, readable = GetContainerItemInfo(0, 1) return readable")
             .unwrap());
         assert!(s
-            .eval::<bool>("return C_Container.GetContainerItemInfo(0, 4).isReadable")
+            .eval::<bool>("local _, _, _, _, readable = GetContainerItemInfo(0, 4) return readable")
             .unwrap());
 
-        // The in-flight slot answers a table with nil icon/quality, id nil (0 = unresolved).
+        // **The in-flight slot**: an entry exists but its template has not landed, so texture and
+        // quality are nil while itemCount is real. This is the state that made the five-value
+        // shape's occupancy test subtle (decision 1199) — the reference's own `if texture then`
+        // would read this as empty, which is why our own FrameXML tests `texture or itemCount`.
         assert!(s
             .eval::<bool>(
-                "local i = C_Container.GetContainerItemInfo(0, 3)\n\
-                 return i ~= nil and i.iconFileID == nil and i.quality == nil",
+                "local texture, itemCount, locked, quality = GetContainerItemInfo(0, 3)\n\
+                 return texture == nil and quality == nil and itemCount ~= nil",
             )
             .unwrap());
         assert!(s
-            .eval::<bool>("return C_Container.GetContainerItemID(0, 3) == nil")
+            .eval::<bool>("return BenillaGetContainerItemID(0, 3) == nil")
             .unwrap());
         // Empty slot: nil.
         assert!(s
-            .eval::<bool>("return C_Container.GetContainerItemInfo(0, 2) == nil")
+            .eval::<bool>("return GetContainerItemInfo(0, 2) == nil")
             .unwrap());
     }
 
@@ -745,9 +792,8 @@ mod tests {
     fn use_container_item_queues_intents() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(backpack()));
-        s.run("C_Container.UseContainerItem(0, 1)").unwrap();
-        s.run("C_Container.UseContainerItem(0, 3, 'target')")
-            .unwrap();
+        s.run("UseContainerItem(0, 1)").unwrap();
+        s.run("UseContainerItem(0, 3, 'target')").unwrap();
         assert_eq!(s.take_container_uses(), vec![(0, 1), (0, 3)]);
         assert!(s.take_container_uses().is_empty(), "drained");
     }
@@ -760,9 +806,7 @@ mod tests {
         assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
 
         // Pick up slot 1 → cursor holds it, the source slot reads locked, no move queued yet.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         let held = s.cursor_item().expect("cursor holds the picked item");
         assert_eq!((held.bag, held.slot, held.item_id), (0, 1, 117));
         assert_eq!(
@@ -771,7 +815,7 @@ mod tests {
         );
         assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
         assert!(s
-            .eval::<bool>("local i = C_Container.GetContainerItemInfo(0, 1) return i.isLocked")
+            .eval::<bool>("local _, _, locked = GetContainerItemInfo(0, 1) return locked")
             .unwrap());
         assert!(s.take_container_moves().is_empty());
 
@@ -782,9 +826,7 @@ mod tests {
         assert_eq!((kind.as_str(), id), ("item", 117));
 
         // Place onto slot 5 → a move (0,1)->(0,5) queues, cursor clears, source un-locks.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 5)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 5)").unwrap());
         assert!(s.cursor_item().is_none());
         assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
         assert_eq!(
@@ -798,7 +840,7 @@ mod tests {
             }]
         );
         assert!(!s
-            .eval::<bool>("local i = C_Container.GetContainerItemInfo(0, 1) return i.isLocked")
+            .eval::<bool>("local i = GetContainerItemInfo(0, 1) return i.isLocked")
             .unwrap());
     }
 
@@ -831,16 +873,12 @@ mod tests {
         );
         s.set_container(0, Some(state));
 
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert_eq!(s.cursor_item().unwrap().item_id, 117);
 
         // Place A onto occupied slot 5 (item B) → move (1→5) queues, the cursor EMPTIES (the
         // server's swap lands B in slot 1), and the source un-locks.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 5)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 5)").unwrap());
         assert!(
             s.cursor_item().is_none(),
             "a swap clears the cursor — the displaced item never hops on"
@@ -856,7 +894,7 @@ mod tests {
             }]
         );
         assert!(!s
-            .eval::<bool>("local i = C_Container.GetContainerItemInfo(0, 1) return i.isLocked")
+            .eval::<bool>("local i = GetContainerItemInfo(0, 1) return i.isLocked")
             .unwrap());
     }
 
@@ -877,10 +915,8 @@ mod tests {
         );
         s.set_container(0, Some(state));
 
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 5)")
-            .unwrap());
+        s.run("PickupContainerItem(0, 1)").unwrap();
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 5)").unwrap());
         assert!(
             s.cursor_item().is_none(),
             "same-item merge clears the cursor"
@@ -904,9 +940,7 @@ mod tests {
         state.slots.get_mut(&1).unwrap().locked = true;
         s.set_container(0, Some(state));
 
-        assert!(!s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(!s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert!(s.cursor_item().is_none());
     }
 
@@ -944,9 +978,7 @@ mod tests {
         );
 
         // Placed onto an empty slot: the move carries the split count, and clears.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 2)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 2)").unwrap());
         assert!(s.cursor_item().is_none());
         assert_eq!(
             s.take_container_moves(),
@@ -961,17 +993,13 @@ mod tests {
 
         // Re-split, then place onto a DIFFERENT item: no-op, the split carry is kept.
         s.run("SplitContainerItem(0, 1, 3)").unwrap();
-        assert!(!s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 9)")
-            .unwrap());
+        assert!(!s.eval::<bool>("return PickupContainerItem(0, 9)").unwrap());
         let held = s.cursor_item().expect("kept — can't swap a partial stack");
         assert_eq!(held.count, Some(3));
         assert!(s.take_container_moves().is_empty());
 
         // Placed onto a SAME-item slot: the server merges — the move queues, cursor clears.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 7)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 7)").unwrap());
         assert!(s.cursor_item().is_none());
         assert_eq!(
             s.take_container_moves(),
@@ -1005,14 +1033,10 @@ mod tests {
     fn pickup_same_slot_cancels_no_move() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(backpack()));
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert!(s.cursor_item().is_some());
         // Click the same slot again → cancel: cursor clears, nothing queued.
-        assert!(s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
-            .unwrap());
+        assert!(s.eval::<bool>("return PickupContainerItem(0, 1)").unwrap());
         assert!(s.cursor_item().is_none());
         assert!(s.take_container_moves().is_empty());
     }
@@ -1022,13 +1046,9 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(backpack()));
         // Slot 2 is empty, slot 3 is in-flight (unresolved, item_id 0) — neither is pickable.
-        assert!(!s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 2)")
-            .unwrap());
+        assert!(!s.eval::<bool>("return PickupContainerItem(0, 2)").unwrap());
         assert!(s.cursor_item().is_none());
-        assert!(!s
-            .eval::<bool>("return C_Container.PickupContainerItem(0, 3)")
-            .unwrap());
+        assert!(!s.eval::<bool>("return PickupContainerItem(0, 3)").unwrap());
         assert!(s.cursor_item().is_none());
     }
 
@@ -1036,7 +1056,7 @@ mod tests {
     fn clear_cursor_drops_the_held_item() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(backpack()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some());
         s.run("ClearCursor()").unwrap();
         assert!(s.cursor_item().is_none());
@@ -1048,11 +1068,7 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_container(2, Some(backpack()));
         s.set_container(2, None);
-        assert_eq!(
-            s.eval::<i64>("return C_Container.GetContainerNumSlots(2)")
-                .unwrap(),
-            0
-        );
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(2)").unwrap(), 0);
     }
 
     /// `GetContainerItemCooldown` — the `GetActionCooldown` conventions on the bag twin: the
@@ -1071,14 +1087,14 @@ mod tests {
         // The pushed absolute start reads back verbatim in seconds.
         assert!(s
             .eval::<bool>(
-                "local s, d, e = C_Container.GetContainerItemCooldown(0, 1)\n\
+                "local s, d, e = GetContainerItemCooldown(0, 1)\n\
                  return s == 96 and d == 10 and e == 1"
             )
             .unwrap());
         // A slot with no cooldown reads cold.
         assert!(s
             .eval::<bool>(
-                "local s, d, e = C_Container.GetContainerItemCooldown(0, 3)\n\
+                "local s, d, e = GetContainerItemCooldown(0, 3)\n\
                  return s == 0 and d == 0 and e == 1"
             )
             .unwrap());
@@ -1086,7 +1102,7 @@ mod tests {
         s.tick(7.0);
         assert!(s
             .eval::<bool>(
-                "local s, d, e = C_Container.GetContainerItemCooldown(0, 1)\n\
+                "local s, d, e = GetContainerItemCooldown(0, 1)\n\
                  return s == 0 and d == 0 and e == 1"
             )
             .unwrap());
@@ -1094,9 +1110,67 @@ mod tests {
         s.set_container(0, Some(backpack()));
         assert!(s
             .eval::<bool>(
-                "local s, d = C_Container.GetContainerItemCooldown(0, 1)\n\
+                "local s, d = GetContainerItemCooldown(0, 1)\n\
                  return s == 0 and d == 0"
             )
             .unwrap());
+    }
+
+    // ── `ContainerIDToInventoryID` (wow-re `bag-language-combat-action-bindings.md` §1) ─────────
+
+    /// Two linear arms and no range check. **−2 → 17 and 0 → 19 are not special cases** — they are
+    /// ordinary points on the `id <= 4` line that the caller-side "keyring is −2 / backpack is 0"
+    /// convention happens to land on, which is why they are asserted beside the bag slots rather
+    /// than as exceptions.
+    #[test]
+    fn container_id_to_inventory_id_is_two_lines_with_no_clamp() {
+        let s = UiScript::new().unwrap();
+        let slot = |id: &str| {
+            s.eval::<i64>(&format!("return ContainerIDToInventoryID({id})"))
+                .unwrap()
+        };
+        // The `id <= 4` line: keyring, the odd −1, the backpack, the four worn bags.
+        assert_eq!(slot("-2"), 17, "keyring — an ordinary point, not a case");
+        assert_eq!(slot("-1"), 18);
+        assert_eq!(slot("0"), 19, "backpack — likewise");
+        assert_eq!(
+            (slot("1"), slot("2"), slot("3"), slot("4")),
+            (20, 21, 22, 23)
+        );
+        // The `id >= 5` line: the bank bags.
+        assert_eq!(slot("5"), 64, "the jump — +59, not +19");
+        assert_eq!((slot("6"), slot("10")), (65, 69));
+        // No range check, no clamp, and never nil: out of range is an ordinary number.
+        assert_eq!(
+            slot("99"),
+            158,
+            "the value `SetInventoryItem` would receive"
+        );
+        assert_eq!(slot("-100"), -81, "negatives run off the line too");
+        assert_eq!(
+            s.eval::<i64>("return select(\'#\', ContainerIDToInventoryID(99))")
+                .unwrap(),
+            1,
+            "one value on every non-raising path"
+        );
+        // `0x40a2b0` truncates toward zero — a C cast, not `floor`.
+        assert_eq!(slot("2.9"), 21, "2.9 -> 2");
+        assert_eq!(slot("-2.9"), 17, "-2.9 -> -2, NOT -3");
+    }
+
+    /// A missing or non-number argument **raises** — the only guard in the function is the type
+    /// test, and `0x6f4940` does not return.
+    #[test]
+    fn container_id_to_inventory_id_raises_on_a_bad_argument() {
+        let s = UiScript::new().unwrap();
+        for call in ["ContainerIDToInventoryID()", "ContainerIDToInventoryID({})"] {
+            let err = s
+                .eval::<mlua::Value>(&format!("return {call}"))
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("Usage: ContainerIDToInventoryID(containerID)"),
+                "{call} must raise, got {err}"
+            );
+        }
     }
 }

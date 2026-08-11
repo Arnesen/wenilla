@@ -30,9 +30,7 @@ fn info_and_error_messages_stack_hold_and_expire() {
     load_xml(&s, "ErrorsFrame.xml");
 
     // Empty at load.
-    assert!(!s
-        .eval::<bool>("return BenillaErrorsFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return UIErrorsFrame:IsVisible()").unwrap());
 
     // A quest progress toast: yellow (ref UIErrorsFrame.lua:12), on the top line.
     s.fire_event(
@@ -40,17 +38,15 @@ fn info_and_error_messages_stack_hold_and_expire() {
         vec![ScriptValue::Str("Tough Wolf Meat: 2/8".into())],
     );
     assert!(s.errors().is_empty(), "info errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaErrorsFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return UIErrorsFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
             .unwrap(),
         "Tough Wolf Meat: 2/8"
     );
     assert!(s
         .eval::<bool>(
-            "local m = BenillaErrorsFrame.messages[1] return m.r == 1.0 and m.g == 1.0 and m.b == 0.0"
+            "local m = UIErrorsFrame.messages[1] return m.r == 1.0 and m.g == 1.0 and m.b == 0.0"
         )
         .unwrap());
 
@@ -61,35 +57,31 @@ fn info_and_error_messages_stack_hold_and_expire() {
         vec![ScriptValue::Str("You are too far away!".into())],
     );
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
             .unwrap(),
         "You are too far away!"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaErrorsFrameLine2:GetText()")
+        s.eval::<String>("return UIErrorsFrameLine2:GetText()")
             .unwrap(),
         "Tough Wolf Meat: 2/8"
     );
     assert!(s
         .eval::<bool>(
-            "local m = BenillaErrorsFrame.messages[1] return m.r == 1.0 and m.g == 0.1 and m.b == 0.1"
+            "local m = UIErrorsFrame.messages[1] return m.r == 1.0 and m.g == 0.1 and m.b == 0.1"
         )
         .unwrap());
 
     // Hold 5 s (ref displayDuration), then the fade window, then gone — the frame hides once the
     // last message expires.
     s.tick(4.0);
-    assert!(s
-        .eval::<bool>("return BenillaErrorsFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return UIErrorsFrame:IsVisible()").unwrap());
     s.tick(2.5); // both past 5 s hold + 1 s fade
-    assert!(!s
-        .eval::<bool>("return BenillaErrorsFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return UIErrorsFrame:IsVisible()").unwrap());
     assert!(s.errors().is_empty(), "expiry errors: {:?}", s.errors());
 }
 
-/// **The toast must outrank an open panel window.** `BenillaErrorsFrame` is 512x60 at TOP (0,-122)
+/// **The toast must outrank an open panel window.** `UIErrorsFrame` is 512x60 at TOP (0,-122)
 /// and every left-slot panel is 384-wide at TOPLEFT (0,-104), so they overlap. The reference puts
 /// this frame in HIGH (`UIErrorsFrame.xml` l.4) and benilla had dropped it, leaving it in the
 /// default MEDIUM alongside the panels.
@@ -111,18 +103,14 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     load_xml(&s, "QuestLogFrame.xml");
 
     // A left-slot panel open, and the toast raised after it — the order that must not decide.
-    s.eval::<()>("ShowUIPanel(BenillaQuestLogFrame)").unwrap();
+    s.eval::<()>("ShowUIPanel(QuestLogFrame)").unwrap();
     s.fire_event(
         "UI_ERROR_MESSAGE",
         vec![ScriptValue::Str("Out of range.".into())],
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-    assert!(s
-        .eval::<bool>("return BenillaErrorsFrame:IsVisible()")
-        .unwrap());
-    assert!(s
-        .eval::<bool>("return BenillaQuestLogFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return UIErrorsFrame:IsVisible()").unwrap());
+    assert!(s.eval::<bool>("return QuestLogFrame:IsVisible()").unwrap());
 
     s.resolve();
     let quads = s.extract();

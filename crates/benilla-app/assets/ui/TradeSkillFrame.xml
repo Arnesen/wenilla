@@ -24,7 +24,7 @@
             token those NPC-session windows use), the UIPanel slot system (carries NO hardcoded
             <Anchors> — ShowUIPanel/SetLeftFrame SetPoints it), OnShow/OnHide PlaySound pair.
           - TrainerFrame.xml — the FLAT layout constraint (below), the faux-scroll list kit
-            (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
+            (FauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
             UIPanelButtonTemplate/close-button/item-button idioms (no such templates ship in this house
             dialect — TalentFrame.xml's own ENGINE API note), the persistent selection-highlight Frame.
 
@@ -127,8 +127,8 @@
                `GetText("*_ABBR", nil, n)` locale-pluralization dispatch collapses to English
                singular/plural directly — `UiPanels.xml`'s `StaticPopupTimeUnit` is the identical-shaped
                precedent for this SAME `GetText` call elsewhere in the reference.
-             - Lua-5.0 `arg`/`arg.n` varargs have no equivalent (`LUA_COMPAT_VARARG` isn't shipped,
-               WorldMapFrame.xml/TalentFrame.xml's own identical note) — `BuildColoredListString`'s
+             - Lua-5.0 `arg`/`arg.n` varargs are written the 5.1-native way
+               (WorldMapFrame.xml/TalentFrame.xml's own identical note) — `BuildColoredListString`'s
                varargs use `select("#", ...)`/`select(i, ...)`, their own precedent for the
                substitution; the new `TradeSkillFilterFrame_LoadSubClasses`/`_LoadInvSlots` (ref l.331/
                377) use the same substitution.
@@ -412,8 +412,8 @@
             end
 
             local scrollFrame = getglobal("BenillaTradeSkillListScrollFrame")
-            BenillaFauxScrollFrame_Update(scrollFrame, numTradeSkills, TRADE_SKILLS_DISPLAYED, TRADE_SKILL_HEIGHT)
-            local skillOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+            FauxScrollFrame_Update(scrollFrame, numTradeSkills, TRADE_SKILLS_DISPLAYED, TRADE_SKILL_HEIGHT)
+            local skillOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
             local highlight = getglobal("BenillaTradeSkillHighlight")
             highlight:Hide()
@@ -545,7 +545,7 @@
         -- doc), using the button's own `.collapsed` flag (re-derived every Update() from the real
         -- header states above, so it stays honest regardless of how a fold happened). The ref's raw
         -- `TradeSkillListScrollFrameScrollBar:SetValue(0)` becomes this file's own
-        -- `BenillaFauxScrollFrame_SetOffset(...,0)` wrapper (already this file's own Show/OnEvent
+        -- `FauxScrollFrame_SetOffset(...,0)` wrapper (already this file's own Show/OnEvent
         -- convention). No direct `BenillaTradeSkillFrame_Update()` call — the ref doesn't call one
         -- either; `CollapseTradeSkillSubClass`/`ExpandTradeSkillSubClass` raise the engine's touched
         -- flag, answered with `TRADE_SKILL_UPDATE` the same frame (header comment, deviation 1). ──────
@@ -555,7 +555,7 @@
                 ExpandTradeSkillSubClass(0)
             else
                 self.collapsed = true
-                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+                FauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
                 CollapseTradeSkillSubClass(0)
             end
         end
@@ -781,7 +781,7 @@
             else
                 BenillaTradeSkillFrame_SetSelection(GetTradeSkillSelectionIndex())
             end
-            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+            FauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
             SetPortraitTexture(getglobal("BenillaTradeSkillFramePortrait"), "player")
             BenillaTradeSkillFrame_Update()
             ShowUIPanel(frame)
@@ -797,7 +797,7 @@
                     BenillaTradeSkillFrame_SetSelection(selection)
                 elseif GetNumTradeSkills() > 0 then
                     BenillaTradeSkillFrame_SetSelection(GetFirstTradeSkill())
-                    BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+                    FauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
                 end
                 BenillaTradeSkillFrame_Update()
             elseif event == "TRADE_SKILL_CLOSE" then
@@ -1131,11 +1131,11 @@
             <Button name="BenillaTradeSkillSkill7" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
             <Button name="BenillaTradeSkillSkill8" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
 
-            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+            <!-- The faux-scroll frame (FauxScrollFrameTemplate, ScrollTemplates.xml): invisible
                  container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
                  8-row span (TRADE_SKILLS_DISPLAYED × TRADE_SKILL_HEIGHT), TrainerFrame.xml's own
                  same-TOPLEFT-as-row1 convention. updateFunc set in BenillaTradeSkillFrame_OnLoad. -->
-            <Frame name="BenillaTradeSkillListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+            <Frame name="BenillaTradeSkillListScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="293" y="128"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
             </Frame>

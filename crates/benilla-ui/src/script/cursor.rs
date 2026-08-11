@@ -761,7 +761,7 @@ mod tests {
     fn delete_cursor_item_queues_destroy_and_clears() {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(one_item_backpack()));
-        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        s.run("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some());
 
         s.run("DeleteCursorItem()").unwrap();

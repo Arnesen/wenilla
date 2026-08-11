@@ -94,11 +94,11 @@ fn shipped_action_bar_drives_end_to_end() {
     s.mouse_button(26.0, 22.0, "LeftButton", false);
     assert_eq!(s.take_action_uses(), vec![73]);
 
-    // The keybinding entry (the app's key feed runs `BenillaActionButtonDown/Up(i)` on the two
+    // The keybinding entry (the app's key feed runs `ActionButtonDown/Up(i)` on the two
     // key edges — the ref's ACTIONBUTTONn binding, ActionButton.lua:15-45): UP fires UseAction
     // directly with no checkCursor (a keybind never places, decision 0216 §7) — but ONLY from
     // the PUSHED state a DOWN set, so a stray release with no press is the ref's own no-op.
-    s.run("BenillaActionButtonUp(2)").unwrap();
+    s.run("ActionButtonUp(2)").unwrap();
     assert!(
         s.take_action_uses().is_empty(),
         "an Up without a Down is a no-op (the PUSHED gate)"
@@ -112,14 +112,14 @@ fn shipped_action_bar_drives_end_to_end() {
             })
             .count()
     };
-    s.run("BenillaActionButtonDown(2)").unwrap();
+    s.run("ActionButtonDown(2)").unwrap();
     assert_eq!(depressed(&s), 1, "key DOWN shows the pushed texture");
     assert_eq!(
-        s.eval::<String>("return BenillaActionButton2:GetButtonState()")
+        s.eval::<String>("return ActionButton2:GetButtonState()")
             .unwrap(),
         "PUSHED"
     );
-    s.run("BenillaActionButtonUp(2)").unwrap();
+    s.run("ActionButtonUp(2)").unwrap();
     assert_eq!(s.take_action_uses(), vec![74], "key '2' fires action 74");
     assert_eq!(depressed(&s), 0, "key UP restores the normal state");
 
@@ -212,9 +212,7 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
         }),
     );
     s.fire_event("ACTIONBAR_UPDATE_STATE", vec![]);
-    assert!(s
-        .eval::<bool>("return BenillaActionButton1:GetChecked()")
-        .unwrap());
+    assert!(s.eval::<bool>("return ActionButton1:GetChecked()").unwrap());
 
     // The OOM blue tint (the transcribed UpdateUsable): usable=false + notEnoughMana=true.
     s.set_action_state(
@@ -442,7 +440,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     s.resolve();
 
     s.run(r#"LOCK_ACTIONBAR = "1""#).unwrap();
-    s.run("BenillaActionButton_OnDragStart(BenillaActionButton1)")
+    s.run("BenillaActionButton_OnDragStart(ActionButton1)")
         .unwrap();
     assert!(
         s.cursor_payload().is_none(),
@@ -468,7 +466,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     );
 
     // The receiving end is guarded too: the held action cannot be dropped back by a drag…
-    s.run("BenillaActionButton_OnReceiveDrag(BenillaActionButton1)")
+    s.run("BenillaActionButton_OnReceiveDrag(ActionButton1)")
         .unwrap();
     assert!(
         s.cursor_payload().is_some(),
@@ -476,7 +474,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
     );
     // …and unlocking makes both ends live again.
     s.run(r#"LOCK_ACTIONBAR = "0""#).unwrap();
-    s.run("BenillaActionButton_OnReceiveDrag(BenillaActionButton1)")
+    s.run("BenillaActionButton_OnReceiveDrag(ActionButton1)")
         .unwrap();
     assert!(s.cursor_payload().is_none(), "unlocked, the drop lands");
     assert_eq!(
@@ -614,10 +612,8 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
     // Read the fontstrings by name, not by scanning painted text: a single-character count
     // ("0") is indistinguishable from a neighbouring button's static HotKey label by content.
     let count_of = |s: &UiScript, n: u32| {
-        s.eval::<String>(&format!(
-            "return BenillaActionButton{n}Count:GetText() or \"\""
-        ))
-        .unwrap()
+        s.eval::<String>(&format!("return ActionButton{n}Count:GetText() or \"\""))
+            .unwrap()
     };
     assert_eq!(
         count_of(&s, 1),
@@ -670,7 +666,7 @@ fn shipped_bag_frame_drives_end_to_end() {
 
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
-    // The bag toggle now seats on the main action bar (BenillaActionBarArtFrame, ActionBar.xml);
+    // The bag toggle now seats on the main action bar (MainMenuBarArtFrame, ActionBar.xml);
     // load the bar FIRST so the toggle's cross-file relativeTo resolves to the real art frame at
     // SetPoint time. The app loads ActionBar before BagFrame (load_default_ui order); without it the
     // anchor would silently fall back to the screen root (it only lands right here by the 1024-wide

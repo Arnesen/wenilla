@@ -388,9 +388,16 @@ pub(crate) struct RegionData {
     /// On-screen rotation about the region center (`SetRotation`, radians, counterclockwise-
     /// positive) — see [`QuadContent::Texture::rotation`].
     pub(crate) rotation: f32,
-    /// The named font object this FontString last resolved (`inherits=`/`SetFontObject`), for
-    /// `GetFontObject`. The object's paint is copied into the fields below at resolve time.
+    /// The named font object this FontString last resolved (`inherits=`/`SetFontObject`) — our
+    /// `FONTINSTANCE+0x028 parentFontObject`, and a **live** link: mutating that object
+    /// (`GameFontNormal:SetFont(…)`) re-paints this region through
+    /// [`script::font::propagate`](super::font::propagate). `GetFontObject` returns its handle.
+    /// The object's paint is eagerly copied into the fields below so every reader stays a plain
+    /// field read.
     pub(crate) font_object: Option<String>,
+    /// Which of the font properties below this region set **for itself** since its last
+    /// `SetFontObject` — our `FONTINSTANCE+0x038 explicitlySetMask`. See [`FontExplicit`].
+    pub(crate) font_explicit: FontExplicit,
     /// Resolved font face path (`SetFont`/`SetFontObject`). `None` = the renderer's default face.
     pub(crate) font_path: Option<String>,
     /// Resolved font height in logical px (`SetFont`/`SetFontObject`/`<FontHeight>`). `None` = default.
@@ -410,6 +417,38 @@ pub(crate) struct RegionData {
     /// [`UiScript::set_measured_text`]): the real client's layout asks its font engine for string
     /// metrics exactly like this (`fontstring.md`). `key` invalidates on text/font/wrap changes.
     pub(crate) measured: Option<MeasuredText>,
+}
+
+/// The per-property "this region set it itself, so it does not inherit" record — the real client's
+/// `FONTINSTANCE+0x038 explicitlySetMask` (wow-re `system/ui/scratch/fontstring.md`).
+///
+/// It exists for exactly one job: when a **font object is mutated**
+/// (`GameFontNormal:SetTextColor(…)`), every region inheriting it re-reads the object, and a
+/// property the region had overridden must survive that re-read. A dropdown row that does
+/// `SetFontObject(GameFontNormalSmall)` and then `SetTextColor(1, 0, 0)` keeps its red.
+///
+/// A fresh `SetFontObject` **clears the whole mask** — re-pointing at an object is a deliberate
+/// "take this object's paint", and `Dewdrop-2.0` re-runs exactly that pair on every row refresh
+/// (`SetFontObject` at l.2160-2166, then `SetTextColor` at l.2180), which only stays correct if the
+/// re-point wins. (Whether the real client's mask outlives a re-point is the one part of this the
+/// bytes have not yet been asked; the choice above is the one that leaves current behaviour
+/// untouched, and it is the *propagation* half — new behaviour either way — that the mask governs.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FontExplicit {
+    /// `SetFont`'s path argument, or XML `font=`.
+    pub(crate) face: bool,
+    /// `SetFont`'s height argument, or XML `<FontHeight>`.
+    pub(crate) height: bool,
+    /// `SetFont`'s flags argument, or XML `outline=`.
+    pub(crate) outline: bool,
+    /// `SetTextColor`/`SetVertexColor`, or a `<FontString><Color>`.
+    pub(crate) color: bool,
+    /// Reserved for a region-level shadow setter; XML `<Shadow>` on the FontString itself.
+    pub(crate) shadow: bool,
+    /// `SetJustifyH`, or XML `justifyH=`.
+    pub(crate) justify_h: bool,
+    /// `SetJustifyV`, or XML `justifyV=`.
+    pub(crate) justify_v: bool,
 }
 
 /// A cached host measurement of a FontString's laid-out text (see [`RegionData::measured`]).

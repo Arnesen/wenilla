@@ -59,7 +59,7 @@
           branch on UnitPlayerControlled (which also covers pets); we resolve its player half via
           UnitIsPlayer, so a player-controlled PET takes the NPC reaction branch until that flag lands.
         - The classification border swap (elite/rare art, ref-TargetFrame.lua l.205-218) LANDED with
-          decision 0782 — UnitClassification is bound and BenillaTargetFrame_CheckClassification
+          decision 0782 — UnitClassification is bound and TargetFrame_CheckClassification
           below runs the ref's branch table. Two things worth knowing at this altitude. The rank
           `UnitClassification` reads is the client's GATED rank (`0x605620`): a pet or charmed unit
           reports rank 0, so an enslaved elite wears the plain border, and because the tooltip's
@@ -163,9 +163,9 @@
                 end
             end
             -- The hover seam (1146): who this bar belongs to, and what its click means.
-            local click = BenillaTargetFrame_OnClick
+            local click = TargetFrame_OnClick
             if unit == "player" then
-                click = BenillaPlayerFrame_OnClick
+                click = PlayerFrame_OnClick
             end
             frame.healthBar.owner = frame
             frame.powerBar.owner = frame
@@ -225,7 +225,7 @@
                 -- The status flash (ref PlayerFrame_OnLoad, decision 1082): the resting zzz /
                 -- auto-attack swords under the portrait, the gold/red ring, and the pulse
                 -- counters. Handles cached like pvpIcon above; their presence is what gates
-                -- BenillaPlayerFrame_UpdateStatus in the shared Update.
+                -- PlayerFrame_UpdateStatus in the shared Update.
                 frame.statusTexture = getglobal(tf .. "StatusTexture")
                 frame.attackBackground = getglobal(tf .. "AttackBackground")
                 frame.restIcon = getglobal(tf .. "RestIcon")
@@ -249,7 +249,7 @@
             -- A plain Frame isn't mouse-enabled by construction (only Button/EditBox are); enable it so
             -- the hover tooltip fires (the real client's unit frames take the mouse to target/tooltip).
             frame:EnableMouse(true)
-            BenillaUnitFrame_Update(frame)
+            UnitFrame_Update()
         end
 
         -- Hover: the engine's SetUnit — the byte-verified unit line law (decision 0276: name/
@@ -324,7 +324,7 @@
             if not UnitExists(unit) then return end
             GameTooltip_SetDefaultAnchor(GameTooltip, frame)
             if SHOW_NEWBIE_TIPS == "1" then
-                if frame:GetName() == "BenillaPlayerFrame" then
+                if frame:GetName() == "PlayerFrame" then
                     GameTooltip_AddNewbieTip(frame, PARTY_OPTIONS_LABEL, 1.0, 1.0, 1.0,
                         NEWBIE_TOOLTIP_PARTYOPTIONS)
                     return
@@ -356,7 +356,8 @@
             end
         end
 
-        function BenillaUnitFrame_OnEvent(frame)
+        function UnitFrame_OnEvent(event)
+            local frame = this
             -- UNIT_* events name their unit in arg1; ignore other units' updates.
             if string.sub(event, 1, 5) == "UNIT_" and arg1 ~= frame.unit then
                 return
@@ -383,7 +384,7 @@
             elseif event == "PLAYER_REGEN_ENABLED" then
                 frame.onHateList = nil
             end
-            BenillaUnitFrame_Update(frame)
+            UnitFrame_Update()
             -- The player's flag-change sound (decision 0646 §2/§4). The reference plays
             -- igPVPUpdate inside PlayerFrame_UpdatePvPStatus's two show branches, which it only
             -- ever reaches from UNIT_FACTION; our repaint runs from the shared Update on every
@@ -549,7 +550,8 @@
         -- sound because all three BLPs are 256x128 (checked, not assumed), so the region's
         -- XML-declared TexCoords (0.09375..1.0 x 0..0.78125 = the 232x100 crop) frame all three
         -- identically, and our SetTexture touches only the path (it leaves tex_coords alone).
-        function BenillaTargetFrame_CheckClassification(frame)
+        function TargetFrame_CheckClassification()
+            local frame = this
             local classification = UnitClassification(frame.unit)
             if classification == "worldboss" or classification == "rareelite" or classification == "elite" then
                 frame.frameTexture:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame-Elite")
@@ -560,7 +562,8 @@
             end
         end
 
-        function BenillaUnitFrame_Update(frame)
+        function UnitFrame_Update()
+            local frame = this
             local unit = frame.unit
             if not UnitExists(unit) then
                 frame:Hide()
@@ -571,7 +574,7 @@
             frame.healthBar:SetMinMaxValues(0, UnitHealthMax(unit))
             frame.healthBar:SetValue(UnitHealth(unit))
 
-            local maxPower = UnitPowerMax(unit)
+            local maxPower = UnitManaMax(unit)
             if maxPower > 0 then
                 frame.powerBar:Show()
                 local _, token = UnitPowerType(unit)
@@ -584,7 +587,7 @@
                 -- mechanism stays — SetTextStatusBarTextPrefix is live and one call brings any
                 -- label back — only the calls are gone.
                 frame.powerBar:SetMinMaxValues(0, maxPower)
-                frame.powerBar:SetValue(UnitPower(unit))
+                frame.powerBar:SetValue(UnitMana(unit))
             else
                 frame.powerBar:Hide()
             end
@@ -660,7 +663,7 @@
             -- The classification border (target only) — the ref's TargetFrame_Update calls
             -- CheckClassification right here, between CheckFaction and CheckDead.
             if frame.frameTexture then
-                BenillaTargetFrame_CheckClassification(frame)
+                TargetFrame_CheckClassification()
             end
 
             -- DEAD text (target only): shown at zero health (ref TargetFrame_CheckDead). Blanked
@@ -679,7 +682,7 @@
 
             -- The status flash, player frame only (handle-gated like pvpIcon; decision 1082).
             if frame.statusTexture then
-                BenillaPlayerFrame_UpdateStatus(frame)
+                PlayerFrame_UpdateStatus()
             end
 
             -- The aura rows (target only) — the ref's TargetFrame_Update →
@@ -695,7 +698,7 @@
 
         -- TargetDebuffButton_Update (ref-TargetFrame.lua l.263-387), transcribed onto the Era API
         -- (decision 0255: UnitBuff returns name,icon,count,debuffType,… — the 1.12 original returned
-        -- the texture first). Only called with a live target (BenillaUnitFrame_Update guards).
+        -- the texture first). Only called with a live target (UnitFrame_Update guards).
         -- DebuffTypeColor is defined by BuffFrame.xml, which loads AFTER this file — safe, because
         -- this function only runs on events, never at load (no target exists at load).
         function BenillaTargetAuras_Update()
@@ -703,7 +706,7 @@
             local numBuffs = 0
             for i = 1, MAX_TARGET_BUFFS do
                 local name, icon = UnitBuff("target", i)
-                button = getglobal("BenillaTargetFrameBuff" .. i)
+                button = getglobal("TargetFrameBuff" .. i)
                 if name then
                     getglobal(button:GetName() .. "Icon"):SetTexture(icon or BENILLA_FALLBACK_ICON)
                     button:Show()
@@ -716,7 +719,7 @@
             local numDebuffs = 0
             for i = 1, MAX_TARGET_DEBUFFS do
                 local name, icon, count, debuffType = UnitDebuff("target", i)
-                button = getglobal("BenillaTargetFrameDebuff" .. i)
+                button = getglobal("TargetFrameDebuff" .. i)
                 if name then
                     getglobal(button:GetName() .. "Icon"):SetTexture(icon or BENILLA_FALLBACK_ICON)
                     local color = DebuffTypeColor[debuffType] or DebuffTypeColor["none"]
@@ -740,11 +743,11 @@
             local debuffWrap = 6
 
             if UnitIsFriend("player", "target") then
-                BenillaTargetFrameBuff1:SetPoint("TOPLEFT", "BenillaTargetFrame", "BOTTOMLEFT", 5, 32)
-                BenillaTargetFrameDebuff1:SetPoint("TOPLEFT", "BenillaTargetFrameBuff1", "BOTTOMLEFT", 0, -2)
+                TargetFrameBuff1:SetPoint("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5, 32)
+                TargetFrameDebuff1:SetPoint("TOPLEFT", "TargetFrameBuff1", "BOTTOMLEFT", 0, -2)
             else
-                BenillaTargetFrameDebuff1:SetPoint("TOPLEFT", "BenillaTargetFrame", "BOTTOMLEFT", 5, 32)
-                BenillaTargetFrameBuff1:SetPoint("TOPLEFT", "BenillaTargetFrameDebuff7", "BOTTOMLEFT", 0, -2)
+                TargetFrameDebuff1:SetPoint("TOPLEFT", "TargetFrame", "BOTTOMLEFT", 5, 32)
+                TargetFrameBuff1:SetPoint("TOPLEFT", "TargetFrameDebuff7", "BOTTOMLEFT", 0, -2)
             end
 
             -- Shrink when the debuffs would overlap the frame (ref l.340-347): 21→17 icons,
@@ -759,13 +762,13 @@
             end
 
             for i = 1, 5 do
-                button = getglobal("BenillaTargetFrameBuff" .. i)
+                button = getglobal("TargetFrameBuff" .. i)
                 button:SetWidth(debuffSize)
                 button:SetHeight(debuffSize)
             end
             -- The ref resizes only the FIRST ROW's debuffs (l.358-368) — rows 2+ stay 17px always.
             for i = 1, 6 do
-                button = getglobal("BenillaTargetFrameDebuff" .. i)
+                button = getglobal("TargetFrameDebuff" .. i)
                 local border = getglobal(button:GetName() .. "Border")
                 border:SetWidth(debuffFrameSize)
                 border:SetHeight(debuffFrameSize)
@@ -775,18 +778,18 @@
 
             -- Re-seat the wrap points (ref l.370-385) — constant with wrap pinned at 6, kept
             -- verbatim so the ToT wrap-5 leg drops in unchanged.
-            getglobal("BenillaTargetFrameDebuff" .. debuffWrap):ClearAllPoints()
-            getglobal("BenillaTargetFrameDebuff" .. debuffWrap):SetPoint("LEFT", getglobal("BenillaTargetFrameDebuff" .. (debuffWrap - 1)), "RIGHT", 3, 0)
-            getglobal("BenillaTargetFrameDebuff" .. (debuffWrap + 1)):ClearAllPoints()
-            getglobal("BenillaTargetFrameDebuff" .. (debuffWrap + 1)):SetPoint("TOPLEFT", "BenillaTargetFrameDebuff1", "BOTTOMLEFT", 0, -2)
-            getglobal("BenillaTargetFrameDebuff" .. (debuffWrap + 2)):ClearAllPoints()
-            getglobal("BenillaTargetFrameDebuff" .. (debuffWrap + 2)):SetPoint("LEFT", getglobal("BenillaTargetFrameDebuff" .. (debuffWrap + 1)), "RIGHT", 3, 0)
+            getglobal("TargetFrameDebuff" .. debuffWrap):ClearAllPoints()
+            getglobal("TargetFrameDebuff" .. debuffWrap):SetPoint("LEFT", getglobal("TargetFrameDebuff" .. (debuffWrap - 1)), "RIGHT", 3, 0)
+            getglobal("TargetFrameDebuff" .. (debuffWrap + 1)):ClearAllPoints()
+            getglobal("TargetFrameDebuff" .. (debuffWrap + 1)):SetPoint("TOPLEFT", "TargetFrameDebuff1", "BOTTOMLEFT", 0, -2)
+            getglobal("TargetFrameDebuff" .. (debuffWrap + 2)):ClearAllPoints()
+            getglobal("TargetFrameDebuff" .. (debuffWrap + 2)):SetPoint("LEFT", getglobal("TargetFrameDebuff" .. (debuffWrap + 1)), "RIGHT", 3, 0)
             if debuffWrap == 5 then
-                BenillaTargetFrameDebuff11:ClearAllPoints()
-                BenillaTargetFrameDebuff11:SetPoint("TOPLEFT", "BenillaTargetFrameDebuff6", "BOTTOMLEFT", 0, -2)
+                TargetFrameDebuff11:ClearAllPoints()
+                TargetFrameDebuff11:SetPoint("TOPLEFT", "TargetFrameDebuff6", "BOTTOMLEFT", 0, -2)
             else
-                BenillaTargetFrameDebuff11:ClearAllPoints()
-                BenillaTargetFrameDebuff11:SetPoint("LEFT", "BenillaTargetFrameDebuff10", "RIGHT", 3, 0)
+                TargetFrameDebuff11:ClearAllPoints()
+                TargetFrameDebuff11:SetPoint("LEFT", "TargetFrameDebuff10", "RIGHT", 3, 0)
             end
         end
 
@@ -806,7 +809,8 @@
         -- style; decision 1082). Priority is the ref's: RESTING wins over combat — sitting in an
         -- inn mid-auto-attack shows the zzz — then the auto-attack state (gold ring/zzz vs red
         -- ring/swords/red disc), then bare swords for on-someone's-aggro-list, then nothing.
-        function BenillaPlayerFrame_UpdateStatus(frame)
+        function PlayerFrame_UpdateStatus()
+            local frame = this
             if IsResting() then
                 frame.statusTexture:SetVertexColor(1.0, 0.88, 0.25, 1.0)
                 frame.statusTexture:Show()
@@ -843,7 +847,8 @@
         -- 55/255 and 255/255 on the ADD-blend status ring and the icon glow, run only while the
         -- ring is visible (resting or auto-attacking); the hit-indicator fade rides the same
         -- tick, exactly as before.
-        function BenillaPlayerFrame_OnUpdate(frame, elapsed)
+        function PlayerFrame_OnUpdate(elapsed)
+            local frame = this
             if frame.statusTexture:IsVisible() then
                 local counter = frame.statusCounter + elapsed
                 local sign = frame.statusSign
@@ -872,9 +877,9 @@
         -- with arg1 = the button. The self-target itself is the byte-verified way the client
         -- selects its own unit; the world-model click is a separate path, deliberately left out
         -- (director's call).
-        function BenillaPlayerFrame_OnClick(button)
+        function PlayerFrame_OnClick(button)
             if button == "RightButton" then
-                ToggleDropDownMenu(1, nil, PlayerFrameDropDown, "BenillaPlayerFrame", 106, 27)
+                ToggleDropDownMenu(1, nil, PlayerFrameDropDown, "PlayerFrame", 106, 27)
                 return
             end
             if button ~= "LeftButton" then return end
@@ -929,9 +934,9 @@
         -- ref TargetFrame_OnClick: right-click opens the unit menu at (120, 10). The ref's
         -- LeftButton branch (SpellTargetUnit / DropItemOnUnit) rides the spell-cursor and
         -- item-drop slices — a bare left-click is a no-op on the ref too.
-        function BenillaTargetFrame_OnClick(button)
+        function TargetFrame_OnClick(button)
             if button == "RightButton" then
-                ToggleDropDownMenu(1, nil, TargetFrameDropDown, "BenillaTargetFrame", 120, 10)
+                ToggleDropDownMenu(1, nil, TargetFrameDropDown, "TargetFrame", 120, 10)
             end
         end
     ]]></Script>
@@ -945,7 +950,7 @@
          BELOW the MEDIUM panel windows on purpose, and the player frame shares the top-left corner
          with the left-slot panel. See the note on PartyFrame.xml's template (decision 0597) for why
          the default MEDIUM makes a unit frame's bar children draw through a window's background. -->
-    <Frame name="BenillaPlayerFrame" frameStrata="BACKGROUND">
+    <Frame name="PlayerFrame" frameStrata="BACKGROUND">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-19" y="-4"/></Offset></Anchor>
@@ -1167,17 +1172,17 @@
         </Frames>
         <Scripts>
             <OnLoad><![CDATA[BenillaUnitFrame_OnLoad(this, "player")]]></OnLoad>
-            <OnEvent><![CDATA[BenillaUnitFrame_OnEvent(this)]]></OnEvent>
-            <OnUpdate><![CDATA[BenillaPlayerFrame_OnUpdate(this, arg1)]]></OnUpdate>
+            <OnEvent><![CDATA[UnitFrame_OnEvent(event)]]></OnEvent>
+            <OnUpdate><![CDATA[PlayerFrame_OnUpdate(arg1)]]></OnUpdate>
             <OnEnter><![CDATA[BenillaUnitFrame_OnEnter(this)]]></OnEnter>
             <OnLeave><![CDATA[BenillaUnitFrame_OnLeave(this)]]></OnLeave>
-            <OnClick><![CDATA[BenillaPlayerFrame_OnClick(arg1)]]></OnClick>
+            <OnClick><![CDATA[PlayerFrame_OnClick(arg1)]]></OnClick>
         </Scripts>
     </Frame>
 
     <!-- The SELF-menu dropdown host (ref $parentDropDown, PlayerFrame.xml): hidden state-holder
          only — the list anchors to the player frame by name, never to this. -->
-    <Frame name="PlayerFrameDropDown" parent="BenillaPlayerFrame" inherits="UIDropDownMenuTemplate" hidden="true">
+    <Frame name="PlayerFrameDropDown" parent="PlayerFrame" inherits="UIDropDownMenuTemplate" hidden="true">
         <Size><AbsDimension x="10" y="10"/></Size>
         <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
         <Scripts>
@@ -1235,7 +1240,7 @@
          every login. Steady-state behavior is identical — Update Shows/Hides on target changes. -->
     <!-- frameStrata LOW is the ref's own (`TargetFrame.xml` l.88) — one above the player frame's
          BACKGROUND, still below the MEDIUM panels. Same reasoning as PlayerFrame above. -->
-    <Frame name="BenillaTargetFrame" hidden="true" frameStrata="LOW">
+    <Frame name="TargetFrame" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="232" y="100"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="250" y="-4"/></Offset></Anchor>
@@ -1452,7 +1457,7 @@
         </Frames>
         <Scripts>
             <OnLoad><![CDATA[BenillaUnitFrame_OnLoad(this, "target")]]></OnLoad>
-            <OnEvent><![CDATA[BenillaUnitFrame_OnEvent(this)]]></OnEvent>
+            <OnEvent><![CDATA[UnitFrame_OnEvent(event)]]></OnEvent>
             <OnEnter><![CDATA[BenillaUnitFrame_OnEnter(this)]]></OnEnter>
             <OnLeave><![CDATA[BenillaUnitFrame_OnLeave(this)]]></OnLeave>
             <!-- The select/deselect pair rides the frame's visibility, exactly the ref
@@ -1474,13 +1479,13 @@
                 PlaySound("INTERFACESOUND_LOSTTARGETUNIT")
                 CloseDropDownMenus()
             ]]></OnHide>
-            <OnClick><![CDATA[BenillaTargetFrame_OnClick(arg1)]]></OnClick>
+            <OnClick><![CDATA[TargetFrame_OnClick(arg1)]]></OnClick>
         </Scripts>
     </Frame>
 
     <!-- The target-menu dropdown host (ref $parentDropDown, TargetFrame.xml): hidden
          state-holder only, like the player's above. -->
-    <Frame name="TargetFrameDropDown" parent="BenillaTargetFrame" inherits="UIDropDownMenuTemplate" hidden="true">
+    <Frame name="TargetFrameDropDown" parent="TargetFrame" inherits="UIDropDownMenuTemplate" hidden="true">
         <Size><AbsDimension x="10" y="10"/></Size>
         <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
         <Scripts>
@@ -1514,30 +1519,31 @@
           frames' own deferred buff panel, not here.
     -->
     <Script><![CDATA[
-        function BenillaPetFrame_OnLoad(frame)
-            frame.portrait  = BenillaPetFrameTextureFramePortrait
-            frame.healthBar = BenillaPetFrameHealthBar
-            frame.manaBar   = BenillaPetFrameManaBar
-            frame.nameText  = BenillaPetFrameTextureFrameName
+        function PetFrame_OnLoad()
+            local frame = this
+            frame.portrait  = PetFrameTextureFramePortrait
+            frame.healthBar = PetFrameHealthBar
+            frame.manaBar   = PetFrameManaBar
+            frame.nameText  = PetFrameTextureFrameName
             -- The recessed-bar look, the same mechanism the player/target/party frames use
             -- (decision 0884): push the bars one frame level BELOW the art's TextureFrame, because
             -- the draw layer is bucket-wide and the frame level is the one key term above it.
-            local level = BenillaPetFrameTextureFrame:GetFrameLevel()
+            local level = PetFrameTextureFrame:GetFrameLevel()
             frame.healthBar:SetFrameLevel(level - 1)
             frame.manaBar:SetFrameLevel(level - 1)
             -- The pet's numerals, textLockable like the ref's (PetFrame.xml l.139/164; 1143).
             if TextStatusBar_Initialize then -- engine tests load file subsets
                 TextStatusBar_Initialize(frame.healthBar)
                 TextStatusBar_Initialize(frame.manaBar)
-                SetTextStatusBarText(frame.healthBar, BenillaPetFrameTextureFrameHealthBarText)
-                SetTextStatusBarText(frame.manaBar, BenillaPetFrameTextureFrameManaBarText)
+                SetTextStatusBarText(frame.healthBar, PetFrameTextureFrameHealthBarText)
+                SetTextStatusBarText(frame.manaBar, PetFrameTextureFrameManaBarText)
                 frame.healthBar.textLockable = 1
                 frame.manaBar.textLockable = 1
             end
             -- The pet's bars hover for their numbers, but hand nothing on: the pet frame has no
             -- OnEnter of its own, and its click is its own handler (1146).
-            frame.healthBar.ownerClick = BenillaPetFrame_OnClick
-            frame.manaBar.ownerClick = BenillaPetFrame_OnClick
+            frame.healthBar.ownerClick = PetFrame_OnClick
+            frame.manaBar.ownerClick = PetFrame_OnClick
             frame.attackModeCounter = 0
             frame.attackModeSign = -1
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1553,33 +1559,35 @@
             frame:RegisterEvent("PET_ATTACK_STOP")
             frame:RegisterEvent("UNIT_HAPPINESS")
             frame:EnableMouse(true)
-            BenillaPetFrame_Update(frame)
+            PetFrame_Update()
         end
 
         -- ref PetFrame_OnEvent, with both of its argument gates kept: UNIT_PET names the OWNER
         -- ("player" — wow-re §9 carves the arg), every other UNIT_* names the pet itself. Getting
         -- those backwards is how a pet frame ends up repainting off the player's health.
-        function BenillaPetFrame_OnEvent(frame)
+        function PetFrame_OnEvent(event)
+            local frame = this
             if event == "PET_ATTACK_START" then
-                BenillaPetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, 1.0)
-                BenillaPetFrameAttackMode:Show()
+                PetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, 1.0)
+                PetFrameAttackMode:Show()
                 return
             elseif event == "PET_ATTACK_STOP" then
-                BenillaPetFrameAttackMode:Hide()
+                PetFrameAttackMode:Hide()
                 return
             elseif event == "UNIT_HAPPINESS" then
                 -- The ref's own last arm: repaint the icon alone, not the whole frame.
-                BenillaPetFrame_SetHappiness()
+                PetFrame_SetHappiness()
                 return
             elseif event == "UNIT_PET" then
                 if arg1 ~= "player" then return end
             elseif string.sub(event, 1, 5) == "UNIT_" and arg1 ~= "pet" then
                 return
             end
-            BenillaPetFrame_Update(frame)
+            PetFrame_Update()
         end
 
-        function BenillaPetFrame_Update(frame)
+        function PetFrame_Update()
+            local frame = this
             if not UnitExists("pet") then
                 frame:Hide()
                 return
@@ -1593,22 +1601,22 @@
 
             -- The ref's art swap (PetFrame.lua's Update): a powerless pet wears the -NoMana plate,
             -- which has no mana rail to leave empty. The bar hides with it, as on every other frame.
-            local maxPower = UnitPowerMax("pet")
+            local maxPower = UnitManaMax("pet")
             if maxPower > 0 then
-                BenillaPetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame")
+                PetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame")
                 frame.manaBar:Show()
                 local _, token = UnitPowerType("pet")
                 local c = BENILLA_POWER_COLORS[token] or BENILLA_POWER_COLORS.MANA
                 frame.manaBar:SetStatusBarColor(c.r, c.g, c.b)
                 frame.manaBar:SetMinMaxValues(0, maxPower)
-                frame.manaBar:SetValue(UnitPower("pet"))
+                frame.manaBar:SetValue(UnitMana("pet"))
             else
-                BenillaPetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame-NoMana")
+                PetFrameTexture:SetTexture("Interface\\TargetingFrame\\UI-SmallTargetingFrame-NoMana")
                 frame.manaBar:Hide()
             end
 
             BenillaPetFrame_UpdateDebuffs()
-            BenillaPetFrame_SetHappiness()
+            PetFrame_SetHappiness()
         end
 
         -- ref PetFrame_SetHappiness (PetFrame.lua l.132-156), quoted (decision 1005).
@@ -1622,29 +1630,29 @@
         --   * the three texcoord cuts run 3/2/1 left-to-right across the strip — happy is at x=0.
         --   * the loyalty line is chosen by the SIGN of loyaltyRate, which is why that return is
         --     unscaled and allowed to be negative.
-        function BenillaPetFrame_SetHappiness()
+        function PetFrame_SetHappiness()
             local happiness, damagePercentage, loyaltyRate = GetPetHappiness()
             local hasPetUI, isHunterPet = HasPetUI()
             if not happiness or not isHunterPet then
-                BenillaPetFrameHappiness:Hide()
+                PetFrameHappiness:Hide()
                 return
             end
-            BenillaPetFrameHappiness:Show()
+            PetFrameHappiness:Show()
             if happiness == 1 then
-                BenillaPetFrameHappinessTexture:SetTexCoord(0.375, 0.5625, 0, 0.359375)
+                PetFrameHappinessTexture:SetTexCoord(0.375, 0.5625, 0, 0.359375)
             elseif happiness == 2 then
-                BenillaPetFrameHappinessTexture:SetTexCoord(0.1875, 0.375, 0, 0.359375)
+                PetFrameHappinessTexture:SetTexCoord(0.1875, 0.375, 0, 0.359375)
             elseif happiness == 3 then
-                BenillaPetFrameHappinessTexture:SetTexCoord(0, 0.1875, 0, 0.359375)
+                PetFrameHappinessTexture:SetTexCoord(0, 0.1875, 0, 0.359375)
             end
-            BenillaPetFrameHappiness.tooltip = getglobal("PET_HAPPINESS" .. happiness)
-            BenillaPetFrameHappiness.tooltipDamage = format(PET_DAMAGE_PERCENTAGE, damagePercentage)
+            PetFrameHappiness.tooltip = getglobal("PET_HAPPINESS" .. happiness)
+            PetFrameHappiness.tooltipDamage = format(PET_DAMAGE_PERCENTAGE, damagePercentage)
             if loyaltyRate < 0 then
-                BenillaPetFrameHappiness.tooltipLoyalty = getglobal("LOSING_LOYALTY")
+                PetFrameHappiness.tooltipLoyalty = getglobal("LOSING_LOYALTY")
             elseif loyaltyRate > 0 then
-                BenillaPetFrameHappiness.tooltipLoyalty = getglobal("GAINING_LOYALTY")
+                PetFrameHappiness.tooltipLoyalty = getglobal("GAINING_LOYALTY")
             else
-                BenillaPetFrameHappiness.tooltipLoyalty = nil
+                PetFrameHappiness.tooltipLoyalty = nil
             end
         end
 
@@ -1653,7 +1661,7 @@
         -- so these are icon + border + stack count, the party rows' shape exactly.
         function BenillaPetFrame_UpdateDebuffs()
             for i = 1, 4 do
-                local button = getglobal("BenillaPetFrameDebuff" .. i)
+                local button = getglobal("PetFrameDebuff" .. i)
                 local _, icon, count = UnitDebuff("pet", i)
                 if icon then
                     getglobal(button:GetName() .. "Icon"):SetTexture(icon)
@@ -1673,15 +1681,16 @@
 
         -- ref PetFrame_OnUpdate: the attack overlay's alpha ramp — a 0.5 s-per-leg triangle between
         -- 55/255 and 1, sign-flipped at each end (the ref's own counter shape, transcribed).
-        function BenillaPetFrame_OnUpdate(frame, elapsed)
-            if not BenillaPetFrameAttackMode:IsVisible() then return end
+        function PetFrame_OnUpdate(elapsed)
+            local frame = this
+            if not PetFrameAttackMode:IsVisible() then return end
             local counter = frame.attackModeCounter + elapsed
             local sign = frame.attackModeSign
             if counter > 0.5 then
                 sign = -sign
                 frame.attackModeSign = sign
             end
-            counter = math.fmod(counter, 0.5)
+            counter = mod(counter, 0.5)
             frame.attackModeCounter = counter
             local alpha
             if sign == 1 then
@@ -1689,13 +1698,13 @@
             else
                 alpha = (255 - (counter * 400)) / 255
             end
-            BenillaPetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, alpha)
+            PetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, alpha)
         end
 
         -- ref PetFrame_OnClick, now whole (decision 1066 built the right branch). Its FIRST leg is
         -- the one that is easy to drop: with a spell armed, a RIGHT click disarms rather than
         -- opening the menu, and it precedes both branches.
-        function BenillaPetFrame_OnClick(button)
+        function PetFrame_OnClick(button)
             if SpellIsTargeting() and button == "RightButton" then
                 SpellStopTargeting()
                 return
@@ -1780,7 +1789,7 @@
 
     <!-- frameStrata LOW matches the party frames' and the target's — above the player frame's
          BACKGROUND (which it overlaps), still below the MEDIUM panels. -->
-    <Frame name="BenillaPetFrame" parent="BenillaPlayerFrame" hidden="true" frameStrata="LOW">
+    <Frame name="PetFrame" parent="PlayerFrame" hidden="true" frameStrata="LOW">
         <Size><AbsDimension x="128" y="53"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT"><Offset><AbsDimension x="80" y="-60"/></Offset></Anchor>
@@ -1840,7 +1849,7 @@
                     <Layer level="BORDER">
                         <!-- 128×64 art at (0,-2) — it hangs 13 px below the frame rect, as
                              authored. The file is swapped at update (see the header). -->
-                        <Texture name="BenillaPetFrameTexture" file="Interface\TargetingFrame\UI-SmallTargetingFrame">
+                        <Texture name="PetFrameTexture" file="Interface\TargetingFrame\UI-SmallTargetingFrame">
                             <Size><AbsDimension x="128" y="64"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
                         </Texture>
@@ -1848,7 +1857,7 @@
                     <Layer level="ARTWORK">
                         <!-- The attacking overlay (ref PetAttackModeTexture, l.104-118): the right
                              29.7% of UI-Player-AttackStatus, ADD-blended, pulsed by OnUpdate. -->
-                        <Texture name="BenillaPetFrameAttackMode" file="Interface\TargetingFrame\UI-Player-AttackStatus" alphaMode="ADD" hidden="true">
+                        <Texture name="PetFrameAttackMode" file="Interface\TargetingFrame\UI-Player-AttackStatus" alphaMode="ADD" hidden="true">
                             <Size><AbsDimension x="76" y="64"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-9"/></Offset></Anchor></Anchors>
                             <TexCoords left="0.703125" right="1.0" top="0" bottom="1.0"/>
@@ -1919,22 +1928,22 @@
                 <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="48" y="-42"/></Offset></Anchor></Anchors>
             </Button>
             <Button name="$parentDebuff2" inherits="BenillaPetDebuffTemplate" id="2">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetFrameDebuff1" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="PetFrameDebuff1" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
             </Button>
             <Button name="$parentDebuff3" inherits="BenillaPetDebuffTemplate" id="3">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetFrameDebuff2" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="PetFrameDebuff2" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
             </Button>
             <Button name="$parentDebuff4" inherits="BenillaPetDebuffTemplate" id="4">
-                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetFrameDebuff3" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                <Anchors><Anchor point="LEFT" relativeTo="PetFrameDebuff3" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
             </Button>
         </Frames>
         <Scripts>
-            <OnLoad>BenillaPetFrame_OnLoad(this)</OnLoad>
-            <OnEvent>BenillaPetFrame_OnEvent(this)</OnEvent>
-            <OnUpdate>BenillaPetFrame_OnUpdate(this, arg1)</OnUpdate>
+            <OnLoad>PetFrame_OnLoad()</OnLoad>
+            <OnEvent>PetFrame_OnEvent(event)</OnEvent>
+            <OnUpdate>PetFrame_OnUpdate(arg1)</OnUpdate>
             <OnEnter>BenillaPetFrame_OnEnter(this)</OnEnter>
             <OnLeave>if SpellIsTargeting() then SetCursor("CAST_ERROR_CURSOR") end GameTooltip:FadeOut()</OnLeave>
-            <OnClick>BenillaPetFrame_OnClick(arg1)</OnClick>
+            <OnClick>PetFrame_OnClick(arg1)</OnClick>
         </Scripts>
     </Frame>
 </Ui>

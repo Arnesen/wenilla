@@ -838,4 +838,49 @@ fn feed_char(
         );
         feed.last_inv = Some(inv);
     }
+
+    // `GetWeaponEnchantInfo`'s whole data path (the buff bar's TemporaryEnchantFrame row, plus 8
+    // corpus addons). Pushed EVERY frame and change-gated by nothing: the remaining time is a live
+    // countdown, so riding the snapshot above would fire `UNIT_INVENTORY_CHANGED` on every tick.
+    // The reference recomputes it per call for exactly the same reason (`0x5d9d00`).
+    script.set_weapon_enchants(
+        weapon_enchant(store, &items, EQUIPMENT_SLOT_MAINHAND),
+        weapon_enchant(store, &items, EQUIPMENT_SLOT_OFFHAND),
+    );
+}
+
+/// The client's own 0-based `EQUIPMENT_SLOT_*` ids for the two weapon slots — the numbers
+/// `GetWeaponEnchantInfo 0x4c9790` hands its container lookup (`push 0xf` at `0x4c97c3`,
+/// `push 0x10` at `0x4c988b`). The live-API `GetInventorySlotInfo` ids the *frames* use are one
+/// higher (16 `MainHandSlot`, 17 `SecondaryHandSlot`).
+const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
+const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
+
+/// `ITEM_FIELD_ENCHANTMENT`'s temporary slot (0 = permanent, 1 = temporary, 2..6 random property)
+/// — the slot index the reference passes to its remaining-time reader (`push 0x1`, `0x4c9828`).
+const TEMP_ENCHANTMENT_SLOT: u8 = 1;
+
+/// One weapon's temporary enchantment for [`benilla_ui::script::WeaponEnchant`], read off the
+/// equipped item object.
+///
+/// **The RAW enchantment triple, not [`InvSlotView::enchants`]**: that view is tooltip-shaped and
+/// drops both an id the `SpellItemEnchantment` catalog cannot name and the whole `Flags & 0x2`
+/// print-no-line family (decision 0928 — the totem weapon imbues), which is exactly the set the
+/// enchant row exists to show. The binary's gate is `[descriptor+0x4c] != 0`, the id and nothing
+/// else, and `item_enchant` already answers `None` for a zero id.
+fn weapon_enchant(
+    store: &ObjectStore,
+    items: &Items,
+    slot0: u8,
+) -> Option<benilla_ui::script::WeaponEnchant> {
+    let guid = store.0.player_inv_slot(slot0)?;
+    // Before the object borrow — the deadlines and the objects both live on `Items`. The
+    // *deadline* read, not the tooltip's: an elapsed timer must answer 0, not "no timer".
+    let remaining_ms = items.enchant_deadline_ms(guid, u32::from(TEMP_ENCHANTMENT_SLOT));
+    let obj = items.object(guid)?;
+    obj.item_enchant(TEMP_ENCHANTMENT_SLOT)?;
+    Some(benilla_ui::script::WeaponEnchant {
+        remaining_ms,
+        charges: obj.item_enchant_charges(TEMP_ENCHANTMENT_SLOT),
+    })
 }

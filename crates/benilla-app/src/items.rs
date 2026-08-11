@@ -198,6 +198,24 @@ impl Items {
         (!left.is_zero()).then_some(left.as_millis() as u64)
     }
 
+    /// The same deadline read **without** the tooltip's expired-is-absent collapse: `Some(0)` for a
+    /// timer that has run out, `None` only when the slot never had one.
+    ///
+    /// `GetWeaponEnchantInfo` needs the two apart where the tooltip does not. Its expiration return
+    /// is `max(0, deadline − now)` from the client-local deadline array (`0x5d9d00`, subtract on
+    /// read — VERIFIED wow-re `system/ui/scratch/weapon-enchant-info.md`), so an enchant whose
+    /// timer has elapsed answers the NUMBER 0, and `BuffFrame_Enchant_OnUpdate` then draws "0 s"
+    /// and pulses the icon. Collapsing that to nil would silently hide a expiring enchant's last
+    /// state. The wire carries **seconds** and this returns **milliseconds**, which is the
+    /// conversion `set_enchant_deadline` already performs.
+    pub(crate) fn enchant_deadline_ms(&self, guid: u64, slot: u32) -> Option<u64> {
+        let at = self.enchant_deadlines.get(&(guid, slot))?;
+        Some(
+            at.saturating_duration_since(std::time::Instant::now())
+                .as_millis() as u64,
+        )
+    }
+
     /// A tracked item object's merged descriptor fields.
     pub(crate) fn object(&self, guid: u64) -> Option<&ObjectFields> {
         self.objects.get(&guid)

@@ -12,11 +12,11 @@ const FILES: [&str; 3] = ["Fonts.xml", "UiPanels.xml", "ItemTextFrame.xml"];
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
-    let provider = |req: &str| -> Option<String> {
+    let provider = |req: &str| -> Option<Vec<u8>> {
         let norm = req.replace('\\', "/");
         let base = norm.rsplit('/').next().unwrap_or(&norm);
-        std::fs::read_to_string(dir.join(&norm))
-            .or_else(|_| std::fs::read_to_string(dir.join(base)))
+        std::fs::read(dir.join(&norm))
+            .or_else(|_| std::fs::read(dir.join(base)))
             .ok()
     };
     for file in FILES {
@@ -52,32 +52,28 @@ fn letter() -> ItemTextState {
 fn a_letter_reads_with_the_creator_tail() {
     let mut s = UiScript::new().unwrap();
     load_ui(&s);
-    assert!(!s
-        .eval::<bool>("return BenillaItemTextFrame:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
 
     s.set_item_text(Some(letter()));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
     assert_eq!(
-        s.eval::<String>("return BenillaItemTextTitleText:GetText()")
+        s.eval::<String>("return ItemTextTitleText:GetText()")
             .unwrap(),
         "Plain Letter"
     );
     s.fire_event("ITEM_TEXT_READY", vec![]);
-    assert!(s
-        .eval::<bool>("return BenillaItemTextFrame:IsShown()")
-        .unwrap());
+    assert!(s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaItemTextPageText:GetText()")
+        s.eval::<String>("return ItemTextPageText:GetText()")
             .unwrap(),
         "\nasd\n\nFrom,\nOne\n\n",
         "the reference creator tail (ITEM_TEXT_FROM really is comma'd)"
     );
     for hidden in [
-        "BenillaItemTextCurrentPage",
-        "BenillaItemTextPrevPageButton",
-        "BenillaItemTextNextPageButton",
-        "BenillaItemTextStatusBar",
+        "ItemTextCurrentPage",
+        "ItemTextPrevPageButton",
+        "ItemTextNextPageButton",
+        "ItemTextStatusBar",
     ] {
         assert!(
             !s.eval::<bool>(&format!("return {hidden}:IsShown()"))
@@ -111,8 +107,8 @@ fn the_scrollbar_track_sits_right_of_the_page() {
     s.resolve();
     let (track_left, page_right): (f32, f32) = s
         .eval(
-            "return BenillaItemTextScrollFrameMiddle:GetLeft(), \
-             BenillaItemTextScrollFrame:GetRight()",
+            "return ItemTextScrollFrameMiddle:GetLeft(), \
+             ItemTextScrollFrame:GetRight()",
         )
         .unwrap();
     assert!(
@@ -139,22 +135,22 @@ fn a_book_page_shows_the_paging_chrome() {
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
     s.fire_event("ITEM_TEXT_READY", vec![]);
     assert_eq!(
-        s.eval::<String>("return BenillaItemTextPageText:GetText()")
+        s.eval::<String>("return ItemTextPageText:GetText()")
             .unwrap(),
         "\npage one\n"
     );
     assert_eq!(
-        s.eval::<String>("return BenillaItemTextCurrentPage:GetText()")
+        s.eval::<String>("return ItemTextCurrentPage:GetText()")
             .unwrap(),
         "1"
     );
     assert!(!s
-        .eval::<bool>("return BenillaItemTextPrevPageButton:IsShown()")
+        .eval::<bool>("return ItemTextPrevPageButton:IsShown()")
         .unwrap());
     assert!(s
-        .eval::<bool>("return BenillaItemTextNextPageButton:IsShown()")
+        .eval::<bool>("return ItemTextNextPageButton:IsShown()")
         .unwrap());
-    s.run("BenillaItemTextNextPageButton:Click()").unwrap();
+    s.run("ItemTextNextPageButton:Click()").unwrap();
     assert_eq!(s.take_item_text_page_turns(), vec![1]);
     assert!(s.take_errors().is_empty());
 }
@@ -170,17 +166,13 @@ fn closing_queues_the_close_intent() {
     s.fire_event("ITEM_TEXT_READY", vec![]);
     let _ = s.take_item_text_close();
 
-    s.run("BenillaItemTextCloseButton:Click()").unwrap();
-    assert!(!s
-        .eval::<bool>("return BenillaItemTextFrame:IsShown()")
-        .unwrap());
+    s.run("ItemTextCloseButton:Click()").unwrap();
+    assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
     assert!(s.take_item_text_close(), "OnHide queued the close intent");
 
     // The app's answer: session cleared + ITEM_TEXT_CLOSED (stays hidden, no errors).
     s.set_item_text(None);
     s.fire_event("ITEM_TEXT_CLOSED", vec![]);
-    assert!(!s
-        .eval::<bool>("return BenillaItemTextFrame:IsShown()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
     assert!(s.take_errors().is_empty());
 }

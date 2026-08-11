@@ -350,7 +350,7 @@
             local popup = getglobal("BenillaMacroPopupFrame")
             local scrollFrame = getglobal("BenillaMacroPopupScrollFrame")
             local numMacroIcons = GetNumMacroIcons()
-            local macroPopupOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+            local macroPopupOffset = FauxScrollFrame_GetOffset(scrollFrame)
 
             if resetName then
                 if popup.mode == "new" then
@@ -379,7 +379,7 @@
                 end
             end
 
-            BenillaFauxScrollFrame_Update(scrollFrame,
+            FauxScrollFrame_Update(scrollFrame,
                 math.ceil(numMacroIcons / NUM_ICONS_PER_ROW), NUM_ICON_ROWS, MACRO_ICON_ROW_HEIGHT)
         end
 
@@ -404,7 +404,7 @@
             local popup = getglobal("BenillaMacroPopupFrame")
             local scrollFrame = getglobal("BenillaMacroPopupScrollFrame")
             popup.selectedIcon = button:GetID()
-                + (BenillaFauxScrollFrame_GetOffset(scrollFrame) * NUM_ICONS_PER_ROW)
+                + (FauxScrollFrame_GetOffset(scrollFrame) * NUM_ICONS_PER_ROW)
             getglobal("BenillaMacroFrameSelectedMacroButtonIcon")
                 :SetTexture(GetMacroIconInfo(popup.selectedIcon))
             BenillaMacroPopupOkayButton_Update()
@@ -892,13 +892,13 @@
 
             <!-- The icon grid's faux scroll (ref a ClassTrainerListScrollFrameTemplate, l.759-775).
                  The frame itself is invisible; its ONE visible consequence is where the bar seats
-                 (BenillaFauxScrollFrameTemplate hangs it off the frame's right edge +6, inset 16
+                 (FauxScrollFrameTemplate hangs it off the frame's right edge +6, inset 16
                  top and bottom). So its rect is the reference's VERBATIM — 296x195 at TOPRIGHT
                  (-39,-67) — which puts the bar at popup x 264..280, on the plate's groove and
                  bracketing the 4-row grid. 0983 sized it to the grid instead (252x152 at TOPLEFT
                  24,-85) and the bar came out at x 282..298: hanging half off the plate's right
                  edge, over the world. -->
-            <Frame name="BenillaMacroPopupScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+            <Frame name="BenillaMacroPopupScrollFrame" inherits="FauxScrollFrameTemplate">
                 <Size><AbsDimension x="296" y="195"/></Size>
                 <Anchors>
                     <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-39" y="-67"/></Offset></Anchor>
@@ -907,7 +907,7 @@
                     <!-- The faux kit's contract (ScrollTemplates.xml): the owner sets updateFunc,
                          the shared Slider handler calls it whenever the row offset moves. -->
                     <OnLoad>
-                        BenillaFauxScrollFrame_OnLoad(self)
+                        ScrollFrame_OnLoad()
                         self.updateFunc = BenillaMacroPopupFrame_Update
                     </OnLoad>
                 </Scripts>

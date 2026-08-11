@@ -20,6 +20,7 @@
 //! [`screen`] (the authored layout), [`refresh`] (list/banner/booth-feed refresh), [`input`]
 //! (clicks, keys, rotation, the flows), [`dialog`] (the delete confirm).
 
+mod addons;
 mod dialog;
 mod input;
 mod refresh;
@@ -93,6 +94,7 @@ impl Plugin for CharSelectPlugin {
                 publish_world_live.before(benilla_world::schedule::WorldStage::Net),
             )
             .init_resource::<dialog::DeleteDialog>()
+            .init_resource::<addons::AddonsPanel>()
             .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
             .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
             .add_systems(Update, (debug_glue_roundtrip, debug_logout_smoke))
@@ -108,6 +110,9 @@ impl Plugin for CharSelectPlugin {
                         input::rotate_model,
                         debug_select_dialog,
                         dialog::drive_delete_dialog,
+                        // Before the list refresh, and before `select_input` reads a click that
+                        // landed on the panel rather than the screen (decision 1196).
+                        addons::drive_addons_panel,
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
                         refresh::feed_glue_preview,

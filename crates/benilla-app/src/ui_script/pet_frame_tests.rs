@@ -1,5 +1,5 @@
 //! The shipped pet frame, driven end to end (decision 0990) — `UnitFrames.xml`'s
-//! `BenillaPetFrame` over synthetic `"pet"` snapshots and the events the app's feed fires.
+//! `PetFrame` over synthetic `"pet"` snapshots and the events the app's feed fires.
 //!
 //! The frame's whole job is to be right about **which unit an event names**, and that is what most
 //! of these test: `UNIT_PET` names the OWNER (`arg1 == "player"`, wow-re §9), every other `UNIT_*`
@@ -25,8 +25,18 @@ fn load_xml(s: &UiScript, file: &str) {
     );
 }
 
-/// The pet frame's production load prefix — it is parented to `BenillaPlayerFrame`, so the whole
+/// The pet frame's production load prefix — it is parented to `PlayerFrame`, so the whole
 /// unit-frame file comes with it, and the tooltip/dropdown kit its hover and its neighbours need.
+///
+/// **A player is seated, and that is load-bearing rather than tidy.** `PetFrame` really is a CHILD
+/// of `PlayerFrame` — our `UnitFrames.xml:1792` says `parent="PlayerFrame"` and the reference's
+/// `PetFrame.xml:4` says the same — and `UnitFrame_Update` hides a frame whose unit does not exist.
+/// So a fixture with a pet and no player gives `PlayerFrame:Hide()`, and a hidden parent means an
+/// invisible pet frame. That is the reference's own structure working correctly; a pet without a
+/// player is a state the game cannot be in.
+///
+/// (It did not matter until the loader learned the `parent=` attribute, which it had been ignoring:
+/// before that `PetFrame` was a top-level frame and nothing could hide it from above.)
 fn load_pet_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -36,6 +46,21 @@ fn load_pet_frame() -> UiScript {
     load_xml(&s, "UIDropDownMenu.xml");
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "UnitFrames.xml");
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Tri".into()),
+            health: 100,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 100,
+            max_power: 100,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
     s
 }
 
@@ -93,6 +118,8 @@ fn debuff(spell_id: u32, name: &str, count: u8) -> AuraState {
         expiration_time: 0.0,
         helpful: false,
         cancelable: false,
+        until_cancelled: false,
+        channeled: false,
     }
 }
 
@@ -103,8 +130,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
     let mut s = load_pet_frame();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaPetFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return PetFrame:IsVisible()").unwrap(),
         "no pet, no frame"
     );
 
@@ -114,11 +140,11 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
     let ok: bool = s
         .eval(
             r#"
-            local hb, mb = BenillaPetFrameHealthBar, BenillaPetFrameManaBar
+            local hb, mb = PetFrameHealthBar, PetFrameManaBar
             local _, hmax = hb:GetMinMaxValues()
             local _, mmax = mb:GetMinMaxValues()
-            return BenillaPetFrame:IsVisible()
-               and BenillaPetFrameTextureFrameName:GetText() == "Grimjaw"
+            return PetFrame:IsVisible()
+               and PetFrameTextureFrameName:GetText() == "Grimjaw"
                and hb:GetValue() == 72 and hmax == 100
                and mb:GetValue() == 45 and mmax == 80 and mb:IsVisible()
             "#,
@@ -129,9 +155,7 @@ fn the_pet_frame_appears_on_a_summon_and_leaves_on_a_dismiss() {
     // The dismiss: the token clears and UNIT_PET fires, exactly as `feed_pet_unit` does it.
     s.set_unit("pet", None);
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
-    assert!(!s
-        .eval::<bool>("return BenillaPetFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
 }
 
 /// **The two argument gates.** `UNIT_PET` names the OWNER, so `arg1 == "pet"` on it is not our
@@ -143,15 +167,13 @@ fn the_frame_answers_only_the_events_that_name_its_own_unit() {
     let mut s = load_pet_frame();
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
-    assert!(s
-        .eval::<bool>("return BenillaPetFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
 
     // A health change on the PLAYER must not touch the pet's bar.
     s.set_unit("pet", Some(pet("Grimjaw", 5, 45, 80, 0)));
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
     assert_eq!(
-        s.eval::<f64>("return BenillaPetFrameHealthBar:GetValue()")
+        s.eval::<f64>("return PetFrameHealthBar:GetValue()")
             .unwrap(),
         72.0,
         "a UNIT_HEALTH for \"player\" is not the pet's event"
@@ -159,7 +181,7 @@ fn the_frame_answers_only_the_events_that_name_its_own_unit() {
     // …and the same event naming the pet does.
     s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("pet".into())]);
     assert_eq!(
-        s.eval::<f64>("return BenillaPetFrameHealthBar:GetValue()")
+        s.eval::<f64>("return PetFrameHealthBar:GetValue()")
             .unwrap(),
         5.0
     );
@@ -168,14 +190,11 @@ fn the_frame_answers_only_the_events_that_name_its_own_unit() {
     s.set_unit("pet", None);
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("pet".into())]);
     assert!(
-        s.eval::<bool>("return BenillaPetFrame:IsVisible()")
-            .unwrap(),
+        s.eval::<bool>("return PetFrame:IsVisible()").unwrap(),
         "UNIT_PET names the OWNER — a \"pet\" arg1 is somebody else's event"
     );
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
-    assert!(!s
-        .eval::<bool>("return BenillaPetFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return PetFrame:IsVisible()").unwrap());
 }
 
 /// The reference's art swap (`PetFrame.lua`'s Update): a pet with no power wears the `-NoMana`
@@ -194,8 +213,8 @@ fn a_powerless_pet_wears_the_no_mana_plate() {
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     let (visible, r, g, b) = s
         .eval::<(bool, f64, f64, f64)>(
-            "local r, g, b = BenillaPetFrameManaBar:GetStatusBarColor() \
-             return BenillaPetFrameManaBar:IsVisible(), r, g, b",
+            "local r, g, b = PetFrameManaBar:GetStatusBarColor() \
+             return PetFrameManaBar:IsVisible(), r, g, b",
         )
         .unwrap();
     assert!(visible);
@@ -207,7 +226,7 @@ fn a_powerless_pet_wears_the_no_mana_plate() {
     s.set_unit("pet", Some(pet("Skeleton", 100, 0, 0, 0)));
     s.fire_event("UNIT_MAXPOWER", vec![ScriptValue::Str("pet".into())]);
     assert!(
-        !s.eval::<bool>("return BenillaPetFrameManaBar:IsVisible()")
+        !s.eval::<bool>("return PetFrameManaBar:IsVisible()")
             .unwrap(),
         "no power bar on the plate that has no rail for it"
     );
@@ -223,12 +242,12 @@ fn the_attack_overlay_follows_its_own_two_events() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(!s
-        .eval::<bool>("return BenillaPetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
         .unwrap());
 
     s.fire_event("PET_ATTACK_START", vec![]);
     assert!(s
-        .eval::<bool>("return BenillaPetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
         .unwrap());
 
     // The ref's OnUpdate ramps the overlay's tint alpha down from 1 on the opening (sign −1) leg.
@@ -250,7 +269,7 @@ fn the_attack_overlay_follows_its_own_two_events() {
 
     s.fire_event("PET_ATTACK_STOP", vec![]);
     assert!(!s
-        .eval::<bool>("return BenillaPetFrameAttackMode:IsVisible()")
+        .eval::<bool>("return PetFrameAttackMode:IsVisible()")
         .unwrap());
 }
 
@@ -271,13 +290,13 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     let ok: bool = s
         .eval(
             r#"
-            return BenillaPetFrameDebuff1:IsVisible()
-               and BenillaPetFrameDebuff2:IsVisible()
-               and not BenillaPetFrameDebuff3:IsVisible()
-               and not BenillaPetFrameDebuff4:IsVisible()
-               and not BenillaPetFrameDebuff1Count:IsVisible()
-               and BenillaPetFrameDebuff2Count:IsVisible()
-               and BenillaPetFrameDebuff2Count:GetText() == "3"
+            return PetFrameDebuff1:IsVisible()
+               and PetFrameDebuff2:IsVisible()
+               and not PetFrameDebuff3:IsVisible()
+               and not PetFrameDebuff4:IsVisible()
+               and not PetFrameDebuff1Count:IsVisible()
+               and PetFrameDebuff2Count:IsVisible()
+               and PetFrameDebuff2Count:GetText() == "3"
             "#,
         )
         .unwrap();
@@ -290,7 +309,7 @@ fn the_debuff_row_fills_from_the_pets_own_auras() {
     s.set_auras("pet", Some(vec![]));
     s.fire_event("UNIT_AURA", vec![ScriptValue::Str("pet".into())]);
     assert!(!s
-        .eval::<bool>("return BenillaPetFrameDebuff1:IsVisible()")
+        .eval::<bool>("return PetFrameDebuff1:IsVisible()")
         .unwrap());
 }
 
@@ -302,11 +321,11 @@ fn left_clicking_the_pet_frame_targets_it() {
     s.set_unit("pet", Some(pet("Grimjaw", 72, 45, 80, 0)));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
 
-    s.run("BenillaPetFrame_OnClick(\"LeftButton\")").unwrap();
+    s.run("PetFrame_OnClick(\"LeftButton\")").unwrap();
     assert_eq!(s.take_target_requests(), vec!["pet".to_string()]);
 
     // The right button is the deferred PET menu — it must do nothing at all, not target.
-    s.run("BenillaPetFrame_OnClick(\"RightButton\")").unwrap();
+    s.run("PetFrame_OnClick(\"RightButton\")").unwrap();
     assert!(s.take_target_requests().is_empty());
 }
 
@@ -361,13 +380,13 @@ fn every_leg_of_the_pet_frame_click_reaches_a_live_binding() {
         }),
     );
     s.fire_event("BAG_UPDATE", vec![ScriptValue::Int(0)]);
-    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.run("PickupContainerItem(0, 1)").unwrap();
     assert!(
         s.eval::<bool>("return CursorHasItem()").unwrap(),
         "the food is on the cursor"
     );
 
-    s.run("BenillaPetFrame_OnClick(\"LeftButton\")")
+    s.run("PetFrame_OnClick(\"LeftButton\")")
         .expect("the cursor-holds-an-item leg must not error");
     assert_eq!(
         s.take_drop_item_on_unit(),
@@ -430,19 +449,19 @@ fn the_happiness_icon_shows_per_bucket_and_hides_for_a_non_hunter_pet() {
         s.set_pet_stats(true, stats(true, Some(bucket), 125.0, rate));
         s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
         assert!(
-            s.eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+            s.eval::<bool>("return PetFrameHappiness:IsVisible()")
                 .unwrap(),
             "bucket {bucket} must show the icon"
         );
         assert_eq!(
-            s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+            s.eval::<String>("return PetFrameHappiness.tooltip")
                 .unwrap(),
             tip,
             "bucket {bucket} took the wrong texcoord branch"
         );
         // The loyalty line is chosen by the SIGN of the rate — and is absent at exactly zero.
         let line = s
-            .eval::<Option<String>>("return BenillaPetFrameHappiness.tooltipLoyalty")
+            .eval::<Option<String>>("return PetFrameHappiness.tooltipLoyalty")
             .unwrap();
         assert_eq!(
             line.as_deref(),
@@ -456,7 +475,7 @@ fn the_happiness_icon_shows_per_bucket_and_hides_for_a_non_hunter_pet() {
     s.set_pet_stats(true, stats(false, Some(3), 125.0, 20.0));
     s.fire_event("UNIT_HAPPINESS", vec![]);
     assert!(!s
-        .eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+        .eval::<bool>("return PetFrameHappiness:IsVisible()")
         .unwrap());
 }
 
@@ -472,7 +491,7 @@ fn happiness_bucket_zero_keeps_the_icon_showing() {
     s.set_pet_stats(true, stats(true, Some(0), 100.0, 0.0));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert!(
-        s.eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+        s.eval::<bool>("return PetFrameHappiness:IsVisible()")
             .unwrap(),
         "bucket 0 is a number, not the hide case"
     );
@@ -481,7 +500,7 @@ fn happiness_bucket_zero_keeps_the_icon_showing() {
     s.set_pet_stats(true, stats(true, None, 100.0, 0.0));
     s.fire_event("UNIT_HAPPINESS", vec![]);
     assert!(!s
-        .eval::<bool>("return BenillaPetFrameHappiness:IsVisible()")
+        .eval::<bool>("return PetFrameHappiness:IsVisible()")
         .unwrap());
 }
 
@@ -495,7 +514,7 @@ fn unit_happiness_repaints_only_the_icon() {
     s.set_pet_stats(true, stats(true, Some(1), 75.0, -10.0));
     s.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     assert_eq!(
-        s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+        s.eval::<String>("return PetFrameHappiness.tooltip")
             .unwrap(),
         "Unhappy"
     );
@@ -504,7 +523,7 @@ fn unit_happiness_repaints_only_the_icon() {
     s.set_pet_stats(true, stats(true, Some(3), 125.0, 20.0));
     s.fire_event("UNIT_HAPPINESS", vec![]);
     assert_eq!(
-        s.eval::<String>("return BenillaPetFrameHappiness.tooltip")
+        s.eval::<String>("return PetFrameHappiness.tooltip")
             .unwrap(),
         "Happy",
         "UNIT_HAPPINESS must re-cut the icon on its own"
@@ -520,9 +539,9 @@ fn the_pet_art_paints_over_the_bars() {
     let s = load_pet_frame();
     let level: (i64, i64, i64) = s
         .eval(
-            "return BenillaPetFrameTextureFrame:GetFrameLevel(), \
-                    BenillaPetFrameHealthBar:GetFrameLevel(), \
-                    BenillaPetFrameManaBar:GetFrameLevel()",
+            "return PetFrameTextureFrame:GetFrameLevel(), \
+                    PetFrameHealthBar:GetFrameLevel(), \
+                    PetFrameManaBar:GetFrameLevel()",
         )
         .unwrap();
     let (art, health, mana) = level;

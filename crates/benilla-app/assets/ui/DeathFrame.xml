@@ -229,7 +229,7 @@
                     end
                 end
                 -- The ref hides the gossip window under the confirm (UIParent.lua l.412).
-                local gossip = getglobal("BenillaGossipFrame")
+                local gossip = getglobal("GossipFrame")
                 if gossip and gossip:IsVisible() then
                     HideUIPanel(gossip)
                 end

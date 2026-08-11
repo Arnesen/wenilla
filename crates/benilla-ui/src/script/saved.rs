@@ -56,10 +56,17 @@ impl super::UiScript {
     /// silently. `nil` IS written (`NAME = nil`), which is how the reference records a toggle that
     /// has never been touched.
     pub fn saved_variables_text(&self) -> String {
-        let names = self.saved_variable_names();
+        self.saved_variables_text_for(&self.saved_variable_names())
+    }
+
+    /// [`UiScript::saved_variables_text`] over an explicit name list — an addon's own
+    /// `## SavedVariables` set (1188 phase 3), which is declared in its manifest rather than
+    /// through `RegisterForSave`. Same grammar, same skip rules; only the source of the names
+    /// differs, which is exactly the difference between the reference's two mechanisms.
+    pub fn saved_variables_text_for(&self, names: &[String]) -> String {
         let mut out = String::new();
         let mut unwritable = Vec::new();
-        for name in &names {
+        for name in names {
             let value: Value = match self.lua().globals().get(name.as_str()) {
                 Ok(v) => v,
                 Err(e) => {

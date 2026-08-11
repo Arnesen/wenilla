@@ -200,6 +200,60 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetActionText(slot) → the MACRO's own name, or nil. 1-based (`0x4e7072 dec eax`).
+    //
+    // **The classification is binary, not four-way** (`0x4e7050`, wow-re
+    // `bag-language-combat-action-bindings.md` §4, §5-cross-checked). The binding tests exactly
+    // one thing — top nibble `raw & 0xf0000000 == 0x40000000` — and **spell, item and empty all
+    // collapse to the identical nil arm**. It settles nothing about how spells or items are
+    // tagged, because it never asks.
+    //
+    // | slot contents | returns |
+    // |---|---|
+    // | macro, id resolves | the macro's own name (record `+0x24`, an inline buffer) |
+    // | macro, id does not resolve | `nil` |
+    // | spell · item · empty | `nil` |
+    // | slot missing / not a number | **raises** `Usage: GetActionText(slot)` (`0x84bff4`) |
+    //
+    // A macro whose name is empty answers `""`, not nil: `+0x24` is an inline buffer and can never
+    // be the null pointer `0x6f3890`'s guard tests for, so that guard is dead at this site. Our
+    // `MacroView::name` is a `String` and reproduces that for free.
+    //
+    // **The reference's trap does not exist here, and the reason is worth stating.** There the
+    // slot's macro payload (`raw & 0x3fffffff`) is an **opaque hash key** into `[0xbdcc54]`, NOT
+    // the 1..36 index — `GetMacroInfo` translates an index through `0xbdcc60` first and
+    // `GetActionText` never does, so a client that treats the payload as an index reads the wrong
+    // macro for every macro whose id ≠ its slot. benilla's macro table has no id space at all
+    // (decision 0983: two dense lists addressed by the 1..36 Lua index), so the payload our wire
+    // carries IS that index — and this is the same lookup `ui_action::feed`'s MACRO icon arm
+    // makes, through the same `MacroState::get`, so a slot's text and its icon cannot disagree
+    // about which macro it holds.
+    //
+    // One deliberate deviation: the reference has **no bounds check** (read contiguously from the
+    // `dec` to `mov eax,[4*eax + 0xbc6980]` — no `cmp`, no clamp), so slot 0 reads the dword below
+    // a 120-dword array and slot 121 reads into the next global. Our slot store is a map, so an
+    // out-of-range slot is simply absent and answers nil. Safer than the binary, and recorded as a
+    // deviation rather than passed off as a match.
+    g.set(
+        "GetActionText",
+        lua.create_function(|lua, slot: Value| {
+            let slot = super::binding_abi::number_arg(lua, slot, "Usage: GetActionText(slot)")?;
+            let name = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                u32::try_from(slot)
+                    .ok()
+                    .and_then(|s| model.actions.get(&s))
+                    .filter(|s| s.kind & 0xf0 == ACTION_KIND_MACRO)
+                    .and_then(|s| model.macros.get(s.action as usize))
+                    .map(|m| m.name.clone())
+            };
+            match name {
+                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // UseAction(action [, checkCursor [, onSelf]]) — `onSelf` is accepted and ignored (the
     // self-cast modifier isn't modeled yet). `checkCursor` TRUTHY (numeric nonzero — the
     // reference's own convention, not Lua's: `0` reads falsy here even though Lua truthiness
@@ -423,5 +477,84 @@ mod tests {
         // checkCursor 1 with an EMPTY cursor: the ordinary use (nothing to place).
         s.run("UseAction(10, 1)").unwrap();
         assert_eq!(s.take_action_uses(), vec![10]);
+    }
+
+    // ── `GetActionText` (wow-re `bag-language-combat-action-bindings.md` §4) ────────────────────
+
+    /// The classification is **binary**: macro or not. A SPELL slot and an ITEM slot answer the
+    /// identical `nil` an empty slot does — the binding tests one nibble and asks nothing else.
+    #[test]
+    fn get_action_text_is_the_macro_name_and_nil_for_everything_else() {
+        use crate::script::{MacroState, MacroView};
+
+        let mut s = UiScript::new().unwrap();
+        s.set_macros(MacroState {
+            account: vec![
+                MacroView {
+                    name: "Pull".into(),
+                    ..Default::default()
+                },
+                MacroView {
+                    name: String::new(),
+                    ..Default::default()
+                },
+            ],
+            character: Vec::new(),
+        });
+        let slot = |kind: u8, action: u32| {
+            Some(ActionSlot {
+                texture: Some("Interface\\Icons\\Spell_A".into()),
+                kind,
+                action,
+                count: 0,
+            })
+        };
+        s.set_action(1, slot(0x40, 1)); // macro 1 — "Pull"
+        s.set_action(2, slot(0x40, 2)); // macro 2 — an empty NAME, not an empty slot
+        s.set_action(3, slot(0x40, 30)); // macro id that does not resolve
+        s.set_action(4, slot(0x00, 133)); // a SPELL (Fireball)
+        s.set_action(5, slot(0x80, 117)); // an ITEM
+
+        assert_eq!(s.eval::<String>("return GetActionText(1)").unwrap(), "Pull");
+        assert_eq!(
+            s.eval::<String>("return GetActionText(2)").unwrap(),
+            "",
+            "an empty macro NAME is the empty string, not nil — `+0x24` is an inline buffer"
+        );
+        for (slot, why) in [
+            (3, "a macro id that resolves to nothing"),
+            (4, "a SPELL — the same nil arm"),
+            (5, "an ITEM — the same nil arm"),
+            (6, "an empty slot"),
+            (121, "past the 120-slot array"),
+            (0, "slot 0 (1-based)"),
+        ] {
+            assert!(
+                s.eval::<bool>(&format!("return GetActionText({slot}) == nil"))
+                    .unwrap(),
+                "{why} must be nil"
+            );
+        }
+        // One value on every non-raising path — never zero values.
+        assert_eq!(
+            s.eval::<i64>("return select('#', GetActionText(4))")
+                .unwrap(),
+            1
+        );
+    }
+
+    /// A missing or non-number slot **raises** (`0x4e70be` → `0x6f4940`, which never returns).
+    #[test]
+    fn get_action_text_raises_on_a_bad_slot() {
+        let s = UiScript::new().unwrap();
+        for call in ["GetActionText()", "GetActionText({})"] {
+            let err = s
+                .eval::<mlua::Value>(&format!("return {call}"))
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("Usage: GetActionText(slot)"),
+                "{call} must raise, got {err}"
+            );
+        }
     }
 }

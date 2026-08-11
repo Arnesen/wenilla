@@ -59,20 +59,33 @@ impl Loader<'_> {
                 dbg,
             );
         }
-        // Still genuine gaps — the window-behaviour surface (input arbitration, decision 0068).
-        // Flag them rather than silently dropping or faking them.
-        for (attr, api) in [
-            ("enableKeyboard", "EnableKeyboard"),
-            ("toplevel", "SetToplevel"),
-            ("movable", "SetMovable"),
-            ("resizable", "SetResizable"),
-        ] {
-            if el.attr_bool(attr) {
-                self.warn_once(
-                    api,
-                    format!("`{attr}` ignored: {api} is not in the v1 object model (gap)"),
-                );
-            }
+        // `movable`/`resizable` → SetMovable/SetResizable — the same flag word the methods write
+        // (`0x76a3c0` with mask 0x100 / 0x200; wow-re `rf24-framexml-loader.md` records the loader
+        // calling that very setter). Both were in the gap list below until the movable family
+        // landed; leaving them there would have left every `movable="true"` reference window
+        // undraggable while `SetMovable` worked from Lua.
+        if el.attr_bool("movable") {
+            self.call(wrapper, "SetMovable", true, dbg);
+        }
+        if el.attr_bool("resizable") {
+            self.call(wrapper, "SetResizable", true, dbg);
+        }
+        // `toplevel` → SetToplevel — the third bit of that same flag word (`0x76a3c0` mask `0x1`,
+        // XML site `0x7698ec`; wow-re `ui/scratch/toplevel-raise.md`), and the third attribute to
+        // graduate out of the gap list below for the same reason: the raise law is built
+        // (`script::object::toplevel`), so accepting the attribute now means the behaviour, not
+        // silence. 82 corpus addons and thirteen of our own frames declare it.
+        if el.attr_bool("toplevel") {
+            self.call(wrapper, "SetToplevel", true, dbg);
+        }
+        // Still a genuine gap — the window-behaviour surface (input arbitration, decision 0068).
+        // Flagged rather than silently dropped or faked: accepting an attribute without
+        // implementing it is strictly worse than saying so.
+        if el.attr_bool("enableKeyboard") {
+            self.warn_once(
+                "EnableKeyboard",
+                "`enableKeyboard` ignored: EnableKeyboard is not in the v1 object model (gap)",
+            );
         }
     }
 

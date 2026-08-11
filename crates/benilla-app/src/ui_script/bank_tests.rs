@@ -60,13 +60,11 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
 
     // Pre-open default: the XML-authored placeholder.
     assert_eq!(
-        s.eval::<String>("return BenillaBankFrameTitleText:GetText()")
+        s.eval::<String>("return BankFrameTitleText:GetText()")
             .unwrap(),
         "Banker"
     );
-    assert!(!s
-        .eval::<bool>("return BenillaBankFrame:IsVisible()")
-        .unwrap());
+    assert!(!s.eval::<bool>("return BankFrame:IsVisible()").unwrap());
 
     let _ = s.take_sounds(); // ignore anything from load (every frame is hidden; nothing should fire)
 
@@ -78,11 +76,9 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
-    assert!(s
-        .eval::<bool>("return BenillaBankFrame:IsVisible()")
-        .unwrap());
+    assert!(s.eval::<bool>("return BankFrame:IsVisible()").unwrap());
     assert_eq!(
-        s.eval::<String>("return BenillaBankFrameTitleText:GetText()")
+        s.eval::<String>("return BankFrameTitleText:GetText()")
             .unwrap(),
         "Grumnus Steelshaper"
     );
@@ -91,7 +87,7 @@ fn bankframe_opened_shows_sets_title_and_opens_backpack() {
         "opening the bank opens the backpack (the 0561 OpenBackpack contract)"
     );
     assert!(
-        s.eval::<bool>("return GetLeftFrame() == BenillaBankFrame")
+        s.eval::<bool>("return GetLeftFrame() == BankFrame")
             .unwrap(),
         "ShowUIPanel landed the bank at the left slot"
     );
@@ -130,8 +126,7 @@ fn bankframe_closed_queues_close_closes_open_popouts_and_plays_the_close_kit() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 
     assert!(
-        !s.eval::<bool>("return BenillaBankFrame:IsVisible()")
-            .unwrap(),
+        !s.eval::<bool>("return BankFrame:IsVisible()").unwrap(),
         "BANKFRAME_CLOSED hides the window"
     );
     assert!(
@@ -271,7 +266,7 @@ fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
     };
 
     // Button 1: its own bag icon (BenillaGetBankBagTexture(1)), purchased -> white.
-    let (x1, y1) = center("BenillaBankBagButton1");
+    let (x1, y1) = center("BankBagButton1");
     let c1 = color_at(x1, y1, "INV_Misc_Bag_08").expect("button 1 shows its fed bag icon");
     assert!(
         near(c1, 1.0, 1.0, 1.0),
@@ -279,7 +274,7 @@ fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
     );
 
     // Button 2 (purchased, no bag fed): the fallback texture, still white.
-    let (x2, y2) = center("BenillaBankBagButton2");
+    let (x2, y2) = center("BankBagButton2");
     let c2 =
         color_at(x2, y2, "PaperDoll-Slot-Bag").expect("button 2 shows the empty-slot fallback");
     assert!(
@@ -289,10 +284,10 @@ fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
 
     // Buttons 3..6 (unpurchased): the fallback texture, tinted the reference's exact red.
     for name in [
-        "BenillaBankBagButton3",
-        "BenillaBankBagButton4",
-        "BenillaBankBagButton5",
-        "BenillaBankBagButton6",
+        "BankBagButton3",
+        "BankBagButton4",
+        "BankBagButton5",
+        "BankBagButton6",
     ] {
         let (x, y) = center(name);
         let c = color_at(x, y, "PaperDoll-Slot-Bag")
@@ -319,7 +314,7 @@ fn purchase_flow_shows_popup_queues_the_intent_and_the_row_hides_when_full() {
     s.fire_event("BANKFRAME_OPENED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        s.eval::<bool>("return BenillaBankFramePurchaseInfo:IsShown()")
+        s.eval::<bool>("return BankFramePurchaseInfo:IsShown()")
             .unwrap(),
         "the purchase row shows while unfilled"
     );
@@ -354,7 +349,7 @@ fn purchase_flow_shows_popup_queues_the_intent_and_the_row_hides_when_full() {
     s.fire_event("PLAYERBANKBAGSLOTS_CHANGED", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
     assert!(
-        !s.eval::<bool>("return BenillaBankFramePurchaseInfo:IsShown()")
+        !s.eval::<bool>("return BankFramePurchaseInfo:IsShown()")
             .unwrap(),
         "the purchase row hides once full (6 purchased)"
     );
@@ -377,8 +372,8 @@ fn a_bank_bag_button_answers_the_right_button_too() {
 
     let (cx, cy): (f64, f64) = s
         .eval(
-            "return (BenillaBankBagButton1:GetLeft() + BenillaBankBagButton1:GetRight()) / 2, \
-                    (BenillaBankBagButton1:GetTop() + BenillaBankBagButton1:GetBottom()) / 2",
+            "return (BankBagButton1:GetLeft() + BankBagButton1:GetRight()) / 2, \
+                    (BankBagButton1:GetTop() + BankBagButton1:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
@@ -430,8 +425,8 @@ fn clicking_item_slot_one_with_an_empty_cursor_queues_the_pickup() {
 
     let (cx, cy): (f64, f64) = s
         .eval(
-            "return (BenillaBankItem1:GetLeft() + BenillaBankItem1:GetRight()) / 2, \
-                    (BenillaBankItem1:GetTop() + BenillaBankItem1:GetBottom()) / 2",
+            "return (BankItem1:GetLeft() + BankItem1:GetRight()) / 2, \
+                    (BankItem1:GetTop() + BankItem1:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "LeftButton", true);

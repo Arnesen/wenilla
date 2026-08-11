@@ -28,7 +28,7 @@ fn load_xml(s: &UiScript, file: &str) {
 }
 
 /// The manifest order this file actually ships in: `UiPanels.xml` for `UIFrameFade`,
-/// `UnitFrames.xml` for the `BenillaTargetFrame` the dots anchor to.
+/// `UnitFrames.xml` for the `TargetFrame` the dots anchor to.
 fn load_combo_frame() -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
@@ -69,11 +69,11 @@ fn settle(s: &mut UiScript) {
 }
 
 fn shown(s: &mut UiScript) -> bool {
-    s.eval("return BenillaComboFrame:IsShown()").unwrap()
+    s.eval("return ComboFrame:IsShown()").unwrap()
 }
 
 fn highlight_alpha(s: &mut UiScript, i: u32) -> f64 {
-    s.eval(&format!("return BenillaComboPoint{i}Highlight:GetAlpha()"))
+    s.eval(&format!("return ComboPoint{i}Highlight:GetAlpha()"))
         .unwrap()
 }
 
@@ -111,7 +111,7 @@ fn combo_frame_follows_the_point_count() {
         .eval(
             r#"
             for i = 1, MAX_COMBO_POINTS do
-                if getglobal("BenillaComboPoint" .. i .. "Highlight"):GetAlpha() < 0.99 then
+                if getglobal("ComboPoint" .. i .. "Highlight"):GetAlpha() < 0.99 then
                     return false
                 end
             end
@@ -141,13 +141,13 @@ fn a_repaint_at_the_same_count_does_not_re_flare() {
     settle(&mut s);
 
     // Both settled: highlights up, shines burned out.
-    let shine: f64 = s.eval("return BenillaComboPoint2Shine:GetAlpha()").unwrap();
+    let shine: f64 = s.eval("return ComboPoint2Shine:GetAlpha()").unwrap();
     assert_eq!(shine, 0.0, "the shine fades back out");
 
     // A re-select of the SAME unit at the same count: no new fade is queued for either dot.
     s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     let fading: bool = s
-        .eval("return UIFrameIsFading(BenillaComboPoint1Highlight) ~= nil")
+        .eval("return UIFrameIsFading(ComboPoint1Highlight) ~= nil")
         .unwrap();
     assert!(!fading, "an unchanged count re-flares nothing");
     assert!(
