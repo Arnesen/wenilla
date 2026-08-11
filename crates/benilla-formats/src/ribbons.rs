@@ -326,11 +326,6 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// [`RibbonVisibility::at`]'s sampling law, on a hand-built gate: STEP (nearest-previous, the
     /// track's own `interp == 0`), the band-opening entry answers before the first in-band key,
     /// and a sequence the model doesn't author falls back to `Stand`(0) and then to the
@@ -367,11 +362,7 @@ mod tests {
     /// "we have the glitter but not the slash"). Pins the band rebase and the keyed samples.
     #[test]
     fn real_holy_smite_slash_ribbons_are_keyed_flares() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Spells\\HolySmite_Low_Chest.m2")
@@ -408,11 +399,7 @@ mod tests {
     /// the InFlight missile does. Pins the per-sequence resolve against the shipped asset.
     #[test]
     fn real_thrown_dagger_trail_is_lit_only_in_flight() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Item\\ObjectComponents\\Weapon\\Thrown_1H_Dagger_A_01.m2")
@@ -440,11 +427,7 @@ mod tests {
     /// director reported (the other half was gravity's sign — see `benilla::ribbons`).
     #[test]
     fn real_frost_trap_upper_streamers_light_only_inside_the_trigger() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("World\\Goober\\G_FrostTrap.m2")

@@ -75,11 +75,7 @@ mod tests {
     /// without client data.
     #[test]
     fn the_shipped_rest_states_carry_the_rested_double() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let rows = load_exhaustion(&mut chain).expect("Exhaustion.dbc");
         let by_id: std::collections::HashMap<u32, (&str, f32)> = rows

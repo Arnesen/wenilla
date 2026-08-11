@@ -1,36 +1,56 @@
-//! Where benilla keeps **local state** — THE LAW (decision 0954). Every file benilla persists on
-//! a player's machine — config today; realmlist, caches, per-character state as they arrive —
-//! lives in **one visible folder, `benilla/`, beside the WoW install's own `Data/`**. Never
-//! scattered into the install, never hidden in a platform config dir: the 1.12 client is itself
-//! fully portable (`WTF/`, `realmlist.wtf`, `Cache/` all in-folder — verified on the live
+//! Where benilla keeps **local state** — THE LAW (decision 0954, placement amended by 1175). Every
+//! file benilla persists on a player's machine — config today; realmlist, caches, per-character
+//! state as they arrive — lives in **one visible folder, `benilla-config/`, beside the benilla binary**.
+//! Never scattered into the install, never hidden in a platform config dir: the 1.12 client is
+//! itself fully portable (`WTF/`, `realmlist.wtf`, `Cache/` all in-folder — verified on the live
 //! install), its community expects the drop-in-a-folder shape, and one folder answers "what here
 //! is benilla's?" at a glance (the director's call, 2026-08-04; prior art: Dolphin's
-//! `portable.txt`, DREAMM's config-next-to-exe — we skip the marker file because benilla always
-//! knows the install root from `$WOW_DATA`).
+//! `portable.txt`, DREAMM's config-next-to-exe).
 //!
-//! **Every feature with local state resolves its paths through this module** — nothing else in
-//! the tree may compute a persistence path (grep `local_state::` to see every resident). New
-//! files get a name here and a line in decision 0954's layout table.
+//! **0954 put this folder inside the WoW install and 1175 moved it out**, on the director's word:
+//! *the benilla folder should be outside the wow folder … in root of the project or same folder as
+//! the benilla binary.* 0954's reasoning was sound for what it knew — `$WOW_DATA` was the only
+//! root the client reliably had — but it made benilla's own state a *guest* of the install, so
+//! pointing at a second install silently swapped your keybinds and a data path that failed to
+//! resolve took your config with it. benilla reads a WoW install; it does not live in one. One
+//! behaviour improves as a result: the state folder no longer depends on finding the install at
+//! all. Everything else about 0954 stands, including this module being the only place in the tree
+//! that may compute a persistence path (grep `local_state::` for every resident) — new files get a
+//! name here and a line in 0954's layout table.
 //!
-//! Resolution, in order:
-//! 1. **`$BENILLA_HOME`** — explicit override (tests point it at a tempdir; a second install or
-//!    a shared-config setup points it wherever it likes).
-//! 2. **`<install root>/benilla/`** — the parent of `$WOW_DATA` (default `WoW/Data` → `WoW/
-//!    benilla/`). Gated on the Data dir actually existing, so a dev run without an install never
-//!    plants a phantom folder in some working directory.
+//! Resolution, in order — deliberately the **same three-step shape** as
+//! [`benilla_formats::wow_data`], because it is one law over two folders:
+//! 1. **`$BENILLA_HOME`** — explicit override (tests point it at a tempdir; a shared-config setup
+//!    points it wherever it likes).
+//! 2. **`<project folder>/benilla-config/`** — `#[cfg(feature = "dev")]` only, so dev runs across the
+//!    worktree pool keep one predictable place. Gated for the same reason the install resolver's
+//!    project-folder probe is: a shipped binary must not carry the build machine's source tree.
+//!    (`.gitignore` carries `/benilla-config` for it.)
+//! 3. **`<exe dir>/benilla-config/`** — the release answer: your settings sit next to the program that
+//!    wrote them.
 //!
 //! **Capture/probe runs are hermetic**: with `$WOW_CAPTURE` set every path resolves to `None` —
 //! a deterministic capture must not read one machine's saved settings or write anything back
-//! (the harness owns its inputs; decision 0008's reproducibility posture). `None` is also the
-//! honest answer when no install exists: features degrade to session-only state, warn once, and
-//! keep running.
+//! (the harness owns its inputs; decision 0008's reproducibility posture).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The one benilla-state folder, or `None` when persistence is off (hermetic capture run, or no
-/// resolvable install). Existence is NOT guaranteed — [`write_atomic`] creates it on first write;
-/// readers just try their file and treat absent as defaults.
+/// The folder's name, everywhere. **Not** `benilla/`, which is what 0954 called it and what 1175
+/// §4 assumed it would keep: beside the binary that name collides with the binary itself, which is
+/// also `benilla`. The bare-directory falsifier caught it immediately — `<exe dir>/benilla/`
+/// resolved onto the executable and every read failed with `Not a directory (os error 20)`, so a
+/// player's settings had nowhere to live. 0954 could name it for the program because it sat inside
+/// somebody else's folder and had to announce whose it was; beside our own binary that reason is
+/// gone and only the collision is left. The reference client has the same shape and the same
+/// answer — `WoW.exe` keeps its state in `WTF/`, named for what it is (and `WTF/` is exactly why we
+/// cannot borrow that name: drop benilla into a real install and it is already taken).
+/// The director's call, 2026-08-10.
+const STATE_DIR: &str = "benilla-config";
+
+/// The one benilla-state folder, or `None` when persistence is off (a hermetic capture run, or a
+/// platform with no discoverable executable path). Existence is NOT guaranteed — [`write_atomic`]
+/// creates it on first write; readers just try their file and treat absent as defaults.
 pub(crate) fn home() -> Option<PathBuf> {
     if std::env::var_os("WOW_CAPTURE").is_some() {
         return None; // hermetic: captures neither read nor write player state
@@ -38,26 +58,74 @@ pub(crate) fn home() -> Option<PathBuf> {
     if let Some(over) = std::env::var_os("BENILLA_HOME") {
         return Some(PathBuf::from(over));
     }
-    let data = PathBuf::from(std::env::var("WOW_DATA").unwrap_or_else(|_| "WoW/Data".into()));
-    if !data.is_dir() {
-        return None; // no install, nothing to sit beside — session-only state
+    // 2 · the project folder, dev builds only — see [`dev_project_root`] for why that is the
+    // PRIMARY checkout and not the worktree this binary was built in. `None` in a player build,
+    // where there is no source tree to name (`run_mode::dev_source_dir`).
+    if let Some(root) = dev_project_root() {
+        return Some(root.join(STATE_DIR));
     }
-    Some(data.parent().unwrap_or(Path::new(".")).join("benilla"))
+    // 3 · beside the binary. A dev build never reaches here — that is what step 2 means by "one
+    // predictable place", and it is why the release path is proven with a player build, not a
+    // dev one.
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join(STATE_DIR))
 }
 
-/// `benilla/config.toml` — the CVar overrides (the `Config.wtf` analog; see `crate::cvars`).
+/// The project folder a dev build keeps its state in: **the primary checkout**, whichever worktree
+/// this binary was actually built in.
+///
+/// This is the one place 1175's §4 needed a correction on contact with how we work. `benilla/` used
+/// to hang off `$WOW_DATA`, and every pool slot symlinks `WoW` to the same install — so there has
+/// always been exactly ONE settings folder no matter which of the eight slots built the binary.
+/// Resolving to `CARGO_MANIFEST_DIR` instead would give eight, and the director's keybinds, macros
+/// and camera pose would appear to reset whenever a session happened to claim a different slot.
+/// That is a silent, recurring surprise, and it is not what "one predictable place" meant.
+///
+/// A linked worktree's `.git` is a **file** reading `gitdir: <primary>/.git/worktrees/<slot>`, so
+/// the primary is derivable with no git binary and no build script: walk up to the common dir and
+/// take its parent. In the primary checkout `.git` is an ordinary directory and the answer is the
+/// crate root's grandparent, unchanged. Anything unexpected falls back to that same answer rather
+/// than to `None` — a wrong-but-present settings folder beats losing persistence entirely.
+fn dev_project_root() -> Option<PathBuf> {
+    let here = crate::run_mode::dev_source_dir()?.ancestors().nth(2)?;
+    let dot_git = here.join(".git");
+    // A linked worktree: `.git` is a file pointing at `<primary>/.git/worktrees/<name>`.
+    if dot_git.is_file() {
+        if let Some(gitdir) = std::fs::read_to_string(&dot_git).ok().and_then(|s| {
+            s.trim()
+                .strip_prefix("gitdir:")
+                .map(|p| p.trim().to_owned())
+        }) {
+            // …/.git/worktrees/<name> → …/.git → the primary checkout.
+            if let Some(primary) = Path::new(&gitdir)
+                .ancestors()
+                .nth(2)
+                .and_then(|d| d.parent())
+            {
+                if primary.is_dir() {
+                    return Some(primary.to_path_buf());
+                }
+            }
+        }
+    }
+    Some(here.to_path_buf())
+}
+
+/// `benilla-config/config.toml` — the CVar overrides (the `Config.wtf` analog; see `crate::cvars`).
 pub(crate) fn config_path() -> Option<PathBuf> {
     home().map(|h| h.join("config.toml"))
 }
 
-/// `benilla/macros/account.txt` — the account-wide macro tab (indices 1..=18; decision 0983). One
+/// `benilla-config/macros/account.txt` — the account-wide macro tab (indices 1..=18; decision 0983). One
 /// file per scope rather than one file with two sections, because the two have different lifetimes:
 /// the account tab follows the install, a character tab dies with its character.
 pub(crate) fn macros_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("macros/account.txt"))
 }
 
-/// `benilla/macros/<realm>-<character>.txt` — the per-character macro tab (indices 19..=36). The
+/// `benilla-config/macros/<realm>-<character>.txt` — the per-character macro tab (indices 19..=36). The
 /// reference nests these (`WTF/Account/<ACC>/<REALM>/<CHAR>/macros-cache.txt`); benilla flattens to
 /// one `macros/` folder because [`home`] is already account-scoped by the install it sits beside.
 pub(crate) fn macros_character_path(realm: &str, character: &str) -> Option<PathBuf> {
@@ -65,14 +133,14 @@ pub(crate) fn macros_character_path(realm: &str, character: &str) -> Option<Path
     home().map(|h| h.join("macros").join(format!("{key}.txt")))
 }
 
-/// `benilla/bindings/account.txt` — the account-wide key bindings (decision 0997; the
+/// `benilla-config/bindings/account.txt` — the account-wide key bindings (decision 0997; the
 /// `bindings-cache.wtf` analog, command-centric diff-vs-defaults so a growing command set keeps
 /// its new defaults).
 pub(crate) fn bindings_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("bindings/account.txt"))
 }
 
-/// `benilla/bindings/<realm>-<character>.txt` — the character-specific binding set (decision
+/// `benilla-config/bindings/<realm>-<character>.txt` — the character-specific binding set (decision
 /// 0997). Its existence IS the "character specific key bindings" state: the window's checkbox
 /// writes it, Okay-back-to-general deletes it (the reference's confirmed permanent delete).
 pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<PathBuf> {
@@ -80,22 +148,42 @@ pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<Pa
     home().map(|h| h.join("bindings").join(format!("{key}.txt")))
 }
 
-/// `benilla/saved-variables.lua` — the Lua saved-variables file (decision 1128; the
+/// `benilla-config/saved-variables.lua` — the Lua saved-variables file (decision 1128; the
 /// `WTF/Account/<ACC>/SavedVariables.lua` analog). Install-scoped, like the reference's account
 /// scope: written whole at logout/exit, executed as a chunk at UI load. One file, because our
 /// ported UI is one FrameXML tree rather than a set of addons — when third-party addons land they
-/// get `benilla/saved/<Addon>.lua`, the reference's per-addon shape.
+/// get `benilla-config/saved/<Addon>.lua`, the reference's per-addon shape.
 pub(crate) fn saved_variables_path() -> Option<PathBuf> {
     home().map(|h| h.join("saved-variables.lua"))
 }
 
-/// `benilla/camera/<realm>-<character>.txt` — the third-person camera pose (decision 1131; the
+/// `benilla-config/camera/<realm>-<character>.txt` — the third-person camera pose (decision 1131; the
 /// `<Char>/camera-settings.txt` analog, and character-scoped for the same reason it is there: a
 /// gnome rogue and a tauren warrior want different zooms). Two lines, the reference's own keys and
 /// order, so the file stays readable beside its ancestor.
 pub(crate) fn camera_character_path(realm: &str, character: &str) -> Option<PathBuf> {
     let key = format!("{}-{}", file_token(realm), file_token(character));
     home().map(|h| h.join("camera").join(format!("{key}.txt")))
+}
+
+/// `benilla-config/account` — the account name the login screen remembers (decision 0539 §4; the
+/// reference's `GetSavedAccountName`/`SetSavedAccountName`, whose own store is `WTF/Config.wtf`'s
+/// `accountName`). Install-scoped like every other resident here.
+///
+/// It resolved to `$HOME/.benilla/account` until decision 1181, through a second path function
+/// that `login` had grown before this module's law existed (0539 predates 0954, whose layout table
+/// never mentioned it). That split a player's state across two folders and — the part that
+/// actually bit — skipped [`home`]'s hermetic guard, so a **capture read the account name off
+/// whatever machine it ran on** and rendered it into the login screen it was photographing.
+pub(crate) fn saved_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("account"))
+}
+
+/// `benilla-config/shots.txt` — the framing instrument's appended camera poses (decision 0600). A dev
+/// affordance (`/shot`, compiled out by `--no-default-features` since 1179), but it persists on a
+/// real machine, so it resolves here like everything else rather than through a private path.
+pub(crate) fn shots_path() -> Option<PathBuf> {
+    home().map(|h| h.join("shots.txt"))
 }
 
 /// Make an arbitrary realm/character name safe as one path component: anything outside
@@ -165,61 +253,133 @@ mod tests {
     use super::test_env::{EnvGuard, ENV_LOCK};
     use super::*;
 
+    /// The residents' layout, exercised through the override — which is the *only* step of
+    /// [`home`] whose answer a test can state, since the other two are the machine's project
+    /// folder and the test runner's own exe directory. Those two get their own tests below; what
+    /// this one owns is 0954's layout table, unchanged by 1175's move.
     #[test]
-    fn the_home_law_override_then_install_root_and_hermetic_captures() {
+    fn the_home_law_override_then_the_residents_and_hermetic_captures() {
         let _l = ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("benilla-ls-{}", std::process::id()));
-        std::fs::create_dir_all(tmp.join("Data")).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
 
-        // 2 · install root: home = parent-of-Data /benilla.
+        // 1 · the explicit override, and every resident hanging off it.
         let _c = EnvGuard::unset("WOW_CAPTURE");
-        let _h = EnvGuard::unset("BENILLA_HOME");
-        let _d = EnvGuard::set("WOW_DATA", tmp.join("Data").to_str().unwrap());
-        assert_eq!(home(), Some(tmp.join("benilla")));
-        assert_eq!(config_path(), Some(tmp.join("benilla/config.toml")));
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.join(STATE_DIR).to_str().unwrap());
+        assert_eq!(home(), Some(tmp.join(STATE_DIR)));
+        assert_eq!(config_path(), Some(tmp.join("benilla-config/config.toml")));
         // The macro residents (decision 0983): one account file, one per character, and every
         // realm/character name reduced to a safe single path component.
         assert_eq!(
             macros_account_path(),
-            Some(tmp.join("benilla/macros/account.txt"))
+            Some(tmp.join("benilla-config/macros/account.txt"))
         );
         // The saved-variables resident (decision 1128) — one install-scoped file.
         assert_eq!(
             saved_variables_path(),
-            Some(tmp.join("benilla/saved-variables.lua"))
+            Some(tmp.join("benilla-config/saved-variables.lua"))
         );
         assert_eq!(
             macros_character_path("Hydraxian Waterlords", "Probeone"),
-            Some(tmp.join("benilla/macros/Hydraxian_Waterlords-Probeone.txt"))
+            Some(tmp.join("benilla-config/macros/Hydraxian_Waterlords-Probeone.txt"))
         );
         assert_eq!(
             macros_character_path("../evil", "a/b"),
-            Some(tmp.join("benilla/macros/___evil-a_b.txt")),
+            Some(tmp.join("benilla-config/macros/___evil-a_b.txt")),
             "no name can escape the folder"
         );
         // The camera-pose resident (decision 1131) — character-scoped, same key shape.
         assert_eq!(
             camera_character_path("Hydraxian Waterlords", "Probeone"),
-            Some(tmp.join("benilla/camera/Hydraxian_Waterlords-Probeone.txt"))
+            Some(tmp.join("benilla-config/camera/Hydraxian_Waterlords-Probeone.txt"))
         );
 
-        // 1 · the explicit override wins over the install root.
-        let _h2 = EnvGuard::set("BENILLA_HOME", tmp.join("elsewhere").to_str().unwrap());
-        assert_eq!(home(), Some(tmp.join("elsewhere")));
+        // The login screen's remembered account name (decision 0539 §4) and the framing
+        // instrument's pose log (0600) — the two residents that computed their own path in
+        // `login::config_base` (`$HOME/.benilla`) until decision 1181 folded them in here.
+        assert_eq!(
+            saved_account_path(),
+            Some(tmp.join("benilla-config/account"))
+        );
+        assert_eq!(shots_path(), Some(tmp.join("benilla-config/shots.txt")));
 
-        // 0 · hermetic: a capture run resolves nothing, even with an override set.
+        // 0 · hermetic: a capture run resolves nothing, even with an override set. The account
+        // name is the reason this line now matters more than it did: `config_base` had no such
+        // guard, so a login-screen capture read whatever account the host machine had saved and
+        // photographed it into the frame (decision 1181).
         let _c2 = EnvGuard::set("WOW_CAPTURE", "ui-options");
         assert_eq!(home(), None);
+        assert_eq!(
+            saved_account_path(),
+            None,
+            "a capture reads no saved account"
+        );
+        assert_eq!(shots_path(), None);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// **The move itself** (1175 §4): the state folder no longer hangs off the WoW install, so a
+    /// missing or wrong `$WOW_DATA` cannot take a player's settings with it. This is the exact
+    /// case that used to return `None` — the one behaviour 1175 changes, and the reason it
+    /// changed.
     #[test]
-    fn no_install_means_no_phantom_folder() {
+    fn the_state_folder_no_longer_depends_on_finding_the_install() {
         let _l = ENV_LOCK.lock().unwrap();
         let _c = EnvGuard::unset("WOW_CAPTURE");
         let _h = EnvGuard::unset("BENILLA_HOME");
         let _d = EnvGuard::set("WOW_DATA", "/nonexistent/benilla-test/Data");
-        assert_eq!(home(), None);
+        let h = home().expect("a broken install path must not cost the player their config");
+        assert!(
+            !h.starts_with("/nonexistent"),
+            "home() still reads $WOW_DATA: {}",
+            h.display()
+        );
+        assert!(h.ends_with(STATE_DIR), "{}", h.display());
+    }
+
+    /// **Where the folder lands, in both builds** — 1175's falsifier, as far as a test can take it.
+    ///
+    /// One test rather than a `#[cfg]`-ed pair, because the seam is `run_mode::dev_source_dir()`'s
+    /// to know and nothing else's (1179): a player build has no source dir, so the state folder
+    /// must sit beside the binary; a dev build has one, and must resolve to the PRIMARY checkout
+    /// so the eight pool slots keep sharing a single settings folder — exactly as they did when it
+    /// hung off the shared install. The dev half is asserted structurally (a `.git` *file* means a
+    /// linked worktree, and then the answer must be somewhere else), so it says the same thing
+    /// whether it runs in the primary or in a slot.
+    #[test]
+    fn the_state_folder_lands_where_the_build_says() {
+        let _l = ENV_LOCK.lock().unwrap();
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _h = EnvGuard::unset("BENILLA_HOME");
+        let h = home().expect("home() always resolves outside a capture");
+        assert!(h.ends_with(STATE_DIR), "{}", h.display());
+
+        let Some(here) = crate::run_mode::dev_source_dir().and_then(|d| d.ancestors().nth(2))
+        else {
+            // Player build: beside the binary, and nowhere near a source tree.
+            let exe_dir = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            assert_eq!(h, exe_dir.join(STATE_DIR));
+            return;
+        };
+
+        if here.join(".git").is_file() {
+            assert_ne!(
+                h,
+                here.join(STATE_DIR),
+                "a linked worktree must not get its own settings folder — the pool shares one"
+            );
+            assert!(
+                h.parent().unwrap().join(".git").is_dir(),
+                "resolved to {}, which is not a primary checkout",
+                h.display()
+            );
+        } else {
+            assert_eq!(h, here.join(STATE_DIR));
+        }
     }
 
     #[test]

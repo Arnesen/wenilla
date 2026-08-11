@@ -28,18 +28,29 @@
 //! alternative, handing the engine the wire record, is the dependency this whole stage exists to
 //! delete.
 
-use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 /// A unit body the world can act on: it wades, it takes ground shade, it claims a WMO room, it
 /// holds a rig palette slot.
 ///
-/// `kind` is the protocol's own enum — `benilla-protocol` sits below both sides of 1160's line, so
-/// naming it here costs nothing and keeps the foam's creature-vs-GameObject test honest.
+/// **Every field is an engine fact.** The first cut carried the wire's own `EntityKind` here and
+/// let the foam ask "is this a `TYPEID_UNIT`" — which made a 37 k-line protocol crate a dependency
+/// of the renderer for one three-line question, and put the wire's vocabulary in the engine's
+/// mouth. 1177 swapped the question for the one the engine actually has ([`wades`](Self::wades))
+/// and `benilla-protocol` left this crate's manifest; that absence is the whole gate.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct WorldUnit {
-    /// Which sort of body — the foam wades `Unit`/`Player` and leaves GameObjects alone.
-    pub kind: EntityKind,
+    /// Does this body **displace water** — does it push a ripple ring and drag a wake.
+    ///
+    /// A creature or a player does; a chest, a mailbox or a spell's ground anchor standing in a
+    /// lake does not. The game decides (it is the only side that knows what it spawned), the
+    /// engine only reads.
+    ///
+    /// A required field rather than a marker component, deliberately: an unstated marker is a body
+    /// that silently makes no foam, and this component exists precisely because that class of
+    /// omission "nobody notices until a screenshot". A field the compiler makes you answer cannot
+    /// be forgotten.
+    pub wades: bool,
     /// The instance's model scale, as the ripple ring's radius input.
     pub scale: f32,
     /// The collision cylinder's height in yards, the ring's other input.

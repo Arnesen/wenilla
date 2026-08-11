@@ -17,7 +17,7 @@
 //! 1138 corrects it. benilla has no `SaveView`, so nothing is owed here yet.)
 //!
 //! benilla writes the same two keys in the same order to
-//! `benilla/camera/<realm>-<character>.txt` ([`crate::local_state::camera_character_path`]) — a file
+//! `benilla-config/camera/<realm>-<character>.txt` ([`crate::local_state::camera_character_path`]) — a file
 //! that stays readable beside its ancestor.
 //!
 //! **Character-scoped, deliberately.** It is where the reference puts it, and it is what the setting

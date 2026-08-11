@@ -12,13 +12,7 @@
 //! This test pins the three facts the fix rests on, straight off the shipped file. Skips (passes)
 //! when the client isn't present at `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animations, parse_m2_playable_animation_lookup};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 const DUEL_FLAG: &str = "World\\Generic\\PassiveDoodads\\DuelingFlag\\DuelingFlag.m2";
 /// `AnimationData.dbc`: 0 = Stand, 145 = Spawn, 157 = Despawn.
@@ -29,11 +23,7 @@ const PLANTED_Z: f32 = -9.124369;
 
 #[test]
 fn the_duel_flag_idle_resolves_to_stand_and_sits_planted() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file(DUEL_FLAG)

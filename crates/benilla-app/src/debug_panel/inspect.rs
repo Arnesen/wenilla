@@ -9,7 +9,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use super::{overlay_text, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::ObjectStore;
-use crate::ui_script::PointerOverUi;
+use crate::ui_script::{InspectMode, PointerOverUi};
 use benilla_world::interact::{pick_at_cursor, PickParts, WorldObject};
 use benilla_world::model_render::ModelKind;
 use benilla_world::modkeys::DEV_CHORD;
@@ -475,13 +475,6 @@ pub(super) fn inspect_ui(
                 });
         });
     Ok(())
-}
-
-/// Whether mouseover picking runs. Today it's armed/disarmed by the **dev chord + `I`** inspector toggle
-/// ([`toggle_inspect`]).
-#[derive(Resource, Default)]
-pub struct InspectMode {
-    pub enabled: bool,
 }
 
 /// The nearest [`WorldObject`] under the cursor this frame, or `None`. Consumers read `entity` and look

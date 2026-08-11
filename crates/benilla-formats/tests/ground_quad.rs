@@ -11,11 +11,7 @@ use benilla_formats::{open_chain, parse_m2_render_submeshes};
 
 #[test]
 fn battle_shout_crescents_detect_as_ground_quads() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
 
     let bytes = chain
@@ -48,11 +44,7 @@ fn battle_shout_crescents_detect_as_ground_quads() {
 /// stay off the lane.
 #[test]
 fn hovering_discs_detect_as_ground_quads() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
 
     let bytes = chain
@@ -89,11 +81,7 @@ fn hovering_discs_detect_as_ground_quads() {
 
 #[test]
 fn character_model_detects_no_ground_quads() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
     let bytes = chain
         .read_file("Character\\Human\\Male\\HumanMale.m2")
@@ -115,11 +103,7 @@ fn character_model_detects_no_ground_quads() {
 /// what keeps the two from double-applying.
 #[test]
 fn ground_quads_carry_their_static_m2color_tint() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
 
     let bytes = chain

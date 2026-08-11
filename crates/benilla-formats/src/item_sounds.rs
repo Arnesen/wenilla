@@ -84,20 +84,12 @@ pub fn load_item_group_sounds(chain: &mut Chain) -> Result<ItemGroupSoundsCatalo
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The real 5875 rows match the RE's corroboration decode (`item-pickup-place-sound.md`):
     /// 24 groups; id 1 → kits [273, 274, 275, 0] (a group with a use kit), id 7 → [1185, 1202, 0, 0]
     /// (a weapon/armor group, no use kit — its `Use` gesture resolves silent).
     #[test]
     fn real_item_group_sounds_resolve() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_group_sounds(&mut chain).expect("load ItemGroupSounds");
         assert_eq!(cat.len(), 24, "24 groups in build 5875");
@@ -115,11 +107,7 @@ mod tests {
     /// our own two adapters.
     #[test]
     fn real_display_group_ids_all_resolve() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let sounds = load_item_group_sounds(&mut chain).expect("load ItemGroupSounds");
         let displays = crate::load_item_display_catalog(&mut chain).expect("load ItemDisplayInfo");

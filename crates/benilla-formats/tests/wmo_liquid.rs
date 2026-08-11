@@ -3,21 +3,11 @@
 //! the SMOLiquidHeader decode, the `xtiles = xverts − 1` grid, the per-tile hole nibble (`0xf`), and
 //! the lake_a (nibble 4) type resolution. Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{wmo_group_liquid_mesh, Chain, LiquidKind};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn stormwind_canal_group_builds_still_water() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
 
     // Group 099 is a canal segment: MLIQ header xverts=12 yverts=9 (12×9 = 108 verts), 11×8 = 88

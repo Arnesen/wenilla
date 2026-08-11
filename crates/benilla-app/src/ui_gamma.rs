@@ -1,7 +1,7 @@
 //! The player-UI **gamma composite lane**'s single decode (decision 0254) — the UI-arc twin of
 //! [`benilla_world::ffx_glow`], which owns the world lane's one decode (0161).
 //!
-//! [`ui_quad.wgsl`](../assets/shaders/ui_quad.wgsl) composites the UI in gamma bytes, the way the
+//! [`ui_quad.wgsl`](shaders/ui_quad.wgsl) composites the UI in gamma bytes, the way the
 //! reference's fixed-function device composites into its 8-bit backbuffer: every tint is a gamma
 //! multiply, every blend is gamma arithmetic clamped at each write, and `alphaMode="ADD"` is the
 //! byte add `dst + texel·α` (EGxBlend 3 = `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`; wow-re
@@ -83,7 +83,7 @@ fn init_pipeline(
         layout: vec![layout.clone()],
         vertex: fullscreen_shader.to_vertex_state(),
         fragment: Some(FragmentState {
-            shader: asset_server.load("game://shaders/ui_gamma.wgsl"),
+            shader: asset_server.load("embedded://benilla_app/shaders/ui_gamma.wgsl"),
             shader_defs: vec![],
             entry_point: Some("fs_decode".into()),
             // The UI camera is not `Hdr`, so its `ViewTarget` carries Bevy's default 8-bit sRGB
@@ -175,8 +175,8 @@ fn use_gamma_ui_shaders(
     mut node: ResMut<UiPipeline>,
     mut slice: ResMut<UiTextureSlicePipeline>,
 ) {
-    node.shader = asset_server.load("game://shaders/ui_node_gamma.wgsl");
-    slice.shader = asset_server.load("game://shaders/ui_slice_gamma.wgsl");
+    node.shader = asset_server.load("embedded://benilla_app/shaders/ui_node_gamma.wgsl");
+    slice.shader = asset_server.load("embedded://benilla_app/shaders/ui_slice_gamma.wgsl");
 }
 
 pub(crate) struct UiGammaPlugin;

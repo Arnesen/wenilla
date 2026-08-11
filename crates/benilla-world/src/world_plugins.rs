@@ -43,6 +43,10 @@ pub struct WorldPlugins;
 impl PluginGroup for WorldPlugins {
     fn build(self) -> PluginGroupBuilder {
         PluginGroupBuilder::start::<Self>()
+            // The engine's own WGSL, compiled into the binary (decision 1175). First in the group
+            // because every material below specializes against a shader handle, and a shader that
+            // was never registered fails silently — as a whole world drawn with nothing on it.
+            .add(crate::shaders::plugin)
             .add(MaterialPlugin::<TerrainMaterial>::default())
             .add(MaterialPlugin::<WowModelMaterial>::default())
             // Physics (avian3d): collider storage + broadphase BVH + shape-casts for the character

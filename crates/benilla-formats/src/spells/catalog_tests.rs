@@ -14,11 +14,7 @@ use super::*;
 /// exact failure that emptied the trainer tree until the hop landed. Skips without client data.
 #[test]
 fn real_learn_spell_hop_resolves_the_taught_ability() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let spells = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
     let skills = crate::skill_lines::load_skill_line_catalog(&mut chain).expect("load skill lines");
@@ -51,11 +47,7 @@ fn real_learn_spell_hop_resolves_the_taught_ability() {
 /// Skips without client data.
 #[test]
 fn real_spell_catalog_reads_ranged_attributes() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -112,11 +104,7 @@ fn real_spell_catalog_reads_ranged_attributes() {
 /// columns 6/7 — a column slip fails loudly. Skips without client data.
 #[test]
 fn real_spell_catalog_hides_stances_from_the_aura_bar() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -163,11 +151,7 @@ fn real_spell_catalog_hides_stances_from_the_aura_bar() {
 /// without client data.
 #[test]
 fn real_spell_catalog_reads_rank_and_passive() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -194,11 +178,7 @@ fn real_spell_catalog_reads_rank_and_passive() {
 /// column slip on castUI (3) or the gate bits fails loudly. Skips without client data.
 #[test]
 fn real_spell_catalog_gates_the_spellbook() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -239,11 +219,7 @@ fn real_spell_catalog_gates_the_spellbook() {
 /// either 61 or 106 breaks the match. Skips without client data.
 #[test]
 fn real_spell_catalog_reads_open_lock_types() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -300,11 +276,7 @@ fn real_spell_catalog_reads_open_lock_types() {
 /// Skips without client data.
 #[test]
 fn real_spell_catalog_pins_the_skin_latch_effects() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -339,11 +311,7 @@ fn real_spell_catalog_pins_the_skin_latch_effects() {
 /// Skips without client data.
 #[test]
 fn real_spell_catalog_computes_the_lock_skill_an_opener_provides() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -379,11 +347,7 @@ fn real_spell_catalog_computes_the_lock_skill_an_opener_provides() {
 /// loudly. Skips without client data.
 #[test]
 fn real_spell_catalog_reads_cooldown_cost_and_range_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -447,11 +411,7 @@ fn real_spell_catalog_reads_cooldown_cost_and_range_columns() {
 /// without client data.
 #[test]
 fn real_spell_catalog_reads_cast_targeting_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -483,11 +443,7 @@ fn real_spell_catalog_reads_cast_targeting_columns() {
 /// family — plus the form-gate law over the real form flags. Skips without client data.
 #[test]
 fn real_spell_catalog_reads_usable_walk_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
     let forms = load_shapeshift_forms(&mut chain).expect("load SpellShapeshiftForm");
@@ -624,11 +580,7 @@ fn real_spell_catalog_reads_usable_walk_columns() {
 /// [`load_spell_durations`] catalogs. Skips without client data.
 #[test]
 fn real_spell_catalog_reads_tooltip_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
     let cast_times = load_spell_cast_times(&mut chain).expect("load SpellCastTimes");
@@ -719,11 +671,7 @@ fn real_spell_catalog_reads_tooltip_columns() {
 /// slip fails loudly. Skips without client data.
 #[test]
 fn real_spell_catalog_classifies_combat_initiation() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -778,11 +726,7 @@ fn real_spell_catalog_classifies_combat_initiation() {
 /// A column slip fails loudly. Skips without client data.
 #[test]
 fn real_crafting_columns_read_created_item_and_focus() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -862,11 +806,7 @@ fn the_tooltip_gates_read_effect_and_mask() {
 /// weapon enchant/poison names a class+subclass instead and leaves the type mask 0.
 #[test]
 fn real_item_target_family_and_its_gate_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
 
@@ -984,11 +924,7 @@ fn real_item_target_family_and_its_gate_columns() {
 /// the store's predicates need re-judging, loudly.
 #[test]
 fn gcd_wildcard_and_shape_corners_hold_on_the_real_data() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_catalog(&mut chain).expect("catalog");
 
@@ -1026,11 +962,7 @@ fn gcd_wildcard_and_shape_corners_hold_on_the_real_data() {
 /// client data.
 #[test]
 fn real_spell_catalog_cost_columns() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
 

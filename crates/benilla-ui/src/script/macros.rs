@@ -8,7 +8,7 @@
 //! `MacroPopupOkayButton_OnClick` does `index = CreateMacro(…)` and immediately selects `index`,
 //! so the mutation must be synchronous and must return the new slot — a queue-an-intent-and-wait
 //! seam cannot answer it. The app therefore **seeds** the table once ([`UiScript::set_macros`],
-//! from `benilla/macros/…`), **reads** it back to persist ([`UiScript::macros`]) whenever
+//! from `benilla-config/macros/…`), **reads** it back to persist ([`UiScript::macros`]) whenever
 //! [`UiScript::take_macros_dirty`] says something moved, and pushes the icon-chooser list
 //! ([`UiScript::set_macro_icons`]) it builds off `SpellIcon.dbc`.
 //!
@@ -161,7 +161,7 @@ fn clamp_chars(s: &str, max: usize) -> String {
 
 impl super::UiScript {
     /// Seed the whole macro table, replacing whatever was there — the app's load path
-    /// (`benilla/macros/…`). Does **not** mark the table dirty: the app already has what it just
+    /// (`benilla-config/macros/…`). Does **not** mark the table dirty: the app already has what it just
     /// handed over, and a save triggered by its own load would be a write-back loop.
     pub fn set_macros(&mut self, state: MacroState) {
         let mut model = self.model_mut();

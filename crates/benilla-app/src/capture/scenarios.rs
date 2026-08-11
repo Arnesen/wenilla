@@ -187,11 +187,58 @@ pub(super) const MAP_AZEROTH: u32 = 0;
 pub(super) const MAP_KALIMDOR: u32 = 1;
 pub(super) const MAP_DEEPRUN_TRAM: u32 = 369;
 
-/// THE golden baseline: **three spots FRAMED BY THE DIRECTOR, each at noon and at night — six
-/// captures, and that is the whole sweep.** A Stormwind canal view, Elwynn water, and a Felwood
-/// hollow on Kalimdor. The numbers below are verbatim from their `~/.benilla/shots.txt` ([`/shot`]).
+/// A **glue-screen** capture — the login-side screens, which have no world, no camera and no map.
 ///
-/// **Held at six on purpose (decision 0817).** 0632 cut a thirty-shot set down to six for exactly
+/// A separate table rather than a variant of [`Scenario`], because the two share nothing but a
+/// name and an output path: every field of a `Scenario` says where a camera stands in a streamed
+/// world. What they do share is the shutter, and that is the part worth sharing — it waits for the
+/// *image* to stop changing (decision 0815), which is as true of a glue screen as of a landscape.
+///
+/// Not in [`SCENARIOS`]: the golden sweep is the director's blessed set (0632's law, 0817's cut,
+/// 1183's eviction) and growing it is their call, not the harness's. Capturable by name like any
+/// on-demand viewpoint.
+#[derive(Clone, Copy)]
+pub(super) struct GlueScenario {
+    pub(super) name: &'static str,
+    pub(super) screen: GlueScreen,
+    /// The preview's race, sex and class ids — the reference comparisons are per-race, so a
+    /// scenario says which one it photographs. Applied through the existing
+    /// `WOW_CHARCREATE_PICK` instrument rather than a second path into `CreateSelection`.
+    pub(super) pick: (u8, u8, u8),
+}
+
+/// Which glue screen a [`GlueScenario`] photographs. One today; the select screen wants a roster
+/// (so it needs a server, or a seeded one) and the login screen is nearly static.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum GlueScreen {
+    /// The character-creation screen (decision 0423). Photographs, in one frame: the authored-rig
+    /// lighting of the `UI_*` backdrop scene and its per-race fog (the lane 1171 left uncovered),
+    /// the preview body in its starting outfit (0527), and the GlueXML panel around them.
+    CharCreate,
+}
+
+/// The glue sweep. Human, 1 (Human male warrior) — the race whose scene the reference's own
+/// screenshots use, and the outfit path most exercised elsewhere.
+pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[GlueScenario {
+    name: "glue-charcreate",
+    screen: GlueScreen::CharCreate,
+    pick: (1, 0, 1),
+}];
+
+/// THE golden baseline: **two spots FRAMED BY THE DIRECTOR, each at noon and at night — four
+/// captures, and that is the whole sweep.** Elwynn water and a Felwood hollow on Kalimdor. The
+/// numbers below are verbatim from their `benilla-config/shots.txt` ([`/shot`] — it was
+/// `~/.benilla/shots.txt` when they were taken; decision 1181 moved it).
+///
+/// **The Stormwind canal was the third spot and is deleted, not evicted** (decision 1183, at the
+/// director's instruction — the one place the "nothing is deleted" rule below does not apply). It
+/// stopped holding the bar of 0 by one pixel per cell, and the cause is a renderer defect that is
+/// still open: two WMO surfaces intersect there, one MSAA sample sits in an exact depth tie, and
+/// reverse-Z `GreaterEqual` gives that sample to whichever batch drew last — which varies because
+/// draw order follows spawn order (1182 measured it, 16/16). **Deleting the shot is not a fix**; it
+/// removes the only cell that was reporting the bug. 1182 holds the repro recipe.
+///
+/// **Held small on purpose (decision 0817).** 0632 cut a thirty-shot set down to six for exactly
 /// this reason and stated the law — *a few spots chosen with the director, times a couple of day
 /// times* — and then the set grew back to **twenty-one** one well-argued addition at a time: an
 /// interior, a second continent, a shadow-line fence, four creature cells, four chest cells, two
@@ -210,22 +257,6 @@ pub(super) const MAP_DEEPRUN_TRAM: u32 = 369;
 /// continent, its own tileset, fog palette, liquid type and WDL horizon, none of which the Elwynn
 /// spots can photograph at all.
 pub(super) const SCENARIOS: &[Scenario] = &[
-    Scenario {
-        name: "canal-noon",
-        map: MAP_AZEROTH,
-        eye: CANAL_EYE,
-        look: CANAL_LOOK,
-        minute: 720,
-        ui: None,
-    },
-    Scenario {
-        name: "canal-night",
-        map: MAP_AZEROTH,
-        eye: CANAL_EYE,
-        look: CANAL_LOOK,
-        minute: 0,
-        ui: None,
-    },
     Scenario {
         name: "water-noon",
         map: MAP_AZEROTH,
@@ -264,11 +295,6 @@ pub(super) const SCENARIOS: &[Scenario] = &[
 /// trees, the Abbey WMO, stained glass, props.
 pub(super) const OVERLOOK_EYE: [f32; 3] = [-8955.0, -98.5, 91.1];
 pub(super) const OVERLOOK_LOOK: [f32; 3] = [-8912.9, -125.4, 87.7];
-
-/// Director shot 2 — the Stormwind canal (Cathedral Square side): water, bridge, walls, spires,
-/// far mountains.
-pub(super) const CANAL_EYE: [f32; 3] = [-8871.7, 724.6, 110.7];
-pub(super) const CANAL_LOOK: [f32; 3] = [-8836.7, 760.3, 112.3];
 
 /// Director shot 3 — Elwynn river, south-east of Northshire: open water dominant, shoreline blend,
 /// murloc camp, fog.

@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let y: f32 = args.next().ok_or_else(usage)?.parse()?;
     let radius: f32 = args.next().map_or(Ok(60.0), |r| r.parse())?;
 
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let tiles = benilla_formats::MapTiles::load(&mut chain, &map)?;
     let (tx, ty) = tiles.tile_at(x, y);

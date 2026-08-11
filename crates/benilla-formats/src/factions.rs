@@ -497,11 +497,6 @@ mod tests {
         assert_eq!(a.reaction_toward(&b_names_a), Reaction::Hostile);
     }
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// End-to-end on the **real** build-5875 DBC, in the direction the client colours by (the unit's
     /// reaction toward the player — verified in the binary: the nameplate resolver `0x7cbaa0` calls
     /// `unit->UnitReaction(activePlayer)`): a human player is faction template 1; Marshal Dughan (12)
@@ -514,11 +509,7 @@ mod tests {
     /// every mask) and the comparator against ground truth.
     #[test]
     fn real_dbc_reactions_match_reference_capture() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_faction_catalog(&mut chain).expect("load faction catalog");
         assert!(
@@ -623,11 +614,7 @@ mod tests {
     /// to blank them — so the two decisive rows are asserted by value. Skips without client data.
     #[test]
     fn real_gameobject_factions_resolve_toward_both_player_templates() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_faction_catalog(&mut chain).expect("load factions");
         let (alliance, horde) = (
@@ -653,11 +640,7 @@ mod tests {
     /// `zonetext-pvpinfo.md`). Skips without client data.
     #[test]
     fn real_faction_group_names_by_mask() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_faction_catalog(&mut chain).expect("load factions");
         assert_eq!(cat.faction_group_name(2), Some("Alliance"));

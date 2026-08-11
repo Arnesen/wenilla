@@ -362,11 +362,7 @@ mod tests {
     }
 
     fn chain() -> Option<benilla_formats::Chain> {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return None;
-        }
+        let data = benilla_formats::wow_data_or_skip!(None);
         Some(benilla_formats::open_chain(&data).expect("open chain"))
     }
 
@@ -520,11 +516,7 @@ mod tests {
     /// here is silent — `getglobal` answers nil and the tooltip simply loses a line.
     #[test]
     fn every_happiness_string_resolves_in_the_real_global_strings() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let src = chain
             .read_file("Interface\\FrameXML\\GlobalStrings.lua")

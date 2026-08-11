@@ -387,11 +387,7 @@ mod tests {
     /// client data.
     #[test]
     fn the_real_boot_resolves_the_real_strings() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let src = chain
             .read_file("Interface\\FrameXML\\GlobalStrings.lua")

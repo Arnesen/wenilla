@@ -325,21 +325,13 @@ pub fn load_area_sound_catalog(chain: &mut Chain) -> Result<AreaSoundCatalog> {
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// End-to-end on the **real** 5875 tables: Elwynn Forest (area 12) resolves to the
     /// "Zone-Forest" music set (3–5 min silence, kit 2523) and ambience 35; a subzone with its
     /// own row zeroes (Crystal Lake 87, parent 12) inherits Elwynn's music through the parent
     /// walk. Skips without client data.
     #[test]
     fn real_area_chain_resolves_elwynn() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_area_sound_catalog(&mut chain).expect("load area-sound catalog");
         assert_eq!(cat.len(), 1081, "all AreaTable rows load");

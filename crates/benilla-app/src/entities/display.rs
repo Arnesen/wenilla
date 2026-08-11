@@ -21,7 +21,7 @@ use benilla_assets::{m2_url, skin_url, wmo_url};
 
 /// A loaded display model's asset handle — an M2 (creatures, most GameObjects) or a WMO (building
 /// GameObjects). `None` ⇒ the display resolved to no model (invisible trigger / missing) → cube/none.
-pub(super) enum ModelHandle {
+pub(crate) enum ModelHandle {
     M2(Handle<M2Model>),
     Wmo(Handle<WmoModel>),
     None,
@@ -136,8 +136,8 @@ pub(super) struct EntityPart {
 /// Everything needed to render one display id, cached so a model is loaded + built once and shared by
 /// every entity of that display. `parts` is `None` while the asset loads, then `Some` — empty if the
 /// model failed / has no geometry (→ cube/none fallback), else the spawn parts.
-pub(super) struct DisplayModel {
-    pub(super) handle: ModelHandle,
+pub(crate) struct DisplayModel {
+    pub(crate) handle: ModelHandle,
     /// The model's directory (for creature skin paths); empty for WMOs / no-skin models.
     pub(super) dir: String,
     /// Creature `Monster1/2/3` skin variation names; all `None` for GameObjects.
@@ -193,7 +193,7 @@ pub(super) struct DisplayModel {
     /// The file-order-first sequence's authored duration ([`M2Model::first_seq_span`]), captured with
     /// `parts` on load — the spell-fx self-termination clock for a model whose sequences build no clip
     /// (the eat/drink tankard: a 6.667 s sequence, zero bone keys). `None` for WMO / sequence-less.
-    pub(super) first_seq_span: Option<f32>,
+    pub(crate) first_seq_span: Option<f32>,
     /// Camera framing-pivot height in **model-local yards, pre-scale** — `0.9 × bbox_z_extent` from the
     /// M2 authored bounds, captured in [`build_parts`]. Stamped onto each instance as [`CameraPivot`] so
     /// the third-person camera targets ~neck height rather than a fixed offset (wow-re `follow-camera`).
@@ -304,7 +304,7 @@ pub(super) fn new_gameobject_display(
 
 /// A blank [`DisplayModel`] shell — `parts: None` (awaiting [`build_parts`]) and every capture field
 /// at its default — for constructors that override only what their source provides.
-pub(super) fn empty_shell() -> DisplayModel {
+pub(crate) fn empty_shell() -> DisplayModel {
     DisplayModel {
         handle: ModelHandle::None,
         dir: String::new(),

@@ -20,9 +20,14 @@ use benilla_formats::open_chain;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let data = args.next().unwrap_or_else(|| "WoW/Data".into());
-    let path = args.next().expect("usage: seamswing <data> <path.m2>");
-    let mut chain = open_chain(std::path::Path::new(&data))?;
+    // An explicit dir still wins; with none, ask the one resolver (decision 1175).
+    let data = args
+        .next()
+        .map(std::path::PathBuf::from)
+        .or_else(benilla_formats::wow_data)
+        .expect("no WoW install found (set $WOW_DATA or pass the dir)");
+    let path = args.next().expect("usage: seamswing [data] <path.m2>");
+    let mut chain = open_chain(&data)?;
     let bytes = chain.read_file(&path)?;
     let denied = benilla_formats::non_separable_billboard_bones(&bytes);
     println!("welded billboard bones: {denied:?}");

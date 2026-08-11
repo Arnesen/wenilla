@@ -28,8 +28,6 @@
 //! seed-`Some` violation — the camera standing in one room while the flood can't reach the player's —
 //! is a hard failure.
 
-use std::path::PathBuf;
-
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
 use benilla_assets::WmoGroupNav;
 use benilla_formats::{
@@ -160,10 +158,8 @@ impl Subject {
 /// walking-collision face set (every non-DETAIL face — the down-ray's Leg A). With a [`Site`], also
 /// resolve the MODF placement and load the terrain the down-ray races.
 fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
-    let data = std::env::var("WOW_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data"));
-    let mut chain = open_chain(&data).expect("open MPQ chain (set WOW_DATA)");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
+    let mut chain = open_chain(&data).expect("open MPQ chain");
     let placed = site.map(|s| load_placement(&mut chain, s));
     let root_bytes = chain.read(internal).expect("read root wmo");
     let root = parse_wmo_root(&root_bytes).expect("parse root");

@@ -119,11 +119,7 @@ mod tests {
     /// readable in the chain as a 256×256 BLP2. Skips without client data.
     #[test]
     fn real_md5translate_resolves_azeroth_tile_and_hash_is_readable() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_minimap_translate(&mut chain).expect("load md5translate.trs");
         assert_eq!(cat.len(), 8401, "all 8401 data rows parse to unique keys");

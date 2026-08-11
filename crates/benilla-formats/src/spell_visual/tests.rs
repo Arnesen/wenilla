@@ -228,22 +228,12 @@ fn kit_world_effect_joins_effects_at_base() {
     );
 }
 
-/// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent) — this
-/// crate's established gate (`anim_data.rs`, `spell_catalog.rs`, …).
-fn vanilla_data_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
-
 /// End-to-end on the real build-5875 tables: the byte-verified header shape (2165×16/64B ·
 /// 1772×35/140B) and the full Fireball chain (module doc's "Verified chain") — a schema drift
 /// or column slip fails loudly. Skips without client data.
 #[test]
 fn real_spell_visual_chain_resolves_fireball() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load SpellVisual/SpellVisualKit");
     assert_eq!(cat.len(), 2165, "all 5875 SpellVisual rows load");
@@ -395,11 +385,7 @@ fn real_spell_visual_chain_resolves_fireball() {
 /// sparkle can actually load (wow-re `loot-corpse-effect.md`). Skips without client data.
 #[test]
 fn real_effect_name_table_resolves_the_loot_art_row() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load the visual catalog");
     assert_eq!(cat.loot_art_path(), Some("Particles\\LootFX.mdl"));
@@ -416,11 +402,7 @@ fn real_effect_name_table_resolves_the_loot_art_row() {
 /// Blizzard's dynobj RADIUS was 8.0 (row 14), Flamestrike's 5.0 (row 8).
 #[test]
 fn ground_aoe_chain_reads_the_dest_anchored_block() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let catalog = crate::load_spell_catalog(&mut chain).expect("spells");
     let visuals = load_spell_visual_catalog(&mut chain).expect("visuals");
@@ -505,11 +487,7 @@ fn char_proc_small_int_recovers_the_integer() {
 /// negative-period drains).
 #[test]
 fn real_chain_effects_table() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
     assert_eq!(
@@ -564,11 +542,7 @@ fn real_chain_effects_table() {
 /// "Drain Life has no beam again".
 #[test]
 fn real_chain_procs_resolve_to_their_beams() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
 
@@ -654,11 +628,7 @@ fn real_chain_procs_resolve_to_their_beams() {
 /// right and the screen is empty".
 #[test]
 fn real_chain_effect_textures_resolve_on_the_patch_chain() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
     // Only the rows a shipped kit can actually reach: an unreachable row's texture is nobody's
@@ -684,11 +654,7 @@ fn real_chain_effect_textures_resolve_on_the_patch_chain() {
 /// ships four of them.
 #[test]
 fn real_zero_param_chain_slots_are_padding() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
     let kit = cat.kit(2089).expect("kit 2089");
@@ -774,11 +740,7 @@ fn the_weapon_merge_fills_only_the_empty_slots() {
 /// this test would say so.
 #[test]
 fn real_hunter_shots_take_the_bows_load_and_release_clips() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
     // `ItemDisplayInfo` col 10 for every bow (wow-re `throw-ranged-attack-anim.md`'s table).

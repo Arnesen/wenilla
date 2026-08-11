@@ -24,24 +24,9 @@ use bevy::time::Real;
 
 use benilla_ui::script::UiScript;
 
-/// One frame's UI-pass phase split, in μs — written by [`crate::ui_script::extract::drive_script`]
-/// under the same marks the `[ui-cost]` line prints, read here.
-#[derive(Resource, Default, Clone)]
-pub struct UiFrameCost {
-    /// How many FontStrings the layout asked the font engine to shape this frame, and the first
-    /// few by name — a steady hover that keeps asking is the churn this recorder exists to catch.
-    pub measured: usize,
-    pub measured_texts: Vec<String>,
-    pub tick: u128,
-    pub resolve: u128,
-    pub measure: u128,
-    pub extract: u128,
-    pub convert: u128,
-    pub diff: u128,
-    pub quads: usize,
-    pub solves: u64,
-    pub skipped: bool,
-}
+/// The per-frame phase split this recorder writes to the CSV. Produced and owned by the UI pass
+/// itself (decision 1174) — an instrument reads the fact, it does not define it.
+use crate::ui_script::{UiCostWanted, UiFrameCost};
 
 /// Where to write, from `$WOW_HOVER_LOG`: unset ⇒ off, `1` ⇒ the default path, anything else ⇒
 /// that path.
@@ -86,6 +71,10 @@ impl Plugin for HoverLogPlugin {
             return;
         }
         let path = log_path().expect("enabled() checked");
+        // Ask the UI pass for its phase split. `init_resource` first so this holds whichever
+        // plugin builds first — `UiScriptPlugin`'s own init is then a no-op (decision 1174).
+        app.init_resource::<UiCostWanted>();
+        app.world_mut().resource_mut::<UiCostWanted>().0 = true;
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }

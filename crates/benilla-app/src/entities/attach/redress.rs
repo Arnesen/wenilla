@@ -527,11 +527,7 @@ mod tests {
     /// the same set, which is what this pins.)
     #[test]
     fn worn_gloves_replace_the_glove_geoset_in_place() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let cg = CharacterGeosets::load(&mut chain).expect("customization tables");
 

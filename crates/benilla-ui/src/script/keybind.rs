@@ -18,7 +18,7 @@
 //! by string equality exactly as the client does (decision 0585's law, now engine-wide).
 //!
 //! The stored account/character sets live here too (seeded by the app from
-//! `benilla/bindings/…`, re-snapshotted on save), so `LoadBindings` is **synchronous** like the
+//! `benilla-config/bindings/…`, re-snapshotted on save), so `LoadBindings` is **synchronous** like the
 //! reference's — the window calls it and repaints in the same tick, no host round-trip.
 
 use std::collections::HashMap;
@@ -40,7 +40,7 @@ pub struct KeybindCommand {
 }
 
 /// A host request queued by Lua: persist the live table as set `1`/`2` (`Save`), on which the
-/// app writes `benilla/bindings/…` — and, for `Save(1)` issued while the character set was
+/// app writes `benilla-config/bindings/…` — and, for `Save(1)` issued while the character set was
 /// active, deletes the character file (the reference's confirmed delete-on-switch).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeybindRequest {
@@ -216,7 +216,7 @@ impl super::UiScript {
     }
 
     /// Host-side seed of a stored set (`1` account / `2` character) — the loaded
-    /// `benilla/bindings/…` state, already resolved to full per-command key lists by the app's
+    /// `benilla-config/bindings/…` state, already resolved to full per-command key lists by the app's
     /// diff layer. Passing the character set marks it existing (the window's checkbox state);
     /// `seed_binding_set(2, None)` clears it. Does not touch the live table — call
     /// [`Self::load_binding_set`] after seeding to activate one.

@@ -39,8 +39,8 @@ use bevy::prelude::*;
 use benilla_ui::script::UiScript;
 
 use crate::creature_anim::Engaged;
-use crate::debug_panel::InspectMode;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_script::InspectMode;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick};
 use benilla_world::schedule::WorldStage;

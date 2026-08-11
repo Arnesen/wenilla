@@ -8,13 +8,7 @@
 //! swinging warm/cool with the camera. Both sides are pinned here on the shipped assets. Skips
 //! when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_m2_mesh, open_chain, BillboardKind};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// The hanging shop sign — the report this shape came from. Its two "chains" are not chain geometry
 /// at all but a pair of 4-vert lock-Z billboard cards on a tiled chain texture, each authored with
@@ -22,11 +16,7 @@ fn vanilla_data_dir() -> PathBuf {
 /// The sign body is ordinary geometry and must stay untouched.
 #[test]
 fn the_shop_signs_chain_cards_face_away_and_its_body_is_untouched() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let subs = load_m2_mesh(
         &mut chain,
@@ -65,11 +55,7 @@ fn the_shop_signs_chain_cards_face_away_and_its_body_is_untouched() {
 /// normal on a billboard batch would gut its shading, so the shape demands ONE plane.
 #[test]
 fn the_questgiver_marker_is_3d_billboard_geometry_not_a_card() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let subs = load_m2_mesh(&mut chain, "Interface\\Buttons\\TalkToMeQuestionMark.m2")
         .expect("load TalkToMeQuestionMark");

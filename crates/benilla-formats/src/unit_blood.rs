@@ -141,22 +141,13 @@ pub fn load_blood_catalog(chain: &mut Chain) -> Result<BloodCatalog> {
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The real 5875 tables, end to end: a red-blooded creature (blood 1 — HumanMale's) at max
     /// violence spurts RED (effect 109 front-small = `Particles\BloodSpurts\BloodSpurt.mdl`,
     /// 55 back-large); at violence 1 the same creature is CENSORED to green (row 2's ids); at 0
     /// nothing. Pins the empirically-derived column order against the shipped data.
     #[test]
     fn real_blood_tables_resolve_the_censorship_chain() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let blood = load_blood_catalog(&mut chain).expect("blood tables");
 

@@ -22,8 +22,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
-use crate::debug_panel::InspectMode;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer, TeleportMessage, WorldportMessage};
+use crate::ui_script::InspectMode;
 use crate::ui_script::PointerOverUi;
 use benilla_assets::AssetSet;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
@@ -49,8 +49,6 @@ mod movement_net;
 // step through the very same code, the way the reference runs every mover through one controller
 // (decision 0059's byte trail).
 pub(crate) mod mover;
-mod probe_cam;
-mod probe_look;
 mod server_ride;
 mod setup;
 mod state;
@@ -126,18 +124,21 @@ pub(crate) struct StandStateRequest {
     pub(crate) state: u8,
 }
 
+/// The player controller's **ordering handle**. Anything that must write the aim or the camera rig
+/// before the controller reads them orders against this — the two scripted probe drivers do
+/// (`capture::probe_look` / `capture::probe_cam`, decision 1174). A set rather than the `control`
+/// symbol itself: an instrument may name the gameplay system it runs against, but exporting
+/// `control` would drag its private parameter types (`MoveSpeed`, `CameraProbe`, `PressGesture`)
+/// out with it, which is exactly the internals-publishing 1173 rejected a crate wall to avoid.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PlayerControlSet;
+
 /// The player/camera subsystem: spawns the camera + move/avatar resources at startup, drives the
 /// third-person/free-fly controller each frame. (The cursor is the [`crate::cursor`] subsystem.)
 pub(crate) struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        if let Some(look) = probe_look::from_env() {
-            app.insert_resource(look);
-        }
-        if let Some(cam) = probe_cam::from_env() {
-            app.insert_resource(cam);
-        }
         follow::plugin(app);
         camera_saved::plugin(app);
         // 1160's wire (a), both directions (see `world_focus`): the game answers the world's
@@ -167,8 +168,9 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 control
+                    .in_set(PlayerControlSet)
                     .in_set(WorldStage::Input)
-                    .run_if(not(resource_exists::<crate::capture::CaptureMode>))
+                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
             // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
@@ -185,28 +187,10 @@ impl Plugin for PlayerPlugin {
                     .before(control)
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
-            // The scripted mouse-turn (`WOW_PROBE_LOOK`, decision 0621): rotates the aim before
-            // `control` reads it, so the frame that sees the new facing is the frame that streams
-            // it. Registered only when the env var asks for it — inert otherwise.
-            .add_systems(
-                Update,
-                probe_look::drive_probe_look
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .run_if(resource_exists::<probe_look::ProbeLook>)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
-            // The scripted camera park (`WOW_PROBE_CAM`, decision 0653): holds yaw/pitch/zoom so an
-            // unattended burst can frame a subject that isn't on the ground. Same slot as the turn
-            // above — `control` reads the rig right after — and equally inert without the env var.
-            .add_systems(
-                Update,
-                probe_cam::drive_probe_cam
-                    .in_set(WorldStage::Input)
-                    .before(control)
-                    .run_if(resource_exists::<probe_cam::ProbeCam>)
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
-            )
+            // (The two scripted probe drivers that used to sit here — `WOW_PROBE_LOOK`'s
+            // mouse-turn and `WOW_PROBE_CAM`'s camera park — are the harness's now, and register
+            // themselves against `control` from there: decision 1174 moved every instrument out of
+            // this module so a player build carries none of them.)
             // A server-authored spline (Charge/knockback/taxi) driving our own player is mirrored into
             // `Player` here, *before* `control` reads `pos` to seat the camera and skip input. Same
             // gates as `control` (not while capturing; in-world only).
@@ -215,7 +199,7 @@ impl Plugin for PlayerPlugin {
                 server_ride::drive_self_ride
                     .in_set(WorldStage::Input)
                     .before(control)
-                    .run_if(not(resource_exists::<crate::capture::CaptureMode>))
+                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
             // A confirmed `/logout` releases the avatar: the streamed entity is despawned by the
@@ -259,7 +243,7 @@ impl Plugin for PlayerPlugin {
                     .after(benilla_world::interior::classify_entity_interior)
                     .after(benilla_world::model_fade::apply_render_fade)
                     .after(benilla_world::model_render::ModelVisSet)
-                    .run_if(not(resource_exists::<crate::capture::CaptureMode>)),
+                    .run_if(not(resource_exists::<crate::run_mode::CaptureMode>)),
             );
     }
 }
@@ -529,7 +513,7 @@ fn control(
     // A bare `F` is a key the reference lets a player bind — our own store test binds it to JUMP —
     // and a dev doesn't get to squat on the game's namespace (0585, the same rule that moved the
     // perf HUD off bare `P`). Ungated on `typing` like every chord: it can't be mistaken for text.
-    if benilla_world::modkeys::dev_chord(&keys, KeyCode::KeyF) {
+    if crate::run_mode::dev_chord(&keys, KeyCode::KeyF) {
         player.detached = !player.detached;
     }
 

@@ -16,13 +16,7 @@
 //! inches, sub-1 start fraction) — so they pin the *identity of the record*, which is the part that
 //! was wrong.
 
-use std::path::PathBuf;
-
 use benilla_formats::{Chain, LightCatalog, Submersion};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// `Map.dbc` id of Deeprun Tram — the WMO-only map with no `Light.dbc` row.
 const MAP_DEEPRUN_TRAM: u32 = 369;
@@ -31,11 +25,7 @@ const NOON: u32 = 1440;
 
 #[test]
 fn deeprun_tram_takes_light_record_1_not_an_invented_default() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = Chain::open(&data).expect("open vanilla patch chain");
     let cat = LightCatalog::load(&mut chain).expect("load Light/LightParams/*Band");
 
@@ -109,11 +99,7 @@ fn deeprun_tram_takes_light_record_1_not_an_invented_default() {
 /// unwritten). They must not be swept into the record-1 fallback on the strength of a guess.
 #[test]
 fn maps_with_positioned_rows_but_no_global_are_left_alone() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = Chain::open(&data).expect("open vanilla patch chain");
     let cat = LightCatalog::load(&mut chain).expect("load Light/LightParams/*Band");
 

@@ -72,22 +72,13 @@ pub fn load_creature_type_flags(chain: &mut Chain) -> Result<CreatureTypeFlags> 
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The shipped 1.12 data, read through the real chain when the install is present: **11**
     /// rows (ids 1–11), and exactly one carries flag bit 0 — **Critter (8)**. Totem (11) does
     /// NOT (verified against the real file; the critter/totem gloss from later expansions doesn't
     /// hold for 5875 data). Beast (1) and Humanoid (7) are targetable.
     #[test]
     fn shipped_flags_mark_only_critter() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let flags = load_creature_type_flags(&mut chain).expect("load CreatureType.dbc");
         assert_eq!(flags.len(), 11, "1.12 ships 11 creature types");

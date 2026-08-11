@@ -1599,11 +1599,7 @@ fn a_row_with_no_1_12_string_raises_no_plate() {
 /// Pins the reporter's own row end to end (B223's screenshot text). Skips without client data.
 #[test]
 fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let src = chain
         .read_file("Interface\\FrameXML\\GlobalStrings.lua")
@@ -2196,7 +2192,7 @@ fn what_the_interface_page_writes_survives_a_restart() {
 }
 
 /// **A saved value that has a SIDE EFFECT has to be applied when the chunk lands.** The whole UI's
-/// XML runs before `benilla/saved-variables.lua` executes over it (1128), so every file-scope
+/// XML runs before `benilla-config/saved-variables.lua` executes over it (1128), so every file-scope
 /// consumer of a global ran against the *shipped* default: `CombatText_OnLoad` armed its six event
 /// registrations from `SHOW_COMBAT_TEXT = "1"`, and nothing re-ran when the saved `"0"` replaced it.
 /// The player's "off" came back on at every restart. 1.12 closes this with a hand-written ladder in

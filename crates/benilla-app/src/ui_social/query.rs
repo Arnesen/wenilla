@@ -263,11 +263,7 @@ mod tests {
     /// rests on, and the one a synthetic catalog could not catch. Skips without client data.
     #[test]
     fn zone_names_resolve_against_real_area_data() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable.dbc");
 

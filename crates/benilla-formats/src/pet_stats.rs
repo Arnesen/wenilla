@@ -238,11 +238,7 @@ mod tests {
     use super::*;
 
     fn chain() -> Option<crate::chain::Chain> {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return None;
-        }
+        let data = crate::wow_data_or_skip!(None);
         Some(crate::open_chain(&data).expect("open chain"))
     }
 

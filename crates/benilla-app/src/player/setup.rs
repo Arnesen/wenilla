@@ -132,7 +132,7 @@ pub(super) fn setup_player(
 /// of entities, MSAA 4×) otherwise renders unseen behind an opaque fullscreen glue scene every
 /// frame. The loading-screen case is load-bearing: that covered render is what compiles the
 /// world's pipelines, so the first visible in-world frame doesn't hitch on shader builds.
-/// Capture runs boot straight `InWorld` (`CharSelectPlugin::start_in_world`) — always active there.
+/// Capture runs boot straight `InWorld` (`CharSelectPlugin::start`) — always active there.
 ///
 /// This gate stays deliberately WIDER than [`benilla_world::schedule::world_is_live`], which decides
 /// whether the world is *loaded* at all (decision 0777): the camera must also render while the

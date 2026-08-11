@@ -5,10 +5,18 @@ edition.workspace = true
 license.workspace = true
 description = "Bevy AssetSource + AssetLoaders over the WoW 1.12.1 MPQ patch chain"
 
+[features]
+# Forwarded dev/player seam (0026 · 1173/1174 · 1175). Default-on. `benilla-formats` must be taken
+# with `default-features = false` and its `dev` re-exported here: it is default-on there too, so
+# without this a `--no-default-features` player build gets the feature back through unification and
+# the binary carries the build machine's source-tree path after all.
+default = ["dev"]
+dev = ["benilla-formats/dev"]
+
 [dependencies]
 anyhow.workspace = true
 bevy.workspace = true
-benilla-formats = { path = "../benilla-formats" }
+benilla-formats = { path = "../benilla-formats", default-features = false }
 # Nearest-neighbour resize for off-Elwynn layer BLPs authored below LAYER_TEX_SIZE (texel
 # replication in gamma byte space — no averaging, so the C2 mid-tone darkening can't creep in).
 image = { version = "0.25", default-features = false }

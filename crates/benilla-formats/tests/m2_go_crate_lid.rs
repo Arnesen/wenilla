@@ -18,13 +18,7 @@
 //! The `G_BookOpenMediumBrown` test next door pins the seed law on the same family; this one pins
 //! the **transition** law. Skips (passes) when the client isn't present at `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animation_lookup, parse_m2_animations};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// The quest ammo crate the report came off — GameObject type 3 CHEST, `world/goober/g_crate01.m2`.
 const CRATE: &str = "World\\Goober\\G_Crate01.m2";
@@ -39,11 +33,7 @@ const LID_BONE: u16 = 8;
 
 #[test]
 fn the_crate_lid_transition_is_bounded_by_the_window_not_the_loop_bit() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file(CRATE)

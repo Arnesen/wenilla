@@ -4,21 +4,11 @@
 //! (`GenericGlow_Alpha_128`, a white-cored radial) gets its warmth *only* from this M2Color; without it
 //! the additive draw washes the bright core to white. See decision 0029. Skips when the client is absent.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_m2_mesh, open_chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn bonfire_glow_carries_warm_m2color_tint() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let subs = load_m2_mesh(
         &mut chain,

@@ -53,7 +53,7 @@ pub struct CloudExt {
 
 impl MaterialExtension for CloudExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/cloud.wgsl".into()
+        "embedded://benilla_world/shaders/cloud.wgsl".into()
     }
 }
 

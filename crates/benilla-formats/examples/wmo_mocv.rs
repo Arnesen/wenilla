@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         .next()
         .ok_or_else(|| anyhow::anyhow!("usage: wmo_mocv <wmo-path-or-substring> [gN | x,y,z]"))?;
     let filter = args.next();
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     // A `.wmo` argument is taken as a literal chain path, but only if the chain HAS it: `stormwind.wmo`
     // ends in `.wmo` and is not a path, and the old "ends_with ⇒ literal" rule turned that into a hard

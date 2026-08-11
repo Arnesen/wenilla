@@ -6,7 +6,7 @@
 //! * `castui <n>` — every spell whose `castUI == n`, with the skill line (if any) its first
 //!   `SkillLineAbility` row names: the client's craft-admission key vs benilla's SLA join.
 fn main() -> anyhow::Result<()> {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let skills = benilla_formats::load_skill_line_catalog(&mut chain)?;
     let spells = benilla_formats::load_spell_catalog(&mut chain)?;

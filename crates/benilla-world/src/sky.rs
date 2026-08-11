@@ -83,7 +83,7 @@ pub struct SkyExt {
 
 impl MaterialExtension for SkyExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/sky.wgsl".into()
+        "embedded://benilla_world/shaders/sky.wgsl".into()
     }
 
     /// Depth-write OFF — the reference draws its whole sky without writing depth (the apitrace

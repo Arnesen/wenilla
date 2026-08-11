@@ -172,22 +172,13 @@ pub fn load_sound_kit_catalog(chain: &mut Chain) -> Result<SoundKitCatalog> {
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// End-to-end on the **real** build-5875 table: the byte-verified 29-field layout parses all
     /// 4623 kits; the spot-checked row (ID 3) reads back exactly; the `PlaySoundByName` lookup is
     /// case-insensitive; and a kit's joined `DirectoryBase\File` path is a real, readable chain
     /// file (guards the path join against a shifted column). Skips without client data.
     #[test]
     fn real_sound_entries_parse_and_resolve() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_sound_kit_catalog(&mut chain).expect("load sound kits");
         assert_eq!(cat.len(), 4623, "all 5875 SoundEntries rows load");
@@ -228,11 +219,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn real_sound_entries_eaxdef_census() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_sound_kit_catalog(&mut chain).expect("load sound kits");
 

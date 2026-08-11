@@ -85,11 +85,17 @@ pub fn run(build: BuildId) -> AppExit {
     }
 
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)
-    // builds — same order, same reason, as the client's boot.
-    let data_dir =
-        std::path::PathBuf::from(std::env::var("WOW_DATA").unwrap_or_else(|_| "WoW/Data".into()));
-    if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
-        eprintln!("benilla-assets: mpq:// source unavailable ({e:#})");
+    // builds — same order, same reason, same install resolver (1175) as the client's boot.
+    match benilla_formats::wow_data() {
+        Some(data_dir) => {
+            if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
+                eprintln!("benilla-assets: mpq:// source unavailable ({e:#})");
+            }
+        }
+        None => eprintln!(
+            "benilla-worldview: no WoW install found — looked in {:?}",
+            benilla_formats::candidates()
+        ),
     }
 
     let background = crate::bgwin::background_run();

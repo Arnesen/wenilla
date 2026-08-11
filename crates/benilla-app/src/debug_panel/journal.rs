@@ -21,7 +21,7 @@ use crate::debug_panel::{overlay_text, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::{Guid, NetCommands, SelfGuid};
 use crate::ui_action::Spells;
 
-use super::InspectMode;
+use crate::ui_script::InspectMode;
 
 /// Records kept in the ring buffer.
 const KEPT: usize = 24;

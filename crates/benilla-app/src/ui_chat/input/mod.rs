@@ -256,7 +256,7 @@ pub(super) fn drain_chat_input(
             ParsedChat::Shot => {
                 // The framing instrument (decision 0600): the CURRENT camera pose, in the raw WoW
                 // coords a capture `Scenario` takes, echoed to chat and appended to
-                // `config_base()`/shots.txt so a chosen spot survives the session.
+                // `benilla-config/shots.txt` so a chosen spot survives the session.
                 let Ok(cam) = world_camera.single() else {
                     continue;
                 };
@@ -272,9 +272,10 @@ pub(super) fn drain_chat_input(
                     super::event::ChatEventKind::System,
                     format!("shot: {snippet}"),
                 ));
-                if let Some(base) = crate::login::config_base() {
-                    let _ = std::fs::create_dir_all(&base);
-                    let path = base.join("shots.txt");
+                if let Some(path) = crate::local_state::shots_path() {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
                     let line = format!("{snippet}\n");
                     let appended = std::fs::OpenOptions::new()
                         .create(true)

@@ -177,19 +177,11 @@ pub fn load_creature_voice_catalog(chain: &mut Chain) -> Result<CreatureVoiceCat
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The join works on the real 5875 tables: display 26 resolves the byte-decoded row (death
     /// kit 314, footstep class 8), and a majority of sound-linked displays resolve to a real row.
     #[test]
     fn real_creature_voice_resolves() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_voice_catalog(&mut chain).expect("load creature voices");
         assert_eq!(cat.len(), 406, "all CreatureSoundData rows load");

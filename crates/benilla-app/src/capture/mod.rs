@@ -39,16 +39,22 @@
 //! ## Running one capture by hand
 //! **Run through Cargo — never the built binary directly:**
 //! ```text
-//! WOW_DATA=<vanilla Data dir> WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes \
+//! WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes \
 //!     WOW_CAPTURE_OUT=/tmp/shot.png cargo run -q -p benilla
 //! ```
+//! (`WOW_DATA` is only needed for a non-standard install — the client finds one in the project
+//! folder or beside the binary on its own, `benilla_formats::wow_data`, decision 1175.)
+//!
 //! `cargo run` rebuilds first; a bare `target/debug/benilla` can silently be **stale code** — the
-//! classic way a capture "disproves" a fix that was never in the binary. (Before 0993 it was
-//! worse: `assets/` resolved through Cargo's runtime `CARGO_MANIFEST_DIR`, so a bare run silently
-//! loaded **no** WGSL shaders and every custom-shader layer — the *entire* player UI, sky, liquid,
-//! models — rendered blank, read as a UI bug for hours once. The app now bakes the absolute
-//! `crates/benilla-world/assets/` path in at compile time, so a bare run finds its shaders;
-//! staleness is the trap that remains.) `WOW_CAPTURE_UI=1` opts the player UI into the shot (off
+//! classic way a capture "disproves" a fix that was never in the binary. Staleness is now the
+//! *only* trap here, and this note is worth keeping for why. Before 0993, `assets/` resolved
+//! through Cargo's runtime `CARGO_MANIFEST_DIR`, so a bare run loaded **no** WGSL at all and every
+//! custom-shader layer — the entire player UI, sky, liquid, models — rendered blank; it was read
+//! as a UI bug for hours once. 0993 patched that by baking an absolute source-tree path in at
+//! compile time, which fixed the capture and left a binary that worked only on the machine that
+//! built it. 1175 deleted the path instead: every shader is compiled into the binary and addressed
+//! `embedded://<crate>/shaders/…`, so there is no asset root left to resolve wrongly.
+//! `WOW_CAPTURE_UI=1` opts the player UI into the shot (off
 //! by default so world baselines stay UI-free; omit it for world-only scenes). `WOW_CAPTURE=list`
 //! prints the scenario names. `scripts/visual.sh` wraps all of this.
 
@@ -86,6 +92,7 @@ mod probe_rig;
 mod probe_taxi;
 mod probes;
 mod scenarios;
+use crate::run_mode::CaptureMode;
 pub(crate) use depth_probe::DepthProbePlugin;
 use fixtures::seed_ui_fixture;
 pub(crate) use live_shot::LiveShotPlugin;
@@ -98,27 +105,53 @@ pub(crate) use probe_crossing::ProbeCrossingPlugin;
 pub(crate) use probe_mail::ProbeMailPlugin;
 pub(crate) use probe_melee::ProbeMeleePlugin;
 pub(crate) use probe_partner::ProbePartnerPlugin;
-pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
+pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin,
     ParticleCensusPlugin, ProbeChatPlugin, ProbeClock, ProbeExitPlugin, ProbeFocusPlugin,
     ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
-use scenarios::{Scenario, SubjectKind, UiFixture, GROUND_EYE, SCENARIOS};
+use scenarios::GlueScreen;
+use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};
 
+pub(crate) mod fxview;
+// The two scripted probe drivers, which lived in `player/` until decision 1174: they turn the
+// avatar's aim and park the camera rig, and both order themselves BEFORE `player::control`. An
+// instrument may name the gameplay system it runs against; gameplay may not name the instrument.
+mod probe_cam;
+mod probe_look;
 pub(crate) mod waterfx;
 
-/// Is the app running a capture (`$WOW_CAPTURE` set)? Read by `main` to disable net + add the
-/// harness.
+pub(crate) use probe_cam::ProbeCamPlugin;
+pub(crate) use probe_look::ProbeLookPlugin;
+
+/// Which screen a capture starts the client on — the dev arm of [`crate::run_mode::start_state`],
+/// which is what `main` actually calls. A glue capture boots onto the screen it photographs; any
+/// other capture boots straight in-world (no net, no picker); with no capture at all this is the
+/// ordinary login screen.
 ///
-/// The engine asks the same question of the same variable, on its own, as
-/// `dev_state::deterministic_run` — because after 1160's split it *is* its own question: "run
-/// deterministically" is a property of the world, and the world must be able to ask it with no
-/// harness above it at all. One environment variable, two readers, no shared symbol across the
-/// boundary. Keep the two names in step.
-pub(crate) fn scenario_active() -> bool {
-    std::env::var("WOW_CAPTURE").is_ok()
+/// The **third** independent reader of `$WOW_CAPTURE`, and deliberately so: `run_mode` asks it for
+/// the app and `dev_state::deterministic_run` asks it for the engine, because after 1160's split
+/// each layer must be able to ask with nothing above it. One environment variable, three readers,
+/// no shared symbol across either boundary. Keep them in step.
+pub(crate) fn start_state() -> crate::char_select::ClientState {
+    match glue_screen() {
+        Some(GlueScreen::CharCreate) => crate::char_select::ClientState::CharCreate,
+        None if crate::run_mode::scenario_active() => crate::char_select::ClientState::InWorld,
+        None => crate::char_select::ClientState::Login,
+    }
+}
+
+/// Is `$WOW_CAPTURE` naming a **glue** screen? Consulted before the plugins build, because
+/// the answer decides which screen the client starts on — a glue capture is the one kind of
+/// capture that must NOT boot straight into the world.
+fn glue_screen() -> Option<GlueScreen> {
+    let name = std::env::var("WOW_CAPTURE").ok()?;
+    GLUE_SCENARIOS
+        .iter()
+        .find(|g| g.name == name)
+        .map(|g| g.screen)
 }
 
 /// The `fxview` fixture request — the **effect-viewer instrument**: spawn one effect/missile
@@ -212,7 +245,7 @@ pub(crate) struct FxViewRequest {
     pub(crate) up: f32,
 }
 
-/// The fixture's live state, written by `entities::spell_fx::drive_fx_view` and the phase
+/// The fixture's live state, written by `fxview::drive_fx_view` and the phase
 /// driver below.
 #[derive(Resource, Default)]
 pub(crate) struct FxViewState {
@@ -247,11 +280,6 @@ pub(crate) fn print_scenario_names() {
         println!("{}", s.name);
     }
 }
-
-/// Marker that a capture is in progress — its presence gates `player::control` off so the harness is
-/// the sole author of the camera (and thus the terrain stream focus).
-#[derive(Resource)]
-pub(crate) struct CaptureMode;
 
 /// Consecutive byte-identical framebuffer readbacks that mean "the scene is built" (decision 0815).
 ///
@@ -380,7 +408,11 @@ enum Phase {
 
 #[derive(Resource)]
 struct CaptureCtx {
-    scenario: Scenario,
+    /// The in-world viewpoint — `None` for a glue-screen capture, which has no world, no camera
+    /// and no map. Every reader of it sits on a world path; the shutter itself needs neither.
+    scenario: Option<Scenario>,
+    /// The scenario's name, whichever table it came from — for the output path and the probe line.
+    name: &'static str,
     out: String,
     phase: Phase,
     /// UI fixture already seeded (once, at residency) — see [`seed_ui_fixture`].
@@ -440,174 +472,200 @@ impl Plugin for CapturePlugin {
                 .before(benilla_world::water_fx::WaterFoamSet)
                 .in_set(benilla_world::schedule::WorldStage::Present),
         );
+        // The `fxview` fixture's driver, same principle and the same shape (decision 1174): it
+        // creates the subject's display-cache entry, so it runs before the frame's build, inside
+        // the entity-visuals set and after the net stage — exactly the slot it held while it was
+        // an element of `EntitiesPlugin`'s chain, now stated rather than positional.
+        app.add_systems(
+            Update,
+            fxview::drive_fx_view
+                .in_set(crate::entities::EntityVisualsSet)
+                .before(crate::entities::DisplayBuildSet)
+                .after(benilla_world::schedule::WorldStage::Net),
+        );
         let name = std::env::var("WOW_CAPTURE").unwrap_or_default();
+        // A **glue** capture short-circuits everything below: no map to seed, no viewpoint to
+        // pin, no fixture to open. Only the shutter is shared, and the shutter wants no world.
+        let glue = GLUE_SCENARIOS.iter().find(|g| g.name == name).copied();
+        if let Some(g) = glue {
+            // The preview pick goes through the existing `WOW_CHARCREATE_PICK` instrument rather
+            // than a second path into `CreateSelection` — same reason the map is seeded by env
+            // (decision 0743): one route into a fact, whoever is asking.
+            let (race, sex, class) = g.pick;
+            std::env::set_var("WOW_CHARCREATE_PICK", format!("{race},{sex},{class}"));
+        }
         // The fxview instrument: a synthetic scenario (ground scene, noon) + the fixture
         // request from env. Not in SCENARIOS — `scripts/visual.sh`'s golden sweep must never
         // run it (its output depends on the model/age/angle knobs, not just the name).
-        let scenario = if name == "fxview" {
-            let display: Option<u32> = std::env::var("WOW_FX_DISPLAY")
-                .ok()
-                .and_then(|v| v.trim().parse().ok());
-            let go: Option<u32> = std::env::var("WOW_FX_GO")
-                .ok()
-                .and_then(|v| v.trim().parse().ok());
-            let model_path = match (std::env::var("WOW_FX_MODEL"), display.or(go)) {
-                (Ok(p), _) => p,
-                (Err(_), Some(_)) => String::new(), // the id lanes name their model by display id
-                (Err(_), None) => {
-                    eprintln!(
-                        "WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path>, \
+        let scenario: Option<Scenario> = if glue.is_some() {
+            None
+        } else {
+            Some(if name == "fxview" {
+                let display: Option<u32> = std::env::var("WOW_FX_DISPLAY")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok());
+                let go: Option<u32> = std::env::var("WOW_FX_GO")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok());
+                let model_path = match (std::env::var("WOW_FX_MODEL"), display.or(go)) {
+                    (Ok(p), _) => p,
+                    (Err(_), Some(_)) => String::new(), // the id lanes name their model by display id
+                    (Err(_), None) => {
+                        eprintln!(
+                            "WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path>, \
                          WOW_FX_DISPLAY=<CreatureDisplayInfo id> or \
                          WOW_FX_GO=<GameObjectDisplayInfo id>"
-                    );
-                    std::process::exit(2);
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                let knob = |k: &str, d: f32| {
+                    std::env::var(k)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(d)
+                };
+                app.insert_resource(FxViewRequest {
+                    model_path,
+                    display,
+                    go,
+                    go_state: knob("WOW_FX_GO_STATE", 1.0) as u32,
+                    go_type: knob("WOW_FX_GO_TYPE", 6.0) as u32,
+                    scale: knob("WOW_FX_SCALE", 1.0),
+                    age: knob("WOW_FX_AGE", 1.0),
+                    az_deg: knob("WOW_FX_AZ", 0.0),
+                    el_deg: knob("WOW_FX_EL", 10.0),
+                    dist: knob("WOW_FX_DIST", 5.0),
+                    fly: knob("WOW_FX_FLY", 0.0),
+                    yaw_deg: knob("WOW_FX_YAW", 0.0),
+                    turn: knob("WOW_FX_TURN", 0.0),
+                    ground: knob("WOW_FX_GROUND", 0.0) > 0.5,
+                    hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
+                    up: knob("WOW_FX_UP", 0.0),
+                })
+                .init_resource::<FxViewState>();
+                Scenario {
+                    name: "fxview",
+                    map: scenarios::MAP_AZEROTH, // the fixture spawns over the Northshire slope
+                    eye: GROUND_EYE,             // overridden per frame by the orbit in `pin_scene`
+                    look: FXVIEW_POS,
+                    minute: 720,
+                    ui: None,
                 }
-            };
-            let knob = |k: &str, d: f32| {
-                std::env::var(k)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(d)
-            };
-            app.insert_resource(FxViewRequest {
-                model_path,
-                display,
-                go,
-                go_state: knob("WOW_FX_GO_STATE", 1.0) as u32,
-                go_type: knob("WOW_FX_GO_TYPE", 6.0) as u32,
-                scale: knob("WOW_FX_SCALE", 1.0),
-                age: knob("WOW_FX_AGE", 1.0),
-                az_deg: knob("WOW_FX_AZ", 0.0),
-                el_deg: knob("WOW_FX_EL", 10.0),
-                dist: knob("WOW_FX_DIST", 5.0),
-                fly: knob("WOW_FX_FLY", 0.0),
-                yaw_deg: knob("WOW_FX_YAW", 0.0),
-                turn: knob("WOW_FX_TURN", 0.0),
-                ground: knob("WOW_FX_GROUND", 0.0) > 0.5,
-                hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
-                up: knob("WOW_FX_UP", 0.0),
-            })
-            .init_resource::<FxViewState>();
-            Scenario {
-                name: "fxview",
-                map: scenarios::MAP_AZEROTH, // the fixture spawns over the Northshire slope
-                eye: GROUND_EYE,             // overridden per frame by the orbit in `pin_scene`
-                look: FXVIEW_POS,
-                minute: 720,
-                ui: None,
-            }
-        } else if name == "waterfx" {
-            // The water-foam viewer (see `water_fx::view`): a synthetic wading unit over a
-            // synthetic wet lattice, framed by a fixed orbit around the rig centre. Knobs:
-            // WOW_WFX_MODE (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_AGE (s),
-            // WOW_WFX_DEPTH (yd), camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
-            let knob = |k: &str, d: f32| {
-                std::env::var(k)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(d)
-            };
-            let mode = match std::env::var("WOW_WFX_MODE").as_deref() {
-                Ok("wake") => waterfx::WfxMode::Wake,
-                Ok("turn") => waterfx::WfxMode::Turn,
-                _ => waterfx::WfxMode::Ring,
-            };
-            // Rig centre in raw WoW coords: over the Northshire ground scene, the synthetic
-            // surface a few yards above the terrain so the backdrop plane reads clean.
-            let center = [-8961.0_f32, -145.0, 95.0];
-            let az = knob("WOW_WFX_AZ", 180.0).to_radians();
-            let el = knob("WOW_WFX_EL", 35.0).to_radians();
-            let dist = knob("WOW_WFX_DIST", 14.0);
-            let eye = [
-                center[0] + dist * el.cos() * az.cos(),
-                center[1] + dist * el.cos() * az.sin(),
-                center[2] + dist * el.sin(),
-            ];
-            app.insert_resource(waterfx::WaterFxView {
-                mode,
-                speed: knob("WOW_WFX_SPEED", 4.0),
-                age: knob("WOW_WFX_AGE", 1.5),
-                center,
-                depth: knob("WOW_WFX_DEPTH", 0.5),
-            })
-            .init_resource::<FxViewState>();
-            Scenario {
-                name: "waterfx",
-                map: scenarios::MAP_AZEROTH, // the synthetic lattice sits over the Northshire slope
-                eye,
-                look: center,
-                minute: 720,
-                ui: None,
-            }
-        } else if name == "vista" {
-            // The **arbitrary-viewpoint** instrument: stand anywhere on the map, face any heading,
-            // at any clock — the world half of what `fxview` is for effects. A director report that
-            // arrives as "look at this horizon, here" (position, facing and time are all on the debug
-            // panel, and `copy .go xyz` puts the position on the clipboard) becomes a reproducible
-            // headless capture instead of a round-trip. Pair it with `WOW_FARCLIP` to match their
-            // slider — horizon and fog artifacts live and die by the far-clip wall. Not a golden
-            // scenario (its output depends on the knobs, not the name).
-            //
-            //   WOW_CAPTURE=vista WOW_VISTA_AT=-5841.9,-3802.4,-59.7 WOW_VISTA_FACE=24 \
-            //     WOW_VISTA_MIN=1052 WOW_FARCLIP=320 WOW_CAPTURE_OUT=/tmp/v.png cargo run -q -p benilla
-            //
-            // Knobs: `WOW_VISTA_AT` (required, raw WoW `x,y,z` — the PLAYER position; the eye seats
-            // `VISTA_EYE_HEIGHT` above it), `WOW_VISTA_FACE` (heading in degrees — the panel's
-            // "facing" in its `(24°)` form; 0 = +X, counter-clockwise), `WOW_VISTA_PITCH` (degrees,
-            // + = up, default 0 = level), `WOW_VISTA_MIN` (game minute of day, default 720 = noon).
-            let knob = |k: &str, d: f32| {
-                std::env::var(k)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(d)
-            };
-            let Some(at) = std::env::var("WOW_VISTA_AT").ok().and_then(|v| {
-                let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-                (c.len() == 3).then(|| [c[0], c[1], c[2]])
-            }) else {
-                eprintln!("WOW_CAPTURE=vista needs WOW_VISTA_AT=<x,y,z> (raw WoW coords)");
-                std::process::exit(2);
-            };
-            let face = knob("WOW_VISTA_FACE", 0.0).to_radians();
-            let pitch = knob("WOW_VISTA_PITCH", 0.0).to_radians();
-            let eye = [at[0], at[1], at[2] + VISTA_EYE_HEIGHT];
-            // A look point far enough out that the framing is the heading, not the distance.
-            let d = 500.0_f32;
-            Scenario {
-                name: "vista",
-                // The arbitrary-viewpoint instrument goes anywhere, so its map is a knob: a
-                // horizon report from Kalimdor is `WOW_MAP=1` (a `Map.dbc` id).
-                map: std::env::var("WOW_MAP")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(scenarios::MAP_AZEROTH),
-                eye,
-                look: [
-                    eye[0] + d * pitch.cos() * face.cos(),
-                    eye[1] + d * pitch.cos() * face.sin(),
-                    eye[2] + d * pitch.sin(),
-                ],
-                minute: knob("WOW_VISTA_MIN", 720.0) as u32,
-                ui: None,
-            }
-        // By name, EITHER table: the blessed six or an on-demand fixture. Only the sweep is
-        // narrowed — every old viewpoint is still capturable by name (decision 0632).
-        } else if let Some(&s) = SCENARIOS
-            .iter()
-            .chain(scenarios::ON_DEMAND.iter())
-            .find(|s| s.name == name)
-        {
-            s
-        } else {
-            let known: Vec<_> = SCENARIOS
+            } else if name == "waterfx" {
+                // The water-foam viewer (see `water_fx::view`): a synthetic wading unit over a
+                // synthetic wet lattice, framed by a fixed orbit around the rig centre. Knobs:
+                // WOW_WFX_MODE (ring|wake|turn), WOW_WFX_SPEED (yd/s), WOW_WFX_AGE (s),
+                // WOW_WFX_DEPTH (yd), camera WOW_WFX_AZ/EL/DIST. Not a golden scenario.
+                let knob = |k: &str, d: f32| {
+                    std::env::var(k)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(d)
+                };
+                let mode = match std::env::var("WOW_WFX_MODE").as_deref() {
+                    Ok("wake") => waterfx::WfxMode::Wake,
+                    Ok("turn") => waterfx::WfxMode::Turn,
+                    _ => waterfx::WfxMode::Ring,
+                };
+                // Rig centre in raw WoW coords: over the Northshire ground scene, the synthetic
+                // surface a few yards above the terrain so the backdrop plane reads clean.
+                let center = [-8961.0_f32, -145.0, 95.0];
+                let az = knob("WOW_WFX_AZ", 180.0).to_radians();
+                let el = knob("WOW_WFX_EL", 35.0).to_radians();
+                let dist = knob("WOW_WFX_DIST", 14.0);
+                let eye = [
+                    center[0] + dist * el.cos() * az.cos(),
+                    center[1] + dist * el.cos() * az.sin(),
+                    center[2] + dist * el.sin(),
+                ];
+                app.insert_resource(waterfx::WaterFxView {
+                    mode,
+                    speed: knob("WOW_WFX_SPEED", 4.0),
+                    age: knob("WOW_WFX_AGE", 1.5),
+                    center,
+                    depth: knob("WOW_WFX_DEPTH", 0.5),
+                })
+                .init_resource::<FxViewState>();
+                Scenario {
+                    name: "waterfx",
+                    map: scenarios::MAP_AZEROTH, // the synthetic lattice sits over the Northshire slope
+                    eye,
+                    look: center,
+                    minute: 720,
+                    ui: None,
+                }
+            } else if name == "vista" {
+                // The **arbitrary-viewpoint** instrument: stand anywhere on the map, face any heading,
+                // at any clock — the world half of what `fxview` is for effects. A director report that
+                // arrives as "look at this horizon, here" (position, facing and time are all on the debug
+                // panel, and `copy .go xyz` puts the position on the clipboard) becomes a reproducible
+                // headless capture instead of a round-trip. Pair it with `WOW_FARCLIP` to match their
+                // slider — horizon and fog artifacts live and die by the far-clip wall. Not a golden
+                // scenario (its output depends on the knobs, not the name).
+                //
+                //   WOW_CAPTURE=vista WOW_VISTA_AT=-5841.9,-3802.4,-59.7 WOW_VISTA_FACE=24 \
+                //     WOW_VISTA_MIN=1052 WOW_FARCLIP=320 WOW_CAPTURE_OUT=/tmp/v.png cargo run -q -p benilla
+                //
+                // Knobs: `WOW_VISTA_AT` (required, raw WoW `x,y,z` — the PLAYER position; the eye seats
+                // `VISTA_EYE_HEIGHT` above it), `WOW_VISTA_FACE` (heading in degrees — the panel's
+                // "facing" in its `(24°)` form; 0 = +X, counter-clockwise), `WOW_VISTA_PITCH` (degrees,
+                // + = up, default 0 = level), `WOW_VISTA_MIN` (game minute of day, default 720 = noon).
+                let knob = |k: &str, d: f32| {
+                    std::env::var(k)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(d)
+                };
+                let Some(at) = std::env::var("WOW_VISTA_AT").ok().and_then(|v| {
+                    let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    (c.len() == 3).then(|| [c[0], c[1], c[2]])
+                }) else {
+                    eprintln!("WOW_CAPTURE=vista needs WOW_VISTA_AT=<x,y,z> (raw WoW coords)");
+                    std::process::exit(2);
+                };
+                let face = knob("WOW_VISTA_FACE", 0.0).to_radians();
+                let pitch = knob("WOW_VISTA_PITCH", 0.0).to_radians();
+                let eye = [at[0], at[1], at[2] + VISTA_EYE_HEIGHT];
+                // A look point far enough out that the framing is the heading, not the distance.
+                let d = 500.0_f32;
+                Scenario {
+                    name: "vista",
+                    // The arbitrary-viewpoint instrument goes anywhere, so its map is a knob: a
+                    // horizon report from Kalimdor is `WOW_MAP=1` (a `Map.dbc` id).
+                    map: std::env::var("WOW_MAP")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(scenarios::MAP_AZEROTH),
+                    eye,
+                    look: [
+                        eye[0] + d * pitch.cos() * face.cos(),
+                        eye[1] + d * pitch.cos() * face.sin(),
+                        eye[2] + d * pitch.sin(),
+                    ],
+                    minute: knob("WOW_VISTA_MIN", 720.0) as u32,
+                    ui: None,
+                }
+            // By name, EITHER table: the blessed six or an on-demand fixture. Only the sweep is
+            // narrowed — every old viewpoint is still capturable by name (decision 0632).
+            } else if let Some(&s) = SCENARIOS
                 .iter()
                 .chain(scenarios::ON_DEMAND.iter())
-                .map(|s| s.name)
-                .collect();
-            eprintln!(
-                "WOW_CAPTURE={name:?} is not a known scenario; choose one of: {known:?} (or fxview, waterfx)"
+                .find(|s| s.name == name)
+            {
+                s
+            } else {
+                let glue_known: Vec<_> = GLUE_SCENARIOS.iter().map(|g| g.name).collect();
+                let known: Vec<_> = SCENARIOS
+                    .iter()
+                    .chain(scenarios::ON_DEMAND.iter())
+                    .map(|s| s.name)
+                    .collect();
+                eprintln!(
+                "WOW_CAPTURE={name:?} is not a known scenario; choose one of: {known:?}, {glue_known:?} (or fxview, waterfx)"
             );
-            std::process::exit(2);
+                std::process::exit(2);
+            })
         };
         // Seed the continent the scenario names, BEFORE `world_map::load_world_map` reads it at
         // `Startup` — that is the single place `CurrentMap` is set for a server-less run, and the
@@ -615,10 +673,13 @@ impl Plugin for CapturePlugin {
         // continent, so a scenario that could not say which map it meant would stream the wrong
         // world's tiles and photograph a void (Felwood's tile `33_24` exists in Azeroth, empty).
         // Written back for `vista` too, which is where the value came from — a harmless no-op that
-        // keeps one path for "which map is this run on" (decision 0743).
-        std::env::set_var("WOW_MAP", scenario.map.to_string());
+        // keeps one path for "which map is this run on" (decision 0743). A glue screen has no map.
+        if let Some(s) = &scenario {
+            std::env::set_var("WOW_MAP", s.map.to_string());
+        }
+        let shot_name = scenario.map(|s| s.name).or(glue.map(|g| g.name)).unwrap();
         let out = std::env::var("WOW_CAPTURE_OUT")
-            .unwrap_or_else(|_| format!("target/visual/{}.png", scenario.name));
+            .unwrap_or_else(|_| format!("target/visual/{shot_name}.png"));
         if let Some(parent) = Path::new(&out).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!(
@@ -644,6 +705,7 @@ impl Plugin for CapturePlugin {
             .init_resource::<FrameWatch>()
             .insert_resource(CaptureCtx {
                 scenario,
+                name: shot_name,
                 out,
                 phase: Phase::Building(0),
                 ui_seeded: false,
@@ -678,9 +740,14 @@ fn pin_scene(
     roots: Query<&Transform, Without<WorldCamera>>,
     mut cam: Query<&mut Transform, With<WorldCamera>>,
 ) {
-    debug.lighting.follow_server_time = false;
-    debug.lighting.manual_minute = ctx.scenario.minute;
     perf.visible = false; // the perf HUD is default-on; suppress it for a pristine, UI-free shot
+                          // A glue screen has no world to light, no clock to pin and no camera to place. The shutter
+                          // above needs none of that — it is watching the framebuffer.
+    let Some(scenario) = ctx.scenario else {
+        return;
+    };
+    debug.lighting.follow_server_time = false;
+    debug.lighting.manual_minute = scenario.minute;
 
     // `WOW_MM_PROBE=x,y,z` (raw WoW coords) drops the player at that point and marks them active, so
     // the interior minimap (which keys off `player.active` + `player.pos`) renders in a headless
@@ -718,10 +785,7 @@ fn pin_scene(
                 * Quat::from_rotation_x(-req.el_deg.to_radians());
             (look + orbit * (Vec3::Z * req.dist), look)
         }
-        _ => (
-            wow_to_bevy(ctx.scenario.eye),
-            wow_to_bevy(ctx.scenario.look),
-        ),
+        _ => (wow_to_bevy(scenario.eye), wow_to_bevy(scenario.look)),
     };
     for mut t in &mut cam {
         *t = Transform::from_translation(eye).looking_at(look, Vec3::Y);
@@ -947,7 +1011,7 @@ fn drive_capture(
                 // capture it without log-filter noise.
                 println!(
                     "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{cpu}{present}",
-                    ctx.scenario.name,
+                    ctx.name,
                     v.len(),
                     at(0.50),
                     at(0.95),

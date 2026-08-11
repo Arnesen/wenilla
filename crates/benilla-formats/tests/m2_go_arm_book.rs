@@ -18,15 +18,9 @@
 //! failure and the one a whole class of GameObjects (every `World\Goober\` door-family prop) shares.
 //! Skips (passes) when the client isn't present at `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{
     open_chain, parse_m2_animation_lookup, parse_m2_animations, parse_m2_playable_animation_lookup,
 };
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 const BOOK: &str = "World\\Goober\\G_BookOpenMediumBrown.m2";
 /// `AnimationData.dbc`: 146 Close (motion), 147 Closed (rest), 148 Open (motion), 149 Opened (rest).
@@ -36,11 +30,7 @@ const OPEN: u16 = 148;
 
 #[test]
 fn the_book_idle_resolves_to_closed_not_the_close_motion() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain.read_file(BOOK).expect("the book M2 is in the chain");
     let anims = parse_m2_animations(&bytes);

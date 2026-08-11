@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("usage: scan_events <4cc, e.g. $CCH> [path-substring]"))?;
     anyhow::ensure!(ident.len() == 4, "the event ident is exactly 4 bytes");
     let pat = std::env::args().nth(2).unwrap_or_default().to_lowercase();
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let chain = benilla_formats::open_chain(&data)?;
     let (mut scanned, mut hits) = (0usize, 0usize);
     for e in chain.list()? {

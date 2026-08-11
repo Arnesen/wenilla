@@ -210,20 +210,12 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The joins hold on real 5875 data: WAVE resolves by name to the byte-decoded id 101 with
     /// anim emote 3; some voice row exists for a human (race 1) male; the voice map carries the
     /// male/female split (the survey's sample rows pair sexes per race).
     #[test]
     fn real_emote_chain_resolves() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_emote_sound_catalog(&mut chain).expect("load emote catalog");
         assert_eq!(cat.text_id("wave"), Some(101), "case-insensitive by name");

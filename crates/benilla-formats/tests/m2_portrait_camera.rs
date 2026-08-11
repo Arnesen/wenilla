@@ -3,21 +3,11 @@
 //! `system/ui/scratch/portrait-render.md` §4: the unit-frame portrait renders through exactly this
 //! authored camera). Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_m2_portrait_camera, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn character_and_creature_portrait_cameras_parse_sane() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     for path in [
         "Character\\Human\\Male\\HumanMale.m2",
@@ -88,11 +78,7 @@ fn too_short_yields_no_camera() {
 /// `far = 1000/36`) come along because a wrong stride would land on neither.
 #[test]
 fn pane_cameras_match_the_authored_records() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
     for (path, eye, target, fov) in [

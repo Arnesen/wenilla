@@ -247,11 +247,6 @@ mod tests {
     use bevy::camera::primitives::MeshAabb;
     use bevy::tasks::block_on;
 
-    /// crates/benilla-assets -> repo root -> WoW/Data (gitignored; test skips when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The sampler-mode URL round-trips, and repeat/repeat stays byte-identical to the old bare
     /// path — so the common case keeps ONE upload and no pre-existing URL changed (decision 0763).
     #[test]
@@ -284,11 +279,7 @@ mod tests {
 
     #[test]
     fn mpq_reader_loads_real_client_bytes_through_the_assetreader() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let reader = MpqAssetReader::open(&data).expect("open mpq reader");
 
         // A real file resolves and drains to its bytes through the Bevy AssetReader/Reader traits.
@@ -313,11 +304,7 @@ mod tests {
 
     #[test]
     fn loads_a_blp_image_through_the_full_mpq_pipeline() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         // Full pipeline, headless: mpq:// source → AssetServer → BlpImageLoader → Handle<Image>.
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -363,11 +350,7 @@ mod tests {
     #[test]
     fn minimap_tile_settings_reach_the_async_loader() {
         use bevy::render::render_resource::TextureFormat;
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         register_mpq_source(&mut app, &data).expect("register mpq source");
@@ -409,11 +392,7 @@ mod tests {
     /// small groups 1×1. Grounds the (RE-inferred) footprint→grid bake the interior renderer rests on.
     #[test]
     fn ironforge_group_grid_matches_trs() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: no client data");
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         register_mpq_source(&mut app, &data).expect("mpq");
@@ -457,11 +436,7 @@ mod tests {
 
     #[test]
     fn loads_an_m2_model_through_the_pipeline() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         register_mpq_source(&mut app, &data).expect("register mpq source");
@@ -521,11 +496,7 @@ mod tests {
 
     #[test]
     fn loads_a_wmo_model_through_the_pipeline() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         register_mpq_source(&mut app, &data).expect("register mpq source");
@@ -569,11 +540,7 @@ mod tests {
 
     #[test]
     fn loads_an_adt_terrain_tile_through_the_pipeline() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         // Find an existing Elwynn-area Azeroth tile (don't hardcode exact coords).
         let reader = benilla_formats::Chain::open(&data).expect("open chain");
         let mut url = None;

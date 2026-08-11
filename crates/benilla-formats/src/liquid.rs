@@ -330,15 +330,10 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use benilla_adt::{parse_adt, ParsedAdt};
 
     use super::*;
-
-    fn data_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
 
     /// Every liquid mesh a real tile builds, with the MCNK origin each came from.
     fn tile_liquids(chain: &mut crate::Chain, map: &str, tx: u32, ty: u32) -> Vec<LiquidMesh> {
@@ -397,11 +392,7 @@ mod tests {
     /// slime anywhere at all.
     #[test]
     fn b21_burning_steppes_lava_builds_a_magma_surface_at_the_reported_pin() {
-        let data = data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: no WoW client at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let meshes = tile_liquids(&mut chain, "Azeroth", 33, 46);
 
@@ -442,7 +433,7 @@ mod tests {
     /// right order: get the scale wrong and it still tiles, get the *field* wrong and the seam shows.
     #[test]
     fn magma_uvs_come_from_the_vertex_and_run_continuous_across_chunks() {
-        let data = data_dir();
+        let data = crate::wow_data_or_skip!();
         if !data.is_dir() {
             return;
         }
@@ -494,7 +485,7 @@ mod tests {
     /// Hillsbrad's tile 33_33 is one. Both blocks must survive, each with its own kind and height.
     #[test]
     fn a_river_mouth_chunk_builds_both_its_river_and_its_sea() {
-        let data = data_dir();
+        let data = crate::wow_data_or_skip!();
         if !data.is_dir() {
             return;
         }
@@ -560,11 +551,7 @@ mod tests {
     /// water chunks (all river/still, surface ≈ 143.99 yd). Skips when the client isn't present.
     #[test]
     fn parses_elwynn_lake_tile() {
-        let data = data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: no WoW client at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("World\\Maps\\Azeroth\\Azeroth_32_48.adt")

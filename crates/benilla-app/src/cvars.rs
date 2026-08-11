@@ -8,7 +8,7 @@
 //!   verified CVar registration defaults (wow-re `benilla-pins.md` B10, quoted in
 //!   [`crate::sound::SoundConfig`]), `uiScale`/`farclip` are benilla's shipped defaults —
 //!   and a test welds each string to the constant it mirrors so they cannot drift.
-//! - **Boot**: read `benilla/config.toml` ([`crate::local_state`]) and apply it to the knob
+//! - **Boot**: read `benilla-config/config.toml` ([`crate::local_state`]) and apply it to the knob
 //!   resources; when the UI VM exists, register the table and push the resolved session values
 //!   so `GetCVar` answers what the client is actually doing.
 //! - **Sync**: drain Lua `SetCVar` changes into the knob resources each frame and mark the
@@ -223,7 +223,7 @@ fn zoom_index(v: f32) -> u8 {
     v.clamp(0.0, f32::from(MINIMAP_ZOOM_LEVELS - 1)) as u8
 }
 
-/// Startup: read `benilla/config.toml` (absent file = all defaults, not an error) and apply it
+/// Startup: read `benilla-config/config.toml` (absent file = all defaults, not an error) and apply it
 /// to the knob resources — except keys the environment overrides this session (their resources
 /// already read the env var in their `Default`s). The VM does not exist yet; [`sync_cvars`]
 /// seeds the table when it does.

@@ -865,11 +865,6 @@ mod tests {
         assert!(OWNER_RUNG_BUCKETS.windows(2).all(|w| w[0] < w[1]));
     }
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The tauren body, straight off the real client data: its M2 type-8 (extra skin — the fur)
     /// batches must surface as [`CharSkinSlot::SkinExtra`] parts, in both authored flavors — the
     /// opaque single-sided fur core and the alpha-cut two-sided fringe cards — so the spawn site can
@@ -877,11 +872,7 @@ mod tests {
     /// draw flat white (the "cows are white" bug).
     #[test]
     fn tauren_fur_batches_carry_the_skin_extra_slot() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let subs = load_m2_mesh(&mut chain, "Character\\Tauren\\Male\\TaurenMale.m2")
             .expect("parse TaurenMale");
@@ -919,11 +910,7 @@ mod tests {
     /// exactly the "flat pale blade" regression this pins against.
     #[test]
     fn whirlwind_axe_reflect_layer_is_mod2x() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let subs = load_m2_mesh(
             &mut chain,
@@ -964,11 +951,7 @@ mod tests {
     /// separability test would still see a clean card here; only the model-wide one catches it.
     #[test]
     fn a_welded_billboard_spike_is_never_split_into_a_card() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let path = "Item\\ObjectComponents\\Shoulder\\LShoulder_Plate_PVPAlliance_A_01.m2";
         let subs = load_m2_mesh(&mut chain, path).expect("parse LShoulder_Plate_PVPAlliance_A_01");
@@ -1008,11 +991,7 @@ mod tests {
     /// goes dark first.
     #[test]
     fn a_detached_glow_card_is_still_split_out() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let path = "Item\\ObjectComponents\\Weapon\\Sword_2H_PVPAlliance_A_01.m2";
         let subs = load_m2_mesh(&mut chain, path).expect("parse Sword_2H_PVPAlliance_A_01");
@@ -1042,11 +1021,7 @@ mod tests {
     /// band-restricted translation bake end-to-end.
     #[test]
     fn questionmark_marker_batch_carries_both_bob_loops() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let subs = load_m2_mesh(&mut chain, "Interface\\Buttons\\TalkToMeQuestionMark.mdx")
             .expect("parse TalkToMeQuestionMark");

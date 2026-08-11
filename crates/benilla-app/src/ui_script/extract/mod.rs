@@ -62,9 +62,15 @@ pub(super) fn drive_script(
     // `SetPortraitTexture`-bound region samples, and the pane geometry this pass publishes back
     // for the booths' projection aspect + render gate (decision 1069).
     mut booths: crate::portrait::BoothBridge,
-    // Gates the held-cursor icon quad (decision 0216 §5): CAPTURE-ONLY, the same presence check
-    // every other capture-only system uses (`ui_script::capture_ui_active`'s sibling pattern).
-    capture: Option<Res<crate::capture::CaptureMode>>,
+    // Two facts about the RUN, tupled to stay inside Bevy's 16-element system-param limit (the
+    // same squeeze `player::control` and `GateInputs` above record):
+    // · the held-cursor icon quad (decision 0216 §5) is CAPTURE-ONLY, the same presence check
+    //   every other capture-only system uses (`ui_script::capture_ui_active`'s sibling pattern);
+    // · whether anything wants this pass's phase split at all ([`super::UiCostWanted`]).
+    run: (
+        Option<Res<crate::run_mode::CaptureMode>>,
+        Res<super::UiCostWanted>,
+    ),
     // This frame's `<Minimap>` widget slot, parked for `minimap::emit_minimap` (the UiQuadAppend
     // producer that fills the hole with tile/arrow quads — decision 0203 phase 1).
     mut minimap_widget: ResMut<crate::minimap::MinimapWidget>,
@@ -84,9 +90,10 @@ pub(super) fn drive_script(
     // would then discard. Capture mode never skips (the harness wants exact per-frame output,
     // including the cursor-icon quad's live mouse position).
     mut prev: Local<GateInputs>,
-    // This frame's phase split, published for the hover recorder (`hover_log`).
-    mut ui_cost: ResMut<crate::hover_log::UiFrameCost>,
+    // This frame's phase split, published for whoever asked (the `[ui-cost]` line, `hover_log`).
+    mut ui_cost: ResMut<super::UiFrameCost>,
 ) {
+    let (capture, ui_cost_wanted) = run;
     let Some(mut script) = script else {
         return;
     };
@@ -122,7 +129,7 @@ pub(super) fn drive_script(
     // The phase marks feed two consumers now: the `[ui-cost]` line and the hover recorder
     // (`hover_log`), which writes the same split per frame to a file. Either one arms them.
     let printing = ui_cost_enabled();
-    let cost_on = printing || crate::hover_log::enabled();
+    let cost_on = printing || ui_cost_wanted.0;
     let solves_before = cost_on.then(|| script.layout_solves());
     // The measure counters are PER FRAME: `measure_fontstrings` adds to them, and both publish
     // sites below carry them forward so the two measure passes sum into one frame's row. Nothing
@@ -172,7 +179,7 @@ pub(super) fn drive_script(
     // one that did not (`WOW_HOVER_LOG`, director's run).
     let mut measured_any = false;
     if let Some(atlas) = font_atlas.as_deref_mut() {
-        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost);
+        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0);
     }
     {
         let _span = bevy::log::info_span!("ui_script: resolve").entered();
@@ -183,7 +190,7 @@ pub(super) fn drive_script(
     // otherwise keeps the quiet frame at ONE sweep of the 6,297-region map, not two.
     if measured_any {
         if let Some(atlas) = font_atlas.as_deref_mut() {
-            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost) {
+            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost, ui_cost_wanted.0) {
                 script.resolve();
             }
         }
@@ -333,7 +340,7 @@ pub(super) fn drive_script(
         let us_cmp = lap();
         if cost_on {
             let solves = script.layout_solves() - solves_before.unwrap_or(0);
-            *ui_cost = crate::hover_log::UiFrameCost {
+            *ui_cost = super::UiFrameCost {
                 measured: ui_cost.measured,
                 measured_texts: std::mem::take(&mut ui_cost.measured_texts),
                 tick: us_tick,
@@ -668,7 +675,7 @@ pub(super) fn drive_script(
     if cost_on {
         let us_diff = lap();
         let solves = script.layout_solves() - solves_before.unwrap_or(0);
-        *ui_cost = crate::hover_log::UiFrameCost {
+        *ui_cost = super::UiFrameCost {
             measured: ui_cost.measured,
             measured_texts: std::mem::take(&mut ui_cost.measured_texts),
             tick: us_tick,
@@ -699,13 +706,16 @@ fn measure_fontstrings(
     script: &mut UiScript,
     atlas: &mut UiFontAtlas,
     s: f32,
-    ui_cost: &mut crate::hover_log::UiFrameCost,
+    ui_cost: &mut super::UiFrameCost,
+    // The churn column is the recorder's alone ([`super::UiCostWanted`]) — the `[ui-cost]` line
+    // reports counts, not the strings behind them, and collecting them is not free.
+    record_texts: bool,
 ) -> bool {
     let requests = script.fontstrings_needing_measure();
     // The recorder's churn column: WHICH strings a frame had to re-shape. A steady hover that
     // keeps asking is the whole question (`hover_log`), and the answer is a string, not a count —
     // so the first few come along by name.
-    if crate::hover_log::enabled() {
+    if record_texts {
         ui_cost.measured += requests.len();
         ui_cost.measured_texts.extend(
             requests
@@ -842,7 +852,8 @@ mod clip_plumb_tests {
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
         app.init_resource::<crate::minimap::MinimapWidget>();
-        app.init_resource::<crate::hover_log::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiCostWanted>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
@@ -926,7 +937,8 @@ mod clip_plumb_tests {
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
         app.init_resource::<crate::minimap::MinimapWidget>();
-        app.init_resource::<crate::hover_log::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiCostWanted>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();
@@ -983,7 +995,8 @@ mod extract_gate_tests {
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::portrait::BoothPanes>();
         app.init_resource::<crate::minimap::MinimapWidget>();
-        app.init_resource::<crate::hover_log::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiFrameCost>();
+        app.init_resource::<crate::ui_script::UiCostWanted>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiClock>();

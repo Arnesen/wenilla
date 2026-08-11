@@ -5,11 +5,22 @@ edition.workspace = true
 license.workspace = true
 description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)"
 
+[features]
+# Forwarded dev/player seam (0026 · 1173/1174 · 1175). Default-on. `benilla-formats` must be taken
+# with `default-features = false` and its `dev` re-exported here: it is default-on there too, so
+# without this a `--no-default-features` player build gets the feature back through unification and
+# the binary carries the build machine's source-tree path after all.
+default = ["dev"]
+dev = ["benilla-formats/dev", "benilla-assets/dev"]
+
 [dependencies]
 avian3d = "0.6"
-benilla-assets = { path = "../benilla-assets" }
-benilla-formats = { path = "../benilla-formats" }
-benilla-protocol = { path = "../benilla-protocol" }
+benilla-assets = { path = "../benilla-assets", default-features = false }
+benilla-formats = { path = "../benilla-formats", default-features = false }
+# The wire crate (`benilla_protocol`) is deliberately NOT here. The engine renders a world; it
+# does not speak a protocol. Decision 1177 took the last crossing out — `WorldUnit.kind:
+# EntityKind` became `WorldUnit.wades: bool` — and the absence of that dependency line IS the
+# record's gate: the crate graph enforces it, so no test has to.
 # The WMO group parser — the portal audit re-parses a group to pin its own decode against the file.
 benilla-wmo = { path = "../benilla-wmo" }
 bevy.workspace = true

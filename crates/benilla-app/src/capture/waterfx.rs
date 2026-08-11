@@ -130,7 +130,7 @@ pub(crate) fn spawn(
         // `WorldStage::Present` — so waiting for it would cost the rig its first frame of foam
         // and shift every ripple's age by one step for the whole aged capture.
         benilla_world::world_unit::WorldUnit {
-            kind: EntityKind::Unit,
+            wades: true,
             scale: 1.0,
             height: crate::entities::CollisionHeight::default().0,
         },

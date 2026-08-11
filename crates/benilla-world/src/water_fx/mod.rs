@@ -48,7 +48,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use benilla_protocol::EntityKind;
 
 use crate::liquid::{FoamPatch, WaterChunkInfo};
 use crate::particles::buffer::{
@@ -438,7 +437,7 @@ fn emit_water_foam(
 
         // Streamed units (the avatar's own wire ghost is excluded via `Without<SelfPlayer>`).
         for (entity, transform, unit) in &units {
-            if !matches!(unit.kind, EntityKind::Unit | EntityKind::Player) {
+            if !unit.wades {
                 continue;
             }
             let pos = transform.translation;

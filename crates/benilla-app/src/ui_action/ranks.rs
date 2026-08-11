@@ -97,11 +97,7 @@ mod tests {
     /// These run the walk against the **real** `SkillLineAbility.dbc` — the chain is the thing
     /// under test, and a hand-built fake chain would only test the walk against itself.
     fn client_data() -> Option<std::path::PathBuf> {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return None;
-        }
+        let data = benilla_formats::wow_data_or_skip!(None);
         Some(data)
     }
 

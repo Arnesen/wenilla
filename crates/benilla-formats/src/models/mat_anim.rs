@@ -163,11 +163,6 @@ pub(super) fn bake_rgb_anim(
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The Stormwind mage portal, straight off the real client data: its shimmer is authored as
     /// animated transparency-weight tracks (3 of its 4 records are time-varying — `doodadscan`'s
     /// material-channel listing), so `parse_m2_render_submeshes` must emit at least one batch with a
@@ -176,11 +171,7 @@ mod tests {
     /// against a silent regression. Skips when the client data isn't present.
     #[test]
     fn mage_portal_bakes_a_time_varying_weight_loop() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("World\\generic\\activedoodads\\mageportals\\StormwindMagePortal01.m2")
@@ -219,11 +210,7 @@ mod tests {
     /// end. Skips when the client data isn't present.
     #[test]
     fn battle_shout_base_bakes_alpha_and_rgb_loops() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Spells\\BattleShout_Cast_Base.m2")
@@ -277,11 +264,7 @@ mod tests {
     /// different sequence — so the pair drew in every animation.
     #[test]
     fn voidwalker_hides_its_death_only_armour_in_every_other_sequence() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Creature\\VoidWalker\\VoidWalker.m2")
@@ -357,11 +340,7 @@ mod tests {
     /// asserting about some other geometry.
     #[test]
     fn banshee_hides_its_death_only_batches() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Creature\\Banshee\\Banshee.m2")
@@ -672,11 +651,7 @@ mod tests {
     /// still read 0 there. Skips when the client data isn't present.
     #[test]
     fn air_elemental_death_leaves_no_opaque_body() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Creature\\AirElemental\\AirElemental.m2")

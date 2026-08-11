@@ -77,7 +77,7 @@ pub(in crate::ui_chat) enum ParsedChat {
     Played,
     /// `/shot` — the director's framing instrument (decision 0600): dump the CURRENT world-camera
     /// pose as a ready-to-paste capture `Scenario` (raw WoW eye/look + the rendered game minute)
-    /// into chat and `config_base()`/shots.txt. Client-local, no wire traffic — how a chosen spot
+    /// into chat and `benilla-config/shots.txt`. Client-local, no wire traffic — how a chosen spot
     /// travels from the director's eye to the golden set as exact numbers.
     Shot,
     /// `/liquid` — the swim diagnostic (decision 0634 follow-up): dump the interior claim, the

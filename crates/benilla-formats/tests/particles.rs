@@ -1,23 +1,13 @@
 //! Difftest the vanilla M2 particle-emitter parser against the real `ElwynnCampfire.m2` (the
 //! Goldshire-area campfire). Skips (passes) when the client isn't present at `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{
     open_chain, parse_m2_particle_emitters, CellRamp, OverLife, ParticleBlend, ParticleShape,
 };
 
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
-
 #[test]
 fn campfire_emitters_match_real_bytes() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file("World\\Azeroth\\Elwynn\\PassiveDoodads\\Campfire\\ElwynnCampfire.m2")
@@ -275,11 +265,7 @@ fn colour_and_size_ride_the_same_inset() {
 /// `clamp` requires `min <= max`. Sampling the real record across life must simply work.
 #[test]
 fn inverted_ramp_on_real_data_does_not_panic() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file("World\\Generic\\Dwarf\\Passive Doodads\\Braziers\\DwarvenBrazier01.m2")
@@ -309,11 +295,7 @@ fn inverted_ramp_on_real_data_does_not_panic() {
 /// ignores the field runs the sheet exactly once and the swarm never flaps.
 #[test]
 fn repeat_count_cycles_the_flipbook() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file("SPELLS\\InsectSwarm_State_Chest.m2")
@@ -346,11 +328,7 @@ fn repeat_count_cycles_the_flipbook() {
 /// `base + rand·variation` reading collapsed to size zero (the director's "candles not burning").
 #[test]
 fn twinkle_fields_gate_not_scale() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
 
     // Kobold candle: twinkle {0,0} — degenerate range, the multiplier must be identity.
@@ -396,11 +374,7 @@ fn twinkle_fields_gate_not_scale() {
 /// campfire (0x21/0x29) scales its flame size with the placement.
 #[test]
 fn flag_remap_reads_the_file_bits() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
 
     let kobold =
@@ -442,11 +416,7 @@ fn flag_remap_reads_the_file_bits() {
 /// burned permanently at 748 live particles.
 #[test]
 fn barrel_explode_emitters_are_off_at_rest_and_fire_in_their_clips() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let emitters = parse_m2_particle_emitters(
         &chain

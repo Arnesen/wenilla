@@ -72,15 +72,7 @@ const ATTACH_FALLBACKS: [u16; 2] = [0xf, 0x13];
 /// fallback and kin) — long enough to read as a flash, short enough never to linger. Shared
 /// with the dest-anchored lane's one-shots ([`super::dest_fx`]) — same completion-callback
 /// stand-in.
-pub(super) const FALLBACK_SPAN: f32 = 1.0;
-
-/// The `fxview` unit lane's synthetic guid (`WOW_FX_DISPLAY`) — a high-word `0xF130` creature guid
-/// like the wire's, in a serverless capture where nothing else claims one.
-const FXVIEW_UNIT_GUID: u64 = (0xF130u64 << 48) | 0xFC0FEE;
-
-/// The `fxview` GameObject lane's synthetic guid (`WOW_FX_GO`) — the wire's `0xF110` high word,
-/// which is what `crate::net` reads a GO's identity out of.
-const FXVIEW_GO_GUID: u64 = (0xF110u64 << 48) | 0xFC0FEE;
+pub(crate) const FALLBACK_SPAN: f32 = 1.0;
 
 /// How long a self-terminating instance may wait unspawned (model/skeleton never loading — the
 /// cube-fallback caster) before it is dropped instead of pending forever.
@@ -90,8 +82,8 @@ const PENDING_TIMEOUT: f32 = 10.0;
 /// is created here on first use; `super::update_display_models` builds `parts` once the asset
 /// loads, shared by every instance of that path).
 #[derive(Resource, Default)]
-pub(super) struct SpellFx {
-    pub(super) models: HashMap<String, DisplayModel>,
+pub(crate) struct SpellFx {
+    pub(crate) models: HashMap<String, DisplayModel>,
 }
 
 /// The live **per-instance tint clones**: an effect part whose M2Color RGB animates gets its own
@@ -155,220 +147,12 @@ fn fx_part_material(
 // texture, blend, fog policy, RGB/alpha loops — rides its `GroundFxDecal` record and the
 // effect stream's per-vertex tint instead of a per-instance `WowModelMaterial`.)
 
-/// Drive the `fxview` capture fixture (see [`crate::capture::FxViewRequest`]) — the effect-
-/// viewer instrument: once the capture driver arms it (scene settled), spawn a root at the
-/// fixture point, create the model's [`SpellFx`] cache entry, attach the full visual set
-/// through the same [`attach_effect_visuals`] body the game uses, and (for missiles) fly the
-/// root along its facing so trails extend. Inert outside fxview captures (the request resource
-/// only exists then).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn drive_fx_view(
-    req: Option<Res<crate::capture::FxViewRequest>>,
-    state: Option<ResMut<crate::capture::FxViewState>>,
-    mut commands: Commands,
-    fx: Option<ResMut<SpellFx>>,
-    asset_server: Res<AssetServer>,
-    time: Res<Time>,
-    mut wow_materials: ResMut<Assets<WowModelMaterial>>,
-    mut tint_reg: ResMut<FxTintAnims>,
-    ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
-    spatial: avian3d::prelude::SpatialQuery,
-    mut transforms: Query<&mut Transform>,
-) {
-    let (Some(req), Some(mut state)) = (req, state) else {
-        return;
-    };
-    if !state.armed {
-        return;
-    }
-    let Some(mut fx) = fx else {
-        // Server-less capture boot: the cache resource normally rides the net session.
-        commands.init_resource::<SpellFx>();
-        return;
-    };
-    let root = *state.root.get_or_insert_with(|| {
-        let mut pos = benilla_assets::coords::wow_to_bevy(crate::capture::FXVIEW_POS);
-        // `WOW_FX_DISPLAY`: the UNIT lane. Spawn the live component set a streamed creature gets
-        // (`net::apply`'s, the same one the `vplates` fixture's wolf uses) and let the ordinary
-        // unit pipeline build the model — so what this shoots is a creature, not a model, and
-        // every unit-only term (tag alpha, the fade gate, anim LOD, the emitters' sequence host)
-        // is in the picture. Always seated on the terrain: a creature stands on the ground.
-        if let Some(display) = req.display {
-            if let Some(hit) = spatial.cast_ray(
-                pos,
-                Dir3::NEG_Y,
-                500.0,
-                true,
-                &benilla_world::collision::WorldCollision::body_filter(),
-            ) {
-                pos.y -= hit.distance;
-            }
-            pos.y += req.up;
-            return commands
-                .spawn((
-                    crate::net::Guid(FXVIEW_UNIT_GUID),
-                    crate::net::NetEntity {
-                        kind: benilla_protocol::EntityKind::Unit,
-                        display_id: Some(display),
-                        scale: req.scale,
-                    },
-                    crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
-                        &[
-                            (22, 100), // UNIT_FIELD_HEALTH
-                            (28, 100), // UNIT_FIELD_MAXHEALTH
-                            (34, 60),  // UNIT_FIELD_LEVEL
-                            (35, 35),  // UNIT_FIELD_FACTIONTEMPLATE — friendly, so no combat pose
-                        ],
-                    )),
-                    Transform::from_translation(pos)
-                        .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
-                    Visibility::default(),
-                ))
-                .id();
-        }
-        // `WOW_FX_GO`: the GAMEOBJECT lane. A placed trap/door/chest reaches the screen through
-        // `crate::go_anim`'s §243 state machine, never through the effect pool, so this is the
-        // only lane that reproduces one. The descriptor carries the three fields the machine
-        // reads — display, TYPE_ID (the `go_animates` gate) and STATE (the substate) — and
-        // nothing else, so an unset knob renders exactly what an omitted wire field renders.
-        // Always seated on the terrain: a GO stands on the ground.
-        if let Some(display) = req.go {
-            if let Some(hit) = spatial.cast_ray(
-                pos,
-                Dir3::NEG_Y,
-                500.0,
-                true,
-                &benilla_world::collision::WorldCollision::body_filter(),
-            ) {
-                pos.y -= hit.distance;
-            }
-            pos.y += req.up;
-            return commands
-                .spawn((
-                    crate::net::Guid(FXVIEW_GO_GUID),
-                    crate::net::NetEntity {
-                        kind: benilla_protocol::EntityKind::GameObject,
-                        display_id: Some(display),
-                        scale: req.scale,
-                    },
-                    crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
-                        &[
-                            (14, req.go_state), // GAMEOBJECT_STATE
-                            (21, req.go_type),  // GAMEOBJECT_TYPE_ID
-                        ],
-                    )),
-                    Transform::from_translation(pos)
-                        .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
-                    Visibility::default(),
-                ))
-                .id();
-        }
-        // `WOW_FX_GROUND=1`: seat the fixture ON the terrain — a ground-anchored effect's flat
-        // quads render as projected surface decals and need ground inside their vertical slab.
-        // The scene settled before arming, so the streamed tile's collider is there to hit.
-        if req.ground {
-            if let Some(hit) = spatial.cast_ray(
-                pos,
-                Dir3::NEG_Y,
-                500.0,
-                true,
-                &benilla_world::collision::WorldCollision::body_filter(),
-            ) {
-                pos.y -= hit.distance;
-            }
-        }
-        pos.y += req.up;
-        commands
-            .spawn((
-                Transform::from_translation(pos)
-                    .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
-                Visibility::default(),
-            ))
-            .id()
-    });
-    // A missile only trails in motion: fly the root along its model-forward (local −Z).
-    // WOW_FX_TURN keeps the fixture rotating — the attached-model heading-since-birth fan.
-    if req.fly > 0.0 || req.turn != 0.0 {
-        if let Ok(mut t) = transforms.get_mut(root) {
-            let fwd = t.rotation * -Vec3::Z;
-            t.translation += fwd * req.fly * time.delta_secs();
-            if req.turn != 0.0 {
-                t.rotation =
-                    Quat::from_rotation_y((req.turn * time.delta_secs()).to_radians()) * t.rotation;
-            }
-        }
-    }
-    // The one-pass reap (the game's completion callback, `fx_attach`): a discrete kit
-    // instance dies at exactly one pass of sequence 0 and its emitters DRAIN — the fixture
-    // mirrors it so a capture past the span shows the truth. `WOW_FX_HOLD=1` previews a
-    // persistent hold instead (reaped by its spell edge in game, so no clock here).
-    // The one-pass reap is an effect-instance rule; a unit — or a placed GameObject — stands there.
-    if !req.hold && !state.expired && req.display.is_none() && req.go.is_none() {
-        if let Some(at) = state.attached_at {
-            let span = fx
-                .models
-                .get(&req.model_path)
-                .and_then(|dm| dm.first_seq_span)
-                .unwrap_or(FALLBACK_SPAN);
-            if time.elapsed_secs() >= at + span {
-                commands.entity(root).despawn();
-                state.expired = true;
-            }
-        }
-    }
-    if state.attached_at.is_none() {
-        // The unit and GameObject lanes have no attach step — the entity pipeline builds the model
-        // on its own. Their "age" is therefore seconds since the entity appeared, which is what the
-        // animation phase is measured in.
-        if req.display.is_some() || req.go.is_some() {
-            state.attached_at = Some(time.elapsed_secs());
-            return;
-        }
-        fx.models
-            .entry(req.model_path.clone())
-            .or_insert_with(|| DisplayModel {
-                handle: ModelHandle::M2(asset_server.load(m2_url(&req.model_path))),
-                ..super::empty_shell()
-            });
-        if attach_effect_visuals(
-            &mut commands,
-            root,
-            &fx.models[&req.model_path],
-            time.elapsed_secs(),
-            true, // the fixture plants at a world point — ground quads decal onto the terrain
-            // The fixture previews kit effects, which are attached models — but it hangs on
-            // nothing (there is no host model in a preview), so its pool keeps the drain.
-            EffectHost {
-                attached: true,
-                parent: None,
-            },
-            // `WOW_FX_HOLD=1` previews a PERSISTENT instance, so it must show the persistent
-            // lifecycle — birth then `Hold` — or the instrument would report a freeze the game
-            // does not have. Without it the fixture previews a one-shot, which runs its birth once
-            // and is reaped by the fixture's own span clock below.
-            Some(if req.hold {
-                FxStage::State
-            } else {
-                FxStage::OneShot
-            }),
-            &mut wow_materials,
-            &mut tint_reg,
-            &ibps,
-            &mut palettes,
-            None, // the fixture previews a kit effect on its model's own `Stand`
-        ) {
-            state.attached_at = Some(time.elapsed_secs());
-        }
-    }
-}
-
 /// Where an effect-model instance sits in the client's **model graph** — the two facts every
 /// caller of [`attach_effect_visuals`] states, together, because they are one fact seen from two
 /// sides and a lane that answered only the first is what left a weapon's enchant glow with no
 /// alpha source and no owner (decision 0833).
 #[derive(Clone, Copy, Default)]
-pub(super) struct EffectHost {
+pub(crate) struct EffectHost {
     /// Is this an **attached** model in the client's sense (`[model+0x17c] ≠ 0`)? It sets the
     /// emitters' attach frame `A`: a kit effect on a unit and the `fxview` fixture are attached
     /// (the cloud fans with the host's motion), a missile is not — its trail stays world-frozen
@@ -404,7 +188,7 @@ pub(super) struct EffectHost {
 /// advance — a missile (the separate `CMissile` TU), an item glow, the `fxview` preview — which
 /// keep the pinned single-clip arm they have always had.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn attach_effect_visuals(
+pub(crate) fn attach_effect_visuals(
     commands: &mut Commands,
     root: Entity,
     dm: &DisplayModel,

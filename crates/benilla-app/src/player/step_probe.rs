@@ -96,6 +96,17 @@ pub(super) fn watch(
     dt: f32,
     now: f32,
 ) {
+    // **Nobody is reading this in a player build** (decision 1179). Unlike its neighbour
+    // `move_trace`, which gates on `trace::enabled()` in its first line, this ran unconditionally:
+    // every blocked walk frame — routine play, walking into a wall — paid a body shape-cast, eight
+    // down-rays and seven full re-runs of `step_up`, up to 5×/s, to fill a `static` whose only
+    // reader is the debug panel. 1174 filed this file as residue, "weight, not behaviour"; that was
+    // wrong, and this is the correction. (Narrowing it further in a DEV build — to "the panel is
+    // open or the trace is on" — is a live question the panel's readout has an opinion about, and
+    // is deliberately not done here.)
+    if !crate::run_mode::dev_affordances() {
+        return;
+    }
     let speed = horiz_vel.length();
     let wanted = speed * dt;
     // Below a millimetre of intent there is no "blocked" to speak of — standing still, or a frame

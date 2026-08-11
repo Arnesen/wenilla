@@ -174,7 +174,7 @@ pub fn init_effect_pipeline(mut commands: Commands, asset_server: Res<AssetServe
     commands.insert_resource(EffectPipeline {
         view_layout,
         image_layout,
-        shader: asset_server.load("shaders/wow_effect.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/wow_effect.wgsl"),
     });
 }
 

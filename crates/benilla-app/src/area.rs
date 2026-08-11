@@ -387,11 +387,7 @@ mod tests {
     /// run through the same WmoAreaCatalog the live feed reads. Skips without client data.
     #[test]
     fn indoor_naming_matches_the_byte_law_on_real_data() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present");
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("chain");
         let cat = benilla_formats::load_wmo_area_catalog(&mut chain).expect("WMOAreaTable");
 

@@ -66,25 +66,16 @@ pub fn load_loading_screens(chain: &mut Chain) -> Result<LoadingScreenCatalog> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
     use crate::load_map_catalog;
-
-    fn data_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
 
     /// Golden test of the full Map.dbc→LoadingScreens.dbc→BLP FK chain against the real client.
     /// Verified pairs (decoded 2026-06-02): mapId 0 (Azeroth) → 4 → EasternKingdom art; mapId 1
     /// (Kalimdor) → 3 → Kalimdor art. Skips when the client isn't present.
     #[test]
     fn resolves_open_world_loading_art() {
-        let data = data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: no WoW client at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let maps = load_map_catalog(&mut chain).expect("Map.dbc");
         let screens = load_loading_screens(&mut chain).expect("LoadingScreens.dbc");

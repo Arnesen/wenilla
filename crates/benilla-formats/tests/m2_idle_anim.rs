@@ -5,13 +5,7 @@
 //! the whole animation crawl. We now select keys by absolute timestamp within each sequence's band, so
 //! every keyframe of every sequence must land inside `[0, duration]`. Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animations, ModelAnimation};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// A spread of vanilla creatures: simple (rabbit/chicken) through rigged humanoid-ish (kobold/murloc),
 /// covering the ones that animated *and* the ones that froze before the fix.
@@ -28,11 +22,7 @@ const CREATURES: &[&str] = &[
 
 #[test]
 fn creature_animation_keyframes_stay_within_their_sequence() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
 
     let mut checked = 0;

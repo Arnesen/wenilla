@@ -1,6 +1,7 @@
 //! GPU materials for the celestial layer — the alpha-blended **disc** material (with the horizon clip +
 //! per-fragment alpha ramp) and the gamma-correct **star** material. Both are [`ExtendedMaterial`]s over
-//! `StandardMaterial`; the fragment shaders live in `assets/shaders/{celestial,star}.wgsl`.
+//! `StandardMaterial`; the fragment shaders live in `src/shaders/{celestial,star}.wgsl`,
+//! compiled in and served as `embedded://benilla_world/shaders/…` (decision 1175).
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
@@ -48,7 +49,7 @@ pub struct CelestialExt {
 
 impl MaterialExtension for CelestialExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/celestial.wgsl".into()
+        "embedded://benilla_world/shaders/celestial.wgsl".into()
     }
 }
 
@@ -71,6 +72,6 @@ pub struct StarExt {}
 
 impl MaterialExtension for StarExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/star.wgsl".into()
+        "embedded://benilla_world/shaders/star.wgsl".into()
     }
 }

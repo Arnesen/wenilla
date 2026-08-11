@@ -249,11 +249,7 @@ mod tests {
     /// load guarantees (sorted, t0 = 0, period = last frame). Skips without client data.
     #[test]
     fn real_transport_animation_layout_sanity() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.exists() {
-            eprintln!("skipping: no client data at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = Chain::open(&data).expect("open patch chain");
         let paths = load_elevator_paths(&mut chain).expect("load TransportAnimation.dbc");
         // The two Thunder Bluff Mesa Elevator cars (gameobject_template 4170/4171) and the

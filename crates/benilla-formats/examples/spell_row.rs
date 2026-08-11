@@ -3,7 +3,7 @@
 //! about which targeting seam a spell arms can be checked against the real shipped Spell.dbc
 //! instead of reasoned about.
 fn main() -> anyhow::Result<()> {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let catalog = benilla_formats::load_spell_catalog(&mut chain)?;
     for arg in std::env::args().skip(1) {

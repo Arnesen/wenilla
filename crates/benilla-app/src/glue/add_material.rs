@@ -24,7 +24,7 @@ pub(crate) struct AddUiMaterial {
 
 impl UiMaterial for AddUiMaterial {
     fn fragment_shader() -> ShaderRef {
-        "game://shaders/ui_add.wgsl".into()
+        "embedded://benilla_app/shaders/ui_add.wgsl".into()
     }
 
     fn specialize(descriptor: &mut RenderPipelineDescriptor, _key: UiMaterialKey<Self>) {

@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let arg = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("usage: dump_model_anim <m2 path | substring>"))?;
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
 
     // An exact path dumps in full; anything else is a substring sweep that prints only the models

@@ -436,11 +436,6 @@ mod tests {
         assert_eq!(dst.mips[0], before, "transparent texel is a no-op");
     }
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// End-to-end regression on the **real** build-5875 files: compositing a Human-male body must yield
     /// a 256² mip pyramid whose head (g8/g9) + pelvis (g5) tiles are overlaid from the base, while a
     /// control tile that carries no naked-body overlay (g3) is untouched. Guards the section→tile map +
@@ -448,11 +443,7 @@ mod tests {
     /// these diffs). Skips when the client data isn't present.
     #[test]
     fn composite_body_overlays_land_on_real_human_male() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cs = CharSections::load(&mut chain).expect("load CharSections");
         let base =
@@ -589,11 +580,7 @@ mod tests {
     /// priority table puts the boot layer on top, so g6 must differ from the pants-only composite).
     #[test]
     fn composite_body_equipment_layers_land_on_real_human_male() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cs = CharSections::load(&mut chain).expect("load CharSections");
         let items = crate::load_item_display_catalog(&mut chain).expect("load ItemDisplayInfo");

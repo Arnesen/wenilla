@@ -431,11 +431,7 @@ mod tests {
     /// data (the `taxi_nodes.rs`/`taxi_path.rs` test style).
     #[test]
     fn real_taxi_projection_matches_geography() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let nodes = load_taxi_nodes(&mut chain).expect("load TaxiNodes");
         let continents = load_world_map_continent_catalog(&mut chain).expect("load WMC");
@@ -491,11 +487,7 @@ mod tests {
     /// data.
     #[test]
     fn build_nodes_classifies_a_real_known_hop() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let cat = TaxiCatalogs {
             nodes: load_taxi_nodes(&mut chain).expect("load TaxiNodes"),

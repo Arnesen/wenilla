@@ -609,11 +609,7 @@ mod tests {
     /// own citation). Skips without client data.
     #[test]
     fn real_skill_line_catalog_resolves_known_spells() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load SkillLine/SkillLineAbility");
         assert!(
@@ -664,11 +660,7 @@ mod tests {
     /// client data.
     #[test]
     fn real_spell_tab_collapses_general_by_race_and_class() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
         const HUMAN: u8 = 1;
@@ -718,11 +710,7 @@ mod tests {
     /// fails loudly. Skips without client data.
     #[test]
     fn real_skill_line_ability_reads_requirement_and_trivial_ranks() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
 
@@ -764,11 +752,7 @@ mod tests {
     /// data.
     #[test]
     fn real_skill_categories_name_and_order_the_pane_groups() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
 
@@ -799,11 +783,7 @@ mod tests {
     /// data split (a human warrior, race 1 / class 1). Skips without client data.
     #[test]
     fn real_abandonable_split_professions_yes_weapons_no() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
 
@@ -829,11 +809,7 @@ mod tests {
     /// profession keeps its real rank. Skips without client data.
     #[test]
     fn real_mono_value_split_class_lines_yes_weapons_no() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
 
@@ -859,11 +835,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn real_hidden_lines_are_the_ones_the_reference_client_never_lists() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
         let row = |line: u32| cat.race_class(line, 4, 3).expect("an admitting row");
@@ -901,11 +873,7 @@ mod tests {
     /// rank-normalization source (decision 0883). Skips without client data.
     #[test]
     fn real_rank_chains_resolve_the_highest_known_rank() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
 

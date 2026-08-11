@@ -22,11 +22,11 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ActionSlot, ScriptValue, UiScript, UnitState};
 
-use crate::debug_panel::EguiPointerOver;
 use crate::ui_unit::UnitFeed;
 use benilla_assets::LockRecover;
 use benilla_world::schedule::WorldStage;
 
+mod content;
 mod extract;
 mod input;
 mod manifest;
@@ -39,12 +39,65 @@ pub(crate) use manifest::{load_font_registry, load_ingame_ui};
 /// Is the pointer over *any* UI this frame — the egui dev overlay OR a mouse-enabled player-UI
 /// frame? The single source of truth for "the mouse is talking to the UI, not the world",
 /// combined by [`arbitrate_pointer_over_ui`] from both contributors (dev overlay =
-/// [`crate::debug_panel::EguiPointerOver`]; player UI = [`PlayerUiHover`]). Gameplay reads it so
+/// [`EguiPointerOver`]; player UI = [`PlayerUiHover`]). Gameplay reads it so
 /// a drag doesn't start mouse-look; the inspector reads it so a pick doesn't fire behind an
 /// overlaid frame. Owned HERE, not by the dev plugin (decision 0026): gameplay's read must
 /// survive a build without the dev overlays, so the combiner treats the egui half as optional.
 #[derive(Resource, Default)]
 pub(crate) struct PointerOverUi(pub(crate) bool);
+
+/// The egui dev overlay's half of the pointer arbitration, written each egui pass by the debug
+/// panel's `track_pointer_over_ui`. **Defined here, with the arbiter that reads it** (decision
+/// 1174 finishing 0026): the type has to exist in a build with no dev overlays compiled in, and
+/// the arbiter takes it as `Option<Res<…>>` so its absence simply means "nothing is hovering the
+/// dev UI" — which is the player-faithful answer. The writer lives in `debug_panel`; a dev
+/// module writing an always-present fact is the allowed direction.
+#[derive(Resource, Default)]
+pub(crate) struct EguiPointerOver(pub(crate) bool);
+
+/// Whether mouseover **world picking** is armed — the dev-chord `I` inspector's mode, toggled by
+/// `debug_panel::inspect`.
+///
+/// The second of the two resources 0026 named as needing "a player-safe home", and here for the
+/// same reason as [`EguiPointerOver`]: `player::control` and `target::click` read it every frame
+/// to decide whether a left-click is the inspector's or the game's, and those reads must compile
+/// and behave in a build with no inspector. The [`Default`] — **disarmed** — *is* the player
+/// behaviour, so a player build's readers take the ordinary branch with nothing to switch them.
+#[derive(Resource, Default)]
+pub(crate) struct InspectMode {
+    pub(crate) enabled: bool,
+}
+
+/// One frame's UI-pass phase split, in μs — written by [`extract::drive_script`] under the same
+/// marks the `[ui-cost]` line prints. **Owned by the producer** (decision 1174): the split is a
+/// fact this pass publishes about itself, so it must exist whether or not the recorder that reads
+/// it (`hover_log`) is compiled in. Its consumers are instruments; its writer is not.
+#[derive(Resource, Default, Clone)]
+pub(crate) struct UiFrameCost {
+    /// How many FontStrings the layout asked the font engine to shape this frame, and the first
+    /// few by name — a steady hover that keeps asking is the churn the recorder exists to catch.
+    pub(crate) measured: usize,
+    pub(crate) measured_texts: Vec<String>,
+    pub(crate) tick: u128,
+    pub(crate) resolve: u128,
+    pub(crate) measure: u128,
+    pub(crate) extract: u128,
+    pub(crate) convert: u128,
+    pub(crate) diff: u128,
+    pub(crate) quads: usize,
+    pub(crate) solves: u64,
+    pub(crate) skipped: bool,
+}
+
+/// Does anything want [`UiFrameCost`] filled in this run? Measuring the split costs a clock read
+/// per phase plus the churn strings, so the pass only pays when asked.
+///
+/// `WOW_UI_COST=1` (this module's own `[ui-cost]` line) arms it inline; the hover recorder arms it
+/// by setting this — the direction that keeps the pass free of the instrument's name, and the
+/// reason the flag is a resource rather than an env read here (decision 1174). Default `false` is
+/// the player answer.
+#[derive(Resource, Default)]
+pub(crate) struct UiCostWanted(pub(crate) bool);
 
 /// The frame the cursor is currently over (a mouse-enabled, visible player-UI frame), or `None`.
 /// Written by [`feed_ui_input`], read by the pointer arbiter below so world-pick
@@ -175,8 +228,11 @@ impl Plugin for UiScriptPlugin {
             // The UI pass publishes its per-frame phase split here every frame the cost meter or
             // the hover recorder is armed; the producer owns the resource so any minimal app that
             // runs `drive_script` (the extract tests) has it.
-            .init_resource::<crate::hover_log::UiFrameCost>()
+            .init_resource::<UiFrameCost>()
+            .init_resource::<UiCostWanted>()
             .init_resource::<PointerOverUi>()
+            .init_resource::<EguiPointerOver>()
+            .init_resource::<InspectMode>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
@@ -238,7 +294,7 @@ impl Plugin for UiScriptPlugin {
 /// Should this CAPTURE include the player UI (+ the synthetic unit snapshot)? The visual harness's
 /// baselines must stay UI-free (they regression-test the WORLD render), so captures skip the UI
 /// unless `WOW_CAPTURE_UI=1` opts in. Normal runs always load the UI and never take synthetic data.
-fn capture_ui_active(capture: Option<Res<crate::capture::CaptureMode>>) -> bool {
+fn capture_ui_active(capture: Option<Res<crate::run_mode::CaptureMode>>) -> bool {
     capture.is_some() && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
 }
 
@@ -281,7 +337,7 @@ fn setup_script(world: &mut World) {
 /// Does this run want the player UI at all? Captures stay pristine — their baselines regression-test
 /// the WORLD render — unless `WOW_CAPTURE_UI=1` opts the UI in.
 fn ui_wanted(world: &World) -> bool {
-    !world.contains_resource::<crate::capture::CaptureMode>()
+    !world.contains_resource::<crate::run_mode::CaptureMode>()
         || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
 }
 

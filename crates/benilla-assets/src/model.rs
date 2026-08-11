@@ -932,11 +932,7 @@ mod tests {
     /// palette. Skips when the client isn't installed (the repo ships no assets).
     #[test]
     fn a_welded_billboard_bone_still_reaches_the_palette_with_its_arm() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let path = "Item\\ObjectComponents\\Shoulder\\LShoulder_Plate_PVPAlliance_A_01.m2";
         let bytes = chain.read_file(path).expect("read the pauldron");
@@ -976,11 +972,7 @@ mod tests {
     /// seat whose ancestors don't rotate.
     #[test]
     fn the_riding_horse_seat_bone_carries_the_root_basis_arm() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Creature\\RidingHorse\\RidingHorse.m2")

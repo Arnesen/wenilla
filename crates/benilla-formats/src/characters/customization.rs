@@ -560,11 +560,6 @@ mod tests {
     /// facial-hair count comes from CharacterFacialHairStyles, so the lib never references it).
     const SECTION_FACIAL_HAIR: u8 = 2;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// vmangos's `Player::ValidateAppearance`, transcribed verbatim (`Player.cpp:326`): the exact
     /// predicate the server runs on `CMSG_CHAR_CREATE`. `GetCharSectionEntry` is an available-row
     /// lookup (`avail` already excludes the `0x1`-flagged rows), and face is keyed by *skinColor*.
@@ -606,11 +601,7 @@ mod tests {
     /// a (race, sex)'s ranges passes the transcribed `ValidateAppearance`. Skips without client data.
     #[test]
     fn char_create_catalog_matches_the_5875_dbcs() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = CharCreateCatalog::load(&mut chain).expect("load char-create catalog");
         let creatures = crate::load_creature_catalog(&mut chain).expect("load creatures");

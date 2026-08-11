@@ -1,5 +1,5 @@
-//! Binding persistence (decision 0997): `benilla/bindings/account.txt` and
-//! `benilla/bindings/<Realm>-<Char>.txt`, through [`crate::local_state`] like every resident.
+//! Binding persistence (decision 0997): `benilla-config/bindings/account.txt` and
+//! `benilla-config/bindings/<Realm>-<Char>.txt`, through [`crate::local_state`] like every resident.
 //!
 //! Format is **command-centric diff-vs-defaults** — one line per command whose keys moved:
 //!

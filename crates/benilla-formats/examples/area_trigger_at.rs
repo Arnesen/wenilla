@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     if args.is_empty() {
         anyhow::bail!("usage: area_trigger_at <id|map:N>...");
     }
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let cat = benilla_formats::load_area_trigger_catalog(&mut chain)?;
     println!("AreaTrigger.dbc — {} rows\n", cat.len());

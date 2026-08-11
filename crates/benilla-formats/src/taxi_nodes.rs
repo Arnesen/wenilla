@@ -129,11 +129,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn real_taxi_nodes_layout_sanity() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_taxi_nodes(&mut chain).expect("load TaxiNodes");
         assert_eq!(cat.len(), 85, "1.12 ships 85 taxi nodes");

@@ -219,7 +219,7 @@ fn drive_policy(
             // so an unattended run from a pool slot must not authenticate as the director's `one`
             // or a neighbouring slot's probe. Only the *automated* path is gated — a typed login
             // is the director's own and is never second-guessed.
-            match crate::preflight::account_guard(&user) {
+            match crate::run_mode::account_guard(&user) {
                 Ok(()) => {
                     info!("login: env fast path — auto-submitting as {user}");
                     intent.creds = Some((user, pass));
@@ -699,47 +699,43 @@ fn drive_dialog(
 
 // ── The saved account name (decision 0539 §4) ────────────────────────────────────────────────────
 
-/// The benilla-owned config base: `$BENILLA_HOME`, else `~/.benilla`. The runtime data dir is the
-/// reference install and is never written. (Also `/shot`'s home for `shots.txt` — decision 0600.)
-pub(crate) fn config_base() -> Option<std::path::PathBuf> {
-    if let Some(base) = std::env::var_os("BENILLA_HOME") {
-        return Some(std::path::PathBuf::from(base));
-    }
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".benilla"))
-}
-
-/// Read the saved account name from `base` (missing file/dir = empty).
-fn load_saved_account_from(base: &std::path::Path) -> String {
-    std::fs::read_to_string(base.join("account"))
+/// Read the saved account name from `base` (missing file/dir = empty). Takes the *file* rather
+/// than resolving one, so the round-trip is testable from a tempdir.
+fn load_saved_account_from(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
-/// Write (or, for an empty name, remove) the saved account name under `base`.
-fn save_account_to(base: &std::path::Path, name: &str) {
-    let path = base.join("account");
+/// Write (or, for an empty name, remove) the saved account name at `path`.
+fn save_account_to(path: &std::path::Path, name: &str) {
     if name.is_empty() {
         let _ = std::fs::remove_file(path);
         return;
     }
-    if std::fs::create_dir_all(base).is_ok() {
-        if let Err(e) = std::fs::write(&path, name) {
-            warn!("login: saving account name failed: {e}");
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
         }
+    }
+    if let Err(e) = std::fs::write(path, name) {
+        warn!("login: saving account name failed: {e}");
     }
 }
 
-/// The ref's `GetSavedAccountName`.
+/// The ref's `GetSavedAccountName`. The path is [`crate::local_state`]'s — this module computed its
+/// own until decision 1181, which is how the account name ended up in a different folder from every
+/// other setting, and how a capture came to read one off the host machine.
 fn load_saved_account() -> String {
-    config_base()
-        .map(|b| load_saved_account_from(&b))
+    crate::local_state::saved_account_path()
+        .map(|p| load_saved_account_from(&p))
         .unwrap_or_default()
 }
 
 /// The ref's `SetSavedAccountName` (empty clears).
 fn save_account(name: &str) {
-    if let Some(base) = config_base() {
-        save_account_to(&base, name);
+    if let Some(path) = crate::local_state::saved_account_path() {
+        save_account_to(&path, name);
     }
 }
 
@@ -808,18 +804,23 @@ mod tests {
     /// Save → load → clear round-trips through the dot-file (the ref's Get/SetSavedAccountName).
     #[test]
     fn saved_account_round_trips() {
-        let base = std::env::temp_dir().join(format!(
+        // A FILE, not a folder: since decision 1181 these two take the resolved path
+        // (`local_state::saved_account_path`) rather than a base to join `account` onto.
+        let dir = std::env::temp_dir().join(format!(
             "benilla-login-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(load_saved_account_from(&base), "");
-        save_account_to(&base, "ONE");
-        assert_eq!(load_saved_account_from(&base), "ONE");
-        save_account_to(&base, "");
-        assert_eq!(load_saved_account_from(&base), "");
-        let _ = std::fs::remove_dir_all(&base);
+        let path = dir.join("account");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(load_saved_account_from(&path), "");
+        // The write creates the folder on its way, exactly as a first run must.
+        save_account_to(&path, "ONE");
+        assert_eq!(load_saved_account_from(&path), "ONE");
+        save_account_to(&path, "");
+        assert_eq!(load_saved_account_from(&path), "");
+        assert!(!path.exists(), "clearing the name removes the file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The clock system toggles the FOCUSED box on the shared 0.5 s period and leaves the other

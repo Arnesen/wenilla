@@ -194,17 +194,11 @@ const _: () = {
 #[test]
 fn every_sky_shader_forces_the_far_depth() {
     for (name, src) in [
-        ("sky.wgsl", include_str!("../assets/shaders/sky.wgsl")),
-        ("star.wgsl", include_str!("../assets/shaders/star.wgsl")),
-        ("cloud.wgsl", include_str!("../assets/shaders/cloud.wgsl")),
-        (
-            "celestial.wgsl",
-            include_str!("../assets/shaders/celestial.wgsl"),
-        ),
-        (
-            "wmo_skybox.wgsl",
-            include_str!("../assets/shaders/wmo_skybox.wgsl"),
-        ),
+        ("sky.wgsl", include_str!("shaders/sky.wgsl")),
+        ("star.wgsl", include_str!("shaders/star.wgsl")),
+        ("cloud.wgsl", include_str!("shaders/cloud.wgsl")),
+        ("celestial.wgsl", include_str!("shaders/celestial.wgsl")),
+        ("wmo_skybox.wgsl", include_str!("shaders/wmo_skybox.wgsl")),
     ] {
         assert!(
             src.contains("const SKY_FAR_DEPTH: f32 = 0.0;"),

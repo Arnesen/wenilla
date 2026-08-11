@@ -46,11 +46,7 @@ fn wmo_group_census() {
         .expect("the census needs a placement");
     // The MLIQ leg the harness's nav skips: re-read each group file for its liquid grid, so the
     // census can say "this group owns the lava" (local-space z range of its wet vertices).
-    let data = std::env::var("WOW_DATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-        });
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let chain = benilla_formats::open_chain(&data).expect("open MPQ chain (set WOW_DATA)");
     let stem = site.wmo.strip_suffix(".wmo").unwrap_or(site.wmo);
     let liquid: Vec<Option<(f32, f32)>> = (0..subject.model.group_nav.len())

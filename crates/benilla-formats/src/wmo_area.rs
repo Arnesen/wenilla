@@ -194,11 +194,7 @@ mod tests {
     /// 478 → CAVE reverb 75 + ambience 50). Skips without client data.
     #[test]
     fn real_wmo_area_resolves_abbey_and_chapel() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_wmo_area_catalog(&mut chain).expect("load WMOAreaTable");
         // 21115 rows, 21105 distinct (wmo, nameset, group) keys — 10 exact-duplicate keys are

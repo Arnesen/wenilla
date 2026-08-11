@@ -3,21 +3,11 @@
 //! items, so a schema drift or column slip fails loudly. The model/geoset columns have their own
 //! synthetic tests in the adapter. Skips (passes) without `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_item_display_catalog, open_chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn item_icons_resolve_known_display_ids() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let catalog = load_item_display_catalog(&mut chain).expect("load item display catalog");
     assert!(

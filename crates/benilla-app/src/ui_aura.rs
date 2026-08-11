@@ -878,11 +878,7 @@ mod tests {
     /// frame" report), while Battle Shout is a real buff that stays. Skips without client data.
     #[test]
     fn the_aura_display_filter_hides_a_real_battle_stance_but_keeps_battle_shout() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
 
@@ -908,11 +904,7 @@ mod tests {
     /// aura wins the global. Skips without client data.
     #[test]
     fn a_real_tracking_aura_is_diverted_from_the_bar_to_the_tracking_state() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
 

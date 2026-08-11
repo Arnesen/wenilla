@@ -261,6 +261,20 @@ pub(crate) struct CameraControl {
 }
 
 impl CameraControl {
+    /// Park the orbit distance at `d` — **both** the live value and the wheel target.
+    ///
+    /// Both, or the wheel glide eases `distance` back toward the old target every frame and a
+    /// parked shot drifts through the whole zoom while the burst is running.
+    ///
+    /// The scripted camera park (`capture::probe_cam`, decision 0653) is the only caller. It gets a
+    /// named method rather than `pub(crate)` fields because an instrument reaching into gameplay is
+    /// the allowed direction but not a licence to open gameplay's internals to the whole crate
+    /// (decision 1174) — this is the entire surface the probe needs.
+    pub(crate) fn park_distance(&mut self, d: f32) {
+        self.distance = d;
+        self.target_distance = d;
+    }
+
     /// True while a mouse-look drag is active (right- or left-button). The cursor is hidden then.
     pub(crate) fn is_looking(&self) -> bool {
         self.look.is_some()
@@ -292,10 +306,22 @@ impl LookButton {
 }
 
 #[derive(Component)]
-pub(super) struct FlyCam {
+// `pub(crate)` on the TYPE only — the scripted camera park has to name it in a query. Its fields
+// stay `pub(super)`; [`FlyCam::park`] is the whole surface an instrument gets (decision 1174).
+pub(crate) struct FlyCam {
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) speed: f32,
+}
+
+impl FlyCam {
+    /// Point the rig at an absolute world yaw/pitch — the scripted camera park's one lever
+    /// (`capture::probe_cam`, decision 0653). From here on this is the identical path a mouse-drag
+    /// takes.
+    pub(crate) fn park(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
 }
 
 /// The per-model camera-pivot height in **model-local yards, pre-scale** — `attach17.z + 0.0972` (M2

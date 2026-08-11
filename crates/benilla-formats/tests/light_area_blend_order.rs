@@ -19,13 +19,7 @@
 //! Tirisfal→Silverpine border snapped green water to near-black brown in a single step (the
 //! director's report) while ambient, sun and fog crossed it without a flicker.
 
-use std::path::PathBuf;
-
 use benilla_formats::{Chain, LightCatalog, Submersion};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// Eastern Kingdoms.
 const MAP_EK: u32 = 0;
@@ -37,11 +31,7 @@ fn rgb(c: [f32; 3]) -> [i32; 3] {
 }
 
 fn catalog() -> Option<LightCatalog> {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return None;
-    }
+    let data = benilla_formats::wow_data_or_skip!(None);
     let mut chain = Chain::open(&data).expect("open vanilla patch chain");
     Some(LightCatalog::load(&mut chain).expect("load Light/LightParams/*Band"))
 }

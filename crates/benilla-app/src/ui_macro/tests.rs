@@ -1,4 +1,4 @@
-//! The app half of the macro system (decision 0983): persistence under `benilla/macros/`, the
+//! The app half of the macro system (decision 0983): persistence under `benilla-config/macros/`, the
 //! runner's route into the chat drain, and the seed/dirty contract the plugin's systems rely on.
 //!
 //! The file FORMAT has its own tests in [`super::store`] (including the director's real 1.12
@@ -18,7 +18,7 @@ fn macro_view(name: &str, body: &str) -> MacroView {
     }
 }
 
-/// A save writes the reference's own format under `benilla/macros/`, and a load brings the same
+/// A save writes the reference's own format under `benilla-config/macros/`, and a load brings the same
 /// macros back — the whole persistence loop over the real `local_state` law.
 #[test]
 fn a_saved_macro_table_round_trips_through_benilla_macros() {
@@ -243,11 +243,7 @@ fn every_macro_chooser_icon_resolves_in_the_client_archives() {
     /// different set: it included five names with no file and missed art the archive has.
     const CHOOSER_ICONS_5875: usize = 517;
 
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: no client data at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let icons = benilla_formats::load_macro_icons(&mut chain).expect("load chooser catalog");
     assert_eq!(

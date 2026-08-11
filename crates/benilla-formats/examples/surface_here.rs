@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     // the small-character class. Both reach it as ordinary data, never a code default.
     let class: u32 = args.next().map_or(Ok(7), |c| c.parse())?;
 
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let cat = benilla_formats::load_footstep_catalog(&mut chain)?;
     let tiles = benilla_formats::MapTiles::load(&mut chain, &map)?;

@@ -131,11 +131,7 @@ mod tests {
     /// each) and path 285 (27 nodes, stops at indexes 4 and 20). Skips without client data.
     #[test]
     fn real_taxi_path_node_layout_sanity() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
         assert!(

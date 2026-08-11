@@ -13,7 +13,7 @@
 //! ```
 //!
 //! benilla writes exactly that. Not nostalgia: it means **a player can drop their vanilla
-//! `macros-cache.txt` into `benilla/macros/` and their macros are there** — and it keeps the file
+//! `macros-cache.txt` into `benilla-config/macros/` and their macros are there** — and it keeps the file
 //! hand-editable, which a serialized blob would not be. The icon column is the texture's *basename*
 //! (`Ability_Ambush`); the client prepends `Interface\Icons\` (`0x44ca64`), which is why the stored
 //! token survives an icon list changing under it where a chooser index would silently re-point.

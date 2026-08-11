@@ -32,7 +32,7 @@ use benilla_world::schedule::WorldStage;
 /// Resolving a display id to its [`DisplayModel`] and building its spawn parts once the model asset
 /// loads (materials, skeleton, collider, camera/selection metrics) — the front half of this subsystem,
 /// kept in its own file as it carries the bulk of the per-display cache/build logic.
-mod display;
+pub(crate) mod display;
 use display::{
     build_parts, empty_display, empty_shell, new_creature_display, new_gameobject_display,
     DisplayModel, EntityPart, ModelHandle,
@@ -93,7 +93,7 @@ use missile::{attach_missile_models, move_missiles, spawn_missiles};
 /// M2s spawned as children of the streamed gameobject, so they ride a moving transport.
 mod wmo_props;
 use wmo_props::{resolve_wmo_gameobject_props, spawn_wmo_gameobject_props};
-mod spell_fx;
+pub(crate) mod spell_fx;
 use spell_fx::{attach_spell_fx, resolve_spell_fx};
 
 /// Dest-anchored spell effects (decision 0797): a DynamicObject's persistent area visuals
@@ -347,6 +347,16 @@ pub(crate) struct VisualAttached;
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct EntityVisualsSet;
 
+/// [`update_display_models`]' ordering handle: anything that must **create** a display-cache entry
+/// in time for this frame's build orders before it.
+///
+/// It exists for one caller, the `fxview` fixture's driver — which registers itself against this
+/// from `capture` rather than being listed in the chain above, because a fixture's driver belongs
+/// with its fixture and gameplay may not name the harness (decisions 1173/1174). Same shape as the
+/// `waterfx` fixture's registration against the engine's `WaterFoamSet`.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DisplayBuildSet;
+
 /// Drop every display/material dedup on a cross-map transition (`world_map::MapChange` — see its
 /// doc for why a clear is always safe mid-session). These caches are get-or-insert at every use
 /// site, so a cleared entry rebuilds on the next spawn that wants it; without this, every display
@@ -427,7 +437,11 @@ fn publish_world_units(
 ) {
     for (entity, net, height, current) in &bodies {
         let want = benilla_world::world_unit::WorldUnit {
-            kind: net.kind,
+            // The wire kind is answered HERE and never handed over (1177): the engine asks "does
+            // this body displace water", and translating its own vocabulary into that answer is
+            // the game's job. A live body wades; a GameObject, a dynamic-object spell anchor or
+            // anything else standing in a lake makes no ripple.
+            wades: matches!(net.kind, EntityKind::Unit | EntityKind::Player),
             scale: net.scale,
             // `unwrap_or_default`, NOT zero: `CollisionHeight`'s Default is the client's own
             // ctor value, and its doc says why — at 0.0 "every depth line collapses and the unit
@@ -438,7 +452,7 @@ fn publish_world_units(
         // Only write on a real change: the component is change-detected downstream, and a
         // per-frame rewrite would mark every body dirty for every reader every frame.
         let same = current.is_some_and(|c| {
-            c.kind == want.kind && c.scale == want.scale && c.height == want.height
+            c.wades == want.wades && c.scale == want.scale && c.height == want.height
         });
         if !same {
             commands.entity(entity).insert(want);
@@ -515,10 +529,7 @@ impl Plugin for EntitiesPlugin {
                 // One nested (unordered) element: three independent producers, and the
                 // outer tuple is at `chain()`'s 20-element ceiling.
                 (arm_ground_effects, spawn_ground_bursts, tick_shard_emitters),
-                // The fxview capture fixture (inert outside `WOW_CAPTURE=fxview`): creates
-                // its cache entry before the same-frame build, attaches after it.
-                spell_fx::drive_fx_view,
-                update_display_models,
+                update_display_models.in_set(DisplayBuildSet),
                 // The char-create preview (decision 0423): assemble the selected look's parts from
                 // the freshly-built display model, for the create booth to bake. After
                 // `update_display_models` (its want-list built the body) — server-less, at char select.
@@ -1063,6 +1074,7 @@ mod world_unit_tests {
     fn every_wire_body_becomes_a_world_unit_and_the_viewer_is_marked() {
         let mut app = App::new();
         let plain = app.world_mut().spawn(net(EntityKind::Unit, 1.25)).id();
+        let chest = app.world_mut().spawn(net(EntityKind::GameObject, 1.0)).id();
         let me = app
             .world_mut()
             .spawn((
@@ -1080,7 +1092,7 @@ mod world_unit_tests {
         let unit = w
             .get::<benilla_world::world_unit::WorldUnit>(plain)
             .expect("a wire body is a world unit");
-        assert_eq!(unit.kind, EntityKind::Unit);
+        assert!(unit.wades, "a creature displaces water");
         assert_eq!(unit.scale, 1.25);
         assert_eq!(
             unit.height,
@@ -1089,9 +1101,19 @@ mod world_unit_tests {
              depth line collapses and the body swims on dry land (see the type's own doc)"
         );
 
+        // The wire→engine translation 1177 moved here: `benilla-world` no longer knows what a
+        // `TYPEID` is, so this is the only place the creature-vs-GameObject question is answered.
+        assert!(
+            !w.get::<benilla_world::world_unit::WorldUnit>(chest)
+                .expect("a GameObject is still a body the world can shade and room-claim")
+                .wades,
+            "…but a chest standing in a lake makes no ripple"
+        );
+
         let mine = w
             .get::<benilla_world::world_unit::WorldUnit>(me)
             .expect("so is the avatar's");
+        assert!(mine.wades, "and so does a player");
         assert_eq!(mine.height, 2.5, "the collision cylinder travels with it");
         assert!(
             w.get::<benilla_world::world_unit::ViewerUnit>(me).is_some(),

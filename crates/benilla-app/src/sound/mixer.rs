@@ -684,15 +684,7 @@ mod tests {
     /// without `WoW/Data` stays green.
     #[test]
     fn real_wav_and_mp3_decode() {
-        let data = std::path::PathBuf::from(
-            std::env::var("WOW_DATA").unwrap_or_else(|_| "WoW/Data".into()),
-        );
-        // The test runs with CWD = crates/benilla; the install lives at the workspace root.
-        let data = if data.is_relative() {
-            std::path::Path::new("../..").join(data)
-        } else {
-            data
-        };
+        let data = benilla_formats::wow_data_or_skip!();
         let Ok(chain) = benilla_formats::open_chain(&data) else {
             eprintln!("skipping: no client data at {}", data.display());
             return;

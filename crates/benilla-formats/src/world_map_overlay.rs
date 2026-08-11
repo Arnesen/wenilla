@@ -145,11 +145,7 @@ mod tests {
     /// client data.
     #[test]
     fn real_world_map_overlay_has_nonempty_textures_for_teldrassil() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_world_map_overlay_catalog(&mut chain).expect("load WorldMapOverlay");
         assert_eq!(cat.len(), 526, "all 526 rows load");

@@ -356,6 +356,12 @@ fn dev_map_jump(
     data: Option<Res<WorldMapUiData>>,
     net: Res<crate::net::NetCommands>,
 ) {
+    // A dev affordance living in a gameplay module — it names no dev root, so nothing about it
+    // fails to compile in a player build, and it shipped in 1174's (decision 1179). Alt-click is
+    // free-fly's closest sibling: it moves the player's body across the continent.
+    if !crate::run_mode::dev_affordances() {
+        return;
+    }
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     if !alt || !buttons.just_pressed(MouseButton::Left) {
         return;

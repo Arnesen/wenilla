@@ -1,21 +1,11 @@
 //! Difftest the vanilla M2 ribbon-emitter parser against real trail-carrying models (wow-5875-re
 //! `ribbon-emitter-spec.md` field map). Skips (passes) when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_ribbon_emitters};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn ribbon_records_match_real_bytes() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
 
     // The red wisp — three streamers trailing an animated creature.

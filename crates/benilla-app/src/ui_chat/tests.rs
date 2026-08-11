@@ -480,11 +480,24 @@ fn one_line_reference_bodies_run_in_the_vm() {
     assert_eq!(parse_line("/script"), ParsedChat::Unknown);
 }
 
+/// `/castvis` is one of benilla's own instruments, so 1179 gates the whole dev alias table behind
+/// `run_mode::dev_affordances()` — in a player build the alias is never claimed and the line falls
+/// through to the reference's "unknown command". This test therefore asserts the grammar in a dev
+/// build and the *absence* of the grammar in a player one, rather than assuming the configuration
+/// it happens to run in. (It assumed, until 1180's `player-tests` gate ran it the other way.)
 #[test]
 fn castvis_parses_id_and_phase() {
     use crate::creature_anim::CastEventKind;
     let t = stub_table();
     let parse_line = |line: &str| super::input::parse_line(&t, line);
+    if !crate::run_mode::dev_affordances() {
+        assert_eq!(
+            parse_line("/castvis 133"),
+            ParsedChat::Unknown,
+            "a player build must not claim an instrument's alias"
+        );
+        return;
+    }
     assert_eq!(
         parse_line("/castvis 133"),
         ParsedChat::CastVis {
@@ -539,11 +552,7 @@ fn unknown_slash_command_is_dropped_not_said_aloud() {
 /// Skips without client data.
 #[test]
 fn real_alias_table_resolves_the_shipped_commands() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let s = benilla_ui::script::UiScript::new().expect("VM");
     for file in ["GlobalStrings.lua", "ChatFrame.lua"] {
@@ -698,7 +707,22 @@ fn real_alias_table_resolves_the_shipped_commands() {
     // aliases** across the 34 registered `SlashCmdList` indices (0886 added TARGET's `/target`
     // `/tar` and ASSIST's `/assist` `/a` to 0881's 55; 0890 added FOLLOW's `/f` `/follow` `/fol`;
     // 0983 added CAST's `/cast` `/spell`, MACRO's `/macro` `/m`, and MACROHELP's `/macrohelp`).
-    assert_eq!(table.counts(), (67, 225), "(slash, emote) aliases");
+    //
+    // The third number is the **seam** (decision 1179): benilla's own instrument commands
+    // (`/castvis` `/chattest` `/partytest` `/shot` `/liquid` `/reaction` `/react` — 7 aliases over 6
+    // commands) are registered only when `run_mode::dev_affordances()`, so a player build claims
+    // none of them and `/partytest` falls through to the reference's "unknown command". Asserted
+    // against the predicate rather than a literal, so the row states the rule in both builds.
+    let instruments = if crate::run_mode::dev_affordances() {
+        7
+    } else {
+        0
+    };
+    assert_eq!(
+        table.counts(),
+        (67, 225, instruments),
+        "(slash, emote, instrument) aliases"
+    );
 }
 
 // ── The send-side posture-eligibility gate (`emote_send_eligible`) — the director-verified rows

@@ -427,7 +427,7 @@ mod tests {
     /// exactly once (never I²).
     ///
     /// This exists because the capture harness cannot check it. `visual.sh`-style captures are
-    /// bit-deterministic on static scenes (canal-noon: MAE 0.000) but NOT on the entity/GameObject
+    /// bit-deterministic on static scenes (water-noon: MAE 0.000) but NOT on the entity/GameObject
     /// scenarios this lane owns — measured run-to-run at MAE 5.1 (chest-shade-rear) and 8.8
     /// (creature-sun-rear), a noise floor far above the ~0.24 signal the response change produces
     /// (0799 §2). So the lane's correctness is pinned HERE, deterministically, and the captures are

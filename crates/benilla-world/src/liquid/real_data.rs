@@ -75,10 +75,7 @@ impl LiquidScene {
 
 /// Build the [`LiquidScene`] around a position. Empty (`None`) when the client isn't present.
 fn liquid_scene(map: &str, wow: [f32; 3]) -> Option<LiquidScene> {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        return None;
-    }
+    let data = benilla_formats::wow_data()?;
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let (cx, cy) = benilla_formats::world_to_tile(wow[0], wow[1]);
     let mut scene = LiquidScene {

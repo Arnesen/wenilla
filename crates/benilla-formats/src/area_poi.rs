@@ -146,11 +146,7 @@ mod tests {
     /// example resolves its `WorldStateID` + live status description. Skips without client data.
     #[test]
     fn real_area_poi_layout_sanity() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_area_poi_catalog(&mut chain).expect("load AreaPOI");
         assert_eq!(cat.len(), 339, "all 339 rows load");

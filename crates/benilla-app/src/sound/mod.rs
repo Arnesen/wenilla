@@ -298,7 +298,7 @@ fn update_audio_listener(
 /// ([`benilla_world::modkeys::dev_chord`], decision 0585) so it can never collide with a game binding
 /// and stays reachable with the chat bar open.
 fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<SoundConfig>) {
-    if benilla_world::modkeys::dev_chord(&keys, KeyCode::KeyM) {
+    if crate::run_mode::dev_chord(&keys, KeyCode::KeyM) {
         config.muted = !config.muted;
         info!("sound {}", if config.muted { "muted" } else { "unmuted" });
     }

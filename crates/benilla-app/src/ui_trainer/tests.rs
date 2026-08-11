@@ -244,11 +244,7 @@ fn trainer_icon_is_nil_until_the_product_template_lands_and_asks_once() {
 /// serve 2756's own icon. Skips without client data.
 #[test]
 fn trainer_icon_on_real_data_reaches_for_the_crafted_item() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
 
@@ -300,11 +296,7 @@ fn trainer_icon_on_real_data_reaches_for_the_crafted_item() {
 /// tree. Skips without client data.
 #[test]
 fn resolve_hops_the_learn_wrapper_to_the_taught_ability() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
     let skills = benilla_formats::load_skill_line_catalog(&mut chain).expect("load skill lines");
@@ -337,11 +329,7 @@ fn resolve_hops_the_learn_wrapper_to_the_taught_ability() {
 /// the director watches change. Skips without client data.
 #[test]
 fn display_name_is_the_wire_spell_not_the_taught_one() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
     let skills = benilla_formats::load_skill_line_catalog(&mut chain).expect("load skill lines");
@@ -478,11 +466,7 @@ fn ability_req_met_tracks_known_spells_not_the_service_category() {
 /// (Rank 1)", met iff the player knows 78. Skips without client data.
 #[test]
 fn ability_req_shows_the_required_rank_on_real_data() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = benilla_formats::load_spell_catalog(&mut chain).expect("load Spell");
 

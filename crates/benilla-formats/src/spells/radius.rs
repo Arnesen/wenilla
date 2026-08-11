@@ -80,11 +80,7 @@ mod tests {
     /// client data.
     #[test]
     fn real_spell_radii_read_the_probed_rows() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let radii = load_spell_radii(&mut chain).expect("load SpellRadius");
         assert_eq!(radii.get(13).map(|r| r.radius), Some(10.0));

@@ -283,11 +283,7 @@ mod mount_error_tests {
     /// against a typo'd key silently swallowing the red line. Skips without client data.
     #[test]
     fn every_mount_key_resolves_in_the_real_global_strings() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let src = chain
             .read_file("Interface\\FrameXML\\GlobalStrings.lua")
@@ -359,11 +355,7 @@ mod ui_error_tests {
     /// client data.
     #[test]
     fn every_lock_refusal_key_resolves_in_the_real_global_strings() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let src = chain
             .read_file("Interface\\FrameXML\\GlobalStrings.lua")
@@ -511,11 +503,7 @@ mod attack_actor_tests {
     /// one — a veto that shows nothing is indistinguishable from a click that did nothing.
     #[test]
     fn every_attack_error_key_resolves_in_the_real_global_strings() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let src = chain
             .read_file("Interface\\FrameXML\\GlobalStrings.lua")

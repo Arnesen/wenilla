@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let ext = std::env::args()
         .nth(2)
         .map(|e| format!(".{}", e.to_lowercase()));
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let chain = benilla_formats::open_chain(&data)?;
     for e in chain.list()? {
         let lower = e.name.to_lowercase();

@@ -6,8 +6,6 @@
 //! art needs the cross-map message (`world_map`), and the residency sweep needs the art-scope
 //! instrument. Three upward reaches, all of them here, none of them in the data core.
 
-use std::path::PathBuf;
-
 use bevy::prelude::*;
 use bevy::render::renderer::RenderDevice;
 
@@ -57,11 +55,19 @@ fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
     }
 }
 
-/// Open the vanilla patch chain from `$WOW_DATA` (default `WoW/Data`) and insert the shared
-/// [`WorldAssets`] (chain + dedup caches) + [`RenderConfig`]. If the client data can't be opened,
-/// `WorldAssets` is simply absent and downstream startup falls back to an empty free-fly scene.
+/// Open the vanilla patch chain from wherever the install is ([`benilla_formats::wow_data`] —
+/// `$WOW_DATA`, the project folder on a dev build, else beside the binary; decision 1175) and
+/// insert the shared [`WorldAssets`] (chain + dedup caches) + [`RenderConfig`]. If the client data
+/// can't be found or opened, `WorldAssets` is simply absent and downstream startup falls back to
+/// an empty free-fly scene.
 fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
-    let data = PathBuf::from(std::env::var("WOW_DATA").unwrap_or_else(|_| "WoW/Data".into()));
+    let Some(data) = benilla_formats::wow_data() else {
+        warn!(
+            "no WoW install found — looked in {:?}; starting with no world",
+            benilla_formats::candidates()
+        );
+        return;
+    };
     // Default 2 (a 5×5 block, ~1066 yd) so loaded terrain extends a buffer past the ~777 yd far-clip
     // wall — tiles are resident before the wall reveals them, no streaming pop-in. Geometry beyond the
     // wall is clipped/culled anyway. Lower $WOW_TILE_RADIUS to 1 to shrink the working set (less view

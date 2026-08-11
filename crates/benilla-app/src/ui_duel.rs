@@ -109,7 +109,7 @@ impl DuelState {
     }
 
     /// Take the challenger owed a response, if any — the partner probe's accept hook
-    /// ([`crate::capture::ProbePartnerPlugin`], decision 0637). Taking it discharges the popup
+    /// (`WOW_PROBE=partner`, decision 0637). Taking it discharges the popup
     /// debt exactly as the feed's `DUEL_REQUESTED` edge does, so the probe never leaves a dialog
     /// owed to a UI it isn't driving.
     pub(crate) fn take_challenger(&mut self) -> Option<u64> {
@@ -489,11 +489,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn the_duel_spell_resolves_to_7266_on_real_data() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
         let mut hits: Vec<u32> = catalog

@@ -2,21 +2,11 @@
 //! chunk walk *past* zero-size chunks (`MOVV(0)`/`MOVB(0)` sit right before MOLT — a walk that stops
 //! there finds nothing) and the SMOLight field offsets. Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_wmo_lights, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn goldshire_blacksmith_has_three_warm_omni_lights() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let bytes = reader
         .read("World\\wmo\\Azeroth\\Buildings\\GoldshireBlacksmith\\GoldshireBlacksmith.wmo")

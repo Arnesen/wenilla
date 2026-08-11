@@ -6,12 +6,21 @@ license.workspace = true
 description = "The launcher: build.rs stamps the git build id, main() hands it to benilla-app. A shim, so the stamp's every-commit rebuild dirties this package and not the app crate (decision 0993)"
 
 [features]
+# The dev/player seam, forwarded (decisions 0026 + 1173): this shim is the binary a player would
+# run, so `cargo build -p benilla --no-default-features` is the player build — and the gate.
+default = ["dev"]
+dev = ["benilla-app/dev"]
 # Forwarded profiling switches, so `cargo run --features tracy -p benilla` keeps working.
 tracy = ["benilla-app/tracy"]
 trace_chrome = ["benilla-app/trace_chrome"]
 
 [dependencies]
-benilla-app = { path = "../benilla-app" }
+# `default-features = false` is LOAD-BEARING, not tidiness: without it `cargo build -p benilla
+# --no-default-features` still builds the library with ITS defaults (a path dep gets its own),
+# so the player-build gate would compile the full dev tree and pass no matter what. Measured on
+# 1174's first green run — `cargo tree` listed bevy_egui either way. The `dev` feature above is
+# what turns the instruments back on, and it is on by default here.
+benilla-app = { path = "../benilla-app", default-features = false }
 
 [build-dependencies]
 benilla-buildstamp = { path = "../benilla-buildstamp" }

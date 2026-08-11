@@ -1,5 +1,5 @@
 //! The **macros** feed (decision 0983) — the app half of `benilla_ui::script::macros`: the icon
-//! chooser's catalog, persistence under `benilla/macros/`, and `UPDATE_MACROS`.
+//! chooser's catalog, persistence under `benilla-config/macros/`, and `UPDATE_MACROS`.
 //!
 //! Unlike every other window feed in this tree there is **no wire traffic here at all**. 1.12
 //! macros are pure client state — no opcode carries them (vmangos has none), and the reference

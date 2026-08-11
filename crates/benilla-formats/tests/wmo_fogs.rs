@@ -4,21 +4,11 @@
 //! guess read zeros there; the `uniqueID @0x38` / no-liquid `@0x34` neighbours self-validate
 //! the layout). Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_wmo_fogs, wmo_group_header, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn goldshire_inn_fogs_and_group_indices() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let root = reader
         .read("World\\wmo\\Azeroth\\Buildings\\GoldshireInn\\GoldshireInn.wmo")

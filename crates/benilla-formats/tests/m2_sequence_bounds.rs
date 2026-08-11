@@ -8,11 +8,7 @@ use benilla_formats::{open_chain, parse_m2_animations};
 
 #[test]
 fn stand_sequence_bounds_sphere_is_body_scale() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let chain = open_chain(&data).expect("open chain");
 
     // (model, Stand bounds-sphere radius read off the real files). Note the chicken: its sphere

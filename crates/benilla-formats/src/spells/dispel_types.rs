@@ -87,11 +87,7 @@ mod tests {
     /// without client data.
     #[test]
     fn real_dispel_types_name_only_what_the_gate_allows() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let types = load_spell_dispel_types(&mut chain).expect("load SpellDispelType");
         assert_eq!(types.name(1), Some("Magic"));

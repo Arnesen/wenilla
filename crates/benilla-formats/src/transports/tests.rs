@@ -105,11 +105,7 @@ const STEPS_VARIANTS: &[u32] = &[3, 10, 20, 100];
 /// asserted here — a period > 0, and the *best* variant per path within 5% of golden.
 #[test]
 fn nine_period_calibration_report() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
 
@@ -205,11 +201,7 @@ fn nine_period_calibration_report() {
 /// requirement).
 #[test]
 fn client_period_bit_exact() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
 
@@ -240,11 +232,7 @@ fn client_period_bit_exact() {
 /// least one of the nine live transports really does cross continents mid-cycle.
 #[test]
 fn touches_map_matches_the_paths_map_set() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = crate::wow_data_or_skip!();
     let mut chain = crate::open_chain(&data).expect("open chain");
     let cat = load_taxi_path_nodes(&mut chain).expect("load TaxiPathNode");
 

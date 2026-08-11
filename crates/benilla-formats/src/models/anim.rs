@@ -916,11 +916,6 @@ pub fn parse_m2_global_sequence_bones(b: &[u8]) -> Vec<GlobalSeqBone> {
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The character eye-blink, straight off the real `HumanMale.m2`: exactly one global-sequence bone
     /// (75, the eyelid), a **scale** channel on a real global sequence, whose keys hold `0` (lid gone,
     /// eye open) at the loop start and pop to `1` (lid full, eye shut) ~33 ms later — the blink. Guards
@@ -928,11 +923,7 @@ mod tests {
     /// gseq-vs-in-band split against a silent regression. Skips when the client data isn't present.
     #[test]
     fn human_male_eyelid_blink_global_sequence() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Character\\Human\\Male\\HumanMale.m2")
@@ -979,11 +970,7 @@ mod tests {
     /// of the model, any bone keyed *anywhere* stays keyed.
     #[test]
     fn empty_band_poses_the_bone_and_never_drops_it() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Character\\Human\\Male\\HumanMale.m2")
@@ -1055,11 +1042,7 @@ mod tests {
     /// copies it. Small in yards, wrong in direction, and only the file's own window gets it right.
     #[test]
     fn empty_band_takes_the_window_key_not_a_later_one() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Creature\\Zombie\\Zombie.m2")
@@ -1097,11 +1080,7 @@ mod tests {
     /// at-or-before clamp and under the window (decision 0643).
     #[test]
     fn hand_grip_reads_the_curled_pose_through_the_window() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Character\\Human\\Male\\HumanMale.m2")
@@ -1126,11 +1105,7 @@ mod tests {
     /// first half is `bonescan`'s "band keys OUTSIDE their own ranges window: 0".
     #[test]
     fn no_clip_carries_a_key_from_another_sequences_band() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         for model in [
             "Creature\\Bear\\Bear.m2",
@@ -1174,11 +1149,7 @@ mod tests {
     /// generation shallower (emitter on bone 10, host bone 2, a 0.097 yd offset).
     #[test]
     fn real_pvp_shoulder_emitters_ride_a_billboard_bone() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Item\\ObjectComponents\\Shoulder\\LShoulder_Mail_PVPAlliance_C_01.m2")
@@ -1259,11 +1230,7 @@ mod tests {
     /// `#bugs` B118). Pinned here because the mistake is invisible in code that reads correct.
     #[test]
     fn a_real_item_glow_model_is_pure_billboard_geometry_with_no_emitters() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Spells\\Enchantments\\Sparkle_A.m2")

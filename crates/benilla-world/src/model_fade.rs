@@ -1375,7 +1375,7 @@ mod inversion_tests {
 
     fn world_unit_for_test() -> crate::world_unit::WorldUnit {
         crate::world_unit::WorldUnit {
-            kind: benilla_protocol::EntityKind::Unit,
+            wades: true,
             scale: 1.0,
             height: 2.0,
         }

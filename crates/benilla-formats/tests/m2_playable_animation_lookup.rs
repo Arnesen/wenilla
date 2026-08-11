@@ -8,11 +8,7 @@ use benilla_formats::{open_chain, parse_m2_playable_animation_lookup};
 
 #[test]
 fn humanmale_playable_animation_lookup_matches_the_byte_verified_shape() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let chain = open_chain(&data).expect("open chain");
     let bytes = chain
         .read("character\\human\\male\\humanmale.m2")
@@ -53,11 +49,7 @@ fn humanmale_playable_animation_lookup_matches_the_byte_verified_shape() {
 /// reference client too.
 #[test]
 fn the_stealth_clips_are_authored_by_players_and_absent_from_the_druid_cat() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let chain = open_chain(&data).expect("open chain");
     let pal = |path: &str| {
         parse_m2_playable_animation_lookup(&chain.read(path).expect("read m2")).expect("parse pal")

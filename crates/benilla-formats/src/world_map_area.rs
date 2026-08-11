@@ -154,11 +154,7 @@ mod tests {
     /// (proving `AreaName` is the art folder, not just a label). Skips without client data.
     #[test]
     fn real_world_map_area_has_continents_and_durotar_and_art_folder() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_world_map_area_catalog(&mut chain).expect("load WorldMapArea");
         assert_eq!(cat.len(), 51, "all 51 rows load");

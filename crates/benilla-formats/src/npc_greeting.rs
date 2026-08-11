@@ -129,20 +129,12 @@ pub fn load_npc_greeting_catalog(chain: &mut Chain) -> Result<NpcGreetingCatalog
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The join works on the real 5875 tables: all 156 `NPCSounds` rows load, thousands of
     /// displays resolve a greeting, a known character display resolves to a real greeting kit, and
     /// a beast display (26, `NPCSoundID` 0) has no greeting.
     #[test]
     fn real_npc_greeting_resolves() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_npc_greeting_catalog(&mut chain).expect("load npc greetings");
         assert_eq!(cat.len(), 156, "all NPCSounds rows load");

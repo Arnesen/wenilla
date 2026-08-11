@@ -16,24 +16,14 @@
 //! as for this one. The byte pins on g144 catch a clamp that silently returns the wrong slice.
 //! Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_wmo_root, wmo_group_header, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// The file the rule exists for. Its MOGP header must come back whole, with the exact values the
 /// raw bytes carry at MOGP+0x08 (flags) and MOGP+0x24/0x26 (the portal-ref span) — the two fields
 /// whose loss dead-ended the flood.
 #[test]
 fn undercity_144_mogp_survives_its_one_byte_overrun() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let bytes = reader
         .read("World\\wmo\\Lorderon\\Undercity\\Undercity_144.wmo")
@@ -60,11 +50,7 @@ fn undercity_144_mogp_survives_its_one_byte_overrun() {
 /// contract rather than a one-file patch; `wmo_chunk_census --all` is the same sweep with a readout.
 #[test]
 fn every_wmo_in_the_corpus_yields_its_loader_chunk() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut reader = Chain::open(&data).expect("open vanilla patch chain");
     let mut paths: Vec<String> = reader
         .list()

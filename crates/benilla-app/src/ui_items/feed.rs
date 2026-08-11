@@ -988,11 +988,7 @@ mod tests {
     /// spell with a real name and NO description, and the old code fell back to the name.
     #[test]
     fn an_undescribed_spell_prints_no_trigger_line_on_real_data() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let spells = crate::ui_action::Spells {
             catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),

@@ -115,11 +115,7 @@ mod tests {
     /// rank-0 format leg is data-empty). Skips without client data.
     #[test]
     fn item_sets_load_from_the_chain() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_sets(&mut chain).expect("ItemSet.dbc loads");
         assert!(!cat.is_empty());

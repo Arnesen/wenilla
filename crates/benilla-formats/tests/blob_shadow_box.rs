@@ -11,11 +11,7 @@ use benilla_formats::{open_chain, parse_m2_animations};
 
 #[test]
 fn stand_box_extents_match_reference() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
 
     // (model, Stand-box horizontal extents (dx, dy) — the wow-re selection-ring RE's measured

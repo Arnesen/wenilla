@@ -872,11 +872,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn the_water_bits_split_the_5875_data_the_way_the_gate_assumes() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
 

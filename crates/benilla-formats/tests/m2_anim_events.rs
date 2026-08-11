@@ -6,21 +6,11 @@
 //! creatures, and the identifier bytes must be forward-stored printable `$xxx` tags (a reversed
 //! read would produce `xxx$`). Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animations};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn creature_anim_events_parse_within_sequences() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let chain = open_chain(&data).expect("open chain");
 
     for model in [

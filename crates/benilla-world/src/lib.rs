@@ -132,6 +132,7 @@ pub mod ribbons;
 pub mod rig_anim;
 pub mod rig_palette;
 pub mod schedule;
+mod shaders;
 pub mod sky;
 pub mod sky_order;
 pub mod sun;

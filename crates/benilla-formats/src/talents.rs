@@ -230,11 +230,7 @@ mod tests {
     /// only draws same-tab arrows, so cross-tab data would falsify the renderer's assumption).
     #[test]
     fn real_talent_tables_hold_the_grid_and_prereq_invariants() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_talent_catalog(&mut chain).expect("load Talent/TalentTab");
         assert!(

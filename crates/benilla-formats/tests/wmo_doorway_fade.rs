@@ -13,13 +13,7 @@
 //! the absence of the MOPY alpha pre-pass (which would rewrite 372 of group 3's alphas and blow the
 //! "byte-identical" finding apart). Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_wmo_root, wmo_group_fixed_colors, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// How many of a group's MOCV slots the fade rewrites, and the mean luminance before → after.
 fn fade_census(reader: &Chain, stem: &str, gi: u32) -> (usize, usize, f32, f32) {
@@ -45,11 +39,7 @@ fn fade_census(reader: &Chain, stem: &str, gi: u32) -> (usize, usize, f32, f32) 
 /// The abbey, against the D3D capture: group 1 untouched, group 3 rewritten in exactly 10 slots.
 #[test]
 fn abbey_matches_the_reference_capture() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let stem = "World\\wmo\\Azeroth\\Buildings\\NSabbey\\NSabbey";
 
@@ -81,11 +71,7 @@ fn abbey_matches_the_reference_capture() {
 /// quad's corners sit *in* the doorway portals, so the fade takes them white.
 #[test]
 fn dire_maul_entrance_corridor_floors_are_lit() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let stem = "World\\wmo\\Dungeon\\KL_Diremaul\\KL_Diremaul";
 

@@ -44,7 +44,7 @@ struct Hit {
 
 fn main() -> anyhow::Result<()> {
     let filter = std::env::args().nth(1).map(|s| s.to_lowercase());
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
 
     // Root .wmo files only: a group file is `<stem>_NNN.wmo`.

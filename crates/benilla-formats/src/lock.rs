@@ -188,11 +188,7 @@ mod tests {
     /// Herbalism node), both skill 1 — the lowest of their profession. Skips without client data.
     #[test]
     fn real_lock_catalog_reads_skill_slots() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_lock_catalog(&mut chain).expect("load Lock.dbc");
         assert!(!cat.is_empty(), "Lock.dbc parsed empty");
@@ -241,11 +237,7 @@ mod tests {
     /// keyless chests (not just gathering nodes) to a spell the player already has. Skips without data.
     #[test]
     fn real_lock_catalog_reads_keyless_chest() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_lock_catalog(&mut chain).expect("load Lock.dbc");
 
@@ -273,11 +265,7 @@ mod tests {
     /// are pinned by value. Skips without client data.
     #[test]
     fn real_lock_catalog_reads_the_action_column() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_lock_catalog(&mut chain).expect("load Lock.dbc");
 

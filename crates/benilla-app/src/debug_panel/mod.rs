@@ -14,9 +14,11 @@
 //!   Each only does work when its slice of the state actually changes (tracked with a `Local`
 //!   snapshot), so leaving the panel open costs nothing. (Lighting is now resolved in `lighting.rs`;
 //!   this section is time controls + a readout, not knobs.)
-//! - [`EguiPointerOver`] publishes "the mouse is talking to the egui overlays" each pass; the
-//!   combined source of truth gameplay reads is [`crate::ui_script::PointerOverUi`] (owned by its
-//!   combiner, decision 0026 — dev plugins must be droppable without breaking gameplay reads).
+//! - [`EguiPointerOver`] publishes "the mouse is talking to the egui overlays" each pass; both it
+//!   and the combined source of truth gameplay reads ([`crate::ui_script::PointerOverUi`]) are
+//!   *defined* by that combiner, and this module only writes them (decisions 0026/1174 — dev
+//!   plugins must be droppable without breaking gameplay reads, so gameplay may not name a
+//!   dev-owned type).
 //!
 //! Adding a section for a new subsystem is therefore: a `FooDebug` field, a few widgets in the
 //! panel, and one `apply_foo` system — no plumbing changes. (Weather is the worked example.)
@@ -38,6 +40,12 @@ use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
 use benilla_world::model_render::{ModelKind, ModelPart};
 use benilla_world::modkeys::{dev_chord, DEV_CHORD};
 use benilla_world::view::ViewDistance;
+
+/// The egui half of the pointer arbitration: this panel *writes* it, `ui_script` owns it —
+/// so a build without these overlays still compiles gameplay's reads (decision 1174; the
+/// module-doc note above). `InspectMode`, the other half of 0026's named pair, lives there too
+/// and is imported by the two files that touch it (`inspect`, `journal`).
+use crate::ui_script::EguiPointerOver;
 
 mod inspect;
 mod journal;
@@ -76,13 +84,6 @@ pub(crate) fn overlay_text(ui: &mut egui::Ui) {
     style.visuals.override_text_color = Some(OVERLAY_TEXT);
     style.wrap_mode = Some(egui::TextWrapMode::Extend);
 }
-
-/// The egui dev overlay's half of the pointer arbitration, written each egui pass. The combined
-/// truth — [`crate::ui_script::PointerOverUi`] — lives with its combiner in `ui_script` (decision
-/// 0026: gameplay must not read dev-owned resources; the arbiter tolerates this half's absence),
-/// which OR's this with the player-UI hover. Neither writer depends on the other.
-#[derive(Resource, Default)]
-pub(crate) struct EguiPointerOver(pub(crate) bool);
 
 /// Strip the **Tab** key from egui's per-frame input so egui never treats it as focus navigation.
 ///
@@ -154,7 +155,7 @@ fn source_label(s: ClockSource) -> &'static str {
 }
 
 /// Adds the egui plugin, the debug-state resource, the panel UI, and the apply systems.
-pub(crate) use inspect::{InspectMode, MouseoverTarget};
+pub(crate) use inspect::MouseoverTarget;
 
 pub struct DebugPanelPlugin;
 
@@ -176,13 +177,12 @@ impl Plugin for DebugPanelPlugin {
         // `DebugState` itself is `benilla_world::dev_state`'s and the engine inits it — this panel is only
         // its editor (decision 0026), and eight other subsystems read it whether or not the panel
         // is installed.
-        app.init_resource::<EguiPointerOver>()
-            // The inspector surface and the cast journal — the two instruments that stood on
-            // `interact` and were registered by it until decision 1160's stage zero. The mouseover
-            // pick comes with them: it never ran except while the inspector was armed, so it was never
-            // the engine's picking, only this overlay's.
-            .init_resource::<InspectMode>()
-            .init_resource::<MouseoverTarget>()
+        // The inspector surface and the cast journal — the two instruments that stood on
+        // `interact` and were registered by it until decision 1160's stage zero. The mouseover
+        // pick comes with them: it never ran except while the inspector was armed, so it was never
+        // the engine's picking, only this overlay's. (`InspectMode` and `EguiPointerOver`, which
+        // this panel writes, are inited by their owner `UiScriptPlugin` — 1174.)
+        app.init_resource::<MouseoverTarget>()
             .init_resource::<journal::CastJournal>()
             // After the UI keyboard feed because `update_mouseover` reads `PointerOverUi`, whose
             // player-UI half `UiInput` writes — the pick must see this frame's hover, not last

@@ -100,11 +100,7 @@ mod tests {
     /// Skips without client data.
     #[test]
     fn real_sheathe_sounds_decode() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_sheathe_sound_catalog(&mut chain).expect("load sheathe sounds");
         assert_eq!(cat.len(), 33);
@@ -133,11 +129,7 @@ mod tests {
     /// does — is the director-reported wrong sound. Skips without client data.
     #[test]
     fn the_kit_pair_is_decided_by_material_alone() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_sheathe_sound_catalog(&mut chain).expect("load sheathe sounds");
 

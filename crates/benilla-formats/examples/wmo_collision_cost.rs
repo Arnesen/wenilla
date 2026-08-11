@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
     if pats.is_empty() {
         anyhow::bail!("usage: wmo_collision_cost <wmo-path-or-substring>...");
     }
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let names: Vec<String> = chain.list()?.into_iter().map(|e| e.name).collect();
 

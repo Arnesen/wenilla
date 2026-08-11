@@ -2,21 +2,11 @@
 //! "hot-spot" caster (decision 0016). Pins the vanilla `0xd4` record stride and the diffuse-colour track
 //! offset. Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_m2_lights, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn elwynn_campfire_has_one_warm_point_light() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let bytes = reader
         .read("World\\Azeroth\\Elwynn\\PassiveDoodads\\Campfire\\ElwynnCampfire.m2")
@@ -46,11 +36,7 @@ fn elwynn_campfire_has_one_warm_point_light() {
 /// intensity, and — the gate — a visibility track whose first key is nonzero, so it CASTS.
 #[test]
 fn held_torch_casts_one_warm_point_light_up_the_shaft() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let bytes = reader
         .read("Item\\ObjectComponents\\Weapon\\Club_1H_Torch_A_01.m2")
@@ -78,11 +64,7 @@ fn held_torch_casts_one_warm_point_light_up_the_shaft() {
 /// impact VFX — so the gate is not academic; before it, every one of them lit the world.
 #[test]
 fn a_static_zero_visibility_key_reads_as_dark() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let bytes = reader
         .read("Spells\\FlameStrike_ImpactDD_Med_Base.m2")

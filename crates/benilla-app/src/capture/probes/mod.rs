@@ -72,6 +72,14 @@ mod tests {
         /// `(file, system, why it is genuinely an age or a delta on the animating clock)`.
         const ALLOWED: &[(&str, &str, &str)] = &[
             (
+                "capture/fxview.rs",
+                "drive_fx_view",
+                "the other half of `drive_capture`'s fixture age below: the driver spawns, flies \
+                 and reaps the subject on the same clock the effect animates on, which the capture \
+                 freezes at save time. A wall clock here would age the fixture apart from the \
+                 visuals it exists to show — an age, not a schedule",
+            ),
+            (
                 "capture/mod.rs",
                 "drive_capture",
                 "the fixture AGE runs on the clock the effect animates on, and the capture freezes \
@@ -98,10 +106,13 @@ mod tests {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
         let mut allowed_seen = 0usize;
-        // The probe harness: everything under `capture/`, plus the one probe that lives beside the
-        // player controller because it writes `face_yaw` directly.
+        // The probe harness: everything under `capture/`. It used to need a hand-added exception
+        // for the one probe that lived beside the player controller; decision 1174 moved every
+        // instrument in here, so the directory walk IS the scope again — and the move immediately
+        // earned its keep by catching `probe_cam`, which had been scheduling on the virtual clock
+        // outside this checker's reach ever since 0653.
         let mut stack = vec![src.join("capture")];
-        let mut files = vec![src.join("player/probe_look.rs")];
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("probe harness dir is readable") {
                 let path = entry.expect("dir entry").path();

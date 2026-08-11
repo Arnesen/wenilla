@@ -885,11 +885,7 @@ mod doodad_base_tests {
     /// calls, so it fails the moment the lane law regresses (decision 0969).
     #[test]
     fn booty_bays_entrance_arch_is_sky_lit_not_a_black_silhouette() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let stem = "World\\wmo\\Azeroth\\Buildings\\Stranglethorn_BootyBay\\BootyBay";
         let chain = benilla_formats::Chain::open(&data).expect("open vanilla patch chain");
         let bytes = chain

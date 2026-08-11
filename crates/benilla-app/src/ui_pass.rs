@@ -291,7 +291,7 @@ pub(crate) struct UiQuadMaterial {
 
 impl Material2d for UiQuadMaterial {
     fn fragment_shader() -> ShaderRef {
-        "game://shaders/ui_quad.wgsl".into()
+        "embedded://benilla_app/shaders/ui_quad.wgsl".into()
     }
 
     fn alpha_mode(&self) -> bevy::sprite_render::AlphaMode2d {

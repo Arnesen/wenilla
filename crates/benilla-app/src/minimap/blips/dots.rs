@@ -483,11 +483,7 @@ mod tests {
     /// and neither lights the other's node.
     #[test]
     fn real_find_minerals_lights_a_copper_vein_not_an_herb() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         let spells = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
         let locks = benilla_formats::load_lock_catalog(&mut chain).expect("Lock.dbc");

@@ -16,6 +16,10 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 
 mod chain;
 pub use chain::{Chain, ChainEntry};
+/// Where the WoW install is — the one resolver (decision 1175). Paired with [`Chain`]: this says
+/// *where*, that opens it.
+mod install;
+pub use install::{candidates, wow_data};
 mod characters;
 pub use characters::{
     CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipGeosets, StartOutfitItem,
@@ -657,11 +661,7 @@ mod tests {
     /// reached for it mid-investigation. Skips without the client data.
     #[test]
     fn registered_dbc_schemas_dump_the_shipped_tables() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = open_chain(&data).expect("open chain");
         let out = std::env::temp_dir().join("benilla-schema-registry-test.csv");
         for table in [

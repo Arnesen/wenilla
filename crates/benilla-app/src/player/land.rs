@@ -61,7 +61,7 @@ pub(crate) fn land_here(
     // Drain both teleport readers every frame (own cursors — `wire_in` reads the same messages
     // through its own): any teleport while an ask is out is our landing.
     let arrived = teleports.read().count() > 0 || worldports.read().count() > 0;
-    let asked = asks.read().count() > 0 || benilla_world::modkeys::dev_chord(&keys, KeyCode::KeyG);
+    let asked = asks.read().count() > 0 || crate::run_mode::dev_chord(&keys, KeyCode::KeyG);
 
     if let Some(deadline) = *pending {
         if arrived {

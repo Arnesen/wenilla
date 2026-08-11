@@ -60,11 +60,7 @@ fn empty_player() -> ObjectStore {
 /// engine's byte formulas, and the view's verified cell shapes. Skips without client data.
 #[test]
 fn fireball_view_on_real_data() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = Spells {
         catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
@@ -130,11 +126,7 @@ fn fireball_view_on_real_data() {
 /// the mana-keyed Instant fork. Skips without client data.
 #[test]
 fn cost_and_cast_cells_on_real_data() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = Spells {
         catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
@@ -221,11 +213,7 @@ fn cost_and_cast_cells_on_real_data() {
 /// REAL 5875 data. Skips without client data.
 #[test]
 fn the_pinned_c6_lines_on_real_data() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let spells = Spells {
         catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),

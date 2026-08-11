@@ -48,11 +48,7 @@ mod tests {
     /// path, layout, and index law against shipped data. Skips without client data.
     #[test]
     fn real_azeroth_zone_map_goldshire_cell() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let grid = load_zone_map(&mut chain, "Azeroth").expect("load Azeroth.zmp");
         assert_eq!(grid.len(), 16384);

@@ -776,11 +776,7 @@ mod tests {
     /// through. Skips without client data.
     #[test]
     fn real_wdts_split_into_adt_maps_and_wmo_only_maps() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
 
         // A WMO-only map, an ADT map, and the one map whose placement is NOT identity — the three

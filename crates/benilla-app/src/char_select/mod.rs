@@ -56,9 +56,14 @@ pub(crate) enum ClientState {
 
 /// The character-select subsystem: the state machine + the select screen.
 pub(crate) struct CharSelectPlugin {
-    /// Capture mode boots straight `InWorld` (no net thread, no picker) so the deterministic
-    /// scene harness is untouched by the glue layer.
-    pub(crate) start_in_world: bool,
+    /// The screen this session opens on.
+    ///
+    /// A connected boot starts at [`ClientState::Login`] (decision 0539) and the roster's arrival
+    /// flips it. A world capture starts straight at [`ClientState::InWorld`] — no net thread, no
+    /// picker — so the deterministic scene harness is untouched by the glue layer. A **glue**
+    /// capture starts on the glue screen it photographs, which is the reason this is a state and
+    /// not the bool it used to be: there turned out to be three answers, not two.
+    pub(crate) start: ClientState,
 }
 
 /// Mirror the session's screen onto the engine's one-bit "is there a world" fact.
@@ -77,53 +82,47 @@ fn publish_world_live(
 
 impl Plugin for CharSelectPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_state(if self.start_in_world {
-            ClientState::InWorld
-        } else {
-            // Connected boots start at the login screen (decision 0539); the roster's arrival
-            // flips to CharSelect (`crate::login::to_select_on_roster`).
-            ClientState::Login
-        })
-        .init_resource::<Roster>()
-        // **The engine's world-existence bit** (1160's wire (b)): the session owner is this
-        // module, so this module tells the world whether there is one. Ordered ahead of every
-        // world stage so the fact and its falling edge are this frame's, not last frame's — which
-        // is the whole reason `WorldLive` is a resource and not a mirrored state.
-        .add_systems(
-            Update,
-            publish_world_live.before(benilla_world::schedule::WorldStage::Net),
-        )
-        .init_resource::<dialog::DeleteDialog>()
-        .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
-        .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
-        .add_systems(Update, (debug_glue_roundtrip, debug_logout_smoke))
-        .add_systems(
-            Update,
-            (
-                // The policy + transitions run in BOTH states: the roster auto-answer (reconnect
-                // relogin) happens while `InWorld`, and the logout edge arrives there too.
-                (apply_roster_policy, enter_on_connected, back_on_logout).chain(),
+        app.insert_state(self.start)
+            .init_resource::<Roster>()
+            // **The engine's world-existence bit** (1160's wire (b)): the session owner is this
+            // module, so this module tells the world whether there is one. Ordered ahead of every
+            // world stage so the fact and its falling edge are this frame's, not last frame's — which
+            // is the whole reason `WorldLive` is a resource and not a mirrored state.
+            .add_systems(
+                Update,
+                publish_world_live.before(benilla_world::schedule::WorldStage::Net),
+            )
+            .init_resource::<dialog::DeleteDialog>()
+            .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
+            .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
+            .add_systems(Update, (debug_glue_roundtrip, debug_logout_smoke))
+            .add_systems(
+                Update,
                 (
-                    screen::materialize_screen,
-                    input::select_input,
-                    input::rotate_model,
-                    debug_select_dialog,
-                    dialog::drive_delete_dialog,
-                    refresh::refresh_list,
-                    refresh::refresh_banner_and_buttons,
-                    refresh::feed_glue_preview,
-                    crate::glue::art_swaps,
-                    crate::glue::glue_button_visuals,
-                    delete_result,
-                    debug_select_shot,
-                    crate::glue::sync_outlines,
+                    // The policy + transitions run in BOTH states: the roster auto-answer (reconnect
+                    // relogin) happens while `InWorld`, and the logout edge arrives there too.
+                    (apply_roster_policy, enter_on_connected, back_on_logout).chain(),
+                    (
+                        screen::materialize_screen,
+                        input::select_input,
+                        input::rotate_model,
+                        debug_select_dialog,
+                        dialog::drive_delete_dialog,
+                        refresh::refresh_list,
+                        refresh::refresh_banner_and_buttons,
+                        refresh::feed_glue_preview,
+                        crate::glue::art_swaps,
+                        crate::glue::glue_button_visuals,
+                        delete_result,
+                        debug_select_shot,
+                        crate::glue::sync_outlines,
+                    )
+                        .chain()
+                        .run_if(in_state(ClientState::CharSelect)),
                 )
                     .chain()
-                    .run_if(in_state(ClientState::CharSelect)),
-            )
-                .chain()
-                .after(benilla_world::schedule::WorldStage::Net),
-        );
+                    .after(benilla_world::schedule::WorldStage::Net),
+            );
     }
 }
 
@@ -222,9 +221,9 @@ impl Roster {
 }
 
 /// Ask the parked IO thread to log in as `guid` (the pick channel) and remember it as pending.
-/// `pub(crate)` for the rig ([`crate::capture::ProbeRigPlugin`]), which picks a character it may
-/// have had to *create* first — going through here is what keeps `pending_pick` truthful, so 0065's
-/// reconnect re-answers with the rigged body rather than showing the roster.
+/// `pub(crate)` for the probe rig (decision 0651), which picks a character it may have had to
+/// *create* first — going through here is what keeps `pending_pick` truthful, so 0065's reconnect
+/// re-answers with the rigged body rather than showing the roster.
 pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
     roster.pending_pick = Some(guid);
     let _ = pick.0.send(CharRequest::Enter(guid));
@@ -238,14 +237,18 @@ fn apply_roster_policy(
     mut msgs: MessageReader<CharListMessage>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
+    // Is the character pick already spoken for? Present only when a rig is driving this run
+    // (decision 1174's always-present run fact) — absent in every ordinary run, which is the
+    // player answer and the one this screen was written for.
+    rig: Option<Res<crate::run_mode::RigCharacter>>,
 ) {
     if !roster.env_read {
         roster.env_read = true;
         // `WOW_RIG` with a body outranks `WOW_CHAR`: the rig picks its own derived character, and
         // it may have to CREATE it first, which this fast path (a one-shot `take()` that gives up
         // on a name it can't find) structurally cannot wait for.
-        roster.env_char = match crate::capture::rig_char_name_from_env() {
-            Some(name) => {
+        roster.env_char = match rig.as_deref() {
+            Some(crate::run_mode::RigCharacter(name)) => {
                 if let Ok(ignored) = std::env::var("WOW_CHAR") {
                     warn!("char select: WOW_RIG names {name} — ignoring WOW_CHAR={ignored}");
                 }

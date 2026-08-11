@@ -56,7 +56,11 @@ pub(super) fn seed_ui_fixture(
         ResMut<crate::ui_bank::BankOpen>,
     ),
 ) {
-    let Some(fixture) = ctx.scenario.ui else {
+    // A glue-screen capture has no world scenario, and no glue screen opens a UI fixture.
+    let Some(scenario) = ctx.scenario else {
+        return;
+    };
+    let Some(fixture) = scenario.ui else {
         return;
     };
     if ctx.ui_seeded || !(progress.total > 0 && progress.ready == progress.total) {
@@ -636,7 +640,7 @@ pub(super) fn seed_ui_fixture(
             // Server-less, Player defaults to the origin — off every zone rect, so the blip
             // projects to the (0,0) hide sentinel and the arrow never shows. Park the avatar at
             // the scenario's Northshire spot so the arrow lands on the Elwynn map for real.
-            player.pos = benilla_assets::coords::wow_to_bevy(ctx.scenario.eye);
+            player.pos = benilla_assets::coords::wow_to_bevy(scenario.eye);
             // Alternating explore bits: roughly half of every zone's overlays reveal, so the
             // capture shows fog doing its job (some sub-areas drawn, some parchment).
             script.set_world_map_explored(vec![0x5555_5555; 64]);
@@ -881,7 +885,7 @@ pub(super) fn seed_ui_fixture(
                 ])),
                 crate::net::SelfPlayer,
                 crate::net::Guid(PLAYER_GUID),
-                Transform::from_translation(wow_to_bevy(ctx.scenario.eye)),
+                Transform::from_translation(wow_to_bevy(scenario.eye)),
             ));
             // The wolf: the live spawn's component set (net/apply.rs) with the descriptor seeded
             // directly, standing at the look point facing the camera, at full health.
@@ -1164,7 +1168,7 @@ pub(super) fn seed_ui_fixture(
                 ])),
                 crate::net::SelfPlayer,
                 crate::net::Guid(SELF_GUID),
-                Transform::from_translation(wow_to_bevy(ctx.scenario.eye)),
+                Transform::from_translation(wow_to_bevy(scenario.eye)),
             ));
             // The named unit out in the river (the `vplates` wolf, re-seated): 25 yd along the
             // scenario's own look bearing, so its overhead name lands on the water surface

@@ -5,6 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "WoW 1.12.1 asset-format adapters (MPQ/BLP/DBC/ADT/WDT) and the benilla-extract CLI"
 
+[features]
+# The dev/player seam (0026, built by 1173/1174). Default-on, so every normal build keeps the
+# instruments; `--no-default-features` is the player build. Here it gates exactly one thing:
+# `install::candidates`' project-folder probe, which bakes THIS source tree's absolute path
+# (decision 1175). EVERY dependent must take this crate with `default-features = false` and
+# re-export `dev`, or feature unification puts `/Users/…` back into a player binary —
+# `scripts/gates.sh`'s `--no-default-features` line is what catches getting that wrong.
+default = ["dev"]
+dev = []
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

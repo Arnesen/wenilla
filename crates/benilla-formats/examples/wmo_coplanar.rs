@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
     // gap far under a centimetre, but seeing the near misses tells you where the margin actually is.
     let gap: f32 = args.next().map_or(Ok(0.05), |g| g.parse())?;
 
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
     let mut chain = benilla_formats::open_chain(&data)?;
     let path = if pat.to_lowercase().ends_with(".wmo") {
         pat.clone()

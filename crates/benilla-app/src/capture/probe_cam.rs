@@ -29,7 +29,10 @@
 
 use bevy::prelude::*;
 
-use super::camera::{CameraControl, FlyCam};
+use crate::player::camera::{CameraControl, FlyCam};
+use benilla_world::schedule::WorldStage;
+
+use super::ProbeClock;
 
 /// One parked pose: absolute yaw/pitch (radians), an optional orbit distance (yards), when it takes
 /// over, and an optional constant yaw pan (rad/s) applied from that moment.
@@ -42,13 +45,13 @@ struct Pose {
 }
 
 #[derive(Resource)]
-pub(super) struct ProbeCam {
+pub(crate) struct ProbeCam {
     poses: Vec<Pose>,
 }
 
 /// Parse the env script. Absent or unparseable entries yield no poses (with a warning), so the probe
 /// is inert unless asked for.
-pub(super) fn from_env() -> Option<ProbeCam> {
+pub(crate) fn from_env() -> Option<ProbeCam> {
     let spec = std::env::var("WOW_PROBE_CAM").ok()?;
     let poses: Vec<Pose> = spec
         .split(';')
@@ -87,9 +90,17 @@ pub(super) fn from_env() -> Option<ProbeCam> {
 
 /// Hold the camera at the latest armed pose. Runs in `WorldStage::Input` **before** `control`, so
 /// the frame that sees the pose is the frame that renders it.
-pub(super) fn drive_probe_cam(
+///
+/// On the **wall clock** ([`ProbeClock`], decision 0789), like every other probe schedule: `@25`
+/// means twenty-five real seconds in, and a pan of `8°/s` means eight degrees per real second. It
+/// read `Res<Time>` from 0653 until decision 1174 — clamped to `max_delta` (250 ms) and frozen
+/// outright by the capture harness, so a hitching or occluded run silently under-ran every knob.
+/// The drift was never caught because this file lived in `player/`, outside the reach of the very
+/// checker that exists to catch it ([`super::probes`]); moving the instrument into the harness is
+/// what surfaced it.
+pub(crate) fn drive_probe_cam(
     probe: Res<ProbeCam>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut rig: ResMut<CameraControl>,
     mut cam: Query<&mut FlyCam, With<benilla_world::view::WorldCamera>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
@@ -107,12 +118,30 @@ pub(super) fn drive_probe_cam(
     };
     // Absolute, from the pose's own start — so the sweep is reproducible frame-for-frame across
     // runs rather than accumulating whatever frame times this run happened to get.
-    cam.yaw = pose.yaw + pose.pan * (now - pose.at);
-    cam.pitch = pose.pitch;
+    cam.park(pose.yaw + pose.pan * (now - pose.at), pose.pitch);
     if let Some(d) = pose.distance {
-        // Both, or the wheel glide eases `distance` back toward the old target every frame and the
-        // parked shot drifts through the whole zoom while the burst is running.
-        rig.distance = d;
-        rig.target_distance = d;
+        // `park_distance`, not the wheel target alone: the glide would ease `distance` back toward
+        // the old target every frame and the parked shot would drift through the whole zoom while
+        // the burst is running.
+        rig.park_distance(d);
+    }
+}
+
+/// `WOW_PROBE_CAM`'s registration — [`super::probe_look::ProbeLookPlugin`]'s twin, in the same slot
+/// (`control` reads the rig right after) and equally inert without the variable.
+pub(crate) struct ProbeCamPlugin;
+
+impl Plugin for ProbeCamPlugin {
+    fn build(&self, app: &mut App) {
+        let Some(cam) = from_env() else {
+            return;
+        };
+        app.insert_resource(cam).add_systems(
+            Update,
+            drive_probe_cam
+                .in_set(WorldStage::Input)
+                .before(crate::player::PlayerControlSet)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        );
     }
 }

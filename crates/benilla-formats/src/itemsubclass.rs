@@ -285,11 +285,7 @@ mod tests {
     /// display fallback. Skips without client data.
     #[test]
     fn real_subclass_names_resolve_verbose_first() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_sub_classes(&mut chain).expect("load ItemSubClass.dbc");
         assert_eq!(cat.name(2, 7), Some("One-Handed Swords"), "verbose wins");
@@ -307,11 +303,7 @@ mod tests {
     /// including the multi-bit case we used to give up on. Skips without client data.
     #[test]
     fn real_requirement_names_take_the_group_before_the_join() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_sub_classes(&mut chain).expect("load the two DBCs");
 
@@ -360,11 +352,7 @@ mod tests {
     /// a schema slip is visible, and pins the known shape. Skips without client data.
     #[test]
     fn item_sub_classes_load_from_the_chain() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_sub_classes(&mut chain).expect("ItemSubClass.dbc loads");
         assert!(!cat.is_empty());

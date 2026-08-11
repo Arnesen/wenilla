@@ -209,11 +209,7 @@ fn a_single_rank_line_paints_gray_with_no_rank_text() {
 /// without client data.
 #[test]
 fn a_real_hunters_block_lists_exactly_what_the_reference_client_lists() {
-    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open chain");
     let catalog = benilla_formats::load_skill_line_catalog(&mut chain).expect("skill lines");
 

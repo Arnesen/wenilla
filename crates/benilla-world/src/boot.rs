@@ -22,24 +22,16 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
             primary_window: Some(primary_window),
             ..default()
         })
-        // Our file assets (the WGSL shaders, the default UI XML) live beside THIS crate — but the
-        // binary is built by a shim package, so Bevy's runtime `CARGO_MANIFEST_DIR` fallback would
-        // resolve `assets/` in the shim's dir (and a bare-binary run has no manifest dir at all —
-        // the silently-no-shaders trap in `capture/mod.rs`'s header). Bake this crate's absolute
-        // path at compile time: right under `cargo run` from any package, and a bare
-        // `target/debug/benilla` now finds its shaders too. Machine-local, like any dev build
-        // (decision 0993).
-        //
-        // This root is the ENGINE's and only the engine's (decision 1171). It sits in
-        // `benilla-world` because `boot` does, and `boot` is here because both binaries need a
-        // window and a plugin set. The game's own files — its FrameXML and its five UI shaders —
-        // moved to `benilla-app/assets` and reach the server through the `game://` source that
-        // crate registers, so a path with no scheme is the engine's by construction and
-        // `benilla-worldview` ships nothing it cannot draw.
-        .set(bevy::asset::AssetPlugin {
-            file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
-            ..default()
-        })
+        // NOTE: there is deliberately no `AssetPlugin::file_path` here (decision 1175). This used
+        // to bake `concat!(env!("CARGO_MANIFEST_DIR"), "/assets")` — the *build* machine's source
+        // tree — because a shim package builds the binary and Bevy's runtime `CARGO_MANIFEST_DIR`
+        // fallback would otherwise resolve `assets/` in the shim's dir (0993). It worked on the
+        // machine that compiled it and nowhere else: on a player's machine every shader resolved
+        // to nothing and the world drew bare, the "silently-no-shaders trap" `capture/mod.rs`'s
+        // header names. Every WGSL file in the tree is now compiled into the binary
+        // (`crate::shaders`, `benilla_app::shaders`, `benilla_assets::materials`) and addressed
+        // `embedded://<crate>/shaders/…`, so nothing reaches for a file root at all and 1171's
+        // engine/game line survives as the crate each shader is embedded from.
         // Quiet wgpu/naga; our own crates stay at info.
         .set(bevy::log::LogPlugin {
             filter: "wgpu=error,naga=warn".into(),

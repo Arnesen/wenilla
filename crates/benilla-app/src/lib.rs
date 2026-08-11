@@ -1,6 +1,7 @@
 //! `benilla` — a from-scratch World of Warcraft 1.12.1 client on Bevy, talking to a local vmangos server.
 //!
-//! Opens the vanilla patch chain from `$WOW_DATA` (default `WoW/Data`) and streams the world around the
+//! Opens the vanilla patch chain from wherever the install is (`$WOW_DATA`, the project folder on a
+//! dev build, else beside the binary — decision 1175) and streams the world around the
 //! player through Bevy's `AssetServer` (the `benilla-assets` `mpq://` pipeline): ADT terrain tiles within
 //! `$WOW_TILE_RADIUS` — their splat-blended ground (tiling `$WOW_TEX_TILES`), doodads/WMOs, water, and
 //! ground clutter — plus the avian colliders the character controller walks on. Lit by a time-of-day WoW
@@ -22,13 +23,23 @@
 //! (`Ctrl`+`Shift`) + `F` toggles free-fly, then WASD flies the camera with Space up / C down and
 //! `Ctrl` boosts — a boost that exists only inside free-fly, itself behind the chord.
 
+// **A player build's dead code is the seam working, not a defect.** With `--no-default-features`
+// every symbol whose only caller is an instrument goes unused — the camera-park seam, the aim
+// seam, the pool-slot identity, a dozen accessors the panel and the probes read. Warning about
+// each one would bury a REAL warning in the one build nobody looks at daily, and the alternative
+// (a `cfg` attribute per item) would spread seam knowledge back across the gameplay modules 1174
+// spent its whole diff clearing it out of. Dev builds still warn normally.
+#![cfg_attr(not(feature = "dev"), allow(dead_code))]
+
 mod area;
 mod area_trigger;
+#[cfg(feature = "dev")]
 mod asset_churn;
 mod aura_visual;
 mod bindings;
 mod blob_shadow;
 mod bowstring;
+#[cfg(feature = "dev")]
 mod capture;
 mod char_create;
 mod char_select;
@@ -39,7 +50,11 @@ mod creature_anim;
 mod cursor;
 mod cvars;
 mod death;
+#[cfg(feature = "dev")]
 mod debug_panel;
+/// **The dev/player seam** (decisions 0026/1173, built in 1174) — the group, and the boundary
+/// rule, in one file. Always compiled; what it *holds* is not.
+mod dev;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -47,6 +62,7 @@ mod glue;
 mod glue_strings;
 mod go_anim;
 mod go_templates;
+#[cfg(feature = "dev")]
 mod hover_log;
 mod items;
 mod loading_screen;
@@ -58,14 +74,19 @@ mod names;
 mod net;
 mod npc_text;
 mod pending_item_ops;
+#[cfg(feature = "dev")]
 mod perf;
 mod pipe_warm;
 mod player;
 mod portrait;
+#[cfg(feature = "dev")]
 mod preflight;
+#[cfg(feature = "dev")]
 mod probe_shield;
 mod quest_markers;
 mod raid_marks;
+mod run_mode;
+mod shaders;
 mod smart_rect;
 mod sound;
 mod target;
@@ -126,13 +147,11 @@ use blob_shadow::BlobShadowPlugin;
 use bowstring::BowstringPlugin;
 use creature_anim::CreatureAnimPlugin;
 use cursor::CursorPlugin;
-use debug_panel::DebugPanelPlugin;
 use entities::EntitiesPlugin;
 use fishing_line::FishingLinePlugin;
 use footprints::FootprintsPlugin;
 use loading_screen::LoadingScreenPlugin;
 use net::NetPlugin;
-use perf::PerfPlugin;
 use player::PlayerPlugin;
 use portrait::PortraitPlugin;
 use quest_markers::QuestMarkersPlugin;
@@ -190,11 +209,6 @@ pub use benilla_world::build_id::BuildId;
 pub use benilla_world::worldview::run as run_worldview;
 pub use bevy::app::AppExit;
 
-/// The asset-source name for the game's own files (`crates/benilla-app/assets`) — the UI shaders
-/// today, anything else the *game* ships tomorrow. The engine's files stay on Bevy's default
-/// source, which `benilla-world` owns; a path with no scheme is the engine's by construction.
-const GAME_SOURCE: &str = "game";
-
 /// Build and run the client app. `build` is the launcher shim's compile-time git stamp
 /// ([`build_id`]) — passed in as plain data so the sha lives in the shim's fingerprint, not
 /// this crate's, and a commit stops recompiling the app (decision 0993).
@@ -204,21 +218,28 @@ pub fn run(build: BuildId) -> AppExit {
     // `WOW_HOVER_LOG_REPORT=<csv>` re-reads a recorded run and prints its report, then exits —
     // no window, no game. New analysis lands on runs already captured (see `hover_log`).
     if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
-        hover_log::report_recorded_file(&path);
+        dev::report_recorded_hover_log(&path);
         return AppExit::Success;
     }
     if std::env::var("WOW_CAPTURE").as_deref() == Ok("list") {
-        capture::print_scenario_names();
+        dev::print_scenario_names();
         return AppExit::Success;
     }
 
     let mut app = App::new();
     // The stamp is plain data from here on — the panel footer and preflight banner read it back.
     app.insert_resource(build);
+    // …and one startup line says which build produced this log. Registered HERE, beside the stamp
+    // it prints, rather than in `preflight` where it sat until decision 1179: **which build is
+    // this** is the first thing a bug report from someone else's machine has to establish, and a
+    // player build is the one whose logs always come from someone else's machine. Gating it out
+    // with the instruments got the argument exactly backwards (`preflight`'s own module doc makes
+    // the case; 1174 moved the file without re-reading it).
+    app.add_systems(Startup, benilla_world::build_id::banner);
 
     // Visual A/B harness (decision 0008): with `$WOW_CAPTURE` set, the app runs a deterministic,
     // server-less capture (net off so no NPCs stream in nondeterministically) and exits. See `capture`.
-    let capturing = capture::scenario_active();
+    let capturing = run_mode::scenario_active();
     // Any instrumented run — captures AND the live-probe fleet — opens in the background so it
     // never fights the director's screen (decision 0703; `WOW_BG` overrides). See `bgwin`.
     let background = benilla_world::bgwin::background_run();
@@ -248,28 +269,27 @@ pub fn run(build: BuildId) -> AppExit {
     }
 
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)
-    // builds. Reads the same `$WOW_DATA` dir as the `WorldAssets` foundation; on failure the source is
-    // simply absent and the AdtTile-pipeline loads fail gracefully (the terrain just doesn't appear).
-    let data_dir =
-        std::path::PathBuf::from(std::env::var("WOW_DATA").unwrap_or_else(|_| "WoW/Data".into()));
-    if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
-        eprintln!("benilla-assets: mpq:// source unavailable ({e:#})");
+    // builds. Finds the install the one way anything does (`benilla_formats::wow_data`, decision
+    // 1175) — the same answer the `WorldAssets` foundation gets. On failure the source is simply
+    // absent and the AdtTile-pipeline loads fail gracefully (the terrain just doesn't appear).
+    match benilla_formats::wow_data() {
+        Some(data_dir) => {
+            if let Err(e) = benilla_assets::register_mpq_source(&mut app, &data_dir) {
+                eprintln!("benilla-assets: mpq:// source unavailable ({e:#})");
+            }
+        }
+        None => eprintln!(
+            "benilla: no WoW install found — looked in {:?}",
+            benilla_formats::candidates()
+        ),
     }
 
-    // The `game://` asset source — the GAME's own files, beside THIS crate (decision 1171).
-    // `boot::tuned_default_plugins` points Bevy's default source at `benilla-world/assets`,
-    // because both binaries need shaders and only one of them has a UI; the game's five UI
-    // shaders live here instead and load as `game://shaders/…`. Registered before `AssetPlugin`
-    // builds, like `mpq://` above. The absolute path is baked at compile time for the same reason
-    // the engine's is: the binary is built by a shim package, so Bevy's runtime
-    // `CARGO_MANIFEST_DIR` fallback would resolve `assets/` in the shim's directory (0993).
-    app.register_asset_source(
-        GAME_SOURCE,
-        bevy::asset::io::AssetSourceBuilder::platform_default(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets"),
-            None,
-        ),
-    );
+    // NOTE: there is deliberately no `game://` asset source here (decision 1175). 1171 gave the
+    // game's five UI shaders their own source pointed at this crate's `assets/` — with the path
+    // baked from `CARGO_MANIFEST_DIR`, so it named the build machine's source tree and resolved
+    // to nothing anywhere else. The line 1171 drew survives: those five are still this crate's,
+    // now compiled in by `crate::shaders` and addressed `embedded://benilla_app/shaders/…`,
+    // because `embedded_asset!` is per-crate by construction. Only the directory is gone.
 
     app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
         title: "benilla".into(),
@@ -368,6 +388,9 @@ pub fn run(build: BuildId) -> AppExit {
         },
         ..default()
     }))
+    // The game's own WGSL, compiled into the binary (decision 1175) — before anything that could
+    // ask for one. The engine's seven register themselves inside `WorldPlugins` below.
+    .add_plugins(shaders::plugin)
     .add_plugins(benilla_world::thread_qos::ThreadQosPlugin)
     // The app-side half of background instrumented runs: undo winit's forced macOS app
     // activation so a probe/capture launch never yanks focus off the director's screen. The
@@ -381,20 +404,18 @@ pub fn run(build: BuildId) -> AppExit {
     // The instruments, which the engine group deliberately does not carry (1160: instruments at
     // the top of the stack). The panel first — `PerfPlugin` needs the egui plugin/context it sets
     // up. Toggles: the dev chord + D, and P.
-    .add_plugins(DebugPanelPlugin)
-    .add_plugins(PerfPlugin)
-    // `WOW_FX_CENSUS=1`: where this frame's particle draws are addressed, and whether the view
-    // they name is switched on (decision 0775). An instrument, and one that reads the portrait
-    // booths — so it belongs on this side of the line, not in the group.
-    .add_plugins(capture::fx_draw_census_plugin)
+    // **The instruments** (decisions 1173/1174): the debug panel, the perf HUD, the object
+    // inspector, the hover-cost recorder, the asset-churn meter, the session preflight and the
+    // probe shield — one group, in the slot the panel has always held (it sets up the egui
+    // context the perf pill needs). `--no-default-features` compiles every one of them out; see
+    // `dev.rs` for what is in the group and the one rule that governs the boundary.
+    .add_plugins(dev::DevToolsPlugin)
     .add_plugins(BowstringPlugin)
     .add_plugins(FishingLinePlugin)
     .add_plugins(QuestMarkersPlugin)
     // Pipeline-compile counters + the live-compile tripwire (decision 0837: macOS builds every
     // pipeline synchronously on the render thread, so a live compile is a felt stall).
     .add_plugins(pipe_warm::plugin)
-    .add_plugins(hover_log::HoverLogPlugin)
-    .add_plugins(asset_churn::AssetChurnPlugin)
     // Streamed world entities: cube assets + display catalogs at startup, sync each frame.
     .add_plugins(EntitiesPlugin)
     // Creature animation: pick Stand/Walk/Run from each creature's movement state each frame (Milestone C).
@@ -424,23 +445,16 @@ pub fn run(build: BuildId) -> AppExit {
     // material, the client-data art set, the GlueStrings table.
     .add_plugins(glue::GluePlugin)
     // The glue layer (decision 0193): the ClientState machine + the character-select screen
-    // that answers the parked IO thread's pick. Captures boot straight InWorld (no net, no picker).
+    // that answers the parked IO thread's pick. A world capture boots straight InWorld (no net,
+    // no picker); a glue capture boots onto the screen it photographs.
     .add_plugins(char_select::CharSelectPlugin {
-        start_in_world: capturing,
+        start: run_mode::start_state(),
     })
     // The login screen (decision 0539): the faithful AccountLogin glue + the credential policy
     // that answers the IO thread's pre-logon park.
     .add_plugins(login::LoginPlugin)
     // The character-creation screen + its live preview booth (decision 0423).
     .add_plugins(char_create::CharCreatePlugin)
-    // The session preflight (decision 0649): one banner per world entry naming the body we logged
-    // into, and loud warnings for the states — dead/ghost, GM mode, server-blocked movement — that
-    // silently invalidate a session's readings. Never env-gated; a warning nobody switches on isn't one.
-    .add_plugins(preflight::PreflightPlugin)
-    // The probe shield (decision 0677): a body on a probe account is put into vmangos's `.cheat
-    // god` on every world entry — damage clamps at 1 hp instead of killing — and GM mode is turned
-    // OFF, because the shield replaces the only reason it was ever on. Inert on any other account.
-    .add_plugins(probe_shield::ProbeShieldPlugin)
     // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).
     .add_plugins(SoundPlugin)
     // Targeting: left-click a unit to select it (→ CMSG_SET_SELECTION) + draw its ground ring.
@@ -512,7 +526,7 @@ pub fn run(build: BuildId) -> AppExit {
     // arc (bags/doll/bars/book). After UiActionPlugin (shares its `Spells` resource + the cast
     // tail `send_spell_cast`).
     .add_plugins(UiSpellbookPlugin)
-    // The macro system (decision 0983): the icon chooser's catalog, the `benilla/macros/`
+    // The macro system (decision 0983): the icon chooser's catalog, the `benilla-config/macros/`
     // files, `UPDATE_MACROS`, and the macro→bound-spell table the action bar's MACRO slots
     // resolve their cooldown/usability through. After UiSpellbookPlugin — the bound spell is
     // resolved against the book that feed pushes, by the same law `CastSpellByName` uses.
@@ -608,160 +622,11 @@ pub fn run(build: BuildId) -> AppExit {
     // Register benilla-assets' loaders AFTER `AssetPlugin` (they go into the live `AssetServer`).
     benilla_assets::register_asset_loaders(&mut app);
 
-    // The capture harness drives one deterministic screenshot then exits — added last so it observes
-    // the fully-built app. Inert unless `$WOW_CAPTURE` is set.
-    if capturing {
-        app.add_plugins(capture::CapturePlugin);
-    }
-    // The LIVE probe shot (orthogonal to the harness): `WOW_LIVE_SHOT=<png>` on a NORMAL connected
-    // run writes one screenshot `WOW_LIVE_SHOT_AT` seconds (default 12) after startup and keeps
-    // running — the agent-side instrument for seeing a live server scene (NPCs, GameObjects, event
-    // spawns) without a scenario. Pair with `WOW_USER`/`WOW_CHAR` + an outer `timeout`.
-    if std::env::var("WOW_LIVE_SHOT").is_ok() {
-        app.add_plugins(capture::LiveShotPlugin);
-    }
-    // The probe RIG (decision 0651): `WOW_RIG="tauren druid 60 gear:heal-preraid-bis"` finds-or-
-    // creates that body on this slot's probe account, logs in as it, and applies level/spells/gear/
-    // spec/place — the one verb that replaces the hand-assembled GM recipe every session used to
-    // re-derive (see `capture::ProbeRigPlugin`).
-    if std::env::var("WOW_RIG").is_ok() {
-        app.add_plugins(capture::ProbeRigPlugin);
-    }
-    // Any scripted probe keeps its window un-occludable: a fully covered macOS window drops to
-    // ~1 fps drawables, and every probe schedule is wall-clock — a throttled run doesn't measure
-    // slowly, it runs the wrong script (see `capture::ProbeFocusPlugin`, decision 0906).
-    // (`WOW_LIVE_FPS` is in the list because an occluded SETTLE phase streams the world at ~1 fps
-    // and under-warms the scene before sampling even starts — the assertion has to be live from
-    // the first tick, not at the uncap.)
-    if [
-        "WOW_PROBE",
-        "WOW_PROBE_CHAT",
-        "WOW_PROBE_KEY",
-        "WOW_PROBE_LUA",
-        "WOW_RIG",
-        "WOW_LIVE_FPS",
-    ]
-    .iter()
-    .any(|k| std::env::var(k).is_ok())
-    {
-        app.add_plugins(capture::ProbeFocusPlugin);
-    }
-    // The probe-chat one-shot: `WOW_PROBE_CHAT=".go xyz …"` sends GM/chat lines once in-world —
-    // the "park the probe character anywhere" instrument (see `capture::ProbeChatPlugin`).
-    if std::env::var("WOW_PROBE_CHAT").is_ok() {
-        app.add_plugins(capture::ProbeChatPlugin);
-    }
-    // The probe-lua one-shot: `WOW_PROBE_LUA="CastSpell(…)"` runs a chunk in the live UI VM once
-    // in-world — the "press the button headlessly" instrument (see `capture::ProbeLuaPlugin`).
-    if std::env::var("WOW_PROBE_LUA").is_ok() {
-        app.add_plugins(capture::ProbeLuaPlugin);
-    }
-    // The probe-key taps: `WOW_PROBE_KEY="Space@14"` presses keys once in-world — the "press
-    // space headlessly" instrument for input-gated behavior (see `capture::ProbeKeyPlugin`).
-    if std::env::var("WOW_PROBE_KEY").is_ok() {
-        app.add_plugins(capture::ProbeKeyPlugin);
-    }
-    // The probe self-termination: `WOW_PROBE_EXIT_AT=<secs>` bounds any scripted live probe's
-    // lifetime — its own knob, not a rider on the Lua probe (see `capture::ProbeExitPlugin`).
-    if std::env::var("WOW_PROBE_EXIT_AT").is_ok() {
-        app.add_plugins(capture::ProbeExitPlugin);
-    }
-    // The ray pick: `WOW_PICK="<x>,<y>"` names every surface along the ray through a screenshot
-    // pixel, nearest first — "what is at the spot `benilla-visual hotspot` flagged, and what is
-    // right behind it" (see `capture::PickProbePlugin`).
-    if std::env::var("WOW_PICK").is_ok() {
-        app.add_plugins(capture::PickProbePlugin);
-    }
-    // The render-phase census: `WOW_PHASE=<uniqueId>` reports, per frame, which phase each of one
-    // placement's batches landed in and where in the draw order — the one thing every scene-side
-    // instrument is blind to, namely whether a surface was submitted at all (see
-    // `capture::PhaseProbePlugin`).
-    if std::env::var("WOW_PHASE").is_ok() {
-        app.add_plugins(capture::PhaseProbePlugin);
-    }
-    // The depth readback: `WOW_DEPTH="<x>,<y>"` reports what depth actually won each named pixel,
-    // per frame, as a distance in yards — the link past submission that decides the pixel. Pair it
-    // with `WOW_PICK` at the same pixels to turn "what won" into "whose it was" (see
-    // `capture::DepthProbePlugin`).
-    // `WOW_DEPTH_QUADS=<bone>…` is the same readback taken at a particle quad's OWN pixels — the
-    // moving-subject form, which no hand-written pixel list can hold (see `capture::depth_probe`).
-    if std::env::var("WOW_DEPTH").is_ok() || std::env::var("WOW_DEPTH_QUADS").is_ok() {
-        app.add_plugins(capture::DepthProbePlugin);
-    }
-    // The bevy_ui node census — "who owns this rectangle" for UI outside the FrameXML quad pass
-    // (see `capture::NodeProbePlugin`).
-    if std::env::var("WOW_NODE_PROBE").is_ok() {
-        app.add_plugins(capture::NodeProbePlugin);
-    }
-    // The mid-run window resize: `WOW_PROBE_RESIZE="<secs>:<W>x<H>"` — the headless fullscreen-
-    // toggle stand-in for resize-reactive layout (see `capture::ProbeResizePlugin`).
-    if std::env::var("WOW_PROBE_RESIZE").is_ok() {
-        app.add_plugins(capture::ProbeResizePlugin);
-    }
-    // The particle census: `WOW_PARTICLE_CENSUS=<secs>` prints per-emitter live counts once —
-    // the trace-comparable coverage number (see `capture::ParticleCensusPlugin`).
-    if std::env::var("WOW_PARTICLE_CENSUS").is_ok() {
-        app.add_plugins(capture::ParticleCensusPlugin);
-    }
-    // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
-    // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
-    if std::env::var("WOW_ENTITY_CENSUS").is_ok() {
-        app.add_plugins(capture::EntityCensusPlugin);
-    }
-    // The melee live probe: `WOW_PROBE=melee` auto-fights the nearest enemy so the dbg-trace
-    // sink can record the combat-text timeline (see `capture::ProbeMeleePlugin`).
-    if std::env::var("WOW_PROBE").as_deref() == Ok("melee") {
-        app.add_plugins(capture::ProbeMeleePlugin);
-    }
-    // The partner live probe: `WOW_PROBE=partner` auto-accepts group invites — the party arc's
-    // second-client instrument (decision 0434; see `capture::ProbePartnerPlugin`).
-    if std::env::var("WOW_PROBE").as_deref() == Ok("partner") {
-        app.add_plugins(capture::ProbePartnerPlugin);
-    }
-    // The sea-crossing live probe: `WOW_PROBE=crossing` boards a cross-continent boat and reports
-    // the map seam surviving — decision 0455's instrument (see `capture::ProbeCrossingPlugin`).
-    if std::env::var("WOW_PROBE").as_deref() == Ok("crossing") {
-        app.add_plugins(capture::ProbeCrossingPlugin);
-    }
-    // The taxi-flight live probe: `WOW_PROBE=taxi` opens the flight-master menu on the real wire
-    // and rides Stormwind → Sentinel Hill to a measured verdict — decision 0484's end-to-end
-    // instrument (see `capture::ProbeTaxiPlugin`).
-    if std::env::var("WOW_PROBE").as_deref() == Ok("taxi") {
-        app.add_plugins(capture::ProbeTaxiPlugin);
-    }
-    // The mail-arc live probe: `WOW_PROBE_MAIL=1` GM-mails the probe's own character, opens the
-    // Goldshire mailbox on the real wire, and drives the inbox/take/send/delete surface through
-    // the live Lua VM — decisions 0544/0548's end-to-end instrument (see `capture::ProbeMailPlugin`).
-    if std::env::var("WOW_PROBE_MAIL").is_ok() {
-        app.add_plugins(capture::ProbeMailPlugin);
-    }
-    // The bank-arc live probe: `WOW_PROBE_BANK=1` GM-hops to a pure banker, drives the whole
-    // six-opcode bank wire (activate/deposit/withdraw/buy-slot/refusal) — decision 0604's
-    // end-to-end instrument (see `capture::ProbeBankPlugin`).
-    if std::env::var("WOW_PROBE_BANK").is_ok() {
-        app.add_plugins(capture::ProbeBankPlugin);
-    }
-    // The cast-cancel live probe: `WOW_PROBE=castcancel` hearths and presses W mid-cast — the
-    // local self-cancel's end-to-end timing instrument (see `capture::ProbeCastCancelPlugin`).
-    if std::env::var("WOW_PROBE").as_deref() == Ok("castcancel") {
-        app.add_plugins(capture::ProbeCastCancelPlugin);
-    }
-    // The char-create live probe: `WOW_PROBE_CHARCREATE="<name>[,race,class,gender,…]"` creates (and
-    // cleans up) a character at select to verify the char-create/delete wire (decision 0423 phase 1;
-    // see `capture::ProbeCharCreatePlugin`).
-    if std::env::var("WOW_PROBE_CHARCREATE").is_ok() {
-        app.add_plugins(capture::ProbeCharCreatePlugin);
-    }
-    // The live FPS probe: `WOW_LIVE_FPS=<frames>` samples frame times on a NORMAL connected run
-    // and exits — the harness probe's numbers with the live world in (see `capture::LiveFpsPlugin`).
-    if std::env::var("WOW_LIVE_FPS").is_ok() {
-        app.add_plugins(capture::LiveFpsPlugin);
-    }
-    // The FPS journal: `WOW_FPS_JOURNAL=<csv>` appends per-second position + frame-time rows on a
-    // director-driven run — "where does it dip" as coordinates (see `perf::FpsJournalPlugin`).
-    if std::env::var("WOW_FPS_JOURNAL").is_ok() {
-        app.add_plugins(perf::FpsJournalPlugin);
-    }
+    // **The probe fleet** — the capture harness and every scripted live probe, each armed by its
+    // own environment variable and inert without it. Added last so they observe the fully-built
+    // app; compiled out entirely by `--no-default-features` (decisions 1173/1174), which is why
+    // this is one line and the twenty env checks behind it live in `dev.rs`.
+    app.add_plugins(dev::DevProbesPlugin);
 
     // Return the app's own exit status instead of dropping it: a failed capture writes
     // `AppExit::error()` (see `capture::drive_capture`), and discarding it made the process exit 0

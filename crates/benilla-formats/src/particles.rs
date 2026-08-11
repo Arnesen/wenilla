@@ -893,11 +893,7 @@ mod tests {
     /// bit 0x1 and blends alpha, so it must come back LIT — the asset-side half of the foam fix.
     #[test]
     fn the_waterfall_emitter_is_lit() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file(
@@ -909,11 +905,6 @@ mod tests {
         assert_eq!(defs[0].flags, 0x0002, "authored flag word");
         assert_eq!(defs[0].blend, ParticleBlend::Alpha);
         assert!(defs[0].lit, "the spray sheet is shaded by the world");
-    }
-
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
     }
 
     /// The spline chain is **arc-length** parameterized: two straight segments of length 1 and
@@ -947,11 +938,7 @@ mod tests {
     /// that the spray (emitter 0) still reads its constant-equivalent first key of 100/s.
     #[test]
     fn real_blood_spurt_emitters_are_keyed_bursts() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file("Particles\\BloodSpurts\\BloodSpurt.m2")
@@ -989,11 +976,7 @@ mod tests {
     /// bit 15 clear — a continuous pour for the whole clip.
     #[test]
     fn real_feint_impact_authors_burst_emitters() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let impact = parse_m2_particle_emitters(
             &chain
@@ -1030,11 +1013,7 @@ mod tests {
     /// columns sit ON their authored descent curves with zero birth velocity).
     #[test]
     fn real_flamestrike_authors_spline_chains() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let defs = parse_m2_particle_emitters(
             &chain
@@ -1073,11 +1052,7 @@ mod tests {
     /// global-timeline read (seq 0 spans [1000, 2600]).
     #[test]
     fn real_fireball_effects_rebase_to_clip_time() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cast = parse_m2_particle_emitters(
             &chain

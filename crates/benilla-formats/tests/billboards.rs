@@ -3,13 +3,7 @@
 //! each card about its own candle (faces the camera in place) instead of swinging the whole cluster
 //! about a single pivot. See decision 0028. Skips (passes) when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_m2_mesh, open_chain, RenderSubmesh};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// The geometric centre of a submesh's vertices (model space).
 fn geom_center(s: &RenderSubmesh) -> [f32; 3] {
@@ -29,11 +23,7 @@ fn geom_center(s: &RenderSubmesh) -> [f32; 3] {
 
 #[test]
 fn candelabra_glow_cards_split_per_bone() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     // CandelabraTallWall01 has five candles; all five glow cards share one additive glow-texture batch,
     // each quad skinned to its own per-candle billboard bone.

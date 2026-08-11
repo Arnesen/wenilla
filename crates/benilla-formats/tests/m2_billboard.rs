@@ -1,21 +1,11 @@
 //! Difftest M2 billboard-bone detection against the real Lamppost: its glow card (GLOW32.BLP) rides a
 //! spherical billboard bone (flag 0x08); its post does not. Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_m2_mesh, open_chain, BillboardKind};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn lamppost_glow_is_spherical_billboard() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let subs = load_m2_mesh(
         &mut chain,

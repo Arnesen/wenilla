@@ -7,13 +7,7 @@
 //! horizontal through the body. The constant must now reach **every** sequence's keyframe set. Skips
 //! when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animations};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// The hip-sheath attach bone (attachment id 32 → bone 29) and its authored constant rotation,
 /// verified by direct dump of the real file (decision 0072's attach survey).
@@ -22,11 +16,7 @@ const HIP_QUAT: [f32; 4] = [0.382, 0.063, -0.922, 0.0];
 
 #[test]
 fn stow_attach_bones_carry_their_constant_rotation_in_every_sequence() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file("Character\\Human\\Male\\HumanMale.m2")

@@ -11,13 +11,7 @@
 //!
 //! Skips when the client isn't present.
 
-use std::path::PathBuf;
-
 use benilla_formats::{parse_wmo_root, wmo_group_raw_colors, Chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// Walk a group file's MOGP sub-chunks (payload clamped to EOF, as the loader does) and return the
 /// declared byte length of `tag`, plus how many of those bytes the file actually holds.
@@ -50,11 +44,7 @@ fn subchunk(group: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
 /// orange the reference renders — not the white an absent bake falls back to.
 #[test]
 fn undercity_144_keeps_its_bake_despite_a_short_mocv() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let reader = Chain::open(&data).expect("open vanilla patch chain");
     let g = reader
         .read("World\\wmo\\Lorderon\\Undercity\\Undercity_144.wmo")
@@ -97,11 +87,7 @@ fn undercity_144_keeps_its_bake_despite_a_short_mocv() {
 /// sample would invent lighting rather than recover it.
 #[test]
 fn only_one_group_in_the_corpus_has_a_short_mocv() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut reader = Chain::open(&data).expect("open vanilla patch chain");
     let mut roots: Vec<String> = reader
         .list()

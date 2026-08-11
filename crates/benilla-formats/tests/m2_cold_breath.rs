@@ -14,13 +14,7 @@
 //!
 //! Skips (passes) when the client isn't present at `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{open_chain, parse_m2_animations, parse_m2_attachments};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 const HUMAN_MALE: &str = "Character\\Human\\Male\\HumanMale.m2";
 /// `SpellVisualEffectName` row 107 (`"HARDCODED Breath Cold"`) names `Particles\ColdBreath.mdl`;
@@ -33,11 +27,7 @@ const STAND: u16 = 0;
 
 #[test]
 fn the_idle_player_keys_bth_and_attaches_it_at_the_mouth() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let bytes = chain
         .read_file(HUMAN_MALE)

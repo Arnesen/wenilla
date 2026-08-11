@@ -3,21 +3,11 @@
 //! `src/spells.rs` docs) to known spells, so a schema drift or column slip fails loudly. Skips
 //! (passes) without `<repo>/WoW/Data`.
 
-use std::path::PathBuf;
-
 use benilla_formats::{load_spell_catalog, open_chain};
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 #[test]
 fn spell_catalog_resolves_known_spells() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let catalog = load_spell_catalog(&mut chain).expect("load spell catalog");
     assert!(
@@ -62,11 +52,7 @@ fn spell_catalog_resolves_known_spells() {
 
 #[test]
 fn shapeshift_bonus_bars_match_the_verified_table() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open vanilla patch chain");
     let forms = benilla_formats::load_shapeshift_forms(&mut chain).expect("load shapeshift rows");
     // The complete 5875 non-zero BonusActionBar set (wow-re byte-verified: SpellShapeshiftForm
@@ -110,11 +96,7 @@ fn shapeshift_bonus_bars_match_the_verified_table() {
 /// (Stealth's −1 sorts last), and the druid forms' ActiveIconID. Skips without client data.
 #[test]
 fn stance_bar_spell_columns_match_the_probed_values() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = benilla_formats::open_chain(&data).expect("open vanilla patch chain");
     let catalog = load_spell_catalog(&mut chain).expect("load spell catalog");
     // (spell, form id, order): Battle/Defensive/Berserker Stance, Bear, Cat, Stealth, Moonkin.
@@ -144,11 +126,7 @@ fn stance_bar_spell_columns_match_the_probed_values() {
 /// abilities and true spells.
 #[test]
 fn melee_white_damage_marks_the_ranged_basic_shots() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let catalog = load_spell_catalog(&mut chain).expect("load spell catalog");
     // Auto Shot, Shoot Bow, Throw, wand Shoot: the white-damage ranged shots.

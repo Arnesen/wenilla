@@ -219,7 +219,7 @@ pub(crate) struct SlashCommands {
     /// How many aliases each source contributed — the boot line that makes a broken table (an
     /// unreadable `GlobalStrings.lua`, a missing token table) visible immediately instead of at
     /// the first command someone types.
-    counts: (usize, usize),
+    counts: (usize, usize, usize),
 }
 
 impl SlashCommands {
@@ -271,21 +271,34 @@ impl SlashCommands {
         let emote_aliases = by_alias.len() - slash_aliases;
 
         // 3 · benilla's instruments, last so they can never shadow a shipped command.
-        for dev in DevCmd::ALL {
-            for alias in dev.aliases() {
-                insert(&mut by_alias, alias, Command::Dev(dev));
+        // benilla's own instruments — `/castvis`, `/partytest`, `/chattest`, `/shot`, `/liquid`,
+        // `/reaction`. A player build claims none of the aliases, so typing one falls through to
+        // the reference's "unknown command" exactly as it should (decision 1179). They are gated
+        // HERE, at the table, rather than at each dispatch arm: one door, like the dev chord's.
+        let before_dev = by_alias.len();
+        if crate::run_mode::dev_affordances() {
+            for dev in DevCmd::ALL {
+                for alias in dev.aliases() {
+                    insert(&mut by_alias, alias, Command::Dev(dev));
+                }
             }
         }
+        let dev_aliases = by_alias.len() - before_dev;
 
         Self {
             by_alias,
-            counts: (slash_aliases, emote_aliases),
+            counts: (slash_aliases, emote_aliases, dev_aliases),
         }
     }
 
-    /// `(slash aliases, emote aliases)` — how many DISTINCT commands each source made reachable
-    /// (the shipped strings repeat: `EMOTE87_CMD1` and `_CMD2` are both `"/sit"`). The boot report.
-    pub(super) fn counts(&self) -> (usize, usize) {
+    /// `(slash aliases, emote aliases, dev aliases)` — how many DISTINCT commands each source made
+    /// reachable (the shipped strings repeat: `EMOTE87_CMD1` and `_CMD2` are both `"/sit"`). The
+    /// boot report.
+    ///
+    /// The third number is the seam, **made observable** (decision 1179): benilla's own instrument
+    /// commands are gated on `run_mode::dev_affordances()`, and a gate nobody can see the effect of
+    /// is a gate nobody checks. A player build must print `0`, and one line of its own log says so.
+    pub(super) fn counts(&self) -> (usize, usize, usize) {
         self.counts
     }
 }
@@ -317,11 +330,14 @@ pub(crate) fn build_slash_commands(
         |name| globals.get::<String>(name).ok().filter(|s| !s.is_empty()),
         |token| emotes.text_id(token),
     );
-    let (slash, emote) = table.counts();
+    let (slash, emote, dev) = table.counts();
     // The "it loaded" signal: the shipped 1.12 data yields 55 distinct aliases across the
     // registered indices and 225 emote commands (pinned by `real_alias_table_resolves_the_shipped_
     // commands`).
-    info!("chat: slash table — {slash} command aliases, {emote} emote aliases");
+    info!(
+        "chat: slash table — {slash} command aliases, {emote} emote aliases, \
+         {dev} instrument aliases"
+    );
     if emote == 0 {
         error!("chat: NO emote aliases — every /wave-style command is dead (GlobalStrings?)");
     }

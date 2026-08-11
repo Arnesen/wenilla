@@ -6,6 +6,23 @@ license.workspace = true
 description = "The Bevy app as a library: everything but the build-id stamp, which lives in the `benilla` launcher shim so a commit dirties ~30 lines instead of this crate (decision 0993)"
 
 [features]
+# **The dev/player seam** (decisions 0026 + 1173). Default-ON, so every ordinary `cargo run`,
+# capture, probe and gate builds exactly what it built before. `--no-default-features` compiles
+# the instruments — the debug panel, the perf HUD, the inspector, the capture harness and the
+# probe fleet — physically OUT: not dormant behind a runtime flag, absent. That is the whole
+# requirement a player client has of them, and a runtime toggle cannot meet it.
+#
+# The rule the seam enforces is one-directional: **dev may see anything; nothing may depend on
+# dev.** It is enforced by `cargo build -p benilla --no-default-features` in `scripts/gates.sh`,
+# not by anyone remembering it — 0026 adopted the rule in June 2026 with no failing build behind
+# it, and twenty-four couplings had accumulated by August (1173).
+default = ["dev"]
+#
+# The three benilla crates below are taken with `default-features = false` and their `dev`
+# re-exported here (1175). Their `dev` is default-on too, so without the round trip a
+# `--no-default-features` build gets the feature back through unification — and the binary
+# carries the build machine's source-tree path after all. Same trap as the shim's, one level down.
+dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui", "dep:libc"]
 # Opt-in Tracy profiling: `cargo run --features tracy` streams per-system `info_span!` markers (on the
 # hot systems) + render-pass CPU timings to a Tracy capture (decision 0026 — the dev/player seam;
 # a `docs/howto/running.md` this once cited never landed).
@@ -25,7 +42,9 @@ anyhow.workspace = true
 arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
-bevy_egui = "0.39"
+# Optional: the dev overlays are its only consumers (the panel, the perf pill, the inspector
+# card), so a player build does not link it at all (`dev` feature, decision 1173).
+bevy_egui = { version = "0.39", optional = true }
 # Zero-copy POD→bytes for the shared light storage buffer (one per-frame write_buffer). Already in
 # the tree transitively; pinned to the same version as the dev-dep below.
 bytemuck = { version = "1", features = ["derive"] }
@@ -33,12 +52,17 @@ bytemuck = { version = "1", features = ["derive"] }
 # `Rgba16Float` (decision 0804) and the PNG wants display bytes. Already in the tree via
 # wgpu/bevy_image; declared so the call site is an honest dependency.
 half = "2"
+# The shipped FrameXML tree, compiled into the binary (decision 1175 §2): 61 files, ~2.8 MB, so the
+# client cannot boot without its interface on a machine that has never seen our source. A proc
+# macro plus a no-dependency runtime shim — it adds nothing to the graph at runtime, and it is the
+# crate everyone uses for this. `assets/ui` is OUR content (MIT/Apache), not Blizzard's.
+include_dir = "0.7"
 # `getrusage` — whole-process CPU time (all threads), the perf probes' `cpu_ms`/`cpu_pct` metric
 # (`perf::process_cpu_secs`). Wall-clock fps is unusable as a regression instrument on a machine
 # running parallel sessions' builds; CPU-per-frame is, and it is also the number the Mac report
 # is about ("250 % CPU at 59 fps"). Already in the tree transitively; declared so the call site is
 # an honest dependency.
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 # Resample varying-size layer BLPs to a uniform size for the terrain texture array; `png` so we can
 # encode the cursor image into data an NSImage can load (macOS hardware cursor).
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -47,10 +71,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # (std's mpsc Sender is `!Sync`, so it can't be a Bevy resource without a mutex — the very thing this
 # bridge deletes). The canonical Bevy background-thread→channel→system idiom. See decision 0006.
 crossbeam-channel = "0.5"
-benilla-assets = { path = "../benilla-assets" }
-benilla-formats = { path = "../benilla-formats" }
+benilla-assets = { path = "../benilla-assets", default-features = false }
+benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-protocol = { path = "../benilla-protocol" }
-benilla-world = { path = "../benilla-world" }
+benilla-world = { path = "../benilla-world", default-features = false }
 # The CVar config diff (`benilla/config.toml`, decision 0954): serde derive on the persisted
 # shape, toml as its format. (serde_json left with the era manifest — 0978.)
 serde = { version = "1", features = ["derive"] }

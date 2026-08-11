@@ -124,6 +124,12 @@ impl Plugin for ProbeRigPlugin {
             return; // inert without a parseable spec (parse() has already said why)
         };
         info!("rig: {}", spec.describe());
+        // Publish the claim on the character pick as an always-present run fact (decision 1174).
+        // The roster reads it to know the pick is already spoken for; before 1174 it called
+        // `rig_char_name_from_env` directly, which is gameplay naming the harness.
+        if let Some(name) = rig_char_name(&spec) {
+            app.insert_resource(crate::run_mode::RigCharacter(name));
+        }
         app.insert_resource(Rig {
             spec,
             phase: RigPhase::AwaitRoster,
@@ -355,7 +361,7 @@ fn drive_rig(
                 messages::CHAR_CREATE_SUCCESS => rig.phase = RigPhase::AwaitRoster,
                 messages::CHAR_CREATE_SERVER_LIMIT if !rig.evicted => {
                     rig.evicted = true;
-                    match crate::preflight::slot_word().and_then(|slot| {
+                    match crate::run_mode::slot_word().and_then(|slot| {
                         evictable(&rig.roster, rig_char_name(&rig.spec).as_deref(), slot)
                     }) {
                         Some((guid, name)) => {
@@ -519,16 +525,9 @@ fn parse_point(at: &str) -> Option<(i32, f32, f32, f32)> {
     parts.next().is_none().then_some((map, x, y, z))
 }
 
-/// The character a `WOW_RIG` body maps to on this slot: `<Race3><Class3><slot-word>[f]`. `None` when
-/// the spec named no body (the rig then configures whatever the normal pick logs in as), or when the
-/// build is outside a pool slot (there is no slot identity to key a name to).
-pub(crate) fn rig_char_name_from_env() -> Option<String> {
-    rig_char_name(&RigSpec::parse(&std::env::var("WOW_RIG").ok()?)?)
-}
-
 fn rig_char_name(spec: &RigSpec) -> Option<String> {
     let (race, class, gender) = spec.body?;
-    let slot = crate::preflight::slot_word()?;
+    let slot = crate::run_mode::slot_word()?;
     let name = format!(
         "{}{}{slot}{}",
         race_code(race)?,

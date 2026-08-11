@@ -492,11 +492,7 @@ mod real_data {
     /// Skips when the 1.12.1 client isn't present (the repo never carries Blizzard data).
     #[test]
     fn a_wmo_pools_fog_block_follows_its_groups_interior_class() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: no WoW client data");
-            return;
-        }
+        let data = benilla_formats::wow_data_or_skip!();
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         // Which groups of a WMO carry liquid, and whether each is an interior group.
         let liquid_groups = |chain: &mut benilla_formats::Chain, root_path: &str| {

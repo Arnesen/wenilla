@@ -24,11 +24,7 @@ use benilla_formats::{load_m2_bounds, open_chain};
 
 #[test]
 fn ring_footprint_matches_reference_pixels() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
 
     // (model, ring radius measured from the reference apitrace at scale 1.0). The Stand-box footprint

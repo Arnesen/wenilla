@@ -78,11 +78,7 @@ mod tests {
     /// data.
     #[test]
     fn real_spell_focus_names_the_profession_objects() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_spell_focus_catalog(&mut chain).expect("load SpellFocusObject.dbc");
 

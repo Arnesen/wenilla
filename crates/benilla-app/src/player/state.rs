@@ -660,6 +660,16 @@ pub(super) struct PlayerRide {
 }
 
 impl Player {
+    /// Turn the avatar's **aim** by `radians` — the scripted mouse-turn's one lever
+    /// (`capture::probe_look`, decision 0621). Writing `face_yaw` is deliberately the whole of it:
+    /// from here on this is the identical path a real mouse-turn takes, and it is the same value
+    /// `stream_self_movement` diffs to decide on a `MSG_MOVE_SET_FACING`. A named method rather
+    /// than a `pub(crate)` field for decision 1174's reason — an instrument may reach into
+    /// gameplay, but not by opening gameplay's internals to the whole crate.
+    pub(crate) fn turn_aim(&mut self, radians: f32) {
+        self.face_yaw += radians;
+    }
+
     /// The character's *facing* (Bevy yaw, radians) — the aim, kept in sync with the camera by
     /// right-drag/movement. This is the unit's orientation as sent to the server, distinct from the
     /// rendered body heading (`model_yaw`, which a strafe rotates). The 3D-audio listener panning

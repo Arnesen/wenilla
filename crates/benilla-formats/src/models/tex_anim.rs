@@ -121,11 +121,7 @@ mod tests {
     /// 0xac lookup slot, the combo two-hop, and the band-clock bake. Skips without client data.
     #[test]
     fn elwynn_waterfall_bakes_two_v_scroll_loops() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let bytes = chain
             .read_file(

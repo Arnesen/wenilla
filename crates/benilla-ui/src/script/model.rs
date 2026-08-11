@@ -259,7 +259,7 @@ pub(crate) struct Model {
     pub(crate) pet_book: spellbook::PetBookState,
     /// The player's **macros** (decision 0983) — the one game-state table this crate owns
     /// outright, because 1.12 macros have no server side at all ([`macros`]'s module docs). The
-    /// app seeds it from `benilla/macros/…` and reads it back to persist.
+    /// app seeds it from `benilla-config/macros/…` and reads it back to persist.
     pub(crate) macros: macros::MacroState,
     /// A script mutated [`Self::macros`] since the app's last
     /// [`super::UiScript::take_macros_dirty`] drain — the save + `UPDATE_MACROS` trigger.

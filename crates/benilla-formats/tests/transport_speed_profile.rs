@@ -27,11 +27,7 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 #[test]
 fn ratchet_booty_bay_speed_profile() {
-    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open chain");
     let nodes = load_taxi_path_nodes(&mut chain).expect("taxi nodes");
     let path = nodes.path(241).expect("path 241 (Ratchet–Booty Bay)");

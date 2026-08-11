@@ -17,8 +17,10 @@
 
 use bevy::prelude::*;
 
-use super::Player;
-use crate::capture::ProbeClock;
+use crate::player::Player;
+use benilla_world::schedule::WorldStage;
+
+use super::ProbeClock;
 
 /// One scripted turn: `rate` (rad/s), when it starts, and how long it runs — **wall-clock seconds**
 /// ([`ProbeClock`], decision 0789). Both halves want real time here, for one reason: `90°/s for 6 s`
@@ -32,13 +34,13 @@ struct Turn {
 }
 
 #[derive(Resource)]
-pub(super) struct ProbeLook {
+pub(crate) struct ProbeLook {
     turns: Vec<Turn>,
 }
 
 /// Parse the env script. Absent or unparseable entries yield no turns (with a warning), so the probe
 /// is inert unless asked for.
-pub(super) fn from_env() -> Option<ProbeLook> {
+pub(crate) fn from_env() -> Option<ProbeLook> {
     let spec = std::env::var("WOW_PROBE_LOOK").ok()?;
     let turns: Vec<Turn> = spec
         .split(';')
@@ -69,7 +71,7 @@ pub(super) fn from_env() -> Option<ProbeLook> {
 
 /// Rotate the aim for every turn whose window covers this frame. Runs in `WorldStage::Input`
 /// **before** the controller, so the frame that sees the new `face_yaw` is the frame that streams it.
-pub(super) fn drive_probe_look(
+pub(crate) fn drive_probe_look(
     probe: Res<ProbeLook>,
     time: ProbeClock,
     mut player: ResMut<Player>,
@@ -87,6 +89,28 @@ pub(super) fn drive_probe_look(
         .map(|t| t.rate)
         .sum();
     if rate != 0.0 {
-        player.face_yaw += rate * dt;
+        player.turn_aim(rate * dt);
+    }
+}
+
+/// `WOW_PROBE_LOOK`'s registration. Added by the probe fleet when the variable is set, and inert
+/// (no resource, no systems) if the script parses to nothing — the same shape every other probe in
+/// the fleet has. It orders itself **before** [`crate::player::control`], which is what makes the
+/// frame that sees the new `face_yaw` the frame that streams it; the controller knows nothing
+/// about it (decision 1174).
+pub(crate) struct ProbeLookPlugin;
+
+impl Plugin for ProbeLookPlugin {
+    fn build(&self, app: &mut App) {
+        let Some(look) = from_env() else {
+            return;
+        };
+        app.insert_resource(look).add_systems(
+            Update,
+            drive_probe_look
+                .in_set(WorldStage::Input)
+                .before(crate::player::PlayerControlSet)
+                .run_if(in_state(crate::char_select::ClientState::InWorld)),
+        );
     }
 }

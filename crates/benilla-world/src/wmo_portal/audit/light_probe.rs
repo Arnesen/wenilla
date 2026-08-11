@@ -5,8 +5,6 @@
 //! these print the g00/g11 ownership boundary and the forge's bake/day-night face patchwork as
 //! maps, so a "it looks wrong HERE" becomes a fixture. Shares `Site`/`Subject` with the PVS audits.
 
-use std::path::PathBuf;
-
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_formats::{load_tile_mesh, mcsh_shadowed_at, open_chain};
 
@@ -30,10 +28,8 @@ fn dump_tile_placements() {
         parts[1].trim().parse::<u32>().unwrap(),
         parts[2].trim().parse::<u32>().unwrap(),
     );
-    let data = std::env::var("WOW_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data"));
-    let mut chain = open_chain(&data).expect("open MPQ chain (set WOW_DATA)");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
+    let mut chain = open_chain(&data).expect("open MPQ chain");
     let tile = load_tile_mesh(&mut chain, &map, tx, ty).expect("load tile");
     println!(
         "== {map} tile ({tx},{ty}) — {} WMO placements ==",
@@ -386,10 +382,8 @@ fn world_point_light_probe() {
     let wx: f32 = parts[1].trim().parse().unwrap();
     let wy: f32 = parts[2].trim().parse().unwrap();
     let wz: f32 = parts[3].trim().parse().unwrap();
-    let data = std::env::var("WOW_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data"));
-    let mut chain = open_chain(&data).expect("open MPQ chain (set WOW_DATA)");
+    let data = benilla_formats::wow_data().expect("no WoW install found (set $WOW_DATA)");
+    let mut chain = open_chain(&data).expect("open MPQ chain");
     let (cx, cy) = benilla_formats::world_to_tile(wx, wy);
     let mut chunks = Vec::new();
     let mut placements: Vec<benilla_formats::WmoInstance> = Vec::new();

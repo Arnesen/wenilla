@@ -36,16 +36,16 @@
 //! one line per world entry when everything is fine, and it re-fires on every re-entry (a relog, a
 //! `.character race` forced logout, a reconnect) because the state can have changed.
 //!
-//! The same audience — the reader of the log — is why [`benilla_world::build_id::banner`] is registered
-//! here: **which build produced this log** is the first thing a report from someone else's machine
-//! has to establish, and one startup line puts it in the output they already paste.
+//! The same audience — the reader of the log — is why [`benilla_world::build_id::banner`] exists.
+//! It is **not** registered here any more (decision 1179): this module is dev-only since 1174, and
+//! "which build produced this log" is the first thing a report from *someone else's machine* has to
+//! establish — which is precisely the player build. The banner now registers beside the stamp
+//! itself, in `lib::run`, where it is always compiled.
 //!
-//! The other half is [`account_guard`] — the pre-connect check that a session running inside a
-//! worktree pool slot is logging in as **its own** probe account. A vmangos login kicks whoever
-//! holds the account, so the default `one` credentials fire the director out of their live session
-//! and another slot's `probeN` fires a parallel session's probe out of the world mid-sample
-//! (method.md "The local vmangos server"). It gates the **env fast path only** — a human typing at
-//! the login screen is never blocked.
+//! The other half of decision 0649 — the pre-connect **account guard**, which keeps a session
+//! running inside a worktree pool slot from logging in as somebody else's account — lives in
+//! [`crate::run_mode`] now, not here: it is consulted by the login policy, and 1174's seam does not
+//! let gameplay call an instrument. Its reasoning went with it.
 
 use bevy::prelude::*;
 
@@ -99,7 +99,7 @@ pub(crate) struct PreflightPlugin;
 impl Plugin for PreflightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Preflight>()
-            .add_systems(Startup, (benilla_world::build_id::banner, offline_notice))
+            .add_systems(Startup, offline_notice)
             .add_systems(
                 Update,
                 report_session.after(benilla_world::schedule::WorldStage::Net),
@@ -329,88 +329,6 @@ fn findings(
     out
 }
 
-/// The pre-connect account guard, consulted by the login policy's env fast path
-/// ([`crate::login`]). Returns `Err(explanation)` when this build lives in a worktree pool slot and
-/// the fast path is about to authenticate as an account that belongs to somebody else — the
-/// director's `one` (a login KICKS their live session mid-play) or another slot's `probeN` (the
-/// kicked client's 0065 teardown despawns every net entity, so a parallel session's probe reads a
-/// unit-less world and prints garbage; it happened, method.md records it).
-///
-/// Slot identity comes from the compiled-in manifest path, because that is what the pool guarantees
-/// is unique per session: every slot has its own checkout and its own `target/`. Outside a pool slot
-/// (the primary checkout, which is the director's) the guard is inert — it has no business having an
-/// opinion about a login it cannot attribute.
-///
-/// `WOW_ALLOW_ACCOUNT=1` is the escape hatch for the rare deliberate cross-account run; it turns the
-/// refusal into a warning rather than silence, because the kick still happens.
-pub(crate) fn account_guard(user: &str) -> Result<(), String> {
-    guard_for(pool_slot(env!("CARGO_MANIFEST_DIR")), user)
-}
-
-/// [`account_guard`]'s decision, with the slot passed in so the ladder is testable from any
-/// checkout (the real one reads a compile-time path that differs per worktree).
-fn guard_for(slot: Option<u32>, user: &str) -> Result<(), String> {
-    let Some(slot) = slot else {
-        return Ok(());
-    };
-    let mine = format!("probe{slot}");
-    let user_lc = user.to_ascii_lowercase();
-    if user_lc == mine {
-        return Ok(());
-    }
-    let whose = if user_lc == "one" {
-        "the DIRECTOR's account — logging in on it kicks them out of their live session mid-play"
-    } else if user_lc.starts_with("probe") && user_lc[5..].chars().all(|c| c.is_ascii_digit()) {
-        "ANOTHER worktree slot's probe account — logging in on it kicks that session's probe out \
-         of the world, and its next sample reads a unit-less world"
-    } else {
-        return Ok(()); // a bystander account (`two`, a fresh test account): not ours to police
-    };
-    Err(format!(
-        "the env fast path is about to log in as `{user}` from pool-{slot}, and that is {whose}. \
-         This slot's identity is WOW_USER=probe{slot} WOW_PASS=pprobe{slot} \
-         WOW_CHAR=Probe{spelled} (method.md \"The local vmangos server\").",
-        spelled = spell_digit(slot)
-    ))
-}
-
-/// This slot's index as the word the probe identity spells it with (`pool-4` → `"four"`), or `None`
-/// outside a pool slot. The one place anything else should ask "which session am I?" — the rig keys
-/// its derived character names off it ([`crate::capture::rig_char_name_from_env`]).
-pub(crate) fn slot_word() -> Option<&'static str> {
-    pool_slot(env!("CARGO_MANIFEST_DIR")).map(spell_digit)
-}
-
-/// The pool slot index this build was compiled in, from a `…/benilla-wt/pool-<N>/…` manifest path.
-/// `None` for the primary checkout and any non-pool worktree.
-fn pool_slot(manifest_dir: &str) -> Option<u32> {
-    let mut parts = manifest_dir.split('/');
-    while let Some(part) = parts.next() {
-        if part == "benilla-wt" {
-            return parts.next()?.strip_prefix("pool-")?.parse().ok();
-        }
-    }
-    None
-}
-
-/// The probe character's name suffix for slot `n` — vmangos names carry no digits, so the pool
-/// index is spelled (`pool-4` → `Probefour`).
-fn spell_digit(n: u32) -> &'static str {
-    match n {
-        0 => "zero",
-        1 => "one",
-        2 => "two",
-        3 => "three",
-        4 => "four",
-        5 => "five",
-        6 => "six",
-        7 => "seven",
-        8 => "eight",
-        9 => "nine",
-        _ => "<n>",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,47 +459,5 @@ mod tests {
         let out = findings(&f, ShieldReport::Armed);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("STUNNED") && out[0].contains("TAXI FLIGHT"));
-    }
-
-    #[test]
-    fn the_guard_only_polices_accounts_that_belong_to_someone() {
-        // Our own slot's probe: the whole point of the identity.
-        assert!(guard_for(Some(4), "probe4").is_ok());
-        assert!(guard_for(Some(4), "PROBE4").is_ok()); // vmangos accounts are case-insensitive
-                                                       // The director's account, and a neighbouring slot's probe: both kick a live session.
-        let director = guard_for(Some(4), "one").unwrap_err();
-        assert!(director.contains("DIRECTOR") && director.contains("WOW_USER=probe4"));
-        // The override hint belongs to the caller that can act on it, not to the reason.
-        assert!(!director.contains("WOW_ALLOW_ACCOUNT"));
-        assert!(guard_for(Some(4), "probe7")
-            .unwrap_err()
-            .contains("ANOTHER worktree slot"));
-        // A bystander account is nobody's to police, and outside a pool slot we have no standing.
-        assert!(guard_for(Some(4), "two").is_ok());
-        assert!(guard_for(None, "one").is_ok());
-    }
-
-    #[test]
-    fn the_probe_character_name_spells_the_slot() {
-        // vmangos player names carry no digits, so `Probe4` cannot exist — the pool index is spelled.
-        assert!(guard_for(Some(0), "one")
-            .unwrap_err()
-            .contains("WOW_CHAR=Probezero"));
-        assert!(guard_for(Some(9), "one")
-            .unwrap_err()
-            .contains("WOW_CHAR=Probenine"));
-    }
-
-    #[test]
-    fn the_slot_is_read_off_the_manifest_path() {
-        assert_eq!(
-            pool_slot("/Users/sam/dev/benilla-wt/pool-7/crates/benilla"),
-            Some(7)
-        );
-        assert_eq!(pool_slot("/Users/sam/dev/benilla-wow/crates/benilla"), None);
-        assert_eq!(
-            pool_slot("/Users/sam/dev/benilla-wow/.claude/worktrees/x/crates/benilla"),
-            None
-        );
     }
 }

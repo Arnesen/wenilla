@@ -9,15 +9,9 @@
 //! `[446, 478, 510, 222, 238]`, every column carrying the gnome bit `1 << 7`). 1.12.1 renders her
 //! pigtails, her long ears and her earrings; honouring the mask strips all three.
 
-use std::path::PathBuf;
-
 use benilla_formats::{
     load_creature_catalog, load_item_display_catalog, open_chain, CharacterGeosets, EquipGeosets,
 };
-
-fn vanilla_data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-}
 
 /// Jubie's `CreatureDisplayInfo` id — the chain's entry point.
 const JUBIE_DISPLAY: u32 = 7969;
@@ -26,11 +20,7 @@ const AMULET_DISPLAY: u32 = 15676;
 
 #[test]
 fn a_modelless_head_display_is_not_a_worn_helm() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let items = load_item_display_catalog(&mut chain).expect("ItemDisplayInfo");
 
@@ -91,11 +81,7 @@ fn a_modelless_head_display_is_not_a_worn_helm() {
 
 #[test]
 fn jubie_keeps_her_hair_ears_and_earrings() {
-    let data = vanilla_data_dir();
-    if !data.is_dir() {
-        eprintln!("skipping: vanilla client not present at {}", data.display());
-        return;
-    }
+    let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");
     let creatures = load_creature_catalog(&mut chain).expect("creature catalog");
     let items = load_item_display_catalog(&mut chain).expect("ItemDisplayInfo");

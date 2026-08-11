@@ -80,7 +80,7 @@ pub struct WmoSkyboxExt {}
 
 impl MaterialExtension for WmoSkyboxExt {
     fn fragment_shader() -> ShaderRef {
-        "shaders/wmo_skybox.wgsl".into()
+        "embedded://benilla_world/shaders/wmo_skybox.wgsl".into()
     }
 
     /// Depth-write OFF, exactly as [`crate::sky::SkyExt`] does it: the backdrop must leave the

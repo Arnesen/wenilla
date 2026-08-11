@@ -449,11 +449,6 @@ fn load_creature_display_info_extra(chain: &mut Chain) -> Result<HashMap<u32, Np
 mod tests {
     use super::*;
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The footprint accessor on the **real** build-5875 DBCs: a display wearing the HumanMale
     /// body resolves the Base boot print (`FootprintTextures` id 1) at the authored 12×10 inches
     /// → 1/3 × 5/18 yards (the client's ×1/36 cache conversion, byte-verified at `0x607a00`);
@@ -461,11 +456,7 @@ mod tests {
     /// schema columns (a shifted field would misread every print) and the inches→yards space.
     #[test]
     fn footprints_resolve_on_real_data() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
         let human = cat
@@ -504,11 +495,7 @@ mod tests {
     /// the baked-texture-path convention. Skips when the client data isn't present.
     #[test]
     fn character_model_npcs_resolve_a_shipped_baked_atlas() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
         assert!(
@@ -556,11 +543,7 @@ mod tests {
     /// DBC; a shifted column or a wrong field offset would misread them. Skips without the client data.
     #[test]
     fn stormwind_guard_equipment_columns_decode_in_bodyslot_order() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
         let guard = cat
@@ -594,11 +577,7 @@ mod tests {
     /// makes the flag safe to gate the reported case on.
     #[test]
     fn the_breathless_models_are_the_ones_with_no_breath() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
 
@@ -634,11 +613,7 @@ mod tests {
 
     #[test]
     fn collision_height_is_the_m2_collision_box() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
 

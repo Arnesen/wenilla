@@ -91,11 +91,7 @@ mod tests {
     /// Charge's 8–25. Skips without client data.
     #[test]
     fn real_spell_ranges_read_the_byte_laws_rows() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let ranges = load_spell_ranges(&mut chain).expect("load SpellRange");
 

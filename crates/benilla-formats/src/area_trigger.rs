@@ -233,11 +233,7 @@ mod tests {
     /// sphere row both present, and the per-map bucketing. Skips without client data.
     #[test]
     fn real_area_triggers_load_and_contain_their_own_centres() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_area_trigger_catalog(&mut chain).expect("load AreaTrigger");
         assert_eq!(cat.len(), 432, "5875 ships 432 area triggers");

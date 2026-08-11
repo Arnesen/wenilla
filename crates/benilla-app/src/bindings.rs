@@ -27,7 +27,7 @@
 //! — the 1.12 law (lone modifiers ignored, left/right clicks stay UI clicks, ESC binds like
 //! any key).
 //!
-//! Persistence: `benilla/bindings/account.txt` + `<Realm>-<Char>.txt` ([`store`], through
+//! Persistence: `benilla-config/bindings/account.txt` + `<Realm>-<Char>.txt` ([`store`], through
 //! [`crate::local_state`]); the character file's existence is the character-set state, deleted
 //! on the confirmed switch back to general — the reference's own semantics.
 
@@ -333,10 +333,16 @@ fn latch_and_dispatch(
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
-    // Exactly the dev overlays' plane (`debug_panel::dev_plane`, minus the Super arm the `sup`
-    // gate below already covers) — it costs the keyboard its fallback probe. See
+    // Exactly the dev overlays' plane (`modkeys::dev_chord`, minus the Super arm the `sup` gate
+    // below already covers) — it costs the keyboard its fallback probe. See
     // [`BindingDispatch::resolve`].
-    let dev_plane = ctrl && shift && !alt;
+    //
+    // **Only when there is something on the plane** (decision 1179). A player build holds no dev
+    // chord at all, so suppressing the reference's fallback there buys nothing and costs fidelity:
+    // `CTRL-SHIFT-P` would resolve to `None` instead of falling through to `SHIFT-P`
+    // (`TOGGLECHARACTER3`, the pet paper doll) the way the binary does. 1176 gated what the plane
+    // *offers* and left what it *costs*; this is the other half.
+    let dev_plane = ctrl && shift && !alt && crate::run_mode::dev_affordances();
 
     let mut script = script;
     let armed = script.as_ref().is_some_and(|s| s.bind_capture_armed());

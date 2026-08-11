@@ -246,10 +246,10 @@ pub(super) fn apply_server_moves(
             // cross-map worldport despawns and re-streams this entity while `player.active` stays
             // true — per-entity state attached only on this one-shot edge would be lost on transfer.
             info!(
-                "took control of player @ {:?} facing {:.3} ({} + F toggles free-fly)",
+                "took control of player @ {:?} facing {:.3}{}",
                 player.pos,
                 yaw.rem_euclid(std::f32::consts::TAU),
-                benilla_world::modkeys::DEV_CHORD
+                crate::run_mode::free_fly_hint()
             );
         }
     }

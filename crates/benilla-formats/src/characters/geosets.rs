@@ -440,11 +440,6 @@ mod tests {
         assert!(set.contains(&1), "max(1, 0) = scalp geoset 1");
     }
 
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// **B11, against the shipped DBC** (decision 0682): `CharHairGeosets` carries four rows for the
     /// goblin male's only hairstyle, and the reference's linear scan takes the first — geoset **1**,
     /// the bare scalp. Last-write took id 244's geoset **2**, which adds an untextured topknot.
@@ -454,11 +449,7 @@ mod tests {
     /// **no other key in the table is duplicated** — which is what bounds this change to goblins.
     #[test]
     fn goblin_male_hair_takes_the_first_of_four_duplicate_rows() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
 
         // The file's own rows, read independently of the loader, so the test states the premise it

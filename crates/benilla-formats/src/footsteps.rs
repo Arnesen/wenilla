@@ -204,21 +204,13 @@ pub fn load_footprint_textures(chain: &mut Chain) -> Result<HashMap<u32, String>
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The full chain resolves on real 5875 data: a Metallic-terrain effect under footstep
     /// class 8 yields the byte-decoded kits (650 dry / 1063 splash); the humanoid class 7
     /// resolves the `CharacterMediumLarge*` kits (560 Dirt with no effect, 562 Grass on a
     /// grass-terrain effect — the character-in-Elwynn case); an unknown class stays silent.
     #[test]
     fn real_footstep_chain_resolves() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_footstep_catalog(&mut chain).expect("load footstep catalog");
         assert_eq!(cat.len(), 179, "all lookup rows load");
@@ -269,11 +261,7 @@ mod tests {
     /// the `textures\Footsteps\*` ink paths.
     #[test]
     fn footprint_gate_and_textures_on_real_data() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_footstep_catalog(&mut chain).expect("load footstep catalog");
         let printing: std::collections::BTreeSet<u32> = cat

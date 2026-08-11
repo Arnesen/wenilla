@@ -318,19 +318,11 @@ pub fn load_enchant_catalog(chain: &mut Chain) -> Result<EnchantCatalog> {
 mod tests {
     use super::*;
 
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
     /// The two glow tables as they actually ship, including both traps: row **28**'s two
     /// out-of-range garbage slots and the reference's per-slot skip.
     #[test]
     fn real_item_visuals_join_their_effect_models() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let cat = load_item_visual_catalog(&mut chain).expect("load ItemVisuals");
         assert_eq!(cat.len(), 34, "34 ItemVisuals rows in build 5875");
@@ -389,11 +381,7 @@ mod tests {
     /// of them the unresolvable `-1`, and every other one resolves to at least one glow model.
     #[test]
     fn real_displays_carrying_a_visual_all_resolve() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let visuals = load_item_visual_catalog(&mut chain).expect("load ItemVisuals");
         let displays = crate::load_item_display_catalog(&mut chain).expect("load ItemDisplayInfo");
@@ -432,11 +420,7 @@ mod tests {
     /// `+0x58`) is the visual, and the three shaman weapon buffs to name it.
     #[test]
     fn real_enchant_visuals_resolve() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let visuals = load_item_visual_catalog(&mut chain).expect("load ItemVisuals");
         let enchants = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
@@ -476,11 +460,7 @@ mod tests {
     /// column — a glowing enchant and a plain +stat one both have one.
     #[test]
     fn real_enchant_names_read_off_the_table() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let enchants = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
 
@@ -515,11 +495,7 @@ mod tests {
     /// confirm does NOT fire for them.
     #[test]
     fn real_enchant_flags_column() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
+        let data = crate::wow_data_or_skip!();
         let mut chain = crate::open_chain(&data).expect("open chain");
         let e = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
 
