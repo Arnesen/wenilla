@@ -7,7 +7,7 @@
 
 use bevy::prelude::*;
 
-use crate::assets::{sprite_image, sprite_image_tiled, WorldAssets};
+use benilla_assets::{sprite_image, sprite_image_tiled, WorldAssets};
 
 /// `UI-Tooltip-Background`'s native size (the tile-period → `stretch_value` conversion).
 const TOOLTIP_BG_NATIVE: f32 = 64.0;

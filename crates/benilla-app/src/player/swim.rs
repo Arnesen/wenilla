@@ -50,8 +50,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::collision::player_query_filter;
-use crate::liquid::{LiquidClaim, WaterChunkInfo};
+use benilla_world::world_point::{Subject, WorldPoint};
 
 use super::mover::Outcome;
 use super::{Player, CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, SKIN_WIDTH};
@@ -117,19 +116,18 @@ fn rest_cap(h: f32) -> f32 {
 }
 
 /// The **Bevy-Y liquid surface** at the avatar's feet, if any liquid covers that XY — the shared
-/// swim/buoyancy query. [`liquid_at`] answers in WoW Z; WoW Z maps straight to Bevy Y, so the
+/// swim/buoyancy query. The world answers in WoW Z; WoW Z maps straight to Bevy Y, so the
 /// surface height above the feet is the same delta in either space and we lift the feet's Bevy Y by it.
 ///
-/// Uses [`liquid_at`], not the water-only wrapper: **you swim in lava and slime too** — Blackrock's
-/// magma and Undercity's sludge are surfaces you enter, not ones you fall through (decision 0634).
-/// `claim` is the player's live WMO-interior claim — which ROOM's liquid answers (decision 0696).
-pub(super) fn surface_over_feet(
-    water: &Query<&WaterChunkInfo>,
-    feet: Vec3,
-    claim: LiquidClaim,
-) -> Option<f32> {
+/// Asks for **any** liquid, not the water-only wrapper: **you swim in lava and slime too** —
+/// Blackrock's magma and Undercity's sludge are surfaces you enter, not ones you fall through
+/// (decision 0634). The subject is the player, so which ROOM's liquid answers is its own live
+/// interior claim (decision 0696).
+pub(super) fn surface_over_feet(world: &WorldPoint, feet: Vec3) -> Option<f32> {
     let wow = bevy_to_wow(feet);
-    crate::liquid::liquid_at(water.iter(), wow, claim).map(|hit| feet.y + (hit.surface_z - wow[2]))
+    world
+        .liquid_at(Subject::Player, wow)
+        .map(|hit| feet.y + (hit.surface_z - wow[2]))
 }
 
 /// Update [`Player::swimming`] from the water surface over the feet, with the verified enter/leave
@@ -192,19 +190,17 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
 pub(super) fn breach_step(
     player: &mut Player,
     time: &Time,
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
 ) -> Outcome {
     player.vel_y = SWIM_JUMP_SPEED;
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
-    let out = crate::collision::one_sided::move_and_slide(
-        ms,
+    let out = world.slide_body(
         capsule,
         player.pos + half_h,
         player.horiz_vel + Vec3::Y * player.vel_y,
         time.delta(),
         &MoveAndSlideConfig::default(),
-        &player_query_filter(),
         |_hit| MoveAndSlideHitResponse::Accept,
     );
     player.pos = out.position - half_h;
@@ -298,7 +294,7 @@ pub(super) fn rest_line(player: &Player, surface_y: Option<f32>) -> Option<f32> 
 pub(super) fn swim_step(
     player: &mut Player,
     time: &Time,
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
     input_vel: Vec3,
     surface_y: Option<f32>,
@@ -307,7 +303,6 @@ pub(super) fn swim_step(
     let dt = time.delta_secs();
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
     let center = player.pos + half_h;
-    let filter = player_query_filter();
 
     // The one vertical constraint: never rise ABOVE the resting waterline — cap the *upward velocity*
     // so the feet reach at most the rest line this frame, NOT the position after the slide. That
@@ -333,14 +328,12 @@ pub(super) fn swim_step(
     };
     let (vel, surface_pitch) = cap_redirect(input_vel, cap);
 
-    let out = crate::collision::one_sided::move_and_slide(
-        ms,
+    let out = world.slide_body(
         capsule,
         center,
         vel,
         time.delta(),
         &MoveAndSlideConfig::default(),
-        &filter,
         |_hit| MoveAndSlideHitResponse::Accept,
     );
     let mut c = out.position;
@@ -381,15 +374,9 @@ pub(super) fn swim_step(
         if let Some(surface_now) = surface_at(c - half_h) {
             let excess = settle_to_rest(c.y - half_h.y, surface_now, player.collision_height.0);
             if excess > 0.0 {
-                let drop = crate::collision::one_sided::cast_move(
-                    ms,
-                    capsule,
-                    c,
-                    Vec3::NEG_Y * excess,
-                    SKIN_WIDTH,
-                    &filter,
-                )
-                .map_or(excess, |h| h.distance.min(excess));
+                let drop = world
+                    .cast_body(capsule, c, Vec3::NEG_Y * excess, SKIN_WIDTH)
+                    .map_or(excess, |h| h.distance.min(excess));
                 c.y -= drop;
             }
         }
@@ -400,14 +387,7 @@ pub(super) fn swim_step(
     player.vel_y = 0.0;
     player.horiz_vel = Vec3::new(vel.x, 0.0, vel.z);
 
-    let probe = crate::collision::one_sided::cast_move(
-        ms,
-        capsule,
-        c,
-        Vec3::NEG_Y * GROUND_PROBE,
-        SKIN_WIDTH,
-        &filter,
-    );
+    let probe = world.cast_body(capsule, c, Vec3::NEG_Y * GROUND_PROBE, SKIN_WIDTH);
     let grounded = probe.is_some_and(|h| h.normal1.y >= GROUND_COS);
     SwimOutcome {
         grounded,

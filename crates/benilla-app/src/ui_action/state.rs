@@ -56,7 +56,7 @@ pub(super) struct StateMemory {
     last_generation: Option<u64>,
     engaged: bool,
     auto_repeat: Option<u32>,
-    /// Last `dbg_trace` "cd tick" stamp — the once-per-second gate (trace runs only).
+    /// Last `benilla_assets::trace` "cd tick" stamp — the once-per-second gate (trace runs only).
     last_cd_trace: Option<Instant>,
 }
 
@@ -335,7 +335,7 @@ pub(super) fn feed_action_state(
     let gen_changed = memory.last_generation != Some(cooldowns.generation);
     memory.last_generation = Some(cooldowns.generation);
     // The cooldown-clock trace (`WOW_MOVE_TRACE` sink, tag "cd"): once per second.
-    let trace_cd = crate::dbg_trace::enabled()
+    let trace_cd = benilla_assets::trace::enabled()
         && memory
             .last_cd_trace
             .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 1.0);
@@ -444,7 +444,7 @@ pub(super) fn feed_action_state(
                 if st.cooldown.is_some() && trace_cd {
                     // The store (Instant clock) vs the widget (GetTime clock) — the sink
                     // stamps the wall time, so drift between the two clocks reads directly.
-                    crate::dbg_trace::line(
+                    benilla_assets::trace::line(
                         "cd",
                         &format!(
                             "tick action={} rem={}ms dur={}ms engine_now={ui_now:.3}",
@@ -514,8 +514,8 @@ pub(super) fn feed_action_state(
         if (n.current, n.auto_repeat) != (o.current, o.auto_repeat) {
             state_changed = true;
         }
-        if n.cooldown != o.cooldown && crate::dbg_trace::enabled() {
-            crate::dbg_trace::line(
+        if n.cooldown != o.cooldown && benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
                 "cd",
                 &format!(
                     "push action={action} cooldown={:?} engine_now={:.3}",

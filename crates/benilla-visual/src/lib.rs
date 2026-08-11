@@ -30,6 +30,17 @@ pub struct Metrics {
     pub max_delta: u8,
     /// Fraction of pixels (0..1) whose largest channel delta exceeds [`OVER_THRESHOLD`].
     pub pct_over: f64,
+    /// How many pixels differ **at all** (any channel, by any amount).
+    ///
+    /// The number that separates "a render changed" from "a silhouette pixel landed on the other
+    /// side of an MSAA tie": both read as a scary `max_delta` and an `mae` of 0.000, and only the
+    /// count tells them apart. A handful of pixels in a 5.76 M-pixel frame is a tie flipping with
+    /// the binary; a region is a regression. Answering that used to take a hand-rolled PNG
+    /// decoder in a scratchpad, every time.
+    pub changed: u64,
+    /// Where the largest delta is, `(x, y)` — `(0, 0)` when nothing differs. A tie flip recurs at
+    /// the *same* coordinate build after build, which is most of the evidence that it is one.
+    pub worst_at: (u32, u32),
 }
 
 /// Compare two equally-sized RGB images. Errors if the dimensions differ.
@@ -45,14 +56,23 @@ pub fn compare(a: &RgbImage, b: &RgbImage) -> anyhow::Result<Metrics> {
     let mut sum_sq = 0u64;
     let mut max_delta = 0u8;
     let mut over = 0u64;
-    for (pa, pb) in a.pixels().zip(b.pixels()) {
+    let mut changed = 0u64;
+    let mut worst_at = (0u32, 0u32);
+    for (i, (pa, pb)) in a.pixels().zip(b.pixels()).enumerate() {
         let mut pixel_max = 0u8;
         for c in 0..3 {
             let d = (pa[c] as i32 - pb[c] as i32).unsigned_abs() as u8;
             sum_abs += d as u64;
             sum_sq += (d as u64) * (d as u64);
-            max_delta = max_delta.max(d);
+            if d > max_delta {
+                max_delta = d;
+                let i = i as u32;
+                worst_at = (i % a.width(), i / a.width());
+            }
             pixel_max = pixel_max.max(d);
+        }
+        if pixel_max > 0 {
+            changed += 1;
         }
         if pixel_max > OVER_THRESHOLD {
             over += 1;
@@ -65,6 +85,8 @@ pub fn compare(a: &RgbImage, b: &RgbImage) -> anyhow::Result<Metrics> {
         rmse: (sum_sq as f64 / n_chan).sqrt(),
         max_delta,
         pct_over: over as f64 / n_pixels.max(1) as f64,
+        changed,
+        worst_at,
     })
 }
 
@@ -570,6 +592,23 @@ mod tests {
         assert_eq!(m.mae, 0.0);
         assert_eq!(m.rmse, 0.0);
         assert_eq!(m.pct_over, 0.0);
+        assert_eq!(m.changed, 0);
+        assert_eq!(m.worst_at, (0, 0));
+    }
+
+    /// The single-pixel case this exists for: one silhouette pixel on the wrong side of an MSAA
+    /// tie. `mae` rounds to 0.000 and `pct_over` to 0.00% in a frame this size, so the *only*
+    /// signals that separate it from a real render change are the count and the coordinate.
+    #[test]
+    fn one_flipped_pixel_is_counted_and_located() {
+        let a = solid(100, 80, [40, 40, 40]);
+        let mut b = a.clone();
+        b.put_pixel(37, 22, image::Rgb([40, 61, 40]));
+        let m = compare(&a, &b).unwrap();
+        assert_eq!(m.changed, 1, "exactly one pixel differs");
+        assert_eq!(m.worst_at, (37, 22), "and the report says where");
+        assert_eq!(m.max_delta, 21);
+        assert!(m.mae < 0.001, "a lone pixel vanishes into the mean");
     }
 
     #[test]

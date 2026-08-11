@@ -81,12 +81,9 @@
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use benilla_assets::AdtTile;
-
 use crate::area::AreaTableRes;
 use crate::entities::Creatures;
 use crate::net::{NetEntity, ObjectStore, SelfPlayer};
-use crate::terrain_stream::{area_id_under, CurrentArea, TerrainStreamer};
 
 use super::events::AnimSoundEvent;
 use super::spell_visual::{FxClass, FxStage, SpellKitFx, SpellVisuals};
@@ -149,11 +146,9 @@ pub(super) fn classify_breath(
     mut commands: Commands,
     time: Res<Time>,
     units: Query<(Entity, &GlobalTransform, Option<&BreathEnv>), With<NetEntity>>,
-    self_area: Res<CurrentArea>,
     self_units: Query<(), With<SelfPlayer>>,
     areas: Option<Res<AreaTableRes>>,
-    streamer: Res<TerrainStreamer>,
-    adt_tiles: Res<Assets<AdtTile>>,
+    world: benilla_world::world_point::WorldPoint,
 ) {
     let Some(areas) = areas else {
         return; // no client data — the DBC-resource degrade shape, as everywhere else
@@ -166,9 +161,9 @@ pub(super) fn classify_breath(
         // The player's area is `CurrentArea` — the client's own `GetAreaID`, WMO-interior claim
         // included. Every other unit gets the outdoor leg alone (module docs).
         let area = if self_units.contains(entity) {
-            self_area.0
+            world.area()
         } else {
-            area_id_under(&streamer, &adt_tiles, transform.translation())
+            world.area_id_under(transform.translation())
         };
         let kind = match area {
             Some(id) if areas.0.is_cold(id) => Breath::Cold,

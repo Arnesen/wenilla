@@ -12,7 +12,7 @@
 //!   `SStrCmpI`); the zone grids remapped from raw AreaTable ids by the client's one-hop parent
 //!   rollup + (mapId, areaId) match — here straight to 1-based zone indices.
 //! - [`feed_world_map`] (every frame): reads the engine-owned selection back, projects the
-//!   player's world position onto the displayed map via [`crate::map_proj`] (world sheet:
+//!   player's world position onto the displayed map via [`benilla_world::map_proj`] (world sheet:
 //!   WorldMapContinent constants; continent/zone: the WorldMapArea rect lerp), resolves the
 //!   player's `(continent, zone)` from `CurrentArea` through the AreaTable parent chain, and
 //!   pushes the trio + facing. (The client matches its zone-level area global directly —
@@ -31,13 +31,13 @@ use benilla_formats::{
 };
 use benilla_ui::script::{UiScript, WorldMapContinentView, WorldMapOverlayView, WorldMapZoneView};
 
-use crate::assets::{LockRecover, WorldAssets};
-use crate::map_proj::{self, WorldProj, ZoneRect};
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::player::Player;
-use crate::terrain_stream::CurrentArea;
 use crate::ui_script::UiInput;
-use crate::world_map::{CurrentMap, MapCatalogRes};
+use benilla_assets::MapCatalogRes;
+use benilla_assets::{LockRecover, WorldAssets};
+use benilla_world::map_proj::{self, WorldProj, ZoneRect};
+use benilla_world::world_map::CurrentMap;
 
 /// The app-side mirror of the pushed catalog — the projection data (rects + world-sheet
 /// constants) per continent/zone, in the SAME order as the engine's copy (indices must agree).
@@ -249,7 +249,7 @@ fn feed_world_map(
     data: Option<Res<WorldMapUiData>>,
     player: Res<Player>,
     map: Option<Res<CurrentMap>>,
-    area: Res<CurrentArea>,
+    world: benilla_world::world_point::WorldPoint,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     death_net: Res<crate::death::DeathNet>,
@@ -276,8 +276,8 @@ fn feed_world_map(
 
     // The player's (continent, zone) — CurrentArea's MCNK areaId walked up the AreaTable parent
     // chain to its top-level zone, matched against the displayed catalog (1-based indices).
-    let player_zone = area
-        .0
+    let player_zone = world
+        .area()
         .and_then(|aid| areas.0.top_zone(aid))
         .and_then(|top| {
             data.continents.iter().enumerate().find_map(|(ci, cont)| {

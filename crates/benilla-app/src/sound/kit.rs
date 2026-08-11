@@ -24,8 +24,8 @@ use kira::sound::PlaybackState;
 
 use benilla_formats::{sound_kit_flags, SoundKitCatalog};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::debug_panel::DebugState;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::dev_state::DebugState;
 
 use super::math;
 use super::mixer::{self, StaticSoundData};
@@ -613,7 +613,7 @@ fn stop_all_channels(mut out: NonSendMut<SoundOutput>) {
 /// while the old map's decodes stop occupying RAM forever (the #bugs teleport leak). Playing
 /// channels own their frames (`StaticSoundData` clones share them), so nothing audible cuts.
 fn evict_kit_cache(
-    mut changes: MessageReader<crate::world_map::MapChange>,
+    mut changes: MessageReader<benilla_world::world_map::MapChange>,
     kits: Option<ResMut<SoundKits>>,
 ) {
     if changes.is_empty() {
@@ -631,7 +631,7 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                pump_channels.in_set(crate::schedule::WorldStage::Present),
+                pump_channels.in_set(benilla_world::schedule::WorldStage::Present),
                 apply_kit_debug,
                 evict_kit_cache,
             ),

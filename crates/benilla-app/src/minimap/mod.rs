@@ -44,13 +44,14 @@ use interior::{interior_group_selection, wmo_minimap_stem};
 
 use benilla_ui::widget::MINIMAP_DEFAULT_ZOOM;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::player::Player;
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuadMask, UiQuads};
-use crate::wmo_portal::{
+use benilla_assets::MapCatalogRes;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::wmo_portal::{
     down_ray_seeds, terrain_z_local, WmoPortalInstance, INTERIOR_PROBE_HEIGHT,
 };
-use crate::world_map::{CurrentMap, MapCatalogRes};
+use benilla_world::world_map::CurrentMap;
 
 /// Yards per ADT tile / per MCNK chunk (16 chunks per tile edge).
 const TILE_YARDS: f32 = 533.333_3;
@@ -281,11 +282,10 @@ fn emit_minimap(
     map: Option<Res<CurrentMap>>,
     catalog: Option<Res<MapCatalogRes>>,
     player: Res<Player>,
-    lighting: Option<Res<crate::lighting::WowLighting>>,
+    lighting: Option<Res<benilla_world::lighting::WowLighting>>,
     instances: Query<&WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
-    streamer: Res<crate::terrain_stream::TerrainStreamer>,
-    adt_tiles: Res<Assets<benilla_assets::AdtTile>>,
+    world: benilla_world::world_point::WorldPoint,
     asset_server: Res<AssetServer>,
     death_net: Res<crate::death::DeathNet>,
     blip_inputs: blips::BlipInputs,
@@ -347,7 +347,7 @@ fn emit_minimap(
         let eye = player.pos + Vec3::Y * INTERIOR_PROBE_HEIGHT;
         // The down-ray races the terrain, exactly as the interior/zone tracker does — standing on the
         // grass above a mine's tunnels is not standing in the mine.
-        let terrain = crate::terrain_stream::terrain_height_under(&streamer, &adt_tiles, eye);
+        let terrain = world.terrain_height_under(eye);
         instances.iter().find_map(|inst| {
             let model = wmos.get(&inst.handle)?;
             if model.wmo_id == 0 {
@@ -634,15 +634,7 @@ fn emit_minimap(
                 assets.forms.as_ref(),
                 icons,
                 player_indoors,
-                |feet| {
-                    crate::wmo_portal::indoors_at(
-                        &wmos,
-                        instances.iter(),
-                        &streamer,
-                        &adt_tiles,
-                        feet,
-                    )
-                },
+                |feet| world.indoors_at(feet),
                 &mut quads,
                 &mut hover,
             );
@@ -655,15 +647,7 @@ fn emit_minimap(
                 player_indoors,
                 // A dot NPC's own containment — the same faces-only down-ray the entity light
                 // classifier stands on (dots are few; the per-frame rays are cheap).
-                |feet| {
-                    crate::wmo_portal::indoors_at(
-                        &wmos,
-                        instances.iter(),
-                        &streamer,
-                        &adt_tiles,
-                        feet,
-                    )
-                },
+                |feet| world.indoors_at(feet),
                 &mut quads,
                 &mut hover,
             );
@@ -716,11 +700,11 @@ fn emit_minimap(
 /// indoors at level 3), which is the director's report (2026-07-09).
 fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
-    interior: Res<crate::wmo_portal::CurrentWmoInterior>,
+    world: benilla_world::world_point::WorldPoint,
     mut was_inside: Local<Option<bool>>,
 ) {
     let Some(mut script) = script else { return };
-    let inside = interior.0.is_some();
+    let inside = world.interior().is_some();
     script.set_minimap_inside(inside);
     if *was_inside != Some(inside) {
         *was_inside = Some(inside);

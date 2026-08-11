@@ -74,7 +74,7 @@ pub(crate) fn drop_item_on_unit(
     pet_bar: Res<crate::ui_pet::PetBar>,
     learned: Res<super::LearnedAbilities>,
     press: Res<crate::target::PressPick>,
-    mut clicks: MessageReader<crate::interact::WorldClick>,
+    mut clicks: MessageReader<benilla_world::interact::WorldClick>,
     mut ladder: super::CastLadder,
 ) {
     let Some(mut script) = script else {

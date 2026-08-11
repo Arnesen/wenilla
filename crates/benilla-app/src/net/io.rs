@@ -168,8 +168,8 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
             .name("wow-net-write".into())
             .spawn(move || {
                 // Latency-sensitive: movement packets queue here (thread QoS, decision 0609).
-                crate::thread_qos::promote_current_thread(
-                    crate::thread_qos::QosClass::UserInitiated,
+                benilla_world::thread_qos::promote_current_thread(
+                    benilla_world::thread_qos::QosClass::UserInitiated,
                 );
                 writer_loop(&cmd_rx, writer_rx, &clock)
             })
@@ -177,8 +177,8 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
         thread::Builder::new()
             .name("wow-net".into())
             .spawn(move || {
-                crate::thread_qos::promote_current_thread(
-                    crate::thread_qos::QosClass::UserInitiated,
+                benilla_world::thread_qos::promote_current_thread(
+                    benilla_world::thread_qos::QosClass::UserInitiated,
                 );
                 loop {
                     match run(&cfg, &events_tx, &writer_tx, &pick_rx, &login_rx, &abandon) {
@@ -446,8 +446,8 @@ fn run(
                 // event, which no instrument could see. With this line every packet off the wire
                 // is accounted for by name, so "the server stopped relaying" and "we dropped it on
                 // the floor" are finally different pictures instead of the same silence.
-                if crate::dbg_trace::enabled() {
-                    crate::dbg_trace::line(
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
                         "in",
                         &format!(
                             "{opcode:#06x} {} ev={}",
@@ -475,8 +475,8 @@ fn run(
                 // arrived: the inbound census counts it either way, and no `rly` line is emitted
                 // either way. That ambiguity is what made a starving remote mover unattributable —
                 // so the skips get their own line, with the opcode that died.
-                if crate::dbg_trace::enabled() {
-                    crate::dbg_trace::line("skip", &format!("opcode={opcode:#06x} {reason}"));
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line("skip", &format!("opcode={opcode:#06x} {reason}"));
                 }
                 // Log which packet we dropped (opcode + message name), capped so it can't itself
                 // flood — enough to capture a post-teleport burst of unparseable object updates.
@@ -557,8 +557,8 @@ fn writer_loop(
                     // No live writer: the session is gone and this command evaporates. Traced
                     // unconditionally — this is the state in which a client keeps *deciding* to send
                     // movement (`snd` lines) that no one will ever receive (decision 0621).
-                    if crate::dbg_trace::enabled() {
-                        crate::dbg_trace::line("wire", "DROPPED — no live session");
+                    if benilla_assets::trace::enabled() {
+                        benilla_assets::trace::line("wire", "DROPPED — no live session");
                     }
                     if warned < SEND_WARN_CAP {
                         bevy::log::warn!("net: dropping command — not connected");
@@ -912,8 +912,8 @@ fn writer_loop(
                 // failures are traced: a silent `wire` log beside a busy `snd` log means every packet
                 // went out.
                 if let Err(e) = result {
-                    if crate::dbg_trace::enabled() {
-                        crate::dbg_trace::line("wire", &format!("SEND FAILED: {e:#}"));
+                    if benilla_assets::trace::enabled() {
+                        benilla_assets::trace::line("wire", &format!("SEND FAILED: {e:#}"));
                     }
                     if warned < SEND_WARN_CAP {
                         bevy::log::warn!("net: send failed: {e:#}");

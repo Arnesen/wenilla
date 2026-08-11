@@ -22,7 +22,13 @@ use bevy::prelude::*;
 
 pub mod column_grid;
 pub mod coords;
+pub mod materials;
 pub mod minimap_grid;
+mod spatial_cache;
+pub mod trace;
+pub use spatial_cache::SpatialCache;
+mod world_assets;
+pub use world_assets::*;
 
 mod model;
 pub use model::{
@@ -136,6 +142,54 @@ pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
     }
 }
 
+/// Bevy resource wrapper around the format crate's [`MapCatalog`] (`mapId` -> directory +
+/// `LoadingScreenID`), read out of `Map.dbc`.
+///
+/// The newtype exists because the orphan rule forbids `Resource` on a foreign type, and it lives
+/// here rather than in the client for the same reason the rest of this crate does: a `.dbc` table
+/// turned into something Bevy can hold is exactly this layer's job, and the three readers are the
+/// WDL streamer, the world-map UI and the loading screen — one engine, two game (decision 1164).
+/// The *loader* stays up top with the patch chain's plugin shell, which is what inserts it.
+#[derive(Resource)]
+pub struct MapCatalogRes(pub benilla_formats::MapCatalog);
+
+/// The `mpq://` URL an authored **model** path resolves to.
+///
+/// The archive holds 1.12.1 `.mdx`/`.mdl`, the loader produces an `M2Model`, and Bevy picks a loader
+/// by extension — so every reference is normalised to one lowercase `mpq://…m2`, which is also what
+/// makes the handle dedup work (a path differing only in case or slash would load twice). The WMO and
+/// skin builders are the same rewrite for their own extensions. They sit beside [`texture_url`]
+/// because they are the same act: turning a path the game files wrote into the one URL this crate's
+/// asset source answers to (decision 1164).
+/// A model reference path (`.mdx`/`.mdl`, mixed case, backslashes) → its `mpq://…m2` load URL.
+/// Lowercased so case variants share one `AssetServer` handle; the physical archive file is `.m2`.
+pub fn m2_url(raw: &str) -> String {
+    let p = raw.to_ascii_lowercase().replace('\\', "/");
+    let stem = p
+        .strip_suffix(".mdx")
+        .or_else(|| p.strip_suffix(".mdl"))
+        .or_else(|| p.strip_suffix(".m2"))
+        .unwrap_or(&p);
+    format!("mpq://{stem}.m2")
+}
+
+/// A WMO root path → its `mpq://…wmo` load URL (already `.wmo`; lowercased for handle dedup).
+pub fn wmo_url(raw: &str) -> String {
+    format!("mpq://{}", raw.to_ascii_lowercase().replace('\\', "/"))
+}
+
+/// A creature skin variation → its `mpq://…blp` URL: `<model-dir>\<name>.blp`. `model_dir` is the
+/// directory of the creature's model path (where its `Monster1/2/3` skins live).
+pub fn skin_url(model_dir: &str, name: &str) -> String {
+    let dir = model_dir.replace('\\', "/").to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    if dir.is_empty() {
+        format!("mpq://{name}.blp")
+    } else {
+        format!("mpq://{dir}/{name}.blp")
+    }
+}
+
 /// The address mode encoded in an asset path by [`texture_url`]; repeat/repeat when unmarked.
 pub fn sampler_mode_of(path: &str) -> (bool, bool) {
     let Some((stem, _)) = path.rsplit_once('.') else {
@@ -182,6 +236,9 @@ pub fn register_asset_loaders(app: &mut App) {
     app.register_asset_loader(WmoModelLoader);
     app.register_asset_loader(AdtLoader);
     app.register_asset_loader(WdtIndexLoader);
+    // The render materials' WGSL, compiled in rather than served off the host binary's asset root
+    // (decision 1164) — same "after AssetPlugin" requirement as the loaders above, so it rides here.
+    materials::register_shaders(app);
 }
 
 #[cfg(test)]

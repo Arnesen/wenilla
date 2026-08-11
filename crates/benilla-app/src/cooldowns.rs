@@ -287,8 +287,8 @@ impl Cooldowns {
         if spell.start_recovery_ms == 0 {
             return;
         }
-        if crate::dbg_trace::enabled() {
-            crate::dbg_trace::line(
+        if benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
                 "cd",
                 &format!(
                     "arm-gcd spell={spell_id} gcdcat={} dur={}ms (cast-send)",
@@ -325,8 +325,11 @@ impl Cooldowns {
             }
         }
         if touched {
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line("cd", &format!("clear-gcd spell={spell_id} (cast-fail)"));
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
+                    "cd",
+                    &format!("clear-gcd spell={spell_id} (cast-fail)"),
+                );
             }
             self.prune(now);
             self.bump();

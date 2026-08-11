@@ -18,8 +18,8 @@
 
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
 use crate::net::{ObjectStore, SelfPlayer};
+use benilla_assets::WorldAssets;
 
 use super::kit::{self, KitRef, SoundKits};
 use super::{SoundConfig, SoundOutput};

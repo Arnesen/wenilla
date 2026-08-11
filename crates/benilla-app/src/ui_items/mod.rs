@@ -928,8 +928,8 @@ pub(crate) struct ItemBagFamilies(pub(crate) benilla_formats::ItemBagFamilyCatal
 
 /// Startup (after the MPQ chain opens): the item-tooltip DBCs. On failure a resource is simply
 /// absent — set items render without their SET block, subclass gates read as absent.
-fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<crate::assets::WorldAssets>>) {
-    use crate::assets::LockRecover;
+fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<benilla_assets::WorldAssets>>) {
+    use benilla_assets::LockRecover;
     let Some(world_assets) = world_assets else {
         return;
     };
@@ -974,7 +974,10 @@ impl Plugin for UiItemsPlugin {
             // won, silently skipped every item DBC (no ItemSets/ItemSubClasses resource for the
             // whole session: set tooltips lost their SET block, the crafting book its headers).
             // Exposed by 0446's header law; every other DBC loader already orders this way.
-            .add_systems(Startup, load_item_dbcs.after(crate::assets::AssetSet::Open))
+            .add_systems(
+                Startup,
+                load_item_dbcs.after(benilla_assets::AssetSet::Open),
+            )
             .add_systems(
                 Update,
                 (

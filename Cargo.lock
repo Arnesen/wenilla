@@ -572,6 +572,7 @@ name = "benilla"
 version = "0.1.0"
 dependencies = [
  "benilla-app",
+ "benilla-buildstamp",
 ]
 
 [[package]]
@@ -593,6 +594,7 @@ dependencies = [
  "benilla-protocol",
  "benilla-ui",
  "benilla-wmo",
+ "benilla-world",
  "bevy",
  "bevy_egui",
  "bytemuck",
@@ -635,6 +637,10 @@ dependencies = [
  "benilla-bytes",
  "texpresso",
 ]
+
+[[package]]
+name = "benilla-buildstamp"
+version = "0.1.0"
 
 [[package]]
 name = "benilla-bytes"
@@ -727,6 +733,31 @@ name = "benilla-wmo"
 version = "0.1.0"
 dependencies = [
  "benilla-bytes",
+]
+
+[[package]]
+name = "benilla-world"
+version = "0.1.0"
+dependencies = [
+ "avian3d",
+ "benilla-assets",
+ "benilla-formats",
+ "benilla-protocol",
+ "benilla-wmo",
+ "bevy",
+ "bytemuck",
+ "image",
+ "libc",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "benilla-worldview"
+version = "0.1.0"
+dependencies = [
+ "benilla-buildstamp",
+ "benilla-world",
 ]
 
 [[package]]

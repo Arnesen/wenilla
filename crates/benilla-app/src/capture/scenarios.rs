@@ -10,7 +10,7 @@ pub(super) struct Scenario {
     /// `Map.dbc` id the eye/look coords belong to. Raw WoW coords repeat on every continent — the
     /// Felwood spot's tile (`33_24`) exists in Azeroth too, empty — so a scenario that could not
     /// name its map silently photographed the wrong world. The harness seeds
-    /// [`crate::world_map::CurrentMap`] from this before streaming starts (decision 0743).
+    /// [`benilla_world::world_map::CurrentMap`] from this before streaming starts (decision 0743).
     pub(super) map: u32,
     /// Camera eye, raw WoW coords `(x, y, z)`.
     pub(super) eye: [f32; 3],

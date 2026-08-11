@@ -50,11 +50,11 @@ use benilla_assets::coords::bevy_to_wow;
 use benilla_formats::AreaTriggerCatalog;
 use bevy::prelude::*;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
-use crate::schedule::WorldStage;
-use crate::world_map::CurrentMap;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
+use benilla_world::world_map::CurrentMap;
 
 /// The `AreaTrigger.dbc` catalog, bucketed by map. Absent when the client data didn't load — the
 /// check then does nothing, like every other data-driven system here.

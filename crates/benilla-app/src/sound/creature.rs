@@ -16,11 +16,11 @@ use bevy::prelude::*;
 use benilla_formats::CreatureVoiceCatalog;
 use benilla_protocol::EntityKind;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::AnimSoundEvent;
 use crate::entities::mount::{MountBody, MountChild};
 use crate::net::{NetEntity, ObjectStore};
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{
     play_kit, play_kit_ext, source_kit_playing, stop_source_kit, KitRef, SoundCategory, SoundKits,

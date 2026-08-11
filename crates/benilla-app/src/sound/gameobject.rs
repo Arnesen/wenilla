@@ -14,9 +14,9 @@ use bevy::prelude::*;
 use benilla_formats::{go_sound_slot, GameObjectSounds};
 use benilla_protocol::EntityKind;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{NetEntity, ObjectStore};
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

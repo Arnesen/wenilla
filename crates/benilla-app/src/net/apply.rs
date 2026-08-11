@@ -12,8 +12,9 @@ use super::{
     AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
     Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
     PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundMessage,
-    ServerTime, ServerWallClock, TeleportMessage, WeatherMessage, WorldportMessage,
+    ServerTime, ServerWallClock, TeleportMessage, WorldportMessage,
 };
+use benilla_world::weather::WeatherMessage;
 
 mod anim;
 mod chat;

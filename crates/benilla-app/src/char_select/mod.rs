@@ -61,6 +61,20 @@ pub(crate) struct CharSelectPlugin {
     pub(crate) start_in_world: bool,
 }
 
+/// Mirror the session's screen onto the engine's one-bit "is there a world" fact.
+///
+/// One writer, not a line at each of the dozen sites that set [`ClientState`] — a mirror a future
+/// transition can forget is worse than the coupling it replaced.
+fn publish_world_live(
+    state: Res<State<ClientState>>,
+    mut live: ResMut<benilla_world::schedule::WorldLive>,
+) {
+    let now = benilla_world::schedule::WorldLive(*state.get() == ClientState::InWorld);
+    if *live != now {
+        *live = now;
+    }
+}
+
 impl Plugin for CharSelectPlugin {
     fn build(&self, app: &mut App) {
         app.insert_state(if self.start_in_world {
@@ -71,6 +85,14 @@ impl Plugin for CharSelectPlugin {
             ClientState::Login
         })
         .init_resource::<Roster>()
+        // **The engine's world-existence bit** (1160's wire (b)): the session owner is this
+        // module, so this module tells the world whether there is one. Ordered ahead of every
+        // world stage so the fact and its falling edge are this frame's, not last frame's — which
+        // is the whole reason `WorldLive` is a resource and not a mirrored state.
+        .add_systems(
+            Update,
+            publish_world_live.before(benilla_world::schedule::WorldStage::Net),
+        )
         .init_resource::<dialog::DeleteDialog>()
         .add_systems(OnEnter(ClientState::CharSelect), screen::enter_select)
         .add_systems(OnExit(ClientState::CharSelect), screen::exit_select)
@@ -100,7 +122,7 @@ impl Plugin for CharSelectPlugin {
                     .run_if(in_state(ClientState::CharSelect)),
             )
                 .chain()
-                .after(crate::schedule::WorldStage::Net),
+                .after(benilla_world::schedule::WorldStage::Net),
         );
     }
 }
@@ -394,7 +416,7 @@ fn debug_logout_smoke(
     commands: Res<crate::net::NetCommands>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
-    streamer: Res<crate::terrain_stream::TerrainStreamer>,
+    streamer: Res<benilla_world::terrain_stream::TerrainStreamer>,
     time: Res<Time>,
     mut exit: MessageWriter<AppExit>,
     mut phase: Local<u8>,

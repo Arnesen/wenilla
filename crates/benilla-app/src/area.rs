@@ -23,7 +23,7 @@
 //!   ownerless zone** (nil is structural failure only); `factionName` = FactionGroup.dbc's
 //!   localized Name for the zone's mask bit; pvpType is never "arena"; realm type never enters.
 //! - **The indoor bit** is the player's faces-only down-ray verdict
-//!   ([`crate::wmo_portal::CurrentAreaInterior`] — wow-re `zonetext-indoor-bit.md`, the CGLight
+//!   ([`benilla_world::wmo_portal::CurrentAreaInterior`] — wow-re `zonetext-indoor-bit.md`, the CGLight
 //!   node's `+0x90` bit 0): indoors ⇔ the nearest surface below is a WMO face whose group lacks
 //!   MOGP `0x8` EXTERIOR. The abbey yard is terrain-below ⇒ outdoors; the flip is the doorway.
 //! - **The indoor naming** (`0x67e670` (d), byte-pinned by (d-ii)): while indoors and the hit
@@ -55,11 +55,9 @@ use bevy::prelude::*;
 use benilla_formats::AreaTableCatalog;
 use benilla_ui::script::UiScript;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::target::Factions;
-use crate::terrain_stream::CurrentArea;
-use crate::wmo_portal::CurrentAreaInterior;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 /// The shared `AreaTable.dbc` catalog: id → (name, parent zone, flags, faction mask). Loaded once
 /// at Startup; absent if the DBC failed to read (consumers take `Option` and go quiet).
@@ -132,9 +130,7 @@ fn elect_event(cache: &ZoneCache, next: &ZoneSignal) -> Option<&'static str> {
 #[allow(clippy::too_many_arguments)]
 fn feed_zone_events(
     script: Option<NonSendMut<UiScript>>,
-    area: Res<CurrentArea>,
-    interior: Res<CurrentAreaInterior>,
-    wmo_areas: Option<Res<crate::sound::interior::WmoAreas>>,
+    world: benilla_world::world_point::WorldPoint,
     areas: Option<Res<AreaTableRes>>,
     factions: Option<Res<Factions>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
@@ -143,7 +139,7 @@ fn feed_zone_events(
     let (Some(mut script), Some(areas)) = (script, areas) else {
         return;
     };
-    let Some(leaf) = area.0 else { return };
+    let Some(leaf) = world.area() else { return };
     let Some(leaf_row) = areas.0.get(leaf) else {
         // An id the catalog doesn't know stays unpublished (keep the last real state, like the
         // resolver itself does for areaId 0).
@@ -157,7 +153,7 @@ fn feed_zone_events(
         leaf_row.zone_id
     };
     let real_zone_text = areas.0.name(zone).unwrap_or_default().to_string();
-    let indoor = interior.0.is_some();
+    let indoor = world.area_interior().is_some();
 
     // The outdoor texts — the locals `0x67e670` starts from.
     let mut zone_text = real_zone_text.clone();
@@ -171,7 +167,7 @@ fn feed_zone_events(
     // holds; else the default-row name (query A) may override the zone slot and the group-row
     // name (query B) re-populates the subzone — both EXACT-key lookups (no name-set retry).
     let mut wmo_group = 0u32;
-    if let Some((k, cat)) = interior.0.zip(wmo_areas.as_ref()) {
+    if let Some((k, group, default)) = world.area_interior_rows() {
         // The dedup key: the hit GROUP's identity (the client's `[groupRec+0x7c]` group index,
         // nonzero-gated — (d-ii)). We key the MOGP uniqueID scoped by WMO id: it changes exactly
         // when the hit group does, and — a named divergence — never aliases across two adjacent
@@ -184,8 +180,6 @@ fn feed_zone_events(
             return; // the dedup: same WMO group ⇒ the whole updater is skipped
         }
         cache.wmo_id = k.wmo_id;
-        let group = cat.0.group_row(k.wmo_id, k.name_set, k.group_area_id);
-        let default = cat.0.default_row(k.wmo_id, k.name_set);
         // Query A (the whole-WMO −1 row): override the zone name + null the subzone — only when
         // the resolved name is non-empty and differs from the current subzone (the abbey skip).
         // An EXISTING-but-unnamed row falls back to an AreaTable name — the row's own
@@ -193,7 +187,7 @@ fn feed_zone_events(
         // "Ironforge"; the client's area-0 arm reads the raw terrain areaId at the node — the
         // current leaf equals it in that arm, since an area-0 row also never overrode the leaf).
         // A MISSING row never overrides (the client's `""` sentinel bypass).
-        let a_name = default.map(|d| {
+        let a_name = default.as_ref().map(|d| {
             if !d.name.is_empty() {
                 d.name.clone()
             } else if d.area_table_id != 0 {
@@ -213,7 +207,11 @@ fn feed_zone_events(
             }
         }
         // Query B (the hit group's own row): re-populate the subzone (empty/missing = leave it).
-        if let Some(b) = group.map(|r| r.name.as_str()).filter(|n| !n.is_empty()) {
+        if let Some(b) = group
+            .as_ref()
+            .map(|r| r.name.as_str())
+            .filter(|n| !n.is_empty())
+        {
             subzone_text = b.to_string();
         }
     }
@@ -308,7 +306,7 @@ impl Plugin for AreaPlugin {
                 // spurious big splash.
                 feed_zone_events
                     .after(crate::ui_script::UiInput)
-                    .after(crate::terrain_stream::AreaAuthoritySet),
+                    .after(benilla_world::terrain_stream::AreaAuthoritySet),
             );
     }
 }

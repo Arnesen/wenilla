@@ -502,7 +502,9 @@ fn promote_decode_thread() {
     }
     PROMOTED.with(|p| {
         if !p.get() {
-            crate::thread_qos::promote_current_thread(crate::thread_qos::QosClass::UserInteractive);
+            benilla_world::thread_qos::promote_current_thread(
+                benilla_world::thread_qos::QosClass::UserInteractive,
+            );
             debug!(
                 "audio: stream decode thread {:?} promoted",
                 std::thread::current().id()

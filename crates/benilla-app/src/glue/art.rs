@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
+use benilla_assets::WorldAssets;
 
 use super::add_material::AddUiMaterial;
 use super::backdrop::BackdropEdges;

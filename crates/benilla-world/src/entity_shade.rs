@@ -1,0 +1,373 @@
+//! Entity ground-shade (decision 0173): units, players, and GameObjects sample the terrain MCSH under
+//! them **dynamically** and dim their sun term when standing in baked ground shadow — the fold-back of
+//! wow-re's byte-verified §8a/§9 verdict (`models/scratch/m2-interior-doodad-base-light`): a spawned
+//! unit/player/GameObject carries the SAME 2.5-lit / 0.5-MCSH-shadowed chain as an ADT doodad, driven by
+//! a per-frame MCSH sample at the object's node position and a linear intensity ramp (`0x69e770`, the
+//! step constant `[0x810808] = 3.3333`/s), not a static spawn-time bake.
+//!
+//! **The chain applies to units, and 0814 restored it after 0809 wrongly took it away.** The reference
+//! has TWO real delivery states for a unit's committed light, and which one a given unit is in is a
+//! *lifecycle* fact, not a category fact. Delivery splits at `0x672a20`: with `[model+0x3c0] != 0` the
+//! node applies (`0x6a7300` multiplies the diffuse by the ramped `[+0xa4]` — the 2.5/0.5 chain this
+//! file models); with `[model+0x3c0] == 0` the null fallback commits the raw day/night pair with no
+//! intensity multiply at all — a hardwired ×1.0, position-independent, never sampling MCSH.
+//! Registration fires on a model-set with the node present (`Node::SetModel 0x6716f0` ←
+//! `0x613cf0`/`0x613d80`: equip / display-id / shapeshift); node birth (`0x670db0` from Activate
+//! `0x613e10`) passes model arg 0, so its birth-time registration gate `670fca` is skipped and a unit
+//! is born UNREGISTERED.
+//!
+//! **We model REGISTERED, because that is the steady state of anything we draw.** Every unit benilla
+//! renders has had its display model applied — which is exactly the node-present model-set that
+//! registers it — so unregistered is the pre-display transient, not the resting state. wow-re's own
+//! two frames bracket this and disagree with each other: a standing Stormwind player commits **×2.5**
+//! (registered, MCSH-lit) while a running Northshire player commits ×1.0
+//! (`unit-mcsh-shadow-target.md` §4). Their note marks the discriminant **Open** and hands it to us as
+//! a benilla-side observable — so a single hardwired value cannot be read off it in either direction,
+//! and 0809 read off the ×1.0 half. The director's eye settles the tie the way the ×2.5 frame does: a
+//! character standing in shade reads visibly dimmer than one in sun, and flattening that was wrong.
+//!
+//! The null fallback is therefore real, verified, and **deliberately not modelled** — see 0814. If we
+//! ever want it, it is a lifecycle flag flipped by the display-model apply, never a per-kind constant.
+//!
+//! Structure mirrors the reference's one-light-node-per-object: [`GroundShade`] lives on the **net
+//! entity root** (the `[obj+0xe0]` twin), sampled at the root's feet and ramped there; the resulting
+//! shade byte is written to every M2 part in the root's descendant tree — body submeshes, and held
+//! items/helm/shoulders hanging off joint entities — via the `MeshTag` shade field (`mesh_tag`), so a
+//! weapon dims with its wielder rather than sampling independently at the hand (the real client lights
+//! attachments from the owner's node; independent sampling would flicker at shadow edges mid-swing).
+//!
+//! Interplay: the interior classifier ([`crate::interior`]) owns a part's tag while it stands in a WMO
+//! room (packed floor colour — no sun indoors, so no shade either); this system skips those parts and
+//! runs after the classifier to re-assert the byte over its exterior reclaim. Fades own the alpha field
+//! only (they write through `with_alpha`), so shade rides through appear/despawn/zoom feathering.
+
+use benilla_assets::AdtTile;
+use bevy::mesh::MeshTag;
+use bevy::prelude::*;
+
+use crate::interior::{classify_entity_interior, InteriorLit};
+use crate::mesh_tag::{shade_of, with_shade};
+use crate::terrain_stream::{doodad_ground_shade, ShadeResolve, TerrainStreamer};
+
+// Decision 0354 generalized this file from "the MCSH ground-shade byte" to the entity light
+// node's CPU ramp pair: `t` (the intensity chase — the tag byte the exterior SH lane scales by)
+// and the ambient word chase the interior bake fold consumes. The MCSH sample now only picks the
+// OUTDOOR target; the classifier's interior verdict overrides it with the day/night point.
+
+/// How fast the shade mix `t` (0 = intensity 2.5, 1 = 0.5) moves toward its target: the binary's
+/// linear step `[0x810808] = 3.3333` **intensity-units/s**, expressed on `t` by dividing by the 2.0-wide
+/// span the mix covers. The rate is on the intensity axis and is unchanged by [`LIT_T`] — what 0821
+/// changed is the *distance travelled* (1.0 → 0.5 rather than 2.5 → 0.5), so a lit→shaded transition
+/// now takes 0.15 s of fully visible movement instead of 0.6 s that was 75 % invisible.
+const SHADE_RAMP_PER_SEC: f32 = 3.3333 / 2.0;
+
+/// Squared distance (yd²) the root must move before the MCSH bit is re-sampled — same gate as the
+/// interior classifier: a standing NPC costs a position compare and nothing else. (MCSH texels are
+/// ~0.5 yd, so half a yard of hysteresis is at the sample's own resolution.)
+const RESAMPLE_DIST_SQ: f32 = 0.25;
+
+/// The ambient word's ramp rate — the binary's `[0x810804] = 2.0` colour-units/s (`0x69e770`'s
+/// FIRST chase, `[+0x9c]` → `[+0xf4]`; wow-re `unit-light-combine-storm.md` c3 — the intensity
+/// chase runs at its own 3.3333).
+const AMBIENT_RAMP_PER_SEC: f32 = 2.0;
+
+/// The shade mix `t` encoding the DAY/NIGHT intensity 1.0: `intensity = mix(2.5, 0.5, t)` ⇒
+/// `t = 0.75`. **Two distinct reference mechanisms land on this same value** and only ONE of them is
+/// modelled here, so keep them apart if either moves: the live one is an indoor entity's node target
+/// (the interior `[+0xf8] = 1.0`, written at `69e36b` behind the `[+0xc]&2` interior gate); the other
+/// is `0x672a20`'s null-node fallback for an unregistered unit (no intensity multiply at all), which
+/// 0814 records as real but deliberately unmodelled. A value shared by a live law and a shelved one is
+/// exactly how 0809 talked itself into pinning every unit here.
+const DAYNIGHT_T: f32 = 0.75;
+
+/// The LIT outdoor target (decision 0821). The reference's lit target is intensity **2.5**, and this is
+/// **1.0** — not because the 2.5 is wrong, but because our shader cannot express it: `wow_model.wgsl`
+/// caps the gain with `min(intensity, 1.0)`, so every value from 2.5 down to 1.0 renders *identically*.
+///
+/// **Clamp the TARGET, not the gain.** With the cap on the gain, `t` ramped 0 → 1 over 0.6 s while the
+/// first 0.75 of that journey (0.45 s) was pinned at 1.0 and therefore **invisible** — the shade change
+/// read as a dead pause followed by a snap, which is what the director reported walking from sun into
+/// shade ("delayed by ~1 s"). Aiming the chase at the value the renderer can actually show removes the
+/// invisible stretch without touching a single rendered pixel of the settled states: lit still commits
+/// 1.0 (the cap was already delivering that) and shadowed still commits 0.5.
+///
+/// This is therefore a faithful ramp over an unfaithful *range*, and the range is the open item: **the
+/// day the `min(I, 1)` cap is lifted, this constant goes back to 0.0** and the full 2.5 → 0.5 sweep
+/// becomes visible on its own. The two must move together — see 0821, and 0803 §3 for why the cap is
+/// still there.
+const LIT_T: f32 = 0.75;
+
+/// Settled-ramp epsilon (on `t` and each ambient channel) — under half a tag/colour byte.
+const RAMP_EPS: f32 = 1.0 / 640.0;
+
+/// The per-entity light-node state, on the net entity **root** (unit / player / GameObject) — the
+/// CPU twin of the reference's per-object light node (decision 0354): the intensity chase
+/// (`[+0xa4]`→`[+0xf8]`, held as the normalized mix `t` over the 2.5→0.5 span) and the ambient
+/// word chase (`[+0x9c]`→`[+0xf4]`) — the pair `0x69e770` steps every frame.
+#[derive(Component)]
+pub struct GroundShade {
+    /// Current shade mix (1 = intensity 0.5; [`LIT_T`] = the lit 1.0 our shader can express, and also
+    /// [`DAYNIGHT_T`]'s day/night 1.0 — the two coincide while the gain cap stands) — what the
+    /// parts' tags show, and what the interior bake fold scales its diffuse word by.
+    t: f32,
+    /// Where `t` is ramping to ([`LIT_T`]/1 from the last MCSH sample outdoors; [`DAYNIGHT_T`] indoors).
+    target: f32,
+    /// Root position at the last sample (the movement gate).
+    last_pos: Vec3,
+    /// Whether the first sample landed (it snaps `t = target`; a spawn never plays a ramp-in).
+    sampled: bool,
+    /// The interior verdict, published by the classifier (`crate::interior`) — indoors the MCSH
+    /// sample is overridden by the day/night target ([`DAYNIGHT_T`]).
+    pub(crate) indoor: bool,
+    /// Standing on an outdoor-class WMO surface (street/deck/porch — `MOGI & 0x48`), published by
+    /// the classifier: the MCSH verdict of the terrain BENEATH the building is overridden by the
+    /// lit target ([`LIT_T`]; the reference's own value here is intensity 2.5) — byte-verified
+    /// (0477/0480, wow-re `unit-wmo-mcsh-gate.md`):
+    /// the down-ray attach's WMO branch sets the skip-shadow bit `[node+0xd]|=0x2` (`0x6a8bc7`,
+    /// every node subclass), the terrain branch clears it (`0x6a8bed`), and the exterior intensity
+    /// leg commits the constant 2.5 whenever it's set (`0x69e483`→`0x69e4ad` — the MCSH sample
+    /// runs only terrain-linked). `self.target` keeps the raw sample so stepping off onto real
+    /// terrain resumes from it.
+    pub(crate) on_wmo: bool,
+    /// The ramped ambient word (0..1 per channel) — the bake fold's ambient input, chasing
+    /// [`Self::ambient_target`] at [`AMBIENT_RAMP_PER_SEC`]. Seeded by the classifier on bake
+    /// entry (from the scene ambient, so walking into a warm room ramps rather than pops).
+    pub(crate) ambient: Vec3,
+    pub(crate) ambient_target: Vec3,
+    /// The last effective target the `WOW_INTERIOR_LOG` instrument printed (log-on-change; starts
+    /// off-scale so the first resolved target always prints).
+    logged_target: f32,
+}
+
+impl Default for GroundShade {
+    fn default() -> Self {
+        Self {
+            t: LIT_T,
+            target: LIT_T,
+            last_pos: Vec3::ZERO,
+            sampled: false,
+            indoor: false,
+            on_wmo: false,
+            ambient: Vec3::ZERO,
+            ambient_target: Vec3::ZERO,
+            logged_target: -1.0,
+        }
+    }
+}
+
+impl GroundShade {
+    /// The node's current committed intensity (`[node+0xa4]`): 2.5 lit → 0.5 MCSH-shadowed, the
+    /// day/night 1.0 at [`DAYNIGHT_T`] — the bake fold multiplies its diffuse word by this.
+    pub(crate) fn intensity(&self) -> f32 {
+        2.5 - 2.0 * self.t
+    }
+
+    /// The intensity chase's EFFECTIVE target: indoors the day/night point overrides the MCSH
+    /// verdict; on an outdoor-class WMO surface the LIT point overrides (`self.target` keeps the raw
+    /// sample, so a root stepping back onto terrain resumes from it); otherwise the MCSH verdict
+    /// stands, for a unit exactly as for a GameObject — the target law is byte-shared and single-site
+    /// (`69e4ad`/`69e496`, wow-re `unit-mcsh-shadow-target.md` §1) and we model the registered
+    /// delivery that consumes it (0814).
+    fn effective_target(&self) -> f32 {
+        if self.indoor {
+            DAYNIGHT_T
+        } else if self.on_wmo {
+            LIT_T
+        } else {
+            self.target
+        }
+    }
+
+    /// Whether both chases sit on their targets — the classifier's refold gate (a Bake anchor
+    /// keeps refolding its owned probe while either ramp moves). Compares against the EFFECTIVE
+    /// intensity target: an indoor unit over MCSH-shadowed terrain (any unit inside a building —
+    /// buildings bake their own footprint shadow) settles at the day/night point, and comparing
+    /// the raw MCSH sample here kept every settled indoor Bake unit refolding forever.
+    pub(crate) fn ramps_settled(&self) -> bool {
+        (self.t - self.effective_target()).abs() < RAMP_EPS
+            && (self.ambient - self.ambient_target).abs().max_element() < RAMP_EPS
+    }
+
+    /// Bake-entry seed (the classifier, on a lane change INTO the footprint bake): the ambient
+    /// chase starts from the scene ambient the entity was just lit by, targeting the floor's
+    /// cap-96 word — the reference's node carries its ramped `[+0x9c]` across the leg flip.
+    pub(crate) fn seed_ambient(&mut self, from: Vec3, target: Vec3) {
+        self.ambient = from;
+        self.ambient_target = target;
+    }
+}
+
+pub(crate) struct EntityShadePlugin;
+
+impl Plugin for EntityShadePlugin {
+    fn build(&self, app: &mut App) {
+        // After the interior classifier: its exterior reclaim writes a fresh tag (shade byte 0) the
+        // same frame this re-asserts the ramped byte, so the pair can't fight across frames.
+        app.add_systems(Update, update_ground_shade.after(classify_entity_interior));
+    }
+}
+
+/// Sample + ramp each shaded root, then push the byte to its parts' tags (change-gated per part).
+#[allow(clippy::type_complexity)]
+// A Bevy system's params are not an argument list to shorten — each is a distinct world access the
+// scheduler needs by name, and the card pass below deliberately takes its own disjoint `MeshTag`
+// query rather than smuggling one through a shared `ParamSet`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_ground_shade(
+    time: Res<Time>,
+    streamer: Option<Res<TerrainStreamer>>,
+    adt_tiles: Res<Assets<AdtTile>>,
+    mut roots: Query<(
+        Entity,
+        &GlobalTransform,
+        &mut GroundShade,
+        Option<&crate::world_unit::ViewerUnit>,
+    )>,
+    children: Query<&Children>,
+    // Parts are matched by carrying a `MeshTag`; interior-classified ones are skipped (their payload
+    // is the packed floor colour). Fading parts are NOT skipped — shade and fade own disjoint fields.
+    mut parts: Query<
+        (&mut MeshTag, Option<&InteriorLit>),
+        Without<crate::billboard::BillboardCard>,
+    >,
+    // A card is a world ROOT (the facing system owns its transform), so the descendant walk below
+    // cannot reach one — it carries its owner instead. Disjoint from `parts` by the filter above.
+    mut cards: Query<(&crate::billboard::BillboardCard, &mut MeshTag)>,
+    // Reused across frames: every entity in a shaded root's tree → that root's shade byte, so the
+    // card pass is one lookup per card instead of a walk per card.
+    mut tree_shade: Local<bevy::platform::collections::HashMap<Entity, u8>>,
+    mut self_log: Local<f32>,
+) {
+    tree_shade.clear();
+    let Some(streamer) = streamer else {
+        return;
+    };
+    let step = SHADE_RAMP_PER_SEC * time.delta_secs();
+    let ambient_step = AMBIENT_RAMP_PER_SEC * time.delta_secs();
+    for (root, gt, shade, is_self) in &mut roots {
+        // `WOW_INTERIOR_LOG=1`: a periodic SELF-node dump (every 3 s) — the probe run's definitive
+        // "what state is the parked character actually in" line, attributable unlike the
+        // change-triggered `[node]` lines below (wandering NPCs fire those constantly).
+        if is_self.is_some()
+            && time.elapsed_secs() - *self_log > 3.0
+            && std::env::var_os("WOW_INTERIOR_LOG").is_some()
+        {
+            let p = gt.translation();
+            eprintln!(
+                "[self-node] at wow ({:.1}, {:.1}, {:.1})  t {:.2} -> {:.2} (I {:.2})  indoor {} \
+                 on_wmo {}",
+                -p.z,
+                -p.x,
+                p.y,
+                shade.t,
+                shade.effective_target(),
+                2.5 - 2.0 * shade.t,
+                shade.indoor,
+                shade.on_wmo,
+            );
+            *self_log = time.elapsed_secs();
+        }
+        let shade = shade.into_inner(); // one deref; field writes below are unconditional-cheap
+        let pos = gt.translation();
+        // Re-sample the MCSH bit only on real movement (or the very first pass) — the global
+        // world→tile→chunk lookup is cheap, but a town of standing NPCs shouldn't run it per frame.
+        if !shade.sampled || pos.distance_squared(shade.last_pos) >= RESAMPLE_DIST_SQ {
+            match doodad_ground_shade(&streamer, &adt_tiles, pos) {
+                ShadeResolve::Ready(shadowed) => {
+                    shade.target = if shadowed { 1.0 } else { LIT_T };
+                    shade.last_pos = pos;
+                    if !shade.sampled {
+                        // First landing: snap — an entity spawns already at its ground's shade
+                        // (the appear-fade covers the arrival; a ramp-in from lit would read as a
+                        // lighting pop right after materializing).
+                        shade.t = shade.effective_target();
+                        shade.sampled = true;
+                    }
+                }
+                // The tile under the entity is requested but still decoding — keep the last state
+                // and retry next frame (mirrors the doodad spawn's deferral).
+                ShadeResolve::Pending => {}
+            }
+        }
+        // Indoors the MCSH sample is moot: the day/night intensity target is 1.0 (the reference's
+        // interior `[+0xf8]`, decision 0354). The sample above still ran its movement gate, so
+        // stepping back outside resumes from a fresh MCSH verdict.
+        let target = shade.effective_target();
+        // `WOW_INTERIOR_LOG=1`: one line whenever a node's intensity target moves — the live
+        // instrument for "which stage is this character actually in?" — MCSH-shadowed 0.5 ⇒ t 1;
+        // exterior lit and day/night both ⇒ t 0.75 / committed 1.0 while the gain cap stands (0821).
+        if (target - shade.logged_target).abs() > f32::EPSILON
+            && std::env::var_os("WOW_INTERIOR_LOG").is_some()
+        {
+            eprintln!(
+                "[node] root {root:?} at ({:.1}, {:.1}, {:.1}) -> target t {target:.2} \
+                 (I {:.2}, indoor {}) from t {:.2}",
+                pos.x,
+                pos.y,
+                pos.z,
+                2.5 - 2.0 * target,
+                shade.indoor,
+                shade.t,
+            );
+            shade.logged_target = target;
+        }
+        // The reference ramps: linear toward the target, never past it — intensity (as the mix
+        // `t`) at 3.3333/s over its span, the ambient word at 2.0/s per channel (`0x69e770`).
+        shade.t = if shade.t < target {
+            (shade.t + step).min(target)
+        } else {
+            (shade.t - step).max(target)
+        };
+        let a = shade.ambient;
+        let at = shade.ambient_target;
+        shade.ambient = Vec3::new(
+            ramp_toward(a.x, at.x, ambient_step),
+            ramp_toward(a.y, at.y, ambient_step),
+            ramp_toward(a.z, at.z, ambient_step),
+        );
+        let byte = (shade.t * 255.0).round().clamp(0.0, 255.0) as u8;
+        // Push to every part below the root (body submeshes are direct children; held items/helm ride
+        // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
+        // the byte, so a settled entity writes nothing and never re-triggers render extraction.
+        tree_shade.insert(root, byte);
+        for part in children.iter_descendants(root) {
+            // Recorded whether or not it is a drawable part: a card can follow a JOINT
+            // (`following_joint` — the swinging lamp's glow), and a joint carries no `MeshTag`.
+            tree_shade.insert(part, byte);
+            let Ok((mut tag, lit)) = parts.get_mut(part) else {
+                continue;
+            };
+            if lit.is_some_and(InteriorLit::is_bake) {
+                continue; // the footprint-bake lane: the classifier owns the payload (probe slot)
+            }
+            if shade_of(tag.0) != byte {
+                tag.0 = with_shade(tag.0, byte);
+            }
+        }
+    }
+    // The cards (0788's loose end). A card belongs to the same light node as the body it hangs off —
+    // the reference shades every batch of an object through one node (0778) — but it is a world root,
+    // so the walk above skips it and it kept the lit rung while its owner dimmed. 0811 scoped this to
+    // GameObjects because 0809 had pinned units flat; 0814 put units back on the chase, so it is once
+    // again every carried card — a torch's flame card dims with the hand that holds it.
+    for (card, mut tag) in &mut cards {
+        let Some(byte) = card
+            .follows()
+            .and_then(|owner| tree_shade.get(&owner).copied())
+        else {
+            continue; // a fixed terrain doodad's card — its shade rides the material selector
+        };
+        if shade_of(tag.0) != byte {
+            tag.0 = with_shade(tag.0, byte);
+        }
+    }
+}
+
+/// One linear ramp step toward a target, never past it (the binary's clamp-no-overshoot chase).
+fn ramp_toward(v: f32, target: f32, step: f32) -> f32 {
+    if v < target {
+        (v + step).min(target)
+    } else {
+        (v - step).max(target)
+    }
+}

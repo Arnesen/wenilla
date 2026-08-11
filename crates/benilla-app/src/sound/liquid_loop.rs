@@ -28,10 +28,9 @@ use bevy::prelude::*;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_formats::WaterSoundCatalog;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::liquid::{LiquidSoundSource, Underwater, WaterChunkInfo};
 use crate::net::SelfPlayer;
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{
     self, play_kit_ext, set_source_kit_gain, source_kit_playing, stop_source_kit, KitRef,
@@ -94,12 +93,9 @@ fn load_water_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 fn drive_liquid_loops(
     mut state: ResMut<LiquidLoopState>,
     water_sounds: Option<Res<WaterSounds>>,
-    // The pairing every liquid surface carries: the sound-class nibble beside the grid the
-    // nearest-point slew target is read from (both spawn paths insert them together).
-    sources: Query<(&LiquidSoundSource, &WaterChunkInfo)>,
+    world: benilla_world::world_point::WorldPoint,
     player: Query<&Transform, With<SelfPlayer>>,
     mut emitters: Query<&mut Transform, Without<SelfPlayer>>,
-    underwater: Res<Underwater>,
     time: Res<Time>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -113,7 +109,7 @@ fn drive_liquid_loops(
     };
 
     // The submerge HARD stop (no fade) + the resurface instant-restart edge.
-    if underwater.0.is_water() {
+    if world.submersion().is_water() {
         for slot in &mut state.classes {
             if let Some(cl) = slot.take() {
                 stop_source_kit(&mut out, cl.emitter, cl.kit);
@@ -134,18 +130,9 @@ fn drive_liquid_loops(
     let player_wow = bevy_to_wow(player_pos);
 
     // Scan: the nearest wet point per class within the radius (the ref's `nearest_liquid` walk;
-    // AABB-clamp approximation, module docs).
-    let mut best: [Option<(f32, [f32; 3], u8)>; 4] = [None, None, None, None];
-    for (src, info) in &sources {
-        let p = info.nearest_point_wow(player_wow[0], player_wow[1]);
-        let d_sq = (p[0] - player_wow[0]).powi(2)
-            + (p[1] - player_wow[1]).powi(2)
-            + (p[2] - player_wow[2]).powi(2);
-        let class = (src.nibble & 3) as usize;
-        if d_sq <= TRIGGER_RADIUS * TRIGGER_RADIUS && best[class].is_none_or(|(b, ..)| d_sq < b) {
-            best[class] = Some((d_sq, p, src.nibble));
-        }
-    }
+    // AABB-clamp approximation, module docs). The walk is the world's; the priority order, the
+    // voice cap and the slew below are ours.
+    let best = world.nearest_liquid_per_class(player_wow, TRIGGER_RADIUS);
 
     // Priority River > Ocean > Magma > Slime, cap 2: the class indices ARE the priority order.
     let mut budget = MAX_CONCURRENT;
@@ -154,7 +141,9 @@ fn drive_liquid_loops(
 
     for (class, scanned) in best.into_iter().enumerate() {
         let candidate = scanned.filter(|_| budget > 0);
-        let desired_kit = candidate.and_then(|(.., nib)| water_sounds.0.kit_for_nibble(nib));
+        let desired_kit = candidate
+            .as_ref()
+            .and_then(|c| water_sounds.0.kit_for_nibble(c.nibble));
         if desired_kit.is_some() {
             budget -= 1;
         }
@@ -163,7 +152,7 @@ fn drive_liquid_loops(
         match (slot.as_mut(), desired_kit) {
             (None, Some(kit_id)) => {
                 // Arm: spawn the emitter at the (near-clamped) nearest point and start the loop.
-                let (_, point, _) = candidate.expect("desired_kit implies a candidate");
+                let point = candidate.expect("desired_kit implies a candidate").point;
                 let pos = near_clamped(wow_to_bevy(point), player_pos);
                 let emitter = commands.spawn((Transform::from_translation(pos),)).id();
                 let gain = if resurfaced { 1.0 } else { 0.0 };
@@ -199,7 +188,7 @@ fn drive_liquid_loops(
                     cl.gain = 0.0;
                 }
                 // Slew the emitter toward the nearest point; the pump's tracked-follow ships it.
-                let (_, point, _) = candidate.expect("desired_kit implies a candidate");
+                let point = candidate.expect("desired_kit implies a candidate").point;
                 if let Ok(mut tf) = emitters.get_mut(cl.emitter) {
                     let target = near_clamped(wow_to_bevy(point), player_pos);
                     let step = target - tf.translation;

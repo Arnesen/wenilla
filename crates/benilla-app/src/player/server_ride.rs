@@ -39,7 +39,7 @@ pub(super) fn yaw_of(rotation: Quat) -> f32 {
 }
 
 /// Mirror an in-progress self-spline into [`Player`], and ack it when it ends. Runs in
-/// [`crate::schedule::WorldStage::Input`] just before `control`, so the pose it publishes is what the
+/// [`benilla_world::schedule::WorldStage::Input`] just before `control`, so the pose it publishes is what the
 /// camera seats on and the animation reads this frame.
 #[allow(clippy::type_complexity)] // a Bevy query's component tuple
 pub(super) fn drive_self_ride(

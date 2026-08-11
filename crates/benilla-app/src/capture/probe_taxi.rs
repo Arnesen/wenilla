@@ -18,10 +18,10 @@ use benilla_formats::{load_taxi_nodes, load_taxi_path_nodes};
 use bevy::prelude::*;
 
 use super::probes::ProbeClock;
-use crate::assets::{LockRecover, WorldAssets};
 use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::ui_taxi::TaxiState;
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// The flight under test: Stormwind (node 2) → Sentinel Hill (node 4), TaxiPath id 6 — the pair
 /// byte-verified against the real 5875 tables by the phase-1 catalog tests.
@@ -45,7 +45,7 @@ impl Plugin for ProbeTaxiPlugin {
         app.init_resource::<TaxiProbe>()
             .add_systems(
                 Startup,
-                load_expectations.after(crate::assets::AssetSet::Open),
+                load_expectations.after(benilla_assets::AssetSet::Open),
             )
             .add_systems(Update, taxi_probe)
             .add_systems(PreUpdate, hold_w_post_land.after(bevy::input::InputSystems));
@@ -417,7 +417,7 @@ fn taxi_probe(
                         Dir3::NEG_Y,
                         52.0,
                         true,
-                        &crate::collision::player_query_filter(),
+                        &benilla_world::collision::WorldCollision::body_filter(),
                         &|_| true,
                     )
                     .map(|hit| origin.y - hit.distance);

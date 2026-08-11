@@ -44,9 +44,8 @@ use bevy::prelude::*;
 
 use crate::char_select::ClientState;
 
-use super::camera::{
-    CameraControl, FlyCam, WorldCamera, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT,
-};
+use super::camera::{CameraControl, FlyCam, CAM_DIST_MAX, CAM_DIST_MIN, CAM_PITCH_LIMIT};
+use benilla_world::view::WorldCamera;
 
 /// The persisted pose's file keys — the reference's own spellings, in the reference's own order.
 const KEY_DISTANCE: &str = "cameraDistance";

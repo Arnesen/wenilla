@@ -39,14 +39,14 @@ use bevy::prelude::*;
 use benilla_formats::NpcGreetingCatalog;
 use benilla_protocol::EntityKind;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{GuidIndex, NetEntity, ObjectStore};
-use crate::player::WorldCamera;
-use crate::schedule::WorldStage;
 use crate::ui_gossip::GossipState;
 use crate::ui_merchant::MerchantOpen;
 use crate::ui_quest::QuestGiver;
 use crate::ui_trainer::TrainerOpen;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
+use benilla_world::view::WorldCamera;
 
 use super::kit::{self, play_kit_ext, KitRef, SoundCategory, SoundKits};
 use super::{SoundConfig, SoundOutput};

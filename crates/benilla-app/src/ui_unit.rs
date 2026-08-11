@@ -32,7 +32,7 @@ use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::UiInput;
 
-/// The feed pass — runs **after [`crate::schedule::WorldStage::Net`]** (the feeds snapshot state
+/// The feed pass — runs **after [`benilla_world::schedule::WorldStage::Net`]** (the feeds snapshot state
 /// the net apply writes; unordered, `apply_net_updates` could land BETWEEN two feeds, and a
 /// synchronous event fired by the later one then re-read the earlier one's pre-mutation push —
 /// the spellbook's cooldown pie stayed cold until a manual reopen, reproduced live 2026-07-31)
@@ -131,7 +131,7 @@ impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(
             Update,
-            UnitFeed.after(crate::schedule::WorldStage::Net), // the set's own doc: the why
+            UnitFeed.after(benilla_world::schedule::WorldStage::Net), // the set's own doc: the why
         )
         .init_resource::<UnitFeedState>()
         .add_message::<UnitCombatFeedback>()
@@ -159,13 +159,13 @@ impl Plugin for UiUnitPlugin {
 /// like the shipped enUS client rather than going dark.
 fn load_exhaustion_rows(
     script: Option<NonSendMut<UiScript>>,
-    assets: Option<Res<crate::assets::WorldAssets>>,
+    assets: Option<Res<benilla_assets::WorldAssets>>,
 ) {
     let (Some(mut script), Some(assets)) = (script, assets) else {
         return;
     };
     let loaded = {
-        use crate::assets::LockRecover;
+        use benilla_assets::LockRecover;
         let mut chain = assets.chain.lock_recover();
         benilla_formats::load_exhaustion(&mut chain)
     };

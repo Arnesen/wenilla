@@ -34,19 +34,19 @@ use bevy_egui::{
     EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
-use benilla_formats::ModelBlend;
+use benilla_world::lighting::{ClockSource, GameClock, WowLighting};
+use benilla_world::model_render::{ModelKind, ModelPart};
+use benilla_world::modkeys::{dev_chord, DEV_CHORD};
+use benilla_world::view::ViewDistance;
 
-use crate::lighting::{ClockSource, GameClock, WowLighting};
-use crate::view::ViewDistance;
+mod inspect;
+mod journal;
 
-/// The debug state — resource-only, faithful defaults (decision 0026: the always-present config
-/// layer; this module is only its editor).
-mod state;
-pub use state::DebugState;
-
-/// The per-frame model-visibility apply system (toggles + the far-clip wall-cull + small-prop fade).
-mod visibility;
-use visibility::apply_model_visibility;
+/// The dev state this panel edits — resource-only, faithful defaults (decision 0026: the
+/// always-present config layer; this module is only its editor). The engine owns and inits it,
+/// and the per-frame model-visibility apply system that reads its toggles is `model_render`'s.
+use benilla_world::dev_state::DebugState;
+use benilla_world::model_render::{blend_index, kind_index};
 
 /// The World section — identity/map/zone/position readout + the copy-`.go xyz` affordance.
 mod world;
@@ -112,53 +112,23 @@ fn track_pointer_over_ui(mut contexts: EguiContexts, mut over: ResMut<EguiPointe
     Ok(())
 }
 
-/// Which world-model subsystem a spawned submesh belongs to — lets the panel scope toggles (e.g.
-/// hide doodads without touching NPCs).
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ModelKind {
-    Doodad,
-    Wmo,
-    Creature,
-    GameObject,
-}
+/// The panel's display order for [`ModelKind`], and the label it writes. Free functions rather
+/// than an inherent `impl`: the type is engine vocabulary now (`model_render`) and an inherent impl
+/// cannot follow it across the crate boundary decision 1160 is drawing — the *panel's* opinion
+/// about how to present it belongs to the panel either way.
+const MODEL_KINDS: [ModelKind; 4] = [
+    ModelKind::Doodad,
+    ModelKind::Wmo,
+    ModelKind::Creature,
+    ModelKind::GameObject,
+];
 
-impl ModelKind {
-    const ALL: [ModelKind; 4] = [Self::Doodad, Self::Wmo, Self::Creature, Self::GameObject];
-
-    fn index(self) -> usize {
-        match self {
-            Self::Doodad => 0,
-            Self::Wmo => 1,
-            Self::Creature => 2,
-            Self::GameObject => 3,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Doodad => "Doodads (trees/props)",
-            Self::Wmo => "WMOs (buildings)",
-            Self::Creature => "Creatures (NPCs)",
-            Self::GameObject => "GameObjects",
-        }
-    }
-}
-
-/// Tags every spawned model submesh with the metadata the panel toggles on: its subsystem and its
-/// blend mode (the "layer" — opaque trunk vs alpha-cut canopy).
-#[derive(Component, Clone, Copy)]
-pub struct ModelPart {
-    pub kind: ModelKind,
-    pub blend: ModelBlend,
-}
-
-fn blend_index(b: ModelBlend) -> usize {
-    match b {
-        ModelBlend::Opaque => 0,
-        ModelBlend::AlphaTest => 1,
-        ModelBlend::Blend => 2,
-        ModelBlend::Mod => 3,
-        ModelBlend::Mod2x => 4,
+fn kind_label(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Doodad => "Doodads (trees/props)",
+        ModelKind::Wmo => "WMOs (buildings)",
+        ModelKind::Creature => "Creatures (NPCs)",
+        ModelKind::GameObject => "GameObjects",
     }
 }
 
@@ -183,12 +153,9 @@ fn source_label(s: ClockSource) -> &'static str {
     }
 }
 
-/// Ordering handle so the one system allowed to *override* the model-`Visibility` authority — the
-/// self-avatar first-person hide ([`crate::player`]) — can run **after** it and win the frame.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModelVisSet;
-
 /// Adds the egui plugin, the debug-state resource, the panel UI, and the apply systems.
+pub(crate) use inspect::{InspectMode, MouseoverTarget};
+
 pub struct DebugPanelPlugin;
 
 impl Plugin for DebugPanelPlugin {
@@ -206,43 +173,51 @@ impl Plugin for DebugPanelPlugin {
             egui.enable_cursor_icon_updates = false;
         }
 
-        app.insert_resource(DebugState {
-            // `$WOW_PANEL=1` — start with the panel **open**, which is how a headless capture run
-            // gets it into the frame. Without it a panel change (a new footer line, a section that
-            // grew past the scroll reserve) can only be checked in the director's own window, and
-            // clipping is exactly the failure a capture catches for free.
-            open: std::env::var_os("WOW_PANEL").is_some(),
-            ..default()
-        })
-        .init_resource::<EguiPointerOver>()
-        .add_systems(Startup, spawn_egui_camera)
-        // Keep Tab out of egui: it's a bound game key, never focus-navigation for our overlays.
-        // Runs after bevy_egui fills `EguiInput` and before egui's pass consumes it (the seam
-        // bevy_egui documents for input edits).
-        .add_systems(
-            PreUpdate,
-            strip_egui_tab_focus
-                .after(EguiPreUpdateSet::ProcessInput)
-                .before(EguiPreUpdateSet::BeginPass),
-        )
-        .add_systems(
-            EguiPrimaryContextPass,
-            (debug_panel_ui, track_pointer_over_ui),
-        )
-        // `apply_model_visibility` reads the WMO portal PVS, so it runs after the compute that
-        // fills it (`crate::wmo_portal::WmoPvsSet`).
-        .add_systems(
-            Update,
-            (
-                // No ordering against the UI keyboard feed any more: the toggle is a dev chord
-                // (1043), which no focused EditBox can consume and which needs no capture gate —
-                // the same reason `perf`'s and `sound`'s toggles never needed one.
-                toggle_panel,
-                apply_model_visibility
-                    .after(crate::wmo_portal::WmoPvsSet)
-                    .in_set(ModelVisSet),
-            ),
-        );
+        // `DebugState` itself is `benilla_world::dev_state`'s and the engine inits it — this panel is only
+        // its editor (decision 0026), and eight other subsystems read it whether or not the panel
+        // is installed.
+        app.init_resource::<EguiPointerOver>()
+            // The inspector surface and the cast journal — the two instruments that stood on
+            // `interact` and were registered by it until decision 1160's stage zero. The mouseover
+            // pick comes with them: it never ran except while the inspector was armed, so it was never
+            // the engine's picking, only this overlay's.
+            .init_resource::<InspectMode>()
+            .init_resource::<MouseoverTarget>()
+            .init_resource::<journal::CastJournal>()
+            // After the UI keyboard feed because `update_mouseover` reads `PointerOverUi`, whose
+            // player-UI half `UiInput` writes — the pick must see this frame's hover, not last
+            // frame's. (`toggle_inspect` itself no longer needs the ordering: its dev chord can't be
+            // typed text, so it reads no keyboard-capture flag — decision 0585.)
+            .add_systems(
+                Update,
+                (inspect::toggle_inspect, inspect::update_mouseover)
+                    .chain()
+                    .after(crate::ui_script::UiInput),
+            )
+            // Always recording (messages persist two frames — no ordering constraint needed).
+            .add_systems(Update, journal::record_casts)
+            .add_systems(
+                EguiPrimaryContextPass,
+                (inspect::inspect_ui, journal::journal_ui),
+            )
+            .add_systems(Startup, spawn_egui_camera)
+            // Keep Tab out of egui: it's a bound game key, never focus-navigation for our overlays.
+            // Runs after bevy_egui fills `EguiInput` and before egui's pass consumes it (the seam
+            // bevy_egui documents for input edits).
+            .add_systems(
+                PreUpdate,
+                strip_egui_tab_focus
+                    .after(EguiPreUpdateSet::ProcessInput)
+                    .before(EguiPreUpdateSet::BeginPass),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                (debug_panel_ui, track_pointer_over_ui),
+            )
+            // No ordering against the UI keyboard feed: the toggle is a dev chord (1043), which no
+            // focused EditBox can consume and which needs no capture gate — the same reason `perf`'s
+            // and `sound`'s toggles never needed one.
+            .add_systems(Update, toggle_panel);
     }
 }
 
@@ -280,86 +255,26 @@ fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugState>) 
     }
 }
 
-/// How the dev plane is written on screen. Every surface that names a chord reads this instead of
-/// spelling one out, so the panel footer, the inspector badge and the mute checkbox can't drift from
-/// what [`dev_chord`] actually listens for.
-pub(crate) const DEV_CHORD: &str = "Ctrl+Shift";
-
-/// Did the **dev-overlay chord** — [`DEV_CHORD`]+*key* — just fire? (decisions 0585, 0867, 0870,
-/// 1043 — which moved the last two dev keys onto it, so the whole fleet is here now.)
-///
-/// The dev instruments used to sit on bare letters, which is a namespace we don't own: every letter is
-/// a *game* binding in the reference client, so `P` both opened the spellbook and toggled the perf HUD
-/// (0585). They moved to `Ctrl`+`Cmd`, and then off it: on Windows that is `Ctrl`+`Win`, a plane the
-/// shell owns and keeps extending — `Win+Ctrl+M` is Magnifier settings, which had our mute (0867).
-///
-/// **`Ctrl`+`Shift`, one plane on every OS** (0870, director's call). The alternative was keeping
-/// `Ctrl`+`Cmd` on macOS for its one real advantage — Cmd is outside the reference's binding namespace
-/// (1.12 builds binding names from `ALT-`/`CTRL-`/`SHIFT-` only), so nothing in game could *ever* claim
-/// it. That buys protection against a binding no default declares and no player has yet written, and
-/// it costs a per-OS split in the docs, the hints and the reader's head. One plane wins. It also drops
-/// our dependence on winit's `sendEvent:` swizzle, without which AppKit's swallowed `keyUp` under Cmd
-/// would latch a chord after one use (0585's macOS risk, now simply not run).
-///
-/// `Ctrl`+`Shift` is the emptiest plane the reference *can* name: of its 152 defaults, exactly two
-/// carry two modifiers — `CTRL-SHIFT-TAB` and `CTRL-SHIFT-PAGEDOWN` — and no letter at all.
-/// `Ctrl`+`Alt` was never available: that is AltGr, which European layouts type real characters with
-/// (decision 0702).
-///
-/// **Exactly those two modifiers and no others**, both sides of each. The block is what makes this
-/// plane safe to leave ungated below: AltGr+Shift+*key* is `Ctrl`+`Alt`+`Shift`+*key*, and a German
-/// layout typing one of those into chat must not fire an overlay.
-///
-/// **"No letter at all" was half the story, and the missing half cost us a plane's worth of safety**
-/// (decision 1142). The reference does not match bindings by equality alone: an exact miss re-probes
-/// **once** with the leftmost modifier dropped, so `CTRL-SHIFT-`*key* falls through to
-/// `SHIFT-`*key* — never to the bare letter, which is why this plane survived the correction at all,
-/// but far enough that `Ctrl`+`Shift`+`P` would open the pet paper doll (`SHIFT-P`,
-/// `TOGGLECHARACTER3`) under the perf HUD. So the other half of the rule now lives where the law
-/// itself does, in `bindings::BindingDispatch::resolve`: this plane spends the keyboard's
-/// **fallback probe**, and only that — an exact `CTRL-SHIFT-` binding, the reference's two included,
-/// still dispatches normally.
-///
-/// Deliberately **not** gated on [`crate::ui_script::UiKeyboardCapture`] the way the bare-key toggles
-/// were: a chord can't be mistaken for typed text, so the dev overlays stay reachable with the chat bar
-/// open.
-pub(crate) fn dev_chord(keys: &ButtonInput<KeyCode>, key: KeyCode) -> bool {
-    dev_plane(keys) && keys.just_pressed(key)
-}
-
-/// The modifier half of [`dev_chord`]. See there for why the plane is what it is.
-fn dev_plane(keys: &ButtonInput<KeyCode>) -> bool {
-    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    let blocked = keys.any_pressed([
-        KeyCode::AltLeft,
-        KeyCode::AltRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]);
-    ctrl && shift && !blocked
-}
-
 /// Draw the panel as a translucent **overlay** on the right — the world renders full-screen
 /// underneath (no viewport inset). `ui_script::PointerOverUi` keeps the cursor's panel
 /// interactions from leaking into gameplay mouse-look.
 #[allow(clippy::too_many_arguments)]
 fn debug_panel_ui(
     mut contexts: EguiContexts,
-    stamp: Res<crate::build_id::BuildId>,
+    stamp: Res<benilla_world::build_id::BuildId>,
     mut debug: ResMut<DebugState>,
     mut view: ResMut<ViewDistance>,
     clock: Res<GameClock>,
     lighting: Res<WowLighting>,
     parts: Query<&ModelPart>,
-    anim_hosts: Query<&crate::doodad_anim::DoodadAnimHost>,
-    mat_anims: Query<&crate::doodad_anim::MatAnim>,
-    uv_mats: Res<crate::doodad_anim::UvAnimMaterials>,
+    anim_hosts: Query<&benilla_world::doodad_anim::DoodadAnimHost>,
+    mat_anims: Query<&benilla_world::doodad_anim::MatAnim>,
+    uv_mats: Res<benilla_world::doodad_anim::UvAnimMaterials>,
     mut sound_cfg: ResMut<crate::sound::SoundConfig>,
-    mut cull_probe: ResMut<crate::wmo_portal::WmoCullProbe>,
+    mut cull_probe: ResMut<benilla_world::wmo_portal::WmoCullProbe>,
     net_status: Res<crate::net::NetStatus>,
     dropped: Res<crate::net::DroppedOpcodes>,
-    mut weather_state: Option<ResMut<crate::weather::WeatherState>>,
+    mut weather_state: Option<ResMut<benilla_world::weather::WeatherState>>,
     mut world: WorldReadout,
 ) -> Result {
     if !debug.open {
@@ -370,7 +285,7 @@ fn debug_panel_ui(
     let mut kind_counts = [0u32; 4];
     let mut blend_counts = [0u32; 5];
     for p in &parts {
-        kind_counts[p.kind.index()] += 1;
+        kind_counts[kind_index(p.kind)] += 1;
         blend_counts[blend_index(p.blend)] += 1;
     }
 
@@ -432,10 +347,10 @@ fn debug_panel_ui(
 
                             ui.add_space(6.0);
                             ui.strong("Type");
-                            for k in ModelKind::ALL {
+                            for k in MODEL_KINDS {
                                 ui.checkbox(
-                                    &mut m.kind_visible[k.index()],
-                                    format!("{}  ·  {}", k.label(), kind_counts[k.index()]),
+                                    &mut m.kind_visible[kind_index(k)],
+                                    format!("{}  ·  {}", kind_label(k), kind_counts[kind_index(k)]),
                                 );
                             }
                             // The doodad-animation cost meter (decision 0130): how many placed
@@ -484,7 +399,7 @@ fn debug_panel_ui(
                             // shared with the `$WOW_FARCLIP` capture knob so a setting seen here can
                             // be reproduced headlessly.
                             ui.add(
-                                egui::Slider::new(&mut view.farclip, crate::view::FARCLIP_RANGE)
+                                egui::Slider::new(&mut view.farclip, benilla_world::view::FARCLIP_RANGE)
                                     .text("view distance / farclip (yd)"),
                             );
                         });
@@ -566,7 +481,7 @@ fn debug_panel_ui(
                                     ws.effect_kind,
                                     ws.effect_density,
                                     ws.sky_density,
-                                    crate::weather::storm_blend(ws.sky_density),
+                                    benilla_world::weather::storm_blend(ws.sky_density),
                                 ));
                             }
                             // The `weatherDensity` setting (video-options Weather Intensity 0–3)
@@ -721,7 +636,7 @@ fn debug_panel_ui(
                     .small()
                     .color(OVERLAY_TEXT_DIM),
             );
-            // …and which build this is (`crate::build_id`). Bottom line of the surface a reader is
+            // …and which build this is (`benilla_world::build_id`). Bottom line of the surface a reader is
             // already on when something looks wrong: a click copies the full sha, so "it looks like
             // this here" can name the code it happened on.
             let build = ui.add(
@@ -741,57 +656,4 @@ fn debug_panel_ui(
             }
         });
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn keys(held: &[KeyCode]) -> ButtonInput<KeyCode> {
-        let mut k = ButtonInput::default();
-        for &c in held {
-            k.press(c);
-        }
-        k
-    }
-
-    /// The plane fires on its two modifiers, either side of each.
-    #[test]
-    fn ctrl_shift_is_the_plane() {
-        for pair in [
-            [KeyCode::ControlLeft, KeyCode::ShiftRight],
-            [KeyCode::ControlRight, KeyCode::ShiftLeft],
-        ] {
-            assert!(dev_plane(&keys(&pair)), "{pair:?} fires");
-        }
-    }
-
-    /// One modifier is not the chord, and a third one names something else. The case that matters:
-    /// AltGr *is* `Ctrl`+`Alt`, so AltGr+Shift+key is a character a European layout types, never a
-    /// dev chord — the overlays are ungated while the chat bar is open. `Ctrl`+`Cmd` is likewise
-    /// nothing of ours now (0870): on Windows it is the shell's, `Win+Ctrl+M` being Magnifier
-    /// settings.
-    #[test]
-    fn a_lone_or_extra_modifier_is_not_the_chord() {
-        for held in [
-            vec![KeyCode::ControlLeft],
-            vec![KeyCode::ShiftLeft],
-            vec![KeyCode::ControlLeft, KeyCode::SuperLeft],
-            vec![KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::AltLeft],
-            vec![KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::SuperLeft],
-        ] {
-            assert!(!dev_plane(&keys(&held)), "{held:?} is not the chord");
-        }
-    }
-
-    /// The label a hint prints is the plane actually listened for — one const, one predicate, so a
-    /// player is never told to press a key we stopped reading.
-    #[test]
-    fn the_label_matches_the_plane() {
-        assert_eq!(DEV_CHORD, "Ctrl+Shift");
-        assert!(dev_plane(&keys(&[
-            KeyCode::ControlLeft,
-            KeyCode::ShiftLeft
-        ])));
-    }
 }

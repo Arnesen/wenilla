@@ -482,11 +482,11 @@ pub(super) fn run(
                     // watchdog window). A re-armed Stand landing on its rare look-around
                     // variations IS the idle fidget.
                     let (c, budget) = roll_loop(anims, c, relaxed, rng);
-                    if traced && crate::dbg_trace::enabled() {
+                    if traced && benilla_assets::trace::enabled() {
                         // Every fresh gait play, including a same-clip replay (which the
                         // settled-state diff below cannot see) — the exact restart-from-head
                         // event a "frames snap" report is hunting.
-                        crate::dbg_trace::line(
+                        benilla_assets::trace::line(
                             "anim",
                             &format!(
                                 "{subject}PLAY gait {} (was {:?}) rate {:.2}",

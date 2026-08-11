@@ -50,10 +50,10 @@ use benilla_protocol::{guid, EntityKind};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::creature_anim::{Engaged, SwingMessage};
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::relations::can_attack;
 use super::{ring_reaction, Factions, Selection};
@@ -230,7 +230,7 @@ pub(crate) struct EnemyScan<'w, 's> {
         'w,
         's,
         (&'static Camera, &'static Transform),
-        (With<crate::player::WorldCamera>, Without<SelfPlayer>),
+        (With<benilla_world::view::WorldCamera>, Without<SelfPlayer>),
     >,
     factions: Option<Res<'w, Factions>>,
     reputations: Res<'w, Reputations>,

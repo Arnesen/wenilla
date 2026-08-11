@@ -5,18 +5,14 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use avian3d::character_controller::move_and_slide::MoveAndSlide;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind};
 use bevy::prelude::*;
 
-use crate::collision::player_query_filter;
 use crate::entities::CollisionHeight;
-use crate::liquid::{unit_claim, water_surface_at, WaterChunkInfo};
 use crate::player::swim_enter_depth;
 
 use super::super::NetEntity;
-use crate::wmo_portal::UnitWmoRoom;
 
 /// A server-dictated movement path (`SMSG_MONSTER_MOVE`): the unit traverses `points` at constant
 /// speed over `duration` from `start`. All points are raw WoW coords; [`sample_splines`] interpolates
@@ -132,7 +128,7 @@ impl Spline {
     ///   the spline tangent (`mover+0x5c`), so the climb angle IS that tangent's vertical
     ///   component. (The `mover+0x20` asin scalar is the SWIM branch's — flight never reaches it.)
     /// - **Bank**: `θ = 2·sign(cross)·acos(clamp(t̂ₓᵧ·d̂ₓᵧ, −1, 1))` between the XY-normalized
-    ///   tangent and the XY direction to the **1000 ms look-ahead** point (`0x3e8` @ `0x7c5623`;
+    ///   tangent and the XY direction to the **1000 world look-ahead** point (`0x3e8` @ `0x7c5623`;
     ///   a degenerate XY length — the client's eps `2.384e-7` — banks 0), then the **snap** — not
     ///   a soft clamp: `θ < −π/2 → −π`, `θ ≥ +π/2 → +π` (the sharp-corner/antipodal guard: a
     ///   hairpin reads as a momentary full roll, visible on the reference at switchbacks). No
@@ -263,7 +259,7 @@ pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
 /// exactly how far this unit will drift from us while we hold it still, and therefore how big a jump
 /// its next `SMSG_MONSTER_MOVE` has to make up. Read it against the `mmv` lines' realized snaps.
 pub(in crate::net) fn trace_create_spline(guid: u64, spline: Option<&CreateSpline>) {
-    if !crate::dbg_trace::enabled() {
+    if !benilla_assets::trace::enabled() {
         return;
     }
     let Some(s) = spline else { return };
@@ -277,10 +273,10 @@ pub(in crate::net) fn trace_create_spline(guid: u64, spline: Option<&CreateSplin
         .sum();
     let ridden = s.time_passed_ms as f32 / s.duration_ms.max(1) as f32;
     let left = length * (1.0 - ridden).clamp(0.0, 1.0);
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "csp",
         &format!(
-            "{guid:#x} nodes={} len={length:.2} left={left:.2} t={}/{} ms{}{}{}",
+            "{guid:#x} nodes={} len={length:.2} left={left:.2} t={}/{} world{}{}{}",
             s.path.len(),
             s.time_passed_ms,
             s.duration_ms,
@@ -312,14 +308,14 @@ pub(in crate::net) fn trace_move_snap(
     stop: bool,
     duration_ms: u32,
 ) {
-    if !crate::dbg_trace::enabled() {
+    if !benilla_assets::trace::enabled() {
         return;
     }
     let snap = from.map_or("xy=? z=?".to_string(), |f| {
         let (dx, dy, dz) = (start[0] - f[0], start[1] - f[1], start[2] - f[2]);
         format!("xy={:.2} z={dz:+.2}", (dx * dx + dy * dy).sqrt())
     });
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "mmv",
         &format!(
             "{guid:#x} {snap} start=[{:.2},{:.2},{:.2}] dur={duration_ms}{}",
@@ -403,7 +399,7 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 /// the grounded fork zeroes the spline Z-delta and the WALK resolver reads Z off the world trace), and
 /// an idle unit reads grounded against the reference too (the exact idle path isn't byte-pinned yet —
 /// decision 0059). We mirror the *behaviour*: cast a ray straight down against the terrain/WMO
-/// **walking** colliders — the same set the player stands on ([`player_query_filter`]) — and set the
+/// **walking** colliders — the same set the player stands on ([`benilla_world::collision::WorldCollision::body_filter`]) — and set the
 /// unit's Y to the hit.
 ///
 /// Scope: **`Unit` creatures only** (a player owns its Z via the controller / `RemoteMotion`; a
@@ -417,7 +413,7 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 /// what we re-ground; an idle unit (no spline) is re-grounded in place each frame, which also catches
 /// it once its terrain collider loads.
 pub(in crate::net) fn ground_clamp_creatures(
-    ms: MoveAndSlide,
+    world: benilla_world::collision::WorldCollision,
     mut q: Query<(
         &NetEntity,
         Option<&Spline>,
@@ -425,7 +421,6 @@ pub(in crate::net) fn ground_clamp_creatures(
         Has<CreatureSwimming>,
     )>,
 ) {
-    let filter = player_query_filter();
     for (net, spline, mut t, swimming) in &mut q {
         if net.kind != EntityKind::Unit {
             continue; // players + GameObjects own their Z
@@ -441,9 +436,7 @@ pub(in crate::net) fn ground_clamp_creatures(
         // The one-sided down-ray (decision 0970): a creature grounds like the player grounds — a
         // face whose winding points away is no floor, or an idle NPC would stand mid-air on the
         // very shell face the player mover now falls through.
-        if let Some(hit) =
-            crate::collision::one_sided::cast_ray(&ms, origin, Dir3::NEG_Y, reach, &filter)
-        {
+        if let Some(hit) = world.ray_body(origin, Dir3::NEG_Y, reach) {
             t.translation.y = origin.y - hit.distance; // the down-ray's hit point Y = feet on the surface
         }
     }
@@ -457,7 +450,6 @@ type SwimMarkQuery = (
     &'static NetEntity,
     &'static Transform,
     Option<&'static CollisionHeight>,
-    Option<&'static UnitWmoRoom>,
     Has<CreatureSwimming>,
 );
 
@@ -488,26 +480,28 @@ pub(crate) struct CreatureSwimming;
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
     units: Query<SwimMarkQuery>,
-    water: Query<&WaterChunkInfo>,
-    placements: crate::liquid::RoomPlacements,
+    world: benilla_world::world_point::WorldPoint,
 ) {
-    for (e, net, t, collision, room, marked) in &units {
+    for (e, net, t, collision, marked) in &units {
         if net.kind != EntityKind::Unit {
             continue; // players carry the real flag on the wire; GameObjects don't swim
         }
-        // The unit's OWN room claim decides whose liquid answers (0696). It used to pass "no claim",
-        // so both sources answered: Undercity's NPCs read Tirisfal's ADT water 95 yd over their
-        // heads and swam on dry stone in rooms the player walked.
-        let claim = unit_claim(room, &placements);
-        // A unit the room tracker hasn't reached yet cannot ENTER swim. `Unknown` admits both
-        // sources — the very false positive this fix removes — so a freshly streamed NPC standing
-        // in an interior would flash the swim gait for the frame before its claim lands. It can
-        // still LEAVE: a stale mark must always be able to clear.
-        if !marked && claim == crate::liquid::LiquidClaim::Unknown {
+        // The unit's OWN room decides whose liquid answers (0696). Before it, both sources
+        // answered: Undercity's NPCs read Tirisfal's ADT water 95 yd over their heads and swam on
+        // dry stone in rooms the player walked.
+        //
+        // A unit the room tracker hasn't reached yet cannot ENTER swim — an unsettled claim admits
+        // both sources, the very false positive that fix removes, so a freshly streamed NPC
+        // standing in an interior would flash the swim gait for the frame before its room lands.
+        // It can still LEAVE: a stale mark must always be able to clear.
+        let who = benilla_world::world_point::Subject::Unit(e);
+        if !marked && !world.room_settled(who) {
             continue;
         }
         let wow = bevy_to_wow(t.translation);
-        let depth = water_surface_at(water.iter(), wow, claim).map_or(f32::MIN, |s| s - wow[2]);
+        let depth = world
+            .water_surface_at(who, wow)
+            .map_or(f32::MIN, |s| s - wow[2]);
         let boundary = swim_enter_depth(collision.copied().unwrap_or_default().0);
         let swimming = if marked {
             depth >= boundary - CREATURE_SWIM_EXIT_BAND

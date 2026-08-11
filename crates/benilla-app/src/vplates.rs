@@ -69,14 +69,14 @@ use bevy::prelude::*;
 use benilla_protocol::EntityKind;
 use benilla_ui::script::{unit_is_grey, JustifyH, JustifyV, Outline};
 
-use crate::assets::{AssetSet, WorldAssets};
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::player::WorldCamera;
 use crate::target::{ring_reaction, Factions, Hovered, Selection, TargetUpdate};
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
+use benilla_assets::{AssetSet, WorldAssets};
+use benilla_world::view::WorldCamera;
 
 /// Sharp-resampling the frame border ([`border::resample_sharp`]) so the 128×32 art reads crisp at
 /// the plate's larger size instead of bilinear-magnified soft (0188).
@@ -466,7 +466,7 @@ fn drive_vplates(
     );
     if border.size != Some(tex) {
         let rgba = border::resample_sharp(&border.src, border.src_w, border.src_h, tex.0, tex.1);
-        border.handle = Some(images.add(crate::assets::sprite_image(tex.0, tex.1, rgba)));
+        border.handle = Some(images.add(benilla_assets::sprite_image(tex.0, tex.1, rgba)));
         border.size = Some(tex);
     }
     let Some(border_tex) = border.handle.clone() else {

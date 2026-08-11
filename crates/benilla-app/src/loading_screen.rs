@@ -30,10 +30,12 @@ use std::collections::HashMap;
 
 use benilla_formats::{load_loading_screens, LoadingScreenCatalog};
 
-use crate::assets::LockRecover;
-use crate::assets::{AssetSet, WorldAssets};
-use crate::schedule::WorldStage;
-use crate::world_map::{CurrentMap, MapCatalogRes};
+use benilla_assets::LockRecover;
+use benilla_assets::MapCatalogRes;
+use benilla_assets::{AssetSet, WorldAssets};
+use benilla_world::schedule::WorldStage;
+use benilla_world::terrain_stream::WorldLoadProgress;
+use benilla_world::world_map::CurrentMap;
 
 // Bar layout — VERIFIED THREE ways (build 5875): the `WoW.exe` `LoadingScreen.cpp` bar descriptor
 // table (@0x7ffd34, `FUN_00407150`) gives entry = {cx, cy, halfW, halfH} with rect = [cx ± halfW·0.5]
@@ -67,59 +69,6 @@ const CLEAR_AFTER_READY_FRAMES: u32 = 3;
 /// nothing extra.
 const WAIT_LOG_AFTER: f32 = 3.0;
 const WAIT_LOG_EVERY: f32 = 2.0;
-
-/// How much of the world the streamer wants around the view focus is actually there. Written each
-/// frame by `terrain_stream::stream_terrain` (tiles + placements) and
-/// `terrain_stream::finish_colliders` (the attach queue); read here to drive the bar + the clear
-/// condition, and by the streamer's own settle release (decision 0737 — the physics hold keys on
-/// this same signal, never on ground contact).
-#[derive(Resource, Default)]
-pub(crate) struct WorldLoadProgress {
-    /// Units done, of [`Self::total`]: desired tiles spawned + focus-neighbourhood placements up.
-    pub(crate) ready: usize,
-    pub(crate) total: usize,
-    /// Whether the tile under the view focus (the nearest desired tile) is spawned. `false` until the
-    /// streamer first runs, and again whenever a teleport/worldport drops the focus onto unloaded
-    /// ground — the backstop trigger (covers startup, cross-map worldport, AND far same-map
-    /// teleports like a cross-continent `.tele`, which don't change `CurrentMap`). During normal
-    /// streaming the focus tile is always resident, so it never fires spuriously.
-    pub(crate) focus_resident: bool,
-    /// The scene term (0737): the focus tile **and its 8 neighbours** are spawned with every
-    /// placement they reference (WMOs, doodads, WMO props) — "the buildings and trees around you
-    /// exist", which is what makes a reveal read as a world rather than bare terrain. Collider
-    /// quiet is deliberately *not* folded in here (it is published a stage apart); consumers use
-    /// [`Self::presentable`].
-    pub(crate) scene_ready: bool,
-    /// Outstanding collider attaches (decision 0610's queue) — published by `finish_colliders`.
-    pub(crate) colliders_pending: usize,
-    /// Focus-neighbourhood placements not yet spawned (the wait instrument's term).
-    pub(crate) placements_pending: usize,
-}
-
-impl WorldLoadProgress {
-    /// 0..1 residency fraction for the bar — **0.0 when nothing is wanted yet** (the cold-start /
-    /// pre-`desired` frame), so the bar starts empty rather than flashing full. (Distinct from the
-    /// clear test [`Self::is_ready`], which treats `total == 0` as not-ready.)
-    fn fraction(&self) -> f32 {
-        if self.total == 0 {
-            0.0
-        } else {
-            (self.ready as f32 / self.total as f32).clamp(0.0, 1.0)
-        }
-    }
-
-    /// True once every wanted unit is resident. Requires `total > 0` so the cold-start / post-swap
-    /// frame (before `desired` is computed) doesn't read as "done".
-    fn is_ready(&self) -> bool {
-        self.total > 0 && self.ready >= self.total
-    }
-
-    /// The world at the focus is presentable — the scene term plus a quiet collider queue. What
-    /// both consumers (the screen clear here, the settle release in the streamer) key on.
-    pub(crate) fn presentable(&self) -> bool {
-        self.scene_ready && self.colliders_pending == 0
-    }
-}
 
 /// Bevy resource wrapper around the format-crate [`LoadingScreenCatalog`] (the `LoadingScreenID` → BLP
 /// path table). Paired with [`MapCatalogRes`] (the `mapId` → `LoadingScreenID` FK) to resolve art.
@@ -198,8 +147,7 @@ pub(crate) struct LoadingScreenPlugin;
 
 impl Plugin for LoadingScreenPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<WorldLoadProgress>()
-            .init_resource::<LoadingScreen>()
+        app.init_resource::<LoadingScreen>()
             .add_systems(Startup, setup_loading_screen.after(AssetSet::Open))
             // In `WorldStage::Present` (after Input + Stream): we read residency for the SAME frame's
             // player position — a teleport snaps in Input → the streamer recomputes focus in Stream →

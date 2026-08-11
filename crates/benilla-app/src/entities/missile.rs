@@ -68,7 +68,7 @@ use crate::creature_anim::{
     oneshot_is_live, AnimData, AnimDriver, AnimSoundEvent, CastEvent, CastEventKind, DefenseAnim,
     MissileSpawn,
 };
-use crate::model_render::m2_url;
+use benilla_assets::m2_url;
 
 use super::equipment::ItemDisplays;
 use super::spell_fx::{attach_effect_visuals, EffectHost, SpellFx};
@@ -597,10 +597,10 @@ pub(super) fn attach_missile_models(
     mut missiles: Query<(Entity, &mut Missile)>,
     fx: Option<Res<SpellFx>>,
     time: Res<Time>,
-    mut wow_materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
+    mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
     let Some(fx) = fx else {
         return;

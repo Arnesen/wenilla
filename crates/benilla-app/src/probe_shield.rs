@@ -98,8 +98,10 @@ pub(crate) struct ProbeShieldPlugin;
 
 impl Plugin for ProbeShieldPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ProbeShield>()
-            .add_systems(Update, drive_shield.after(crate::schedule::WorldStage::Net));
+        app.init_resource::<ProbeShield>().add_systems(
+            Update,
+            drive_shield.after(benilla_world::schedule::WorldStage::Net),
+        );
     }
 }
 

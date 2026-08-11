@@ -10,13 +10,14 @@ use bevy::render::view::Hdr;
 
 use benilla_assets::coords::wow_to_bevy;
 
-use crate::assets::{RenderConfig, WorldAssets};
-use crate::lighting::fog_range;
-use crate::SPAWN_XY;
+use benilla_assets::{RenderConfig, WorldAssets};
+use benilla_world::lighting::fog_range;
+use benilla_world::terrain_stream::SPAWN_XY;
+use benilla_world::view::{WorldCamera, CAM_FOVY, CAM_NEAR};
 
 use super::{
     CameraControl, CameraProbe, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_COLLISION_RADIUS,
-    CAM_DIST_DEFAULT, CAM_FOVY, CAM_NEAR, CAPSULE_HEIGHT, CAPSULE_RADIUS,
+    CAM_DIST_DEFAULT, CAPSULE_HEIGHT, CAPSULE_RADIUS,
 };
 
 /// Default avatar speed in yards/second — the **VERIFIED** vanilla run speed (`MOVE_RUN` 7.0). Ctrl
@@ -28,10 +29,10 @@ const DEFAULT_MOVE_SPEED: f32 = 7.0;
 fn spawn_fallback_camera(commands: &mut Commands) {
     commands.spawn((
         Camera3d::default(),
-        super::WorldCamera,
+        WorldCamera,
         Hdr,
         Tonemapping::None,
-        crate::ffx_glow::FfxGlow::WORLD,
+        benilla_world::ffx_glow::FfxGlow::WORLD,
         Transform::from_xyz(0.0, 50.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
         FlyCam {
             yaw: 0.0,
@@ -88,7 +89,7 @@ pub(super) fn setup_player(
         Camera3d::default(),
         // THE world camera (the portrait booths are further `Camera3d`s — every "where is the viewer"
         // consumer filters on this marker, never on bare `Camera3d`; see its doc).
-        super::WorldCamera,
+        WorldCamera,
         // MSAA from $WOW_MSAA (off/0/1 → Off, 2, 4 default, 8). A STARTUP knob, not a live toggle:
         // switching MSAA at runtime leaves our post-process passes (glow/egui) MSAA-mismatched and
         // freezes the view, so A/B by restarting. 4× is real GPU fill cost — performance-foundation.md.
@@ -114,7 +115,7 @@ pub(super) fn setup_player(
         Tonemapping::None,
         // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`
         // — and, in the gamma lane, the owner of the frame's single output decode.
-        crate::ffx_glow::FfxGlow::WORLD,
+        benilla_world::ffx_glow::FfxGlow::WORLD,
         Transform::from_translation(spawn + Vec3::new(0.0, 60.0, 60.0)).looking_at(spawn, Vec3::Y),
         // PHASE 0: no PBR ambient fill, no distance fog — pitch-black clean slate. The faithful scene
         // light is rebuilt in-shader from Light.dbc (terrain/model WGSL), not via Bevy PBR lights.
@@ -133,13 +134,13 @@ pub(super) fn setup_player(
 /// world's pipelines, so the first visible in-world frame doesn't hitch on shader builds.
 /// Capture runs boot straight `InWorld` (`CharSelectPlugin::start_in_world`) — always active there.
 ///
-/// This gate stays deliberately WIDER than [`crate::schedule::world_is_live`], which decides
+/// This gate stays deliberately WIDER than [`benilla_world::schedule::world_is_live`], which decides
 /// whether the world is *loaded* at all (decision 0777): the camera must also render while the
 /// cover is up, which is exactly the window in which the world is streaming in.
 pub(super) fn gate_world_camera(
     state: Res<State<crate::char_select::ClientState>>,
     loading: Res<crate::loading_screen::LoadingScreen>,
-    mut cams: Query<&mut Camera, With<super::WorldCamera>>,
+    mut cams: Query<&mut Camera, With<WorldCamera>>,
 ) {
     let active = *state.get() == crate::char_select::ClientState::InWorld || loading.covering();
     for mut cam in &mut cams {

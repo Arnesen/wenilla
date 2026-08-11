@@ -12,13 +12,13 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 
 use avian3d::prelude::*;
 
-use crate::collision::camera_query_filter;
-use crate::interact::{WorldClick, WorldRightClick, WorldRightPress};
-use crate::model_fade::{
+use crate::net::SelfPlayer;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
+use benilla_world::model_fade::{
     self_model_fade_alpha, FadeMaterials, PendingAppearFade, RenderFade, SELF_FADE_WINDOW,
 };
-use crate::net::SelfPlayer;
-use crate::terrain::WowModelMaterial;
+use benilla_world::view::CAM_NEAR;
 
 /// The reference's up-edge click predicate, in **camera degrees and milliseconds** — the whole
 /// orbit-vs-select law (decision 1122; wow-re `world-click-drag-arbitration.md`, §5 fan-out
@@ -29,7 +29,7 @@ use crate::terrain::WowModelMaterial;
 ///        || (elapsed < 800ms && yaw_travel < 2.25° && pitch_travel < 2.0°)
 /// ```
 ///
-/// **A press under 200 ms selects however far the mouse swept.** That arm is the entire bug report
+/// **A press under 200 world selects however far the mouse swept.** That arm is the entire bug report
 /// (ledger B226): flick the cursor across a mob and click on arrival with the hand still moving, and
 /// the reference targets it — the camera has been orbiting since the first motion sample and selects
 /// anyway. The two mechanisms are independent and share only the button state.
@@ -90,7 +90,7 @@ impl PressGesture {
 /// the camera CVars, wow-re `follow-camera`): max orbit = `cameraDistanceMax × cameraDistanceMaxFactor`,
 /// **hard-capped at 50**; the low clamp is **0** — zoom-to-first-person (at distance 0 the eye sits at
 /// the framing pivot, inside the head, and the avatar fades to invisible — see
-/// [`crate::model_fade::self_model_fade_alpha`]). The out-of-box *default* max is 15 (`15 × 1`); we use
+/// [`benilla_world::model_fade::self_model_fade_alpha`]). The out-of-box *default* max is 15 (`15 × 1`); we use
 /// **30** as the max zoom-out — the "Max Camera Distance" setting fully raised (`cameraDistanceMax 15 ×
 /// cameraDistanceMaxFactor 2.0`, well under the 50 cap), matched against the reference client. (The 2.0
 /// factor cap is inferred from the ref-client comparison, not byte-verified — the RE pinned the CVar
@@ -226,25 +226,6 @@ pub(crate) fn head_height(pivot: Option<&CameraPivot>, scale: f32) -> f32 {
         (p.height_local * scale).max(CAM_PIVOT_FLOOR)
     })
 }
-/// The camera **near-plane** distance (yd) — the reference's own **1/9**, hardcoded in its camera
-/// ctor (`0x50a6c0`: `+0x38 = 0x3de38e39`; the `nearclip` console cvar stores to a global with zero
-/// readers — dead plumbing; wow-re `water-frame-straddle` §4d). Shared by the projection ([`setup`])
-/// and the self-avatar fade's `nearclip` ([`crate::model_fade::self_model_fade_alpha`]) so the model
-/// finishes fading exactly as the near plane would begin to slice it — the reference couples the
-/// two the same way (`cam+0x38 ≈ 0.1`, set per frame in the driver `0x511bc0`).
-///
-/// It was 1.0 from 0062 to 0905 "for depth precision" — a rationale that predates knowing the
-/// pipeline: the projection is `perspective_infinite_reverse_rh` on a float depth buffer
-/// ([`crate::capture::depth_probe`]'s tests draw with the real one), where `depth = near/z` makes
-/// relative precision — and our ULP-relative bias ladder ([`crate::sky_order`]) — independent of
-/// the near value. The small near is what keeps the whole waterline-crossing band (the corner-min
-/// submersion probe, `liquid::detect_submersion`) inches tall instead of a yard.
-pub(crate) const CAM_NEAR: f32 = 1.0 / 9.0;
-/// The camera's vertical field of view (radians) — one constant shared by the projection
-/// ([`setup`]) and every consumer that needs the near rectangle's true shape. 45°, the value the
-/// projection has always used (Bevy's `PerspectiveProjection` default, ≈ the reference's 44.1° —
-/// [`crate::sun`]'s projection note); naming it here just stops the consumers drifting apart.
-pub(crate) const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
 
 /// A small sphere swept from the camera pivot toward the desired camera seat each frame to keep walls
 /// from sliding between the camera and the character (camera collision). Built once at startup like
@@ -273,7 +254,7 @@ pub(crate) struct CameraControl {
     /// Logical cursor position captured when look began, to restore on release.
     pub(super) cursor_stash: Option<Vec2>,
     /// The self-avatar's render alpha for this frame, from the camera-to-pivot distance
-    /// ([`crate::model_fade::self_model_fade_alpha`]): `1.0` third-person (opaque), ramping to `0.0` as
+    /// ([`benilla_world::model_fade::self_model_fade_alpha`]): `1.0` third-person (opaque), ramping to `0.0` as
     /// the camera zooms into the head (first-person). `control` computes it (it owns the pivot + camera
     /// pose); [`apply_self_model_fade`] applies it to the body parts. Starts opaque.
     pub(super) self_fade_alpha: f32,
@@ -316,14 +297,6 @@ pub(super) struct FlyCam {
     pub(super) pitch: f32,
     pub(super) speed: f32,
 }
-
-/// Marks **the world camera** — the one flying the scene. Every "where is the viewer" consumer
-/// (terrain streaming, PVS, sun follow, sound listener, picking, the capture pin, …) filters on this,
-/// NOT on `Camera3d`: since the portrait booths ([`crate::portrait`]) there are multiple `Camera3d`s,
-/// and a bare `With<WorldCamera>` query silently reads (or writes!) an off-screen booth camera — exactly
-/// how the capture pin once yanked the booths to the scenario eye and blanked every portrait.
-#[derive(Component)]
-pub(crate) struct WorldCamera;
 
 /// The per-model camera-pivot height in **model-local yards, pre-scale** — `attach17.z + 0.0972` (M2
 /// attachment id 17) for a character, else `0.9 × vertex-box Z-extent`; the reference's camera-target
@@ -538,7 +511,7 @@ pub(super) fn seat_camera(
     rig: &mut CameraControl,
     cam: &mut FlyCam,
     cam_t: &mut Transform,
-    move_and_slide: &MoveAndSlide,
+    collide: &benilla_world::collision::WorldCollision<'_, '_>,
     cam_probe: &Collider,
 ) {
     // A keyboard turn carries the camera RIGIDLY (char and camera rotate as one — the reference
@@ -575,15 +548,8 @@ pub(super) fn seat_camera(
     let boom_len = boom.length().max(1.0e-3);
     // The camera collides with the WMO *camera/LOS* faces (keeps DETAIL overhangs like forge pipes,
     // drops NOCAMCOLLIDE) + terrain/doodads/GameObjects — its own audience, not the walking mesh.
-    let open = move_and_slide
-        .cast_move(
-            cam_probe,
-            head,
-            Quat::IDENTITY,
-            boom,
-            0.0,
-            &camera_query_filter(),
-        )
+    let open = collide
+        .cast_camera(cam_probe, head, Quat::IDENTITY, boom, 0.0)
         .map_or(boom_len, |h| h.distance);
     // Snap in instantly when geometry intrudes (a wall must never sit between camera and character);
     // ease back out to the open arm length once it clears — the vanilla snap-close-then-glide-back.
@@ -646,7 +612,7 @@ pub(super) fn seat_camera(
 /// the player's own body parts **and every attach-model descendant** (held items, helm, shoulders —
 /// [`crate::entities::BoneAttach`] rides them several levels down through the joint hierarchy), so you
 /// go translucent then invisible — weapon and armor included — as the camera zooms into the head. Drives
-/// the same per-instance render-alpha channel as [`crate::model_fade::apply_render_fade`] — the `MeshTag`
+/// the same per-instance render-alpha channel as [`benilla_world::model_fade::apply_render_fade`] — the `MeshTag`
 /// alpha field on the blend-twin material — and hard-hides via [`Visibility`] at α 0 (true
 /// first-person; cheaper + cleaner than a ≈0-alpha head sitting on the camera).
 ///
@@ -689,8 +655,8 @@ pub(crate) fn apply_self_model_fade(
             &mut MeshTag,
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
-            Option<&crate::interior::InteriorLit>,
-            Has<crate::model_render::FarSideOfWater>,
+            Option<&benilla_world::interior::InteriorLit>,
+            Has<benilla_world::model_render::FarSideOfWater>,
         ),
         (
             Without<RenderFade>,
@@ -699,22 +665,22 @@ pub(crate) fn apply_self_model_fade(
             // `FadeMaterials` too since 0836, so this now genuinely diverts them — into the loop
             // at the end, which applies the same law without touching `Visibility` (a card's own
             // hidden-owner mirror authors that in a different system).
-            Without<crate::billboard::BillboardCard>,
+            Without<benilla_world::billboard::BillboardCard>,
         ),
     >,
     mut cards: Query<(
-        &crate::billboard::BillboardCard,
+        &benilla_world::billboard::BillboardCard,
         &mut MeshTag,
-        Option<&crate::doodad_anim::MatAnim>,
+        Option<&benilla_world::doodad_anim::MatAnim>,
         Option<&FadeMaterials>,
         Option<&mut MeshMaterial3d<WowModelMaterial>>,
-        Option<&crate::interior::InteriorLit>,
-        Has<crate::model_render::FarSideOfWater>,
+        Option<&benilla_world::interior::InteriorLit>,
+        Has<benilla_world::model_render::FarSideOfWater>,
     )>,
     // The water-plane axis, composed into every pick below (`far_resolved`) like every other
     // owner of the handle channel — the feather and the classifier converge, never re-swap.
-    far_twins: Res<crate::model_render::FarSideTwins>,
-    mut reauthor: ResMut<crate::interior::InteriorReauthor>,
+    far_twins: Res<benilla_world::model_render::FarSideTwins>,
+    mut reauthor: ResMut<benilla_world::interior::InteriorReauthor>,
     mut was_fading: Local<bool>,
 ) {
     let fading = rig.self_fade_alpha < 1.0;
@@ -758,7 +724,7 @@ pub(crate) fn apply_self_model_fade(
         // (not from the tag we'd read back) keeps that animation alive under the fade, and the
         // release frame's `α = 1` write lands exactly on the value it would have had.
         let authored = anim.map_or(1.0, |a| a.current);
-        let bits = crate::mesh_tag::with_alpha(tag.0, authored * alpha);
+        let bits = benilla_world::mesh_tag::with_alpha(tag.0, authored * alpha);
         if tag.0 != bits {
             tag.0 = bits;
         }
@@ -769,7 +735,7 @@ pub(crate) fn apply_self_model_fade(
         // (decision 0836). No `Visibility` here: that channel belongs to the card's hidden-owner
         // mirror in another system.
         if let (Some(fm), Some(mut mat)) = (fm, mat) {
-            let want = crate::model_render::far_resolved(
+            let want = benilla_world::model_render::far_resolved(
                 fm.material_for(lit, alpha < 1.0),
                 far_side,
                 &far_twins,
@@ -798,17 +764,17 @@ fn apply_self_fade_to_descendants(
             &mut MeshTag,
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
-            Option<&crate::interior::InteriorLit>,
-            Has<crate::model_render::FarSideOfWater>,
+            Option<&benilla_world::interior::InteriorLit>,
+            Has<benilla_world::model_render::FarSideOfWater>,
         ),
         (
             Without<RenderFade>,
             Without<PendingAppearFade>,
-            Without<crate::billboard::BillboardCard>,
+            Without<benilla_world::billboard::BillboardCard>,
         ),
     >,
-    far_twins: &crate::model_render::FarSideTwins,
-    reauthor: &mut crate::interior::InteriorReauthor,
+    far_twins: &benilla_world::model_render::FarSideTwins,
+    reauthor: &mut benilla_world::interior::InteriorReauthor,
     walked: &mut EntityHashSet,
 ) {
     walked.insert(entity);
@@ -823,12 +789,15 @@ fn apply_self_fade_to_descendants(
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
             }
-            let bits = crate::mesh_tag::with_alpha(tag.0, 1.0);
+            let bits = benilla_world::mesh_tag::with_alpha(tag.0, 1.0);
             if tag.0 != bits {
                 tag.0 = bits;
             }
-            let want =
-                crate::model_render::far_resolved(fm.material_for(lit, false), far_side, far_twins);
+            let want = benilla_world::model_render::far_resolved(
+                fm.material_for(lit, false),
+                far_side,
+                far_twins,
+            );
             if mat.0 != *want {
                 mat.0 = want.clone();
             }
@@ -849,7 +818,7 @@ fn apply_self_fade_to_descendants(
             // Feathering: ride the blend twin with the alpha packed into the tag's alpha field
             // (the cutout ignores α; `with_alpha` preserves the ground-shade byte so a shadowed
             // avatar doesn't flash lit while zooming).
-            let bits = crate::mesh_tag::with_alpha(tag.0, alpha);
+            let bits = benilla_world::mesh_tag::with_alpha(tag.0, alpha);
             if tag.0 != bits {
                 tag.0 = bits;
             }
@@ -858,8 +827,11 @@ fn apply_self_fade_to_descendants(
             // exterior twin at shade byte 0 read as full outdoor intensity deep indoors
             // (director-caught, 2026-07-13). Shared with the appear/despawn ramp since 0755, so
             // the two can never disagree about which twin a law wants.
-            let want =
-                crate::model_render::far_resolved(fm.material_for(lit, true), far_side, far_twins);
+            let want = benilla_world::model_render::far_resolved(
+                fm.material_for(lit, true),
+                far_side,
+                far_twins,
+            );
             if mat.0 != *want {
                 mat.0 = want.clone();
             }
@@ -950,8 +922,8 @@ mod tests {
     use benilla_assets::BillboardInfo;
     use benilla_formats::BillboardKind;
 
-    use crate::billboard::BillboardCard;
-    use crate::mesh_tag::alpha_bits;
+    use benilla_world::billboard::BillboardCard;
+    use benilla_world::mesh_tag::alpha_bits;
 
     /// A press that has travelled `yaw`/`pitch` **degrees** of camera rotation.
     fn press(yaw_deg: f32, pitch_deg: f32) -> PressGesture {
@@ -963,7 +935,7 @@ mod tests {
     }
 
     /// The report this whole change exists for (ledger B226, decision 1122): **a fast click
-    /// selects however far the mouse swept.** Under 200 ms the reference asks nothing about
+    /// selects however far the mouse swept.** Under 200 world the reference asks nothing about
     /// motion at all (`0x514ae0`'s first arm, `0x514b24`) — which is the gesture people actually
     /// make, flicking the cursor at a mob and clicking on arrival with the hand still moving.
     /// benilla used to destroy the pending click after 4 px of travel, so this case never fired.
@@ -973,7 +945,7 @@ mod tests {
         let swept = press(90.0, 45.0);
         assert!(
             swept.is_click(0.199),
-            "under 200 ms, travel is not consulted"
+            "under 200 world, travel is not consulted"
         );
         // And the camera is expected to have orbited through all of it: the two are independent,
         // which is the half that makes the reference's gesture possible at all.
@@ -999,7 +971,7 @@ mod tests {
         assert_eq!(slow.rate(), LOOK_SENSITIVITY * 0.5);
     }
 
-    /// The second arm: between 200 and 800 ms the travel gate applies, per axis and independently
+    /// The second arm: between 200 and 800 world the travel gate applies, per axis and independently
     /// (`0x514ae0`'s `both accums < 8.0` arm). The thresholds are the reference's 2.25° of yaw and
     /// 2.0° of pitch — see [`CLICK_HOLD_CEILING`] for why we hold the angle, not the raw literal.
     #[test]
@@ -1018,7 +990,7 @@ mod tests {
         );
     }
 
-    /// The 800 ms ceiling (`0x514aeb lea eax,[edx-0x320]`) is absolute — a long hold is never a
+    /// The 800 world ceiling (`0x514aeb lea eax,[edx-0x320]`) is absolute — a long hold is never a
     /// click, however still the hand was. This is the arm that keeps a deliberate camera orbit from
     /// re-targeting whatever it started on, and it is the reason the fix could not simply be
     /// "always select on release".
@@ -1050,9 +1022,9 @@ mod tests {
         };
         let mut app = App::new();
         app.init_resource::<CameraControl>();
-        app.init_resource::<crate::interior::InteriorReauthor>();
+        app.init_resource::<benilla_world::interior::InteriorReauthor>();
         // The water-plane twin map the feather composes with (empty — no water in a fixture).
-        app.init_resource::<crate::model_render::FarSideTwins>();
+        app.init_resource::<benilla_world::model_render::FarSideTwins>();
         app.add_systems(Update, apply_self_model_fade);
 
         // The avatar: root -> joint (the eye-glow bone). Its card follows the joint.

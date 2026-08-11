@@ -11,10 +11,10 @@
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
 use crate::creature_anim::SpellKitSound;
 use crate::net::NetEntity;
-use crate::schedule::WorldStage;
+use benilla_assets::WorldAssets;
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{kit_looping, play_kit, play_kit_ext, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

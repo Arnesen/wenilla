@@ -5,8 +5,8 @@
 
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
 use crate::ui_pass::UiQuad;
+use benilla_assets::WorldAssets;
 
 /// The cooldown wipe's paint: flat black at α = 0x99/255 — the byte content of
 /// `Interface\Cooldown\cooldown.blp` (a uniform 32² black texel field at alpha 0x99, with only a

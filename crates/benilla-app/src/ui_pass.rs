@@ -77,7 +77,7 @@ use bevy::shader::ShaderRef;
 use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin};
 use bevy::window::PrimaryWindow;
 
-use crate::assets::{AssetSet, WorldAssets};
+use benilla_assets::{AssetSet, WorldAssets};
 
 /// Per-corner UVs for a quad: one explicit `(u,v)` sample per **screen** corner, in the
 /// [`Run::push_quad`] winding — `[top-left, top-right, bottom-right, bottom-left]`. Deliberately four
@@ -291,7 +291,7 @@ pub(crate) struct UiQuadMaterial {
 
 impl Material2d for UiQuadMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/ui_quad.wgsl".into()
+        "game://shaders/ui_quad.wgsl".into()
     }
 
     fn alpha_mode(&self) -> bevy::sprite_render::AlphaMode2d {
@@ -328,7 +328,7 @@ impl Material2d for UiQuadMaterial {
 
 /// Producers that **append** to [`UiQuads`] after the script extract replaced it — the
 /// world-anchored text (combat numbers, nameplates). The set lives in **Update, after
-/// [`crate::schedule::WorldStage::Input`]** (itself after the script extract's `UiInput`): the
+/// [`benilla_world::schedule::WorldStage::Input`]** (itself after the script extract's `UiInput`): the
 /// camera controller has written this frame's camera `Transform` by then, and the producers
 /// project through THAT fresh Transform (`GlobalTransform::from` — the world camera is a root
 /// entity), never the stale propagated `GlobalTransform` — the fix for text dragging one frame
@@ -355,7 +355,7 @@ impl Plugin for PlayerUiPlugin {
             .add_systems(Startup, (spawn_ui_camera, init_white_texture))
             .configure_sets(
                 Update,
-                UiQuadAppend.after(crate::schedule::WorldStage::Input),
+                UiQuadAppend.after(benilla_world::schedule::WorldStage::Input),
             )
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
             .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend));

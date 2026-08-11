@@ -29,9 +29,9 @@ use bevy::prelude::*;
 use benilla_formats::SpellCatalog;
 use benilla_protocol::messages::ActionButton;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 mod cast_fail;
 mod cast_send;

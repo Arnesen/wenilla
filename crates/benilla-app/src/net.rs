@@ -24,7 +24,7 @@ use benilla_protocol::{
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::schedule::WorldStage;
+use benilla_world::schedule::WorldStage;
 
 mod apply;
 pub(crate) mod io;
@@ -66,6 +66,13 @@ impl Plugin for NetPlugin {
         if !self.connect {
             app.insert_resource(NetOffline);
         }
+        // In the wire-drain stage, because that is what it is the product of. The lighting
+        // resolve is ordered after that stage so it always reads THIS frame's clock rather than
+        // whichever way the executor happened to break the tie.
+        app.add_systems(
+            Update,
+            publish_world_time.in_set(benilla_world::schedule::WorldStage::Net),
+        );
         app.insert_resource(NetEvents(handles.events))
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))
@@ -91,7 +98,6 @@ impl Plugin for NetPlugin {
             .add_message::<SpeedChangeMessage>()
             .add_message::<MoveModeMessage>()
             .add_message::<ServerSoundMessage>()
-            .add_message::<WeatherMessage>()
             .add_message::<EmoteMessage>()
             .add_message::<AiReactionMessage>()
             .add_message::<WorldportMessage>()
@@ -349,6 +355,24 @@ pub(crate) struct DropTally {
 /// until the first time packet. Read by the lighting subsystem to drive time-of-day.
 #[derive(Resource, Default)]
 pub(crate) struct ServerTime(pub(crate) Option<GameTime>);
+
+/// Publish the session clock into the engine's [`benilla_world::lighting::WorldTime`] input, once a
+/// frame. The renderer wants three scalars, not a wire sample with an `Instant` in it — and with
+/// no server at all it wants noon, which is `WorldTime`'s own default rather than a branch here.
+pub(crate) fn publish_world_time(
+    server: Res<ServerTime>,
+    mut world_time: ResMut<benilla_world::lighting::WorldTime>,
+) {
+    *world_time = match server.0 {
+        Some(gt) => benilla_world::lighting::WorldTime {
+            minute: gt.minute_of_day(),
+            minute_f: gt.minute_of_day_f32(),
+            day: gt.day_continuous(),
+            live: true,
+        },
+        None => benilla_world::lighting::WorldTime::default(),
+    };
+}
 
 /// The server's **wall clock** (`SMSG_QUERY_TIME_RESPONSE`, asked for on entering the world),
 /// advanced monotonically from the sample. `None` until the first answer lands.
@@ -1454,16 +1478,4 @@ pub(crate) enum EmoteKind {
 pub(crate) struct AiReactionMessage {
     pub(crate) unit: Entity,
     pub(crate) hostile: bool,
-}
-
-/// The zone's weather state (`SMSG_WEATHER`, bridged from the Net drain): the loop kit for the
-/// sound subsystem; `weather_type`/`grade`/`instant` for the visuals' state machine
-/// (`weather::weather_tick`, decision 0310).
-#[derive(Message, Clone, Copy)]
-pub(crate) struct WeatherMessage {
-    pub(crate) weather_type: u32,
-    pub(crate) grade: f32,
-    /// A SoundEntries loop kit (8533..8558), 0 = clear skies.
-    pub(crate) sound_id: u32,
-    pub(crate) instant: bool,
 }

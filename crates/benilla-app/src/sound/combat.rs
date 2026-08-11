@@ -56,10 +56,10 @@ use bevy::prelude::*;
 
 use benilla_formats::{impact_slot, WeaponImpactCatalog};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::{AnimSoundEvent, SwingImpact, SwingMessage, Wielded};
 use crate::net::NetEntity;
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::creature::CreatureVoices;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};

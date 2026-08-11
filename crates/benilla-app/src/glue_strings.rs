@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 
 const GLUE_STRINGS: &str = "Interface\\GlueXML\\GlueStrings.lua";
 

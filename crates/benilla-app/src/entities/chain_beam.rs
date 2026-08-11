@@ -51,8 +51,8 @@
 //!
 //! **Render state** (`0x7afcb0`, decoded against wow-re's own verified `EGxRs` map): additive
 //! `SRC_ALPHA/ONE`, emissive white — a beam is **never tinted** — two-sided, depth-write off, fog
-//! **off**. It rides the shared effect-quad stream ([`crate::particles::buffer::EffectQuads`]) like
-//! every other dynamic effect; `crate::ribbons` is the structural model (same strip-as-quads
+//! **off**. It rides the shared effect-quad stream ([`benilla_world::particles::buffer::EffectQuads`]) like
+//! every other dynamic effect; `benilla_world::ribbons` is the structural model (same strip-as-quads
 //! conversion, same commit).
 //!
 //! **Named approximations.** (a) The strand count (`CharParamOne`, ≤ 3 — only Chain Burn ships > 1)
@@ -71,8 +71,8 @@ use bevy::prelude::*;
 
 use crate::creature_anim::{ChainProcPlay, FxClass, SpellKitFx, SpellVisuals};
 use crate::net::GuidIndex;
-use crate::particles::buffer::{EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
-use crate::player::WorldCamera;
+use benilla_world::particles::buffer::EffectVertex;
+use benilla_world::view::WorldCamera;
 
 use super::{BoneAttach, OverheadFallback};
 
@@ -434,7 +434,7 @@ fn push_strand(verts: &mut Vec<EffectVertex>, pts: &[Vec3], half_width: f32, u_s
 pub(crate) fn simulate_chain_beams(
     time: Res<Time>,
     mut commands: Commands,
-    mut quads: ResMut<EffectQuads>,
+    mut draw: benilla_world::particles::buffer::WorldEffectDraw,
     images: Res<Assets<Image>>,
     world_cam: Query<Entity, With<WorldCamera>>,
     units: Query<(&GlobalTransform, Option<&BoneAttach>)>,
@@ -474,7 +474,7 @@ pub(crate) fn simulate_chain_beams(
             ..
         } = &mut *beam;
 
-        let start = quads.begin();
+        let mut batch = draw.batch(cam, texture);
         let (mut anchor_sum, mut anchor_n) = (Vec3::ZERO, 0.0f32);
         for (i, bolt) in bolts.iter_mut().enumerate() {
             // The per-hop window — bypassed entirely while the flag is set (`0x6ec520`).
@@ -517,31 +517,20 @@ pub(crate) fn simulate_chain_beams(
                     pts.clear();
                     pts.extend_from_slice(&scratch);
                 }
-                push_strand(&mut quads.verts, pts, half_width, u_scroll);
+                push_strand(batch.verts_mut(), pts, half_width, u_scroll);
             }
         }
         if anchor_n == 0.0 {
             continue; // every hop hidden — `commit_quads` over an empty range is a no-op anyway
         }
-        quads.commit_quads(
-            start,
-            EffectDrawSpec {
-                cam,
-                texture,
-                // `EGxRs 0x07 = 3` → `glBlendFunc(SRC_ALPHA, ONE)`, and `0x0f = 0` → GL_FOG off.
-                // Depth-write off and two-sided come with the lane's additive pipeline.
-                blend: crate::particles::buffer::EffectBlend::Add,
-                fog: EffectFog::Off,
-                lit: false,
-                anchor: anchor_sum / anchor_n,
-                // No owner rung: a beam is not a model's emitter (module docs, approximation (d)).
-                bias: 0.0,
-                raster_bias: 0,
-                cam_relative: false,
-                main_entity: entity,
-                light: None,
-            },
-        );
+        // `EGxRs 0x07 = 3` → `glBlendFunc(SRC_ALPHA, ONE)`, and `0x0f = 0` → GL_FOG off (the
+        // lane's default). Depth-write off and two-sided come with the additive pipeline. No
+        // owner rung: a beam is not a model's emitter (module docs, approximation (d)).
+        batch
+            .additive()
+            .anchored(anchor_sum / anchor_n)
+            .owner(entity)
+            .quads();
     }
 }
 

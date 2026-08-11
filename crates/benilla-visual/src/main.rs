@@ -422,6 +422,8 @@ fn flicker(dir: &Path, out: Option<&Path>, amplify: u32, toggle_delta: u8) -> Re
         rmse: 0.0,
         max_delta: 0,
         pct_over: 0.0,
+        changed: 0,
+        worst_at: (0, 0),
     };
     for (pair, window) in frames.windows(2).enumerate() {
         let m = compare(&window[0], &window[1])?;
@@ -754,11 +756,21 @@ fn pngs(dir: &Path) -> Result<BTreeSet<String>> {
 }
 
 fn fmt_metrics(m: &Metrics) -> String {
+    // `px` and the worst pixel's coordinate are what tell a render change from an MSAA tie: both
+    // show `MAE 0.000` with an alarming `max`, and only the count and the location separate them
+    // (a handful of pixels, at the same coordinate every build, is a tie).
+    let where_ = if m.changed == 0 {
+        String::new()
+    } else {
+        format!(" @{},{}", m.worst_at.0, m.worst_at.1)
+    };
     format!(
-        "MAE {:>6.3}  RMSE {:>6.3}  max {:>3}  >{}: {:>6.2}%",
+        "MAE {:>6.3}  RMSE {:>6.3}  max {:>3}{:<12}  px {:>8}  >{}: {:>6.2}%",
         m.mae,
         m.rmse,
         m.max_delta,
+        where_,
+        m.changed,
         OVER_THRESHOLD,
         m.pct_over * 100.0
     )

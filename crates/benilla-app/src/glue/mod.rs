@@ -28,7 +28,7 @@ impl Plugin for GluePlugin {
             .init_resource::<GlueArt>()
             .add_systems(
                 Startup,
-                crate::glue_strings::load_glue_strings.after(crate::assets::AssetSet::Open),
+                crate::glue_strings::load_glue_strings.after(benilla_assets::AssetSet::Open),
             )
             .add_systems(
                 Update,

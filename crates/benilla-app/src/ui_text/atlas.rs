@@ -8,7 +8,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap};
 
-use crate::assets::{LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::DEFAULT_FONT_SIZE;
 

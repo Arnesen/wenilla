@@ -58,11 +58,11 @@ fn fire_particle_census(
     mut probe: ResMut<ParticleCensus>,
     screen: Res<crate::loading_screen::LoadingScreen>,
     time: ProbeClock,
-    view: Res<crate::view::ViewDistance>,
-    cam: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
+    view: Res<benilla_world::view::ViewDistance>,
+    cam: Query<&GlobalTransform, With<benilla_world::view::WorldCamera>>,
     emitters: Query<(
-        &crate::particles::ParticleEmitter,
-        Option<&crate::particles::EmitterFade>,
+        &benilla_world::particles::ParticleEmitter,
+        Option<&benilla_world::particles::EmitterFade>,
         Option<&bevy::camera::visibility::RenderLayers>,
     )>,
 ) {

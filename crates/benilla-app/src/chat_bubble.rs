@@ -60,14 +60,14 @@ use benilla_ui::layout::Rect as GxRect;
 use benilla_ui::script::{pieces, Backdrop, Insets};
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
-use crate::assets::{AssetSet, WorldAssets};
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::net::{Guid, NetEntity, SelfGuid, SelfPlayer};
-use crate::player::WorldCamera;
 use crate::ui_chat::{default_color, ChatEventKind};
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
 use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
+use benilla_assets::{AssetSet, WorldAssets};
+use benilla_world::view::WorldCamera;
 
 /// The two CVars (registrar `0x603280`), host side. **Registered knobs since decision 1139** —
 /// they were a pair of `const bool` from 0598 until the options window had a Social page to put

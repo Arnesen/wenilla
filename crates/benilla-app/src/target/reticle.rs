@@ -10,7 +10,7 @@
 //! `Interface\SpellShadow\Spell-Shadow-Acceptable.blp` (in range) /
 //! `…-Unacceptable.blp` (out), vertex colour `0xffffffff` — the *texture* carries the
 //! green/red, not a tint. It projects through **the same ground-decal projector as the
-//! selection ring** (`0x6d7330 → 0x6d6fa0 → 0x6d7480` — [`crate::decal`]), axis-aligned (no
+//! selection ring** (`0x6d7330 → 0x6d6fa0 → 0x6d7480` — [`benilla_world::decal`]), axis-aligned (no
 //! rotation term; the effect-0x51 placement rotate orients a GameObject *preview model*, a
 //! machine we don't carry — that family of spells is a named residual).
 //!
@@ -31,16 +31,14 @@
 //! surfaces (flags `0x0f0000`) — our [`GroundDecalSurface`] set has no liquid yet, so the
 //! reticle vanishes over water instead of floating on it (wow-re trap #8, half-carried).
 
-use avian3d::prelude::Collider;
 use bevy::prelude::*;
 
-use crate::collision::GroundDecalSurface;
-use crate::decal::{project_decal, DecalFrame};
 use crate::net::{ObjectStore, SelfPlayer};
-use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
-use crate::player::WorldCamera;
 use crate::target::{PickOcclusion, WorldCursor};
 use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells, TargetingWants};
+use benilla_world::decal::{DecalFrame, WorldDecal};
+use benilla_world::particles::buffer::EffectVertex;
+use benilla_world::view::WorldCamera;
 
 /// The default footprint when the radius is 0 — out of range, or a rowless spell
 /// (`[0xb4b3b0] == 0.0 → 1.3888889`, the ref's literal).
@@ -48,7 +46,7 @@ const RETICLE_DEFAULT_RADIUS: f32 = 1.388_889;
 /// The projection box's vertical slab: ± 2.0 around the picked point (`0x4837b0` — fixed, not
 /// radius-scaled like the ring's).
 const RETICLE_VERT: f32 = 2.0;
-/// Same coplanarity treatment as the ring (`ring::RING_DEPTH_BIAS` rationale).
+/// Same coplanarity treatment as the ring (`sky_order::Rung::RING` rationale).
 const RETICLE_DEPTH_BIAS: f32 = 8192.0;
 
 /// The two state textures (the render-side residency gate withholds the draw until loaded).
@@ -107,7 +105,7 @@ pub(super) fn update_reticle(
     cursor: Res<WorldCursor>,
     spells: Option<Res<Spells>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    surfaces: Query<&Collider, With<GroundDecalSurface>>,
+    decals: WorldDecal,
     mut state: ResMut<ReticleState>,
 ) {
     let state = &mut *state;
@@ -141,7 +139,7 @@ pub(super) fn update_reticle(
     let key = ReticleKey {
         center: point,
         radius,
-        surfaces: surfaces.iter().count(),
+        surfaces: decals.receiver_count(),
     };
     if !(state.shown && key == state.key && state.acceptable == acceptable) {
         state.verts.clear();
@@ -161,9 +159,8 @@ pub(super) fn update_reticle(
             min_y: -RETICLE_VERT,
             max_y: RETICLE_VERT,
         };
-        project_decal(
+        decals.project(
             &mut state.verts,
-            &surfaces,
             &frame,
             |p| ((RETICLE_VERT - p.y.abs()) / RETICLE_VERT).clamp(0.0, 1.0),
             |x, z| frame.rect_uv(x, z),
@@ -179,7 +176,7 @@ pub(super) fn push_reticle(
     assets: Option<Res<ReticleAssets>>,
     state: Option<Res<ReticleState>>,
     cam: Query<Entity, With<WorldCamera>>,
-    mut quads: ResMut<EffectQuads>,
+    mut draw: benilla_world::particles::buffer::WorldEffectDraw,
 ) {
     let (Some(assets), Some(state)) = (assets, state) else {
         return;
@@ -193,34 +190,24 @@ pub(super) fn push_reticle(
     } else {
         assets.unacceptable.id()
     };
-    let start = quads.begin();
-    quads.verts.extend(state.verts.iter().map(|v| EffectVertex {
+    let mut batch = draw
+        .batch(cam, texture)
+        .anchored(state.key.center)
+        .rung(RETICLE_DEPTH_BIAS, RETICLE_DEPTH_BIAS as i32);
+    batch.extend(state.verts.iter().map(|v| EffectVertex {
         pos: v.pos,
         uv: v.uv,
         color: [1.0, 1.0, 1.0, v.color[3]],
     }));
-    quads.commit_tris(
-        start,
-        EffectDrawSpec {
-            cam,
-            texture,
-            blend: EffectBlend::Alpha,
-            fog: EffectFog::Off,
-            lit: false,
-            anchor: state.key.center,
-            bias: RETICLE_DEPTH_BIAS,
-            raster_bias: RETICLE_DEPTH_BIAS as i32,
-            cam_relative: false,
-            main_entity: Entity::PLACEHOLDER,
-            light: None,
-        },
-    );
+    batch.tris();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui_action::CastCommit;
+    use avian3d::prelude::Collider;
+    use benilla_world::collision::GroundDecalSurface;
     use bevy::ecs::system::RunSystemOnce;
 
     /// **`0x4820f0`'s second guard** (decision 0943). One armed cursor, three seams, one decal:

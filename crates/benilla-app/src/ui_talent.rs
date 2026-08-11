@@ -35,12 +35,12 @@ use bevy::prelude::*;
 use benilla_formats::{Talent, TalentCatalog};
 use benilla_ui::script::{TalentPrereqView, TalentTabView, TalentUiState, TalentView, UiScript};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 /// The talent catalog (`Talent.dbc` × `TalentTab.dbc`) — absent when the client data failed to
 /// load (every consumer tolerates that; the `SkillLines` precedent).

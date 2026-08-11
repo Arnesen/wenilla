@@ -1,0 +1,32 @@
+[package]
+name = "benilla-world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The world renderer: terrain, water, sky, weather, models, lighting, collision and the frame ladder — everything needed to put something in a world and ask the world about itself, with no game attached (decision 1160)"
+
+[dependencies]
+avian3d = "0.6"
+benilla-assets = { path = "../benilla-assets" }
+benilla-formats = { path = "../benilla-formats" }
+benilla-protocol = { path = "../benilla-protocol" }
+# The WMO group parser — the portal audit re-parses a group to pin its own decode against the file.
+benilla-wmo = { path = "../benilla-wmo" }
+bevy.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+
+# macOS: `bgwin` demotes the app to Accessory for a background run and orders the window out of
+# the way. Same pins as `benilla-app`'s — one objc2 in the graph.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2", features = [
+    # `bgwin`'s Accessory demotion and window ordering, and `modkeys`' modifier read.
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSWindow",
+] }
+# `MainThreadMarker`, for the AppKit calls above.
+objc2-foundation = "0.2"

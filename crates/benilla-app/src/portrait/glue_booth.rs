@@ -22,8 +22,8 @@ use bevy::render::render_resource::Extent3d;
 use bevy::window::PrimaryWindow;
 
 use crate::entities::Creatures;
-use crate::model_render::m2_url;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::m2_url;
+use benilla_assets::materials::WowModelMaterial;
 
 use super::framing::{attachment_point, diag_to_vert, PORTRAIT_CROP_ASPECT};
 use super::{
@@ -200,7 +200,7 @@ fn scene_token(scene: GlueScene) -> &'static str {
 /// A glue scene's authored M2 light rig, folded for the booth's light buffer under the
 /// byte-verified world law (wow-re `m2-dynamic-lights.md`): **directional** lights accumulate —
 /// ambient tracks summed into one ambient term, each diffuse×intensity an SH lobe with its *own*
-/// direction (the `Model2.bls` fold, [`crate::lighting::prop_probe_coeffs`]) — and **point**
+/// direction (the `Model2.bls` fold, [`benilla_world::lighting::prop_probe_coeffs`]) — and **point**
 /// lights become per-vertex lights on the buffer's point table, evaluated with the engine's fixed
 /// falloff `1/(0.7·d + 0.03·d²)` (the authored attenuation radii are dead code in the reference;
 /// `wow_model.wgsl`'s point term already implements the law). Both booth models read this one
@@ -210,10 +210,10 @@ fn scene_token(scene: GlueScene) -> &'static str {
 struct SceneRig {
     /// The summed directional-light ambient (every UI_* point light authors ambient ×0).
     ambient: [f32; 3],
-    /// Probe slot 0 of the booth buffer: ambient + the directional lobes, SH-folded.
-    probe: [Vec4; 7],
-    /// Point-table entries, two rows each: `[pos.xyz, range]`, `[rgb, 0]`.
-    points: Vec<[[f32; 4]; 2]>,
+    /// The directional lobes, toward-light and committed — folded into probe slot 0.
+    lobes: Vec<(Vec3, [f32; 3])>,
+    /// The point lights: Bevy position + committed colour.
+    points: Vec<(Vec3, [f32; 3])>,
 }
 
 /// Candidacy range packed with a scene point light — the reference gather has no range gate
@@ -235,24 +235,19 @@ fn scene_rig(lights: &[benilla_assets::ModelLight]) -> SceneRig {
         }
         let color = l.diffuse_color.map(|c| c * l.diffuse_intensity);
         if l.is_point() {
-            let pos = benilla_assets::coords::wow_to_bevy(l.position);
-            // The same RAW commit the world table applies (the `0x71ca80` encode is undone by the
-            // `0x593040` decode — wow-re trace-forensics-overgamut-point-commit-d3d) — a glue
-            // scene is just another CM2Scene, and the GL commit is shared. Carried here so one law
-            // covers both tables, not two by coincidence.
-            let c = crate::lighting::commit_raw(color);
-            points.push([
-                [pos.x, pos.y, pos.z, SCENE_POINT_RANGE],
-                [c[0], c[1], c[2], 0.0],
-            ]);
+            // `LightBlob::point` applies the same RAW commit the world table does (the `0x71ca80`
+            // encode is undone by the `0x593040` decode — wow-re
+            // trace-forensics-overgamut-point-commit-d3d): a glue scene is just another CM2Scene,
+            // and the GL commit is shared. One law covers both tables, not two by coincidence.
+            points.push((benilla_assets::coords::wow_to_bevy(l.position), color));
         } else {
-            // Toward-light unit vector, as `prop_probe_coeffs` expects (it re-normalizes).
+            // Toward-light unit vector, as the probe fold expects (it re-normalizes).
             lobes.push((benilla_assets::coords::wow_to_bevy(l.bone_z), color));
         }
     }
     SceneRig {
         ambient,
-        probe: crate::lighting::prop_probe_coeffs(ambient, &lobes),
+        lobes,
         points,
     }
 }
@@ -294,7 +289,7 @@ pub(crate) struct PreviewRider {
 }
 
 /// One **camera-facing batch** on the assembled preview — the world path's billboard card
-/// ([`crate::billboard`]). The booth is a separate camera, so such a batch can't ride the world card
+/// ([`benilla_world::billboard`]). The booth is a separate camera, so such a batch can't ride the world card
 /// system; it's rebuilt here for the booth's own camera ([`super::booth::face_booth_billboards`]).
 /// Its centred quad, its material, and the billboard bone/flag it rides.
 ///
@@ -398,7 +393,7 @@ pub(super) fn spawn_glue_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        crate::ffx_glow::FfxGlow::BOOTH,
+        benilla_world::ffx_glow::FfxGlow::BOOTH,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
         Projection::from(bevy::camera::PerspectiveProjection {
@@ -460,9 +455,8 @@ pub(super) fn sync_glue_scene(
     asset_server: Res<AssetServer>,
     m2s: Res<Assets<M2Model>>,
     booth_light: Res<BoothLight>,
-    mut materials: ResMut<Assets<WowModelMaterial>>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
     mut images: ResMut<Assets<Image>>,
-    mut cache: Local<crate::model_render::MaterialCache>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -472,9 +466,9 @@ pub(super) fn sync_glue_scene(
     // its mirror registry (decision 0720) + the model-forms cache and mesh store (decision 0834)
     // — one tuple param (the 16-SystemParam ceiling).
     particle_assets: (
-        ResMut<crate::rig_palette::RigPalettes>,
-        ResMut<crate::rig_palette::RigPaletteMirrors>,
-        ResMut<crate::model_forms::ModelForms>,
+        ResMut<benilla_world::rig_palette::RigPalettes>,
+        ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
+        ResMut<benilla_world::model_forms::ModelForms>,
         ResMut<Assets<Mesh>>,
     ),
 ) {
@@ -489,7 +483,7 @@ pub(super) fn sync_glue_scene(
             commands.entity(scene.root).remove::<(
                 AnimationPlayer,
                 AnimationGraphHandle,
-                crate::creature_anim::GlobalSeqDrive,
+                benilla_world::rig_anim::GlobalSeqDrive,
             )>();
             scene.token = None;
             scene.handle = None;
@@ -548,102 +542,56 @@ pub(super) fn sync_glue_scene(
         // stage) plus the ref's per-race fog (`CharModelFogInfo`) — its own buffer, so the
         // portraits' shared studio light stays untouched. Rewritten in place on every scene swap
         // (the cached scene + character materials keep binding it).
+        let stage = attachment_point(&model.skeleton, &model.attachments, 0).unwrap_or(Vec3::ZERO);
+        let rig = scene_rig(&model.lights);
+        let (fog_rgb, fog_far) = scene_fog(token);
+        // Rig materials read the probe + point table; the core rows still carry the plain ambient
+        // (with a zero sun) so any non-rig lane that ever lands in the booth degrades sanely. The
+        // directional fold lands in probe slot 0 — booth instances carry MeshTag 0, the rig lane's
+        // read side. The dial is 1.0: the rig lane ignores it, so byte levels stand.
+        let mut blob =
+            benilla_world::lighting::LightBlob::model(rig.ambient, [0.0; 3], Vec3::NEG_Y)
+                .probe(rig.ambient, &rig.lobes)
+                .fog(fog_rgb, fog_far, fog)
+                .dial(1.0);
+        for (pos, color) in &rig.points {
+            blob = blob.point(*pos, SCENE_POINT_RANGE, *color);
+        }
         let light = scene
             .light
-            .get_or_insert_with(|| {
-                device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-                    label: Some("wow_create_scene_light"),
-                    size: crate::lighting::light_blob_bytes(),
-                    usage: bevy::render::render_resource::BufferUsages::STORAGE
-                        | bevy::render::render_resource::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            })
+            .get_or_insert_with(|| blob.create(&device, "wow_create_scene_light"))
             .clone();
         // The scene's rigs skin from THIS buffer's palette region (decision 0720): register it
         // as a mirror (re-registration replaces — a rebuilt scene's old buffer drops).
         mirrors.0.insert("glue_scene", light.clone());
-        let stage = attachment_point(&model.skeleton, &model.attachments, 0).unwrap_or(Vec3::ZERO);
-        let rig = scene_rig(&model.lights);
-        let (fog_rgb, fog_far) = scene_fog(token);
-        let mut rows = [[0.0f32; 4]; crate::lighting::LIGHT_HEADER_ROWS];
-        // Rig materials read the probe + point table; the core rows still carry the plain ambient
-        // (with a zero sun) so any non-rig lane that ever lands in the booth degrades sanely.
-        crate::lighting::pack_model_core_rows(&mut rows, rig.ambient, [0.0; 3], Vec3::NEG_Y);
-        rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; terrain-shininess convention)
-        let fog_w = if fog { 1.0 } else { 0.0 };
-        rows[4] = [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_w]; // fog color, w = enabled
-        rows[5] = [0.0, fog_far, 0.0, 10_000.0]; // start 0, the ref's far; farclip wall inert
-        rows[19] = [0.0, 0.0, 0.0, 1.0]; // rig lane ignores the intensity dial; 1.0 = byte levels
-        rows[20] = [rig.points.len() as f32, 0.0, 0.0, 0.0]; // point-table count
-                                                             // Header rows + the point table are contiguous in the std430 layout — one write covers
-                                                             // both (stale entries past `count` never read).
-        let mut blob: Vec<[f32; 4]> = rows.to_vec();
-        for p in &rig.points {
-            blob.extend_from_slice(p);
-        }
-        queue.write_buffer(&light, 0, bytemuck::cast_slice(&blob));
-        // The directional fold lands in probe slot 0 at the buffer's probe region (booth
-        // instances carry MeshTag 0 → slot 0 — the rig lane's read side).
-        let probe: [[f32; 4]; 7] = rig.probe.map(|v| v.to_array());
-        queue.write_buffer(
-            &light,
-            crate::lighting::prop_probe_region_offset(),
-            bytemuck::cast_slice(&probe),
-        );
+        blob.write(&queue, &light);
         scene.fog = fog;
+        let dc = blob.probe_dc();
         info!(
             "create scene: UI_{token} rig — ambient {:?}, {} point light(s), probe dc ({:.2},{:.2},{:.2})",
             rig.ambient,
-            rig.points.len(),
-            rig.probe[0].w,
-            rig.probe[1].w,
-            rig.probe[2].w,
+            blob.point_count(),
+            dc[0],
+            dc[1],
+            dc[2],
         );
         // The scene model's render forms, built NOW (decision 0834): one backdrop model, behind
         // the glue screen — the booth-lane exception to the paced rule.
-        let scene_key = scene
+        let scene_handle = scene
             .handle
             .as_ref()
-            .map(crate::model_forms::ModelKey::from)
             .expect("scene.handle is Some — `model` above came from it");
-        forms.ensure_now(
-            scene_key,
-            crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
-            &model.submeshes,
-            &mut mesh_assets,
-        );
-        let stat_forms = forms.static_meshes(scene_key).unwrap_or(&[]);
-        let skin_forms = forms.skinned_meshes(scene_key).unwrap_or(&[]);
+        forms.ensure_now_rigged(scene_handle, &model.submeshes, &mut mesh_assets);
+        let built = forms.slices(scene_handle);
+        let (stat_forms, skin_forms) = (built.stat, built.skin.unwrap_or(&[]));
         let scene_parts: Vec<BoothPart> = model
             .submeshes
             .iter()
             .enumerate()
             .map(|(pi, s)| {
-                let material = crate::model_render::model_material(
-                    &mut cache,
-                    &mut materials,
-                    s.texture.clone(),
-                    s.blend,
-                    s.two_sided,
-                    false,
-                    false,
-                    s.emissive,
-                    s.additive,
-                    false,
-                    s.no_depth_write,
-                    s.no_depth_test,
-                    s.fog_policy,
-                    s.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                    crate::model_render::ShadeSel::Rig, // lit by the scene's own authored rig
-                    0,
-                    s.uv_anim.as_ref(), // scene clouds/water scroll
-                    s.rgb_anim.as_ref(),
-                    None,
-                    None,
-                    false,
-                    &light,
-                );
+                // The create scene is lit by its OWN authored M2 rig against its own buffer —
+                // never the world's sun (decisions 0429/0435) — and its clouds and water scroll.
+                let material = mats.off_world(s, s.texture.clone(), &light, true);
                 BoothPart {
                     skinned: skin_forms.get(pi).cloned(),
                     static_mesh: stat_forms
@@ -688,16 +636,16 @@ pub(super) fn sync_glue_scene(
             let owner = joints
                 .get(em.def.bone as usize)
                 .map_or((scene.root, [0.0; 3]), |&j| (j, em.bone_pivot));
-            if let Some(e) = crate::particles::spawn_emitter(
+            if let Some(e) = benilla_world::particles::spawn_emitter(
                 &mut commands,
                 em,
                 Transform::IDENTITY,
-                crate::particles::EmitterFrames {
+                benilla_world::particles::EmitterFrames {
                     owner: Some(owner),
                     attach: None, // a backdrop scene is never an attached model
                     anchor: Some(scene.root),
                     // The scene root is torn down and rebuilt as a whole.
-                    on_owner_loss: crate::particles::OwnerLoss::Free,
+                    on_owner_loss: benilla_world::particles::OwnerLoss::Free,
                     // A booth bake has no appear/despawn ramp and no self-avatar feather — its
                     // riders are always opaque (0827).
                     alpha: None,
@@ -706,12 +654,12 @@ pub(super) fn sync_glue_scene(
                     world_composed: false,
                 },
                 // A glue scene loops its one authored clip forever — the doodad law.
-                crate::particles::EmitClock::Pinned,
+                benilla_world::particles::EmitClock::Pinned,
             ) {
                 commands.entity(e).insert((
                     booth.layer.clone(),
                     ChildOf(scene.root),
-                    crate::particles::buffer::EffectLightOverride(light.clone()),
+                    benilla_world::particles::buffer::EffectLightOverride(light.clone()),
                 ));
                 emitters += 1;
             }
@@ -761,7 +709,7 @@ pub(super) fn sync_glue_scene(
 /// Resize the booth's render target if it isn't already `w`×`h` (content is discarded — the next
 /// frame repaints it whole).
 fn resize_target(images: &mut Assets<Image>, target: &Handle<Image>, w: u32, h: u32) {
-    // Through the house write-gate ([`crate::assets::write_gated`]), for the reason that helper
+    // Through the house write-gate ([`benilla_assets::write_gated`]), for the reason that helper
     // exists: `Assets::get_mut` queues `AssetEvent::Modified` unconditionally — it cannot know
     // whether the caller wrote anything — and a Modified image is re-extracted and re-uploaded
     // whole by `prepare_assets<GpuImage>` next frame. This target is the glue scene's FULLSCREEN
@@ -769,7 +717,7 @@ fn resize_target(images: &mut Assets<Image>, target: &Handle<Image>, w: u32, h: 
     // compare two u32s re-uploaded all 22 MB every frame on a screen where nothing moves
     // (~1.3 GB/s; measured with `WOW_ASSET_CHURN=1`, decision 0772). This was the ONE asset write
     // site in the tree not already behind that gate.
-    crate::assets::write_gated(
+    benilla_assets::write_gated(
         images,
         target,
         |image| image.width() != w || image.height() != h,
@@ -803,7 +751,7 @@ pub(super) fn sync_glue_booth(
     creatures: Option<Res<Creatures>>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut last: Local<Option<(u64, f32, u64)>>,
 ) {
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
@@ -1180,26 +1128,27 @@ mod tests {
         let rig = scene_rig(&lights);
         // Ambient = Σ ambient_color × ambient_intensity, across every light.
         assert_eq!(rig.ambient, [0.2, 0.25, 0.3]);
-        // Exactly the one point light on the table, position converted, colour × intensity —
-        // committed RAW, over-gamut preserved (the reference's `0x71ca80` encode is undone by the
-        // `0x593040` decode; a night terrain draw in the ring capture commits (1.2, 1.035, 0.805)
-        // verbatim). This fixture's `(0.7, 0.8, 1.0) × 2.5` is deliberately over-driven so it pins
-        // the mechanism: the raw product `(1.75, 2.0, 2.5)` reaches the table untouched — the
-        // saturation the eye sees happens at the receiving vertex's lighting clamp, never here.
+        // Exactly the one point light, position converted, colour × intensity — over-gamut
+        // preserved. This fixture's `(0.7, 0.8, 1.0) × 2.5` is deliberately over-driven so it pins
+        // the mechanism: the raw product `(1.75, 2.0, 2.5)` leaves the parse untouched, and
+        // `LightBlob::point` commits it RAW from here (the reference's `0x71ca80` encode is undone
+        // by the `0x593040` decode) — the saturation the eye sees happens at the receiving
+        // vertex's lighting clamp, never on this path.
         assert_eq!(rig.points.len(), 1);
-        let p = benilla_assets::coords::wow_to_bevy([1.0, 2.0, 3.0]);
-        assert_eq!(rig.points[0][0], [p.x, p.y, p.z, SCENE_POINT_RANGE]);
-        let c = rig.points[0][1];
+        assert_eq!(
+            rig.points[0].0,
+            benilla_assets::coords::wow_to_bevy([1.0, 2.0, 3.0])
+        );
+        let c = rig.points[0].1;
         assert!(
             (c[0] - 1.75).abs() < 1e-6 && (c[1] - 2.0).abs() < 1e-6 && (c[2] - 2.5).abs() < 1e-6,
-            "committed raw, over-gamut preserved: {c:?}"
+            "over-gamut preserved: {c:?}"
         );
-        assert_eq!(c[3], 0.0);
-        // The probe folds each directional's bone_z (wow→bevy) as its to-light lobe; the
-        // zero-intensity ambient-only light contributes a zero lobe (colour 0). Never the point.
-        let expected = crate::lighting::prop_probe_coeffs(
-            rig.ambient,
-            &[
+        // Each directional's bone_z (wow→bevy) becomes a to-light lobe; the zero-intensity
+        // ambient-only light contributes a zero lobe (colour 0). Never the point light.
+        assert_eq!(
+            rig.lobes,
+            vec![
                 (
                     benilla_assets::coords::wow_to_bevy([1.0, 0.0, 0.0]),
                     [2.0, 1.0, 0.4],
@@ -1208,8 +1157,7 @@ mod tests {
                     benilla_assets::coords::wow_to_bevy([0.0, 1.0, 0.0]),
                     [0.0, 0.0, 0.0],
                 ),
-            ],
+            ]
         );
-        assert_eq!(rig.probe, expected);
     }
 }

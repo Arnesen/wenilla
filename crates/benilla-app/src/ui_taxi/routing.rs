@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{TaxiNodeType, TaxiUiNode};
 
-use crate::assets::{LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::TaxiOpen;
 

@@ -91,7 +91,7 @@ pub(super) fn drive_probe_cam(
     probe: Res<ProbeCam>,
     time: Res<Time>,
     mut rig: ResMut<CameraControl>,
-    mut cam: Query<&mut FlyCam, With<super::camera::WorldCamera>>,
+    mut cam: Query<&mut FlyCam, With<benilla_world::view::WorldCamera>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
 ) {
     if self_player.is_empty() {

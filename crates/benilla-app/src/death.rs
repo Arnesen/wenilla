@@ -153,7 +153,7 @@ fn feed_death(
     net: Res<NetCommands>,
     index: Res<GuidIndex>,
     transforms: Query<&Transform>,
-    map: Option<Res<crate::world_map::CurrentMap>>,
+    map: Option<Res<benilla_world::world_map::CurrentMap>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -330,7 +330,7 @@ fn sickness_duration(level: u32) -> Option<String> {
 /// the consumers across their owning systems off the same derived flag).
 fn drive_death_look(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut ffx: ResMut<crate::ffx_glow::FfxDeathFade>,
+    mut ffx: ResMut<benilla_world::ffx_glow::FfxDeathFade>,
 ) {
     let ghost = self_q.single().is_ok_and(|store| store.0.player_is_ghost());
     let target = if ghost { 1.0 } else { 0.0 };

@@ -17,11 +17,11 @@ use bevy::prelude::*;
 use bevy::ui_render::ui_material::MaterialNode;
 use bevy::window::PrimaryWindow;
 
-use crate::assets::WorldAssets;
 use crate::char_select::{race_name, wow_font};
 use crate::entities::CharCreate;
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{GlueLook, GluePreview, PortraitImages, PortraitSource, GLUE_SLOT};
+use benilla_assets::WorldAssets;
 
 use super::parts::{CharCreateUi, DialRow, DynIcon, DynText, DynTint, StatusLine};
 use super::{CreateAction, CreateSelection, ALLIANCE, HORDE, INITIAL_FACING};

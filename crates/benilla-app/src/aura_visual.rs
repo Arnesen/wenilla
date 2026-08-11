@@ -27,7 +27,7 @@
 //!   and player vtables: "players 1.0" was the data talking, not a type fork — §6) — and handed
 //!   to **`0x614f80` StartAlphaFade(target, 1000 ms)**, the same ramp block (`+0xec..0x100`) and
 //!   the same `clamp01(t)³` ease (`0x614a90`) our appear-fade already rides
-//!   ([`crate::model_fade::fade_alpha`]). Per frame `model+0x180 = master × fade`
+//!   ([`benilla_world::model_fade::fade_alpha`]). Per frame `model+0x180 = master × fade`
 //!   (`0x614baa → 0x710cb0`), which multiplies into the per-batch alpha (`0x707680`).
 //!   The recompute has a second, aura-free caller: the DISPLAYID watcher's refresh (`0x60abe0 →
 //!   0x60ad9f`), which is how a display whose row says `CreatureModelAlpha < 255` — Ghost Wolf's
@@ -63,7 +63,7 @@
 //!
 //! **Proc 1 ships too** (decision 0812): its nodes live here ([`AuraNodes::tint`], head-node-wins as
 //! the reference's `unit+0xce0` list is) and [`apply_aura_tint`] publishes the head to
-//! [`crate::instance_tint`], the per-instance modulate channel keyed on the part's rig slot. Written
+//! [`benilla_world::instance_tint`], the per-instance modulate channel keyed on the part's rig slot. Written
 //! on change, never eased — the reference's own asymmetry (`unit+0xd04` change-detection straight to
 //! `0x710cf0`, with none of the alpha's 1000 ms ramp).
 //!
@@ -82,7 +82,7 @@
 //! - a **rigged** one carries its OWN slot, because the vertex stage indexes the skin palette with
 //!   that same field and cannot borrow it (a spell-effect instance; since 0841, the seven shoulder
 //!   models that weld geometry to a billboard bone). [`chained_tint`] walks such an instance's
-//!   [`crate::model_fade::ParentModel`] link up to the unit — the recursion itself, and the same walk
+//!   [`benilla_world::model_fade::ParentModel`] link up to the unit — the recursion itself, and the same walk
 //!   `ModelAlphas` already does for alpha.
 //!
 //! **Proc 11 ships too** (decisions 0889 + 0891): the **freeze**. Its param is a playback *rate*
@@ -102,9 +102,9 @@ use benilla_protocol::EntityKind;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
-use crate::interior::InteriorLit;
-use crate::model_fade::{fade_alpha, FadeMaterials, PendingAppearFade, RenderFade};
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::interior::InteriorLit;
+use benilla_world::model_fade::{fade_alpha, FadeMaterials, PendingAppearFade, RenderFade};
 
 /// The reference's aura-alpha ramp: `StartAlphaFade(target, **1000 ms**)` (`0x614f80` from
 /// `0x60d180`'s recompute), eased `clamp01(t)³` by `0x614a90` — [`fade_alpha`] is that curve.
@@ -137,7 +137,7 @@ pub(crate) enum AuraNode {
 /// The CharProc node lists of one unit — the ECS twin of the reference's per-unit `unit+0xb50`
 /// (alpha) and `unit+0xce0` (tint) lists, plus the ramp `0x614f80` drives from their heads.
 ///
-/// Lives on the **net entity root**, like [`crate::entity_shade::GroundShade`]: the reference has one
+/// Lives on the **net entity root**, like [`benilla_world::entity_shade::GroundShade`]: the reference has one
 /// of these per CGUnit and every attached model (held item, helm, shoulder) renders off the owner's,
 /// which is also why [`apply_aura_alpha`] walks the root's whole descendant tree rather than its
 /// direct children.
@@ -235,7 +235,7 @@ impl AuraNodes {
     }
 }
 
-/// Publish every rig's body tint to the per-instance channel ([`crate::instance_tint`], decision
+/// Publish every rig's body tint to the per-instance channel ([`benilla_world::instance_tint`], decision
 /// 0812): the head node's RGB packed the reference's way, keyed on the unit's rig slot — the slot
 /// each of its skinned parts already carries in its `MeshTag`, and which the fragment stage reads to
 /// index the table.
@@ -250,17 +250,21 @@ impl AuraNodes {
 /// went away, not a unit whose last tint aura dropped. (The despawn/rebuild edge is covered
 /// structurally too, in `RigSkin`'s free hook.)
 pub(crate) fn apply_aura_tint(
-    rigs: Query<(Entity, &crate::rig_palette::RigSkin)>,
-    chain: Query<(Option<&AuraNodes>, Option<&crate::model_fade::ParentModel>)>,
-    mut tints: ResMut<crate::instance_tint::InstanceTints>,
+    rigs: Query<(Entity, &benilla_world::rig_palette::RigSkin)>,
+    chain: Query<(
+        Option<&AuraNodes>,
+        Option<&benilla_world::model_fade::ParentModel>,
+    )>,
+    mut tints: ResMut<benilla_world::instance_tint::InstanceTints>,
     mut probe_logged: Local<bool>,
 ) {
     let probe = tint_probe();
     let mut painted = 0usize;
     for (root, rig) in &rigs {
-        let word = probe
-            .or_else(|| chained_tint(&chain, root))
-            .map_or(crate::instance_tint::IDENTITY, crate::instance_tint::pack);
+        let word = probe.or_else(|| chained_tint(&chain, root)).map_or(
+            benilla_world::instance_tint::IDENTITY,
+            benilla_world::instance_tint::pack,
+        );
         tints.set(rig.slot, word);
         painted += 1;
     }
@@ -271,7 +275,7 @@ pub(crate) fn apply_aura_tint(
 }
 
 /// The tint a rig instance renders with: its own head node, else the nearest one **up its
-/// [`crate::model_fade::ParentModel`] chain** — the reference's `0x714000` recursion, which composes
+/// [`benilla_world::model_fade::ParentModel`] chain** — the reference's `0x714000` recursion, which composes
 /// an attached model's colours onto its parent's computed ones (the same walk [`ModelAlphas`] does
 /// for alpha, and the same law `mesh_tag` cites for why an item's parts carry their wearer's slot).
 ///
@@ -280,11 +284,14 @@ pub(crate) fn apply_aura_tint(
 /// without the walk, a dwarf's Stoneform tint would stop at exactly the pauldrons the rig was added
 /// for. A despawned link ends the walk.
 fn chained_tint(
-    chain: &Query<(Option<&AuraNodes>, Option<&crate::model_fade::ParentModel>)>,
+    chain: &Query<(
+        Option<&AuraNodes>,
+        Option<&benilla_world::model_fade::ParentModel>,
+    )>,
     instance: Entity,
 ) -> Option<[u8; 3]> {
     let mut at = instance;
-    for _ in 0..crate::model_fade::MAX_MODEL_CHAIN {
+    for _ in 0..benilla_world::model_fade::MAX_MODEL_CHAIN {
         let Ok((nodes, parent)) = chain.get(at) else {
             return None;
         };
@@ -417,14 +424,14 @@ pub(crate) fn apply_aura_anim_rate(
 /// It prints the speeds precisely because the first version's bug was invisible without them: a `@0`
 /// on the thaw line is a clip that will never advance again.
 fn trace_clock_edge(what: &str, rig: Entity, player: &AnimationPlayer) {
-    if !crate::dbg_trace::enabled_for("aur") {
+    if !benilla_assets::trace::enabled_for("aur") {
         return;
     }
     let clips: Vec<String> = player
         .playing_animations()
         .map(|(n, a)| format!("{}@{}", n.index(), a.speed()))
         .collect();
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "aur",
         &format!("{what} rig={rig} clips=[{}]", clips.join(" ")),
     );
@@ -576,7 +583,7 @@ fn install(n: &mut AuraNodes, spell_id: u32, procs: &[AuraNode], now: f32) {
 /// one timeline with the movement/anim lines — a "why did it not fade when I moved" question needs
 /// exactly that.
 fn trace_edge(what: &str, entity: Entity, spell_id: u32, n: &AuraNodes) {
-    if !crate::dbg_trace::enabled() {
+    if !benilla_assets::trace::enabled() {
         return;
     }
     let alphas: Vec<f32> = n.alpha.iter().map(|(_, f)| *f).collect();
@@ -586,7 +593,7 @@ fn trace_edge(what: &str, entity: Entity, spell_id: u32, n: &AuraNodes) {
     let rate = n
         .head_anim_rate()
         .map_or_else(String::new, |r| format!(" animrate={r}"));
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "aur",
         &format!(
             "{what} e={entity} spell={spell_id} alpha={alphas:?}{tint}{rate}              base {:.2} cur {:.2} target {:.2}",
@@ -691,16 +698,16 @@ type AuraParts<'w, 's> = Query<
         &'static FadeMaterials,
         &'static mut MeshTag,
         &'static mut MeshMaterial3d<WowModelMaterial>,
-        Option<&'static crate::doodad_anim::MatAnim>,
+        Option<&'static benilla_world::doodad_anim::MatAnim>,
         Option<&'static InteriorLit>,
         Option<&'static RenderFade>,
         Has<PendingAppearFade>,
-        Has<crate::model_render::FarSideOfWater>,
+        Has<benilla_world::model_render::FarSideOfWater>,
     ),
     // Disjointness for the card pass (both want `&mut MeshTag`); a card never carries
     // `FadeMaterials`, so this filter excludes nothing that would otherwise match — the same
     // trick `apply_self_model_fade` uses for the same pair of queries.
-    Without<crate::billboard::BillboardCard>,
+    Without<benilla_world::billboard::BillboardCard>,
 >;
 
 /// Drive every unit's aura-alpha ramp and author its parts' render alpha + material.
@@ -720,27 +727,46 @@ type AuraParts<'w, 's> = Query<
 /// **The material swap is load-bearing, not cosmetic.** A cutout/opaque batch ignores instance
 /// alpha, so writing `0.3` into the tag without moving the part onto its **blend twin** renders no
 /// translucency at all — the same "blend pass while `0 < fade < 1`" the reference runs for its
-/// doodad fade ([`crate::model_fade`]). It goes through [`FadeMaterials::material_for`], the one
+/// doodad fade ([`benilla_world::model_fade`]). It goes through [`FadeMaterials::material_for`], the one
 /// place the blend-vs-law axes compose, so this writer and the classifier can never disagree.
 /// Note the swap keys on the *instance* alpha only: a batch whose own animated colour alpha dips is
 /// a per-batch quantity the reference combines separately, and forcing those onto a blend pass would
 /// change every existing unit's look.
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn apply_aura_alpha(
     time: Res<Time>,
-    mut roots: Query<(Entity, &mut AuraNodes)>,
+    mut commands: Commands,
+    mut roots: Query<(
+        Entity,
+        &mut AuraNodes,
+        Option<&benilla_world::model_fade::ModelFade>,
+    )>,
     children_of: Query<&Children>,
     mut parts: AuraParts,
-    far_twins: Res<crate::model_render::FarSideTwins>,
+    far_twins: Res<benilla_world::model_render::FarSideTwins>,
     mut cards: Query<(
-        &crate::billboard::BillboardCard,
+        &benilla_world::billboard::BillboardCard,
         &mut MeshTag,
-        Option<&crate::doodad_anim::MatAnim>,
+        Option<&benilla_world::doodad_anim::MatAnim>,
     )>,
-    mut reauthor: ResMut<crate::interior::InteriorReauthor>,
+    mut reauthor: ResMut<benilla_world::interior::InteriorReauthor>,
 ) {
     let now = time.elapsed_secs();
-    for (root, mut n) in &mut roots {
+    for (root, mut n, declared) in &mut roots {
         let alpha = n.tick(now);
+        // Declare it to the engine, which owns the composed model alpha and its chain walk
+        // (`model_fade::ModelFade` — 1164's inversion). This is the whole of the aura's claim on
+        // the channel: a number and a reason, never a write.
+        //
+        // Written **before** the settled-opaque early-out below, and unconditionally on change:
+        // a declaration the engine keeps reading has to be retired by its declarer, and the ramp
+        // arriving at 1.0 is exactly when that matters. (`AuraNodes` itself is never removed — it
+        // parks at 1.0 — so there is no removal hook to hang this on.)
+        if declared.is_none_or(|d| d.0 != alpha) {
+            commands
+                .entity(root)
+                .insert(benilla_world::model_fade::ModelFade(alpha));
+        }
         let translucent = n.translucent();
         if !translucent && !n.authoring {
             continue; // settled opaque: not ours, nothing to release
@@ -780,9 +806,9 @@ fn author_cards(
     alpha: f32,
     walked: &bevy::ecs::entity::EntityHashSet,
     cards: &mut Query<(
-        &crate::billboard::BillboardCard,
+        &benilla_world::billboard::BillboardCard,
         &mut MeshTag,
-        Option<&crate::doodad_anim::MatAnim>,
+        Option<&benilla_world::doodad_anim::MatAnim>,
     )>,
 ) {
     for (card, mut tag, anim) in cards.iter_mut() {
@@ -793,7 +819,7 @@ fn author_cards(
         // card's per-sequence alpha animation stays alive under the aura — and so the release frame's
         // `alpha = 1` write lands exactly on the value the card would have had anyway.
         let authored = anim.map_or(1.0, |a| a.current);
-        let bits = crate::mesh_tag::with_alpha(tag.0, authored * alpha);
+        let bits = benilla_world::mesh_tag::with_alpha(tag.0, authored * alpha);
         if tag.0 != bits {
             tag.0 = bits;
         }
@@ -804,7 +830,7 @@ fn author_cards(
 /// recurse regardless — a joint or an attach-model root carries no [`FadeMaterials`] itself but the
 /// held weapon / helm / shoulder meshes hang beneath it, and the reference's alpha is a per-CGUnit
 /// property that its attached models render off (the same reason
-/// [`crate::model_fade::apply_despawn_fade`] and the self feather both walk descendants, not
+/// [`benilla_world::model_fade::apply_despawn_fade`] and the self feather both walk descendants, not
 /// children).
 #[allow(clippy::too_many_arguments)] // the author's full channel set, threaded down the walk
 fn author_descendants(
@@ -813,8 +839,8 @@ fn author_descendants(
     now: f32,
     children_of: &Query<&Children>,
     parts: &mut AuraParts,
-    far_twins: &crate::model_render::FarSideTwins,
-    reauthor: &mut crate::interior::InteriorReauthor,
+    far_twins: &benilla_world::model_render::FarSideTwins,
+    reauthor: &mut benilla_world::interior::InteriorReauthor,
     walked: &mut bevy::ecs::entity::EntityHashSet,
 ) {
     walked.insert(entity);
@@ -836,14 +862,14 @@ fn author_descendants(
                 fade_alpha(f.from, f.to, t)
             });
             let combined = alpha * anim.map_or(1.0, |a| a.current) * ramp;
-            let bits = crate::mesh_tag::with_alpha(tag.0, combined);
+            let bits = benilla_world::mesh_tag::with_alpha(tag.0, combined);
             if tag.0 != bits {
                 tag.0 = bits;
             }
             // The INSTANCE alpha decides the pass; a settled-opaque release hands the law's steady
             // material back and asks the classifier to re-author, so nothing is left on a stale
             // one. The water-plane axis composes here like everywhere else (`far_resolved`).
-            let want = crate::model_render::far_resolved(
+            let want = benilla_world::model_render::far_resolved(
                 fm.material_for(lit, alpha < 1.0),
                 far_side,
                 far_twins,

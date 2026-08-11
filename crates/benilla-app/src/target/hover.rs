@@ -10,17 +10,17 @@ use std::collections::HashSet;
 use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::camera::primitives::Aabb;
-use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::collision::PickOccluder;
 use crate::creature_anim::AnimDriver;
-use crate::debug_panel::ModelKind;
-use crate::interact::{ray_aabb, ray_triangle, world_aabb, PickParts, WorldObject};
 use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
-use crate::player::{CameraControl, WorldCamera};
+use crate::player::CameraControl;
 use crate::ui_script::PointerOverUi;
+use benilla_world::collision::PickOccluder;
+use benilla_world::interact::{ray_mesh_bounds, ray_posed_mesh, PickParts, WorldObject};
+use benilla_world::model_render::ModelKind;
+use benilla_world::view::WorldCamera;
 
 use super::{Hovered, HoveredObject, PickOcclusion};
 
@@ -58,7 +58,7 @@ pub(super) fn update_pick_occlusion(
         true,
         // Default (terrain/doodads) + the WMO *walk* bake — the mask that reaches every
         // `PickOccluder`-marked collider; the marker picks the exact occluder set within it.
-        &crate::collision::player_query_filter(),
+        &benilla_world::collision::WorldCollision::body_filter(),
         &|e| occluders.contains(e),
     ) {
         occlusion.distance = hit.distance;
@@ -92,8 +92,8 @@ pub(super) fn update_hover(
     mesh_assets: Res<Assets<Mesh>>,
     // The owned palette table (decision 0720): the picker reads the same world-space matrices
     // the vertex stage skins with, straight from the CPU rows.
-    palettes: Res<crate::rig_palette::RigPalettes>,
-    rigs: Query<&crate::rig_palette::RigSkin>,
+    palettes: Res<benilla_world::rig_palette::RigPalettes>,
+    rigs: Query<&benilla_world::rig_palette::RigSkin>,
     // Last frame's pick, for pass 2's sticky-hover (the reference's anti-flicker cache: the previous
     // pick outranks everything in the halo retry, so the hover doesn't strobe between two units).
     mut last_pick: Local<Option<Entity>>,
@@ -116,7 +116,7 @@ pub(super) fn update_hover(
     // unit's pick set — the reference draws mount + rider as one clickable unit.
     child_sets: Query<&Children>,
     // A part child's mesh + its palette-rig link (the rig its vertices pose through).
-    parts: Query<(&Mesh3d, &crate::rig_palette::RigPart)>,
+    parts: Query<(&Mesh3d, &benilla_world::rig_palette::RigPart)>,
     // Fallback path: a unit's pickable mesh children — `WorldObject` kind, model-local `Aabb`, world
     // transform, and the link to the streamed parent (whose `Guid` we resolve the hit to).
     meshes: Query<(&ChildOf, &Aabb, &GlobalTransform, &WorldObject)>,
@@ -195,12 +195,13 @@ pub(super) fn update_hover(
         // world-from-bind-pose matrices GPU skinning applies, read from the owned palette rows
         // (decision 0720 — last frame's propagated pose, exactly what the previous
         // joint-GlobalTransform read gave).
-        let palette_of = |sk: &[(&Mesh3d, &crate::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
-            sk.first().and_then(|(_, part)| {
-                let rig = rigs.get(part.0).ok()?;
-                palettes.world_palette(rig.slot, rig.bones() as usize)
-            })
-        };
+        let palette_of =
+            |sk: &[(&Mesh3d, &benilla_world::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
+                sk.first().and_then(|(_, part)| {
+                    let rig = rigs.get(part.0).ok()?;
+                    palettes.world_palette(rig.slot, rig.bones() as usize)
+                })
+            };
         let Some(palette) = palette_of(&skinned) else {
             continue;
         };
@@ -253,8 +254,7 @@ pub(super) fn update_hover(
         if faithful.contains(&parent) || units.get(parent).is_err() {
             continue; // posed-mesh-tested above, or not a targetable unit (e.g. a GameObject part)
         }
-        let (min, max) = world_aabb(aabb, gt);
-        if let Some(t) = ray_aabb(origin, dir, min, max) {
+        if let Some(t) = ray_mesh_bounds(origin, dir, aabb, gt) {
             if best.is_none_or(|(bt, _)| t < bt) {
                 best = Some((t, parent));
             }
@@ -400,7 +400,7 @@ pub(super) fn update_hovered_object(
 
     // Pass 1 — the exact resident geometry, pure nearest-wins (priority-independent).
     let mut best: Option<(f32, Entity)> =
-        crate::interact::cast_pick_ray(ray, &pickable, &parts, false)
+        benilla_world::interact::cast_pick_ray(ray, &pickable, &parts, false)
             .into_iter()
             .next()
             .map(|(e, h)| (h.distance, e));
@@ -413,7 +413,7 @@ pub(super) fn update_hovered_object(
             return;
         }
         let mut best2: Option<(f32, u32, Entity)> = None;
-        for (part, hit) in crate::interact::cast_pick_ray_inflated(ray, &pickable, &parts) {
+        for (part, hit) in benilla_world::interact::cast_pick_ray_inflated(ray, &pickable, &parts) {
             let net = resolve_net(part);
             let prio = if *last_pick == Some(net) {
                 u32::MAX // the sticky-hover cache outranks everything
@@ -503,139 +503,4 @@ pub(super) fn update_hovered_object(
     hovered.target = Some(net_entity);
     hovered.guid = Some(guid.0);
     hovered.distance = distance;
-}
-
-/// The narrow phase for one part: skin its vertices through `palette` (world-from-bind-pose joint
-/// matrices — the same transform GPU skinning applies) and ray-test every triangle. With `inflate`
-/// (the reference's pass 2), each vertex is additionally displaced by its **skinned normal, un-
-/// normalized** — the M2 normal is unit-length and the palette carries the world scale, so the
-/// halo is 1 model-unit × scale outward, exactly the binary's `skinned_pos + rot(palette)·normal`
-/// with no extra constant. Returns the nearest world-space hit distance, or `None`. Cost is
-/// bounded by the broad phase: only units near the cursor get here.
-fn ray_posed_mesh(
-    mesh_assets: &Assets<Mesh>,
-    mesh_id: AssetId<Mesh>,
-    palette: &[Mat4],
-    origin: Vec3,
-    dir: Vec3,
-    inflate: bool,
-) -> Option<f32> {
-    let mesh = mesh_assets.get(mesh_id)?;
-    let VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)?
-    else {
-        return None;
-    };
-    // The joint data rides the WOW attributes (decision 0720 retired Bevy's skin lane, and
-    // Bevy's `ATTRIBUTE_JOINT_INDEX` left our meshes with it). Every mesh that reaches this
-    // function is a skinned twin by construction (`RigPart` parts only), so a missing
-    // attribute is a broken authoring contract — not an unloaded asset — and it silently
-    // un-picks the whole unit: say so, once, loudly.
-    let (
-        Some(VertexAttributeValues::Uint16x4(joints)),
-        Some(VertexAttributeValues::Float32x4(weights)),
-    ) = (
-        mesh.attribute(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX),
-        mesh.attribute(benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT),
-    )
-    else {
-        warn_once!(
-            "a skinned part's mesh lacks the WOW joint attributes — the posed pick cannot hit it"
-        );
-        return None;
-    };
-    let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
-        Some(VertexAttributeValues::Float32x3(n)) if inflate => Some(n),
-        _ if inflate => return None, // can't build the halo without normals
-        _ => None,
-    };
-    // Skin every vertex to world space once (blended matrix, as GPU skinning sums it), then walk
-    // the index triangles. Pass 2 adds the rotated normal, translation-free, to the position.
-    let world: Vec<Vec3> = positions
-        .iter()
-        .enumerate()
-        .zip(joints.iter().zip(weights.iter()))
-        .map(|((i, p), (j, w))| {
-            let mut m = Mat4::ZERO;
-            for k in 0..4 {
-                if w[k] > 0.0 {
-                    if let Some(mk) = palette.get(j[k] as usize) {
-                        m += *mk * w[k];
-                    }
-                }
-            }
-            let mut out = (m * Vec4::new(p[0], p[1], p[2], 1.0)).truncate();
-            if let Some(ns) = normals {
-                let n = ns[i];
-                out += m.transform_vector3(Vec3::new(n[0], n[1], n[2]));
-            }
-            out
-        })
-        .collect();
-    let tri = |a: usize, b: usize, c: usize| -> Option<f32> {
-        ray_triangle(origin, dir, &[world[a], world[b], world[c]])
-    };
-    let hits = match mesh.indices()? {
-        Indices::U16(ix) => ix
-            .chunks_exact(3)
-            .filter_map(|c| tri(c[0] as usize, c[1] as usize, c[2] as usize))
-            .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.min(t)))),
-        Indices::U32(ix) => ix
-            .chunks_exact(3)
-            .filter_map(|c| tri(c[0] as usize, c[1] as usize, c[2] as usize))
-            .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.min(t)))),
-    };
-    hits
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TRI: [Vec3; 3] = [
-        Vec3::new(-1.0, 0.0, -1.0),
-        Vec3::new(1.0, 0.0, -1.0),
-        Vec3::new(0.0, 0.0, 1.0),
-    ];
-
-    /// The picker ↔ mesh-builder attribute contract: `ray_posed_mesh` must read the WOW joint
-    /// attributes the skinned twin is authored with ([`benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX`],
-    /// decision 0720) — reading Bevy's standard skin attributes made every unit silently
-    /// unpickable, because a `None` here also blocks the AABB fallback (the `faithful` set).
-    #[test]
-    fn posed_pick_reads_the_wow_skin_attributes() {
-        use bevy::asset::RenderAssetUsages;
-        use bevy::mesh::PrimitiveTopology;
-
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
-        mesh.insert_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            TRI.iter().map(|v| v.to_array()).collect::<Vec<_>>(),
-        );
-        mesh.insert_attribute(
-            benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX,
-            VertexAttributeValues::Uint16x4(vec![[1, 0, 0, 0]; 3]),
-        );
-        mesh.insert_attribute(
-            benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT,
-            VertexAttributeValues::Float32x4(vec![[1.0, 0.0, 0.0, 0.0]; 3]),
-        );
-        mesh.insert_indices(Indices::U16(vec![0, 1, 2]));
-        let mut assets = Assets::<Mesh>::default();
-        let handle = assets.add(mesh);
-
-        // Bone 1 lifts the triangle +2 on Y; bone 0 is a zero row (a hit through it would land
-        // at the origin) — so a 3.0-distance hit proves the indices routed through the WOW
-        // attribute into the right palette row.
-        let palette = [Mat4::ZERO, Mat4::from_translation(Vec3::Y * 2.0)];
-        let t = ray_posed_mesh(
-            &assets,
-            handle.id(),
-            &palette,
-            Vec3::new(0.0, 5.0, 0.0),
-            Vec3::NEG_Y,
-            false,
-        )
-        .expect("the posed pick must hit the WOW-attributed mesh");
-        assert!((t - 3.0).abs() < 1e-5);
-    }
 }

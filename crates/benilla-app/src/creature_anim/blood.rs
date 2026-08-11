@@ -10,8 +10,8 @@ use bevy::prelude::*;
 use benilla_assets::coords::bevy_to_wow;
 use benilla_formats::BloodCatalog;
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::net::NetEntity;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::spell_visual::SpellVisuals;
 use super::{SpellKitFx, SwingImpact, SwingMessage};

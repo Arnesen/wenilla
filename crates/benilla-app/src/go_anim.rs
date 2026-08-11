@@ -74,7 +74,7 @@ use std::time::Duration;
 
 use crate::creature_anim::{advance_track, scan_events, AnimSoundEvent};
 use crate::net::{GuidIndex, ObjectStore};
-use crate::schedule::WorldStage;
+use benilla_world::schedule::WorldStage;
 
 /// `GO_STATE_ACTIVE` (vmangos `GOState`) — the **open** state (door swung, chest lid up). Passable.
 const GO_STATE_ACTIVE: u32 = 0;

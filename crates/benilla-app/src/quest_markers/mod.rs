@@ -29,7 +29,7 @@
 //! benilla's translation (m2bones-probed: every marker M2 is ONE bone with a 3-key translation
 //! bob): a **seat** entity parented under the unit's slot-18 joint (the held-items rail) carries
 //! the one-time `1/L` counter-scale; the `!` models (plain bone) animate through the doodad rail
-//! ([`crate::doodad_anim::spawn_anim_host`] — skinned twin + the one-time sequence-0 arm); the `?`
+//! ([`benilla_world::doodad_anim::spawn_anim_host`] — skinned twin + the one-time sequence-0 arm); the `?`
 //! models (cylindrical-billboard bone) render as [`BillboardCard`]s under the identity root —
 //! cards write ABSOLUTE world transforms, so they can't sit under the moving seat; instead
 //! [`re_seat_cards`] re-seats them from the seat's world placement each frame (PostUpdate, the
@@ -52,16 +52,14 @@ use bevy::prelude::*;
 use benilla_assets::{BillboardInfo, M2Model};
 use benilla_formats::BoneScaleAnim;
 
-use crate::assets::WorldAssets;
-use crate::billboard::BillboardCard;
 use crate::entities::BoneAttach;
-use crate::lighting::SharedLightBuffer;
-use crate::mesh_tag::alpha_bits;
-use crate::model_render::{m2_url, model_material, MaterialCache, ShadeSel};
 use crate::nameplates::Nameplates;
 use crate::net::GuidIndex;
-use crate::terrain::WowModelMaterial;
 use crate::ui_quest::QuestGiver;
+use benilla_assets::m2_url;
+use benilla_assets::WorldAssets;
+use benilla_world::billboard::BillboardCard;
+use benilla_world::mesh_tag::spawn_tag;
 use bevy::mesh::MeshTag;
 
 use crate::entities::{ATTACH_OVERHEAD, ATTACH_OVERHEAD_MOUNTED};
@@ -254,16 +252,14 @@ fn build_markers(
     mut commands: Commands,
     mut roots: Query<(Entity, &mut QuestMarkerRoot)>,
     m2s: Res<Assets<M2Model>>,
-    mut forms: ResMut<crate::model_forms::ModelForms>,
+    mut forms: ResMut<benilla_world::model_forms::ModelForms>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<WowModelMaterial>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
-    light: Res<SharedLightBuffer>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     index: Res<GuidIndex>,
     anchors: Query<&BoneAttach>,
     mounts: Query<(), With<crate::entities::mount::MountChild>>,
     time: Res<Time>,
-    mut cache: Local<MaterialCache>,
 ) {
     for (root, mut marker) in &mut roots {
         if marker.seat.is_some() || marker.no_anchor {
@@ -275,13 +271,7 @@ fn build_markers(
         // The marker's render forms, built NOW (decision 0834): two tiny models per map, on the
         // booth-lane exception — a marker popping a frame late over a questgiver would be a
         // regression nothing here needs.
-        let key = crate::model_forms::ModelKey::from(&marker.handle);
-        forms.ensure_now(
-            key,
-            crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
-            &model.submeshes,
-            &mut mesh_assets,
-        );
+        forms.ensure_now_rigged(&marker.handle, &model.submeshes, &mut mesh_assets);
         // The unit's joint set + attachment table — absent while its own model still loads (or
         // forever on a boneless/model-less unit, which then simply never shows a marker).
         let Some((unit, anchor)) = index
@@ -322,14 +312,14 @@ fn build_markers(
             .submeshes
             .iter()
             .any(|s| s.billboard.is_none())
-            .then(|| crate::doodad_anim::spawn_anim_host(&mut commands, model, seat_tf))
+            .then(|| benilla_world::doodad_anim::spawn_anim_host(&mut commands, model, seat_tf))
             .flatten();
         // EAGER slot allocation — this lane has no draw gate to promote lazily (decision 0863
         // made laziness the terrain-stream caller's policy, not the host's). A handful of
         // markers exist at once, so eager is the right spend; slot 0 (table full, warned)
         // falls back to the static mesh below exactly as before.
         let marker_slot = host.as_ref().map_or(0, |h| {
-            crate::rig_palette::RigSkin::allocate(
+            benilla_world::rig_palette::RigSkin::allocate(
                 &mut palettes,
                 h.joints.clone(),
                 h.inverse_bindposes.clone(),
@@ -355,35 +345,14 @@ fn build_markers(
         // The client arms the marker's animation at status receive — the cards' bob loop starts
         // its cursor here (the same clock `face_billboards` samples).
         let arm_ms = time.elapsed().as_millis() as u32;
-        let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
-        let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
+        let built = forms.slices(&marker.handle);
+        let (stat_forms, skin_forms) = (built.stat, built.skin.unwrap_or(&[]));
         for (pi, sub) in model.submeshes.iter().enumerate() {
-            let material = model_material(
-                &mut cache,
-                &mut materials,
-                sub.texture.clone(),
-                sub.blend,
-                // The material's `0x04` flag alone, like every other batch (decision 0629) — the
-                // marker is a 353-vert SOLID `?`, so its back faces belong culled.
-                sub.two_sided,
-                false,
-                false,
-                sub.emissive,
-                sub.additive,
-                false,
-                sub.no_depth_write,
-                sub.no_depth_test,
-                sub.fog_policy,
-                sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                ShadeSel::Lit, // a floating marker never inherits ground shade
-                0,
-                None,                  // static UVs
-                sub.rgb_anim.as_ref(), // seeded at its first key (the `!`/`?` are constant-tinted)
-                None, // floating marker: instance-origin light anchor (moot — it draws near-unlit)
-                None, // M2 carries no MOMT SIDN colour
-                false, // …nor the WINDOW flag
-                &light.0,
-            );
+            // A floating marker is an ordinary world-lit batch: one steady material, batch
+            // order 0 (a `?` is a single 353-vert mesh, not a coplanar stack).
+            let Some(material) = mats.steady(sub, sub.texture.clone(), 0) else {
+                continue; // no shared light buffer yet
+            };
             match &sub.billboard {
                 Some(info) => {
                     // Cards write ABSOLUTE world transforms (`face_billboards`), so they live
@@ -398,7 +367,7 @@ fn build_markers(
                                     .unwrap_or_default(),
                             ),
                             MeshMaterial3d(material),
-                            MeshTag(alpha_bits(1.0)),
+                            MeshTag(spawn_tag(0, 1.0)),
                             Transform::IDENTITY,
                             BillboardCard::new(info, Transform::IDENTITY)
                                 .with_seq_translation(seq_loop(info, ANIM_MARKER_LOW), arm_ms),
@@ -421,12 +390,11 @@ fn build_markers(
                             .map(|(h, _)| h.clone())
                             .unwrap_or_default()
                     };
-                    let rig_tag = crate::mesh_tag::rig_bits(marker_slot);
                     let child = commands
                         .spawn((
                             Mesh3d(mesh),
                             MeshMaterial3d(material),
-                            MeshTag(rig_tag | alpha_bits(1.0)),
+                            MeshTag(spawn_tag(marker_slot, 1.0)),
                             Transform::IDENTITY,
                         ))
                         .id();
@@ -434,7 +402,7 @@ fn build_markers(
                         if use_rig {
                             commands
                                 .entity(child)
-                                .insert(crate::rig_palette::RigPart(h.root));
+                                .insert(benilla_world::rig_palette::RigPart(h.root));
                         }
                     }
                     commands.entity(seat).add_child(child);
@@ -552,7 +520,7 @@ fn bake_seat_scale(
 
 /// Re-seat every billboard card from its seat's world placement (cards write absolute world
 /// transforms, so they can't be parented under the moving seat). Runs in PostUpdate after
-/// transform propagation and before [`crate::billboard::BillboardPlace`] writes the card
+/// transform propagation and before [`benilla_world::billboard::BillboardPlace`] writes the card
 /// transforms — the card
 /// rides the SAME-frame posed seat, no trailing frame.
 fn re_seat_cards(
@@ -593,7 +561,7 @@ impl Plugin for QuestMarkersPlugin {
             PostUpdate,
             re_seat_cards
                 .after(bevy::transform::TransformSystems::Propagate)
-                .before(crate::billboard::BillboardPlace),
+                .before(benilla_world::billboard::BillboardPlace),
         );
     }
 }

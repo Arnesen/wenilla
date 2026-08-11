@@ -14,8 +14,8 @@
 
 use bevy::prelude::*;
 
-use crate::net::WeatherMessage;
-use crate::schedule::WorldStage;
+use benilla_world::schedule::WorldStage;
+use benilla_world::weather::WeatherMessage;
 
 /// The weather loop's SoundEntries kit from the last `SMSG_WEATHER` (0 = clear skies). Consumed by
 /// the ambience selector in [`super::zone`].

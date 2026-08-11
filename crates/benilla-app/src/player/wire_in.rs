@@ -25,7 +25,7 @@ use crate::net::{
     SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
-use crate::world_map::CurrentMap;
+use benilla_world::world_map::CurrentMap;
 
 use super::camera::FlyCam;
 use super::{movement_net, Player, SETTLE_TIMEOUT};
@@ -249,7 +249,7 @@ pub(super) fn apply_server_moves(
                 "took control of player @ {:?} facing {:.3} ({} + F toggles free-fly)",
                 player.pos,
                 yaw.rem_euclid(std::f32::consts::TAU),
-                crate::debug_panel::DEV_CHORD
+                benilla_world::modkeys::DEV_CHORD
             );
         }
     }

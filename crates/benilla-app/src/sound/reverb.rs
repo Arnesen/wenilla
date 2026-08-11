@@ -5,7 +5,7 @@
 //! `...Underwater`, parent-inherited — the client's caller `0x67e7f0` walks the same fallback,
 //! wow-re `reverb-pipeline.md` A2, VERIFIED) → `SoundProviderPreferences.dbc` (the EAX listener
 //! properties, consumed RAW — no clamps on this path, A1) → [`Mixer::set_reverb`]'s Freeverb
-//! projection, applied **instantly** on change (A2). Submerged ([`Underwater`]) the underwater
+//! projection, applied **instantly** on change (A2). Submerged, the underwater
 //! column wins — pref 11 on 568 areas; dry land uses the dry column (8 dungeon floors in 1.12).
 //!
 //! Which sounds the wet signal reaches is **not** this module's business and is not "every 3D
@@ -26,10 +26,8 @@ use bevy::prelude::*;
 
 use benilla_formats::SoundProviderCatalog;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::liquid::Underwater;
-use crate::schedule::WorldStage;
-use crate::terrain_stream::CurrentArea;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::zone::AreaSounds;
 use super::{SoundConfig, SoundOutput};
@@ -66,8 +64,7 @@ struct AppliedPreset(Option<u32>);
 fn zone_reverb(
     mut applied: ResMut<AppliedPreset>,
     mut out: NonSendMut<SoundOutput>,
-    area: Res<CurrentArea>,
-    underwater: Res<Underwater>,
+    world: benilla_world::world_point::WorldPoint,
     areas: Option<Res<AreaSounds>>,
     providers: Option<Res<SoundProviders>>,
     config: Res<SoundConfig>,
@@ -76,7 +73,7 @@ fn zone_reverb(
     let (Some(areas), Some(providers)) = (areas, providers) else {
         return;
     };
-    let column = usize::from(underwater.0.is_water());
+    let column = usize::from(world.submersion().is_water());
     // `SoundReverb` off ⇒ no preset reaches the backend at all — the client's `0x45a75b` gate,
     // which returns before the marshal rather than applying a silent one. Off is our default and
     // the reference's audible truth (decision 1153): its EAX path needs hardware no machine has
@@ -88,7 +85,8 @@ fn zone_reverb(
             .map(|i| i.sound_provider[column])
             .filter(|p| *p != 0)
             .or_else(|| {
-                area.0
+                world
+                    .area()
                     .and_then(|id| areas.0.resolve(id))
                     .map(|a| a.sound_provider[column])
             })

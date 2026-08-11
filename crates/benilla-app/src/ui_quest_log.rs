@@ -137,7 +137,7 @@ impl Plugin for UiQuestLogPlugin {
         app.init_resource::<QuestLog>()
             .add_systems(
                 Startup,
-                load_quest_header_names.after(crate::assets::AssetSet::Open),
+                load_quest_header_names.after(benilla_assets::AssetSet::Open),
             )
             .add_systems(
                 Update,
@@ -736,9 +736,9 @@ pub(crate) struct QuestHeaderNamesRes(pub benilla_formats::QuestHeaderNames);
 /// exact load shape).
 fn load_quest_header_names(
     mut commands: Commands,
-    assets: Option<Res<crate::assets::WorldAssets>>,
+    assets: Option<Res<benilla_assets::WorldAssets>>,
 ) {
-    use crate::assets::LockRecover;
+    use benilla_assets::LockRecover;
     let Some(assets) = assets else { return };
     let loaded = {
         let mut chain = assets.chain.lock_recover();

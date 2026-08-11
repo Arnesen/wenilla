@@ -16,12 +16,12 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
-use crate::billboard::BillboardCard;
-use crate::debug_panel::{ModelKind, ModelPart};
-use crate::interact::WorldObject;
-use crate::interior::part_interior_lit;
-use crate::model_fade::{FadeSet, JoinedFade, PartFade};
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::billboard::BillboardCard;
+use benilla_world::interact::WorldObject;
+use benilla_world::interior::part_interior_lit;
+use benilla_world::model_fade::{FadeSet, JoinedFade, PartFade};
+use benilla_world::model_render::{ModelKind, ModelPart};
 
 use super::super::EntityPart;
 use super::char_skin::CharSkinMaterials;
@@ -90,7 +90,7 @@ pub(super) fn part_materials<'a>(
             fade_blend: Some(fade),
             bake: Some(bake),
             bake_blend: Some(bake_blend),
-            zfill: Some(zfill),
+            zfill: zfill.as_ref(),
         },
         None => PartMaterials {
             steady: &part.material,
@@ -127,9 +127,6 @@ pub(super) struct PartDress<'a> {
     pub(super) char_mats: &'a CharSkinMaterials,
     /// Identity for the mouseover inspector, cloned onto every part and card.
     pub(super) object: &'a WorldObject,
-    /// The unit's rig-palette slot in `MeshTag` bits — a per-INSTANCE identity every part carries,
-    /// skinned or not, so a tinted unit tints whole (decision 0812).
-    pub(super) rig_tag: u32,
     /// `0` = the palette table was full: parts fall back to the static bind-pose mesh.
     pub(super) inst_slot: u16,
     /// Whether the unit built a rig at all — the gate on a part drawing its skinned twin.
@@ -145,7 +142,7 @@ pub(super) struct PartDress<'a> {
     pub(super) now: f32,
     /// What this part should do about the unit's appear-fade. A fresh visual passes
     /// `Pending { since: now }` (decision 0032); a part spawned by a **re-dress** JOINS whatever the
-    /// unit's own clock says ([`crate::model_fade::join_unit_appear_fade`]), exactly as a
+    /// unit's own clock says ([`benilla_world::model_fade::join_unit_appear_fade`]), exactly as a
     /// late-resolving held item does — so a gear change during the login cascade neither pops the
     /// new geoset opaque over a still-feathering body nor restarts a second ramp beside it.
     pub(super) fade: JoinedFade,
@@ -206,7 +203,7 @@ pub(super) fn spawn_part(
         dress.object.clone(),
         // The picker's triangles (decision 0857): the render meshes are `RENDER_WORLD`-only, so
         // the ray pickers read the model's resident geometry instead.
-        crate::interact::PickMesh(part.geometry.clone()),
+        benilla_world::interact::PickMesh(part.geometry.clone()),
         DressedPart {
             index: index as u32,
             card: None,
@@ -217,14 +214,15 @@ pub(super) fn spawn_part(
     // and because the two conditional writers that used to seed it (the interior classifier, the
     // animated-alpha compose) each covered only their own subset, leaving a part in neither with no
     // tag at all.
-    child.insert(MeshTag(
-        dress.rig_tag | crate::mesh_tag::alpha_bits(tag_alpha),
-    ));
+    child.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+        dress.inst_slot,
+        tag_alpha,
+    )));
     // `RigPart` stays gated on actually being skinned by that rig — it is the CPU-side link for the
     // mouseover picker's skinned ray test (decision 0720), which has nothing to say about a static
     // part.
     if skinned {
-        child.insert(crate::rig_palette::RigPart(dress.unit));
+        child.insert(benilla_world::rig_palette::RigPart(dress.unit));
     }
     if dress.rigged && part.skinned_mesh.is_some() {
         // A streamed entity's M2 is **never view-culled** — the reference registers entity render
@@ -267,7 +265,7 @@ pub(super) fn spawn_part(
     // SEQUENCE, so which of its batches draw is a function of what it is playing. Sampling follows
     // the unit's own `AnimationPlayer`, so the alpha stays in phase with the pose.
     if let Some(anim) = &part.alpha_anim {
-        child.insert(crate::doodad_anim::MatAnim::following(
+        child.insert(benilla_world::doodad_anim::MatAnim::following(
             anim.clone(),
             dress.unit,
         ));
@@ -337,7 +335,7 @@ fn spawn_billboard_part(
         dress.object.clone(),
         // The picker's triangles (decision 0857) — the caster centres a card at its pivot, the
         // same bake the render form draws with.
-        crate::interact::PickMesh(part.geometry.clone()),
+        benilla_world::interact::PickMesh(part.geometry.clone()),
         card_follow,
     ));
     // A card takes its MODEL's indoor law through the same constructor as the sibling meshes it was
@@ -345,9 +343,10 @@ fn spawn_billboard_part(
     // even though it is never skinned by it — it is a batch of the unit's own model, so a tinted
     // unit tints its eye-glow and torch cards too (decision 0812). No char-slot variants are
     // consulted: a body/hair/cape/skin-extra batch is never a billboard batch.
-    card.insert(MeshTag(
-        dress.rig_tag | crate::mesh_tag::alpha_bits(tag_alpha),
-    ));
+    card.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+        dress.inst_slot,
+        tag_alpha,
+    )));
     // The card's build-time bound (decision 0834) — `calculate_bounds` can no longer derive one
     // from the `RENDER_WORLD`-only static form's data.
     if let Some(aabb) = part.aabb {
@@ -365,7 +364,7 @@ fn spawn_billboard_part(
     // A card shares its batch's per-sequence alpha loops (the billboard split copies them onto every
     // group), sampled off the same unit clock as the mesh parts.
     if let Some(anim) = &part.alpha_anim {
-        card.insert(crate::doodad_anim::MatAnim::following(
+        card.insert(benilla_world::doodad_anim::MatAnim::following(
             anim.clone(),
             dress.unit,
         ));
@@ -384,7 +383,7 @@ fn spawn_billboard_part(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_fade::{FadeMaterials, PendingAppearFade};
+    use benilla_world::model_fade::{FadeMaterials, PendingAppearFade};
 
     /// One synthetic batch at `char_slot`/`two_sided`, carrying its own (distinguishable) built
     /// material set so the fallback arm is visible in the assertions.
@@ -430,7 +429,7 @@ mod tests {
             mat(seed * 8 + 2),
             mat(seed * 8 + 3),
             mat(seed * 8 + 4),
-            mat(seed * 8 + 5),
+            Some(mat(seed * 8 + 5)),
         )
     }
 
@@ -491,7 +490,6 @@ mod tests {
             kind: ModelKind::Creature,
             char_mats: &empty,
             object: &object,
-            rig_tag: 0,
             inst_slot: 0,
             rigged: false,
             anchors: &anchors,
@@ -556,7 +554,6 @@ mod tests {
             kind: ModelKind::Creature,
             char_mats: &empty,
             object: &object,
-            rig_tag: 0,
             inst_slot: 0,
             rigged: false,
             anchors: &anchors,
@@ -596,7 +593,7 @@ mod tests {
         );
         assert_eq!(found[0].1, mat(99), "…and the card OPENS on it");
         assert!(
-            crate::mesh_tag::alpha_of(found[0].0) <= 1.0 / 63.0,
+            benilla_world::mesh_tag::alpha_of(found[0].0) <= 1.0 / 63.0,
             "…at the encoder's ≈0 floor",
         );
     }

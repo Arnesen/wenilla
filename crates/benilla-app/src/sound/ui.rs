@@ -33,10 +33,10 @@ use bevy::prelude::*;
 use benilla_formats::{ItemGesture, ItemGroupSoundsCatalog};
 use benilla_ui::script::{CursorPayload, SoundRequest, UiScript};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::NetCommands;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 use super::kit::{self, KitRef, SoundKits};
 use super::{SoundConfig, SoundOutput};

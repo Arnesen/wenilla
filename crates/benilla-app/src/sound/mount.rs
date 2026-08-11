@@ -13,9 +13,9 @@ use bevy::prelude::*;
 
 use benilla_protocol::EntityKind;
 
-use crate::assets::WorldAssets;
 use crate::net::{NetEntity, ObjectStore};
-use crate::schedule::WorldStage;
+use benilla_assets::WorldAssets;
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

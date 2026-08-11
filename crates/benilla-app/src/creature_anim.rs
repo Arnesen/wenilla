@@ -39,8 +39,8 @@ use benilla_assets::{AnimClip, ModelAnimations};
 use benilla_formats::AnimDataCatalog;
 use bevy::prelude::*;
 
-use crate::assets::AssetSet;
-use crate::schedule::WorldStage;
+use benilla_assets::AssetSet;
+use benilla_world::schedule::WorldStage;
 
 /// The pure animation-selection logic (RF-0057/0073 tables, movement/Special state, gait/swing/ready
 /// picks, playback-rate math) — kept in its own file as it carries the bulk of the unit-tested selector
@@ -54,25 +54,12 @@ use select::{Mode, Special};
 mod twist;
 pub(crate) use twist::{wrap_pi, BodyTwist};
 
-/// Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses): free-clock loops
-/// the per-sequence reader drops, driven on their own clock over the gait.
-mod global_seq;
-pub(crate) use global_seq::GlobalSeqDrive;
-
 /// The unit animation-LOD gate (decision 0448): park an off-frustum rig's per-bone pose
 /// evaluation — the clocks, the driver state machine, and the event tracks keep running, so
 /// off-screen combat stays audible (0075) and a re-appearing unit snaps to the absolute-clock
 /// pose. A modernization, not fidelity — the reference animates every in-range unit (wow-re
 /// `unit-anim-visibility-gate.md`).
 mod lod;
-pub(crate) use lod::AnimParked;
-mod pose;
-pub(crate) use pose::{RigAnchor, RigFrame, RigPose};
-
-/// The collapsed rig's composition passes (decision 0724): the pre-propagation model compose +
-/// anchor re-seat, and the post-propagation world pass (palette rows + billboard replacements).
-mod compose;
-pub(crate) use compose::{finalize_rig_worlds, PosePost};
 
 /// The unit's wielded weapon classes — `(item class, item subclass)` per hand, `None` for an empty
 /// (or non-item) hand. Written by the held-item resolution ([`crate::entities`], decision 0072) from
@@ -978,17 +965,14 @@ pub(crate) struct CreatureAnimPlugin;
 impl Plugin for CreatureAnimPlugin {
     fn build(&self, app: &mut App) {
         twist::plugin(app);
-        global_seq::plugin(app);
         lod::plugin(app);
-        pose::plugin(app);
-        compose::plugin(app);
         breath::register(app);
         // The breath classifier is a per-unit environment resolve, not an animation step: it runs
         // off the area authority, at its own 10 s cadence, and only publishes the component
         // `fire_breath` reads inside the chain below.
         app.add_systems(
             Update,
-            classify_breath.after(crate::terrain_stream::AreaAuthoritySet),
+            classify_breath.after(benilla_world::terrain_stream::AreaAuthoritySet),
         );
         app.add_message::<AnimSoundEvent>()
             .add_message::<SwingMessage>()

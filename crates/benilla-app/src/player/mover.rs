@@ -3,7 +3,7 @@
 //! One call per frame: [`step`].
 //!
 //! Thin kinematic controller (decision 0009) over the **one-sided** mirror of avian's
-//! `MoveAndSlide` (`crate::collision::one_sided`, decision 0970: a face only blocks motion its
+//! `MoveAndSlide` (`benilla_world::collision::one_sided`, decision 0970: a face only blocks motion its
 //! authored winding opposes, the reference's `0x632700` law) — kept simple and robust on the
 //! triangulated heightmap:
 //!   - probe down to classify the ground (walkable iff its normal is within ~50° of up);
@@ -34,8 +34,6 @@
 use avian3d::character_controller::move_and_slide::MoveHitData;
 use avian3d::prelude::*;
 use bevy::prelude::*;
-
-use crate::collision::player_query_filter;
 
 use super::{
     move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY,
@@ -68,7 +66,7 @@ pub(super) struct Outcome {
 pub(super) fn step(
     player: &mut Player,
     time: &Time,
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
     moving: bool,
     dir: Vec3,
@@ -85,11 +83,8 @@ pub(super) fn step(
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
     let mut center = player.pos + half_h;
     // Player body collides with terrain/doodads/GameObjects + the WMO *walking* faces (not the
-    // camera-only ones); the camera sweep uses its own filter (see `crate::collision`).
-    let filter = player_query_filter();
-    let cast = |from: Vec3, disp: Vec3| {
-        crate::collision::one_sided::cast_move(ms, capsule, from, disp, SKIN_WIDTH, &filter)
-    };
+    // camera-only ones); the camera sweep uses its own filter (see `benilla_world::collision`).
+    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
     let probe_down = |c: Vec3, dist: f32| cast(c, Vec3::NEG_Y * dist);
 
     // While airborne, "on the ground" means where the slide actually contacts the floor
@@ -215,9 +210,8 @@ pub(super) fn step(
     let (mut climb, mut snap_probe) = (None, None);
     if !held && !anchored && grounded && !jumped {
         let g = grounded_step(
-            ms,
+            world,
             capsule,
-            &filter,
             center,
             player.horiz_vel,
             time.delta(),
@@ -230,9 +224,8 @@ pub(super) fn step(
         // anyone is looking at): a walk frame that went nowhere writes the `stup` deep report —
         // the surface profile ahead, the advance ladder, the candidate faces.
         super::step_probe::watch(
-            ms,
+            world,
             capsule,
-            &filter,
             center,
             g.center,
             player.horiz_vel,
@@ -256,7 +249,7 @@ pub(super) fn step(
         };
         // The airborne slide is the OTHER shared resolve ([`airborne_step`]) — the same code a
         // remote mover's arc runs, so a jump meets our walls whoever is jumping (decision 0627).
-        center = airborne_step(ms, capsule, &filter, center, velocity, time.delta());
+        center = airborne_step(world, capsule, center, velocity, time.delta());
         // Nothing here can be riding a cone: this arm is the arc, the hold and the anchor.
         player.steep_support = false;
     }
@@ -281,7 +274,7 @@ pub(super) fn step(
             player.wedge_still = 0;
             player.vel_y = 0.0;
             let feet = center - half_h;
-            crate::dbg_trace::line(
+            benilla_assets::trace::line(
                 "move",
                 &format!(
                     "wedge rest at ({:8.2},{:7.2},{:8.2}) -> landed standing",
@@ -412,18 +405,15 @@ pub(crate) struct GroundedStep {
 /// Airborne and swimming frames are **not** this function's: a jump is a ballistic arc and a
 /// swimmer's Z is its depth, exactly as the reference's grounded fork excludes both.
 pub(crate) fn grounded_step(
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
-    filter: &SpatialQueryFilter,
     center: Vec3,
     horiz_vel: Vec3,
     dt: std::time::Duration,
     support: Support,
 ) -> GroundedStep {
     let surface_offset = support.offset;
-    let cast = |from: Vec3, disp: Vec3| {
-        crate::collision::one_sided::cast_move(ms, capsule, from, disp, SKIN_WIDTH, filter)
-    };
+    let cast = |from: Vec3, disp: Vec3| world.cast_body(capsule, from, disp, SKIN_WIDTH);
     let speed = horiz_vel.length();
     // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
     // advance-this-frame's-travel-at-the-raised-height → settle onto a walkable floor, all
@@ -459,9 +449,9 @@ pub(crate) fn grounded_step(
     // *blocked-frame* deep report — the advance ladder and the surface profile — is the `stup` tag
     // in [`super::step_probe`], which the local mover fires when a walk frame goes nowhere.)
     if let Some((point, n)) = attempt.contact {
-        if crate::dbg_trace::enabled_for("step") {
+        if benilla_assets::trace::enabled_for("step") {
             let feet_y = center.y - CAPSULE_HEIGHT * 0.5;
-            crate::dbg_trace::line(
+            benilla_assets::trace::line(
                 "step",
                 &format!(
                     "hit ({:8.2},{:7.2},{:8.2}) h={:+.2} n=({:+.2},{:+.2},{:+.2}) {}",
@@ -537,14 +527,12 @@ pub(crate) fn grounded_step(
     };
     let start = center + Vec3::Y * popped.unwrap_or(0.0);
     let mut rode = false;
-    let out = crate::collision::one_sided::move_and_slide(
-        ms,
+    let out = world.slide_body(
         capsule,
         start,
         horiz_vel,
         dt,
         &MoveAndSlideConfig::default(),
-        filter,
         |hit| {
             if let Some(ride) = walkable_ride_velocity(**hit.normal, *hit.velocity) {
                 *hit.velocity = ride;
@@ -736,29 +724,27 @@ pub(crate) fn grounded_step(
 /// drawn *inside* it for the length of the jump and pops back out on the landing packet — the
 /// airborne half of the very defect 0626 fixed on the ground (decision 0627).
 pub(crate) fn airborne_step(
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
-    filter: &SpatialQueryFilter,
     center: Vec3,
     velocity: Vec3,
     dt: std::time::Duration,
 ) -> Vec3 {
-    crate::collision::one_sided::move_and_slide(
-        ms,
-        capsule,
-        center,
-        velocity,
-        dt,
-        &MoveAndSlideConfig::default(),
-        filter,
-        |hit| {
-            if let Some(followed) = steep_contact_shear(**hit.normal, *hit.velocity) {
-                *hit.velocity = followed;
-            }
-            MoveAndSlideHitResponse::Accept
-        },
-    )
-    .position
+    world
+        .slide_body(
+            capsule,
+            center,
+            velocity,
+            dt,
+            &MoveAndSlideConfig::default(),
+            |hit| {
+                if let Some(followed) = steep_contact_shear(**hit.normal, *hit.velocity) {
+                    *hit.velocity = followed;
+                }
+                MoveAndSlideHitResponse::Accept
+            },
+        )
+        .position
 }
 
 /// **The overhang line is a tolerance, not zero** — and it has to be, or half the world's vertical
@@ -1129,14 +1115,10 @@ mod tests {
     fn step_at(advance: f32) -> StepVerdict {
         world_with_kerb()
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
-                let cast = |from: Vec3, disp: Vec3| {
-                    crate::collision::one_sided::cast_move(
-                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
-                    )
-                };
+                let cast =
+                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
                 // Approach from 1 yd back along +X at street level and stop where the kerb stops us.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
                 let run = cast(start, Vec3::X).map_or(1.0, |h| h.distance);
@@ -1172,14 +1154,10 @@ mod tests {
     fn walk_from(mut world: App, start: Vec3, dir: Vec3, frames: usize) -> Vec<Row> {
         world
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
-                let cast = |from: Vec3, disp: Vec3| {
-                    crate::collision::one_sided::cast_move(
-                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
-                    )
-                };
+                let cast =
+                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
                 let start = start + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
                 let run = cast(start, dir).map_or(1.0, |h| h.distance);
                 let mut center = start + dir * run;
@@ -1190,8 +1168,7 @@ mod tests {
                 let mut support = Support::default();
                 (0..frames)
                     .map(|_| {
-                        let g =
-                            grounded_step(&ms, &capsule, &filter, center, dir * 7.0, dt, support);
+                        let g = grounded_step(&world, &capsule, center, dir * 7.0, dt, support);
                         center = g.center;
                         support.steep = g.steep_support;
                         (
@@ -1371,20 +1348,11 @@ mod tests {
         const P: [(f32, f32); 2] = [(-2.0, 0.0), (3.0, 0.0)];
         let (dy, ground) = world_from_profile(&P)
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
                 let center = Vec3::new(0.0, CAPSULE_HEIGHT * 0.5 + 1.0, 0.0);
-                let g = grounded_step(
-                    &ms,
-                    &capsule,
-                    &filter,
-                    center,
-                    Vec3::ZERO,
-                    dt,
-                    Support::default(),
-                );
+                let g = grounded_step(&world, &capsule, center, Vec3::ZERO, dt, Support::default());
                 (g.center.y - center.y, g.ground.is_some())
             })
             .unwrap();
@@ -1429,16 +1397,14 @@ mod tests {
         ];
         let track = world_from_profile(&P)
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
                 let mut center = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5, 0.0);
                 let mut support = Support::default();
                 let mut rows = Vec::new();
                 for _ in 0..24 {
-                    let g =
-                        grounded_step(&ms, &capsule, &filter, center, Vec3::X * 7.0, dt, support);
+                    let g = grounded_step(&world, &capsule, center, Vec3::X * 7.0, dt, support);
                     rows.push((g.center.x - center.x, g.center.y - CAPSULE_HEIGHT * 0.5));
                     center = g.center;
                     support.steep = g.steep_support;
@@ -1528,15 +1494,13 @@ mod tests {
         const P: [(f32, f32); 2] = [(-2.0, 0.0), (3.0, 0.0)];
         let dy = world_from_profile(&P)
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
                 let center = Vec3::new(0.0, CAPSULE_HEIGHT * 0.5 + 1.6, 0.0);
                 let g = grounded_step(
-                    &ms,
+                    &world,
                     &capsule,
-                    &filter,
                     center,
                     Vec3::X * 7.0,
                     dt,
@@ -1564,9 +1528,8 @@ mod tests {
         const P: [(f32, f32); 3] = [(-2.0, 0.0), (0.0, 0.0), (3.0, -5.196)];
         let out = world_from_profile(&P)
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
                 let mut center = Vec3::new(0.6, CAPSULE_HEIGHT * 0.5 - 1.039, 0.0);
                 let mut rows = Vec::new();
@@ -1574,7 +1537,7 @@ mod tests {
                 for i in 0..4 {
                     // Two frames walking, then two standing perfectly still.
                     let v = if i < 2 { Vec3::X * 7.0 } else { Vec3::ZERO };
-                    let g = grounded_step(&ms, &capsule, &filter, center, v, dt, support);
+                    let g = grounded_step(&world, &capsule, center, v, dt, support);
                     center = g.center;
                     support.steep = g.steep_support;
                     rows.push((v.length() > 0.0, g.steep_support));
@@ -1719,14 +1682,10 @@ mod tests {
         // for, asserted at the advance that made the kerb work.
         let v = world_with_kerb()
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
-                let cast = |from: Vec3, disp: Vec3| {
-                    crate::collision::one_sided::cast_move(
-                        &ms, &capsule, from, disp, SKIN_WIDTH, &filter,
-                    )
-                };
+                let cast =
+                    |from: Vec3, disp: Vec3| world.cast_body(&capsule, from, disp, SKIN_WIDTH);
                 // Stand the body a full kerb below the tread — the same geometry read as a 2.3 yd
                 // wall by dropping the approach to y = −2.0, where the tread is far overhead.
                 let start = Vec3::new(-1.0, CAPSULE_HEIGHT * 0.5 - 2.0, 0.0);
@@ -1904,9 +1863,8 @@ mod tests {
     fn jump_into(mut world: App, start_feet: Vec3, dir: Vec3, frames: usize) -> Vec<AirRow> {
         world
             .world_mut()
-            .run_system_once(move |ms: MoveAndSlide| {
+            .run_system_once(move |world: benilla_world::collision::WorldCollision| {
                 let capsule = player_capsule();
-                let filter = SpatialQueryFilter::default();
                 let dt = std::time::Duration::from_secs_f32(TRAVEL_60FPS / 7.0);
                 let secs = dt.as_secs_f32();
                 let mut center = start_feet + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
@@ -1916,9 +1874,8 @@ mod tests {
                         vel_y = (vel_y - GRAVITY * secs).max(-TERMINAL_VELOCITY);
                         let before = center.y;
                         center = airborne_step(
-                            &ms,
+                            &world,
                             &capsule,
-                            &filter,
                             center,
                             dir * 7.0 + Vec3::Y * vel_y,
                             dt,

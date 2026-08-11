@@ -1,4 +1,4 @@
-//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]), three tags:
+//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`benilla_assets::trace`]), three tags:
 //!
 //! - **`move`** — one line per *interesting* frame of the player mover ([`frame`]): a step-down snap,
 //!   a grounded flip, an airborne frame, or any sizeable vertical delta — so a movement-feel report
@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::dbg_trace;
+use benilla_assets::trace;
 
 /// What the mover did this frame, filled at the end of the physics step in [`super`].
 pub(super) struct Frame {
@@ -52,10 +52,10 @@ pub(super) struct Frame {
 /// and the facing. Read against the sniff's client stream (opcode + flags + orientation per line) this
 /// answers "does our wire look like the reference's?" without anyone squinting at a second window.
 pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f32; 3]) {
-    if !dbg_trace::enabled() {
+    if !trace::enabled() {
         return;
     }
-    dbg_trace::line(
+    trace::line(
         "snd",
         &format!(
             "{kind:?} flags={flags:#x} o={facing:.4} pos=[{:.2},{:.2},{:.2}]",
@@ -75,7 +75,7 @@ pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f3
 /// misdirection that let the constant survive this long. It is echoed on the line so a capture says
 /// which body it was taken on.
 pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
-    if !dbg_trace::enabled() {
+    if !trace::enabled() {
         return;
     }
     let (enter, exit) = (
@@ -90,7 +90,7 @@ pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
     } else {
         '='
     };
-    dbg_trace::line(
+    trace::line(
         "swim",
         &format!(
             "y {feet_y:9.3} surf {surface_y:9.3} depth {depth:6.3} {band} [{exit:.3}..{enter:.3}] h {h:.3} mode={}",
@@ -119,10 +119,10 @@ pub(super) fn settle(resident: bool, waited: f32, pos: bevy::prelude::Vec3) {
             pos.z,
         );
     }
-    if !dbg_trace::enabled() {
+    if !trace::enabled() {
         return;
     }
-    dbg_trace::line(
+    trace::line(
         "sett",
         &format!(
             "{} after {waited:6.2}s at ({:8.2},{:7.2},{:8.2})",
@@ -141,7 +141,7 @@ pub(super) fn settle(resident: bool, waited: f32, pos: bevy::prelude::Vec3) {
 static PREV_GROUNDED: AtomicBool = AtomicBool::new(true);
 
 pub(super) fn frame(f: Frame) {
-    if !dbg_trace::enabled() {
+    if !trace::enabled() {
         return;
     }
     let dy = f.y_out - f.y_in;
@@ -208,7 +208,7 @@ pub(super) fn frame(f: Frame) {
     let left = if left { " LEFT-SURFACE" } else { "" };
     let climb = f.climb.map_or(String::new(), |t| format!(" climb={t:+.3}"));
     let anchored = if f.anchored { " ROOTED" } else { "" };
-    dbg_trace::line(
+    trace::line(
         "move",
         &format!(
             "y {:9.3} -> {:9.3} dy={:+.3}{} grounded={} walk={} vy={:+7.2} {}{}{}{}",

@@ -249,8 +249,8 @@ fn transplant_up(
         id,
         looping: false,
     });
-    if crate::dbg_trace::enabled() {
-        crate::dbg_trace::line(
+    if benilla_assets::trace::enabled() {
+        benilla_assets::trace::line(
             "fct",
             &format!("anim transplant unit={entity} id={id} -> key-bone at {seek:.3}s (bone 0 takes the request)"),
         );
@@ -909,8 +909,8 @@ pub(super) fn drive_animations(
                         active.set_speed(2.0);
                     }
                     drv.deferred = Some(id);
-                    if crate::dbg_trace::enabled() {
-                        crate::dbg_trace::line(
+                    if benilla_assets::trace::enabled() {
+                        benilla_assets::trace::line(
                             "fct",
                             &format!(
                                 "anim fastpath unit={entity} cur={cur} req={id} (cur 2x, req deferred)"
@@ -934,8 +934,8 @@ pub(super) fn drive_animations(
             let base_live = matches!(drv.mode, Mode::Swing { id: m, .. } if m == id)
                 && !oneshot_finished(&player, anims, id, catalog);
             if overlay_live || base_live {
-                if crate::dbg_trace::enabled() {
-                    crate::dbg_trace::line(
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
                         "fct",
                         &format!(
                             "anim dedup-eat unit={entity} id={id} overlay_live={overlay_live} base_live={base_live}"
@@ -1009,8 +1009,8 @@ pub(super) fn drive_animations(
                 base_played = true;
                 played_oneshot = Some(id);
             }
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line(
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
                     "fct",
                     &format!(
                         "anim play unit={entity} id={id} masked={masked_played} base={base_played} under={special:?}"
@@ -1221,7 +1221,7 @@ pub(super) fn drive_animations(
         // frame's PlayAnimation calls).
         overlay_fade_upkeep(&mut drv, &mut player, dt);
 
-        // The anim half of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]): one line per
+        // The anim half of the `WOW_MOVE_TRACE` debug trace ([`benilla_assets::trace`]): one line per
         // frame the SELF unit's settled anim state *changes* — mode, gait, Special, flags, the
         // rate-driving speed, and **both slots** — interleaved with the mover's `move` lines on the
         // same clock, so a feel report ("the char's frames snap on landing") pins which layer moved
@@ -1235,7 +1235,7 @@ pub(super) fn drive_animations(
         // goes slow when I land") is unreadable without it: the request was JumpLandRun 187, the
         // clip playing was Run 5, and `rate=` was the wrong number for exactly that clip
         // (decision 0906). `?` = the slot holds a node this model has no clip record for.
-        if traced && crate::dbg_trace::enabled() {
+        if traced && benilla_assets::trace::enabled() {
             let base = tr
                 .get_main_animation()
                 .and_then(|n| anims.clips.iter().find(|c| c.node == n))
@@ -1261,7 +1261,7 @@ pub(super) fn drive_animations(
                 },
             );
             if anim_trace_last.get(&entity) != Some(&state) {
-                crate::dbg_trace::line("anim", &state);
+                benilla_assets::trace::line("anim", &state);
                 anim_trace_last.insert(entity, state);
             }
         }

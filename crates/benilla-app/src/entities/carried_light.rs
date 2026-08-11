@@ -1,5 +1,5 @@
 //! **Carried M2 lights** — the dynamic point lights an *entity* brings into the world, as opposed to
-//! the ones a placed ADT doodad / WMO prop brings (`crate::terrain_stream`'s `spawn_lights_for`).
+//! the ones a placed ADT doodad / WMO prop brings (`benilla_world::terrain_stream`'s `spawn_lights_for`).
 //!
 //! The law is one law. `0x718960` runs per frame over **every** CM2Model the scene draws — a placed
 //! doodad, a creature, a GameObject, and (recursing at `7191b9`/`719286`) each attached child model —
@@ -20,13 +20,13 @@
 //! joint entity** with the def position rebased into that bone's frame (`position − bone_pivot`),
 //! exactly as the emitters and ribbons ride (0130 phase 4). Bevy's transform propagation then walks
 //! the light through the animation for free, and the per-frame light packer
-//! ([`crate::lighting`]) reads its `GlobalTransform` like any other point light.
+//! ([`benilla_world::lighting`]) reads its `GlobalTransform` like any other point light.
 
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::ModelLight;
 use bevy::prelude::*;
 
-use crate::terrain_stream::point_light;
+use benilla_world::terrain_stream::point_light;
 
 /// Spawn a `PointLight` child for each **casting** (`type==1`, not visibility-gated dark) M2 light of
 /// an entity's model.

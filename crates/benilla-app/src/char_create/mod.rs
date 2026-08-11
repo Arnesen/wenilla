@@ -82,7 +82,7 @@ impl Plugin for CharCreatePlugin {
                 )
                     .chain()
                     .run_if(in_state(ClientState::CharCreate))
-                    .after(crate::schedule::WorldStage::Net),
+                    .after(benilla_world::schedule::WorldStage::Net),
             );
     }
 }

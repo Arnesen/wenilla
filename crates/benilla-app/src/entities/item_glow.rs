@@ -51,8 +51,8 @@ use std::collections::HashMap;
 use benilla_formats::{EnchantCatalog, ItemVisualCatalog, ITEM_VISUAL_SLOTS};
 use bevy::prelude::*;
 
-use crate::model_render::m2_url;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::m2_url;
+use benilla_assets::materials::WowModelMaterial;
 
 use super::equipment::{ItemDisplays, ItemModelKind};
 use super::spell_fx::{attach_effect_visuals, EffectHost, FxTintAnims};
@@ -183,7 +183,7 @@ pub(super) fn attach_item_glows(
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     // One breadcrumb per session the first time a glow actually spawns — the machine-readable
     // "this lane is live" signal for a subsystem whose whole symptom is *absence* (the same
     // idiom `apply_unit_mat_alpha` uses for its cull).

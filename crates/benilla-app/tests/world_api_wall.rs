@@ -1,0 +1,675 @@
+//! **The world API wall** — the doorway of `benilla-world`, counted from source on every
+//! `cargo test`, so it can never be measured once and then quietly widen.
+//!
+//! Decision 1160 splits the world renderer out of `benilla-app` into `benilla-world`, and its
+//! *secondary* falsifier is a number: if the engine's public vocabulary is much larger than a
+//! designed API, the cut line is wrong. 1163 measured it — **214 distinct engine items named by
+//! gameplay code** — and set the gate at **forty**, with the sort into DOWN / PUBLISH / CLOSE as
+//! the work. 1164 is that sort.
+//!
+//! A number in a decision record is a number nobody re-measures. This is the same measurement as
+//! a test, so every commit that closes a leak shows up as [`CEILING`] going down, and every commit
+//! that opens a new one fails the gate the day it lands rather than three weeks later.
+//!
+//! **It has two lives, and it switches by itself.** Before the move, the boundary is a naming
+//! convention: gameplay files reaching `crate::<engine module>::…`. After the move it is a real
+//! crate, and the same count is `benilla_world::…` in `benilla-app`'s sources. The scan below
+//! looks for `crates/benilla-world` and measures whichever world exists — so the ratchet survives
+//! stage two instead of being deleted by it.
+//!
+//! What it deliberately does **not** count: `#[cfg(test)]` bodies (a test naming an internal is
+//! not an API consumer), doc comments (a `[`crate::x::Y`]` link is prose), and the composition
+//! root's plugin registrations are counted like anything else — 1164's plugin-group collapse has
+//! to actually happen for them to stop counting.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+/// The engine's module set inside `benilla-app` — the cut line of 1160, written down.
+///
+/// This list is the pre-move definition of "the world". It is load-bearing in exactly one way: an
+/// engine module missing from it makes its leaks invisible to this test. It goes away at stage
+/// two, when `crates/benilla-world/` becomes the definition and the scan switches to the crate
+/// path (see the module docs).
+const ENGINE_ROOTS: &[&str] = &[
+    "art_scope",
+    "assets",
+    "billboard",
+    "clouds",
+    "clutter",
+    "collision",
+    "debug_panel",
+    "decal",
+    "dev_state",
+    "doodad_anim",
+    "entity_shade",
+    "exterior_cull",
+    "ffx_glow",
+    "instance_tint",
+    "interact",
+    "interior",
+    "lighting",
+    "liquid",
+    "map_proj",
+    "mesh_tag",
+    "model_fade",
+    "model_forms",
+    "model_render",
+    "modkeys",
+    "particles",
+    "perf",
+    "pipe_warm",
+    "ribbons",
+    "rig_anim",
+    "rig_palette",
+    "schedule",
+    "sky",
+    "sky_order",
+    "sun",
+    "surface",
+    "terrain",
+    "terrain_stream",
+    "view",
+    "water_fx",
+    "wdl",
+    "weather",
+    "wmo_portal",
+    "wmo_sky",
+    "world_census",
+    "world_plugins",
+    "world_point",
+    "world_unit",
+    "world_map",
+    "zfill",
+];
+
+/// The instruments — `debug_panel`, `perf`, `pipe_warm`, `art_scope`. They live inside the engine
+/// module set today (the world viewer boots them), but 1160 puts instruments at the *top* of the
+/// stack, not the bottom: extracting them early would publish hundreds of internals as permanent
+/// API shaped by what a debugger wanted to poke. So they are not part of the doorway being
+/// measured, and gameplay reaching into them is a different problem with a different record.
+const INSTRUMENT_ROOTS: &[&str] = &["art_scope", "debug_panel", "perf", "pipe_warm"];
+
+/// The instruments that ended up **above** the engine — `benilla-app` modules that consume
+/// `benilla-world` like any other caller.
+///
+/// 1164's rule is that an instrument's surface is not the engine's designed API: "1160 puts
+/// instruments at the top of the stack, and their surface is a different record's problem".
+/// 1167 corrected the *geography* — the compiler proved these three read the game and cannot live
+/// inside the engine — but the rule it was attached to still holds, and for the reason 1163 gave:
+/// an API whose target is set by what a debugger wanted to poke is the same failure as an API
+/// shaped by whichever `use` statement got written first.
+///
+/// So they are excluded from the gated number and **counted separately**, because a rule that
+/// hides a number is worse than no rule. `art_scope` is not here: it is registered by
+/// `WorldPlugins` and lives inside the engine, so it never crosses.
+const INSTRUMENT_CONSUMERS: &[&str] = &["debug_panel", "perf", "pipe_warm"];
+
+/// Is this file one of the app-side instruments?
+fn is_instrument_consumer(rel: &str) -> bool {
+    let root = rel.split(['/', '.']).next().unwrap_or("");
+    INSTRUMENT_CONSUMERS.contains(&root)
+}
+
+/// The gate. 1163 sets it at forty; this is the current standing count, ratcheted down by each
+/// commit that lands a DOWN or a CLOSE from 1164's sort.
+///
+/// **Lower it when you close something.** The lower bound below exists so that a session which
+/// closes twenty leaks cannot leave the ceiling standing at the old number, which would silently
+/// hand the next twenty leaks a free pass.
+///
+/// It has been raised **twelve times**, and every reason is worth keeping. 138 → 139: `ground_fx`
+/// moved into the engine, where 1164 says it belongs ("326 lines of pure render"), and the game
+/// now names one entry point (`spawn_ground_fx_decal`) where before it named none — it was calling
+/// a module in its own crate. A structural correction that costs one item and buys the lane's
+/// ordering law back from its caller; `ModelEffects` absorbs the entry point when it is built.
+///
+/// **150 → 176: the crate
+/// exists, and the count switched to the thing it was always a proxy for.** Two reasons it went up,
+/// both of them the measurement getting more honest rather than the doorway widening:
+///
+/// - The module-name scan excluded the *instruments* (`debug_panel`, `perf`, `pipe_warm`) as
+///   namers, on the assumption they travel with the engine. The compiler refuted that the moment
+///   the move was attempted: all three read the game, so they stayed in `benilla-app` — and they
+///   consume the engine API like any other consumer, which they always did.
+/// - `crate::x::Y` had to be parsed out of a naming convention. `benilla_world::x::Y` is a real
+///   path the compiler agrees with, so nothing hides behind a form the parser did not anticipate.
+///
+/// The number to work down is this one. It is also the last time it can be argued with: from here
+/// every item on it is a `pub` in `benilla-world`, and closing one is a demotion the compiler
+/// checks.
+///
+/// 149 → 150: `SPAWN_XY`, the
+/// streamer's last-ditch focus, moved out of `lib.rs` and into `terrain_stream` where it is used —
+/// an engine that cannot answer "where do I stream from" with no game attached is not an engine.
+/// The two gameplay readers (the player's boot pose, the world viewer's start) name it across the
+/// line now; it bought the one reverse crossing that neither wall could see.
+///
+/// 155 → 156:
+/// `model_fade::ModelFade` — 1164's alpha inversion, in one component. The game declares how
+/// translucent a root should be; the engine owns the write, the chain composition and the material
+/// swap. One published name for two impossible dependencies, and it retires a gameplay writer of a
+/// channel the reference gives one owner.
+///
+/// 153 → 155:
+/// `world_unit::{WorldUnit, ViewerUnit}` — a body in the world and the viewer's own, replacing
+/// five engine lanes' filters on the game's wire record. Two published markers for three
+/// impossible dependencies (`net::NetEntity`, `net::SelfPlayer`, `entities::CollisionHeight`).
+///
+/// 152 → 153: `view::Viewer`
+/// — the avatar as a *body* (where, how fast, which way, how tall) rather than as the game's
+/// `Player` type. Three engine lanes were reading it behind the identical predicate. One published
+/// resource for two impossible dependencies.
+///
+/// 148 → 152: `creature_anim`
+/// split along 1163's line — the rig machinery (pose evaluation, world/palette composition, the
+/// global-sequence channels) became `rig_anim` and the game kept the policy. The four are the real
+/// "pose a rig" vocabulary (`RigPose`, `RigFrame`/`RigAnchor`, `PosePost`, `GlobalSeqDrive`), and
+/// they belong beside `RigPalettes` and `RigSkin` in 1164's *place* face — a second program that
+/// spawns a skinned model has to pose it. They bought three impossible dependencies.
+///
+/// 147 → 148: 1160's wire
+/// (b). The engine stopped reading the game's four-variant session enum to learn whether a world
+/// exists and started reading its own one-bit `schedule::WorldLive`, which the session writes.
+///
+/// 145 → 147: 1160's wire
+/// (a) inverted. The streamer stopped reading `player::Player` and started reading
+/// `terrain_stream::ViewFocus`, which the game writes; and `WorldLoadProgress` — the streamer's
+/// own residency fact, which had been living in `loading_screen` — came home, so its two readers
+/// (the bar, and the mover's post-snap hold) now name it across the line. Two published inputs
+/// bought four reverse crossings, and the enforcer stopped needing a stub avatar to boot.
+///
+/// 143 → 145: two capture
+/// fixtures that had been living inside engine modules (`water_fx::view`, the foam viewer, and
+/// `particles::census`, the draw-address probe) moved out to `capture`, where they belong — and
+/// an instrument on the game side naming engine internals is a forward crossing where an
+/// instrument *inside* the engine was not counted at all. Same shape as the 160 → 162 raise
+/// below: the doorway did not widen, the measurement got honest. It closed three reverse
+/// crossings, including an engine plugin that had to name `capture` to register a fixture.
+///
+/// 142 → 143: the depth-bias
+/// ladder came together in `sky_order` as one `Rung` type. That is a genuinely new forward
+/// crossing — gameplay lanes now name an engine rung where before each kept its own constant —
+/// and it bought three REVERSE crossings, the ones that cannot exist at all once the crate does.
+/// One published rung against three impossible dependencies is the trade, and the ladder is
+/// engine API by 1164's own spine (a second program orders against the engine's frame).
+///
+/// 133 → 154, and this is the one to read first: it is not a leak, it is the wall admitting it
+/// had been lying. `expand` stopped walking at a brace, so `use benilla_world::interact::{A, B}`
+/// — the ordinary Rust import — collapsed to the bare module path and was then discarded as a
+/// prefix. Only items written out fully qualified at a *usage* site were ever counted. Every
+/// number this test has printed since the crate landed was an undercount of the same kind, and
+/// the honest surface is 154. Found by disagreement: a second scanner put the total one item
+/// lower while naming items this one had never heard of, and neither error was visible from
+/// either side alone. `WOW_API_DUMP=1` exists because of this.
+///
+/// And 160 → 162, the first one: moving
+/// `StreamActivity` out of `perf` and `DebugState` out of `debug_panel` did not widen the doorway,
+/// it stopped two engine facts hiding inside instrument modules this test deliberately does not
+/// count. The items were always crossing; the measurement improved. That is the only kind of raise
+/// that is not a retreat — a raise for a NEW leak is the failure this number exists to catch.
+const CEILING: usize = 154;
+
+/// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
+/// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it
+/// impossible to bank a whole stage of work without writing the new number down.
+const SLACK: usize = 10;
+
+#[test]
+fn the_world_api_doorway_stays_shut() {
+    let all = measure();
+    // Partition: an item only an instrument names is the instruments' surcharge, not the designed
+    // doorway (see `INSTRUMENT_CONSUMERS`). One a game module *also* names is the doorway's.
+    let (probes, surface): (BTreeMap<_, _>, BTreeMap<_, _>) = all
+        .into_iter()
+        .partition(|(_, files)| files.iter().all(|f| is_instrument_consumer(f)));
+    let n = surface.len();
+    // Always say the number: `cargo test -p benilla-app --test world_api_wall -- --nocapture` is
+    // the one-command answer to "where is the wall now", which is asked on every unit of 1164's
+    // sort and used to need a deliberately-failing ceiling to get.
+    eprintln!(
+        "world API surface: {n} items (ceiling {CEILING}, slack {SLACK})  \
+         + {} named only by the instruments",
+        probes.len()
+    );
+
+    // `WOW_API_DUMP=1` prints the surface itself, most-named first. The count alone answers "is
+    // the wall holding"; it cannot answer "which item did that unit actually retire", and a unit
+    // that reads as net-zero is exactly when you need the list (a second scanner disagreeing by
+    // one is how this got added).
+    if std::env::var("WOW_API_DUMP").is_ok() {
+        let mut rows: Vec<_> = surface.iter().map(|(k, v)| (v.len(), k)).collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        eprintln!("{}", render(&rows));
+        let mut probe_rows: Vec<_> = probes.iter().map(|(k, v)| (v.len(), k)).collect();
+        probe_rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        eprintln!(
+            "--- named only by the instruments ---\n{}",
+            render(&probe_rows)
+        );
+    }
+
+    if n > CEILING {
+        let fresh: Vec<_> = surface.iter().map(|(k, v)| (v.len(), k)).collect();
+        panic!(
+            "world API surface is {n} items, ceiling is {CEILING}.\n\
+             Something new crossed the line. Either close it, or — if it is genuine engine API — \
+             raise the ceiling in this file WITH the justification, the way decision 1164 requires \
+             for every item in the PUBLISH bucket.\n\n{}",
+            render(&fresh)
+        );
+    }
+    assert!(
+        n + SLACK >= CEILING,
+        "world API surface is down to {n} items and the ceiling still says {CEILING}. \
+         Lower CEILING to {n} in this file so the next leak has to earn its place — the ratchet \
+         only holds if the number follows the work down."
+    );
+}
+
+/// **The wall that points the other way.** 1160 stage one's other half: an engine file naming a
+/// gameplay item is a dependency `benilla-world` cannot express, so every one of these has to go
+/// before the crate can exist at all. Ratcheted to zero, and then the crate graph keeps it there.
+#[test]
+fn the_engine_names_nothing_of_the_game() {
+    let surface = measure_back();
+    let n = surface.len();
+    eprintln!("engine→game surface: {n} items (target 0 — CLOSED)");
+    assert!(
+        n == 0,
+        "the engine names {n} gameplay items, and this wall is CLOSED — it reached zero and must \
+         stay there.\n\
+         An engine file reaching into the game is the dependency `benilla-world` cannot have: not \
+         a lint, a compile error waiting for the crate to exist. Invert it (the engine publishes \
+         the fact, the game reads it), move the caller, or move the thing named.\n\n{}",
+        render(
+            &surface
+                .iter()
+                .map(|(k, v)| (v.len(), k))
+                .collect::<Vec<_>>()
+        )
+    );
+}
+
+/// Every distinct engine item named by non-engine code, and the files that name it.
+fn measure() -> BTreeMap<String, BTreeSet<String>> {
+    let app = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let split = app
+        .parent()
+        .is_some_and(|c| c.join("benilla-world").is_dir());
+
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let src = app.join("src");
+    let tests = test_module_files(&src);
+    for file in rs_files(&src) {
+        let rel = file
+            .strip_prefix(&src)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // Pre-move, the caller's own module decides which side of the line it is on; post-move,
+        // every file in this crate is on the game side by construction.
+        if (!split && is_engine(&rel)) || tests.contains(&rel) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (path, _) in paths_in(&text, split, true) {
+            out.entry(path).or_default().insert(rel.clone());
+        }
+    }
+    drop_module_paths(out)
+}
+
+/// Drop every entry that is only the **path to** another entry.
+///
+/// `use benilla_world::particles::buffer;` exists so the file can write `buffer::EffectQuads`
+/// below, and that second form is the one worth counting. There is no syntactic way to tell a
+/// module path from a free function — `particles::buffer` and `mesh_tag::spawn_tag` look
+/// identical — but there is a structural one: a module path is a **strict prefix of something
+/// else that was named**, and a function is a prefix of nothing.
+///
+/// This generalises a special case that only caught single-segment modules and so missed
+/// `particles::buffer` by one level. A rule that needs a list of exceptions is usually the wrong
+/// rule; this one needs none.
+fn drop_module_paths(
+    all: BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let keys: Vec<String> = all.keys().cloned().collect();
+    all.into_iter()
+        .filter(|(k, _)| {
+            let prefix = format!("{k}::");
+            !keys.iter().any(|other| other.starts_with(&prefix))
+        })
+        .collect()
+}
+
+/// Every **gameplay** item named by an ENGINE file — the wall that points the other way.
+///
+/// Empty by construction once the crate exists: `benilla-world` does not depend on `benilla-app`,
+/// so a name that crosses this way is not a lint, it is a compile error. Before the move it is
+/// only a convention, and this is what holds it.
+fn measure_back() -> BTreeMap<String, BTreeSet<String>> {
+    let app = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if app
+        .parent()
+        .is_some_and(|c| c.join("benilla-world").is_dir())
+    {
+        return BTreeMap::new(); // the crate graph is the enforcement now
+    }
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let src = app.join("src");
+    let tests = test_module_files(&src);
+    for file in rs_files(&src) {
+        let rel = file
+            .strip_prefix(&src)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        if tests.contains(&rel) {
+            continue;
+        }
+        // Instruments are allowed to see both sides — 1160 puts them at the top of the stack, so
+        // they are not part of the engine being extracted and their reads are a later record's.
+        let root = rel.split(['/', '.']).next().unwrap_or("");
+        if !is_engine(&rel) || INSTRUMENT_ROOTS.contains(&root) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (path, _) in paths_in(&text, false, false) {
+            out.entry(path).or_default().insert(rel.clone());
+        }
+    }
+    out
+}
+
+/// Every source file that is a **test module in its own file** — declared `#[cfg(test)] mod x;`
+/// somewhere, with its body in `x.rs` or `x/mod.rs` beside its parent.
+///
+/// 1164's counting rule says `#[cfg(test)]` bodies do not count: a test naming an internal is not
+/// an API consumer. The scan honours that for an inline `#[cfg(test)] mod tests { … }` by tracking
+/// brace depth, and used to miss it entirely when the same module lives in its own file — so a
+/// test file inflated the wall with items no shipping code names. One item was hiding behind this
+/// (`mesh_tag::alpha_of`, read by `aura_visual/tests.rs` to assert a packed alpha round-trips);
+/// the rule, not the count, is why it is worth fixing.
+fn test_module_files(src: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for file in rs_files(src) {
+        let text = std::fs::read_to_string(&file).unwrap();
+        // A module file's children live in a directory named after it — `a.rs`'s `mod b;` is
+        // `a/b.rs`; `a/mod.rs`'s is `a/b.rs` too.
+        let dir = match file.file_name().and_then(|n| n.to_str()) {
+            Some("mod.rs") | Some("lib.rs") | Some("main.rs") => {
+                file.parent().unwrap().to_path_buf()
+            }
+            _ => file.with_extension(""),
+        };
+        let mut armed = false;
+        for line in text.lines() {
+            let t = line.trim();
+            if t == "#[cfg(test)]" {
+                armed = true;
+                continue;
+            }
+            if armed {
+                if let Some(name) = t
+                    .strip_suffix(';')
+                    .and_then(|d| d.rsplit_once("mod "))
+                    .map(|(_, n)| n)
+                {
+                    for cand in [
+                        dir.join(format!("{name}.rs")),
+                        dir.join(name).join("mod.rs"),
+                    ] {
+                        if cand.is_file() {
+                            out.insert(
+                                cand.strip_prefix(src)
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                armed = false;
+            }
+        }
+    }
+    out
+}
+
+fn is_engine(rel: &str) -> bool {
+    let root = rel.split(['/', '.']).next().unwrap_or("");
+    ENGINE_ROOTS.contains(&root)
+}
+
+/// Walk a source file and yield `(canonical item, line)` for every engine path it names in code.
+///
+/// Hand-rolled rather than a regex dependency, and deliberately literal: it follows `crate::root::`
+/// (or `benilla_world::` once the crate exists), expands a `use` brace group so
+/// `use crate::assets::{AssetSet, LockRecover}` counts as two items, and stops the path at its
+/// first capitalised segment so `crate::assets::WorldAssets::get` is one item and not two.
+fn paths_in(text: &str, split: bool, want_engine: bool) -> Vec<(String, usize)> {
+    let prefix = if split { "benilla_world::" } else { "crate::" };
+    let mut found = Vec::new();
+    let mut depth: i32 = 0;
+    let mut test_depth: Option<i32> = None;
+    for (n, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("#[cfg(test)]") {
+            test_depth = Some(depth);
+        }
+        if test_depth.is_some_and(|d| depth < d) {
+            test_depth = None;
+        }
+        let skip = test_depth.is_some() || t.starts_with("//") || t.starts_with('*');
+        if !skip {
+            let mut rest = line;
+            while let Some(i) = rest.find(prefix) {
+                // A bare `xcrate::` is not our prefix; require a non-ident char before it.
+                let boundary = i == 0 || !is_ident(rest.as_bytes()[i - 1] as char);
+                let tail = &rest[i + prefix.len()..];
+                if boundary {
+                    // A **crate-root** item — `crate::SPAWN_XY`, no module segment — is neither
+                    // side's by module, and both walls were structurally blind to it: the parse
+                    // below wants a lowercase module root, so an uppercase first segment fell out
+                    // entirely. It belongs to the *game* by construction, because `lib.rs` is what
+                    // stays behind in `benilla-app` when the engine moves — so an engine file
+                    // naming one is a reverse crossing, and it took a hand-rolled grep over the
+                    // engine file set to find the one that was hiding (`SPAWN_XY`).
+                    let root_item = !split
+                        && ident(tail).is_some_and(|(r, a)| {
+                            r.starts_with(char::is_uppercase) && !a.starts_with("::")
+                        });
+                    if root_item && !want_engine {
+                        if let Some((r, _)) = ident(tail) {
+                            found.push((format!("crate::{r}"), n + 1));
+                        }
+                        rest = &rest[i + prefix.len()..];
+                        continue;
+                    }
+                    let (root, after) = if split {
+                        (String::new(), tail)
+                    } else {
+                        match ident(tail) {
+                            Some((r, a))
+                                if a.starts_with("::") && !r.starts_with(char::is_uppercase) =>
+                            {
+                                (r, &a[2..])
+                            }
+                            _ => (String::new(), ""),
+                        }
+                    };
+                    // Three sides, not two. An INSTRUMENT is neither: it is excluded from the
+                    // doorway being measured (1160 puts instruments at the top of the stack), and
+                    // an engine file naming one is not a reverse dependency either — every
+                    // instrument module is registered by `WorldPlugins`, so it travels *with* the
+                    // engine into the crate.
+                    let instrument = !split && INSTRUMENT_ROOTS.contains(&root.as_str());
+                    let engine = split || (!instrument && ENGINE_ROOTS.contains(&root.as_str()));
+                    let keep = if want_engine {
+                        engine
+                    } else {
+                        !engine && !instrument
+                    };
+                    if keep && !after.is_empty() {
+                        for tail in expand(after) {
+                            let full = if root.is_empty() {
+                                tail
+                            } else {
+                                format!("{root}::{tail}")
+                            };
+                            let item = canon(&full);
+                            // A bare module name is not an item — `use benilla_world::interact;`
+                            // exists so the file can write `interact::WorldObject` below. Most of
+                            // these are caught structurally by `drop_module_paths`, but not the
+                            // ones whose member is only named where this scan does not look (a
+                            // `#[cfg(test)]` block, a macro body), so the parse drops them too.
+                            let bare_module =
+                                !item.contains("::") && !item.starts_with(char::is_uppercase);
+                            if !bare_module {
+                                found.push((item, n + 1));
+                            }
+                        }
+                    }
+                }
+                rest = &rest[i + prefix.len()..];
+            }
+        }
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+    }
+    found
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The leading identifier of `s`, and what follows it.
+fn ident(s: &str) -> Option<(String, &str)> {
+    let end = s.find(|c: char| !is_ident(c)).unwrap_or(s.len());
+    (end > 0).then(|| (s[..end].to_string(), &s[end..]))
+}
+
+/// The dotted tails a path fragment names — one, or every leaf of a `use` brace group.
+fn expand(s: &str) -> Vec<String> {
+    let s = s.trim_start();
+    if !s.starts_with('{') {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some((seg, after)) = ident(rest) {
+            if !out.is_empty() {
+                out.push_str("::");
+            }
+            out.push_str(&seg);
+            if !after.starts_with("::") {
+                break;
+            }
+            let tail = &after[2..];
+            // `interact::{WorldClick, WorldRightClick}` — a group hanging off a path we have
+            // already walked. Without this the walk stops dead at the brace and the whole group
+            // collapses to the bare module path, which `drop_module_paths` then discards: every
+            // item imported the ordinary Rust way was invisible to both walls. The brace arm
+            // below only ever saw a group that began the path, which in real code it never does.
+            if tail.trim_start().starts_with('{') {
+                let head = out;
+                return expand(tail)
+                    .into_iter()
+                    .map(|leaf| format!("{head}::{leaf}"))
+                    .collect();
+            }
+            rest = tail;
+        }
+        return if out.is_empty() { vec![] } else { vec![out] };
+    }
+    let mut depth = 0usize;
+    let mut end = s.len();
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    for part in split_top(&s[1..end], &mut depth) {
+        let part = part.trim();
+        let part = part.split(" as ").next().unwrap_or(part).trim();
+        if part.is_empty() || part == "self" {
+            continue;
+        }
+        match part.find('{') {
+            Some(b) => {
+                let head = part[..b].trim_end_matches(':');
+                for leaf in expand(&part[b..]) {
+                    out.push(format!("{head}::{leaf}"));
+                }
+            }
+            None => out.extend(expand(part)),
+        }
+    }
+    out
+}
+
+/// Split on commas that are not inside a nested brace group.
+fn split_top<'a>(s: &'a str, depth: &mut usize) -> Vec<&'a str> {
+    let (mut out, mut start) = (Vec::new(), 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => *depth += 1,
+            '}' => *depth = depth.saturating_sub(1),
+            ',' if *depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// A path folded to the symbol it names: everything up to and including the first capitalised
+/// segment (a type), or the whole path when every segment is lowercase (a function).
+fn canon(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split("::") {
+        out.push(seg);
+        if seg.starts_with(char::is_uppercase) {
+            break;
+        }
+    }
+    out.join("::")
+}
+
+fn rs_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn render(items: &[(usize, &String)]) -> String {
+    let mut v = items.to_vec();
+    v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    v.iter()
+        .map(|(n, k)| format!("  {n:3} file(s)  {k}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

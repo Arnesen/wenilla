@@ -13,6 +13,9 @@ trace_chrome = ["benilla-app/trace_chrome"]
 [dependencies]
 benilla-app = { path = "../benilla-app" }
 
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }
+
 [[bin]]
 name = "benilla"
 path = "src/main.rs"

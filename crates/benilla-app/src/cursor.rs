@@ -28,7 +28,7 @@
 //! the pointer sits at the icon's top-left corner, the icon hangs down-right, matching the
 //! reference look (and `ui_script::extract::cursor_icon_quad`'s capture-only stand-in).
 
-use crate::assets::AssetSet;
+use benilla_assets::AssetSet;
 use bevy::prelude::*;
 
 /// The held cursor payload's icon path (`Interface\Icons\…`, extensionless — the DBC/FrameXML
@@ -46,7 +46,7 @@ fn payload_icon(script: &benilla_ui::script::UiScript) -> Option<String> {
 }
 
 /// Box-downsample a raw RGBA8 image (top-to-bottom raster order —
-/// [`crate::assets::WorldAssets::decode_rgba`]'s layout) to a fixed 32×32 buffer: each output
+/// [`benilla_assets::WorldAssets::decode_rgba`]'s layout) to a fixed 32×32 buffer: each output
 /// texel averages a `(w/32)×(h/32)` block of the source. Vanilla item icons are 64×64 — a clean
 /// 2×2 average per output texel (decision 0216 §5) — but this degrades gracefully for any other
 /// source size.
@@ -87,7 +87,7 @@ fn box_downsample_32(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
 /// (byte-verified, wow-re cursor-dragdrop-payload.md: 64×64 → 2×2 box filter → 32×32, alpha
 /// written 0xFF; folded back by 0218). `None` on a missing/undecodable icon.
 fn decode_payload_cursor_rgba(
-    assets: &mut crate::assets::WorldAssets,
+    assets: &mut benilla_assets::WorldAssets,
     path: &str,
 ) -> Option<Vec<u8>> {
     let (w, h, rgba) = assets.decode_rgba(path)?;
@@ -297,7 +297,7 @@ impl Plugin for CursorPlugin {
 #[cfg(not(target_os = "macos"))]
 mod other {
     use super::{cursor_path, payload_icon, CURSOR_STEMS};
-    use crate::assets::{cursor_texture, WorldAssets};
+    use benilla_assets::{cursor_texture, WorldAssets};
     use bevy::platform::collections::{HashMap, HashSet};
     use bevy::prelude::*;
     use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
@@ -418,9 +418,9 @@ mod other {
 mod macos {
     use std::collections::{HashMap, HashSet};
 
-    use crate::assets::LockRecover;
-    use crate::assets::WorldAssets;
     use crate::player::CameraControl;
+    use benilla_assets::LockRecover;
+    use benilla_assets::WorldAssets;
     use benilla_formats::read_texture_rgba;
     use bevy::prelude::*;
     use objc2::rc::Retained;

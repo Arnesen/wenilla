@@ -9,13 +9,10 @@
 use benilla_formats::{CharSkinSlot, ModelBlend};
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
-use bevy::render::render_resource::Buffer;
 
-use crate::assets::{repeat_texture_authored, LockRecover, WorldAssets};
-use crate::lighting::SharedLightBuffer;
-use crate::model_render::{model_material, MaterialCache, ShadeSel};
 use crate::net::{NetEntity, ObjectStore};
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::{repeat_texture_authored, LockRecover, WorldAssets};
 
 use super::super::{DisplayModel, EntityPart, SkinKey, SkinSections};
 
@@ -207,7 +204,7 @@ pub(super) type MatQuint = (
     Handle<WowModelMaterial>,
     Handle<WowModelMaterial>,
     Handle<WowModelMaterial>,
-    Handle<WowModelMaterial>,
+    Option<Handle<WowModelMaterial>>,
 );
 
 /// The full character material set [`build_char_skin_materials`] returns: `(body, hair, object,
@@ -220,81 +217,6 @@ pub(super) type CharSkinMaterials = (
     Option<MatQuint>,
     (Option<MatQuint>, Option<MatQuint>),
 );
-
-/// Build the (steady, interior-matte, fade-blend, interior-bake, interior-bake-blend) variants for
-/// one character texture at one blend + sidedness. The body is opaque, hair is alpha-cut (its own
-/// blend) — so the caller passes the blend, and the fade variants carry it too as the SOURCE blend
-/// (`model_material` builds them `AlphaMode::Blend` regardless; the source decides the twin's
-/// 224/255 cutout marker — decision 0842. The feathers ramp alpha; the bake-blend keeps the probe
-/// light through a feather — 0355). All sky-lit; `model_material` dedups them by (texture, blend,
-/// sidedness, …).
-fn build_char_materials(
-    tex: Handle<Image>,
-    blend: ModelBlend,
-    two_sided: bool,
-    light: &Buffer,
-    materials: &mut Assets<WowModelMaterial>,
-    cache: &mut MaterialCache,
-) -> MatQuint {
-    // The depth-prime twin (decision 0831): body/hair batches are opaque/alpha-cut and always
-    // z-writing, so every character part twins; `cutout` mirrors the colour twin's 224/255
-    // discard exactly as the model-built parts' twins do — only an AlphaKey source alpha-tests
-    // while fading (decision 0842). Built before `mk` captures the caches.
-    let zfill = crate::model_render::zfill_material(
-        cache,
-        materials,
-        Some(tex.clone()),
-        two_sided,
-        blend == ModelBlend::AlphaTest,
-        light,
-    );
-    let mut mk = |blend, shade: ShadeSel, fade, probe| {
-        model_material(
-            cache,
-            materials,
-            Some(tex.clone()),
-            blend,
-            two_sided,
-            false,
-            probe, // interior-PROP mode: the shader reads the MeshTag as an SH-probe slot
-            false,
-            false,
-            fade,
-            false,
-            false,
-            // A character body/hair texture is a synthetic composite, not one M2 batch — it carries
-            // no blend-mode fog policy of its own (body/hair are always opaque/alpha-cut, which the
-            // byte table fogs toward the scene colour anyway).
-            benilla_formats::FogPolicy::Scene,
-            // …and no generated texcoords: a composite body/hair sheet is sampled by the body's
-            // own authored UVs. Env-mapping reaches a character through the ArmorReflect batches
-            // of its HELD items, which spawn as ordinary M2 submeshes and carry their own flag.
-            false,
-            // Steady/fade: LIT like every entity M2 — the owner's dynamic MCSH shade reaches these
-            // parts per instance through the MeshTag shade byte (`entity_shade`), not the shared
-            // material. Interior-matte: the plain pair at sun ×1.0 — the null-node fallback.
-            // Interior-bake: the footprint-MOCV probe, the steady indoor law for every entity M2
-            // (wow-re `unit-m2-shader-light.md` — units take the same entity-node bake as
-            // GameObjects; shade is unread on the probe lane).
-            shade,
-            0,
-            None,  // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
-            None,  // character skin/hair swaps never carry an animated M2Color tint
-            None,  // worn/held part: light selection anchors at the instance origin
-            None,  // M2 carries no MOMT SIDN colour
-            false, // …nor the WINDOW flag
-            light,
-        )
-    };
-    (
-        mk(blend, ShadeSel::Lit, false, false),
-        mk(blend, ShadeSel::Matte, false, false),
-        mk(blend, ShadeSel::Lit, true, false),
-        mk(blend, ShadeSel::Matte, false, true),
-        mk(blend, ShadeSel::Matte, true, true),
-        zfill,
-    )
-}
 
 /// Build a character body's per-appearance materials — the **body** atlas (as a (single-sided,
 /// two-sided) pair — a body batch keeps its own M2 0x04, e.g. the robe skirt) and the **hair**-mesh
@@ -319,18 +241,27 @@ pub(super) fn build_char_skin_materials(
     displays: Option<&super::super::ItemDisplays>,
     sections: Option<&SkinSections>,
     world_assets: Option<&WorldAssets>,
-    light: Option<&SharedLightBuffer>,
     parts: &[EntityPart],
     images: &mut Assets<Image>,
-    skin_cache: &mut crate::art_scope::SpatialCache<SkinKey, Handle<Image>>,
+    skin_cache: &mut benilla_assets::SpatialCache<SkinKey, Handle<Image>>,
     asset_server: &AssetServer,
-    materials: &mut Assets<WowModelMaterial>,
-    cache: &mut MaterialCache,
+    mats: &mut benilla_world::model_render::M2BatchMaterials,
 ) -> CharSkinMaterials {
-    let (Some(sections), Some(light)) = (sections, light) else {
+    let (Some(sections), true) = (sections, mats.ready()) else {
         return (None, None, None, (None, None));
     };
-    let light = &light.0;
+    // The quint IS the engine's variant set, in the order the character swap reads it: steady,
+    // interior-matte, appear-fade-blend, interior-bake, interior-bake-blend, depth-prime twin.
+    let quint = |v: benilla_world::model_render::BatchVariants| {
+        (
+            v.steady,
+            v.interior,
+            v.fade_blend,
+            v.interior_bake,
+            v.interior_bake_blend,
+            v.zfill,
+        )
+    };
 
     // Body-skin atlas. A character-model NPC loads its shipped, pre-baked atlas directly; a player (or an
     // NPC row without a bake name) composites it live from CharSections + overlays, uploaded + cached
@@ -393,15 +324,14 @@ pub(super) fn build_char_skin_materials(
     // the second quint is a handful of cache entries per look, shared like the first.
     let body = body_tex.map(|tex| {
         (
-            build_char_materials(
-                tex.clone(),
-                ModelBlend::Opaque,
-                false,
-                light,
-                materials,
-                cache,
+            quint(
+                mats.char_variants(tex.clone(), ModelBlend::Opaque, false)
+                    .expect("light buffer checked at entry"),
             ),
-            build_char_materials(tex, ModelBlend::Opaque, true, light, materials, cache),
+            quint(
+                mats.char_variants(tex, ModelBlend::Opaque, true)
+                    .expect("light buffer checked at entry"),
+            ),
         )
     });
 
@@ -424,14 +354,8 @@ pub(super) fn build_char_skin_materials(
                 "mpq://{}",
                 path.replace('\\', "/").to_ascii_lowercase()
             ));
-            Some(build_char_materials(
-                tex,
-                hair_part.blend,
-                hair_part.two_sided,
-                light,
-                materials,
-                cache,
-            ))
+            mats.char_variants(tex, hair_part.blend, hair_part.two_sided)
+                .map(&quint)
         });
 
     // Cape texture (decision 0074's empirical pin): the worn cloak's ItemDisplayInfo
@@ -450,14 +374,8 @@ pub(super) fn build_char_skin_materials(
                 "mpq://item/objectcomponents/cape/{}.blp",
                 tex_name.to_ascii_lowercase()
             ));
-            Some(build_char_materials(
-                tex,
-                part.blend,
-                part.two_sided,
-                light,
-                materials,
-                cache,
-            ))
+            mats.char_variants(tex, part.blend, part.two_sided)
+                .map(&quint)
         });
 
     // Extra-skin texture (the tauren fur, M2 type 8) — CharSections `sectionType 0` `TextureName[1]`
@@ -479,14 +397,8 @@ pub(super) fn build_char_skin_materials(
                 let part = parts.iter().find(|p| {
                     p.char_slot == Some(CharSkinSlot::SkinExtra) && p.two_sided == two_sided
                 })?;
-                Some(build_char_materials(
-                    tex.clone(),
-                    part.blend,
-                    part.two_sided,
-                    light,
-                    materials,
-                    cache,
-                ))
+                mats.char_variants(tex.clone(), part.blend, part.two_sided)
+                    .map(&quint)
             };
             (quint_for(false), quint_for(true))
         });

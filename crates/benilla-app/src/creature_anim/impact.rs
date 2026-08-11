@@ -134,8 +134,8 @@ pub(super) fn route_swing_impacts(
                 defended: false,
             },
         ) {
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line(
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
                     "fct",
                     &format!(
                         "flush supersede atk={:?} dmg={}",
@@ -155,8 +155,8 @@ pub(super) fn route_swing_impacts(
             // Fires once: the tag consumes the record (`0x6247d0` clears the GUIDs after
             // dispatch) — a `$CPP` authored after this frame finds nothing (mutual exclusion).
             if let Some(p) = pending.0.remove(&ev.entity) {
-                if crate::dbg_trace::enabled() {
-                    crate::dbg_trace::line(
+                if benilla_assets::trace::enabled() {
+                    benilla_assets::trace::line(
                         "fct",
                         &format!(
                             "impact tag={} atk={:?} dmg={}",
@@ -175,8 +175,8 @@ pub(super) fn route_swing_impacts(
                     text_only: false,
                     natural,
                 });
-            } else if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line(
+            } else if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
                     "fct",
                     &format!(
                         "impact tag={} atk={:?} NO-PENDING",
@@ -208,8 +208,8 @@ pub(super) fn route_swing_impacts(
     for SwingFlush(attacker) in flushes.read() {
         // SMSG_ATTACKSTOP → 0x624e40: text-only flush + clear (death/stun arrive as this packet).
         if let Some(p) = pending.0.remove(attacker) {
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line(
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
                     "fct",
                     &format!("flush stop atk={:?} dmg={}", attacker, p.swing.damage),
                 );

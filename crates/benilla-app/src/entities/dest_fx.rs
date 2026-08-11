@@ -39,8 +39,8 @@
 use bevy::prelude::*;
 
 use crate::creature_anim::{SpellKitSound, SpellVisuals};
-use crate::model_render::m2_url;
 use crate::net::{NetEntity, ObjectStore};
+use benilla_assets::m2_url;
 use benilla_protocol::EntityKind;
 
 use super::spell_fx::{attach_effect_visuals, SpellFx};
@@ -275,10 +275,10 @@ pub(super) fn attach_ground_fx_models(
     time: Res<Time>,
     mut instances: Query<(Entity, &mut GroundFx, Option<&mut AnimationPlayer>)>,
     fx: Option<Res<SpellFx>>,
-    mut wow_materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
+    mut wow_materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
     let Some(fx) = fx else { return };
     let now = time.elapsed_secs();

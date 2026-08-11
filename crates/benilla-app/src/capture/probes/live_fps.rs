@@ -1,14 +1,20 @@
 //! The live frame-time sample ([`LiveFpsPlugin`]) and everything printed from the same sample
-//! window: the `FPS_PROBE` line itself, the visible-submesh census (`VisCensus` —
-//! `VIS_CENSUS`/`VIS_ESCAPED`/`VIS_DUMP`), the asset-churn ratchet (`ChurnCensus` —
-//! `MAT_CHURN`) and the residency meter (`ResidencyMeter` — `ASSET_DUMP`). One file because
-//! one system, `drive_live_fps`, builds all four from the same frame's queries at the same
-//! instant — they are one measurement with four line families, not four instruments.
+//! window: the `FPS_PROBE` line itself, the visible-submesh census
+//! (`VIS_CENSUS`/`VIS_ESCAPED`/`VIS_DUMP`), the asset-churn ratchet (`MAT_CHURN`) and the
+//! residency meter (`ASSET_DUMP`). One file because one system, `drive_live_fps`, prints all four
+//! from the same frame at the same instant — they are one measurement with four line families,
+//! not four instruments.
+//!
+//! **What is counted lives in [`benilla_world::world_census`]; what is printed lives here.** The census
+//! is the engine's own published account of the frame it drew (decision 1164) — this probe adds
+//! the timing window around it and owns the line shapes, which are a greppable contract of ours
+//! and no business of the renderer's.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::capture::PROBE_WARMUP_FRAMES;
+use benilla_world::world_census::WorldCensus;
 
 /// The LIVE FPS probe (`WOW_LIVE_FPS=<frames>`, delay via `WOW_LIVE_FPS_AT` seconds, default 25;
 /// `WOW_LIVE_FPS_MOVE=1` holds W through warmup + sampling, so the probe measures RUNNING through
@@ -44,29 +50,11 @@ impl Plugin for LiveFpsPlugin {
             occluded_now: false,
             occluded_frames: 0,
         })
-        .init_resource::<ChurnCensus>()
-        .add_systems(Update, drive_live_fps)
-        .add_systems(
-            First,
-            (
-                (
-                    churn_counter::<bevy::image::Image>("image"),
-                    churn_counter::<Mesh>("mesh"),
-                    churn_counter::<StandardMaterial>("std"),
-                    churn_counter::<crate::terrain::TerrainMaterial>("terrain"),
-                    churn_counter::<crate::terrain::WowModelMaterial>("model"),
-                    churn_counter::<crate::terrain::WdlMaterial>("wdl"),
-                    churn_counter::<crate::terrain::LiquidMaterial>("liquid"),
-                ),
-                (
-                    churn_counter::<crate::sky::SkyMaterial>("sky"),
-                    churn_counter::<crate::sun::CelestialMaterial>("celestial"),
-                    churn_counter::<crate::sun::StarMaterial>("star"),
-                    churn_counter::<crate::clouds::CloudMaterial>("cloud"),
-                    churn_counter::<crate::ui_pass::UiQuadMaterial>("uiquad"),
-                ),
-            ),
-        );
+        .add_systems(Update, drive_live_fps);
+        WorldCensus::churn_counters(app);
+        // The engine counts its own materials; the UI pass is ours, so we fold it into the same
+        // tally rather than keeping a second one that could disagree about the window.
+        WorldCensus::count_churn::<crate::ui_pass::UiQuadMaterial>(app, "uiquad");
     }
 }
 
@@ -106,116 +94,19 @@ struct LiveFps {
     occluded_frames: usize,
 }
 
-/// Asset residency — the leak meter (the #bugs teleport leak: caches hold strong handles, so maps
-/// visited earlier keep their materials/meshes/images resident, and every uv/tint registry survivor
-/// is re-uploaded per frame). A tour probe reading the same counts as a fresh control is what
-/// "torn down" means, machine-checked. One struct because `drive_live_fps` is at Bevy's
-/// system-param arity limit.
-#[derive(bevy::ecs::system::SystemParam)]
-struct ResidencyMeter<'w> {
-    mats: Res<'w, Assets<crate::terrain::WowModelMaterial>>,
-    meshes: Res<'w, Assets<Mesh>>,
-    images: Res<'w, Assets<bevy::image::Image>>,
-    uv_reg: Res<'w, crate::doodad_anim::UvAnimMaterials>,
-    tint_reg: Res<'w, crate::doodad_anim::TintAnimMaterials>,
-    models: Res<'w, Assets<benilla_assets::M2Model>>,
-    server: Res<'w, AssetServer>,
-    churn: ResMut<'w, ChurnCensus>,
-}
-
-/// The asset-churn census (the probe's ratchet meter): `AssetEvent::Modified` counts per asset
-/// type across the sample window, printed as one `MAT_CHURN` line beside `FPS_PROBE`. A modified
-/// material re-creates its uniform buffers + bind group that frame (the Metal non-bindless path),
-/// and a modified image/mesh re-uploads — the teleport leak's CPU engine was exactly a per-frame
-/// ratchet of this shape, so the floor hunt names them instead of guessing suspects one at a
-/// time. Counters register only under `WOW_LIVE_FPS` ([`LiveFpsPlugin`]) — a normal run carries
-/// none of this.
-#[derive(Resource, Default)]
-struct ChurnCensus(std::collections::BTreeMap<&'static str, usize>);
-
-/// One census counter for asset type `A`, folding this frame's `Modified` events in under
-/// `label` (a short stable name — the `type_name` of an `ExtendedMaterial` alias is unreadable).
-fn churn_counter<A: bevy::asset::Asset>(
-    label: &'static str,
-) -> impl FnMut(MessageReader<bevy::asset::AssetEvent<A>>, ResMut<ChurnCensus>) {
-    move |mut reader, mut census| {
-        let n = reader
-            .read()
-            .filter(|e| matches!(e, bevy::asset::AssetEvent::Modified { .. }))
-            .count();
-        if n > 0 {
-            *census.0.entry(label).or_default() += n;
-        }
-    }
-}
-
-impl ResidencyMeter<'_> {
-    /// `WOW_ASSET_DUMP=1`: one `ASSET_DUMP` line per resident image/mesh at sample time, path
-    /// via the asset server (runtime-built assets have no path and print as `<unpathed>` counts).
-    /// Diffing a tour probe's dump against a fresh control's names exactly which files a
-    /// teardown left behind — the leak meter's magnifying glass.
-    fn dump(&self) {
-        let mut lines: Vec<String> = Vec::new();
-        let mut unpathed = [0usize; 3];
-        for (kind, ids) in [
-            (
-                "image",
-                self.images.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
-            ),
-            (
-                "mesh",
-                self.meshes.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
-            ),
-            (
-                "model",
-                self.models.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
-            ),
-        ] {
-            let slot = match kind {
-                "image" => 0,
-                "mesh" => 1,
-                _ => 2,
-            };
-            for id in ids {
-                match self.server.get_path(id) {
-                    Some(p) => lines.push(format!("ASSET_DUMP {kind} {p}")),
-                    None => unpathed[slot] += 1,
-                }
-            }
-        }
-        lines.sort();
-        for l in &lines {
-            println!("{l}");
-        }
-        println!(
-            "ASSET_DUMP <unpathed> images={} meshes={} models={} materials={}",
-            unpathed[0],
-            unpathed[1],
-            unpathed[2],
-            self.mats.len()
-        );
-    }
-}
-
-/// Where — and in what scene state — the sample was taken. Bundled because [`drive_live_fps`] sits
-/// at Bevy's 16-param ceiling, and because these four are read together or not at all.
+/// **Where** the sample was taken — the 0705 prove-the-run law: a probe number is evidence only
+/// once the body is known to be at the pin, and `WOW_PROBE_CHAT`'s `.go` can silently fail (a bad
+/// map id, a refused command) leaving the run measuring the login spot.
 ///
-/// The `room`/`windows` half is the exterior-scene gate's two terms (decision 0774), the same pair
-/// the debug panel's World section shows. Without them a `drawn=` reading taken indoors cannot be
-/// read at all: a big number means either "we claimed a room and the cull let everything through" or
-/// "we never claimed a room, so nothing was gated" — opposite bugs with identical numbers, and the
-/// difference cost a measurement (0780).
+/// The *scene-state* half of the pin — which room the camera claims, how many exterior windows,
+/// what the cull did — is the engine's, and arrives with the rest of the census. Without it a
+/// `drawn=` reading taken indoors cannot be read at all: a big number means either "we claimed a
+/// room and the cull let everything through" or "we never claimed a room, so nothing was gated" —
+/// opposite bugs with identical numbers, and the difference cost a measurement (0780).
 #[derive(SystemParam)]
 struct SamplePin<'w> {
-    /// The map the sample landed on (0705's prove-the-run law): a probe number is evidence only once
-    /// the body is known to be at the pin, and `WOW_PROBE_CHAT`'s `.go` can silently fail (a bad map
-    /// id, a refused command) leaving the run measuring the login spot.
-    map: Option<Res<'w, crate::world_map::CurrentMap>>,
+    map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
     body: Option<Res<'w, crate::player::Player>>,
-    room: Option<Res<'w, crate::wmo_portal::CameraInteriorClaim>>,
-    windows: Option<Res<'w, crate::wmo_portal::ExteriorWindows>>,
-    /// What the cull DID, not just what it was told — see [`crate::exterior_cull::ExteriorCullVerdict`].
-    verdict: Option<Res<'w, crate::exterior_cull::ExteriorCullVerdict>>,
 }
 
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
@@ -226,22 +117,19 @@ fn drive_live_fps(
     time: Res<Time<bevy::time::Real>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
-    particles: Query<&crate::particles::ParticleEmitter>,
-    // Every spawned model submesh, with the two facts that make a visible one accountable: which
-    // subsystem it belongs to, and whether it is gated by the exterior-scene cull. See
-    // [`VisCensus`] for why "visible" alone was not enough to diagnose anything.
-    parts: Query<CensusData>,
+    // What the engine drew this frame and what it is holding — submeshes, the exterior-scene
+    // gate, emitters, resident assets, the churn window. One param, one instant.
+    mut census: WorldCensus,
     streamed: Query<(), With<crate::net::NetEntity>>,
     // The animation-LOD gate's effect, machine-readable per probe (decision 0448): how many
     // streamed rigs sat parked at sample end.
-    parked: Query<(), With<crate::creature_anim::AnimParked>>,
+    parked: Query<(), With<benilla_world::rig_anim::AnimParked>>,
     entities: Query<()>,
     pin: SamplePin,
     // The owned skin-palette occupancy (decision 0720) — `rigs=live/peak bones=live/peak` on the
     // probe line proves the palette lane is actually populated (an all-zero table renders
     // origin-collapsed rigs, which no other probe number would catch).
-    palettes: Option<Res<crate::rig_palette::RigPalettes>>,
-    mut residency: ResidencyMeter,
+    palettes: Option<Res<benilla_world::rig_palette::RigPalettes>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut key_events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
     mut exit: MessageWriter<AppExit>,
@@ -299,7 +187,7 @@ fn drive_live_fps(
                 probe.sys_at_start = crate::perf::system_cpu_ticks();
                 // The churn census restarts with the window — warmup noise (streaming, shader
                 // warms) would otherwise read as steady-state ratchets.
-                residency.churn.0.clear();
+                census.restart_churn();
                 probe.occluded_frames = 0;
             }
             if probe.occluded_now {
@@ -314,19 +202,7 @@ fn drive_live_fps(
             v.sort_by(f32::total_cmp);
             let at = |q: f32| v[(((v.len() - 1) as f32) * q).round() as usize];
             let mean = v.iter().sum::<f32>() / v.len() as f32;
-            let (emitters, active, live) = particles
-                .iter()
-                .fold((0usize, 0usize, 0usize), |(e, a, l), p| {
-                    (e + 1, a + usize::from(p.live() > 0), l + p.live())
-                });
-            let mut census = VisCensus {
-                own_instance: pin.room.as_ref().and_then(|r| r.0).map(|c| c.room.instance),
-                ..Default::default()
-            };
-            let (submeshes, drawn) = parts.iter().fold((0usize, 0usize), |(n, d), row| {
-                census.add(row);
-                (n + 1, d + usize::from(row.0.get()))
-            });
+            let seen = census.take();
             let px = windows
                 .single()
                 .map(|w| (w.physical_width(), w.physical_height()))
@@ -373,30 +249,14 @@ fn drive_live_fps(
                 }
                 _ => String::new(),
             };
-            let gate = {
-                let room = match pin.room.as_ref().and_then(|r| r.0) {
-                    Some(claim) => format!("g{:02}", claim.room.group),
-                    None => "none".to_string(),
-                };
-                match pin.windows.as_deref() {
-                    Some(crate::wmo_portal::ExteriorWindows::Windows(rects)) => {
-                        format!(" room={room} windows={}", rects.len())
-                    }
-                    Some(crate::wmo_portal::ExteriorWindows::Unrestricted) => {
-                        format!(" room={room} windows=unrestricted")
-                    }
-                    None => String::new(),
-                }
+            let gate = match (seen.room.as_deref(), seen.windows.as_deref()) {
+                (Some(room), Some(w)) => format!(" room={room} windows={w}"),
+                _ => String::new(),
             };
-            let culled = match pin.verdict.as_deref() {
+            let culled = match seen.cull.as_ref() {
                 Some(v) => format!(
                     " cull_windows={} cull_frusta={} cull_tested={} cull_hidden={} cull_unbounded={}",
-                    v.windows
-                        .map_or("unrestricted".to_string(), |n| n.to_string()),
-                    v.frusta,
-                    v.tested,
-                    v.hidden,
-                    v.unbounded
+                    v.windows, v.frusta, v.tested, v.hidden, v.unbounded
                 ),
                 None => String::new(),
             };
@@ -411,20 +271,21 @@ fn drive_live_fps(
                 .unwrap_or_default();
             let residency_line = format!(
                 " mats={} meshes={} images={} uv={} tint={}",
-                residency.mats.len(),
-                residency.meshes.len(),
-                residency.images.len(),
-                residency.uv_reg.0.len(),
-                residency.tint_reg.0.len(),
+                seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present} occluded_frames={}{at_pin}{gate}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present} occluded_frames={}{at_pin}{gate}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),
                 at(0.99),
                 v[v.len() - 1],
                 1000.0 / mean,
+                seen.emitters,
+                seen.active_emitters,
+                seen.particles,
+                seen.submeshes,
+                seen.drawn,
                 streamed.iter().len(),
                 parked.iter().len(),
                 entities.iter().len(),
@@ -432,13 +293,12 @@ fn drive_live_fps(
                 px.1,
                 probe.occluded_frames,
             );
-            census.print();
+            print_vis_census(&seen);
             // The window's Modified-event totals per asset type — a type at ~1×/frame here is a
-            // per-frame re-upload ratchet (see [`ChurnCensus`]); absent means quiet.
-            if !residency.churn.0.is_empty() {
-                let churn = residency
+            // per-frame re-upload ratchet; absent means quiet.
+            if !seen.churn.is_empty() {
+                let churn = seen
                     .churn
-                    .0
                     .iter()
                     .map(|(k, n)| format!("{k}={n}"))
                     .collect::<Vec<_>>()
@@ -446,7 +306,14 @@ fn drive_live_fps(
                 println!("MAT_CHURN frames={} {churn}", v.len());
             }
             if std::env::var_os("WOW_ASSET_DUMP").is_some() {
-                residency.dump();
+                let (lines, unpathed) = census.resident_assets();
+                for l in &lines {
+                    println!("ASSET_DUMP {l}");
+                }
+                println!(
+                    "ASSET_DUMP <unpathed> images={} meshes={} models={} materials={}",
+                    unpathed[0], unpathed[1], unpathed[2], seen.mats
+                );
             }
             if probe.run {
                 keys.release(KeyCode::KeyW);
@@ -463,121 +330,36 @@ fn drive_live_fps(
 /// `drawn=` alone cannot answer "why can I still see that from in here?". It is one number over
 /// every model submesh, and the interesting split is not visible-vs-not: it is which *subsystem* the
 /// visible thing belongs to and whether anything is gating it at all. A tree that draws through a
-/// wall is a completely different defect depending on whether it carries
-/// [`crate::exterior_cull::ExteriorScene`] (tagged but admitted — the cull or the bound is wrong) or
-/// does not (nothing is gating it — the wrong lane spawned it). Naming which took a screenshot, an
-/// asset dig and a wrong guess; this line answers it in one run.
+/// wall is a completely different defect depending on whether it is tagged as exterior scene
+/// (tagged but admitted — the cull or the bound is wrong) or is not (nothing is gating it — the
+/// wrong lane spawned it). Naming which took a screenshot, an asset dig and a wrong guess; this
+/// line answers it in one run.
 ///
 /// `WOW_VIS_DUMP=1` then names the models: one `VIS_DUMP` line per distinct visible label, ungated
-/// first, most-drawn first — which is the "so WHICH trees are they?" question.
-#[derive(Default)]
-struct VisCensus {
-    /// Per [`ModelKind`] index: `(visible, visible-and-gated)`.
-    kinds: [(usize, usize); 4],
-    /// `label -> (visible count, gated)`, for the dump.
-    labels: std::collections::HashMap<(String, bool), usize>,
-    /// Of every `ExteriorScene`-tagged submesh: how many the cull actually wrote `Hidden` on, and
-    /// how many carry **no `Aabb`** — the cull's fail-open arm, which admits them unconditionally.
-    /// A tagged-but-drawn object is one of those two, and they are opposite bugs.
-    gated_total: usize,
-    gated_hidden: usize,
-    gated_no_aabb: usize,
-    /// Tagged, bounded, NOT exempt, and yet NOT `Hidden` — the escapees, by `(label, is a
-    /// billboard card)`. **Exempt** means the piece belongs to the placement the camera is standing
-    /// in, which is not exterior scene to itself (decision 0784) and is *supposed* to draw; without
-    /// that subtraction this list is all room-you-are-in furniture and says nothing.
-    escaped: std::collections::HashMap<(String, bool), usize>,
-    /// The placement the camera is inside, for that subtraction.
-    own_instance: Option<Entity>,
-    /// How many tagged pieces were exempt — the number that explains the `tagged` vs `hidden` gap.
-    exempt: usize,
-}
-
-/// What [`VisCensus`] reads off every model submesh — the query shape and its fetched row.
-type CensusData = (
-    &'static ViewVisibility,
-    &'static crate::debug_panel::ModelPart,
-    Has<crate::exterior_cull::ExteriorScene>,
-    Option<&'static crate::interact::WorldObject>,
-    &'static Visibility,
-    Option<&'static bevy::camera::primitives::Aabb>,
-    Has<crate::billboard::BillboardCard>,
-    Option<&'static crate::wmo_portal::WmoGroupVis>,
-);
-
-type CensusRow<'a> = (
-    &'a ViewVisibility,
-    &'a crate::debug_panel::ModelPart,
-    bool,
-    Option<&'a crate::interact::WorldObject>,
-    &'a Visibility,
-    Option<&'a bevy::camera::primitives::Aabb>,
-    bool,
-    Option<&'a crate::wmo_portal::WmoGroupVis>,
-);
-
-impl VisCensus {
-    fn add(&mut self, (vis, part, gated, object, want, aabb, card, group): CensusRow) {
-        if gated {
-            let exempt = group.is_some_and(|g| Some(g.instance) == self.own_instance);
-            self.gated_total += 1;
-            self.gated_hidden += usize::from(*want == Visibility::Hidden);
-            self.gated_no_aabb += usize::from(aabb.is_none());
-            self.exempt += usize::from(exempt);
-            if *want != Visibility::Hidden && aabb.is_some() && !exempt {
-                let label = object.map_or("<unlabelled>", |o| o.label.as_str());
-                *self.escaped.entry((label.to_string(), card)).or_default() += 1;
-            }
-        }
-        if !vis.get() {
-            return;
-        }
-        let slot = &mut self.kinds[kind_index(part.kind)];
-        slot.0 += 1;
-        slot.1 += usize::from(gated);
-        if let Some(o) = object {
-            *self.labels.entry((o.label.clone(), gated)).or_default() += 1;
-        }
+/// first, most-drawn first — which is the "so WHICH trees are they?" question. The counting is
+/// [`benilla_world::world_census`]'s; the line shapes below are ours.
+fn print_vis_census(seen: &benilla_world::world_census::CensusReport) {
+    let line = seen
+        .kinds
+        .iter()
+        .map(|(name, vis, gated)| format!("{name}={vis}/gated{gated}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "VIS_CENSUS visible-submeshes {line} | tagged={} hidden={} exempt={} no_aabb={}",
+        seen.tagged, seen.hidden, seen.exempt, seen.no_aabb
+    );
+    // The escapees always print: a tagged, bounded object the cull left un-hidden is a defect by
+    // construction, and burying it behind a flag is how it stays unnoticed.
+    for (label, card, n) in &seen.escaped {
+        let c = if *card { " BILLBOARD-CARD" } else { "" };
+        println!("VIS_ESCAPED {n}{c} {label}");
     }
-
-    fn print(&self) {
-        let line = ["doodad", "wmo", "creature", "gameobject"]
-            .iter()
-            .zip(&self.kinds)
-            .map(|(name, (vis, gated))| format!("{name}={vis}/gated{gated}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!(
-            "VIS_CENSUS visible-submeshes {line} | tagged={} hidden={} exempt={} no_aabb={}",
-            self.gated_total, self.gated_hidden, self.exempt, self.gated_no_aabb
-        );
-        // The escapees always print: a tagged, bounded object the cull left un-hidden is a defect
-        // by construction, and burying it behind a flag is how it stays unnoticed.
-        let mut escapees: Vec<_> = self.escaped.iter().collect();
-        escapees.sort_by(|a, b| b.1.cmp(a.1));
-        for ((label, card), n) in escapees {
-            let c = if *card { " BILLBOARD-CARD" } else { "" };
-            println!("VIS_ESCAPED {n}{c} {label}");
-        }
-        if std::env::var_os("WOW_VIS_DUMP").is_none() {
-            return;
-        }
-        let mut rows: Vec<_> = self.labels.iter().collect();
-        // Ungated first (the leak candidates), then most-drawn first.
-        rows.sort_by(|a, b| a.0 .1.cmp(&b.0 .1).then(b.1.cmp(a.1)));
-        for ((label, gated), n) in rows {
-            let g = if *gated { "gated" } else { "UNGATED" };
-            println!("VIS_DUMP {g} {n} {label}");
-        }
+    if std::env::var_os("WOW_VIS_DUMP").is_none() {
+        return;
     }
-}
-
-/// [`ModelKind`] has a private `index`; the census needs its own (and pins the column order).
-fn kind_index(kind: crate::debug_panel::ModelKind) -> usize {
-    match kind {
-        crate::debug_panel::ModelKind::Doodad => 0,
-        crate::debug_panel::ModelKind::Wmo => 1,
-        crate::debug_panel::ModelKind::Creature => 2,
-        crate::debug_panel::ModelKind::GameObject => 3,
+    for (label, gated, n) in &seen.labels {
+        let g = if *gated { "gated" } else { "UNGATED" };
+        println!("VIS_DUMP {g} {n} {label}");
     }
 }

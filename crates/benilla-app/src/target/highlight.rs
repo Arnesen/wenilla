@@ -10,7 +10,7 @@
 //! lighting sum, pre-texture-modulate, riding every lit material of the model *and* its attachments.
 //!
 //! benilla carries the flag in **bit 31 of the per-instance `MeshTag`** (the convention home is
-//! `crate::mesh_tag`); `wow_model.wgsl` adds the 64/255 lift to its lighting factor when set. This
+//! `benilla_world::mesh_tag`); `wow_model.wgsl` adds the 64/255 lift to its lighting factor when set. This
 //! system is the bit's only writer: each frame (PostUpdate — after every Update payload writer, so
 //! their whole-`u32` overwrites can't strand the bit) it ORs the flag onto every part of the
 //! hovered + selected roots and clears it on roots that left the set. The reason bitmask collapses
@@ -21,7 +21,7 @@
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
-use crate::mesh_tag::HIGHLIGHT_BIT;
+use benilla_world::mesh_tag::HIGHLIGHT_BIT;
 
 use super::{go_is_nearest, Hovered, HoveredObject, Selection};
 

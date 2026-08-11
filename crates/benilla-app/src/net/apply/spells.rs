@@ -406,9 +406,9 @@ pub(super) fn spell_go(
                 }
             }
         }
-        if crate::dbg_trace::enabled() {
+        if benilla_assets::trace::enabled() {
             if let Some(d) = display {
-                crate::dbg_trace::line(
+                benilla_assets::trace::line(
                     "cd",
                     &format!(
                         "arm spell={spell_id} rec={}ms cat={}:{}ms (GO self-insert)",
@@ -430,8 +430,8 @@ pub(super) fn spell_go(
         // bump is belt-and-braces for the case where the same spell re-arms to an identical
         // triple (a zero-length re-cast), which the diff would otherwise swallow.
         pet_bar.bar_signals = pet_bar.bar_signals.wrapping_add(1);
-        if crate::dbg_trace::enabled() {
-            crate::dbg_trace::line(
+        if benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
                 "cd",
                 &format!(
                     "arm spell={spell_id} rec={}ms cat={}:{}ms (GO pet-insert)",

@@ -33,19 +33,17 @@ use benilla_formats::CharSkinSlot;
 use benilla_protocol::{CharEnumItem, CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM};
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
-use crate::lighting::SharedLightBuffer;
 use crate::portrait::{
     DressUpBake, DressUpLook, DressUpPreview, GlueLook, GluePreview, GluePreviewBake,
     PreviewBillboard, PreviewEffects, PreviewPart, PreviewRider,
 };
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::WorldAssets;
 
 use super::super::equipment::{attach_id, ensure_item_model, placement, ItemModelKind};
 use super::super::item_glow::{self, ItemGlows};
 use super::super::{
-    CharCreate, Characters, Creatures, EntityMaterials, EntityPart, ItemDisplays, SkinComposites,
-    SkinSections,
+    CharCreate, Characters, Creatures, EntityPart, ItemDisplays, SkinComposites, SkinSections,
 };
 use super::char_skin::{equip_geosets, BodySkin, CharLook};
 
@@ -137,7 +135,7 @@ pub(in crate::entities) struct Assembled {
 /// the character/skin data the composite is built from, and the asset stores it writes into. A
 /// plain borrow struct rather than a `SystemParam`: each driver already holds these as its own
 /// `Res`/`ResMut` params and simply lends them for the call.
-pub(in crate::entities) struct PreviewCtx<'a> {
+pub(in crate::entities) struct PreviewCtx<'a, 'w> {
     pub(in crate::entities) creatures: &'a Creatures,
     pub(in crate::entities) characters: Option<&'a Characters>,
     pub(in crate::entities) displays: Option<&'a mut ItemDisplays>,
@@ -146,12 +144,10 @@ pub(in crate::entities) struct PreviewCtx<'a> {
     pub(in crate::entities) glows: Option<&'a mut ItemGlows>,
     pub(in crate::entities) sections: Option<&'a SkinSections>,
     pub(in crate::entities) world_assets: Option<&'a WorldAssets>,
-    pub(in crate::entities) shared_light: Option<&'a SharedLightBuffer>,
     pub(in crate::entities) images: &'a mut Assets<Image>,
     pub(in crate::entities) skin_composites: &'a mut SkinComposites,
     pub(in crate::entities) asset_server: &'a AssetServer,
-    pub(in crate::entities) materials: &'a mut Assets<WowModelMaterial>,
-    pub(in crate::entities) entity_mats: &'a mut EntityMaterials,
+    pub(in crate::entities) mats: &'a mut benilla_world::model_render::M2BatchMaterials<'w>,
 }
 
 /// Assemble the preview part (+ rider) lists when the glue-screen look changes. Runs in the
@@ -171,12 +167,10 @@ pub(in crate::entities) fn build_glue_preview(
     mut glows: Option<ResMut<ItemGlows>>,
     sections: Option<Res<SkinSections>>,
     world_assets: Option<Res<WorldAssets>>,
-    shared_light: Option<Res<SharedLightBuffer>>,
     mut images: ResMut<Assets<Image>>,
     mut skin_composites: ResMut<SkinComposites>,
     asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<WowModelMaterial>>,
-    mut entity_mats: ResMut<EntityMaterials>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
     // Change tracking: the look we last emitted a bake for, and whether that bake succeeded (so a
     // look whose models weren't ready yet keeps retrying until they build).
     mut state: Local<PreviewState>,
@@ -266,12 +260,10 @@ pub(in crate::entities) fn build_glue_preview(
             glows: glows.as_deref_mut(),
             sections: sections.as_deref(),
             world_assets: world_assets.as_deref(),
-            shared_light: shared_light.as_deref(),
             images: &mut images,
             skin_composites: &mut skin_composites,
             asset_server: &asset_server,
-            materials: &mut materials,
-            entity_mats: &mut entity_mats,
+            mats: &mut mats,
         },
     ) else {
         return; // a model (body, item, or glow) is still loading — retry next frame
@@ -321,12 +313,10 @@ pub(in crate::entities) fn build_dressup_preview(
     mut glows: Option<ResMut<ItemGlows>>,
     sections: Option<Res<SkinSections>>,
     world_assets: Option<Res<WorldAssets>>,
-    shared_light: Option<Res<SharedLightBuffer>>,
     mut images: ResMut<Assets<Image>>,
     mut skin_composites: ResMut<SkinComposites>,
     asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<WowModelMaterial>>,
-    mut entity_mats: ResMut<EntityMaterials>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
     mut state: Local<DressUpState>,
 ) {
     // A new look resets the retry latch (the glue driver's own shape).
@@ -381,12 +371,10 @@ pub(in crate::entities) fn build_dressup_preview(
             glows: glows.as_deref_mut(),
             sections: sections.as_deref(),
             world_assets: world_assets.as_deref(),
-            shared_light: shared_light.as_deref(),
             images: &mut images,
             skin_composites: &mut skin_composites,
             asset_server: &asset_server,
-            materials: &mut materials,
-            entity_mats: &mut entity_mats,
+            mats: &mut mats,
         },
     ) else {
         return; // an item model is still loading — retry next frame
@@ -421,7 +409,7 @@ pub(in crate::entities) fn build_dressup_preview(
 /// `None` means **not ready**: the body model, an item model, or a glow model is still loading.
 /// A caller must treat that as "retry next frame" and leave its bake untouched, never as an empty
 /// look — a geared character popping in piecewise would flicker on every change.
-fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx) -> Option<Assembled> {
+fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx<'_, '_>) -> Option<Assembled> {
     let PreviewSpec {
         display_id,
         race,
@@ -518,13 +506,11 @@ fn assemble(spec: &PreviewSpec, ctx: &mut PreviewCtx) -> Option<Assembled> {
         ctx.displays.as_deref(),
         ctx.sections,
         ctx.world_assets,
-        ctx.shared_light,
         parts,
         ctx.images,
         &mut ctx.skin_composites.0,
         ctx.asset_server,
-        ctx.materials,
-        &mut ctx.entity_mats.0,
+        ctx.mats,
     );
 
     // Whether this look shows the part's geoset (billboard or body alike).

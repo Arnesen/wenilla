@@ -75,7 +75,7 @@ impl Plugin for BowstringPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            draw_bowstrings.in_set(crate::billboard::BillboardPlace),
+            draw_bowstrings.in_set(benilla_world::billboard::BillboardPlace),
         );
     }
 }

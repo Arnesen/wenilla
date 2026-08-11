@@ -27,9 +27,9 @@ use bevy::prelude::*;
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::nameplates::{height_scale, Nameplates};
 use crate::net::GuidIndex;
-use crate::player::WorldCamera;
 use crate::ui_party::GroupState;
 use crate::vplates::VPlates;
+use benilla_world::view::WorldCamera;
 
 /// The mark atlas (4×2 icons in a 4-column grid, cell 0.25) — the same art the popup's submenu
 /// rows and the plate child slice.

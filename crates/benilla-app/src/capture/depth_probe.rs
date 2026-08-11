@@ -69,8 +69,8 @@ use bevy::render::view::{ExtractedView, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::probes::ProbeClock;
-use crate::particles::ParticleEmitter;
-use crate::player::WorldCamera;
+use benilla_world::particles::ParticleEmitter;
+use benilla_world::view::WorldCamera;
 
 pub(crate) struct DepthProbePlugin;
 
@@ -111,7 +111,7 @@ impl Plugin for DepthProbePlugin {
         .add_systems(Update, arm)
         .add_systems(
             PostUpdate,
-            collect_quads.after(crate::billboard::BillboardPlace),
+            collect_quads.after(benilla_world::billboard::BillboardPlace),
         )
         .add_plugins((
             ExtractResourcePlugin::<DepthWatch>::default(),
@@ -230,7 +230,7 @@ fn collect_quads(
     mut probes: ResMut<QuadProbes>,
     cam: Query<(&Camera, &GlobalTransform, &Projection), With<WorldCamera>>,
     emitters: Query<(Entity, &ParticleEmitter)>,
-    quads: Res<crate::particles::buffer::EffectQuads>,
+    quads: Res<benilla_world::particles::buffer::EffectQuads>,
 ) {
     let Some(bones) = watch.0.as_deref() else {
         return;
@@ -699,7 +699,7 @@ mod tests {
         Mat4::perspective_infinite_reverse_rh(
             std::f32::consts::FRAC_PI_4,
             3200.0 / 1800.0,
-            crate::player::CAM_NEAR,
+            benilla_world::view::CAM_NEAR,
         )
     }
 

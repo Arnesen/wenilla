@@ -31,18 +31,19 @@
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
-use crate::interior::InteriorLit;
-use crate::lighting::SharedLightBuffer;
-use crate::model_fade::{join_unit_appear_fade, FadeMaterials, PendingAppearFade, RenderFade};
 use crate::net::{NetEntity, ObjectStore};
 use crate::portrait::PortraitPart;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::WorldAssets;
+use benilla_world::interior::InteriorLit;
+use benilla_world::model_fade::{
+    join_unit_appear_fade, FadeMaterials, PendingAppearFade, RenderFade,
+};
 
 use super::super::equipment::AppliedEquipment;
 use super::super::{
-    Characters, Creatures, EntityMaterials, EntityPart, Equipment, ItemDisplays, SkinComposites,
-    SkinSections, VisualAttached,
+    Characters, Creatures, EntityPart, Equipment, ItemDisplays, SkinComposites, SkinSections,
+    VisualAttached,
 };
 use super::char_skin::{
     build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip,
@@ -76,10 +77,10 @@ pub(in crate::entities) fn redress_player_looks(
             &Equipment,
             &mut AppliedEquipment,
             &Children,
-            Option<&crate::rig_palette::RigSkin>,
+            Option<&benilla_world::rig_palette::RigSkin>,
             Option<&super::super::BoneAttach>,
-            Option<&crate::interior::BodyBakeCenter>,
-            Option<&crate::model_fade::UnitAppearFade>,
+            Option<&benilla_world::interior::BodyBakeCenter>,
+            Option<&benilla_world::model_fade::UnitAppearFade>,
         ),
         With<VisualAttached>,
     >,
@@ -102,25 +103,15 @@ pub(in crate::entities) fn redress_player_looks(
     skin_build: (
         Option<Res<SkinSections>>,
         Option<Res<WorldAssets>>,
-        Option<Res<SharedLightBuffer>>,
         ResMut<Assets<Image>>,
         ResMut<SkinComposites>,
         Res<AssetServer>,
-        ResMut<Assets<WowModelMaterial>>,
-        ResMut<EntityMaterials>,
+        benilla_world::model_render::M2BatchMaterials,
     ),
     time: Res<Time>,
 ) {
-    let (
-        sections,
-        world_assets,
-        shared_light,
-        mut images,
-        mut skin_composites,
-        asset_server,
-        mut materials,
-        mut entity_mats,
-    ) = skin_build;
+    let (sections, world_assets, mut images, mut skin_composites, asset_server, mut mats) =
+        skin_build;
     let now = time.elapsed_secs();
     for (entity, net, live, mut applied, children, rig, bones, bake_center, unit_fade) in
         &mut players
@@ -162,13 +153,11 @@ pub(in crate::entities) fn redress_player_looks(
                 displays.as_deref(),
                 sections.as_deref(),
                 world_assets.as_deref(),
-                shared_light.as_deref(),
                 parts,
                 &mut images,
                 &mut skin_composites.0,
                 &asset_server,
-                &mut materials,
-                &mut entity_mats.0,
+                &mut mats,
             ),
             None => (None, None, None, (None, None)),
         };
@@ -220,15 +209,14 @@ pub(in crate::entities) fn redress_player_looks(
         let no_anchors = std::collections::HashMap::new();
         let dress = PartDress {
             unit: entity,
-            kind: crate::debug_panel::ModelKind::Creature,
+            kind: benilla_world::model_render::ModelKind::Creature,
             char_mats: &char_mats,
-            object: &crate::interact::WorldObject {
-                kind: crate::debug_panel::ModelKind::Creature,
+            object: &benilla_world::interact::WorldObject {
+                kind: benilla_world::model_render::ModelKind::Creature,
                 label: super::display_label(&dm.handle),
                 id: net.display_id.unwrap_or(0),
                 detail: format!("emitters: {}", dm.emitters.len()),
             },
-            rig_tag: crate::mesh_tag::rig_bits(rig.map_or(0, |r| r.slot)),
             inst_slot: rig.map_or(0, |r| r.slot),
             rigged: bones.is_some(),
             anchors: bones.map_or(&no_anchors, |b| &b.anchors),
@@ -266,7 +254,7 @@ pub(in crate::entities) fn redress_player_looks(
 /// ramps resolve their twin every frame from [`FadeMaterials`] + the law, and the portrait booths
 /// mirror the steady one whenever a booth rebuilds. The **displayed** material is only written when
 /// no ramp owns that channel — a part mid-appear-fade wears its blend twin, and
-/// [`crate::model_fade::apply_render_fade`] re-resolves it from the two records above on its next
+/// [`benilla_world::model_fade::apply_render_fade`] re-resolves it from the two records above on its next
 /// tick, so writing the steady handle here would flash it opaque for a frame.
 fn repoint_part(
     part: &EntityPart,
@@ -368,7 +356,9 @@ mod tests {
             .init_asset::<Image>()
             .init_asset::<WowModelMaterial>()
             .init_resource::<SkinComposites>()
-            .init_resource::<EntityMaterials>();
+            // The engine's material cache — normally `model_render::plugin`'s, which this bare
+            // harness does not install.
+            .init_resource::<benilla_world::model_render::ModelMaterials>();
 
         let mut dm = empty_display();
         dm.parts = Some(geosets.iter().map(|g| part(*g)).collect());

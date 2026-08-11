@@ -64,24 +64,15 @@ use benilla_ui::script::{JustifyH, JustifyV, Outline};
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::player::WorldCamera;
 use crate::target::{ring_reaction, ring_variant, CombatFlash, Factions, RingVariant, Selection};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
+use benilla_world::view::WorldCamera;
 
 /// The height-scale law (`0x6c6e90`): `d > KNEE ? d/KNEE · RATE · FLOOR : FLOOR`, `d` the anchor's
 /// height above the feet in world units.
 const SCALE_FLOOR: f32 = 0.2; // [0x80679c]
 const SCALE_KNEE: f32 = 4.0; // [0x8112a8]
 const SCALE_RATE: f32 = 1.5; // [0x8112ac]
-
-/// Transparent-sort bias on every plate material — the ladder's TOP rung: names draw after every
-/// ordinary transparent (the reference draws its world text late in the frame — decision 0519) and
-/// after the celestial glare ([`crate::sky_order`], whose rungs all sit below this one, so a flare
-/// never washes text). **Positive = drawn later**; the sign law, read off the bevy sources, is in
-/// [`crate::sky_order`] — it was inverted here and the water erased the glyphs (decision 0639).
-/// Small on purpose: 6× the far plane is all the ordering needs, and this same field doubles as
-/// the rasterizer depth bias on a layer that is depth-TESTED (walls must keep occluding names).
-pub(crate) const NAMEPLATE_DEPTH_BIAS: f32 = 4.0e4;
 
 /// benilla's nameplate config (the client's `0xce8720` cvar mask, reduced to what streams today),
 /// player-settable since 0992: 1.12's own `UnitNamePlayer`/`UnitNameNPC`/`UnitNameOwn` CVars over
@@ -372,7 +363,7 @@ pub(crate) fn drive_nameplates(
                     // draws its world text late in the frame, after the liquid — this reproduces
                     // that order; walls still occlude via the depth test, and plate-vs-plate
                     // ordering is unchanged (uniform bias).
-                    depth_bias: NAMEPLATE_DEPTH_BIAS,
+                    depth_bias: benilla_world::sky_order::Rung::NAMEPLATE,
                     ..default()
                 }),
             );
@@ -658,7 +649,7 @@ impl Plugin for NameplatesPlugin {
 /// doc): it grows with every distinct name ever seen and the old map's population never comes
 /// back. The palette `materials` stay — a small fixed set, rebuilt only if the atlas changes.
 fn evict_name_meshes(
-    mut changes: MessageReader<crate::world_map::MapChange>,
+    mut changes: MessageReader<benilla_world::world_map::MapChange>,
     mut plates: ResMut<Nameplates>,
 ) {
     if changes.is_empty() {

@@ -10,6 +10,8 @@ use bevy::prelude::*;
 
 /// The **actuation** probes — the three channels that make a live session do something
 /// headlessly: chat/slash lines, synthetic key presses, and a Lua chunk in the UI VM.
+mod fx_draw_census;
+pub(crate) use fx_draw_census::plugin as fx_draw_census_plugin;
 mod act;
 pub(crate) use act::{ProbeChatPlugin, ProbeKeyPlugin, ProbeLuaPlugin};
 
@@ -68,12 +70,23 @@ mod tests {
     #[test]
     fn probe_schedules_read_the_wall_clock() {
         /// `(file, system, why it is genuinely an age or a delta on the animating clock)`.
-        const ALLOWED: &[(&str, &str, &str)] = &[(
-            "capture/mod.rs",
-            "drive_capture",
-            "the fixture AGE runs on the clock the effect animates on, and the capture freezes that \
-             same clock at save time — an age, not a schedule",
-        )];
+        const ALLOWED: &[(&str, &str, &str)] = &[
+            (
+                "capture/mod.rs",
+                "drive_capture",
+                "the fixture AGE runs on the clock the effect animates on, and the capture freezes \
+                 that same clock at save time — an age, not a schedule",
+            ),
+            (
+                "capture/waterfx.rs",
+                "spawn / drive",
+                "the foam fixture is a SIMULATION rig, not a schedule: it walks a synthetic dummy \
+                 through the shipped emitter path, and the emitter reads its velocity on the same \
+                 animating clock. A wall clock here would desync the dummy from the thing it is \
+                 feeding — the one case where matching the virtual clock is the correctness \
+                 requirement rather than the bug",
+            ),
+        ];
 
         // The needles are assembled at runtime so the checker does not flag **its own source** —
         // which is exactly what it did on its first run, and is the cheapest possible proof that it

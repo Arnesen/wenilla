@@ -33,8 +33,8 @@ use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::probes::ProbeClock;
-use crate::interact::WorldObject;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::interact::WorldObject;
 
 pub(crate) struct PhaseProbePlugin;
 
@@ -148,7 +148,7 @@ fn collect_batches(
     parts: Query<(
         Entity,
         &WorldObject,
-        &crate::debug_panel::ModelPart,
+        &benilla_world::model_render::ModelPart,
         &MeshMaterial3d<WowModelMaterial>,
     )>,
     materials: Res<Assets<WowModelMaterial>>,
@@ -208,9 +208,17 @@ fn collect_batches(
 fn collect_emitters(
     mut watch: ResMut<PhaseWatch>,
     time: ProbeClock,
-    emitters: Query<(Entity, &crate::particles::ParticleEmitter)>,
-    trails: Query<(Entity, &crate::ribbons::RibbonTrail, &GlobalTransform)>,
-    parts: Query<(Entity, &crate::debug_panel::ModelPart, &GlobalTransform)>,
+    emitters: Query<(Entity, &benilla_world::particles::ParticleEmitter)>,
+    trails: Query<(
+        Entity,
+        &benilla_world::ribbons::RibbonTrail,
+        &GlobalTransform,
+    )>,
+    parts: Query<(
+        Entity,
+        &benilla_world::model_render::ModelPart,
+        &GlobalTransform,
+    )>,
 ) {
     if !watch.particles || watch.armed || time.elapsed_secs() < watch.at {
         return;
@@ -365,7 +373,7 @@ fn report_phases(
         for phase in transparent.values() {
             if let Some(pos) = phase.items.iter().position(|item| item.entity.1 == main) {
                 // The sort key itself, not just the slot: `Transparent3d` orders on view-space z +
-                // the material's depth bias, ascending = farthest first (`crate::sky_order`). Two
+                // the material's depth bias, ascending = farthest first (`benilla_world::sky_order`). Two
                 // slots tell you WHICH drew last; the two distances tell you WHY, and whether the
                 // gap is a real spatial one or a tie the sort broke arbitrarily.
                 found.push(format!(

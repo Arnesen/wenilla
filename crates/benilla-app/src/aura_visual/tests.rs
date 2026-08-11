@@ -248,7 +248,7 @@ fn app_with_chains() -> App {
     app.add_message::<crate::creature_anim::SpellKitSound>();
     app.add_message::<AuraProc>();
     // The water-plane twin map the alpha author composes with (empty here — no water in a fixture).
-    app.init_resource::<crate::model_render::FarSideTwins>();
+    app.init_resource::<benilla_world::model_render::FarSideTwins>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
             (
@@ -337,8 +337,8 @@ fn app_with_chains() -> App {
 /// palette allocator whose slots index it, and the publish system.
 fn app_with_tint_channel() -> App {
     let mut app = app_with_chains();
-    app.init_resource::<crate::instance_tint::InstanceTints>();
-    app.init_resource::<crate::rig_palette::RigPalettes>();
+    app.init_resource::<benilla_world::instance_tint::InstanceTints>();
+    app.init_resource::<benilla_world::rig_palette::RigPalettes>();
     app.add_systems(Update, apply_aura_tint.after(drain_aura_procs));
     app
 }
@@ -480,19 +480,19 @@ fn an_unmodelled_proc_only_kit_arms_nothing() {
 /// material, and the part re-queued for the classifier.
 #[test]
 fn the_author_owns_the_tree_then_releases_at_opaque() {
-    use crate::model_fade::FadeMaterials;
+    use benilla_world::model_fade::FadeMaterials;
     use bevy::mesh::MeshTag;
 
-    let cutout: Handle<crate::terrain::WowModelMaterial> =
+    let cutout: Handle<benilla_assets::materials::WowModelMaterial> =
         bevy::asset::uuid_handle!("c0000000-0000-4000-8000-00000000a114");
-    let blend: Handle<crate::terrain::WowModelMaterial> =
+    let blend: Handle<benilla_assets::materials::WowModelMaterial> =
         bevy::asset::uuid_handle!("b1000000-0000-4000-8000-00000000a114");
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.init_resource::<crate::interior::InteriorReauthor>();
+    app.init_resource::<benilla_world::interior::InteriorReauthor>();
     // The water-plane twin map the author composes with (empty — no water in a fixture).
-    app.init_resource::<crate::model_render::FarSideTwins>();
+    app.init_resource::<benilla_world::model_render::FarSideTwins>();
     app.add_systems(Update, apply_aura_alpha);
 
     let fm = FadeMaterials {
@@ -538,13 +538,13 @@ fn the_author_owns_the_tree_then_releases_at_opaque() {
     for part in [body, weapon] {
         let tag = app.world().entity(part).get::<MeshTag>().unwrap().0;
         assert!(
-            (crate::mesh_tag::alpha_of(tag) - 0.3).abs() < 1.0 / 63.0,
+            (benilla_world::mesh_tag::alpha_of(tag) - 0.3).abs() < 1.0 / 63.0,
             "part {part} carries the aura alpha (tag {tag:#x})"
         );
         assert_eq!(
             app.world()
                 .entity(part)
-                .get::<MeshMaterial3d<crate::terrain::WowModelMaterial>>()
+                .get::<MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>()
                 .unwrap()
                 .0,
             blend,
@@ -564,11 +564,11 @@ fn the_author_owns_the_tree_then_releases_at_opaque() {
     app.update();
     for part in [body, weapon] {
         let tag = app.world().entity(part).get::<MeshTag>().unwrap().0;
-        assert!((crate::mesh_tag::alpha_of(tag) - 1.0).abs() < 1.0 / 63.0);
+        assert!((benilla_world::mesh_tag::alpha_of(tag) - 1.0).abs() < 1.0 / 63.0);
         assert_eq!(
             app.world()
                 .entity(part)
-                .get::<MeshMaterial3d<crate::terrain::WowModelMaterial>>()
+                .get::<MeshMaterial3d<benilla_assets::materials::WowModelMaterial>>()
                 .unwrap()
                 .0,
             cutout,
@@ -593,9 +593,9 @@ fn the_author_owns_the_tree_then_releases_at_opaque() {
 #[test]
 fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
     let mut app = app_with_tint_channel();
-    let skin = crate::rig_palette::RigSkin::allocate_bones(
+    let skin = benilla_world::rig_palette::RigSkin::allocate_bones(
         app.world_mut()
-            .resource_mut::<crate::rig_palette::RigPalettes>()
+            .resource_mut::<benilla_world::rig_palette::RigPalettes>()
             .as_mut(),
         8,
         Handle::default(),
@@ -614,7 +614,7 @@ fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
     app.update();
     let tints = app
         .world()
-        .resource::<crate::instance_tint::InstanceTints>();
+        .resource::<benilla_world::instance_tint::InstanceTints>();
     assert_eq!(
         tints.get(slot),
         0xff8c_b9fd,
@@ -631,8 +631,8 @@ fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
     app.update();
     let tints = app
         .world()
-        .resource::<crate::instance_tint::InstanceTints>();
-    assert_eq!(tints.get(slot), crate::instance_tint::IDENTITY);
+        .resource::<benilla_world::instance_tint::InstanceTints>();
+    assert_eq!(tints.get(slot), benilla_world::instance_tint::IDENTITY);
 }
 
 /// **The chain (decision 0841).** A rigged ATTACHED model — a spell-effect instance, or one of the
@@ -647,10 +647,14 @@ fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
     let (body, shoulder) = {
         let mut palettes = app
             .world_mut()
-            .resource_mut::<crate::rig_palette::RigPalettes>();
+            .resource_mut::<benilla_world::rig_palette::RigPalettes>();
         let mut alloc = |bones| {
-            crate::rig_palette::RigSkin::allocate_bones(&mut palettes, bones, Handle::default())
-                .expect("a fresh palette has room")
+            benilla_world::rig_palette::RigSkin::allocate_bones(
+                &mut palettes,
+                bones,
+                Handle::default(),
+            )
+            .expect("a fresh palette has room")
         };
         (alloc(8), alloc(3))
     };
@@ -665,12 +669,12 @@ fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
         .id();
     // The item root: its own rig, no aura nodes of its own, chained to the unit wearing it.
     app.world_mut()
-        .spawn((shoulder, crate::model_fade::ParentModel(unit)));
+        .spawn((shoulder, benilla_world::model_fade::ParentModel(unit)));
 
     app.update();
     let tints = app
         .world()
-        .resource::<crate::instance_tint::InstanceTints>();
+        .resource::<benilla_world::instance_tint::InstanceTints>();
     assert_eq!(tints.get(body_slot), 0xff8c_b9fd, "the body is ghost-blue");
     assert_eq!(
         tints.get(shoulder_slot),
@@ -687,9 +691,12 @@ fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
     app.update();
     let tints = app
         .world()
-        .resource::<crate::instance_tint::InstanceTints>();
-    assert_eq!(tints.get(body_slot), crate::instance_tint::IDENTITY);
-    assert_eq!(tints.get(shoulder_slot), crate::instance_tint::IDENTITY);
+        .resource::<benilla_world::instance_tint::InstanceTints>();
+    assert_eq!(tints.get(body_slot), benilla_world::instance_tint::IDENTITY);
+    assert_eq!(
+        tints.get(shoulder_slot),
+        benilla_world::instance_tint::IDENTITY
+    );
 }
 
 /// An unchained rig — a placed doodad, a world effect — has no parent to inherit from and must stay
@@ -701,10 +708,14 @@ fn an_unchained_rig_inherits_nothing() {
     let (body, loose) = {
         let mut palettes = app
             .world_mut()
-            .resource_mut::<crate::rig_palette::RigPalettes>();
+            .resource_mut::<benilla_world::rig_palette::RigPalettes>();
         let mut alloc = |bones| {
-            crate::rig_palette::RigSkin::allocate_bones(&mut palettes, bones, Handle::default())
-                .expect("a fresh palette has room")
+            benilla_world::rig_palette::RigSkin::allocate_bones(
+                &mut palettes,
+                bones,
+                Handle::default(),
+            )
+            .expect("a fresh palette has room")
         };
         (alloc(8), alloc(3))
     };
@@ -717,9 +728,9 @@ fn an_unchained_rig_inherits_nothing() {
     app.update();
     assert_eq!(
         app.world()
-            .resource::<crate::instance_tint::InstanceTints>()
+            .resource::<benilla_world::instance_tint::InstanceTints>()
             .get(loose_slot),
-        crate::instance_tint::IDENTITY,
+        benilla_world::instance_tint::IDENTITY,
         "a tinted unit standing next to it changes nothing"
     );
 }
@@ -730,9 +741,9 @@ fn an_unchained_rig_inherits_nothing() {
 #[test]
 fn the_rig_free_hook_clears_a_dead_units_tint() {
     let mut app = app_with_tint_channel();
-    let skin = crate::rig_palette::RigSkin::allocate_bones(
+    let skin = benilla_world::rig_palette::RigSkin::allocate_bones(
         app.world_mut()
-            .resource_mut::<crate::rig_palette::RigPalettes>()
+            .resource_mut::<benilla_world::rig_palette::RigPalettes>()
             .as_mut(),
         8,
         Handle::default(),
@@ -749,7 +760,7 @@ fn the_rig_free_hook_clears_a_dead_units_tint() {
     app.update();
     assert_eq!(
         app.world()
-            .resource::<crate::instance_tint::InstanceTints>()
+            .resource::<benilla_world::instance_tint::InstanceTints>()
             .get(slot),
         0xff8c_b9fd,
     );
@@ -758,9 +769,9 @@ fn the_rig_free_hook_clears_a_dead_units_tint() {
     app.world_mut().entity_mut(unit).despawn();
     assert_eq!(
         app.world()
-            .resource::<crate::instance_tint::InstanceTints>()
+            .resource::<benilla_world::instance_tint::InstanceTints>()
             .get(slot),
-        crate::instance_tint::IDENTITY,
+        benilla_world::instance_tint::IDENTITY,
         "the slot is clean before anyone can reallocate it",
     );
 }

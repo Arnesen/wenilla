@@ -21,17 +21,17 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
-use avian3d::prelude::*;
-
-use crate::assets::AssetSet;
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
-use crate::interact::{InspectMode, WorldClick, WorldRightClick, WorldRightPress};
+use crate::debug_panel::InspectMode;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer, TeleportMessage, WorldportMessage};
-use crate::schedule::WorldStage;
 use crate::ui_script::PointerOverUi;
+use benilla_assets::AssetSet;
+use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
+use benilla_world::schedule::WorldStage;
 
 mod arc;
 pub(crate) mod camera;
+mod world_focus;
 // The remembered camera pose (decision 1131) — it lives inside `player/` so it can read the rig's
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
@@ -69,7 +69,7 @@ use camera::{
     apply_zoom_scroll, run_look_session, seat_camera, CameraProbe, FlyCam, LookButton,
     CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT, CAM_PIVOT_FALLBACK,
 };
-pub(crate) use camera::{head_height, CameraControl, CameraPivot, WorldCamera, CAM_FOVY, CAM_NEAR};
+pub(crate) use camera::{head_height, CameraControl, CameraPivot};
 pub(crate) use follow::{FollowRequest, FollowState};
 // The shared avatar state + movement constants live in [`state`]; the private re-imports below are
 // what lets this module and the concern modules beside it keep naming them `super::X` unchanged.
@@ -140,6 +140,18 @@ impl Plugin for PlayerPlugin {
         }
         follow::plugin(app);
         camera_saved::plugin(app);
+        // 1160's wire (a), both directions (see `world_focus`): the game answers the world's
+        // "where do I stream from" before the stream stage, and reads the residency the world
+        // publishes after it to end its own post-snap hold.
+        app.add_systems(
+            Update,
+            (world_focus::publish_viewer, world_focus::publish_view_focus)
+                .before(benilla_world::schedule::WorldStage::Stream),
+        )
+        .add_systems(
+            Update,
+            world_focus::release_post_snap_hold.after(benilla_world::schedule::WorldStage::Stream),
+        );
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
@@ -244,9 +256,9 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 apply_self_model_fade
-                    .after(crate::interior::classify_entity_interior)
-                    .after(crate::model_fade::apply_render_fade)
-                    .after(crate::debug_panel::ModelVisSet)
+                    .after(benilla_world::interior::classify_entity_interior)
+                    .after(benilla_world::model_fade::apply_render_fade)
+                    .after(benilla_world::model_render::ModelVisSet)
                     .run_if(not(resource_exists::<crate::capture::CaptureMode>)),
             );
     }
@@ -332,7 +344,7 @@ fn control(
     mut player: ResMut<Player>,
     mut rig: ResMut<CameraControl>,
     // Avian's kinematic move-and-slide: sweeps the capsule against the streamed colliders (decision 0009).
-    move_and_slide: MoveAndSlide,
+    collide: benilla_world::collision::WorldCollision,
     mut cameras: Query<(&mut Transform, &mut FlyCam, &Camera)>,
     // The streamed self entity: we read its server pose to take control, then drive its transform
     // (feet position + facing) and feed its movement to the animation selector via `MovementState`. Its
@@ -369,13 +381,13 @@ fn control(
         Local<Option<camera::PressGesture>>,
         Local<Option<camera::PressGesture>>,
     ),
-    // World context for the mover, bundled into one param (16-param limit): the loaded water
-    // surfaces (swim mode + the buoyant float, see [`swim`]), the armed transports (the
+    // World context for the mover, bundled into one param (16-param limit): the world query the
+    // swim mode + buoyant float ask the liquid through (see [`swim`]), the armed transports (the
     // platform-frame carry/attach — decision 0438 phase 2; `Without`s only disjoint the borrows),
     // and the parent chain (the attach walk resolves a deck prop's collider child to the
     // transport that owns it — solid cargo, 0470).
     world_q: (
-        Query<&crate::liquid::WaterChunkInfo>,
+        benilla_world::world_point::WorldPoint,
         Query<
             (&Transform, &crate::net::Guid),
             (
@@ -385,18 +397,9 @@ fn control(
             ),
         >,
         Query<&ChildOf>,
-        // The player's live WMO-interior claim — the liquid query's delegation + scope key:
-        // inside a building only THAT PLACEMENT's own MLIQ answers, outdoors only the ADT's
-        // (decisions 0634 + 0696, the "swim in air" family). Fourth slot here rather than a 17th
-        // top-level param.
-        Res<crate::wmo_portal::PlayerWmoRoom>,
-        // …and the placements those rooms live in, for the whole-group submersion override a
-        // flooded room carries instead of a pool (decision 1000).
-        Query<&'static crate::wmo_portal::WmoPortalInstance>,
     ),
 ) {
-    let (water, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
-    let claim = crate::liquid::player_claim(&world_q.3, &world_q.4);
+    let (world, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
     let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
         return;
@@ -419,7 +422,7 @@ fn control(
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
     // works. The gate is `UiKeyboardCapture`, which the focused chat EditBox drives; the free-fly
-    // chord below is deliberately outside it, like every dev chord ([`debug_panel::dev_chord`]).
+    // chord below is deliberately outside it, like every dev chord ([`modkeys::dev_chord`]).
     let typing = ui_capture.0;
     // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the
     // typing gate and 0585's exact-modifier law when it latched, so this module carries neither
@@ -526,7 +529,7 @@ fn control(
     // A bare `F` is a key the reference lets a player bind — our own store test binds it to JUMP —
     // and a dev doesn't get to squat on the game's namespace (0585, the same rule that moved the
     // perf HUD off bare `P`). Ungated on `typing` like every chord: it can't be mistaken for text.
-    if crate::debug_panel::dev_chord(&keys, KeyCode::KeyF) {
+    if benilla_world::modkeys::dev_chord(&keys, KeyCode::KeyF) {
         player.detached = !player.detached;
     }
 
@@ -613,15 +616,7 @@ fn control(
                 .unwrap_or(CAM_PIVOT_FALLBACK);
             let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
             seat_camera(
-                dt,
-                0.0,
-                player.pos,
-                head,
-                pivot_h,
-                &mut rig,
-                &mut cam,
-                &mut cam_t,
-                &move_and_slide,
+                dt, 0.0, player.pos, head, pivot_h, &mut rig, &mut cam, &mut cam_t, &collide,
                 cam_probe,
             );
             return;
@@ -930,7 +925,7 @@ fn control(
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
         // doesn't flicker between the two physics regimes.
-        let surface_y = swim::surface_over_feet(water, player.pos, claim);
+        let surface_y = swim::surface_over_feet(world, player.pos);
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
         if let Some(surface) = surface_y {
             move_trace::swim(player.pos.y, surface, swimming, player.collision_height.0);
@@ -1032,7 +1027,7 @@ fn control(
             // the upward velocity halves (`update_swimming`'s verified `0x7c5de0` gate). The wire
             // streams it as a normal JUMP: fall clock 0, the seeded zspeed in the tail —
             // `advance_airborne_arc` below snapshots it like any land jump.
-            swim::breach_step(&mut player, &time, &move_and_slide, capsule)
+            swim::breach_step(&mut player, &time, &collide, capsule)
         } else if swimming {
             // The swim pitch: HELD when unsteered (VERIFIED TU-B(c) — an idle floater keeps its
             // pitch, never auto-levels), and steered by mouselook as a DIRECT set of the camera
@@ -1098,11 +1093,11 @@ fn control(
             let out = swim::swim_step(
                 &mut player,
                 &time,
-                &move_and_slide,
+                &collide,
                 capsule,
                 dir3 * dir_speed,
                 rest_line,
-                |feet| swim::surface_over_feet(water, feet, claim),
+                |feet| swim::surface_over_feet(world, feet),
             );
             // The surface redirect (decisions 0499+0505 — a NAMED DIVERGENCE, see
             // `swim::cap_redirect`): when the rise capped at the rest line, the stroke went
@@ -1135,7 +1130,7 @@ fn control(
             mover::step(
                 &mut player,
                 &time,
-                &move_and_slide,
+                &collide,
                 capsule,
                 moving,
                 dir,
@@ -1207,7 +1202,7 @@ fn control(
         // director's report — *stepped off a ledge on a boat and it threw me back across the boat
         // until I landed* — is a statement about the DECK-relative path, which no other instrument
         // here records.
-        if crate::dbg_trace::enabled_for("ride") {
+        if benilla_assets::trace::enabled_for("ride") {
             let boat_pose = player
                 .ride
                 .as_ref()
@@ -1217,7 +1212,7 @@ fn control(
                 let local = Quat::from_euler(EulerRot::YXZ, byaw, 0.0, 0.0)
                     .inverse()
                     .mul_vec3(feet - bpos);
-                crate::dbg_trace::line(
+                benilla_assets::trace::line(
                     "ride",
                     &format!(
                         "on {:#x} deck({:8.2},{:7.2},{:8.2}) yaw{:+.3} | feet({:8.2},{:7.2},{:8.2})                          local({:7.2},{:6.2},{:7.2}) | grounded={} support={} vy={:+6.2}",
@@ -1245,7 +1240,7 @@ fn control(
                 // Not riding: only worth a line when something under us *is* a transport, i.e. the
                 // frames where an attach should have happened and did not.
                 if let Some((_, _, guid)) = ground.and_then(owning_transport) {
-                    crate::dbg_trace::line(
+                    benilla_assets::trace::line(
                         "ride",
                         &format!(
                             "OFF but standing on {:#x} at ({:8.2},{:7.2},{:8.2}) grounded={}",
@@ -1518,7 +1513,7 @@ fn control(
             &mut rig,
             &mut cam,
             &mut cam_t,
-            &move_and_slide,
+            &collide,
             cam_probe,
         );
 

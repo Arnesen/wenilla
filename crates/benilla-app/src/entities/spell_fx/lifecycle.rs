@@ -50,7 +50,7 @@
 //!   repeating play instead. Corpus: of the 692 `Spells\` models, 507 have a single sequence, 119
 //!   two, 65 three and **one** has four or more — so a multi-variation `Hold` is at most that single
 //!   model, and it is not worth a per-pass re-roll's complexity until one shows.
-//! - A **ribbon**'s per-sequence visibility is still decided once at spawn ([`crate::ribbons`],
+//! - A **ribbon**'s per-sequence visibility is still decided once at spawn ([`benilla_world::ribbons`],
 //!   which spawns per fixed-sequence entity). A trail authored dark in `Stand` and lit in `Hold`
 //!   would stay dark. Left as a residual: the ribbon lane's own spawn shape has to change for it,
 //!   and no reported effect turns on it.
@@ -188,10 +188,10 @@ pub(crate) fn advance_fx_anim(
 /// drop prints `fx leg decay` followed by the `kit expire` a further 1.10 s on. A duration question
 /// is answered from timestamps, never from watching.
 pub(super) fn trace_leg(leg: &str, root: Entity, anim_id: u16) {
-    if !crate::dbg_trace::enabled() {
+    if !benilla_assets::trace::enabled() {
         return;
     }
-    crate::dbg_trace::line("fx", &format!("leg {leg} e={root} anim={anim_id}"));
+    benilla_assets::trace::line("fx", &format!("leg {leg} e={root} anim={anim_id}"));
 }
 
 /// The reap's decay-out (`0x614150`, gates at `0x614187`–`0x6141a1`): arm `Decay` if the model

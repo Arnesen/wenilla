@@ -77,7 +77,7 @@ impl Plugin for LoginPlugin {
                     (debug_login_smoke, screen::debug_login_shot),
                 )
                     .chain()
-                    .after(crate::schedule::WorldStage::Net),
+                    .after(benilla_world::schedule::WorldStage::Net),
             );
     }
 }

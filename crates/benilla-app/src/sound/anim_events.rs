@@ -33,10 +33,10 @@
 
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
 use crate::creature_anim::{held_strike_sound, AnimSoundEvent, CastHold, SpellVisuals};
 use crate::net::ObjectStore;
-use crate::schedule::WorldStage;
+use benilla_assets::WorldAssets;
+use benilla_world::schedule::WorldStage;
 
 use super::emote::EmoteSounds;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};

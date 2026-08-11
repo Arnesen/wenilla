@@ -17,9 +17,9 @@ use bevy::prelude::*;
 
 use benilla_formats::EmoteSoundCatalog;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{EmoteKind, EmoteMessage, ObjectStore};
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

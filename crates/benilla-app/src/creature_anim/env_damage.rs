@@ -28,7 +28,7 @@
 
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 
 /// The loaded 6-slot table (`None` until the startup load lands; absent = no environmental
 /// feedback kits, like every optional DBC face).

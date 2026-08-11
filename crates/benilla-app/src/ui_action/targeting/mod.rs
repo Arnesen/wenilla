@@ -73,7 +73,7 @@ pub(crate) use world::{commit_ground_cast_on_click, commit_object_cast_on_click}
 
 use bevy::prelude::*;
 
-use crate::interact::WorldRightPress;
+use benilla_world::interact::WorldRightPress;
 
 /// Which click seam is asking the standing flag_word whether it may bind — the reference's three
 /// *wants* predicates, each a one-instruction mask test on the same word `0xcecac0`, each consulted

@@ -10,8 +10,7 @@ use bevy::prelude::*;
 use super::booth::{spawn_booth_model, BoothMotion, BoothPart};
 use super::framing::{body_frame, frame, head_anchor, PortraitAnchors};
 use super::{aim, test_mode, BoothCam, BoothLight, Booths, PaperDollBooth, PAPERDOLL_SLOT, SLOTS};
-use crate::model_render::m2_url;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::m2_url;
 
 /// The debug bake driver: when `WOW_PORTRAIT_TEST` is set, bake the named model into every slot once
 /// it loads, and own the booths (the live sync yields). See [`bake_test`].
@@ -22,15 +21,14 @@ pub(super) fn sync_test_portraits(
     booth_light: Res<BoothLight>,
     m2s: Res<Assets<M2Model>>,
     asset_server: Res<AssetServer>,
-    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
-    mut test_cache: Local<crate::model_render::MaterialCache>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
     mut test_handle: Local<Option<Handle<M2Model>>>,
     mut test_done: Local<bool>,
     mut env_cache: Local<Option<bool>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
-    mut forms: ResMut<crate::model_forms::ModelForms>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    mut forms: ResMut<benilla_world::model_forms::ModelForms>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
 ) {
     if !test_mode(&mut env_cache) || *test_done {
@@ -46,9 +44,8 @@ pub(super) fn sync_test_portraits(
         &m2s,
         &mut forms,
         &mut mesh_assets,
-        &mut wow_mats,
+        &mut mats,
         &booth_light,
-        &mut test_cache,
         &mut test_handle,
         &mut cams,
         anim_data.as_deref().map(|a| &a.0),
@@ -64,16 +61,15 @@ pub(super) fn sync_test_portraits(
 #[allow(clippy::too_many_arguments)]
 fn bake_test(
     commands: &mut Commands,
-    palettes: &mut crate::rig_palette::RigPalettes,
+    palettes: &mut benilla_world::rig_palette::RigPalettes,
     booths: &Booths,
     path: &str,
     asset_server: &AssetServer,
     m2s: &Assets<M2Model>,
-    forms: &mut crate::model_forms::ModelForms,
+    forms: &mut benilla_world::model_forms::ModelForms,
     mesh_assets: &mut Assets<Mesh>,
-    wow_mats: &mut Assets<WowModelMaterial>,
+    mats: &mut benilla_world::model_render::M2BatchMaterials,
     booth_light: &BoothLight,
-    cache: &mut crate::model_render::MaterialCache,
     test_handle: &mut Option<Handle<M2Model>>,
     cams: &mut Query<(&BoothCam, &mut Transform, &mut Projection)>,
     catalog: Option<&benilla_formats::AnimDataCatalog>,
@@ -106,63 +102,38 @@ fn bake_test(
             ))
         });
     // The test model's render forms, built NOW (decision 0834) — a dev harness bake, one model.
-    let key = crate::model_forms::ModelKey::from(&handle);
-    forms.ensure_now(
-        key,
-        crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
-        &model.submeshes,
-        mesh_assets,
-    );
-    let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
-    let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
-    let parts_against = |light: &bevy::render::render_resource::Buffer,
-                         cache: &mut crate::model_render::MaterialCache,
-                         wow_mats: &mut Assets<WowModelMaterial>| {
-        model
-            .submeshes
-            .iter()
-            .enumerate()
-            .map(|(pi, s)| {
-                let mat = crate::model_render::model_material(
-                    cache,
-                    wow_mats,
-                    s.texture.clone().or_else(|| skin.clone()),
-                    s.blend,
-                    s.two_sided,
-                    false,
-                    false,
-                    s.emissive,
-                    s.additive,
-                    false,
-                    s.no_depth_write,
-                    s.no_depth_test,
-                    s.fog_policy,
-                    s.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                    crate::model_render::ShadeSel::Lit, // booth look: never ground-shaded
-                    0,
-                    None,                // static UVs
-                    s.rgb_anim.as_ref(), // seeded at its first key — the booth freezes at t = 0
-                    None,  // booth: no booth buffer has a point table (count 0) — anchor moot
-                    None,  // M2 carries no MOMT SIDN colour
-                    false, // …nor the WINDOW flag
-                    light,
-                );
-                BoothPart {
+    forms.ensure_now_rigged(&handle, &model.submeshes, mesh_assets);
+    let built = forms.slices(&handle);
+    let (stat_forms, skin_forms) = (built.stat, built.skin.unwrap_or(&[]));
+    let parts_against =
+        |light: &bevy::render::render_resource::Buffer,
+         mats: &mut benilla_world::model_render::M2BatchMaterials| {
+            model
+                .submeshes
+                .iter()
+                .enumerate()
+                .map(|(pi, s)| BoothPart {
                     skinned: skin_forms.get(pi).cloned(),
                     static_mesh: stat_forms
                         .get(pi)
                         .map(|(h, _)| h.clone())
                         .unwrap_or_default(),
-                    material: mat,
+                    // The booth look: the slot's own light buffer, sky lane (never ground-shaded),
+                    // frozen at t = 0 — so no UV scroll and the tint seeded at its first key.
+                    material: mats.off_world(
+                        s,
+                        s.texture.clone().or_else(|| skin.clone()),
+                        light,
+                        false,
+                    ),
                     // The harness parses submeshes straight off the model, so the authored alpha is
                     // right here — an eyeball bake should show the batch dimming the artist wrote.
                     alpha_anim: s.alpha_anim.clone(),
-                }
-            })
-            .collect::<Vec<BoothPart>>()
-    };
-    let parts = parts_against(&studio, cache, wow_mats);
-    let pane_parts = parts_against(&pane, cache, wow_mats);
+                })
+                .collect::<Vec<BoothPart>>()
+        };
+    let parts = parts_against(&studio, mats);
+    let pane_parts = parts_against(&pane, mats);
     let (pivot_height, ground_radius) = model
         .bounds
         .map(|b| (b.pivot_z.map_or(0.0, |z| z + 0.0972), b.ring_footprint))

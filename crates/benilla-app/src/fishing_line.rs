@@ -19,7 +19,7 @@
 //!
 //! Named deviations (same class as the bowstring's, decision 1099): the anchor rides the static
 //! prop frame (the pole's bone 1 is not posed — item props rest at bind pose here); the color
-//! samples the scene ambient ([`crate::lighting::WowLighting`]) rather than a per-model light
+//! samples the scene ambient ([`benilla_world::lighting::WowLighting`]) rather than a per-model light
 //! collector; gizmo lines are unfogged. The reference's sheath side-trigger (`0x60d2f0` calls
 //! `SetSheatheState(1)` when the watcher finds the pole on the back) and the FishingCast→
 //! FishingLoop anim handoff (`0x5fc3f0` case 0x85) are the channel-anim family's, not drawn here.
@@ -59,7 +59,7 @@ fn draw_fishing_lines(
         &GlobalTransform,
         Option<&OverheadFallback>,
     )>,
-    lighting: Option<Res<crate::lighting::WowLighting>>,
+    lighting: Option<Res<benilla_world::lighting::WowLighting>>,
     mut gizmos: Gizmos,
 ) {
     for (pole, prop, vis) in &poles {
@@ -120,7 +120,7 @@ impl Plugin for FishingLinePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             PostUpdate,
-            draw_fishing_lines.in_set(crate::billboard::BillboardPlace),
+            draw_fishing_lines.in_set(benilla_world::billboard::BillboardPlace),
         );
     }
 }

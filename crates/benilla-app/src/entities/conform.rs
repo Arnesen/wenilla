@@ -22,7 +22,7 @@ const TILT_WALKABLE_Y: f32 = 0.0175;
 /// FREEZES the smoothed up-vector (holds the last stance) instead of conforming.
 const TILT_FREEZE_Y: f32 = 0.3572;
 /// The up-vector smoothing decay — the bridge's `[0x80c6a0]`: per-frame factor `0.0018^dt`
-/// (≈ `e^(−6.32·dt)`, τ ≈ 158 ms) applied to the RESIDUAL toward the target normal.
+/// (≈ `e^(−6.32·dt)`, τ ≈ 158 world) applied to the RESIDUAL toward the target normal.
 const TILT_DECAY: f32 = 0.0018;
 
 /// The tilt carrier a flagged model's root bones parent under — spawned by the attach path when
@@ -98,8 +98,8 @@ fn conform_rotation(mode: u8, n_local: Vec3) -> Quat {
 pub(super) fn conform_units(
     time: Res<Time>,
     spatial: SpatialQuery,
-    ground: Query<(), With<crate::collision::GroundDecalSurface>>,
-    units: Query<(&Transform, Has<crate::creature_anim::AnimParked>), Without<ConformNode>>,
+    decals: benilla_world::decal::WorldDecal,
+    units: Query<(&Transform, Has<benilla_world::rig_anim::AnimParked>), Without<ConformNode>>,
     mut nodes: Query<(&ConformNode, &mut Transform)>,
     mut ups: Local<EntityHashMap<Vec3>>,
     mut disabled: Local<Option<bool>>,
@@ -110,7 +110,7 @@ pub(super) fn conform_units(
     if *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_MOUNT_TILT").is_some()) {
         return;
     }
-    let filter = crate::collision::player_query_filter();
+    let filter = benilla_world::collision::WorldCollision::body_filter();
     let decay = TILT_DECAY.powf(time.delta_secs());
     let mut seen = EntityHashSet::default();
     let mut max_pitch: Option<(Entity, f32)> = None;
@@ -142,7 +142,7 @@ pub(super) fn conform_units(
                         TILT_PROBE_UP + TILT_PROBE_DOWN,
                         true,
                         &filter,
-                        &|e| ground.contains(e),
+                        &|e| decals.receives(e),
                     )
                     .map(|hit| hit.normal);
                 tilt_target(sampled)

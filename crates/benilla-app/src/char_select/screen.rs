@@ -17,7 +17,6 @@ use bevy::prelude::*;
 use bevy::ui_render::ui_material::MaterialNode;
 use bevy::window::PrimaryWindow;
 
-use crate::assets::WorldAssets;
 use crate::glue::art::{GlueArt, BACKDROP, DIM, GOLD, NAME_EDGE};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
@@ -25,6 +24,7 @@ use crate::glue::widgets::{
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{GluePreview, PortraitImages, PortraitSource, GLUE_SLOT};
+use benilla_assets::WorldAssets;
 
 use super::wow_font;
 

@@ -23,10 +23,10 @@ use bevy::prelude::*;
 
 use benilla_formats::SheatheSoundCatalog;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::{SheathSwapMessage, Wielded};
 use crate::net::NetEntity;
-use crate::schedule::WorldStage;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

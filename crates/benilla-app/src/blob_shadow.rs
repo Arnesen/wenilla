@@ -1,6 +1,6 @@
 //! The **unit blob shadow** — the soft dark oval under every unit (the player, every NPC, every
 //! creature), the reference's per-frame shadow pass rebuilt on the shared surface-decal projector
-//! ([`crate::decal`]), drawn on the shared effect stream (0733).
+//! ([`benilla_world::decal`]), drawn on the shared effect stream (0733).
 //!
 //! **The byte-verified mechanism** (wow-re `unit-blob-shadow.md`, a §5 cross-check; the "cloud
 //! shadow" label on `0x6d7920` was corrected — it IS the unit shadow draw):
@@ -44,43 +44,23 @@
 //! an off-screen shadow's triangles are vertex-clipped GPU-side — dozens of ~50-vert slices,
 //! below any ledger line.)
 
-use avian3d::prelude::Collider;
 use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
-use crate::collision::GroundDecalSurface;
 use crate::creature_anim::AnimData;
-use crate::decal::{project_decal, DecalFrame};
-use crate::model_fade::{fade_alpha, RenderFade};
 use crate::net::{NetEntity, SelfPlayer};
-use crate::particles::buffer::{
-    begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
-};
-use crate::player::{CameraControl, WorldCamera};
-use crate::schedule::WorldStage;
+use crate::player::CameraControl;
+use benilla_world::decal::{DecalFrame, WorldDecal};
+use benilla_world::model_fade::{fade_alpha, RenderFade};
+use benilla_world::particles::buffer::{begin_effect_frame, EffectVertex};
+use benilla_world::schedule::WorldStage;
+use benilla_world::view::WorldCamera;
 
 /// The reference's shadow disc (`Textures\ShadowBlob.blp`, wow-re unit-blob-shadow RE): grayscale
 /// radial blob (gray-160 core → white rim) under a binary alpha disc, multiplied onto the ground.
 const SHADOW_TEXTURE: &str = "mpq://textures/shadowblob.blp";
-/// The shadow's sort-ladder rung: half the ring's `RING_DEPTH_BIAS`, so where both decals stack
-/// the ring draws later deterministically. Sort only — the rasterizer margin is
-/// [`SHADOW_RASTER_BIAS`], sized independently (B131 split one constant into its two roles).
-const SHADOW_SORT_BIAS: f32 = 4096.0;
-/// The shadow's rasterizer depth-bias constant — the margin funding the `GreaterEqual` tie
-/// against the drawn ground (`DECAL_WORLD_CLIP`, 0781). The reference's mechanism is the same
-/// class: `shadowBias` cvar 0.1 → a **constant-only** polygon offset (−102.4 LSBs of its 24-bit
-/// buffer; no slope term exists in the binary — wow-re unit-blob-shadow RE, corroborated across
-/// every shadow draw of four apitraces). The *size* is ours, not the reference's number: our
-/// residual is 0781's — the decal's CPU-baked world verts vs the receiver's GPU-transformed
-/// verts diverge by ~1–3 ulps of the world coordinate, which is millimetres at city magnitudes
-/// and lands on the depth tie where the receiver is *sloped* (horizontal ulps project onto the
-/// tilted normal — the confirmed B131 flicker walk was the Stormwind gate ramp). 4096 absorbed
-/// under half the 3-ulp worst case at close zoom and lost the tie while moving; 32768 dominates
-/// it ≥2× at every zoom ≥1 yd and stays centimetre-order at 30 yd (no visible punch-through).
-/// Sizing pinned by `raised_bias_dominates_the_bake_residual` (particles/render.rs).
-pub(crate) const SHADOW_RASTER_BIAS: i32 = 32768;
 /// The byte clamp on the animation box: each corner component is clamped INTO ±5 yd pre-scale
 /// (`0x6992c0` MAX(−5) / `0x699250` MIN(+5) — a cap on huge authored boxes, never a floor).
 const BOX_CLAMP: f32 = 5.0;
@@ -194,7 +174,7 @@ fn update_shadows(
     rig: Option<Res<CameraControl>>,
     shadow_assets: Option<Res<ShadowAssets>>,
     images: Res<Assets<Image>>,
-    surfaces: Query<&Collider, With<GroundDecalSurface>>,
+    decals: WorldDecal,
     // Spawn/despawn fades live on the model *part* entities; attribute each to its unit root so
     // the shadow can ride the same alpha the body renders with (O(#currently-fading parts) — zero
     // in the steady state).
@@ -239,7 +219,7 @@ fn update_shadows(
         let slot = root_fade.entry(root).or_insert(1.0);
         *slot = slot.min(alpha);
     }
-    let surface_count = surfaces.iter().count();
+    let surface_count = decals.receiver_count();
     for (shadow, mut key, mut verts) in &mut shadows {
         n_total += 1;
         let Ok((unit, anims, is_self, mount_child)) = owners.get(shadow.owner) else {
@@ -335,9 +315,8 @@ fn update_shadows(
         let span_v = frame.max_y - frame.min_y;
         verts.0.clear();
         let projected = span_v > 0.0
-            && project_decal(
+            && decals.project(
                 &mut verts.0,
-                &surfaces,
                 &frame,
                 |p| {
                     // The trapezoid ramp over the vertical span (the reference's second texture
@@ -469,7 +448,7 @@ fn update_shadows(
 fn push_shadows(
     assets: Option<Res<ShadowAssets>>,
     cam: Query<Entity, With<WorldCamera>>,
-    mut quads: ResMut<EffectQuads>,
+    mut draw: benilla_world::particles::buffer::WorldEffectDraw,
     shadows: Query<(Entity, &ShadowKey, &ShadowVerts)>,
 ) {
     let Some(assets) = assets else { return };
@@ -478,26 +457,19 @@ fn push_shadows(
         if verts.0.is_empty() {
             continue;
         }
-        let start = quads.begin();
-        quads.verts.extend_from_slice(&verts.0);
-        quads.commit_tris(
-            start,
-            EffectDrawSpec {
-                cam,
-                texture: assets.texture.id(),
-                blend: EffectBlend::Multiply,
-                fog: EffectFog::Off,
-                // The modulate decal is its own darkening — the scene light is already in
-                // the ground it multiplies.
-                lit: false,
-                anchor: key.feet,
-                bias: SHADOW_SORT_BIAS,
-                raster_bias: SHADOW_RASTER_BIAS,
-                cam_relative: false,
-                main_entity: entity,
-                light: None,
-            },
-        );
+        // Multiply: the modulate decal is its own darkening — the scene light is already in the
+        // ground it multiplies, which is why the lane's unlit default is right here.
+        let mut batch = draw
+            .batch(cam, assets.texture.id())
+            .multiply()
+            .anchored(key.feet)
+            .rung(
+                benilla_world::sky_order::Rung::SHADOW_SORT,
+                benilla_world::sky_order::Rung::SHADOW_RASTER,
+            )
+            .owner(entity);
+        batch.vertices(&verts.0);
+        batch.tris();
     }
 }
 

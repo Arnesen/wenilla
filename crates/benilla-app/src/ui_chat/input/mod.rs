@@ -94,9 +94,9 @@ fn target_player_name(
 /// 16-parameter ceiling, and a named struct beats a nested tuple nobody can read.
 ///
 /// - `camera`/`clock` feed **`/shot`**, the framing instrument (decision 0600).
-/// - `liquids`/`interior` feed **`/liquid`**, the swim diagnostic (decision 0634 follow-up): the
-///   interior claim is what decides which liquid surfaces the swim query is allowed to see, so the
-///   two only mean anything together.
+/// - `world` feeds **`/liquid`**, the swim diagnostic (decision 0634 follow-up): the interior
+///   claim is what decides which liquid surfaces the swim query may see, and it arrives with the
+///   query rather than beside it.
 /// - `stores`/`self_store`/`factions`/`reputations` feed **`/reaction`**, the attackability
 ///   diagnostic (decision 0637): the exact inputs [`crate::target::ring_reaction`] judges on, so
 ///   "why is this unit not attackable" is one command instead of a guess.
@@ -106,15 +106,11 @@ pub(super) struct ChatProbes<'w, 's> {
         'w,
         's,
         &'static GlobalTransform,
-        (With<crate::player::WorldCamera>, Without<SelfPlayer>),
+        (With<benilla_world::view::WorldCamera>, Without<SelfPlayer>),
     >,
-    clock: Option<Res<'w, crate::lighting::GameClock>>,
-    liquids: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
-    interior: Res<'w, crate::wmo_portal::CurrentWmoInterior>,
-    player_room: Res<'w, crate::wmo_portal::PlayerWmoRoom>,
-    camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
-    /// The placed buildings, so a room's whole-group submersion override resolves (1000).
-    placements: crate::liquid::RoomPlacements<'w, 's>,
+    clock: Option<Res<'w, benilla_world::lighting::GameClock>>,
+    /// The `/liquid` instrument's whole world side — the claims, the verdict, the candidates.
+    world: benilla_world::world_point::WorldPoint<'w, 's>,
     stores: Query<'w, 's, &'static crate::net::ObjectStore>,
     self_store: Query<'w, 's, &'static crate::net::ObjectStore, With<SelfPlayer>>,
     factions: Option<Res<'w, crate::target::Factions>>,
@@ -172,11 +168,7 @@ pub(super) fn drain_chat_input(
     let ChatProbes {
         camera: world_camera,
         clock,
-        liquids,
-        interior,
-        player_room,
-        camera_claim,
-        placements,
+        world,
         stores,
         self_store,
         factions,
@@ -310,16 +302,16 @@ pub(super) fn drain_chat_input(
                     continue;
                 };
                 let wow = benilla_assets::coords::bevy_to_wow(feet);
-                let claim = crate::liquid::player_claim(player_room, placements);
-                let eye = crate::liquid::camera_claim(camera_claim, placements);
-                let verdict = crate::liquid::liquid_at(liquids.iter(), wow, claim);
+                let claim = world.claim(benilla_world::world_point::Subject::Player);
+                let eye = world.claim(benilla_world::world_point::Subject::Eye);
+                let verdict = world.liquid_at(benilla_world::world_point::Subject::Player, wow);
                 let mut lines = vec![
                     format!(
                         "liquid: feet [{:.2}, {:.2}, {:.2}] · claim {claim:?} ({})",
                         wow[0],
                         wow[1],
                         wow[2],
-                        match interior.0 {
+                        match world.interior() {
                             Some(k) => format!(
                                 "wmo {} nameSet {} group {}",
                                 k.wmo_id, k.name_set, k.group_area_id
@@ -341,7 +333,8 @@ pub(super) fn drain_chat_input(
                         None => "liquid: VERDICT none — not in liquid".into(),
                     },
                 ];
-                let candidates = crate::liquid::describe_at(liquids.iter(), wow, claim);
+                let candidates =
+                    world.describe_liquid_at(benilla_world::world_point::Subject::Player, wow);
                 if candidates.is_empty() {
                     lines.push("liquid: no footprint covers this XY at all".into());
                 }

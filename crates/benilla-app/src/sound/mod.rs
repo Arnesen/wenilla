@@ -10,8 +10,9 @@
 use bevy::prelude::*;
 
 use crate::net::SelfPlayer;
-use crate::player::{head_height, CameraPivot, Player, WorldCamera};
-use crate::schedule::WorldStage;
+use crate::player::{head_height, CameraPivot, Player};
+use benilla_world::schedule::WorldStage;
+use benilla_world::view::WorldCamera;
 
 mod anim_events;
 mod combat;
@@ -177,7 +178,7 @@ impl Default for AudioListener {
 /// The world soundscape is live: in the world AND seated on the avatar ([`Player::active`]).
 /// The state half is the session boundary — the world's followers must not keep tracking (or
 /// restarting) its audio from the glue screens after a logout. The seated half covers the edges:
-/// after a logout the camera — and with it [`crate::terrain_stream::CurrentArea`] — still sits at
+/// after a logout the camera — and with it [`benilla_world::terrain_stream::CurrentArea`] — still sits at
 /// the old spot until the next login's take-control, and following it would start the *previous*
 /// session's soundscape for those frames.
 fn world_audio_live(
@@ -294,10 +295,10 @@ fn update_audio_listener(
 }
 
 /// The dev chord + `M` — flip [`SoundConfig::muted`]. Lives on the dev-chord plane
-/// ([`crate::debug_panel::dev_chord`], decision 0585) so it can never collide with a game binding
+/// ([`benilla_world::modkeys::dev_chord`], decision 0585) so it can never collide with a game binding
 /// and stays reachable with the chat bar open.
 fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<SoundConfig>) {
-    if crate::debug_panel::dev_chord(&keys, KeyCode::KeyM) {
+    if benilla_world::modkeys::dev_chord(&keys, KeyCode::KeyM) {
         config.muted = !config.muted;
         info!("sound {}", if config.muted { "muted" } else { "unmuted" });
     }

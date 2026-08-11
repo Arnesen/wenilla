@@ -190,8 +190,8 @@ pub(super) fn spell_damage_log(
     feedback: &mut MessageWriter<UnitCombatFeedback>,
     center: &mut MessageWriter<CombatTextEvent>,
 ) {
-    if crate::dbg_trace::enabled() {
-        crate::dbg_trace::line(
+    if benilla_assets::trace::enabled() {
+        benilla_assets::trace::line(
             "fct",
             &format!(
                 "recv spelldmg atk={:#x} target={:#x} dmg={} crit={}",
@@ -262,8 +262,8 @@ pub(super) fn periodic_aura_log(
     names: &mut NameCache,
     net: &NetCommands,
 ) {
-    if crate::dbg_trace::enabled() {
-        crate::dbg_trace::line(
+    if benilla_assets::trace::enabled() {
+        benilla_assets::trace::line(
             "fct",
             &format!(
                 "recv periodic caster={:#x} target={:#x} ticks={}",

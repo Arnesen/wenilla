@@ -22,10 +22,10 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{ActionSlot, ScriptValue, UiScript, UnitState};
 
-use crate::assets::LockRecover;
 use crate::debug_panel::EguiPointerOver;
-use crate::schedule::WorldStage;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::LockRecover;
+use benilla_world::schedule::WorldStage;
 
 mod extract;
 mod input;
@@ -186,7 +186,7 @@ impl Plugin for UiScriptPlugin {
             // After `AssetSet::Open` so the patch chain exists at boot: the VM's first load is
             // the real `GlobalStrings.lua` (the reference's own FrameXML order), which the
             // cast-fail display (0427) resolves its messages from.
-            .add_systems(Startup, setup_script.after(crate::assets::AssetSet::Open))
+            .add_systems(Startup, setup_script.after(benilla_assets::AssetSet::Open))
             // The in-game UI materializes on entering the world, not at boot (1051) — the
             // reference's own seam. Only the font registry loads at `Startup`.
             .add_systems(
@@ -299,7 +299,7 @@ pub(crate) struct IngameUiLoaded(pub(crate) bool);
 ///
 /// Safe on the state edge only because 1038 moved the initial transition after `PostStartup` — a
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
-/// [`crate::assets::AssetSet::Open`] and loaded against no patch chain.
+/// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 fn load_ingame_ui_on_world_entry(world: &mut World) {
     if world.resource::<IngameUiLoaded>().0 || !ui_wanted(world) {
         return;
@@ -332,7 +332,7 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
 /// a silently missing GlobalStrings once suppressed every red error line (the 0427 fold's
 /// absent-key face is faithful data suppression — but only when the file actually loaded).
 fn load_global_strings(world: &mut World, script: &UiScript) {
-    let Some(assets) = world.get_resource::<crate::assets::WorldAssets>() else {
+    let Some(assets) = world.get_resource::<benilla_assets::WorldAssets>() else {
         warn!("ui_script: no patch chain — GlobalStrings absent, error lines will be empty");
         return;
     };
@@ -373,7 +373,7 @@ fn load_global_strings(world: &mut World, script: &UiScript) {
 /// Rust: a transcription can be wrong, and a hand-kept alias list is exactly what left 61 real
 /// commands (`/lol`, `/hi`, `/ty`, …) unresolvable before 0881.
 fn load_emote_tokens(world: &mut World, script: &UiScript) {
-    let Some(assets) = world.get_resource::<crate::assets::WorldAssets>() else {
+    let Some(assets) = world.get_resource::<benilla_assets::WorldAssets>() else {
         return; // already WARNed by load_global_strings
     };
     let bytes = {

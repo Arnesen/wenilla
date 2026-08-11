@@ -11,9 +11,9 @@
 
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
 use crate::entities::MissileSound;
-use crate::schedule::WorldStage;
+use benilla_assets::WorldAssets;
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit_ext, stop_source, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};

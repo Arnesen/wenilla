@@ -8,27 +8,25 @@
 //! reaches the shared types + caches in the parent via `super::`.
 
 use avian3d::prelude::RigidBody;
-use benilla_assets::{ModelAnimations, ModelSkeleton};
+use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::assets::WorldAssets;
+use benilla_assets::WorldAssets;
 use bevy::animation::transition::AnimationTransitions;
 
 use crate::creature_anim::AnimDriver;
-use crate::debug_panel::ModelKind;
-use crate::interact::WorldObject;
-use crate::lighting::SharedLightBuffer;
-use crate::model_fade::JoinedFade;
 use crate::net::{NetEntity, ObjectStore};
-use crate::particles;
 use crate::player::CameraPivot;
 use crate::target::SelectionRadius;
-use crate::terrain::WowModelMaterial;
+use benilla_world::interact::WorldObject;
+use benilla_world::model_fade::JoinedFade;
+use benilla_world::model_render::ModelKind;
+use benilla_world::particles;
 
 use super::{
-    Characters, Creatures, CubeAssets, DisplayModel, EntityMaterials, GameObjects, ModelHandle,
-    SkinComposites, SkinSections, VisualAttached,
+    Characters, Creatures, CubeAssets, DisplayModel, GameObjects, ModelHandle, SkinComposites,
+    SkinSections, VisualAttached,
 };
 
 mod char_skin;
@@ -52,7 +50,7 @@ pub(super) use redress::redress_player_looks;
 /// clock is worth arming on every instance, because a sequence drives far more than a pose.
 ///
 /// This lane spawns **no joint
-/// entities** (decision 0724): the pose lives in a [`crate::creature_anim::RigPose`] array on
+/// entities** (decision 0724): the pose lives in a [`benilla_world::rig_anim::RigPose`] array on
 /// `entity`, and only the CONSUMER bones — attachment points, event markers, emitter/ribbon/
 /// light hosts, billboard-card bones — get an anchor entity under `joints_root`, re-seated from
 /// the composed pose each frame it changes. Returns the anchors + the palette rig slot
@@ -62,7 +60,7 @@ pub(super) use redress::redress_player_looks;
 /// (Milestone A).
 fn setup_skinned_instance(
     commands: &mut Commands,
-    palettes: &mut crate::rig_palette::RigPalettes,
+    palettes: &mut benilla_world::rig_palette::RigPalettes,
     entity: Entity,
     joints_root: Entity,
     d: &DisplayModel,
@@ -73,7 +71,7 @@ fn setup_skinned_instance(
     // rider's frame is the seat anchor instead (decision 0441), a conform-tilted model's its
     // conform node, while the `AnimationPlayer`/driver components stay on `entity`. Skinned
     // parts render purely from the palette, so their own parentage is free.
-    let mut pose = crate::creature_anim::RigPose::new(joints_root, &d.skeleton);
+    let mut pose = benilla_world::rig_anim::RigPose::new(joints_root, &d.skeleton);
     // The consumer bones: every bone something in the world reaches by entity — an attachment
     // point (held items, spell effects, the mount seat, overhead anchors), an event marker, an
     // emitter/ribbon/light host, a billboard card's bone. Everything else is palette-only.
@@ -108,7 +106,7 @@ fn setup_skinned_instance(
                     scale,
                 },
                 Visibility::default(),
-                crate::creature_anim::RigAnchor { rig: entity, bone },
+                benilla_world::rig_anim::RigAnchor { rig: entity, bone },
             ))
             .id();
         commands.entity(joints_root).add_child(anchor);
@@ -118,36 +116,39 @@ fn setup_skinned_instance(
     // The owned palette rig (decision 0720): the world pass writes this rig's composed frames ×
     // these bindposes into the slot; every skinned part below tags the slot so the vertex stage
     // finds its palette. The on-replace hook frees the slot with the visual teardown.
-    let slot =
-        match crate::rig_palette::RigSkin::allocate_bones(palettes, nbones as u32, ibp.clone()) {
-            Some(rig) => {
-                let slot = rig.slot;
-                // The marker's invariant is "currently slot-less": a heal-triggered (or any
-                // other) rebuild that lands a slot clears it, or the healer would loop.
-                commands
-                    .entity(entity)
-                    .insert(rig)
-                    .remove::<crate::rig_palette::RigStarved>();
-                slot
-            }
-            None => {
-                // Table full (warned): parts render the static bind-pose mesh — but no longer
-                // for ever. The marker hands the unit to `heal_rig_starved` (decision 0863),
-                // which rebuilds the visual once the table has headroom; without it a mob that
-                // streamed in during a full-table window stayed a statue for its whole life.
-                commands
-                    .entity(entity)
-                    .insert(crate::rig_palette::RigStarved);
-                0
-            }
-        };
+    let slot = match benilla_world::rig_palette::RigSkin::allocate_bones(
+        palettes,
+        nbones as u32,
+        ibp.clone(),
+    ) {
+        Some(rig) => {
+            let slot = rig.slot;
+            // The marker's invariant is "currently slot-less": a heal-triggered (or any
+            // other) rebuild that lands a slot clears it, or the healer would loop.
+            commands
+                .entity(entity)
+                .insert(rig)
+                .remove::<benilla_world::rig_palette::RigStarved>();
+            slot
+        }
+        None => {
+            // Table full (warned): parts render the static bind-pose mesh — but no longer
+            // for ever. The marker hands the unit to `heal_rig_starved` (decision 0863),
+            // which rebuilds the visual once the table has headroom; without it a mob that
+            // streamed in during a full-table window stayed a statue for its whole life.
+            commands
+                .entity(entity)
+                .insert(benilla_world::rig_palette::RigStarved);
+            0
+        }
+    };
     if let Some(anims) = d.animations.as_ref() {
         // Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses; a GO's
         // free-running flicker): free-clock loops the per-sequence reader drops, driven on their own clock.
         // Rig-bound (it writes bone slots), unlike the sequence clock — which is armed by
         // [`arm_sequence_clock`] whether or not this instance ended up with a rig.
         if let Some(drive) =
-            crate::creature_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
+            benilla_world::rig_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
             commands.entity(entity).insert(drive);
         }
@@ -235,7 +236,7 @@ fn arm_sequence_clock(
                 // A (re)built rig is born live: fresh joints spawn pointing at the root, so a
                 // stale park marker from the torn-down visual would desync the LOD gate's
                 // edge-triggered bookkeeping (decision 0448). It re-parks on its own merits.
-                .remove::<crate::creature_anim::AnimParked>();
+                .remove::<benilla_world::rig_anim::AnimParked>();
         }
     }
 }
@@ -291,27 +292,17 @@ pub(super) fn attach_entity_visuals(
     skin_build: (
         Option<Res<SkinSections>>,
         Option<Res<WorldAssets>>,
-        Option<Res<SharedLightBuffer>>,
         ResMut<Assets<Image>>,
         ResMut<SkinComposites>,
         Res<AssetServer>,
-        ResMut<Assets<WowModelMaterial>>,
-        ResMut<EntityMaterials>,
+        benilla_world::model_render::M2BatchMaterials,
     ),
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     time: Res<Time>,
 ) {
-    let (
-        sections,
-        world_assets,
-        shared_light,
-        mut images,
-        mut skin_composites,
-        asset_server,
-        mut materials,
-        mut entity_mats,
-    ) = skin_build;
+    let (sections, world_assets, mut images, mut skin_composites, asset_server, mut mats) =
+        skin_build;
     // Arm each entity's appear-fade at the moment its visual attaches (≈ its first-visible moment).
     let now = time.elapsed_secs();
     for (entity, net, equipment, reattached, mount_child, mount_body, anchored) in &pending {
@@ -415,7 +406,7 @@ pub(super) fn attach_entity_visuals(
             // lighting pop).
             commands
                 .entity(entity)
-                .insert_if_new(crate::entity_shade::GroundShade::default());
+                .insert_if_new(benilla_world::entity_shade::GroundShade::default());
             // The root's canonical fold reference: held items share the root's interior verdict
             // (one light node per unit — the reference aliases the wearer's collector into each
             // equipped item, wow-re `unit-light-combine-storm.md`), and their classifier fold must
@@ -423,7 +414,7 @@ pub(super) fn attach_entity_visuals(
             // change re-derives it with the new body model.
             commands
                 .entity(entity)
-                .insert(crate::interior::BodyBakeCenter(bake_center));
+                .insert(benilla_world::interior::BodyBakeCenter(bake_center));
             // The light node's ATTACH MODE — the reference's `[node+0x90]` bit 13, written once at
             // node creation from the descriptor TYPEMASK (`0x613e10`/`0x670db0`) and dispatched at
             // `0x6a86d0`: a GameObject attaches by CONTAINMENT (`0x6a8c10`), anchored at the world
@@ -434,12 +425,12 @@ pub(super) fn attach_entity_visuals(
                 EntityKind::GameObject => {
                     commands
                         .entity(entity)
-                        .insert(crate::interior::ContainmentAttach);
+                        .insert(benilla_world::interior::ContainmentAttach);
                 }
                 _ => {
                     commands
                         .entity(entity)
-                        .remove::<crate::interior::ContainmentAttach>();
+                        .remove::<benilla_world::interior::ContainmentAttach>();
                 }
             }
             // Identity for the mouseover inspector (and, later, hover tooltips / targeting).
@@ -514,8 +505,8 @@ pub(super) fn attach_entity_visuals(
                 {
                     let state_machine = go_state_machine;
                     let ambient = !matches!(
-                        crate::doodad_anim::classify(&d.skeleton, d.animations.as_ref()),
-                        crate::doodad_anim::DoodadAnimTier::Static
+                        benilla_world::doodad_anim::classify(&d.skeleton, d.animations.as_ref()),
+                        benilla_world::doodad_anim::DoodadAnimTier::Static
                     );
                     // A state GO whose model poses NO bone in any sequence gets no rig: skinning
                     // it could only reproduce the bind-pose mesh it already renders, at the cost
@@ -620,13 +611,11 @@ pub(super) fn attach_entity_visuals(
                     displays.as_deref(),
                     sections.as_deref(),
                     world_assets.as_deref(),
-                    shared_light.as_deref(),
                     parts,
                     &mut images,
                     &mut skin_composites.0,
                     &asset_server,
-                    &mut materials,
-                    &mut entity_mats.0,
+                    &mut mats,
                 ),
                 None => (None, None, None, (None, None)),
             };
@@ -640,7 +629,6 @@ pub(super) fn attach_entity_visuals(
             // every part and card below. See the per-part note at the spawn for why it is the
             // instance's identity rather than a skinning detail (decision 0812).
             let inst_slot = skin.as_ref().map_or(0, |rb| rb.slot);
-            let rig_tag = crate::mesh_tag::rig_bits(inst_slot);
             // The armed idle's **authored** CAaBox (decision 0637) — the mouseover picker's
             // volume for a skinned part, NOT a culling volume (skinned entity parts are never
             // frustum-culled; see the `NoFrustumCulling` note at the insert below). The bind-pose
@@ -665,7 +653,6 @@ pub(super) fn attach_entity_visuals(
                 kind,
                 char_mats: &char_mats,
                 object: &object,
-                rig_tag,
                 inst_slot,
                 rigged: skin.is_some(),
                 anchors: skin.as_ref().map_or(&no_anchors, |rb| &rb.anchors),
@@ -704,11 +691,11 @@ pub(super) fn attach_entity_visuals(
             if unit_will_fade {
                 commands
                     .entity(entity)
-                    .insert(crate::model_fade::UnitAppearFade::Pending { since: now });
+                    .insert(benilla_world::model_fade::UnitAppearFade::Pending { since: now });
             } else if reattached {
                 commands
                     .entity(entity)
-                    .remove::<crate::model_fade::UnitAppearFade>();
+                    .remove::<benilla_world::model_fade::UnitAppearFade>();
             }
             // Final size = the server's per-object scale (`OBJECT_FIELD_SCALE_X`) alone. The server
             // already folds the unit's DBC scale (`CreatureModelData.modelScale ×
@@ -812,13 +799,13 @@ pub(super) fn attach_entity_visuals(
                     // GameObjects) drew every trail a model authored in every state: the Frost
                     // Trap's twelve trigger-only streamers became a permanent spinning column
                     // over the placed trap (decision 1011).
-                    crate::ribbons::spawn_ribbon(
+                    benilla_world::ribbons::spawn_ribbon(
                         &mut commands,
                         rb,
                         owner,
                         use_pivot,
                         placement.scale.max_element(),
-                        crate::ribbons::RibbonSeq::Host(entity),
+                        benilla_world::ribbons::RibbonSeq::Host(entity),
                         // The unit's own render alpha gates its trail (0827).
                         Some(entity),
                     );
@@ -879,7 +866,7 @@ pub(super) fn attach_entity_visuals(
                         // The cube has no resident `RenderSubmesh` to cast against — its `Aabb` IS
                         // its shape, which it must SAY (decision 0929): the picker requires pick
                         // geometry rather than inferring a box from its absence.
-                        crate::interact::PickBox,
+                        benilla_world::interact::PickBox,
                     ));
                 });
             }
@@ -912,43 +899,10 @@ pub(super) fn attach_entity_visuals(
 /// they inherit the entity's world pose, others under their parent joint. Returns the joints in
 /// bone order, so a vertex's joint index maps straight in and every submesh's palette rig shares
 /// this one set. **The doodad/effect/booth lane only** (decision 0724): a streamed unit's rig is
-/// the joint-less [`crate::creature_anim::RigPose`] buffer instead — this hierarchy remains for
+/// the joint-less [`benilla_world::rig_anim::RigPose`] buffer instead — this hierarchy remains for
 /// the Bevy-graph-driven hosts. `holder` is the rig root that carries (or will carry) the
-/// [`crate::rig_palette::RigSkin`] — every joint marks it with a `RigJoint`, which is what the
+/// [`benilla_world::rig_palette::RigSkin`] — every joint marks it with a `RigJoint`, which is what the
 /// palette change-sweep iterates (0720).
-pub(crate) fn spawn_joints(
-    commands: &mut Commands,
-    root: Entity,
-    holder: Entity,
-    skeleton: &ModelSkeleton,
-) -> Vec<Entity> {
-    let joints: Vec<Entity> = skeleton
-        .joints
-        .iter()
-        .map(|j| {
-            commands
-                // Visibility too, not just Transform: held items and spell effects hang their
-                // visible roots under joints, and a gap in the chain both trips Bevy's B0004 and
-                // orphans those subtrees from the unit root's visibility (a hidden unit would
-                // keep its weapon on screen).
-                .spawn((
-                    Transform::from_translation(j.local_translation),
-                    Visibility::default(),
-                    crate::rig_palette::RigJoint(holder),
-                ))
-                .id()
-        })
-        .collect();
-    for (i, j) in skeleton.joints.iter().enumerate() {
-        let parent = usize::try_from(j.parent)
-            .ok()
-            .and_then(|p| joints.get(p).copied())
-            .unwrap_or(root);
-        commands.entity(parent).add_child(joints[i]);
-    }
-    joints
-}
-
 /// A display model's source path as a readable inspector label (the asset path, sans `mpq://` source).
 /// Empty for the model-less variant or a path-less handle.
 fn display_label(handle: &ModelHandle) -> String {

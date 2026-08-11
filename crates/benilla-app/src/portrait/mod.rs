@@ -53,7 +53,7 @@
 //!
 //! High-res (256² vs 64²), a fixed neutral **studio light** on the round portraits (vs the ref's
 //! ambient state — the *body* panes instead carry the reference's own `<PlayerModel>` light, see
-//! [`model_pane_light_rows`]), continuous
+//! [`model_pane_light`]), continuous
 //! booth render vs dirty-byte bake, and the frozen Stand *phase* is t=0 (the ref's sampling clock
 //! is the verdict's one unsettled INFERRED point — t≈0 vs live phase; both are Stand, and t=0
 //! reproduces the ref wolf's open mouth). The creature *loading* stand-in is `-Monster` (our
@@ -75,7 +75,7 @@ use bevy::render::view::Msaa;
 use crate::entities::Creatures;
 use crate::net::{NetEntity, SelfPlayer};
 use crate::target::Selection;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
 
 mod framing;
 pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
@@ -93,7 +93,7 @@ pub(crate) use glue_booth::{
     PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
-use light::{material_variant, model_pane_light_rows, studio_light_rows, BoothLight};
+use light::{material_variant, model_pane_light, studio_light, BoothLight};
 mod test_bake;
 
 /// The portrait slots we bake, each with its own render layer/camera: the player + target unit
@@ -204,7 +204,7 @@ pub(crate) struct PortraitRider {
 
 /// Stamped on a lightweight **anchor child** the attach path plants under a unit for each
 /// camera-facing batch it dresses in. The visible world card is a *root-spawned* entity
-/// ([`crate::billboard::BillboardCard`]), never a unit descendant, so it can't be mirrored; this
+/// ([`benilla_world::billboard::BillboardCard`]), never a unit descendant, so it can't be mirrored; this
 /// marker rides the unit's tree purely so the portrait / paper-doll booths (which mirror the unit's
 /// dressed descendants) can rebuild the batch as a booth card ([`BoothBillboardSpec`] +
 /// [`booth::face_booth_billboards`]) — the same reconstruction the char-create glue path does from
@@ -262,7 +262,7 @@ impl PortraitSeat {
 /// its whole look (the R14 PVP pauldron's `SPARKLE` twinkle, the held torch's flame — decision 0813,
 /// `#bugs` B118) and the `ItemVisuals` glow a held weapon hangs on its own attachment points
 /// (decision 0805). The world emitters are *free* entities the owner contract walks
-/// ([`crate::particles::spawn_emitter`]), never unit descendants, so — like [`PortraitBillboard`] —
+/// ([`benilla_world::particles::spawn_emitter`]), never unit descendants, so — like [`PortraitBillboard`] —
 /// this marker is how a booth learns they exist at all: the mirror carries the emitter records plus
 /// the composed seat, and the booth spawns its own copies against its own camera
 /// ([`booth::spawn_booth_effects`]). The glue path's [`PreviewEffects`] is the same carry assembled
@@ -676,7 +676,7 @@ impl Plugin for PortraitPlugin {
             // sampler, the only producer of `MatAnim::current`, so it moves THIS frame's value.
             .add_systems(
                 Update,
-                booth::push_booth_mat_alpha.after(crate::doodad_anim::sample_mat_anim),
+                booth::push_booth_mat_alpha.after(benilla_world::doodad_anim::sample_mat_anim),
             )
             // The phase-3 preview instrument (`WOW_CREATE_TEST`, decision 0423): inert without the env.
             .add_systems(Update, glue_booth::drive_create_test)
@@ -764,7 +764,7 @@ pub(crate) fn spawn_warm_booth(
                 ..default()
             },
             RenderTarget::Image(image.into()),
-            crate::ffx_glow::FfxGlow::BOOTH,
+            benilla_world::ffx_glow::FfxGlow::BOOTH,
             Projection::custom(framing::WowPortraitProjection {
                 fov: framing::PANE_FIXED_FOV,
                 near: 0.02,
@@ -789,7 +789,7 @@ fn setup_booths(
     mut portraits: ResMut<PortraitImages>,
     mut booths: ResMut<Booths>,
     mut booth_light: ResMut<BoothLight>,
-    mut mirrors: ResMut<crate::rig_palette::RigPaletteMirrors>,
+    mut mirrors: ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
 ) {
@@ -799,24 +799,14 @@ fn setup_booths(
     // whole struct and wgpu validates the bound size against it at every draw. Only the studio header
     // rows are written; wgpu zero-initializes the rest, so `point_count = 0` and no scene point light
     // ever touches a portrait (the studio look is deliberately static).
-    let light_buffer =
-        |label: &'static str, rows: [[f32; 4]; crate::lighting::LIGHT_HEADER_ROWS]| {
-            let buffer = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-                label: Some(label),
-                size: crate::lighting::light_blob_bytes(),
-                usage: bevy::render::render_resource::BufferUsages::STORAGE
-                    | bevy::render::render_resource::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&rows));
-            buffer
-        };
-    booth_light.studio.buffer = Some(light_buffer("wow_portrait_light", studio_light_rows()));
+    let light_buffer = |label: &'static str, blob: benilla_world::lighting::LightBlob| {
+        let buffer = blob.create(&device, label);
+        blob.write(&queue, &buffer);
+        buffer
+    };
+    booth_light.studio.buffer = Some(light_buffer("wow_portrait_light", studio_light()));
     // The body panes' own light — the reference `<PlayerModel>` widget's (see the fn's doc).
-    booth_light.pane.buffer = Some(light_buffer(
-        "wow_model_pane_light",
-        model_pane_light_rows(),
-    ));
+    booth_light.pane.buffer = Some(light_buffer("wow_model_pane_light", model_pane_light()));
     // Booth rigs skin from the palette regions of THESE buffers (decision 0720): register both
     // as mirrors so the palette upload keeps their regions live.
     for (key, buf) in [
@@ -856,7 +846,7 @@ fn setup_booths(
             // booth needs the same final node — the FFXGlow combine owns the frame's ONE decode.
             // This also keeps the bake at exact world parity (same glow, same transform chain);
             // without it the portrait reads one encode too bright.
-            crate::ffx_glow::FfxGlow::BOOTH,
+            benilla_world::ffx_glow::FfxGlow::BOOTH,
             Projection::from(PerspectiveProjection {
                 fov: PORTRAIT_FOV,
                 near: 0.02,
@@ -923,8 +913,8 @@ fn setup_booths(
             RenderTarget::Image(image.clone().into()),
             // Decode, but NO glow: these two stand in for 1.12 `<PlayerModel>` widgets, which the
             // reference paints in the UI strata — after the WorldFrame's own FFX apply — so they
-            // never carry the scene glow (decision 0638; [`crate::ffx_glow::FfxGlow::UI_PANE`]).
-            crate::ffx_glow::FfxGlow::UI_PANE,
+            // never carry the scene glow (decision 0638; [`benilla_world::ffx_glow::FfxGlow::UI_PANE`]).
+            benilla_world::ffx_glow::FfxGlow::UI_PANE,
             // Placeholder — `sync_body_booth` overwrites transform + projection from the unit's
             // bounds on the first bake. A plain perspective is harmless while the model is loading.
             Projection::from(PerspectiveProjection {
@@ -1063,7 +1053,7 @@ fn sync_portraits(
     party: (
         Res<crate::ui_party::GroupState>,
         Res<crate::net::GuidIndex>,
-        ResMut<crate::rig_palette::RigPalettes>,
+        ResMut<benilla_world::rig_palette::RigPalettes>,
         Res<crate::ui_pet::PetBar>,
     ),
 ) {
@@ -1272,7 +1262,7 @@ fn sync_paperdoll(
     ent_q: Query<&NetEntity>,
     look: DressedLook,
     paperdoll: Res<PaperDollBooth>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
     mut last_pose: Local<Option<(f32, f32)>>,
@@ -1316,7 +1306,7 @@ fn sync_inspect_booth(
     ent_q: Query<&NetEntity>,
     look: DressedLook,
     inspect: Res<InspectBooth>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
     mut last_pose: Local<Option<(f32, f32)>>,
@@ -1360,7 +1350,7 @@ fn sync_petdoll_booth(
     ent_q: Query<&NetEntity>,
     look: DressedLook,
     petdoll: Res<PetDollBooth>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
     mut last_pose: Local<Option<(f32, f32)>>,
@@ -1397,7 +1387,7 @@ fn sync_petdoll_booth(
 /// doll). `unit` is `None` when there is nothing to show, which empties the booth.
 #[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
-    palettes: &mut crate::rig_palette::RigPalettes,
+    palettes: &mut benilla_world::rig_palette::RigPalettes,
     slot: &str,
     unit: Option<Entity>,
     yaw: f32,
@@ -1747,7 +1737,7 @@ mod tests {
             offset,
             emitters: (0..count)
                 .map(|_| benilla_assets::ModelEmitter {
-                    def: crate::particles::tests::plain_def(),
+                    def: benilla_world::testing::plain_particle_def(),
                     texture: None,
                     bone_pivot: [0.0; 3],
                     billboard: None,

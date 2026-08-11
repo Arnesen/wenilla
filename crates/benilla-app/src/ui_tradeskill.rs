@@ -32,7 +32,6 @@ use benilla_ui::script::{
     TradeSkillDifficulty, TradeSkillReagent, TradeSkillRecipe, TradeSkillState, UiScript,
 };
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -42,6 +41,7 @@ use crate::ui_items::{count_of, item_icon, InventoryScope};
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 /// Effect-47 opener casts intercepted by `ui_action::send_spell_cast` (the TryCast branch's
 /// benilla seam) — each entry is the opener's spell id, resolved to a skill line and opened by

@@ -7,7 +7,7 @@ use benilla_formats::BillboardKind;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
 
 /// One mesh headed into a booth bake: the mirrored part's twins + its studio-lit material.
 pub(super) struct BoothPart {
@@ -24,7 +24,7 @@ pub(super) struct BoothPart {
 }
 
 /// Marks a booth part whose render-alpha `MeshTag` is driven by its own
-/// [`MatAnim`](crate::doodad_anim::MatAnim) sample — the booth twin of the world lane's writer.
+/// [`MatAnim`](benilla_world::doodad_anim::MatAnim) sample — the booth twin of the world lane's writer.
 ///
 /// The world path's writer is the *visibility authority* (`debug_panel::apply_model_visibility`),
 /// which is scoped to `ModelPart` + `GlobalTransform` and culls by distance to the **world** camera.
@@ -45,7 +45,7 @@ pub(super) struct BoothRider {
 
 /// One camera-facing batch headed into a booth bake — the undead/night-elf **eye-glow** (a quad on
 /// the eye bone, geoset 302 / geoset 0, additive-fullbright), or an equipped item's / item glow's own
-/// such batch. The world path splits these into camera-facing cards ([`crate::billboard`]); a booth
+/// such batch. The world path splits these into camera-facing cards ([`benilla_world::billboard`]); a booth
 /// is a *separate* camera, so the booth seats the same centred quad under its bone's joint and
 /// re-faces it to the booth camera itself ([`face_booth_billboards`]). Its centred quad, material,
 /// the bone it rides, where its pivot sits in that joint's frame, and the flag arm.
@@ -72,7 +72,7 @@ impl BoothBillboard {
     /// world rotation is a billboard bone's replaced palette basis about this booth's camera, for
     /// the other consumers of that matrix to ride. It draws nothing; only its transform matters.
     ///
-    /// The booth twin of [`crate::billboard::BillboardCard::frame_following`], and the same
+    /// The booth twin of [`benilla_world::billboard::BillboardCard::frame_following`], and the same
     /// reasoning (decision 0813 §3, itself 0153's rule): same basis function, same law, one system
     /// — not a second mechanism. Today's caller is the glue booth's equipment riders
     /// ([`super::glue_booth`]): an item model spawns no rig, so nothing else would apply the
@@ -107,7 +107,7 @@ pub(super) struct BoothEffects {
 /// `(emitters, frames)` — how many emitters went up, and how many of them ride a billboard frame.
 ///
 /// `light` is the booth's own light-storage buffer, bound onto every emitter
-/// ([`crate::particles::buffer::EffectLightOverride`]) for the same reason a booth part gets a
+/// ([`benilla_world::particles::buffer::EffectLightOverride`]) for the same reason a booth part gets a
 /// material twin: the world buffer would fog and shade a pane by the world's time of day.
 ///
 /// **Which booths call this is a fidelity split, not a cost one.** The body panes
@@ -164,16 +164,16 @@ pub(super) fn spawn_booth_effects(
                 }
                 None => (host, [0.0; 3]),
             };
-            let Some(e) = crate::particles::spawn_emitter(
+            let Some(e) = benilla_world::particles::spawn_emitter(
                 commands,
                 em,
                 Transform::IDENTITY,
-                crate::particles::EmitterFrames {
+                benilla_world::particles::EmitterFrames {
                     owner: Some(owner),
                     attach: Some(host), // an attached model — its fan swings with the item
                     anchor: Some(host), // the cloud anchors at the MODEL; bones compose births only
                     // A booth rider's host is torn down with the bake it belongs to.
-                    on_owner_loss: crate::particles::OwnerLoss::Free,
+                    on_owner_loss: benilla_world::particles::OwnerLoss::Free,
                     // A booth bake has no appear/despawn ramp and no self-avatar feather — its
                     // riders are always opaque (0827).
                     alpha: None,
@@ -181,7 +181,7 @@ pub(super) fn spawn_booth_effects(
                     // device stack, so its cloud RIDES (0986's baseline).
                     world_composed: false,
                 },
-                crate::particles::EmitClock::Pinned, // an item's effects loop forever
+                benilla_world::particles::EmitClock::Pinned, // an item's effects loop forever
             ) else {
                 continue;
             };
@@ -189,7 +189,9 @@ pub(super) fn spawn_booth_effects(
             if let Some(buf) = light {
                 commands
                     .entity(e)
-                    .insert(crate::particles::buffer::EffectLightOverride(buf.clone()));
+                    .insert(benilla_world::particles::buffer::EffectLightOverride(
+                        buf.clone(),
+                    ));
             }
             spawned += 1;
         }
@@ -223,7 +225,7 @@ pub(super) enum BoothMotion {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_booth_model(
     commands: &mut Commands,
-    palettes: &mut crate::rig_palette::RigPalettes,
+    palettes: &mut benilla_world::rig_palette::RigPalettes,
     root: Entity,
     layer: RenderLayers,
     parts: &[BoothPart],
@@ -251,8 +253,8 @@ pub(super) fn spawn_booth_model(
     commands.entity(root).remove::<(
         AnimationPlayer,
         AnimationGraphHandle,
-        crate::creature_anim::GlobalSeqDrive,
-        crate::rig_palette::RigSkin,
+        benilla_world::rig_anim::GlobalSeqDrive,
+        benilla_world::rig_palette::RigSkin,
     )>();
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
         for p in parts {
@@ -266,9 +268,10 @@ pub(super) fn spawn_booth_model(
             // The authored material alpha reaches the boneless bake too — it is a property of the
             // batch, not of the rig.
             if let Some(anim) = &p.alpha_anim {
-                let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
+                let mat_anim =
+                    benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
                 child.insert((
-                    bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
+                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, mat_anim.current)),
                     mat_anim,
                     BoothMatAlpha,
                 ));
@@ -276,19 +279,20 @@ pub(super) fn spawn_booth_model(
         }
         return Vec::new();
     };
-    let joints = crate::entities::spawn_joints(commands, root, root, skeleton);
+    let joints = benilla_world::rig_palette::spawn_joints(commands, root, root, skeleton);
     // The owned palette rig (decision 0720): the booth's skinned parts tag this slot; the palette
     // compute reads these joints like any world rig, and the booth's studio light buffer mirrors
     // the palette region (`rig_palette::RigPaletteMirrors`), so the booth camera sees the pose.
-    let rig_slot = crate::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone())
-        .map_or(0, |rig| {
-            let slot = rig.slot;
-            commands.entity(root).insert(rig);
-            // Booth materials bind a STUDIO light buffer, not the shared one — route this
-            // rig's rows to the registered mirrors too.
-            palettes.mark_mirrored(slot);
-            slot
-        });
+    let rig_slot =
+        benilla_world::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone())
+            .map_or(0, |rig| {
+                let slot = rig.slot;
+                commands.entity(root).insert(rig);
+                // Booth materials bind a STUDIO light buffer, not the shared one — route this
+                // rig's rows to the registered mirrors too.
+                palettes.mark_mirrored(slot);
+                slot
+            });
     // The model's global-sequence bone channels, by motion (decision 0539 §5):
     // - **Loop** (the glue scenes + the create/select character): LIVE, on the world's own
     //   clock-driven sampler — the login gate's fires flicker, the Tauren windmill turns, the
@@ -301,7 +305,7 @@ pub(super) fn spawn_booth_model(
         match motion {
             BoothMotion::Loop => {
                 if let Some(drive) =
-                    crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
+                    benilla_world::rig_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
                 {
                     commands.entity(root).insert(drive);
                 }
@@ -349,25 +353,25 @@ pub(super) fn spawn_booth_model(
         // a booth part's alpha). The rig field rides the same tag, so compose rather than overwrite;
         // `alpha_bits` floors a true zero at ≈0 so the shader's whole-payload-`0` *untagged ⇒
         // opaque* sentinel can't fire on a batch the artist authored invisible.
-        let rig_tag = if use_rig {
-            crate::mesh_tag::rig_bits(rig_slot)
-        } else {
-            0
-        };
+        let tag_slot = if use_rig { rig_slot } else { 0 };
         if let Some(anim) = &p.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
+            let mat_anim =
+                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
             child.insert((
-                bevy::mesh::MeshTag(rig_tag | crate::mesh_tag::alpha_bits(mat_anim.current)),
+                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                    tag_slot,
+                    mat_anim.current,
+                )),
                 mat_anim,
                 BoothMatAlpha,
             ));
         } else if use_rig {
-            child.insert(bevy::mesh::MeshTag(
-                rig_tag | crate::mesh_tag::alpha_bits(1.0),
-            ));
+            child.insert(bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                tag_slot, 1.0,
+            )));
         }
         if use_rig {
-            child.insert(crate::rig_palette::RigPart(root));
+            child.insert(benilla_world::rig_palette::RigPart(root));
         }
     }
     for r in riders {
@@ -443,7 +447,7 @@ pub(super) fn spawn_booth_model(
 }
 
 /// Re-face each booth billboard card ([`BoothBillboard`]) to its booth's camera — the booth twin of
-/// the world's [`crate::billboard::face_billboards`]. Each booth owns one camera, matched here by
+/// the world's [`benilla_world::billboard::face_billboards`]. Each booth owns one camera, matched here by
 /// their shared render layer. The card is a child of its billboard bone's joint, so we set its
 /// **local** rotation to counter the joint's world rotation and land the world rotation on the
 /// camera basis; the joint carries translation/scale (the eye pivot, the booth/character scale). The
@@ -461,7 +465,7 @@ pub(super) fn face_booth_billboards(
         let Ok(joint) = joints.get(child_of.parent()) else {
             continue;
         };
-        let basis = crate::billboard::billboard_basis(
+        let basis = benilla_world::billboard::billboard_basis(
             card.kind,
             Quat::IDENTITY,
             *cam.forward(),
@@ -482,10 +486,16 @@ pub(super) fn face_booth_billboards(
 /// through untouched. Write-on-change, so the overwhelmingly common case — an authored *constant*
 /// like UI_Tauren's 0.55 vignette — costs one compare per part per frame and never re-batches.
 pub(super) fn push_booth_mat_alpha(
-    mut parts: Query<(&crate::doodad_anim::MatAnim, &mut bevy::mesh::MeshTag), With<BoothMatAlpha>>,
+    mut parts: Query<
+        (
+            &benilla_world::doodad_anim::MatAnim,
+            &mut bevy::mesh::MeshTag,
+        ),
+        With<BoothMatAlpha>,
+    >,
 ) {
     for (anim, mut tag) in &mut parts {
-        let bits = crate::mesh_tag::with_alpha(tag.0, anim.current);
+        let bits = benilla_world::mesh_tag::with_alpha(tag.0, anim.current);
         if tag.0 != bits {
             tag.0 = bits;
         }
@@ -495,7 +505,7 @@ pub(super) fn push_booth_mat_alpha(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doodad_anim::MatAnim;
+    use benilla_world::doodad_anim::MatAnim;
 
     /// A constant authored alpha, the shape every glue scene actually uses (UI_Tauren's vignette is
     /// `0.55..0.55`, its ground shadow `0.99..0.99`).
@@ -527,9 +537,7 @@ mod tests {
         let part = app
             .world_mut()
             .spawn((
-                bevy::mesh::MeshTag(
-                    crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
-                ),
+                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(rig_slot, 1.0)),
                 anim,
                 BoothMatAlpha,
             ))
@@ -542,11 +550,11 @@ mod tests {
             .get::<bevy::mesh::MeshTag>()
             .unwrap();
         assert_eq!(
-            crate::mesh_tag::rig_of(tag.0),
+            benilla_world::mesh_tag::rig_of(tag.0),
             rig_slot,
             "the palette slot must survive an alpha write"
         );
-        let alpha = crate::mesh_tag::alpha_of(tag.0);
+        let alpha = benilla_world::mesh_tag::alpha_of(tag.0);
         assert!(
             (alpha - 0.55).abs() <= 1.0 / 63.0,
             "authored 0.55 reached the tag (got {alpha})"
@@ -664,13 +672,13 @@ mod tests {
         let part = app
             .world_mut()
             .spawn((
-                bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, 1.0)),
                 MatAnim::driving_tag(constant_alpha(0.1), 0.0, None),
             ))
             .id();
         app.update();
         assert_eq!(
-            crate::mesh_tag::alpha_of(
+            benilla_world::mesh_tag::alpha_of(
                 app.world()
                     .entity(part)
                     .get::<bevy::mesh::MeshTag>()

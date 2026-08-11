@@ -23,14 +23,14 @@
 //! pose evaluator ([`super::pose`]) skips a parked rig, so its bone `Transform`s stop changing,
 //! which quiets transform propagation and `extract_skins`' changed-joint upload by change
 //! detection. The pose post-passes (body twist, global-sequence writes, billboard joint palette)
-//! gate on the same marker. Contrast the DOODAD gate ([`crate::doodad_anim`]), which faithfully
+//! gate on the same marker. Contrast the DOODAD gate ([`benilla_world::doodad_anim`]), which faithfully
 //! stops the player and re-arms on the shared clock — correct there (no one consumes a doodad's
 //! events off-screen), the exact 0075 trap here.
 //!
 //! **The room leg (decision 0739).** The frustum is the wrong instrument indoors: a dungeon
 //! camera's view cone passes through walls, so most of an instance's population stays "in
 //! frustum" while only the current room chain is drawable. The portal PVS
-//! ([`crate::wmo_portal`], the faithful WMO group cull) already knows which rooms the camera can
+//! ([`benilla_world::wmo_portal`], the faithful WMO group cull) already knows which rooms the camera can
 //! reach, and [`UnitWmoRoom`] already names each unit's room — so a unit whose room (and every
 //! room one portal hop from it) is outside this frame's PVS parks too. Soundness: a unit is
 //! room-parked exactly when the geometry *around* it — its room's walls, floor, furniture — is
@@ -40,7 +40,7 @@
 //! non-zero the flood marks its room visible (`compute_wmo_pvs` runs in `Update`, this gate in
 //! `PostUpdate` before the evaluator — same-frame wake, absolute-clock pose). Fail-open at every
 //! seam: no claim (outdoors, EXTERIOR groups), a despawned placement, a still-loading model, an
-//! out-of-range index — all read visible, the [`crate::wmo_portal::WmoGroupVis::drawn_by`]
+//! out-of-range index — all read visible, the [`benilla_world::wmo_portal::WmoGroupVis::drawn_by`]
 //! convention.
 //! `WOW_NO_ROOM_LOD=1` disables just this leg (the A/B lever); `WOW_RIG_COST=1` prints the
 //! per-frame `[rig-gate]` counters.
@@ -54,17 +54,11 @@ use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalRef};
 
 use crate::entities::mount::MountBody;
 use crate::net::SelfPlayer;
-use crate::player::WorldCamera;
 use crate::target::SelectionRadius;
-use crate::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
+use benilla_world::view::WorldCamera;
+use benilla_world::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
 
-use super::RigPose;
-
-/// This rig's per-bone pose evaluation is parked (decision 0448): the pose evaluator and the pose
-/// post-passes skip it. The sequence clocks, the driver state machine, and the event scanner all
-/// keep running — parking turns *sampling* off, nothing else.
-#[derive(Component)]
-pub(crate) struct AnimParked;
+use benilla_world::rig_anim::{AnimParked, RigPose};
 
 /// Park only after the rig has been continuously out of frustum this long — a camera swing
 /// across the pack doesn't churn bone repoints. Waking is always instant.
@@ -131,7 +125,7 @@ pub(super) fn gate_rig_animation(
     // rigs the frustum keeps that the PVS rejects — so a `WOW_NO_ROOM_LOD=1` leg reads the
     // premise number without applying the leg (counted either way, applied only when the lever
     // is off).
-    let cost_on = crate::rig_palette::rig_cost_enabled();
+    let cost_on = benilla_world::rig_palette::rig_cost_enabled();
     let (mut n_rigs, mut n_parked, mut room_out) = (0u32, 0u32, 0u32);
     let Ok(frustum) = cam.single() else {
         return;
@@ -208,7 +202,7 @@ fn room_pvs_visible(
 /// Is the claimed group — or any group one portal hop from it — in the PVS? The one-hop union is
 /// the doorway-straddle guard: a body can extend past its feet's room only through a portal
 /// opening, so the neighbour set bounds everything of the unit that could be on screen. Indices
-/// out of range read visible (fail-open, [`crate::wmo_portal::WmoGroupVis::drawn_by`]'s
+/// out of range read visible (fail-open, [`benilla_world::wmo_portal::WmoGroupVis::drawn_by`]'s
 /// convention); a group with no portal refs at all can only be seen with the camera inside it
 /// (the flood cannot reach it), which the direct bit already answered.
 fn room_visible(visible: &[bool], nav: &[WmoGroupNav], refs: &[WmoPortalRef], group: u16) -> bool {
@@ -349,7 +343,7 @@ mod tests {
         };
         app.world_mut()
             .entity_mut(root)
-            .insert(super::super::RigPose::new(root, &skeleton));
+            .insert(benilla_world::rig_anim::RigPose::new(root, &skeleton));
         (root, root)
     }
 
@@ -373,7 +367,7 @@ mod tests {
         // The live schedule's shape: the gate ahead of the frame's pose evaluation; the event
         // scanner reading the advanced seek after it.
         app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
-        super::super::pose::plugin(&mut app);
+        benilla_world::rig_anim::plugin(&mut app);
         app.add_systems(PostUpdate, fire_anim_events.after(AnimationSystems));
         app
     }
@@ -396,7 +390,7 @@ mod tests {
     fn bone(app: &App, rig: Entity) -> Vec3 {
         app.world()
             .entity(rig)
-            .get::<super::super::RigPose>()
+            .get::<benilla_world::rig_anim::RigPose>()
             .unwrap()
             .locals[0]
             .translation

@@ -23,12 +23,10 @@ use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
 
-use crate::assets::WorldAssets;
 use crate::entities::CollisionHeight;
-use crate::liquid::{unit_claim, water_surface_at, WaterChunkInfo};
 use crate::net::NetEntity;
-use crate::schedule::WorldStage;
-use crate::wmo_portal::UnitWmoRoom;
+use benilla_assets::WorldAssets;
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit_ext, source_kit_playing, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
@@ -40,21 +38,16 @@ const SPLASH_KIT: u32 = 1096;
 /// (`0x60314a`'s compare inside `0x6030c0`). Applied to the feet-referenced depth.
 const SPLASH_DEPTH_FRAC: f32 = 0.4;
 
-/// What [`water_splashes`] reads per unit: identity, pose, its own collision height, and its own
-/// WMO-room claim (whose liquid may answer for it — decision 0696).
-type SplashQuery = (
-    Entity,
-    &'static Transform,
-    Option<&'static CollisionHeight>,
-    Option<&'static UnitWmoRoom>,
-);
+/// What [`water_splashes`] reads per unit: identity, pose and its own collision height. Whose
+/// liquid may answer for it (decision 0696) is the world's own bookkeeping now — the unit is named
+/// by entity and `WorldPoint` looks its room up.
+type SplashQuery = (Entity, &'static Transform, Option<&'static CollisionHeight>);
 
 /// Play the water splash on a unit's `0.4·h` depth-line crossing, either direction (module docs).
 #[allow(clippy::too_many_arguments)] // the sound-play plumbing, one param per concern
 fn water_splashes(
     units: Query<SplashQuery, With<NetEntity>>,
-    water: Query<&WaterChunkInfo>,
-    placements: crate::liquid::RoomPlacements,
+    world: benilla_world::world_point::WorldPoint,
     mut wet: Local<EntityHashMap<bool>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
@@ -66,14 +59,15 @@ fn water_splashes(
         return;
     };
     let listener = listener.pos;
-    for (entity, transform, collision, room) in &units {
+    for (entity, transform, collision) in &units {
         let wow = bevy_to_wow(transform.translation);
         // The unit's own collision height (0645). `None` only on a unit's very first frame, before
         // the stamp runs — the ctor default covers it, as it does in the reference.
         let h = collision.copied().unwrap_or_default().0;
-        // The unit's own room claim — every unit carries one since 0696 (it used to pass "no
-        // claim", so an ADT lake overhead splashed units standing dry underneath it).
-        let submerged = water_surface_at(water.iter(), wow, unit_claim(room, &placements))
+        // Every unit carries a room claim since 0696 — before that the query passed "no claim",
+        // so an ADT lake overhead splashed units standing dry underneath it.
+        let submerged = world
+            .water_surface_at(benilla_world::world_point::Subject::Unit(entity), wow)
             .is_some_and(|s| s - wow[2] > SPLASH_DEPTH_FRAC * h);
         let was = wet.insert(entity, submerged);
         // The symmetric edge: any crossing splashes — wading in past the line AND surfacing back

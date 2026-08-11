@@ -54,13 +54,13 @@ use benilla_formats::{PetNameTokens, SpellDisplay};
 use benilla_protocol::messages::PetActionEntry;
 use benilla_ui::script::{PetBookState, SpellSlotView, UiScript};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_action::Spells;
 use crate::ui_pet::PetBar;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 /// `ChrClasses.dbc`'s pet-name-token column — absent when the client data failed to load, in which
 /// case [`benilla_ui`]'s own `"PET"` fallback stands (the reference's `0x4b44a6` arm).

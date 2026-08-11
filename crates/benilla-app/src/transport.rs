@@ -33,10 +33,10 @@ use benilla_formats::{
 };
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::go_templates::GameObjectTemplates;
 use crate::net::Guid;
-use crate::world_map::CurrentMap;
+use benilla_assets::{LockRecover, WorldAssets};
+use benilla_world::world_map::CurrentMap;
 
 pub(crate) struct TransportPlugin;
 
@@ -48,7 +48,7 @@ impl Plugin for TransportPlugin {
             // `WorldAssets` (bit us on the first live run — every downstream log went quiet).
             .add_systems(
                 Startup,
-                setup_taxi_nodes.after(crate::assets::AssetSet::Open),
+                setup_taxi_nodes.after(benilla_assets::AssetSet::Open),
             )
             .add_systems(
                 Update,
@@ -57,8 +57,8 @@ impl Plugin for TransportPlugin {
                 // the world (phase 2's platform carry rides exactly this edge).
                 (arm_transports, tick_transports, compose_riders)
                     .chain()
-                    .after(crate::schedule::WorldStage::Net)
-                    .before(crate::schedule::WorldStage::Input),
+                    .after(benilla_world::schedule::WorldStage::Net)
+                    .before(benilla_world::schedule::WorldStage::Input),
             );
     }
 }

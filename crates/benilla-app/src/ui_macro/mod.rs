@@ -19,8 +19,8 @@ use bevy::prelude::*;
 
 use benilla_ui::script::{MacroState, ScriptValue, UiScript};
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::char_select::ClientState;
+use benilla_assets::{LockRecover, WorldAssets};
 
 pub(crate) mod run;
 mod store;

@@ -11,8 +11,8 @@ use bevy::prelude::*;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::items::Items;
-use crate::model_fade::DespawnFade;
 use crate::names::NameCache;
+use benilla_world::model_fade::DespawnFade;
 
 use super::super::motion::{
     create_spline, monster_move_spline, pose_transform, resolve_facing, trace_create_spline,

@@ -66,8 +66,11 @@ pub(super) fn chat(
                 "net: addon chat [{:#04x}] from {:#x}: {:?} (suppressed — not a chat line)",
                 m.chat_type, m.sender_guid, m.text
             );
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line("addon", &format!("[{:#04x}] {:?}", m.chat_type, m.text));
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
+                    "addon",
+                    &format!("[{:#04x}] {:?}", m.chat_type, m.text),
+                );
             }
         }
         return;
@@ -87,8 +90,8 @@ pub(super) fn chat(
     // may or may not be reaching it — and its answer is only usable if it lands on the same
     // timeline as the `snd`/`rly`/`run` lines it must be read against. `debug!` timestamps are
     // wall-clock in a different format; this is one clock, one file.
-    if crate::dbg_trace::enabled() {
-        crate::dbg_trace::line(
+    if benilla_assets::trace::enabled() {
+        benilla_assets::trace::line(
             "sys",
             &format!("[{:#04x}] {}", m.chat_type, m.text.replace('\n', " ⏎ ")),
         );

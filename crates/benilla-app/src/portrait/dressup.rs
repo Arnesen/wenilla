@@ -21,7 +21,7 @@
 //! `DressUpModel` (`0x495c00`) subclasses the very `CharacterModelBase` ctor (`0x505680`) the
 //! character window's `<PlayerModel>` uses — same single directional light, same ambient
 //! (decision 0638). So this bake lights through [`BoothLight::pane`], the same rig as the paper
-//! doll, with no glow ([`crate::ffx_glow::FfxGlow::UI_PANE`]) for the same reason.
+//! doll, with no glow ([`benilla_world::ffx_glow::FfxGlow::UI_PANE`]) for the same reason.
 
 use benilla_protocol::CharEnumItem;
 use bevy::camera::visibility::RenderLayers;
@@ -29,7 +29,7 @@ use bevy::camera::PerspectiveProjection;
 use bevy::prelude::*;
 
 use crate::entities::Creatures;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
 
 use super::light::BoothLight;
 use super::{
@@ -136,7 +136,7 @@ pub(super) fn spawn_dressup_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        crate::ffx_glow::FfxGlow::UI_PANE,
+        benilla_world::ffx_glow::FfxGlow::UI_PANE,
         // Placeholder — `sync_dressup_booth` overwrites transform + projection from the body's
         // bounds on the first bake, exactly as the paper doll's does.
         Projection::from(PerspectiveProjection {
@@ -182,7 +182,7 @@ pub(super) fn sync_dressup_booth(
     creatures: Option<Res<Creatures>>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     mut env_cache: Local<Option<bool>>,
     mut last: Local<Option<(u64, f32)>>,
     // Whether a bake is currently STANDING on the stage — the empty arm's "is there anything to

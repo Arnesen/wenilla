@@ -165,7 +165,7 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
     let missing: Vec<String> = refs
         .iter()
         .filter(|(_, _, path)| {
-            !crate::assets::sprite_candidates(path)
+            !benilla_assets::sprite_candidates(path)
                 .iter()
                 .any(|c| chain.contains(c))
         })

@@ -39,8 +39,8 @@
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::creature_anim::RigPose;
 use crate::net::{NetEntity, ObjectStore};
+use benilla_world::rig_anim::RigPose;
 
 /// The mount child — the second creature visual a mounted unit carries (the client's
 /// `unit+0xdc` secondary model instance). Spawned by [`seat_or_spawn_mount`] (from the first
@@ -104,7 +104,7 @@ pub(super) fn spawn_mount_child(
 /// the client's body carries a compensating own/mount base ratio, `0x607b49 fld [esi+0x98]; fdiv
 /// [esi+0x9c]` → `0x710620` — wow-re `mount-composition.md` Q3).
 ///
-/// [`crate::creature_anim::RigFrame`] marks it as `rider`'s model frame so the world pass cascades
+/// [`benilla_world::rig_anim::RigFrame`] marks it as `rider`'s model frame so the world pass cascades
 /// a re-seat into the rider's palette (decision 0724).
 fn spawn_seat_anchor(
     commands: &mut Commands,
@@ -118,7 +118,7 @@ fn spawn_seat_anchor(
             Transform::from_translation(offset)
                 .with_scale(Vec3::splat(1.0 / mount_scale.max(0.001))),
             Visibility::default(),
-            crate::creature_anim::RigFrame(rider),
+            benilla_world::rig_anim::RigFrame(rider),
         ))
         .id();
     commands.entity(joint).add_child(anchor);

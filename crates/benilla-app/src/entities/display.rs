@@ -16,8 +16,8 @@ use benilla_formats::{
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 
-use crate::model_render::{m2_url, model_material, skin_url, wmo_url, MaterialCache, ShadeSel};
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::{m2_url, skin_url, wmo_url};
 
 /// A loaded display model's asset handle — an M2 (creatures, most GameObjects) or a WMO (building
 /// GameObjects). `None` ⇒ the display resolved to no model (invisible trigger / missing) → cube/none.
@@ -34,7 +34,7 @@ pub(super) enum ModelHandle {
 pub(super) struct EntityPart {
     pub(super) mesh: Handle<Mesh>,
     /// The batch's decoded geometry — the model's resident CPU copy (`ModelSubmesh::geometry`),
-    /// cloned onto every spawned part/card as [`crate::interact::PickMesh`] so the ray pickers read
+    /// cloned onto every spawned part/card as [`benilla_world::interact::PickMesh`] so the ray pickers read
     /// triangles from here: the static render form is `RENDER_WORLD`-only (decision 0834), so no
     /// main-world mesh data exists to ray-cast (decision 0857).
     pub(super) geometry: std::sync::Arc<benilla_formats::RenderSubmesh>,
@@ -50,7 +50,7 @@ pub(super) struct EntityPart {
     pub(super) material: Handle<WowModelMaterial>,
     /// The interior-lit variant (M2 only): the same material in the plain day/night matte
     /// (`interior = false`, sun ×1.0 — the base-CGLight law), which the interior classifier
-    /// ([`crate::interior`]) swaps to when the entity stands inside a WMO room. `None` for
+    /// ([`benilla_world::interior`]) swaps to when the entity stands inside a WMO room. `None` for
     /// WMO-display entities (their interior is per-submesh, already baked into `material`).
     pub(super) material_interior: Option<Handle<WowModelMaterial>>,
     /// The interior BAKE variant (every M2 part): the material in interior-PROP mode, whose
@@ -67,7 +67,7 @@ pub(super) struct EntityPart {
     /// the entity feathers in on this while `α < 1`, then swaps back to `material`. `Some` for M2 parts
     /// (creatures + M2 GameObjects, the CGObjects that appear-fade); `None` for WMO-display parts.
     pub(super) fade_blend: Option<Handle<WowModelMaterial>>,
-    /// The **depth-prime twin** material ([`crate::model_render::zfill_material`] — the reference's
+    /// The **depth-prime twin** material ([`benilla_world::model_render::zfill_material`] — the reference's
     /// `M2UseZFill` clone, wow-re `m2-blend-promotion-zfill.md` §4). While the part draws
     /// translucent, `model_fade::sync_zfill_twins` spawns a child mesh on this: colour-masked,
     /// blend-off, z-writing, sorted before the colour parts — one blended layer everywhere, no
@@ -79,7 +79,7 @@ pub(super) struct EntityPart {
     /// Whether this part blends **additively** (M2 blend mode 3 `NoAlphaAdd` / 4 `Add`).
     /// [`ModelBlend`] deliberately folds "alpha-blended / additive" into its single `Blend`
     /// variant, so [`Self::blend`] alone CANNOT answer this — the material path recovers it from
-    /// [`crate::model_render`]'s separate `is_additive` input (marker bit 2 of `clutter_fade.z`,
+    /// [`benilla_world::model_render`]'s separate `is_additive` input (marker bit 2 of `clutter_fade.z`,
     /// which `specialize` turns into the pure-add state). Any consumer that re-derives a blend
     /// state from `blend` needs this alongside it, or every additive batch silently draws
     /// alpha-blended — decision 0748, the black ground-decal tile.
@@ -106,7 +106,7 @@ pub(super) struct EntityPart {
     pub(super) char_slot: Option<CharSkinSlot>,
     /// A billboard batch (glow card / chain): its pivot + facing info. The spawn sites must NOT
     /// spawn it as an ordinary child — its mesh is centred at the bone pivot and its transform is
-    /// owned by the billboard system (a following [`crate::billboard::BillboardCard`], decision
+    /// owned by the billboard system (a following [`benilla_world::billboard::BillboardCard`], decision
     /// 0153: the brazier/torch "glow on the ground" family). `None` for ordinary geometry.
     pub(super) billboard: Option<benilla_assets::BillboardInfo>,
     /// This part's geometry is **welded** to a billboard bone the card split refused
@@ -229,7 +229,7 @@ pub(super) struct DisplayModel {
     pub(super) bbox_z_local: f32,
     /// The M2 vertex-box CENTRE in Bevy model-local (pre-scale) — the interior fold's MOLR
     /// reference point for a GameObject's footprint bake (the byte-cited `[def+0x5c]` anchor
-    /// family; `crate::interior`). `Vec3::ZERO` for a bounds-less / WMO / model-less display.
+    /// family; `benilla_world::interior`). `Vec3::ZERO` for a bounds-less / WMO / model-less display.
     pub(super) bake_center_local: Vec3,
     /// The model's terrain-conform gate — MD20 `GlobalModelFlags & 3` (wow-re `terrain-tilt.md`,
     /// §5): `1` = pitch to slope, `3` = pitch+roll, else level. Captured with `parts` on load;
@@ -354,15 +354,16 @@ pub(super) fn build_parts(
     // The app-built render forms (decision 0834): parts wait for the furnisher exactly as they
     // wait for the asset. Entity displays request at priority 0 — a mob walking into view never
     // queues behind a city crossing's scenery (whose placements request at 16+).
-    forms: &mut crate::model_forms::ModelForms,
+    forms: &mut benilla_world::model_forms::ModelForms,
     asset_server: &AssetServer,
-    materials: &mut Assets<WowModelMaterial>,
-    cache: &mut MaterialCache,
-    light: &bevy::render::render_resource::Buffer,
+    mats: &mut benilla_world::model_render::M2BatchMaterials,
     // Whether this display is a GAMEOBJECT: gates the hull-collider build (chests/veins/doors;
     // creatures use unit collision).
     gameobject: bool,
 ) {
+    if !mats.ready() {
+        return; // no shared light buffer yet — retry next frame, like a still-loading asset
+    }
     let mut emitters = Vec::new();
     let mut ribbons = Vec::new();
     let mut lights = Vec::new();
@@ -390,9 +391,7 @@ pub(super) fn build_parts(
             // Every M2 entity lane can rig (creatures, animated GameObjects, held items with
             // billboard chains), so both forms are requested; the static form still serves the
             // truly static instances and the billboard cards.
-            let key = crate::model_forms::ModelKey::from(h);
-            let want = crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED;
-            if !forms.require(key, want, 0) {
+            if !forms.require_rigged(h, 0) {
                 return; // forms still building — same retry-next-frame as the asset itself
             }
             emitters = model.emitters.clone();
@@ -448,8 +447,8 @@ pub(super) fn build_parts(
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
-            let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
-            let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
+            let built = forms.slices(h);
+            let (stat_forms, skin_forms) = (built.stat, built.skin.unwrap_or(&[]));
             model
                 .submeshes
                 .iter()
@@ -467,194 +466,13 @@ pub(super) fn build_parts(
                     // sheen + Blend overlay) draw in file order instead of re-flipping a sort tie
                     // every frame (`model_render::BATCH_ORDER_SORT_EPS`).
                     let order = u16::try_from(pi + 1).unwrap_or(u16::MAX);
-                    let exterior = model_material(
-                        cache,
-                        materials,
-                        texture.clone(),
-                        sub.blend,
-                        sub.two_sided,
-                        false,
-                        false,        // exterior (sky-lit) variant
-                        sub.emissive, // M2 UNLIT (0x01) glass/glow → fullbright
-                        sub.additive, // M2 blend 3/4 → additive (glow cards)
-                        false,
-                        sub.no_depth_write, // M2 render flag 0x10
-                        sub.no_depth_test,  // M2 render flag 0x08
-                        sub.fog_policy,
-                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                        // Every entity M2 (unit/player/GameObject/held/fx) is built LIT — the verified
-                        // §9 chain gives them the same 2.5/0.5 lane as ADT doodads, and the DYNAMIC half
-                        // (the MCSH sample at their feet) rides the per-instance MeshTag shade byte
-                        // (`entity_shade`), not the shared material.
-                        ShadeSel::Lit,
-                        order,
-                        None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
-                        sub.rgb_anim.as_ref(), // animated M2Color tint, seeded at its first key
-                        None, // entity M2: light selection anchors at the instance origin
-                        None, // M2 carries no MOMT SIDN colour
-                        false, // …nor the WINDOW flag
-                        light,
-                    );
-                    // The AlphaMode::Blend twin for the spawn appear-fade (decision 0032) — the exterior
-                    // look feathered, the same variant DoodadFade uses. Reuse the exterior when it's
-                    // already Blend (its cutout already feathers; no separate twin needed). A MULTIPLY
-                    // batch (Mod/Mod2x) also reuses its steady self: its blend equation reads no
-                    // alpha, so it cannot feather through the alpha channel — the reference's
-                    // instanceAlpha ramp leaves the sheen at full strength while the base fades under
-                    // it (0528; re-confirmed for items by wow-re `m2-item-texture-fill.md`). benilla
-                    // fades it anyway as a deliberate deviation: the part arms the ramp like any
-                    // other, and `wow_model.wgsl` lerps a multiply batch's colour toward its blend
-                    // IDENTITY by the tag alpha, so the sheen rides the same ramp instead of popping
-                    // over a body that hasn't faded in (the director's login report; decision 0865).
-                    // The depth-prime twin (wow-re `m2-blend-promotion-zfill.md` §4): every batch
-                    // that can fade AND writes depth gets one. `cutout` mirrors what the part's
-                    // colour pass discards while translucent — the fade twin's hard 224/255 for
-                    // AlphaKey sources only (an Opaque source never alpha-tests, steady or
-                    // promoted — §2; decision 0842), nothing for authored-Blend sources (their
-                    // colour pass is the plain blend material) — so depth and colour coverage agree.
-                    let zfill = if sub.no_depth_write || sub.no_depth_test {
-                        None
-                    } else {
-                        match sub.blend {
-                            ModelBlend::Mod | ModelBlend::Mod2x => None,
-                            b => Some(crate::model_render::zfill_material(
-                                cache,
-                                materials,
-                                texture.clone(),
-                                sub.two_sided,
-                                b == ModelBlend::AlphaTest,
-                                light,
-                            )),
-                        }
-                    };
-                    let fade_blend = match sub.blend {
-                        // The steady material IS the "twin": no swap, the ramp only drives the tag
-                        // alpha the shader's identity-lerp reads (see the comment block above).
-                        ModelBlend::Mod | ModelBlend::Mod2x => Some(exterior.clone()),
-                        ModelBlend::Blend => Some(exterior.clone()),
-                        // The SOURCE blend rides into the twin (Opaque or AlphaKey here): with
-                        // fade_variant it still builds AlphaMode::Blend, but the source decides
-                        // the twin's 224/255 cutout marker (decision 0842).
-                        _ => Some(model_material(
-                            cache,
-                            materials,
-                            texture.clone(),
-                            sub.blend,
-                            sub.two_sided,
-                            false,
-                            false, // exterior
-                            sub.emissive,
-                            sub.additive,
-                            true, // fade_variant — the blend twin the shader feathers
-                            sub.no_depth_write,
-                            sub.no_depth_test,
-                            sub.fog_policy,
-                            sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                            ShadeSel::Lit, // matches the exterior variant above
-                            order,
-                            None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
-                            sub.rgb_anim.as_ref(),
-                            None, // entity M2 fade twin: same instance-origin anchor
-                            None,
-                            false,
-                            light,
-                        )),
-                    };
-                    // The interior BAKE variant (every M2 entity): interior-PROP mode — the shader
-                    // evaluates the model's SH probe (footprint MOCV + MOLR lobes, `crate::interior`)
-                    // by the MeshTag slot. The reference hands EVERY entity M2 — unit, player,
-                    // GameObject — the same entity-node fill (`Node::SetModel` → the footprint bake;
-                    // wow-re `unit-m2-shader-light.md`), so all classes build the variant and take it
-                    // indoors. Cache-deduped like every variant.
-                    let interior_bake = Some(model_material(
-                        cache,
-                        materials,
-                        texture.clone(),
-                        sub.blend,
-                        sub.two_sided,
-                        false,
-                        true, // interior-PROP mode — the probe lane
-                        sub.emissive,
-                        sub.additive,
-                        false,
-                        sub.no_depth_write,
-                        sub.no_depth_test,
-                        sub.fog_policy,
-                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                        ShadeSel::Matte, // unread on the probe lane
-                        order,
-                        None,
-                        sub.rgb_anim.as_ref(),
-                        None,
-                        None,
-                        false,
-                        light,
-                    ));
-                    // The bake lane's Blend twin — the probe-lit feather (the self-avatar zoom,
-                    // a despawn ramp): same probe mode, alpha-blend state. Without it a fade swaps
-                    // an indoor entity to the EXTERIOR blend twin and its light jumps to the lit
-                    // outdoor intensity mid-feather (director-caught, 2026-07-13). Reuse the bake
-                    // variant when the part is already Blend, like the exterior twin above — and
-                    // for a multiply batch, whose steady bake IS the twin (the shader's
-                    // identity-lerp does the feather, decision 0865).
-                    let interior_bake_blend = interior_bake.as_ref().map(|bake| {
-                        match sub.blend {
-                            ModelBlend::Mod | ModelBlend::Mod2x | ModelBlend::Blend => bake.clone(),
-                            // Source blend through to the twin, like the exterior twin above (0842).
-                            _ => model_material(
-                                cache,
-                                materials,
-                                texture.clone(),
-                                sub.blend,
-                                sub.two_sided,
-                                false,
-                                true, // interior-PROP mode — the probe lane
-                                sub.emissive,
-                                sub.additive,
-                                true, // fade_variant — the blend twin the shader feathers
-                                sub.no_depth_write,
-                                sub.no_depth_test,
-                                sub.fog_policy,
-                                sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                                ShadeSel::Matte, // unread on the probe lane
-                                order,
-                                None,
-                                sub.rgb_anim.as_ref(),
-                                None,
-                                None,
-                                false,
-                                light,
-                            ),
-                        }
-                    });
-                    // The interior MATTE variant: the plain day/night pair at sun ×1.0 — the
-                    // reference's null-node fallback (`0x672a20` with no registered node), which the
-                    // classifier applies when the footprint ray misses / hits MOPY&1 / the probe
-                    // table is full. Not the steady indoor law — that's the bake above.
-                    let interior = model_material(
-                        cache,
-                        materials,
-                        texture,
-                        sub.blend,
-                        sub.two_sided,
-                        false,
-                        false, // NOT the prop MOCV path — entities have no interior colour leg
-                        sub.emissive,
-                        sub.additive,
-                        false,
-                        sub.no_depth_write,
-                        sub.no_depth_test,
-                        sub.fog_policy,
-                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
-                        ShadeSel::Matte, // sun ×1.0, the forced indoor intensity — const so it dedups
-                        order,
-                        None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
-                        sub.rgb_anim.as_ref(),
-                        None, // entity M2 interior variant: same instance-origin anchor
-                        None,
-                        false,
-                        light,
-                    );
+                    // The whole variant set for this batch — steady, the indoor pair, their
+                    // blend twins and the depth-prime twin — built once by the engine, which owns
+                    // the law that decides which of them collapse onto each other (decisions 0842
+                    // / 0865 / 0831 / 0355). `None` cannot happen here: the caller gated on the
+                    // light buffer before the first build.
+                    let v = mats.entity_variants(sub, texture, order);
+                    let v = v.expect("light buffer checked at entry");
                     EntityPart {
                         // Index-parallel with the submeshes by the forms contract; a miss is a
                         // broken contract — a default (dead) handle draws nothing rather than panic.
@@ -665,12 +483,12 @@ pub(super) fn build_parts(
                         geometry: sub.geometry.clone(),
                         aabb: stat_forms.get(pi).and_then(|(_, a)| *a),
                         skinned_mesh: skin_forms.get(pi).cloned(),
-                        material: exterior,
-                        material_interior: Some(interior),
-                        material_interior_bake: interior_bake,
-                        material_interior_bake_blend: interior_bake_blend,
-                        fade_blend,
-                        zfill,
+                        material: v.steady,
+                        material_interior: Some(v.interior),
+                        material_interior_bake: Some(v.interior_bake),
+                        material_interior_bake_blend: Some(v.interior_bake_blend),
+                        fade_blend: Some(v.fade_blend),
+                        zfill: v.zfill,
                         blend: sub.blend,
                         additive: sub.additive,
                         two_sided: sub.two_sided,
@@ -690,14 +508,13 @@ pub(super) fn build_parts(
                 return;
             };
             // WMO-display GameObjects never skin — static forms only.
-            let key = crate::model_forms::ModelKey::from(h);
-            if !forms.require(key, crate::model_forms::WANT_STATIC, 0) {
+            if !forms.require_static(h, 0) {
                 return;
             }
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
-            let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
+            let stat_forms = forms.slices(h).stat;
             model
                 .submeshes
                 .iter()
@@ -712,30 +529,13 @@ pub(super) fn build_parts(
                     geoset_id: sub.geoset_id, // 0 for WMO — no geoset selection
                     char_slot: None,          // WMO is never a character body
                     skinned_mesh: None,       // WMO-display GameObjects don't skin (no skeleton)
-                    material: model_material(
-                        cache,
-                        materials,
-                        sub.texture.clone(),
-                        sub.blend,
-                        sub.two_sided,
-                        true,
-                        sub.interior,
-                        sub.emissive,
-                        sub.additive, // false for WMO (additive WMO batches deferred)
-                        false,
-                        sub.no_depth_write, // false for WMO (standard depth state)
-                        sub.no_depth_test,
-                        sub.fog_policy,  // always Scene for WMO
-                        false, // WMO batches never env-map — the M2 texcoord mechanism has no MOMT analogue
-                        ShadeSel::Matte, // WMO uses the FFP N·L path, not the lobe — sun_scale unused
-                        0,
-                        None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
-                        None, // WMO batches carry no M2Color tint
-                        sub.wmo_batch, // an interior group's INT/TRANS lighting law rides tint.w
-                        sub.sidn, // MOMT SIDN night-glow colour
-                        sub.window, // MOMT WINDOW midpoint light
-                        light,
-                    ),
+                    // A WMO-display GameObject draws one material per batch: its interior law
+                    // is per-submesh and already baked into the batch (MOBA class + SIDN +
+                    // WINDOW), so there is no M2 footprint-probe pair to build. Batch order 0 —
+                    // these are single-building props, not the streamer's coplanar MOBA stacks.
+                    material: mats
+                        .steady(sub, sub.texture.clone(), 0)
+                        .expect("light buffer checked at entry"),
                     material_interior: None, // WMO entity: interior is per-submesh, baked into `material`
                     material_interior_bake: None, // …and never the M2 footprint lane
                     material_interior_bake_blend: None,
@@ -778,7 +578,7 @@ pub(super) fn build_parts(
 
 /// Bake a model-local avian trimesh collider from a model's raw-WoW collision hull, mapping each vertex
 /// through `wow_to_bevy` so it coincides with the entity's rendered submeshes (same convention as the
-/// map-doodad [`crate::terrain_stream`] bake, minus the placement — the entity's own pose places it).
+/// map-doodad [`benilla_world::terrain_stream`] bake, minus the placement — the entity's own pose places it).
 /// `None` for a hull-less or degenerate mesh: collide-iff-hull, so herbs/props stay non-solid.
 fn model_local_collider(hull: &CollisionMesh) -> Option<Collider> {
     if hull.indices.len() < 3 {

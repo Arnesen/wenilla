@@ -8,7 +8,8 @@ use bevy::prelude::*;
 
 use crate::world_state::WorldStates;
 
-use super::super::{GuidIndex, ServerSoundKind, ServerSoundMessage, WeatherMessage};
+use super::super::{GuidIndex, ServerSoundKind, ServerSoundMessage};
+use benilla_world::weather::WeatherMessage;
 
 /// `SMSG_PLAY_SOUND` — a 2D (non-positional) one-shot.
 pub(super) fn play_sound(sound_id: u32, out: &mut MessageWriter<ServerSoundMessage>) {

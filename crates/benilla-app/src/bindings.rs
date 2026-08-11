@@ -65,7 +65,7 @@ impl BindingDispatch {
     /// always beats the general one.
     ///
     /// `dev_plane` suppresses the **retry only**, and only on the keyboard path. `Ctrl`+`Shift` is
-    /// ours ([`crate::debug_panel::DEV_CHORD`]), and 0870 picked it on the argument that the plane
+    /// ours ([`benilla_world::modkeys::DEV_CHORD`]), and 0870 picked it on the argument that the plane
     /// was empty — an argument that rested on the exact-match law 1142 corrects. It is
     /// *nearly* empty anyway under the real law, because the single strip drops `CTRL` and leaves
     /// `SHIFT-`*key*, never reaching the bare letter — but "nearly" is not a plane: `SHIFT-P` is a
@@ -167,7 +167,7 @@ impl Plugin for BindingsPlugin {
                         .chain()
                         .in_set(crate::ui_script::UiInput)
                         .in_set(BindingSet)
-                        .before(crate::schedule::WorldStage::Input)
+                        .before(benilla_world::schedule::WorldStage::Input)
                         .run_if(in_state(ClientState::InWorld)),
                     load_character_bindings.run_if(in_state(ClientState::InWorld)),
                     save_bindings.after(load_character_bindings),

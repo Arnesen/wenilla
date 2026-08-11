@@ -107,7 +107,7 @@ fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
 }
 
 /// Compose the counter-twist onto the animated bone locals — PostUpdate, in the pose post-pass
-/// window ([`super::PosePost`]: after the evaluator wrote this frame's pose, before the model
+/// window ([`benilla_world::rig_anim::PosePost`]: after the evaluator wrote this frame's pose, before the model
 /// compose folds it).
 ///
 /// Each channel yaws its subtree about **world up through the bone's own pivot**: with `g` the
@@ -118,14 +118,14 @@ fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
 /// twisted spine, exactly the client's residual-gap composition. The ancestor walk runs up the
 /// rig's own parent table, then the entity frames between its `joints_root` and the unit (a
 /// conform node's tilt; a mounted rider's seat — splicing through the mount's bone chain via its
-/// [`super::RigAnchor`]), exactly the frames the joint-entity walk used to compose.
+/// [`benilla_world::rig_anim::RigAnchor`]), exactly the frames the joint-entity walk used to compose.
 pub(super) fn apply_body_twist(
     // A parked rig's bones are frozen (decision 0448) — composing the twist onto them would
     // recompute the palette every frame for a unit no one sees; the wake re-seats `base` from the
     // fresh sample on its own (`cur != last_out`).
-    mut units: Query<(Entity, &mut BodyTwist), Without<super::AnimParked>>,
-    mut rigs: Query<&mut super::RigPose>,
-    anchors: Query<&super::RigAnchor>,
+    mut units: Query<(Entity, &mut BodyTwist), Without<benilla_world::rig_anim::AnimParked>>,
+    mut rigs: Query<&mut benilla_world::rig_anim::RigPose>,
+    anchors: Query<&benilla_world::rig_anim::RigAnchor>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     stores: Query<&crate::net::ObjectStore>,
@@ -212,7 +212,10 @@ pub(super) fn apply_body_twist(
 
 /// Register [`apply_body_twist`] in the pose post-pass window.
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(PostUpdate, apply_body_twist.in_set(super::PosePost));
+    app.add_systems(
+        PostUpdate,
+        apply_body_twist.in_set(benilla_world::rig_anim::PosePost),
+    );
 }
 
 #[cfg(test)]

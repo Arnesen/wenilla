@@ -14,7 +14,7 @@ use super::probes::ProbeClock;
 use crate::net::{ClientCommand, Guid, SelfPlayer};
 use crate::player::Player;
 use crate::transport::{Transport, TransportAnchor};
-use crate::world_map::CurrentMap;
+use benilla_world::world_map::CurrentMap;
 
 pub(crate) struct ProbeCrossingPlugin;
 

@@ -38,21 +38,19 @@
 //! legs are live (0434 phase 6 — pale blue / pale green off the roster). Deferred selector
 //! states: the full PvP attackability matrix (X/Y), forced reactions, contested-guard.
 
-use avian3d::prelude::Collider;
 use benilla_formats::{load_faction_catalog, reputation_rank, FactionCatalog, Reaction};
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
-use crate::collision::GroundDecalSurface;
-use crate::decal::{project_decal, DecalFrame};
 use crate::net::{NetEntity, ObjectStore, Reputations, SelfPlayer};
-use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
+use benilla_assets::{LockRecover, WorldAssets};
+use benilla_world::decal::{DecalFrame, WorldDecal};
+use benilla_world::particles::buffer::EffectVertex;
 
 use super::click::clear;
 use super::{CombatFlash, Selection, SelectionRadius};
 use crate::creature_anim::Engaged;
-use crate::player::WorldCamera;
+use benilla_world::view::WorldCamera;
 
 /// The single ring record (a resource since 0733 — the projection rides the effect stream; no
 /// entity, no mesh, no materials). `update_ring` rebuilds `verts` when the [`RingKey`] moves and
@@ -87,15 +85,6 @@ pub(super) struct RingAssets {
 const RING_TEXTURE: &str = "mpq://textures/unitselecttexture.blp";
 /// Model-local ring radius for a unit with no model (a cube fallback), since it has no M2 footprint.
 const RING_FALLBACK_RADIUS: f32 = 0.7;
-/// Rasterizer depth bias on the ring materials (`StandardMaterial::depth_bias` →
-/// `DepthBiasState::constant`, in depth-ulp units). The projected vertices rest **exactly on** the
-/// drawn ground — geometrically coplanar — so without a bias the depth test dissolves into
-/// per-pixel f32 noise (stipple, view-dependent bites). This pushes the ring's *depth* toward the
-/// camera by ~1e-3·distance yards-equivalent (8192 · 2⁻²³): far above the coplanar noise floor
-/// (~ulp of Elwynn's 10⁴-yard world coords), far below anything visible. Geometric lifts (0.1,
-/// 0.02) read as hovering at grazing angles — director-confirmed; the reference fights the same
-/// coplanarity with polygon offset (trace-verified), the fixed-function twin of this bias.
-const RING_DEPTH_BIAS: f32 = 8192.0;
 /// The ring's own palette — **trace + byte verified end-to-end** (wow-re selection-circle §5, the
 /// `CGUnit::GetSelectionCircleColor` selector `0x605960`, per-object vtable `+0x2c`; the dword is
 /// written verbatim as every decal vertex's diffuse, alpha 255 — no tint global, no tex-env
@@ -265,7 +254,7 @@ pub(super) fn update_ring(
     flash: Res<CombatFlash>,
     mut state: ResMut<RingState>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
-    surfaces: Query<&Collider, With<GroundDecalSurface>>,
+    decals: WorldDecal,
     // The last camera-relative fade angle, kept across frames so a degenerate (straight-down) camera
     // holds the previous orientation instead of snapping.
     mut fade_angle: Local<f32>,
@@ -333,14 +322,14 @@ pub(super) fn update_ring(
                     feet: unit.translation,
                     radius,
                     fade_angle: *fade_angle,
-                    surfaces: surfaces.iter().count(),
+                    surfaces: decals.receiver_count(),
                 };
                 let projected = if state.shown && key == state.key {
                     !state.verts.is_empty()
                 } else {
                     state.verts.clear();
                     state.key = key;
-                    project_ring(&mut state.verts, &surfaces, unit.translation, radius, {
+                    project_ring(&mut state.verts, &decals, unit.translation, radius, {
                         *fade_angle
                     })
                 };
@@ -450,7 +439,7 @@ fn ring_fade_angle(camera: &Query<&GlobalTransform, With<WorldCamera>>) -> Optio
 
 /// Rebuild the ring mesh as a **projected decal** — the reference's actual mechanism (wow-re
 /// selection-circle RE §2: clip world geometry to the projection box, texture it top-down), via
-/// the shared projector ([`crate::decal::project_decal`] — the blob shadow rides the same emit
+/// the shared projector ([`benilla_world::decal::WorldDecal::project`] — the blob shadow rides the same emit
 /// chain, `0x6d7330 → 0x6d6fa0 → 0x6d7480`). The ring's box: the *rotated* texture square
 /// (half-extent `s` = radius, yawed by the camera fade angle — the clip frame is exactly the
 /// texture frame, so UVs stay in `[0,1]`) × the byte-verified vertical half-range **2s** (the
@@ -464,7 +453,7 @@ fn ring_fade_angle(camera: &Query<&GlobalTransform, With<WorldCamera>>) -> Optio
 /// the caller hides the ring, the reference's no-ground gate.
 fn project_ring(
     out: &mut Vec<EffectVertex>,
-    surfaces: &Query<&Collider, With<GroundDecalSurface>>,
+    decals: &WorldDecal<'_, '_>,
     feet: Vec3,
     radius: f32,
     fade_angle: f32,
@@ -482,9 +471,8 @@ fn project_ring(
         min_y: -vert,
         max_y: vert,
     };
-    project_decal(
+    decals.project(
         out,
-        surfaces,
         &frame,
         |p| ((vert - p.y.abs()) / (1.5 * radius)).clamp(0.0, 1.0),
         |x, z| frame.rect_uv(x, z),
@@ -497,7 +485,7 @@ pub(super) fn push_ring(
     assets: Option<Res<RingAssets>>,
     state: Option<Res<RingState>>,
     cam: Query<Entity, With<WorldCamera>>,
-    mut quads: ResMut<EffectQuads>,
+    mut draw: benilla_world::particles::buffer::WorldEffectDraw,
 ) {
     let (Some(assets), Some(state)) = (assets, state) else {
         return;
@@ -507,30 +495,22 @@ pub(super) fn push_ring(
         return;
     }
     let tint = state.color.to_linear();
-    let start = quads.begin();
-    quads.verts.extend(state.verts.iter().map(|v| EffectVertex {
+    let mut batch = draw
+        .batch(cam, assets.texture.id())
+        .additive()
+        .anchored(state.key.feet)
+        .rung(
+            benilla_world::sky_order::Rung::RING,
+            benilla_world::sky_order::Rung::RING as i32,
+        );
+    batch.extend(state.verts.iter().map(|v| EffectVertex {
         pos: v.pos,
         uv: v.uv,
         // The selector's dword as every vertex's diffuse — the reference's own wiring
         // (`0x605960` → vertex colour, alpha = the vertical fade the projector baked).
         color: [tint.red, tint.green, tint.blue, v.color[3]],
     }));
-    quads.commit_tris(
-        start,
-        EffectDrawSpec {
-            cam,
-            texture: assets.texture.id(),
-            blend: EffectBlend::Add,
-            fog: EffectFog::Off,
-            lit: false,
-            anchor: state.key.feet,
-            bias: RING_DEPTH_BIAS,
-            raster_bias: RING_DEPTH_BIAS as i32,
-            cam_relative: false,
-            main_entity: Entity::PLACEHOLDER,
-            light: None,
-        },
-    );
+    batch.tris();
 }
 
 /// The target's reaction toward our player — the direction the reference colours by (its nameplate/ring

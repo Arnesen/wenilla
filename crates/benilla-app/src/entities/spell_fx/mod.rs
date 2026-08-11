@@ -26,11 +26,11 @@
 //! authored `Stand` → `Hold` → `Decay` lifecycle ([`lifecycle`], which is where the Ice Barrier
 //! shield's pulse comes from), and run their **material
 //! animation**: each part's colour-alpha × transparency-weight loops sample per instance on the
-//! attach clock (a [`MatAnim`](crate::doodad_anim::MatAnim) that owns the part's render-alpha
+//! attach clock (a [`MatAnim`](benilla_world::doodad_anim::MatAnim) that owns the part's render-alpha
 //! tag — Battle Shout's staggered crescent pulses), and an animated M2Color RGB ticks a
 //! **per-instance material clone**'s tint uniform ([`FxTintAnims`] — the white-hot flash cooling
 //! to red; per instance because one cast = one phase, unlike the doodad lane's shared-clock
-//! loops in [`crate::doodad_anim::TintAnimMaterials`]).
+//! loops in [`benilla_world::doodad_anim::TintAnimMaterials`]).
 //!
 //! Effect instances **fire their model's event track** ([`fire_fx_anim_events`], decision 0304):
 //! the playing clip's `$SND`-family keyframes emit the same [`AnimSoundEvent`] stream creatures
@@ -54,10 +54,10 @@ use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
 use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, FxStage, SpellKitFx};
-use crate::debug_panel::{ModelKind, ModelPart};
-use crate::model_render::m2_url;
-use crate::particles;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::m2_url;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::model_render::{ModelKind, ModelPart};
+use benilla_world::particles;
 
 use super::{BoneAttach, DisplayModel, EntityPart, ModelHandle};
 pub(super) use lifecycle::advance_fx_anim;
@@ -96,7 +96,7 @@ pub(super) struct SpellFx {
 
 /// The live **per-instance tint clones**: an effect part whose M2Color RGB animates gets its own
 /// material clone at attach (one cast = one phase — the doodad lane's shared-clock registry
-/// [`crate::doodad_anim::TintAnimMaterials`] would run every Battle Shout on one global pulse),
+/// [`benilla_world::doodad_anim::TintAnimMaterials`] would run every Battle Shout on one global pulse),
 /// keyed by the clone's asset id → `(RGB loop, attach-time clock origin)`. An entry drops with
 /// its material asset — the instance root's despawn releases the only strong handle.
 #[derive(Resource, Default)]
@@ -172,7 +172,7 @@ pub(crate) fn drive_fx_view(
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     spatial: avian3d::prelude::SpatialQuery,
     mut transforms: Query<&mut Transform>,
 ) {
@@ -200,7 +200,7 @@ pub(crate) fn drive_fx_view(
                 Dir3::NEG_Y,
                 500.0,
                 true,
-                &crate::collision::player_query_filter(),
+                &benilla_world::collision::WorldCollision::body_filter(),
             ) {
                 pos.y -= hit.distance;
             }
@@ -239,7 +239,7 @@ pub(crate) fn drive_fx_view(
                 Dir3::NEG_Y,
                 500.0,
                 true,
-                &crate::collision::player_query_filter(),
+                &benilla_world::collision::WorldCollision::body_filter(),
             ) {
                 pos.y -= hit.distance;
             }
@@ -273,7 +273,7 @@ pub(crate) fn drive_fx_view(
                 Dir3::NEG_Y,
                 500.0,
                 true,
-                &crate::collision::player_query_filter(),
+                &benilla_world::collision::WorldCollision::body_filter(),
             ) {
                 pos.y -= hit.distance;
             }
@@ -374,7 +374,7 @@ pub(super) struct EffectHost {
     /// (the cloud fans with the host's motion), a missile is not — its trail stays world-frozen
     /// (wow-re `part-kit-effect-attach-orient.md`).
     pub attached: bool,
-    /// The model instance this one is **chained to** ([`crate::model_fade::ParentModel`]): the
+    /// The model instance this one is **chained to** ([`benilla_world::model_fade::ParentModel`]): the
     /// unit a kit effect is hung on, the item root a weapon glow rides. `None` for a model that
     /// belongs to no other — a missile, the fixture preview — which is also what keeps the 0202
     /// drain for the impacting trail.
@@ -415,7 +415,7 @@ pub(super) fn attach_effect_visuals(
     wow_materials: &mut Assets<WowModelMaterial>,
     tint_reg: &mut FxTintAnims,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
-    palettes: &mut crate::rig_palette::RigPalettes,
+    palettes: &mut benilla_world::rig_palette::RigPalettes,
     preferred_anim: Option<u16>,
 ) -> bool {
     let Some(parts) = dm.parts.as_ref() else {
@@ -428,16 +428,16 @@ pub(super) fn attach_effect_visuals(
     if let Some(parent) = host.parent {
         commands
             .entity(root)
-            .insert(crate::model_fade::ParentModel(parent));
+            .insert(benilla_world::model_fade::ParentModel(parent));
     }
     // …and, from the same fact, what losing the owner means: an instance hung on another model is
     // part of that model's tree, so its pool is freed with it (the reference's dtor) instead of
     // being left to finish in world space — the ghost clouds a gear change used to strand at the
     // body. A free-standing instance (a missile) keeps the 0202 drain.
     let on_owner_loss = if host.parent.is_some() {
-        crate::particles::OwnerLoss::Free
+        benilla_world::particles::OwnerLoss::Free
     } else {
-        crate::particles::OwnerLoss::Drain
+        benilla_world::particles::OwnerLoss::Drain
     };
     let is_ground_decal = |part: &EntityPart| ground_anchor && part.ground_quad.is_some();
     // Per-part materials for THIS instance (a tint clone where the RGB animates), resolved
@@ -458,14 +458,12 @@ pub(super) fn attach_effect_visuals(
     // hook frees the slot when the instance despawns (impact reap, missile arrival).
     let rig_slot = match (&dm.inverse_bindposes, joints.is_empty()) {
         (Some(ibp), false) => {
-            crate::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone()).map_or(
-                0,
-                |rig| {
+            benilla_world::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone())
+                .map_or(0, |rig| {
                     let slot = rig.slot;
                     commands.entity(root).insert(rig);
                     slot
-                },
-            )
+                })
         }
         _ => 0,
     };
@@ -509,14 +507,12 @@ pub(super) fn attach_effect_visuals(
                 },
                 // The picker's triangles (decision 0857): the probe names fx batches through
                 // `ModelPart`, and the render meshes are `RENDER_WORLD`-only.
-                crate::interact::PickMesh(part.geometry.clone()),
+                benilla_world::interact::PickMesh(part.geometry.clone()),
             ));
             if let (true, Some(_)) = (rigged, &part.skinned_mesh) {
                 child.insert((
-                    crate::rig_palette::RigPart(root),
-                    bevy::mesh::MeshTag(
-                        crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
-                    ),
+                    benilla_world::rig_palette::RigPart(root),
+                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(rig_slot, 1.0)),
                 ));
             }
             // The part's colour-alpha × weight loops, on this instance's clock: the sampler owns
@@ -524,15 +520,18 @@ pub(super) fn attach_effect_visuals(
             // The rig field rides the whole-tag seed (decision 0720).
             if let Some(anim) = &part.alpha_anim {
                 let mat_anim =
-                    crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                    benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
                         .following_host(seq_host);
-                let rig_tag = if rigged && part.skinned_mesh.is_some() {
-                    crate::mesh_tag::rig_bits(rig_slot)
+                let tag_slot = if rigged && part.skinned_mesh.is_some() {
+                    rig_slot
                 } else {
                     0
                 };
                 child.insert((
-                    bevy::mesh::MeshTag(rig_tag | crate::mesh_tag::alpha_bits(mat_anim.current)),
+                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                        tag_slot,
+                        mat_anim.current,
+                    )),
                     mat_anim,
                 ));
             }
@@ -543,8 +542,8 @@ pub(super) fn attach_effect_visuals(
             continue;
         };
         let card = match joints.get(info.bone as usize) {
-            Some(&j) => crate::billboard::BillboardCard::following_joint(info, j),
-            None => crate::billboard::BillboardCard::following(info, root),
+            Some(&j) => benilla_world::billboard::BillboardCard::following_joint(info, j),
+            None => benilla_world::billboard::BillboardCard::following(info, root),
         };
         let mut spawned = commands.spawn((
             Mesh3d(part.mesh.clone()),
@@ -555,7 +554,7 @@ pub(super) fn attach_effect_visuals(
                 blend: part.blend,
             },
             // The picker's triangles (decision 0857), pivot-centred by the caster like the bake.
-            crate::interact::PickMesh(part.geometry.clone()),
+            benilla_world::interact::PickMesh(part.geometry.clone()),
             card,
         ));
         // The card's build-time bound (decision 0834): `calculate_bounds` can no longer derive
@@ -565,10 +564,11 @@ pub(super) fn attach_effect_visuals(
         }
         // A card shares its batch's material-alpha loops (the billboard split copies them).
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
-                .following_host(seq_host);
+            let mat_anim =
+                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                    .following_host(seq_host);
             spawned.insert((
-                bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
+                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, mat_anim.current)),
                 mat_anim,
             ));
         }
@@ -593,31 +593,33 @@ pub(super) fn attach_effect_visuals(
             ),
             None => (root, Mat4::IDENTITY), // boneless model: the quad rides the instance root
         };
-        let (texture, fog) = match wow_materials.get(part.material.id()) {
+        // The material's packed fog byte, handed over raw — the lane owns what it maps to.
+        // `7` (Scene) is the no-material fallback the packer's own default agrees with.
+        let (texture, fog_bits) = match wow_materials.get(part.material.id()) {
             Some(mat) => (
                 mat.base.base_color_texture.clone(),
-                crate::particles::buffer::EffectFog::from_model_policy(
-                    (mat.extension.clutter_fade.z as u32 >> 4) & 7,
-                ),
+                (mat.extension.clutter_fade.z as u32 >> 4) & 7,
             ),
-            None => (None, crate::particles::buffer::EffectFog::Scene),
+            None => (None, u32::from(benilla_formats::FogPolicy::Scene as u8)),
         };
         let Some(texture) = texture else {
             continue; // texture-less ground quad: nothing the stream could draw
         };
-        let decal = crate::ground_fx::spawn_ground_fx_decal(
+        let decal = benilla_world::ground_fx::spawn_ground_fx_decal(
             commands,
             texture,
-            crate::particles::buffer::EffectBlend::from_model(part.blend, part.additive),
-            fog,
+            part.blend,
+            part.additive,
+            fog_bits,
             part.rgb_anim.as_ref().map(|a| (a.clone(), now)),
             &quad,
             joint,
             ibp,
         );
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
-                .following_host(seq_host);
+            let mat_anim =
+                benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                    .following_host(seq_host);
             commands.entity(decal).insert(mat_anim);
         }
     }
@@ -664,7 +666,7 @@ pub(super) fn attach_effect_visuals(
         let (owner, use_pivot) = joints
             .get(rb.def.bone as usize)
             .map_or((root, false), |&j| (j, true));
-        crate::ribbons::spawn_ribbon(
+        benilla_world::ribbons::spawn_ribbon(
             commands,
             rb,
             owner,
@@ -676,7 +678,7 @@ pub(super) fn attach_effect_visuals(
             // The instance's own root carries the clip: an effect model that steps
             // Stand -> Hold -> Decay re-answers the gate at each step, instead of freezing the
             // birth clip's answer for the whole life.
-            crate::ribbons::RibbonSeq::Host(root),
+            benilla_world::ribbons::RibbonSeq::Host(root),
             // This instance's own model alpha, chained to its host (0827/0833): a standalone
             // instance has none above it and draws exactly as before.
             Some(root),
@@ -713,10 +715,11 @@ pub(super) fn arm_effect_rig(
     if dm.skeleton.joints.is_empty() {
         return (Vec::new(), false);
     }
-    let joints = super::spawn_joints(commands, root, root, &dm.skeleton);
+    let joints = benilla_world::rig_palette::spawn_joints(commands, root, root, &dm.skeleton);
     // Billboard bones face the camera at the PALETTE level, children inheriting (the frost-armor
     // sheets skin to a lock-Z bone's child) — the joint pass needs the map.
-    if let Some(bb) = crate::billboard::BillboardJointRig::new(&dm.skeleton, &joints, root) {
+    if let Some(bb) = benilla_world::billboard::BillboardJointRig::new(&dm.skeleton, &joints, root)
+    {
         commands.entity(root).insert(bb);
     }
     let mut armed = false;
@@ -746,7 +749,8 @@ pub(super) fn arm_effect_rig(
             }
             armed = true;
         }
-        if let Some(drive) = crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
+        if let Some(drive) =
+            benilla_world::rig_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
         {
             // Fresh anchor per play — the byte-verified effect lifecycle (0858): CreateModel
             // always allocates+attaches, so every cast's gseq loops open at phase 0, exactly
@@ -1001,7 +1005,7 @@ pub(super) fn attach_spell_fx(
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
 ) {
     let Some(fx) = fx else {
         return;
@@ -1015,8 +1019,8 @@ pub(super) fn attach_spell_fx(
                     if let Some(root) = inst.root {
                         commands.entity(root).despawn();
                     }
-                    if crate::dbg_trace::enabled() {
-                        crate::dbg_trace::line(
+                    if benilla_assets::trace::enabled() {
+                        benilla_assets::trace::line(
                             "fx",
                             &format!("kit expire unit={unit} path={}", inst.path),
                         );
@@ -1137,8 +1141,8 @@ pub(super) fn attach_spell_fx(
                 let span = dm.first_seq_span.unwrap_or(FALLBACK_SPAN);
                 inst.expires = Some(now + span);
             }
-            if crate::dbg_trace::enabled() {
-                crate::dbg_trace::line(
+            if benilla_assets::trace::enabled() {
+                benilla_assets::trace::line(
                     "fx",
                     &format!(
                         "kit spawn unit={unit} path={} persistent={} span={:?}",
@@ -1233,7 +1237,7 @@ mod tests {
             .init_asset::<SkinnedMeshInverseBindposes>()
             .init_resource::<SpellFx>()
             .init_resource::<FxTintAnims>()
-            .init_resource::<crate::rig_palette::RigPalettes>()
+            .init_resource::<benilla_world::rig_palette::RigPalettes>()
             .add_systems(Update, attach_spell_fx);
         let roots: Vec<Entity> = persistent
             .iter()

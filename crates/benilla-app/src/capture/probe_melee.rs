@@ -1,7 +1,7 @@
 //! The melee live probe (`WOW_PROBE=melee`) — an agent-side instrument, inert without the env:
 //! once in-world, periodically fire the attack-nearest core ([`AttackNearestRequest`] — the
 //! action-bar attack's own no-selection path), so the probe character fights whatever is closest
-//! while the `dbg_trace` sink (`WOW_MOVE_TRACE=<path>`) records the swing→impact→spawn combat-text
+//! while the `benilla_assets::trace` sink (`WOW_MOVE_TRACE=<path>`) records the swing→impact→spawn combat-text
 //! timeline for pair-birth analysis. Pair with the slot-keyed probe identity (method.md) + an outer
 //! `timeout`.
 //!

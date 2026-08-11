@@ -230,7 +230,7 @@ fn either_line_ending_splits_a_body() {
 /// that matters (the chooser stores names extension-stripped, and `…Mangle.tga.blp` ships): it only
 /// resolves via the reference's second `.blp` candidate, and the old rule had no second candidate.
 ///
-/// Resolution goes through the renderer's own [`crate::assets::sprite_candidates`], never a copy of
+/// Resolution goes through the renderer's own [`benilla_assets::sprite_candidates`], never a copy of
 /// it: a sweep re-implementing the rule could agree with itself while disagreeing with what draws.
 ///
 /// Needs client data; skips without it, like the XML sweep.
@@ -260,7 +260,7 @@ fn every_macro_chooser_icon_resolves_in_the_client_archives() {
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            !crate::assets::sprite_candidates(p)
+            !benilla_assets::sprite_candidates(p)
                 .iter()
                 .any(|c| chain.contains(c))
         })

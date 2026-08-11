@@ -8,7 +8,7 @@ use benilla_assets::ModelAnimations;
 use benilla_formats::AnimDataCatalog;
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::{find_resolved, select, AnimDriver, Wielded};
 

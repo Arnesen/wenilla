@@ -50,6 +50,7 @@ crossbeam-channel = "0.5"
 benilla-assets = { path = "../benilla-assets" }
 benilla-formats = { path = "../benilla-formats" }
 benilla-protocol = { path = "../benilla-protocol" }
+benilla-world = { path = "../benilla-world" }
 # The CVar config diff (`benilla/config.toml`, decision 0954): serde derive on the persisted
 # shape, toml as its format. (serde_json left with the era manifest — 0978.)
 serde = { version = "1", features = ["derive"] }

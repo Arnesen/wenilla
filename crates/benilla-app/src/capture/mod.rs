@@ -47,7 +47,7 @@
 //! worse: `assets/` resolved through Cargo's runtime `CARGO_MANIFEST_DIR`, so a bare run silently
 //! loaded **no** WGSL shaders and every custom-shader layer — the *entire* player UI, sky, liquid,
 //! models — rendered blank, read as a UI bug for hours once. The app now bakes the absolute
-//! `crates/benilla-app/assets/` path in at compile time, so a bare run finds its shaders;
+//! `crates/benilla-world/assets/` path in at compile time, so a bare run finds its shaders;
 //! staleness is the trap that remains.) `WOW_CAPTURE_UI=1` opts the player UI into the shot (off
 //! by default so world baselines stay UI-free; omit it for world-only scenes). `WOW_CAPTURE=list`
 //! prints the scenario names. `scripts/visual.sh` wraps all of this.
@@ -61,11 +61,11 @@ use bevy::time::TimeUpdateStrategy;
 
 use benilla_assets::coords::wow_to_bevy;
 
-use crate::debug_panel::DebugState;
-use crate::loading_screen::WorldLoadProgress;
 use crate::perf::PerfHud;
-use crate::player::WorldCamera;
-use crate::schedule::WorldStage;
+use benilla_world::dev_state::DebugState;
+use benilla_world::schedule::WorldStage;
+use benilla_world::terrain_stream::WorldLoadProgress;
+use benilla_world::view::WorldCamera;
 
 // The UI fixture seeding (the synthetic window states), the scenario table, and the live-run
 // probe instruments (`probes`) each live in their own file — the server-less harness (settle,
@@ -101,13 +101,22 @@ pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
-    EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeClock, ProbeExitPlugin, ProbeFocusPlugin, ProbeKeyPlugin, ProbeLuaPlugin,
-    ProbeResizePlugin,
+    fx_draw_census_plugin, EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin,
+    ParticleCensusPlugin, ProbeChatPlugin, ProbeClock, ProbeExitPlugin, ProbeFocusPlugin,
+    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
 use scenarios::{Scenario, SubjectKind, UiFixture, GROUND_EYE, SCENARIOS};
 
-/// Is the app running a capture (`$WOW_CAPTURE` set)? Read by `main` to disable net + add the harness.
+pub(crate) mod waterfx;
+
+/// Is the app running a capture (`$WOW_CAPTURE` set)? Read by `main` to disable net + add the
+/// harness.
+///
+/// The engine asks the same question of the same variable, on its own, as
+/// `dev_state::deterministic_run` — because after 1160's split it *is* its own question: "run
+/// deterministically" is a property of the world, and the world must be able to ask it with no
+/// harness above it at all. One environment variable, two readers, no shared symbol across the
+/// boundary. Keep the two names in step.
 pub(crate) fn scenario_active() -> bool {
     std::env::var("WOW_CAPTURE").is_ok()
 }
@@ -421,6 +430,16 @@ pub(crate) struct CapturePlugin;
 
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
+        // The `waterfx` fixture drives its synthetic wading dummy before the foam emitter reads
+        // the motion — registered here, against the engine's ordering handle, because the
+        // instrument is the one that knows it is an instrument.
+        app.add_systems(
+            Update,
+            (waterfx::spawn, waterfx::drive)
+                .chain()
+                .before(benilla_world::water_fx::WaterFoamSet)
+                .in_set(benilla_world::schedule::WorldStage::Present),
+        );
         let name = std::env::var("WOW_CAPTURE").unwrap_or_default();
         // The fxview instrument: a synthetic scenario (ground scene, noon) + the fixture
         // request from env. Not in SCENARIOS — `scripts/visual.sh`'s golden sweep must never
@@ -489,9 +508,9 @@ impl Plugin for CapturePlugin {
                     .unwrap_or(d)
             };
             let mode = match std::env::var("WOW_WFX_MODE").as_deref() {
-                Ok("wake") => crate::water_fx::WfxMode::Wake,
-                Ok("turn") => crate::water_fx::WfxMode::Turn,
-                _ => crate::water_fx::WfxMode::Ring,
+                Ok("wake") => waterfx::WfxMode::Wake,
+                Ok("turn") => waterfx::WfxMode::Turn,
+                _ => waterfx::WfxMode::Ring,
             };
             // Rig centre in raw WoW coords: over the Northshire ground scene, the synthetic
             // surface a few yards above the terrain so the backdrop plane reads clean.
@@ -504,7 +523,7 @@ impl Plugin for CapturePlugin {
                 center[1] + dist * el.cos() * az.sin(),
                 center[2] + dist * el.sin(),
             ];
-            app.insert_resource(crate::water_fx::WaterFxView {
+            app.insert_resource(waterfx::WaterFxView {
                 mode,
                 speed: knob("WOW_WFX_SPEED", 4.0),
                 age: knob("WOW_WFX_AGE", 1.5),
@@ -735,11 +754,11 @@ fn drive_capture(
     mut exit: MessageWriter<AppExit>,
     time: Res<Time<bevy::time::Real>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
-    particles: Query<&crate::particles::ParticleEmitter>,
-    parts: Query<&ViewVisibility, With<crate::debug_panel::ModelPart>>,
+    particles: Query<&benilla_world::particles::ParticleEmitter>,
+    parts: Query<&ViewVisibility, With<benilla_world::model_render::ModelPart>>,
     entities: Query<()>,
     fx_req: Option<Res<FxViewRequest>>,
-    wfx_req: Option<Res<crate::water_fx::WaterFxView>>,
+    wfx_req: Option<Res<waterfx::WaterFxView>>,
     mut fx_state: Option<ResMut<FxViewState>>,
     // **The harness's one deliberate virtual clock** — the allowlisted exception in
     // `probes::probe_schedules_read_the_wall_clock`. The fixture age below is an age *on the clock

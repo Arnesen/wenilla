@@ -29,7 +29,6 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use crate::chat_bubble::BubbleConfig;
-use crate::clutter::ClutterConfig;
 use crate::minimap::MinimapZoom;
 use crate::nameplates::NameConfig;
 use crate::player::camera::{LookConfig, ZoomLimit, MOUSE_SPEED_RANGE};
@@ -37,9 +36,10 @@ use crate::sound::SoundConfig;
 use crate::target::ClickConfig;
 use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
-use crate::view::{ViewDistance, FARCLIP_RANGE};
 use benilla_ui::script::UiScript;
 use benilla_ui::widget::MINIMAP_ZOOM_LEVELS;
+use benilla_world::clutter::ClutterConfig;
+use benilla_world::view::{ViewDistance, FARCLIP_RANGE};
 
 /// The host-backed CVars: `(registered name, default)`. Grows one row per knob a settings page
 /// actually wires — never ahead of the knob (see the module doc).

@@ -21,11 +21,11 @@ use bevy::prelude::*;
 
 use benilla_assets::coords::bevy_to_wow;
 
-use crate::interact::WorldClick;
 use crate::target::go_is_nearest;
 #[cfg(test)]
 use crate::target::{Hovered, HoveredObject};
 use crate::ui_action::cast_send::TargetedBind;
+use benilla_world::interact::WorldClick;
 
 use super::TargetingWants;
 

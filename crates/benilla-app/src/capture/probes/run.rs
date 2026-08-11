@@ -19,13 +19,13 @@ use super::ProbeClock;
 /// it, so a key/chat/Lua probe defends itself exactly like the FPS one.
 ///
 /// **The parking half is the other side of that bill** (decision 1148). Asserting `AlwaysOnTop`
-/// every frame silently defeats [`crate::bgwin`]'s whole design — it overrides the
+/// every frame silently defeats [`benilla_world::bgwin`]'s whole design — it overrides the
 /// `AlwaysOnBottom` birth cage *and* the `Normal` handed back at release — so an instrumented run
 /// sits on top for its entire life however politely it was launched. At the full-size default that
 /// is a screen-filling window over whatever the director is doing, and a session that fires six
 /// probes fires six of them (which is how it got reported). The answer is not to drop the
 /// assertion — the throttle is real — but to shrink what is being asserted:
-/// [`crate::bgwin::no_pixel_run`] sizes such a run at 640×360 and this parks it in the top-right
+/// [`benilla_world::bgwin::no_pixel_run`] sizes such a run at 640×360 and this parks it in the top-right
 /// corner. A run that photographs pixels is excluded from both and keeps the full window.
 ///
 /// Write-gated on both counts: re-marking `Window` every frame would re-apply its whole state
@@ -85,7 +85,7 @@ fn keep_probe_window_on_top(
     let Ok(mut w) = windows.single_mut() else {
         return;
     };
-    let no_pixel = crate::bgwin::no_pixel_run();
+    let no_pixel = benilla_world::bgwin::no_pixel_run();
     let mode = park_mode();
     // Only `Corner` needs the pin: the other two get out of the way by *position*, which is the
     // point of measuring them — an edge/offscreen window that never reports `occluded_frames` has

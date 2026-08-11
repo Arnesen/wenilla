@@ -107,9 +107,9 @@ use bevy::prelude::*;
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
-use crate::player::WorldCamera;
 use crate::ui_pass::{UiQuadAppend, UiQuads};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
+use benilla_world::view::WorldCamera;
 
 /// Spawn one floating text over `anchor` — written by the `net/apply` handlers (the SMSG spawn
 /// table), consumed by [`float_combat_text`]. The emitters' self-suppression (Gate A) happens at
@@ -210,11 +210,11 @@ pub(crate) fn float_combat_text(
             "fct: \"{}\" (cat {}) over {:?}",
             spawn.text, spawn.category, spawn.anchor
         );
-        if crate::dbg_trace::enabled() {
+        if benilla_assets::trace::enabled() {
             let via_attach = anchors
                 .get(spawn.anchor)
                 .is_ok_and(|a| a.points.contains_key(&crate::entities::ATTACH_OVERHEAD));
-            crate::dbg_trace::line(
+            benilla_assets::trace::line(
                 "fct",
                 &format!(
                     "spawn \"{}\" cat={} anchor={:?} pos=({:.3},{:.3},{:.3}) attach18={}",

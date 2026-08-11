@@ -3,7 +3,7 @@
 //! The flicker instruments (decisions 0653/0656) localise a defect: `benilla-visual hotspot` hands
 //! back a pixel box and says *this* is what would not hold still. Naming what is actually there was
 //! then a manual step — read the ADT placements, guess which model the report meant, hope. The
-//! interactive inspector ([`crate::interact`]) answers it with a cursor, which an unattended probe
+//! interactive inspector ([`benilla_world::interact`]) answers it with a cursor, which an unattended probe
 //! does not have.
 //!
 //! So: `WOW_PICK="<x>,<y>[;<x>,<y>…]"` (+ `WOW_PICK_AT=<secs>`, default 20) casts a ray through each
@@ -42,9 +42,9 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::probes::ProbeClock;
-use crate::interact::{cast_pick_ray, PickParts, WorldObject};
-use crate::player::WorldCamera;
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::interact::{cast_pick_ray, PickParts, WorldObject};
+use benilla_world::view::WorldCamera;
 
 pub(crate) struct PickProbePlugin;
 
@@ -104,21 +104,24 @@ fn parse_pixels(spec: &str) -> Vec<Vec2> {
 }
 
 /// The filter deciding what a cast may hit — see [`fire_pick`]'s `objects` for why it is both.
-type Pickable = Or<(With<WorldObject>, With<crate::debug_panel::ModelPart>)>;
+type Pickable = Or<(
+    With<WorldObject>,
+    With<benilla_world::model_render::ModelPart>,
+)>;
 
 /// What a hit entity is asked for: its identity, the batch class it draws as, the material
 /// carrying the WMO batch order, and its per-instance `MeshTag` (`Option` because a hit need not be a
 /// model batch at all — and an equipped item's batch carries no [`WorldObject`]).
 type HitIdentity = (
     Option<&'static WorldObject>,
-    Option<&'static crate::debug_panel::ModelPart>,
+    Option<&'static benilla_world::model_render::ModelPart>,
     Option<&'static MeshMaterial3d<WowModelMaterial>>,
     Option<&'static MeshTag>,
     // Is this hit a camera-FACING batch (decision 0153's world-root card) or the model's own
     // geometry? The two are indistinguishable in the pixels and lead to completely different
     // diagnoses — a card that should be culled vs a submesh drawn with the wrong texture — so the
     // cast says which. (`card` in the line below.)
-    Has<crate::billboard::BillboardCard>,
+    Has<benilla_world::billboard::BillboardCard>,
 );
 
 /// Every shading input the batch actually has, as text — the five packed uniform rows and the base
@@ -311,7 +314,10 @@ fn fire_pick(
             info!(
                 "        {}  tag {}",
                 shading_of(resolved),
-                tag.map_or_else(|| "<none>".to_string(), |t| crate::mesh_tag::describe(t.0)),
+                tag.map_or_else(
+                    || "<none>".to_string(),
+                    |t| benilla_world::mesh_tag::describe(t.0)
+                ),
             );
         }
     }

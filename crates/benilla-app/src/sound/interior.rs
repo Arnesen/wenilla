@@ -13,15 +13,7 @@
 
 use bevy::prelude::*;
 
-use benilla_formats::WmoAreaCatalog;
-
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::schedule::WorldStage;
-use crate::wmo_portal::CurrentWmoInterior;
-
-/// The `WMOAreaTable` catalog. Absent when the client data didn't load.
-#[derive(Resource)]
-pub(crate) struct WmoAreas(pub(crate) WmoAreaCatalog);
+use benilla_world::schedule::WorldStage;
 
 /// The audio FKs of the interior the eye is in (`None` = open world). All-zero fields mean "an
 /// interior with no audio identity of its own" — consumers fall through to the terrain chain.
@@ -40,31 +32,12 @@ pub(crate) struct InteriorAudio {
     pub(crate) intro_sound: u32,
 }
 
-fn load_wmo_areas(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
-    let Some(assets) = assets else { return };
-    let loaded = {
-        let mut chain = assets.chain.lock_recover();
-        benilla_formats::load_wmo_area_catalog(&mut chain)
-    };
-    match loaded {
-        Ok(cat) => {
-            info!("sound: {} WMO interior audio rows", cat.len());
-            commands.insert_resource(WmoAreas(cat));
-        }
-        Err(e) => warn!("sound: WMOAreaTable failed to load: {e:#}"),
-    }
-}
-
 /// Resolve the eye's interior keys to the audio row; log transitions by interior name.
 fn resolve_interior(
-    keys: Res<CurrentWmoInterior>,
-    areas: Option<Res<WmoAreas>>,
+    world: benilla_world::world_point::WorldPoint,
     mut current: ResMut<CurrentInterior>,
 ) {
-    let Some(areas) = areas else { return };
-    let row = keys
-        .0
-        .and_then(|k| areas.0.resolve(k.wmo_id, k.name_set, k.group_area_id));
+    let row = world.interior_row();
     let audio = row.as_ref().map(|r| InteriorAudio {
         sound_provider: r.sound_provider,
         ambience: r.ambience,
@@ -90,13 +63,12 @@ fn leave_world(mut current: ResMut<CurrentInterior>) {
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<CurrentInterior>()
-        .add_systems(Startup, load_wmo_areas.after(AssetSet::Open))
         .add_systems(
             Update,
             resolve_interior
                 .run_if(super::world_audio_live)
                 .in_set(WorldStage::Present)
-                .after(crate::wmo_portal::WmoPvsSet),
+                .after(benilla_world::wmo_portal::WmoPvsSet),
         )
         .add_systems(
             OnExit(crate::char_select::ClientState::InWorld),

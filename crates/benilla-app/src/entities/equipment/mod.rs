@@ -33,7 +33,7 @@ use benilla_formats::ItemDisplayCatalog;
 use bevy::prelude::*;
 
 use super::{DisplayModel, ModelHandle};
-use crate::model_render::m2_url;
+use benilla_assets::m2_url;
 
 mod resolve;
 pub(in crate::entities) use resolve::placement;

@@ -1,6 +1,6 @@
 //! Targeting — click a unit to select it, and mark it with a ground selection ring.
 //!
-//! The first real player-facing consumer of the [`crate::interact`] picking foundation (whose header
+//! The first real player-facing consumer of the [`benilla_world::interact`] picking foundation (whose header
 //! long anticipated "mouseover-targeting"). This module owns the *selection state and input*; the
 //! ring itself — the projected decal, its colour selector, and the reaction decode — lives in
 //! [`ring`]. The pieces here:
@@ -38,11 +38,12 @@ use bevy::prelude::*;
 
 use benilla_ui::script::UiScript;
 
-use crate::assets::AssetSet;
 use crate::creature_anim::Engaged;
-use crate::interact::{InspectMode, WorldClick, WorldRightClick};
+use crate::debug_panel::InspectMode;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
-use crate::schedule::WorldStage;
+use benilla_assets::AssetSet;
+use benilla_world::interact::{WorldClick, WorldRightClick};
+use benilla_world::schedule::WorldStage;
 
 mod by_name;
 mod click;
@@ -118,7 +119,7 @@ pub(crate) struct HoveredObject {
 }
 
 /// This frame's **world-occlusion distance** for the mouse pick: the distance along the cursor ray
-/// to the nearest [`crate::collision::PickOccluder`] hit (terrain, the WMO walk-bake ≈ `0x84`
+/// to the nearest [`benilla_world::collision::PickOccluder`] hit (terrain, the WMO walk-bake ≈ `0x84`
 /// reject-mask faces, static doodad hulls), or `f32::INFINITY` with no hit. The reference's scene
 /// trace (`0x480df0`, wow-re selection-circle PART 3, §5-cross-checked) traces objects unbounded
 /// and discards the object hit iff the world hit is *strictly* nearer — a unit or GameObject
@@ -356,7 +357,7 @@ impl Plugin for TargetPlugin {
             .add_systems(
                 PostUpdate,
                 (ring::push_ring, reticle::push_reticle)
-                    .after(crate::particles::buffer::begin_effect_frame),
+                    .after(benilla_world::particles::buffer::begin_effect_frame),
             );
     }
 }

@@ -83,8 +83,8 @@ pub(super) fn attacker_state(
     seq: u64,
 ) {
     let victim = index.0.get(&s.victim).copied();
-    if crate::dbg_trace::enabled() {
-        crate::dbg_trace::line(
+    if benilla_assets::trace::enabled() {
+        benilla_assets::trace::line(
             "fct",
             &format!(
                 "recv swing atk={:#x} victim={:#x} dmg={} vstate={} hit={:#x}",

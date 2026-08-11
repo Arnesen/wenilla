@@ -2,7 +2,6 @@
 //! [`super`]'s motion model (decision 0053): flag-driven ground locomotion between the ~2 Hz
 //! heartbeats, and the jump as a locally-played ballistic event.
 
-use avian3d::character_controller::move_and_slide::MoveAndSlide;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{JumpInfo, MoveSpeeds};
 use bevy::prelude::*;
@@ -124,12 +123,12 @@ pub(in crate::net) fn trace_relay(
     queued: usize,
     out: RelayOutcome,
 ) {
-    if !crate::dbg_trace::enabled() {
+    if !benilla_assets::trace::enabled() {
         return;
     }
     let lead = chain.lead_ms(now_ms);
     let kind = if mv.heartbeat { "hb" } else { "tr" };
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "rly",
         &format!(
             "guid={guid:#x} {kind} wire={} flags={:#x} out={} lead={lead:7.1} q={queued}",
@@ -165,7 +164,7 @@ fn trace_runaway(guid_hint: Entity, rm: &RemoteMotion, now_ms: f64, silent_s: u3
     // the whole census frozen means the **socket** died with nobody noticing (decision 0621).
     let (pkts, age) = crate::net::io::inbound_census();
     let age = age.map_or_else(|| "never".to_string(), |ms| format!("{ms}ms"));
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "run",
         &format!(
             "{guid_hint} RUNAWAY flags={:#x} silent={silent_s}s drift={:.1}yd since={:.0}ms pos=[{:.1},{:.1}] netpkts={pkts} lastpkt={age}",
@@ -200,7 +199,7 @@ const REMOTE_TRACE_MS: f64 = 500.0;
 ///
 /// `age` (ms since a packet last applied) rides along so a sample is never read as server truth.
 fn trace_remote(e: Entity, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
-    crate::dbg_trace::line(
+    benilla_assets::trace::line(
         "rem",
         &format!(
             "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} held={held:.3} age={:.0}ms",
@@ -411,7 +410,7 @@ pub(in crate::net) fn extrapolate_remote_units(
     mut commands: Commands,
     // Avian's kinematic move-and-slide + the player-body capsule — the *same* pair the local
     // controller sweeps (decision 0626): one controller, every mover.
-    move_and_slide: MoveAndSlide,
+    world: benilla_world::collision::WorldCollision,
     capsule: Res<crate::player::PlayerCapsule>,
     // The runaway watch's per-mover throttle: the last whole silent second reported, so a stuck
     // mover writes one line a second rather than one a frame. Trace-only, hence a `Local` and not
@@ -435,11 +434,10 @@ pub(in crate::net) fn extrapolate_remote_units(
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
     let dt = time.delta_secs();
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    let filter = crate::collision::player_query_filter();
     for (e, mut t, mut rm, speeds, twist, latched, riding) in &mut q {
         // The runaway watch (trace-only): a mover still carrying a direction flag, with nothing
         // queued behind it and nothing applied for seconds, is running on our extrapolation alone.
-        if crate::dbg_trace::enabled() {
+        if benilla_assets::trace::enabled() {
             let silent = now_ms - rm.last_apply_ms;
             let moving = rm.flags & move_flags::ANY_MOVE != 0;
             if moving && rm.pending.is_empty() && silent > RUNAWAY_SILENCE_MS {
@@ -494,19 +492,11 @@ pub(in crate::net) fn extrapolate_remote_units(
                 Vec3::ZERO
             };
             let resolved_center = if airborne {
-                crate::player::mover::airborne_step(
-                    &move_and_slide,
-                    &capsule.0,
-                    &filter,
-                    from,
-                    vel,
-                    time.delta(),
-                )
+                crate::player::mover::airborne_step(&world, &capsule.0, from, vel, time.delta())
             } else {
                 crate::player::mover::grounded_step(
-                    &move_and_slide,
+                    &world,
                     &capsule.0,
-                    &filter,
                     from,
                     vel,
                     time.delta(),
@@ -584,7 +574,7 @@ pub(in crate::net) fn extrapolate_remote_units(
         rm.vertical_velocity = vertical_velocity;
         rm.speed = speed;
         // The remote-pose watch (trace-only): one sample per mover per half-second.
-        if crate::dbg_trace::enabled()
+        if benilla_assets::trace::enabled()
             && sampled
                 .get(&e)
                 .is_none_or(|t| now_ms - t >= REMOTE_TRACE_MS)

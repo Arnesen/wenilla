@@ -14,11 +14,11 @@ use bevy::prelude::*;
 use benilla_formats::{SpellVisualCatalog, VisualKit, VisualStages, MISSILE_ATTACH_TABLE};
 use benilla_protocol::EntityKind;
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore};
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::{CastEvent, CastEventKind, CastHold, EmoteAnim, SpellGoTargets, WoundAnim};
 

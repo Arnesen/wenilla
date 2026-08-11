@@ -12,8 +12,8 @@
 
 use bevy::prelude::*;
 
-use crate::assets::{LockRecover, WorldAssets};
 use crate::char_select::ClientState;
+use benilla_assets::{LockRecover, WorldAssets};
 
 use super::kit::{self, KitRef, SoundCategory, SoundKits};
 use super::{mixer, SoundConfig, SoundOutput};

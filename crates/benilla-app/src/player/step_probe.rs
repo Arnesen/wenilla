@@ -18,7 +18,7 @@
 //!    radius is [`super::CAPSULE_RADIUS`]. If a rung further out commits where the live one did
 //!    not, the advance is the defect; if *every* rung says `NO-FLOOR`, the geometry is; if every
 //!    rung says `STEEP-FLOOR`, the walkable gate is. One line, one verdict.
-//! 4. **The candidate faces are dumped** ([`crate::collision::one_sided::faces_near`]), with the
+//! 4. **The candidate faces are dumped** ([`benilla_world::collision::WorldCollision::faces_near_body`]), with the
 //!    facing gate's own answer per face, when the trace asks for them.
 //!
 //! Output goes two places: the `stup` tag of `WOW_MOVE_TRACE` (the record we read afterwards) and
@@ -29,7 +29,6 @@
 //! [`REPORT_HZ`] reports a second, each a handful of shape casts and rays — so leaning on a wall
 //! forever cannot turn into a frame-rate story of its own.
 
-use avian3d::character_controller::move_and_slide::MoveAndSlide;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::sync::Mutex;
@@ -89,9 +88,8 @@ pub(crate) fn latest() -> (Vec<String>, f32) {
 /// reasons that have nothing to do with a kerb.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn watch(
-    ms: &MoveAndSlide<'_, '_>,
+    world: &benilla_world::collision::WorldCollision<'_, '_>,
     capsule: &Collider,
-    filter: &SpatialQueryFilter,
     from: Vec3,
     to: Vec3,
     horiz_vel: Vec3,
@@ -120,9 +118,7 @@ pub(super) fn watch(
 
     let dir_h = horiz_vel / speed;
     let feet_y = from.y - CAPSULE_HEIGHT * 0.5;
-    let cast = |c: Vec3, disp: Vec3| {
-        crate::collision::one_sided::cast_move(ms, capsule, c, disp, SKIN_WIDTH, filter)
-    };
+    let cast = |c: Vec3, disp: Vec3| world.cast_body(capsule, c, disp, SKIN_WIDTH);
 
     // The spot is stamped in **WoW** coordinates as well as Bevy's: every other probe, every `.go
     // xyz`, and the director's own `/gps` speak that frame, so a blocked report is walkable-back-to
@@ -172,22 +168,16 @@ pub(super) fn watch(
     let ray_len = STEP_UP_HEIGHT + CAPSULE_HEIGHT * 0.5 + 1.0;
     let profile: Vec<String> = PROFILE
         .iter()
-        .map(|&o| {
-            match crate::collision::one_sided::cast_ray(
-                ms,
-                eye + dir_h * o,
-                Dir3::NEG_Y,
-                ray_len,
-                filter,
-            ) {
+        .map(
+            |&o| match world.ray_body(eye + dir_h * o, Dir3::NEG_Y, ray_len) {
                 None => format!("{o:+.2}:miss"),
                 Some(h) => format!(
                     "{o:+.2}:{:+.2}/{:+.2}",
                     eye.y - h.distance - feet_y,
                     h.normal.y
                 ),
-            }
-        })
+            },
+        )
         .collect();
     lines.push(format!("  ahead {}", profile.join(" ")));
 
@@ -215,10 +205,10 @@ pub(super) fn watch(
     // The faces themselves, when the trace asks. Kept off the panel and off an untraced run: it is
     // two dozen lines, and it is the answer only when the three readings above disagree.
     let mut faces = Vec::new();
-    if crate::dbg_trace::enabled_for("stup") {
+    if benilla_assets::trace::enabled_for("stup") {
         let at = from + dir_h * CAPSULE_RADIUS;
         let half = Vec3::new(1.0, CAPSULE_HEIGHT * 0.5 + STEP_UP_HEIGHT, 1.0);
-        for f in crate::collision::one_sided::faces_near(ms, at, half, filter, FACE_DUMP) {
+        for f in world.faces_near_body(at, half, FACE_DUMP) {
             let c = f.centroid();
             faces.push(format!(
                 "  face  n=({:+.2},{:+.2},{:+.2}) mid ({:8.2},{:7.2},{:8.2}) h={:+.2} \
@@ -242,7 +232,7 @@ pub(super) fn watch(
     }
 
     for l in lines.iter().chain(&faces) {
-        crate::dbg_trace::line("stup", l);
+        benilla_assets::trace::line("stup", l);
     }
     if let Ok(mut probe) = PROBE.lock() {
         probe.report = lines;

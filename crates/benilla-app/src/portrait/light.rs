@@ -5,17 +5,18 @@
 //! swapped ([`material_variant`]) — so a bake never drifts from what is standing in the world, and
 //! never inherits the world's time of day. Which light it swaps to is a *fidelity* question with two
 //! different answers ([`BoothLight`]): the round unit-frame portraits keep our neutral
-//! [`studio_light_rows`], while the body panes — transcriptions of 1.12 `<PlayerModel>` widgets —
-//! carry the reference widget's own light, [`model_pane_light_rows`] (decision 0638).
+//! [`studio_light`], while the body panes — transcriptions of 1.12 `<PlayerModel>` widgets —
+//! carry the reference widget's own light, [`model_pane_light`] (decision 0638).
 
+use benilla_world::lighting::LightBlob;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::terrain::WowModelMaterial;
+use benilla_assets::materials::WowModelMaterial;
 
 /// One booth light: its own copy of the shared-light storage buffer (the canonical
-/// [`crate::lighting::LIGHT_HEADER_ROWS`]-row std430 layout, lit lanes packed by the scene's own
+/// [`benilla_world::lighting::LIGHT_HEADER_ROWS`]-row std430 layout, lit lanes packed by the scene's own
 /// packer), written ONCE at startup — so a booth reads the same at noon, midnight, or in a fog bank
 /// (the world buffer would render a night portrait pitch black). `variants` caches, per world
 /// material, its booth twin: an exact clone with only `light_buf` swapped — zero drift from the
@@ -75,10 +76,10 @@ impl BoothRig {
 ///
 /// - [`Self::studio`] lights the round unit-frame **portraits**. The reference bakes those through
 ///   its own portrait render (`SetPortraitTexture`), not through a UI model widget, so this stays
-///   our fixed neutral front-lit studio ([`studio_light_rows`]) — the director-approved look.
+///   our fixed neutral front-lit studio ([`studio_light`]) — the director-approved look.
 /// - [`Self::pane`] lights the **body panes** — the character window's paper doll and the inspect
 ///   window's twin. Those transcribe a `<PlayerModel>` widget, and the reference gives every one of
-///   those exactly one light, from its own constructor ([`model_pane_light_rows`]).
+///   those exactly one light, from its own constructor ([`model_pane_light`]).
 ///
 /// Two buffers means two variant caches: a material twin points at exactly ONE light buffer, so a
 /// twin built for the portraits can never be handed to a body pane.
@@ -108,7 +109,7 @@ pub(super) fn reap_dead_variants(
 /// The twin of a world-built material against `buffer`, cached in `variants` — same
 /// texture/blend/flags, only the light storage swapped. [`BoothRig::variant`] is this against one of
 /// the two fixed booth buffers; the create scene passes its own authored-rig buffer with `rig` set,
-/// which additionally flips the twin onto the [`crate::model_render::ShadeSel::Rig`] lane (the
+/// which additionally flips the twin onto the [`benilla_world::model_render::ShadeSel::Rig`] lane (the
 /// probe-slot SH eval + the buffer's point table — the scene's authored M2 light rig, decision
 /// 0429/0435) instead of the world sun/intensity lane the material was built for — and forces the
 /// twin's fog OFF: the glue CHARACTER model takes no fog in the reference (its fill callback
@@ -133,12 +134,12 @@ pub(super) fn material_variant(
     let mut twin = mat.clone();
     twin.extension.light_buf = buffer.clone();
     if rig {
-        twin.extension.sun_scale.x = crate::model_render::ShadeSel::Rig.selector();
+        twin.extension.sun_scale.x = benilla_world::model_render::ShadeSel::Rig.selector();
         // Force fog OFF while preserving every pipeline marker `specialize` keys on (bits 0-3
         // AND the 0528 multiply markers, bits 7-8) — the mask is owned by `model_render`, next
         // to the packer. A hand-rolled `as u8 & 0x0f` here once dropped the multiply markers
         // and alpha-blended the char-select weapon sheen into a white blade.
-        twin.extension.clutter_fade.z = crate::model_render::replace_fog_policy(
+        twin.extension.clutter_fade.z = benilla_world::model_render::replace_fog_policy(
             twin.extension.clutter_fade.z,
             benilla_formats::FogPolicy::Off,
         );
@@ -177,22 +178,16 @@ pub(super) fn material_variant(
 /// grazing the figure's screen-right side. The studio light aims its diffuse from the camera's own
 /// side, so the same surfaces got `0.58 + 0.85·(N·L≈1) ≈ 1.4` — roughly twice the reference, which
 /// is exactly the "too brightly lit" the director reported.
-pub(super) fn model_pane_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADER_ROWS] {
-    // The packer takes the light's PROPAGATION direction (it negates it back into a to-light vector
-    // for the SH fold), so the ctor's to-light `(0,1,0)` goes in negated.
+pub(super) fn model_pane_light() -> LightBlob {
+    // The builder takes the light's PROPAGATION direction (it negates it back into a to-light
+    // vector for the SH fold), so the ctor's to-light `(0,1,0)` goes in negated.
     let sun_dir = -benilla_assets::coords::wow_to_bevy([0.0, 1.0, 0.0]);
-    let mut rows = [[0.0f32; 4]; crate::lighting::LIGHT_HEADER_ROWS];
-    crate::lighting::pack_model_core_rows(
-        &mut rows,
+    LightBlob::model(
         [0.7, 0.7, 0.7],  // CharacterModelBase ctor, CGLight+0x30
         [0.8, 0.8, 0.64], // CharacterModelBase ctor, CGLight+0x3c
         sun_dir,
-    );
-    rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; w = terrain shininess convention)
-    rows[4] = [0.0, 0.0, 0.0, 0.0]; // fog color, w = 0: fog OFF in the booth
-    rows[5] = [0.0, 10_000.0, 0.0, 10_000.0]; // fog params (inert; farclip wall far away)
-    rows[19] = [0.0, 0.0, 0.0, 0.4]; // STALE dial (see `studio_light_rows` — no shader reads 19.w)
-    rows
+    )
+    .dial(0.4) // STALE (see `studio_light` — no shader reads 19.w)
 }
 
 /// The fixed studio-light rows (the shared-light std430 layout): neutral warm-white ambient +
@@ -200,33 +195,27 @@ pub(super) fn model_pane_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADE
 /// portrait shows is the lit one), fog OFF (row 4 w=0), point lights off (row 12.w).
 ///
 /// This lights the round unit-frame **portraits** only. The body panes have a reference law of
-/// their own — [`model_pane_light_rows`].
+/// their own — [`model_pane_light`].
 ///
 /// The lit-lane rows (0-2, the SH block, the sun DC) come from the SAME packer the scene light
-/// uses ([`crate::lighting::pack_model_core_rows`]) — this function used to hand-copy the layout
+/// uses ([`LightBlob`]) — this function used to hand-copy the layout
 /// and rendered black portraits the day 0354 moved the lit lanes onto rows it never wrote. Only
 /// the studio *values* live here; the layout lives in one place.
-pub(super) fn studio_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADER_ROWS] {
+pub(super) fn studio_light() -> LightBlob {
     // −sun_dir is the to-light vector: toward the camera side (−Z, a bit of −X from the yaw, up).
     let sun_dir = Vec3::new(0.25, -0.45, 0.85).normalize();
-    let mut rows = [[0.0f32; 4]; crate::lighting::LIGHT_HEADER_ROWS];
-    crate::lighting::pack_model_core_rows(
-        &mut rows,
+    // Fog stays off and the SIDN night lane stays 0 — the builder's off-world defaults.
+    // 19.w — STALE: this was the retired exterior-intensity A/B dial ("0.4 brings the untagged
+    // booth parts from the lit 2.5 rung to intensity 1.0"), but NO shader reads 19.w today. Under
+    // the 0753 trace law the exterior lane commits the sun at ×1 regardless, which is the very
+    // level this dial once aimed for — the drift resolved itself; stated until a portrait-light
+    // pass confirms the booth look.
+    LightBlob::model(
         [0.58, 0.56, 0.54], // studio ambient — neutral warm-white
         [0.85, 0.82, 0.78], // studio diffuse
         sun_dir,
-    );
-    rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; w = terrain shininess convention)
-    rows[4] = [0.0, 0.0, 0.0, 0.0]; // fog color, w = 0: fog OFF in the booth
-    rows[5] = [0.0, 10_000.0, 0.0, 10_000.0]; // fog params (inert; farclip wall far away)
-                                              // 12.w / 17.x (SIDN night) stay 0: no dial lanes, no night emissive in the booth.
-                                              // 19.w — STALE: this was the retired exterior-intensity A/B dial ("0.4 brings the untagged
-                                              // booth parts from the lit 2.5 rung to intensity 1.0"), but NO shader reads 19.w today.
-                                              // Under the 0753 trace law the exterior lane commits the sun at ×1 regardless, which is the
-                                              // very level this dial once aimed for — the drift resolved itself; comment kept until a
-                                              // portrait-light pass confirms the booth look.
-    rows[19] = [0.0, 0.0, 0.0, 0.4];
-    rows
+    )
+    .dial(0.4)
 }
 
 #[cfg(test)]
@@ -240,7 +229,8 @@ mod tests {
     /// (a frontal studio key, ~2× the reference on every surface the director can see).
     #[test]
     fn model_pane_light_is_the_reference_widget_light_across_the_view_axis() {
-        let rows = model_pane_light_rows();
+        let blob = model_pane_light();
+        let rows = blob.header_rows();
         assert_eq!(rows[0][..3], [0.7, 0.7, 0.7], "ambient (CGLight+0x30)");
         assert_eq!(rows[1][..3], [0.8, 0.8, 0.64], "diffuse (CGLight+0x3c)");
 
@@ -270,7 +260,8 @@ mod tests {
     /// comes from the camera's own side, which is why the two rigs must not share a buffer.
     #[test]
     fn studio_light_keys_from_the_camera_side() {
-        let rows = studio_light_rows();
+        let blob = studio_light();
+        let rows = blob.header_rows();
         let to_light = -Vec3::from_slice(&rows[2][..3]);
         assert!(
             to_light.z < -0.5,

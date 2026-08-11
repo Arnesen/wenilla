@@ -32,21 +32,21 @@ use crate::player::land::LandHere;
 #[derive(SystemParam)]
 pub(super) struct WorldReadout<'w, 's> {
     player: Option<Res<'w, crate::player::Player>>,
-    map: Option<Res<'w, crate::world_map::CurrentMap>>,
-    catalog: Option<Res<'w, crate::world_map::MapCatalogRes>>,
-    area: Res<'w, crate::terrain_stream::CurrentArea>,
+    map: Option<Res<'w, benilla_world::world_map::CurrentMap>>,
+    catalog: Option<Res<'w, benilla_assets::MapCatalogRes>>,
+    area: Res<'w, benilla_world::terrain_stream::CurrentArea>,
     areas: Option<Res<'w, crate::area::AreaTableRes>>,
-    interior: Res<'w, crate::wmo_portal::CurrentAreaInterior>,
+    interior: Res<'w, benilla_world::wmo_portal::CurrentAreaInterior>,
     /// The camera's own WMO room claim + the exterior-window worklist it produces — the two inputs
-    /// [`crate::exterior_cull`] runs on. See the readout below for why they are worth a line.
-    room: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
-    windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
-    skybox: Res<'w, crate::wmo_sky::CameraWmoSkybox>,
-    streamer: Res<'w, crate::terrain_stream::TerrainStreamer>,
+    /// [`benilla_world::exterior_cull`] runs on. See the readout below for why they are worth a line.
+    room: Res<'w, benilla_world::wmo_portal::CameraInteriorClaim>,
+    windows: Res<'w, benilla_world::wmo_portal::ExteriorWindows>,
+    skybox: Res<'w, benilla_world::wmo_sky::CameraWmoSkybox>,
+    streamer: Res<'w, benilla_world::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
     names: ResMut<'w, crate::names::NameCache>,
     net_commands: Res<'w, crate::net::NetCommands>,
-    camera: Query<'w, 's, &'static Transform, With<crate::player::WorldCamera>>,
+    camera: Query<'w, 's, &'static Transform, With<benilla_world::view::WorldCamera>>,
     land: MessageWriter<'w, LandHere>,
 }
 
@@ -130,8 +130,10 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
         None => "room —".to_string(),
     };
     let window_line = match &*world.windows {
-        crate::wmo_portal::ExteriorWindows::Unrestricted => "exterior unrestricted".to_string(),
-        crate::wmo_portal::ExteriorWindows::Windows(rects) => {
+        benilla_world::wmo_portal::ExteriorWindows::Unrestricted => {
+            "exterior unrestricted".to_string()
+        }
+        benilla_world::wmo_portal::ExteriorWindows::Windows(rects) => {
             let widest = rects
                 .iter()
                 .map(|[x0, y0, x1, y1]| ((x1 - x0) * (y1 - y0)).max(0.0))

@@ -36,7 +36,7 @@
 //! one line per world entry when everything is fine, and it re-fires on every re-entry (a relog, a
 //! `.character race` forced logout, a reconnect) because the state can have changed.
 //!
-//! The same audience — the reader of the log — is why [`crate::build_id::banner`] is registered
+//! The same audience — the reader of the log — is why [`benilla_world::build_id::banner`] is registered
 //! here: **which build produced this log** is the first thing a report from someone else's machine
 //! has to establish, and one startup line puts it in the output they already paste.
 //!
@@ -53,8 +53,7 @@ use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{EnteredWorldMessage, ObjectStore, SelfGuid, SelfPlayer};
 use crate::probe_shield::{ProbeShield, ShieldReport};
-use crate::terrain_stream::CurrentArea;
-use crate::world_map::CurrentMap;
+use benilla_world::world_map::CurrentMap;
 
 /// `PLAYER_FLAGS_GM` (vmangos `Player.h`) — set by `SetGameMaster(true)` alongside the faction-35
 /// re-template. PUBLIC, so it rides our own descriptor like any other player flag.
@@ -100,10 +99,10 @@ pub(crate) struct PreflightPlugin;
 impl Plugin for PreflightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Preflight>()
-            .add_systems(Startup, (crate::build_id::banner, offline_notice))
+            .add_systems(Startup, (benilla_world::build_id::banner, offline_notice))
             .add_systems(
                 Update,
-                report_session.after(crate::schedule::WorldStage::Net),
+                report_session.after(benilla_world::schedule::WorldStage::Net),
             );
     }
 }
@@ -145,7 +144,7 @@ fn report_session(
     self_guid: Res<SelfGuid>,
     names: Res<NameCache>,
     map: Option<Res<CurrentMap>>,
-    area: Option<Res<CurrentArea>>,
+    world: benilla_world::world_point::WorldPoint,
     area_table: Option<Res<AreaTableRes>>,
     shield: Res<ProbeShield>,
 ) {
@@ -170,8 +169,8 @@ fn report_session(
     }
     // `CurrentArea` is the FINEST area under us ("Darrowshire"), which on its own can be unplaceable;
     // the parent zone ("Eastern Plaguelands") is what orients a reader, so print zone / subzone.
-    let zone = area
-        .and_then(|a| a.0)
+    let zone = world
+        .area()
         .zip(area_table.as_deref())
         .map(|(id, cat)| {
             let sub = cat.0.name(id);

@@ -38,7 +38,6 @@ use bevy::prelude::*;
 use benilla_formats::{SkillLineCatalog, SpellCatalog};
 use benilla_ui::script::{SpellBookState, SpellSlotView, SpellTabView, UiScript};
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
@@ -48,6 +47,7 @@ use crate::ui_action::{
 };
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 
 /// The skill-line catalog (`SkillLine.dbc` × `SkillLineAbility.dbc`) — absent when the client
 /// data failed to load (every consumer tolerates that; `ui_action::Spells`' own precedent).

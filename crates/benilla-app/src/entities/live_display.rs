@@ -127,11 +127,11 @@ pub(super) fn refresh_live_display(
                         benilla_assets::ModelAnimations,
                         crate::creature_anim::AnimDriver,
                         (
-                            crate::creature_anim::RigPose,
+                            benilla_world::rig_anim::RigPose,
                             crate::creature_anim::BodyTwist,
-                            crate::creature_anim::GlobalSeqDrive,
+                            benilla_world::rig_anim::GlobalSeqDrive,
                         ),
-                        crate::rig_palette::RigSkin,
+                        benilla_world::rig_palette::RigSkin,
                         super::BoneAttach,
                         super::equipment::HeldAttached,
                     )>()
@@ -211,7 +211,7 @@ const HEAL_MIN_HEADROOM: usize = 128;
 const HEAL_PER_FRAME: usize = 2;
 
 /// Rebuild the visuals of units whose attach was DENIED a palette rig (decision 0863 — the
-/// [`RigStarved`](crate::rig_palette::RigStarved) marker): the same teardown set as the
+/// [`RigStarved`](benilla_world::rig_palette::RigStarved) marker): the same teardown set as the
 /// display-id swap above (the reference's `0x60abe0` rebuild), fade-skipped via `Reattached` —
 /// a heal is not a spawn. `attach_entity_visuals` rebuilds next frame(s), allocating with the
 /// headroom this system waited for; if the table filled again in between, the attach re-marks
@@ -220,8 +220,14 @@ const HEAL_PER_FRAME: usize = 2;
 #[allow(clippy::type_complexity)] // one query's two-marker filter
 pub(super) fn heal_rig_starved(
     mut commands: Commands,
-    palettes: Res<crate::rig_palette::RigPalettes>,
-    starved: Query<(Entity, &Guid), (With<crate::rig_palette::RigStarved>, With<VisualAttached>)>,
+    palettes: Res<benilla_world::rig_palette::RigPalettes>,
+    starved: Query<
+        (Entity, &Guid),
+        (
+            With<benilla_world::rig_palette::RigStarved>,
+            With<VisualAttached>,
+        ),
+    >,
 ) {
     if starved.is_empty() || palettes.slot_headroom() < HEAL_MIN_HEADROOM {
         return;
@@ -246,14 +252,14 @@ pub(super) fn heal_rig_starved(
                 benilla_assets::ModelAnimations,
                 crate::creature_anim::AnimDriver,
                 (
-                    crate::creature_anim::RigPose,
+                    benilla_world::rig_anim::RigPose,
                     crate::creature_anim::BodyTwist,
-                    crate::creature_anim::GlobalSeqDrive,
+                    benilla_world::rig_anim::GlobalSeqDrive,
                 ),
-                crate::rig_palette::RigSkin,
+                benilla_world::rig_palette::RigSkin,
                 super::BoneAttach,
                 super::equipment::HeldAttached,
-                crate::rig_palette::RigStarved,
+                benilla_world::rig_palette::RigStarved,
             )>()
             .insert(super::equipment::Reattached);
     }
@@ -270,13 +276,13 @@ mod tests {
     #[test]
     fn a_starved_unit_rebuilds_when_the_table_has_room_and_waits_when_it_has_not() {
         let mut app = App::new();
-        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.init_resource::<benilla_world::rig_palette::RigPalettes>();
         app.add_systems(Update, heal_rig_starved);
         let child = app.world_mut().spawn_empty().id();
         let unit = app
             .world_mut()
             .spawn((
-                crate::rig_palette::RigStarved,
+                benilla_world::rig_palette::RigStarved,
                 VisualAttached,
                 crate::net::Guid(0xB0B),
                 AppliedDisplay(Some(7)),
@@ -285,13 +291,17 @@ mod tests {
             .id();
 
         // Choke the table under the heal's minimum headroom: the unit is left alone.
-        let hoard: Vec<crate::rig_palette::RigSkin> = {
+        let hoard: Vec<benilla_world::rig_palette::RigSkin> = {
             let mut palettes = app
                 .world_mut()
-                .resource_mut::<crate::rig_palette::RigPalettes>();
-            (0..(crate::mesh_tag::MAX_RIG_SLOTS - 1 - HEAL_MIN_HEADROOM / 2))
+                .resource_mut::<benilla_world::rig_palette::RigPalettes>();
+            (0..(benilla_world::mesh_tag::MAX_RIG_SLOTS - 1 - HEAL_MIN_HEADROOM / 2))
                 .filter_map(|_| {
-                    crate::rig_palette::RigSkin::allocate_bones(&mut palettes, 1, Handle::default())
+                    benilla_world::rig_palette::RigSkin::allocate_bones(
+                        &mut palettes,
+                        1,
+                        Handle::default(),
+                    )
                 })
                 .collect()
         };
@@ -305,7 +315,7 @@ mod tests {
         {
             let mut palettes = app
                 .world_mut()
-                .resource_mut::<crate::rig_palette::RigPalettes>();
+                .resource_mut::<benilla_world::rig_palette::RigPalettes>();
             for rig in hoard.iter().take(HEAL_MIN_HEADROOM) {
                 let slot = rig.slot;
                 palettes.free(slot);
@@ -315,7 +325,7 @@ mod tests {
         let e = app.world().entity(unit);
         assert!(!e.contains::<VisualAttached>(), "attach re-armed");
         assert!(
-            !e.contains::<crate::rig_palette::RigStarved>(),
+            !e.contains::<benilla_world::rig_palette::RigStarved>(),
             "marker consumed"
         );
         assert!(

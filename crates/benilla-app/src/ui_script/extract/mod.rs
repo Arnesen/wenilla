@@ -11,9 +11,9 @@ use bevy::window::PrimaryWindow;
 
 use benilla_ui::script::{QuadContent, TexCoords, UiScript};
 
-use crate::assets::WorldAssets;
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 use crate::ui_text::UiFontAtlas;
+use benilla_assets::WorldAssets;
 
 mod cooldown;
 mod text;

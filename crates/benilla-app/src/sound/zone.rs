@@ -53,11 +53,10 @@ use bevy::prelude::*;
 
 use benilla_formats::AreaSoundCatalog;
 
-use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::lighting::GameClock;
 use crate::net::{ServerSoundKind, ServerSoundMessage};
-use crate::schedule::WorldStage;
-use crate::terrain_stream::CurrentArea;
+use benilla_assets::{AssetSet, LockRecover, WorldAssets};
+use benilla_world::lighting::GameClock;
+use benilla_world::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::mixer::{self, StreamingSoundHandle};
@@ -263,17 +262,15 @@ fn load_area_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 fn zone_audio(
     mut zone: NonSendMut<ZoneAudio>,
     mut out: NonSendMut<SoundOutput>,
-    area: Res<CurrentArea>,
     areas: Option<Res<AreaSounds>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     config: Res<SoundConfig>,
     clock: Res<GameClock>,
     time: Res<Time>,
-    underwater: Res<crate::liquid::Underwater>,
+    world: benilla_world::world_point::WorldPoint,
     interior: Res<super::interior::CurrentInterior>,
     weather: Res<super::weather::WeatherAmbience>,
-    area_interior: Res<crate::wmo_portal::CurrentAreaInterior>,
     self_store: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {
     let (Some(areas), Some(mut kits), Some(assets)) = (areas, kits, assets) else {
@@ -286,10 +283,11 @@ fn zone_audio(
     // ---- react to an area or interior change (the WMO row overrides the terrain chain where
     // its FKs are nonzero — sound::interior, decision 0076) ----
     let inside = interior.0;
-    if area.0 != zone.area || inside != zone.interior {
-        zone.area = area.0;
+    let area = world.area();
+    if area != zone.area || inside != zone.interior {
+        zone.area = area;
         zone.interior = inside;
-        let resolved = area.0.and_then(|id| areas.0.resolve(id));
+        let resolved = area.and_then(|id| areas.0.resolve(id));
         let (mut music_row, mut intro) = match &resolved {
             Some(r) => (r.music.map(|m| m.id).unwrap_or(0), r.intro),
             None => (0, None),
@@ -365,9 +363,9 @@ fn zone_audio(
         .is_ok_and(|store| store.0.player_is_ghost());
     let desired = if ghost {
         kits.id_by_name("Ghost").unwrap_or(0)
-    } else if underwater.0.is_water() {
+    } else if world.submersion().is_water() {
         UNDERWATER_LOOP_KIT
-    } else if weather.0 != 0 && area_interior.0.is_none() {
+    } else if weather.0 != 0 && world.area_interior().is_none() {
         // The selector's weather branch (`0x460bd0`, 0x460bf7–0x460c17; wow-re
         // `rf-weather-emission-timeline` ROUND 5 Q-C): while the **zonetext indoor bit** is clear
         // (the keep-flag `[0xb06d44]`, dl=0 from the outdoor area feeder) the raw weather
@@ -394,7 +392,7 @@ fn zone_audio(
         // branch (`0x458650` → `0x460af0(param=1)`, wow-re §5 B16, correcting the old "5 s
         // underwater" of B6). Every other ambience swap — interior, area, day↔night — is the one
         // 5.0 s crossfade (`0x460b00`'s fade branch).
-        let fade_ms = if underwater.0.is_water() != zone.was_underwater {
+        let fade_ms = if world.submersion().is_water() != zone.was_underwater {
             0
         } else {
             AMBIENCE_TRANSITION_FADE_MS
@@ -403,7 +401,7 @@ fn zone_audio(
             zone, &mut out, &mut kits, &assets, &config, desired, fade_ms, now,
         );
     }
-    zone.was_underwater = underwater.0.is_water();
+    zone.was_underwater = world.submersion().is_water();
 
     // ---- music transport ----
     // Reap a finished track → schedule the next after a fresh silence interval.

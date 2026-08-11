@@ -18,7 +18,6 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::assets::WorldAssets;
 use crate::char_select::wow_font;
 use crate::glue::art::{GlueArt, BACKDROP, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
@@ -28,6 +27,7 @@ use crate::glue::widgets::{
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{PortraitImages, PortraitSource, GLUE_SLOT};
+use benilla_assets::WorldAssets;
 
 use super::{ClientState, DialogKind, Field, LoginForm};
 

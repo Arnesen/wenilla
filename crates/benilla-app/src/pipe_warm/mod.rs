@@ -55,11 +55,11 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::char_select::ClientState;
 use crate::loading_screen::LoadingScreen;
-use crate::model_render::MaterialCache;
-use crate::particles::buffer::{
+use benilla_assets::materials::WowModelMaterial;
+use benilla_world::model_render::MaterialCache;
+use benilla_world::particles::buffer::{
     begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
 };
-use crate::terrain::WowModelMaterial;
 
 mod menagerie;
 use menagerie::{spawn_menagerie, BoothCamQuery, WarmLanes};
@@ -91,7 +91,7 @@ pub(crate) fn plugin(app: &mut App) {
     // Before the Present stage so the loading screen reads this frame's gate, not last frame's.
     app.add_systems(
         Update,
-        run_warm_pass.before(crate::schedule::WorldStage::Present),
+        run_warm_pass.before(benilla_world::schedule::WorldStage::Present),
     );
     // The effect-lane warm writer rides the production stream, which is cleared at the top of
     // PostUpdate's effect set — so it writes after the clear, like every family writer. The
@@ -113,7 +113,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// frame-critical QoS band for the duration (decision 1117; the band itself is `thread_qos`).
 fn publish_compile_burst(warm: Res<WarmPass>) {
     let bursting = warm.spawned_at.is_some() && !warm.done;
-    crate::thread_qos::COMPILE_BURST.store(bursting, Ordering::Relaxed);
+    benilla_world::thread_qos::COMPILE_BURST.store(bursting, Ordering::Relaxed);
 }
 
 /// Main world → render world: is the frame covered right now?
@@ -366,7 +366,7 @@ fn run_warm_pass(
     loading: Res<LoadingScreen>,
     state: Res<State<ClientState>>,
     time: Res<Time<Real>>,
-    camera: Query<Entity, With<crate::player::WorldCamera>>,
+    camera: Query<Entity, With<benilla_world::view::WorldCamera>>,
     rigs: Query<(Entity, Option<&ChildOf>), With<WarmRig>>,
     mut rig_vis: WarmRigVis,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -375,7 +375,7 @@ fn run_warm_pass(
     booth: BoothCamQuery,
     mut gizmos: Gizmos,
     mut cache: Local<MaterialCache>,
-    shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
+    shared_light: Option<Res<benilla_world::lighting::SharedLightBuffer>>,
 ) {
     let covering = loading.covering() && *state.get() == ClientState::InWorld;
     if !covering {
@@ -390,7 +390,7 @@ fn run_warm_pass(
         return;
     }
     // Captures boot straight in-world, deterministic by construction — no menagerie in a shot.
-    if crate::capture::scenario_active() {
+    if benilla_world::dev_state::deterministic_run() {
         warm.done = true;
         return;
     }
@@ -534,7 +534,7 @@ fn despawn_rigs(commands: &mut Commands, rigs: &Query<(Entity, Option<&ChildOf>)
 /// the origin compiles the whole space behind the cover; the stand-in texture keeps the prepare
 /// half exercised too. Per-frame like the gizmo line: the stream clears every frame.
 ///
-/// [`EffectPipelineKey`]: crate::particles::render::EffectPipelineKey
+/// [`EffectPipelineKey`]: benilla_world::particles::render::EffectPipelineKey
 /// The HUD-substrate warm (0958's sweep, residual): `UiQuadMaterial` is exactly ONE pipeline,
 /// and on a normal entry it compiles covered because the HUD's first quad batch lands under the
 /// cover — but nothing structural holds that timing (a slow Interface load would land it after
@@ -554,7 +554,7 @@ fn warm_ui_quad_lane(warm: Res<WarmPass>, mut quads: ResMut<crate::ui_pass::UiQu
 fn warm_effect_lane(
     warm: Res<WarmPass>,
     mut quads: ResMut<EffectQuads>,
-    world_cam: Query<Entity, With<crate::player::WorldCamera>>,
+    world_cam: Query<Entity, With<benilla_world::view::WorldCamera>>,
     warm_booth: Query<Entity, With<WarmBoothCam>>,
 ) {
     if warm.spawned_at.is_none() || warm.done {
@@ -573,8 +573,8 @@ fn warm_effect_lane(
         ] {
             for raster_bias in [
                 0,
-                crate::ground_fx::GROUND_FX_DEPTH_BIAS as i32,
-                crate::blob_shadow::SHADOW_RASTER_BIAS,
+                benilla_world::sky_order::Rung::GROUND_FX as i32,
+                benilla_world::sky_order::Rung::SHADOW_RASTER,
             ] {
                 // `lit` is a pipeline-key axis (a shader def), so BOTH arms are warmed — a hole
                 // here is a first-lit-emitter compile mid-play, which is the whole failure this

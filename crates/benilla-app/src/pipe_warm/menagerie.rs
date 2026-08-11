@@ -13,12 +13,14 @@ use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
 
-use crate::clouds::CloudMaterial;
-use crate::model_render::{far_twin_of, model_material, zfill_material, MaterialCache, ShadeSel};
-use crate::sky::SkyMaterial;
-use crate::sun::{CelestialMaterial, StarMaterial};
-use crate::terrain::{LiquidMaterial, WowModelMaterial};
-use crate::wmo_sky::{WmoSkyboxExt, WmoSkyboxMaterial};
+use benilla_assets::materials::{LiquidMaterial, WowModelMaterial};
+use benilla_world::clouds::CloudMaterial;
+use benilla_world::model_render::{
+    far_twin_of, model_material, zfill_material, MaterialCache, ShadeSel,
+};
+use benilla_world::sky::SkyMaterial;
+use benilla_world::sun::{CelestialMaterial, StarMaterial};
+use benilla_world::wmo_sky::{WmoSkyboxExt, WmoSkyboxMaterial};
 
 use super::WarmRig;
 
@@ -473,7 +475,7 @@ pub(super) fn spawn_menagerie(
         unlit: true,
         alpha_mode: AlphaMode::Blend,
         cull_mode: None,
-        depth_bias: crate::nameplates::NAMEPLATE_DEPTH_BIAS,
+        depth_bias: benilla_world::sky_order::Rung::NAMEPLATE,
         ..default()
     });
     spawn_lane_rig(
@@ -539,9 +541,9 @@ fn spawn_model_rig(
     mat: &Handle<WowModelMaterial>,
 ) {
     let tag = if skinned {
-        MeshTag(crate::mesh_tag::rig_bits(0) | crate::mesh_tag::alpha_bits(1.0))
+        MeshTag(benilla_world::mesh_tag::rig_bits(0) | benilla_world::mesh_tag::alpha_bits(1.0))
     } else {
-        MeshTag(crate::mesh_tag::alpha_bits(1.0))
+        MeshTag(benilla_world::mesh_tag::alpha_bits(1.0))
     };
     let mut e = commands.spawn((
         Mesh3d(mesh.clone()),

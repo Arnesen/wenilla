@@ -9,7 +9,7 @@
 //! extracted roots: ship 134 props / zeppelin 1, all in set 0).
 //!
 //! Each prop spawns through the shared placed-model assembler
-//! ([`crate::terrain_stream::spawn_model_entities`]) with its doodad-LOCAL transform, and the
+//! ([`benilla_world::terrain_stream::spawn_model_entities`]) with its doodad-LOCAL transform, and the
 //! result is parented under the streamed gameobject entity: transform propagation carries the
 //! props with the moving boat, the entity's despawn cascades through them, and the transport's
 //! off-map hide (`Visibility` on the root) is inherited. The animated props (sails, rotors) get
@@ -30,7 +30,7 @@
 //!   refreshes the placement from the owner's propagated `GlobalTransform` every frame and the
 //!   risen cloud re-anchors to the prop's live position (the reference's per-frame
 //!   `translate(−emitterPos)` draw-matrix rebuild: a moving model carries its flame). No
-//!   [`crate::particles::EmitterFade`] — that gate's centre is a baked world point, and a mover has
+//!   [`benilla_world::particles::EmitterFade`] — that gate's centre is a baked world point, and a mover has
 //!   none. The emitter entity parents under the gameobject, so the off-map hide reaches it and
 //!   despawn cascades.
 //!   ⚠ **This used to say the population is "bounded by server visibility instead". That was
@@ -38,7 +38,7 @@
 //!   streams transports **map-wide**, so a ship's deck lanterns are resident from anywhere on the
 //!   map. Measured from Durotar: 56 emitters ticking and drawing at 4853–7080 yd, this boat's
 //!   lanterns among them. The bound is now the far-clip wall, applied in
-//!   [`crate::particles`]' sim to every world-lane emitter regardless of `EmitterFade`.
+//!   [`benilla_world::particles`]' sim to every world-lane emitter regardless of `EmitterFade`.
 //! - **M2 point lights** (the lantern's glow source) spawn as CHILDREN at the prop-local
 //!   position — propagation carries the source with the hull, and the hide/despawn follow.
 //! - **Interior cabin props** (an INDOOR-group MODD — ~118 of the ship's 133) take the interior
@@ -54,17 +54,17 @@ use benilla_assets::{DoodadBase, M2Model, WmoModel};
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
-use crate::lighting::{PropProbeSlot, PropProbes, SharedLightBuffer};
-use crate::model_render::{m2_url, ShadeSel};
 use crate::net::NetEntity;
-use crate::particles;
-use crate::terrain::WowModelMaterial;
-use crate::terrain_stream::{
+use benilla_assets::m2_url;
+use benilla_world::lighting::{PropProbeSlot, PropProbes};
+use benilla_world::model_render::ShadeSel;
+use benilla_world::particles;
+use benilla_world::terrain_stream::{
     build_collider_task, fold_interior_probe, m2_fade, placement_collider_data, point_light,
     spawn_model_entities, PendingCollider, PropLobeLight,
 };
 
-use super::{EntityMaterials, GameObjects, ModelHandle, VisualAttached};
+use super::{GameObjects, ModelHandle, VisualAttached};
 
 /// Marks a streamed entity the prop resolver has visited — once, ever (units and M2 gameobjects
 /// included, so the resolve query never re-scans them). A WMO gameobject with props also gets
@@ -184,20 +184,18 @@ pub(super) fn resolve_wmo_gameobject_props(
 pub(super) fn spawn_wmo_gameobject_props(
     mut commands: Commands,
     m2s: Res<Assets<M2Model>>,
-    mut forms: ResMut<crate::model_forms::ModelForms>,
-    shared_light: Option<Res<SharedLightBuffer>>,
-    mut materials: ResMut<Assets<WowModelMaterial>>,
-    mut entity_mats: ResMut<EntityMaterials>,
-    mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
-    mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
+    mut forms: ResMut<benilla_world::model_forms::ModelForms>,
+    mut mats: benilla_world::model_render::M2BatchMaterials,
+    mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
+    mut tint_reg: ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
     mut probes: ResMut<PropProbes>,
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
 ) {
-    let Some(shared_light) = shared_light else {
-        return;
+    let Some((mat_cache, materials, light)) = mats.pieces() else {
+        return; // no shared light buffer yet
     };
-    let light = &shared_light.0;
+    let light = &light;
     // The animated-prop clock origin (decision 0130) — per-instance phase = spawn time.
     let now = time.elapsed_secs();
     for (entity, host_gt, mut props) in &mut hosts {
@@ -213,14 +211,12 @@ pub(super) fn spawn_wmo_gameobject_props(
             };
             // The prop's app-built render forms (decision 0834): a transport's cabin props are
             // the entity lane — priority 0, same as any creature walking into view.
-            let key = crate::model_forms::ModelKey::from(&prop.handle);
-            let kinds = crate::model_forms::WANT_STATIC
-                | if crate::doodad_anim::wants_rig(m) {
-                    crate::model_forms::WANT_SKINNED
-                } else {
-                    0
-                };
-            if !forms.require(key, kinds, 0) {
+            let ready = if benilla_world::doodad_anim::wants_rig(m) {
+                forms.require_rigged(&prop.handle, 0)
+            } else {
+                forms.require_static(&prop.handle, 0)
+            };
+            if !ready {
                 return true; // forms still building — retry next frame
             }
             // A boneless prop's glow card follows an ANCHOR child at the prop's placement (the
@@ -264,14 +260,11 @@ pub(super) fn spawn_wmo_gameobject_props(
             });
             let (ents, host) = spawn_model_entities(
                 &mut commands,
-                &mut entity_mats.0,
-                &mut materials,
+                mat_cache,
+                materials,
                 light,
                 &m.submeshes,
-                crate::model_forms::FormSlices {
-                    stat: forms.static_meshes(key).unwrap_or(&[]),
-                    skin: forms.skinned_meshes(key),
-                },
+                forms.slices(&prop.handle),
                 prop.local, // doodad-LOCAL — the parent composes the world pose
                 false,
                 // Deck props: plain matte, like a terrain exterior prop on lit ground (a boat is
@@ -366,13 +359,13 @@ pub(super) fn spawn_wmo_gameobject_props(
                         .map(|h| h.joints.as_slice())
                         .and_then(|js| js.get(rb.def.bone as usize))
                         .map_or((root, false), |&j| (j, true));
-                    if crate::ribbons::spawn_ribbon(
+                    if benilla_world::ribbons::spawn_ribbon(
                         &mut commands,
                         rb,
                         owner,
                         use_pivot,
                         placement.scale.max_element(),
-                        crate::ribbons::RibbonSeq::Host(entity),
+                        benilla_world::ribbons::RibbonSeq::Host(entity),
                         // No model-alpha source: a placed prop / effect instance is always drawn (0827).
                         None,
                     )
