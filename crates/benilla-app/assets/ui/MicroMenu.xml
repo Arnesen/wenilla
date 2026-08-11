@@ -124,10 +124,10 @@
         end
 
         -- ref MainMenuBarMicroButton's OnEnter (l.13), verbatim bar the owner shift:
-        --     GameTooltip_AddNewbieTip(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText)
+        --     BenillaTooltip_AddNewbieTipFor(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText)
         function BenillaMicroButton_OnEnter(button)
             if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
-            GameTooltip_AddNewbieTip(button, BenillaMicroButton_TooltipText(button), 1.0, 1.0, 1.0,
+            BenillaTooltip_AddNewbieTipFor(button, BenillaMicroButton_TooltipText(button), 1.0, 1.0, 1.0,
                 button.newbieText)
         end
 

@@ -484,7 +484,25 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     for (verb, helpful) in [("SetUnitBuff", true), ("SetUnitDebuff", false)] {
         m.set(
             verb,
-            lua.create_function(move |lua, (this, token, index): (Table, String, i64)| {
+            // `index` is `Value`, not `i64`, and that is a fidelity fix rather than laxity — the
+            // same correction `SetTexture` already carries. A C binding reads what it wants off
+            // the Lua stack: `lua_tonumber` on nil yields 0, which finds no aura and shows
+            // nothing. Typing it `i64` made us RAISE on a call the real client accepts silently.
+            //
+            // Found by the use-probe: `CT_AssistFrameDebuff1:OnEnter` calls
+            // `SetUnitDebuff(unit, this:GetID())` and the id is nil on a frame CT_UnitFrames
+            // created without one. It only fires on hover, so nothing before the probe saw it.
+            lua.create_function(move |lua, (this, token, index): (Table, String, Value)| {
+                let index = match &index {
+                    Value::Integer(i) => *i,
+                    Value::Number(n) => *n as i64,
+                    Value::String(s) => s
+                        .to_str()
+                        .ok()
+                        .and_then(|t| t.parse::<i64>().ok())
+                        .unwrap_or(0),
+                    _ => 0,
+                };
                 let hit = {
                     let model = lua.app_data_mut::<Model>().expect("model app_data");
                     let idx = usize::try_from(index.max(1) - 1).unwrap_or(0);

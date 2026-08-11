@@ -104,6 +104,30 @@
         -- The added line is `SetValueStep(1)`: our bar's step is also its ARROW/WHEEL step
         -- (BenillaScrollBar_Step), so a bar that has not been through an _Update yet would step by
         -- nothing. The ref has no such coupling — its arrows move by half the bar's height.
+        -- The ScrollingEdit trio (ref UIPanelTemplates.lua l.307-317) — a multi-line EditBox
+        -- inside a ScrollFrame keeps the scroll child's rect in step as the text grows, and tracks
+        -- where the caret is so the OnUpdate can follow it.
+        --
+        -- Published under the REFERENCE's names because that is what an addon's XML wires: our
+        -- corpus hits it through `InviteOMaticOptionFormSpamPanelAIGSpamEditE...:OnTextChanged`,
+        -- which raised `attempt to call global 'ScrollingEdit_OnTextChanged'` the moment anyone
+        -- typed. Both take an OPTIONAL scroll frame and fall back to `this:GetParent()`, exactly as
+        -- the reference does — an addon that wires the bare name relies on that fallback.
+        --
+        -- `ScrollingEdit_OnUpdate`'s caret-follow scroll is NOT here: it needs the caret's own
+        -- offset from the font engine, which our EditBox does not report yet. Named rather than
+        -- stubbed silently — a stub that scrolls nowhere would look like a working caret-follow.
+        function ScrollingEdit_OnTextChanged(scrollFrame)
+            local f = scrollFrame or (this and this:GetParent())
+            if f and f.UpdateScrollChildRect then f:UpdateScrollChildRect() end
+        end
+
+        function ScrollingEdit_OnCursorChanged(x, y, w, h)
+            if not this then return end
+            this.cursorOffset = y
+            this.cursorHeight = h
+        end
+
         function ScrollFrame_OnLoad()
             getglobal(this:GetName() .. "ScrollBarScrollDownButton"):Disable()
             getglobal(this:GetName() .. "ScrollBarScrollUpButton"):Disable()

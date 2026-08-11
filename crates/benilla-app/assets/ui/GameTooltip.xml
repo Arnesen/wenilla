@@ -102,7 +102,23 @@
         -- convention is to keep the ref NAME and take that frame as a leading parameter
         -- (GameTooltip_OnHide(self), GameTooltip_ClearMoney(frame) — same shift). Reference code
         -- pasted in verbatim must therefore have the owner threaded in as arg 1.
-        function GameTooltip_AddNewbieTip(owner, normalText, r, g, b, newbieText, noNormalText)
+        -- **The reference's exact signature, because a signature IS api (1199).** Ours used to take
+        -- the owner as arg 1; the reference takes none and reads `this`. Outfitter calls it the
+        -- reference's way (`OutfitterMinimapButton:OnEnter` -> `GameTooltip_AddNewbieTip(text, ...)`),
+        -- so its TEXT landed in our owner slot and `SetOwner` raised
+        -- "bad argument #2: error converting Lua string to table". Found by the use-probe, not by
+        -- reading: it only fires when something hovers.
+        --
+        -- Our own callers mostly hold the owner in a local that is NOT the firing frame (`bar`,
+        -- `button`, `frame`), so they use the explicit-owner variant below rather than `this`.
+        function GameTooltip_AddNewbieTip(normalText, r, g, b, newbieText, noNormalText)
+            BenillaTooltip_AddNewbieTipFor(this, normalText, r, g, b, newbieText, noNormalText)
+        end
+
+        -- The explicit-owner form our FrameXML uses. Same body the reference's has, with the owner
+        -- threaded rather than taken from `this` — kept under a Benilla name so it can never be
+        -- mistaken for a reference global an addon might call or replace.
+        function BenillaTooltip_AddNewbieTipFor(owner, normalText, r, g, b, newbieText, noNormalText)
             if SHOW_NEWBIE_TIPS == "1" then
                 GameTooltip_SetDefaultAnchor(GameTooltip, owner)
                 if normalText then

@@ -358,3 +358,50 @@ fn the_reference_on_vertical_scroll_path_runs_once_a_scroll_child_exists() {
         "and the addon's own update function ran"
     );
 }
+
+/// **The ScrollingEdit trio answers to the REFERENCE's names, and to a bare call.**
+///
+/// `InviteOMatic` wires `ScrollingEdit_OnTextChanged` straight into an EditBox's `OnTextChanged`
+/// and raised `attempt to call global` the moment anyone typed — found by the use-probe, since it
+/// only fires on input. Both helpers take an OPTIONAL scroll frame and fall back to
+/// `this:GetParent()` (ref `UIPanelTemplates.lua` l.307-310); an addon wiring the bare name depends
+/// on that fallback, so the no-argument path is what this test drives.
+#[test]
+fn scrolling_edit_helpers_answer_bare_calls_from_a_handler() {
+    let s = UiScript::new().unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_inline(
+        &s,
+        r#"<Ui>
+            <ScrollFrame name="SeScroll">
+                <Size><AbsDimension x="200" y="100"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <ScrollChild>
+                    <EditBox name="SeEdit" multiLine="true">
+                        <Size><AbsDimension x="200" y="300"/></Size>
+                    </EditBox>
+                </ScrollChild>
+            </ScrollFrame>
+        </Ui>"#,
+    );
+
+    // Bare call with `this` set to the edit box — the addon's exact wiring.
+    s.run(
+        "this = SeEdit; ScrollingEdit_OnTextChanged(); ScrollingEdit_OnCursorChanged(0, 42, 0, 14); this = nil",
+    )
+    .unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "bare calls must not raise: {:?}",
+        s.errors()
+    );
+
+    // OnCursorChanged records where the caret is, which is what an OnUpdate would follow.
+    assert_eq!(s.eval::<f32>("return SeEdit.cursorOffset").unwrap(), 42.0);
+    assert_eq!(s.eval::<f32>("return SeEdit.cursorHeight").unwrap(), 14.0);
+
+    // ...and the explicit-frame form works too (the reference's first branch).
+    s.run("ScrollingEdit_OnTextChanged(SeScroll)").unwrap();
+    assert!(s.errors().is_empty(), "explicit form: {:?}", s.errors());
+}

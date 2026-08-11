@@ -147,7 +147,7 @@
                 TextStatusBar_UpdateTextString()
                 ShowTextStatusBarText(this)
                 if this.tooltipTitle and GameTooltip_AddNewbieTip then
-                    GameTooltip_AddNewbieTip(this, this.tooltipTitle, 1.0, 1.0, 1.0, this.tooltipText, 1)
+                    BenillaTooltip_AddNewbieTipFor(this, this.tooltipTitle, 1.0, 1.0, 1.0, this.tooltipText, 1)
                 end
             </OnEnter>
             <OnLeave>

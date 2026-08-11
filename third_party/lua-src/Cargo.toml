@@ -1,0 +1,39 @@
+# A fork of the `lua-src` crate (MIT, github.com/mlua-rs/lua-src-rs), pinned to the version mlua
+# 0.11 asks for, carrying ONE deliberate change to the Lua 5.1.5 sources it compiles.
+#
+# WHY THIS EXISTS — decision 1215. The 1.12 addon corpus is written for Lua 5.0 and uses the
+# iterator-less generic-for (`for k, v in someTable do`) in 183 of 218 addons. Lua 5.1 deleted the
+# opcode that made it work, so on stock 5.1 it raises `attempt to call a table value` — the first
+# error for 60 of 218 addons at session start, three quarters of everything that breaks in a running
+# session. It is not reachable from inside Lua: not a library function, not a global, an OPCODE.
+#
+# WHAT IS AND IS NOT CHANGED. **Right now: nothing.** The `lua-5.1.5/` tree here is byte-identical
+# to upstream's, and this fork was landed inert on purpose — the pipeline is proven transparent
+# BEFORE any behavioural payload goes into it, so that when the suite moves, the patch is the only
+# thing that could have moved it. `BENILLA.md` carries the current state and the one command that
+# verifies the sources against upstream.
+#
+# When the payload does land we are still NOT adopting Lua 5.0: we stay on 5.1.5 and restore the
+# behaviour of one opcode Lua itself shipped and labelled "for compatibility only", so every other
+# 5.1 fix and mlua's whole surface stay intact.
+#
+# The crate's own `src/lib.rs` is upstream's, with Lua 5.2/5.3/5.4/5.5 stripped from the `Version`
+# enum and the trees deleted. That is deliberate rather than tidiness: benilla builds 5.1 and only
+# 5.1, and a fork that still *offers* the other four would answer a request for them with a missing
+# directory at build time instead of a compile error here.
+[package]
+name = "lua-src"
+version = "550.0.0"
+authors = ["Aleksandr Orlenko <zxteam@protonmail.com>"]
+edition = "2024"
+repository = "https://github.com/mlua-rs/lua-src-rs"
+license = "MIT"
+description = """
+Sources of Lua 5.1 and logic to build them — benilla's fork, see the header and BENILLA.md.
+"""
+
+[features]
+ucid = [] # accept UniCode IDentifiers (upstream's; inert here, it only ever gated 5.4/5.5)
+
+[dependencies]
+cc = "1.2"

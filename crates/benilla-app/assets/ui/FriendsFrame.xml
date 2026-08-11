@@ -815,7 +815,7 @@
                                     StaticPopup_Show("ADD_FRIEND")
                                 end
                             </OnClick>
-                            <OnEnter>GameTooltip_AddNewbieTip(self, ADD_FRIEND, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_ADDFRIEND, 1)</OnEnter>
+                            <OnEnter>BenillaTooltip_AddNewbieTipFor(self, ADD_FRIEND, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_ADDFRIEND, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
@@ -824,7 +824,7 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameAddFriendButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnClick>FriendsFrame_RemoveFriend()</OnClick>
-                            <OnEnter>GameTooltip_AddNewbieTip(self, REMOVE_FRIEND, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_REMOVEFRIEND, 1)</OnEnter>
+                            <OnEnter>BenillaTooltip_AddNewbieTipFor(self, REMOVE_FRIEND, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_REMOVEFRIEND, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
@@ -833,7 +833,7 @@
                         <Anchors><Anchor point="LEFT" relativeTo="FriendsFrameAddFriendButton" relativePoint="RIGHT"><Offset><AbsDimension x="66" y="0"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnClick>FriendsFrame_SendMessage()</OnClick>
-                            <OnEnter>GameTooltip_AddNewbieTip(self, SEND_MESSAGE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_SENDMESSAGE, 1)</OnEnter>
+                            <OnEnter>BenillaTooltip_AddNewbieTipFor(self, SEND_MESSAGE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_SENDMESSAGE, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>
@@ -842,7 +842,7 @@
                         <Anchors><Anchor point="TOP" relativeTo="FriendsFrameSendMessageButton" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
                         <Scripts>
                             <OnClick>FriendsFrame_GroupInvite()</OnClick>
-                            <OnEnter>GameTooltip_AddNewbieTip(self, GROUP_INVITE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_GROUPINVITE, 1)</OnEnter>
+                            <OnEnter>BenillaTooltip_AddNewbieTipFor(self, GROUP_INVITE, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_GROUPINVITE, 1)</OnEnter>
                             <OnLeave>GameTooltip:Hide()</OnLeave>
                         </Scripts>
                     </Button>

@@ -339,12 +339,12 @@
             GameTooltip_SetDefaultAnchor(GameTooltip, frame)
             if SHOW_NEWBIE_TIPS == "1" then
                 if frame:GetName() == "PlayerFrame" then
-                    GameTooltip_AddNewbieTip(frame, PARTY_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                    BenillaTooltip_AddNewbieTipFor(frame, PARTY_OPTIONS_LABEL, 1.0, 1.0, 1.0,
                         NEWBIE_TOOLTIP_PARTYOPTIONS)
                     return
                 elseif UnitIsPlayer("target") and not UnitIsUnit("target", "player")
                     and not UnitIsUnit("target", "pet") then
-                    GameTooltip_AddNewbieTip(frame, PLAYER_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                    BenillaTooltip_AddNewbieTipFor(frame, PLAYER_OPTIONS_LABEL, 1.0, 1.0, 1.0,
                         NEWBIE_TOOLTIP_PLAYEROPTIONS)
                     return
                 end

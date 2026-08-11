@@ -1029,3 +1029,47 @@ fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The reference's action-bar constants are real globals, not comments.**
+///
+/// `ActionButton.lua:1-9` defines them; this file and `MultiBars.xml` cited them in comments and
+/// defined none. An addon reading one got nil — `zBar.lua:40` is the shape,
+/// `to = to or value.max or NUM_ACTIONBAR_BUTTONS` feeding a numeric `for`, which raises
+/// `'for' limit must be a number`. Only the use-probe could find it: nothing else touches anything.
+///
+/// `CURRENT_ACTIONBAR_PAGE` is asserted ABSENT on purpose. It is the reference's mutable page
+/// cursor and benilla does not page the main bar that way; a frozen 1 would be silently wrong
+/// forever, where nil fails loudly. Pinned so a later "completeness" pass cannot quietly add it.
+#[test]
+fn the_reference_action_bar_constants_are_defined() {
+    let s = UiScript::new().unwrap();
+    load_action_bar(&s);
+
+    for (name, want) in [
+        ("NUM_ACTIONBAR_PAGES", 6),
+        ("NUM_ACTIONBAR_BUTTONS", 12),
+        ("BOTTOMLEFT_ACTIONBAR_PAGE", 6),
+        ("BOTTOMRIGHT_ACTIONBAR_PAGE", 5),
+        ("LEFT_ACTIONBAR_PAGE", 4),
+        ("RIGHT_ACTIONBAR_PAGE", 3),
+    ] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return {name}")).unwrap(),
+            want,
+            "{name} must be the reference's value"
+        );
+    }
+
+    // zBar's exact expression, which raised before these existed.
+    assert_eq!(
+        s.eval::<i64>("local to = nil or nil or NUM_ACTIONBAR_BUTTONS local n = 0 for i = 1, to do n = n + 1 end return n")
+            .unwrap(),
+        12,
+        "zBar.lua:40's numeric for must have a limit"
+    );
+
+    assert!(
+        s.eval::<bool>("return CURRENT_ACTIONBAR_PAGE == nil").unwrap(),
+        "CURRENT_ACTIONBAR_PAGE is mutable page state we do not keep — nil fails loudly, a frozen 1 lies"
+    );
+}

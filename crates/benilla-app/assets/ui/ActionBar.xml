@@ -58,6 +58,28 @@
     <Script><![CDATA[
         BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
+        -- **The reference's action-bar constant block (ActionButton.lua:1-9).** Every one of these
+        -- was cited in comments across this file and MultiBars.xml and DEFINED nowhere, so an addon
+        -- reading them got nil. `zBar.lua:40` is the shape:
+        --
+        --     to = to or value.max or NUM_ACTIONBAR_BUTTONS
+        --     for i = from, to do          -- 'for' limit must be a number
+        --
+        -- Found by the use-probe, which is the only column that touches anything.
+        --
+        -- `CURRENT_ACTIONBAR_PAGE` is deliberately NOT among them. It is the reference's mutable
+        -- page cursor (ActionButton.lua:64/74 walk it), and benilla does not page the main bar that
+        -- way — the bonus offset re-pages it instead. Defining it as a frozen 1 would hand every
+        -- addon a number that is silently wrong forever; absent, a reader fails loudly and we find
+        -- out. That is this arc's own rule (1203/1205/1230: a silent wrong answer costs more than
+        -- a missing one), applied to ourselves.
+        NUM_ACTIONBAR_PAGES = 6
+        NUM_ACTIONBAR_BUTTONS = 12
+        BOTTOMLEFT_ACTIONBAR_PAGE = 6
+        BOTTOMRIGHT_ACTIONBAR_PAGE = 5
+        LEFT_ACTIONBAR_PAGE = 4
+        RIGHT_ACTIONBAR_PAGE = 3
+
         -- Ref ActionButton.lua:4 / UIParent.lua: the flash blink period and the range-check cadence.
         ATTACK_BUTTON_FLASH_TIME = 0.4
         TOOLTIP_UPDATE_TIME = 0.2
@@ -696,7 +718,7 @@
             end
             ExhaustionTick.timer = 1
             if not GameTooltip_AddNewbieTip then return end
-            GameTooltip_AddNewbieTip(bar, XPBAR_LABEL, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_XPBAR, 1)
+            BenillaTooltip_AddNewbieTipFor(bar, XPBAR_LABEL, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_XPBAR, 1)
             GameTooltip.canAddRestStateLine = 1
         end
 
@@ -916,13 +938,13 @@
         end
 
         -- ref l.389 (the held-open refresh) and l.400 (OnEnter), both the same call:
-        --     GameTooltip_AddNewbieTip(MAINMENUBAR_LATENCY_LABEL.." "..latency..MILLISECONDS_ABBR,
+        --     BenillaTooltip_AddNewbieTipFor(MAINMENUBAR_LATENCY_LABEL.." "..latency..MILLISECONDS_ABBR,
         --                              1.0, 1.0, 1.0, NEWBIE_TOOLTIP_LATENCY)
         -- So the reference hover is TWO lines — the number, then the wrapped explanation — seated
         -- at the default screen corner, not beside the meter (GameTooltip.xml, decision 0661).
         function BenillaPerformanceBar_ShowTooltip(owner)
             if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
-            GameTooltip_AddNewbieTip(owner, BenillaPerformanceBar_TooltipText(), 1.0, 1.0, 1.0,
+            BenillaTooltip_AddNewbieTipFor(owner, BenillaPerformanceBar_TooltipText(), 1.0, 1.0, 1.0,
                 NEWBIE_TOOLTIP_LATENCY)
         end
 
