@@ -349,4 +349,37 @@ mod tests {
         s.register_cvars([("MusicVolume", "0.4")]);
         assert_eq!(s.cvar("MusicVolume").as_deref(), Some("0.9"));
     }
+    /// **`GetCVar("realmName")` answers the session's realm, set by the one seam that owns it.**
+    ///
+    /// It is a real 1.12 CVar (`0x83f2d0`, persisted — the client builds its SavedVariables path
+    /// from it) and it had no value here at all. `Ace/AceState.lua:27` is
+    /// `ace.trim(GetCVar("realmName"))` inside `SetGameState`, which EVERY Ace addon runs at
+    /// PLAYER_ENTERING_WORLD, so nil became `gsub(nil, ...)` and took the whole family down.
+    ///
+    /// Asserted through `set_realm_name` rather than by writing the CVar directly, because that is
+    /// the point: the CVar and `GetRealmName()` are the SAME fact and must not be settable apart.
+    #[test]
+    fn the_realm_name_cvar_and_get_realm_name_are_one_fact() {
+        let mut s = UiScript::new().unwrap();
+        s.register_cvars([("realmName", "")]);
+
+        // Before a session: empty, never nil — `ace.trim` must have a string to gsub.
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("realmName")"#).unwrap(),
+            ""
+        );
+
+        s.set_realm_name("Archimonde");
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("realmName")"#).unwrap(),
+            "Archimonde",
+            "the realm seam must write the CVar too, or the two facts drift"
+        );
+
+        // Ace's own line, run for real.
+        let trimmed: String = s
+            .eval(r#"return string.gsub(GetCVar("realmName"), "^%s*", "")"#)
+            .unwrap();
+        assert_eq!(trimmed, "Archimonde");
+    }
 }

@@ -398,6 +398,11 @@ pub fn traversal(arena: &WidgetArena) -> Vec<(ZTarget, ZKey)> {
             let Some(region) = arena.region(rh) else {
                 continue;
             };
+            // `Region:SetParent(nil)` orphaned this leaf: unlinked from every draw layer, still
+            // alive (see [`crate::widget::Region::detached`]). It draws nothing until re-parented.
+            if region.detached {
+                continue;
+            }
             let key = ZKey::region(
                 strata,
                 level,

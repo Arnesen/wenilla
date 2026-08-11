@@ -501,3 +501,150 @@ fn fired_event_names_are_all_chat_type_info_keys() {
         assert!(present, r#"{name} → ChatTypeInfo["{key}"] is missing"#);
     }
 }
+
+// ── The seven chat windows (NUM_CHAT_WINDOWS) ────────────────────────────────────────────────
+//
+// benilla shipped two windows against a constant the reference sets to seven. Everything below is
+// a claim about the five that were missing, checked against the shipped `ChatFrame.xml` itself
+// rather than against the loader's idea of it.
+
+/// `NUM_CHAT_WINDOWS = 7` (ref ChatFrame.lua l.5) and every index it promises resolves to a real
+/// `ScrollingMessageFrame`. _LazyPig walks exactly this loop and indexes the result with no nil
+/// guard (`LazyPig.lua:1992`), so the constant without the frames is worse than neither.
+#[test]
+fn every_window_num_chat_windows_promises_is_a_real_frame() {
+    let s = chat_frame();
+    assert_eq!(s.eval::<i64>("return NUM_CHAT_WINDOWS").unwrap(), 7);
+    for i in 1..=7 {
+        let ok: bool = s
+            .eval(&format!(
+                "local f = getglobal('ChatFrame{i}') \
+                 return f ~= nil and f.AddMessage ~= nil and f:GetID() == {i}"
+            ))
+            .unwrap();
+        assert!(ok, "ChatFrame{i} is a real message frame carrying its id");
+    }
+}
+
+/// The corpus walk itself, verbatim from `_LazyPig/LazyPig.lua:1992` down to the unguarded
+/// `getglobal(...):IsVisible()` that used to die at i=3.
+#[test]
+fn the_lazypig_window_walk_survives_all_seven_indices() {
+    let s = chat_frame();
+    let visible: i64 = s
+        .eval(
+            "local n = 0\n\
+             for i = 1, NUM_CHAT_WINDOWS do\n\
+               local ChatFrame = getglobal('ChatFrame'..i)\n\
+               if ChatFrame:IsVisible() then n = n + 1 end\n\
+             end\n\
+             return n",
+        )
+        .unwrap();
+    assert_eq!(visible, 1, "only the selected dock window is visible");
+}
+
+/// ChatFrame3..7 ship hidden and with no `isDocked`, the reference's own chat-cache state
+/// (`DOCKED 0 / SHOWN 0`). This is not cosmetic: `Outfitter.lua:3099` reaches an UNGUARDED
+/// `getglobal('ChatFrame'..i..'Tab'):GetText()` for any window that is visible *or* docked, and we
+/// build no tabs past ChatFrame1Tab. The same reason keeps `isDocked` off ChatFrame2, whose
+/// "Combat Log" tab is deliberately unbuilt.
+#[test]
+fn the_undocked_windows_are_hidden_and_carry_no_is_docked() {
+    let s = chat_frame();
+    for i in 2..=7 {
+        let shown: bool = s.eval(&format!("return ChatFrame{i}:IsShown()")).unwrap();
+        assert!(!shown, "ChatFrame{i} ships hidden");
+        let docked: bool = s
+            .eval(&format!("return ChatFrame{i}.isDocked ~= nil"))
+            .unwrap();
+        assert!(!docked, "ChatFrame{i} carries no isDocked");
+    }
+    // And therefore the Outfitter walk never reaches a tab that does not exist.
+    let ok: bool = s
+        .eval(
+            "for i = 1, NUM_CHAT_WINDOWS do\n\
+               local f = getglobal('ChatFrame'..i)\n\
+               if f and (f:IsVisible() or f.isDocked) then\n\
+                 local tab = getglobal('ChatFrame'..i..'Tab')\n\
+                 if not tab then return false end\n\
+                 local _ = tab:GetText()\n\
+               end\n\
+             end\n\
+             return true",
+        )
+        .unwrap();
+    assert!(ok, "the Outfitter tab walk never touches a missing tab");
+}
+
+/// `GetChatWindowInfo`'s `shown` is not an independent opinion — it must agree with the frame the
+/// shipped XML actually built, or an addon that trusts the getter and an addon that trusts the
+/// frame will disagree about the same window. The drift guard between the Rust table and the XML.
+#[test]
+fn get_chat_window_info_shown_matches_the_shipped_frames() {
+    let s = chat_frame();
+    for i in 1..=7 {
+        let agrees: bool = s
+            .eval(&format!(
+                "local _, _, _, _, _, _, shown = GetChatWindowInfo({i})\n\
+                 return (shown ~= nil) == ChatFrame{i}:IsShown()"
+            ))
+            .unwrap();
+        assert!(
+            agrees,
+            "window {i}: GetChatWindowInfo disagrees with the frame"
+        );
+    }
+}
+
+/// A named debug sink is a real ring of its own: `ChatFrame3:AddMessage` (IgniteStatus does this
+/// seven times, TipBuddy once, Radar guarded, and AceDebug's `debugFrame` stores the frame) lands
+/// in ChatFrame3 and nowhere near the window the player is reading.
+#[test]
+fn a_line_added_to_chat_frame3_lands_in_chat_frame3_only() {
+    let mut s = chat_frame();
+    s.add_chat_message("ChatFrame1", "a real line", 1.0, 1.0, 1.0);
+    s.run("ChatFrame3:AddMessage('Radar: debug', 1, 1, 0)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return ChatFrame3:GetNumMessages()").unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<i64>("return ChatFrame1:GetNumMessages()").unwrap(),
+        1
+    );
+    // Hidden, so nothing of it reaches the screen.
+    s.resolve();
+    assert!(
+        text_color(&s.extract(), "Radar: debug").is_none(),
+        "a hidden window renders nothing"
+    );
+}
+
+/// `FCF_SelectDockFrame(frame)` — the corpus idiom (CustomNameplates.lua:69, Roid-Macros
+/// Utility.lua:40) is "un-hide the default chat frame before printing into it". It takes a FRAME,
+/// where ours takes a dock id; and it RAISES on a window benilla cannot dock rather than returning
+/// quietly and leaving the caller's next AddMessage in a window that is still hidden.
+#[test]
+fn fcf_select_dock_frame_selects_by_frame_and_raises_for_an_undocked_one() {
+    let s = chat_frame();
+    s.run("FCF_SelectDockFrame(ChatFrame2)").unwrap();
+    let (one, two): (bool, bool) = (
+        s.eval("return ChatFrame1:IsShown()").unwrap(),
+        s.eval("return ChatFrame2:IsShown()").unwrap(),
+    );
+    assert!(!one && two, "selecting the Combat Log swaps the dock");
+
+    s.run("if not DEFAULT_CHAT_FRAME:IsVisible() then FCF_SelectDockFrame(DEFAULT_CHAT_FRAME) end")
+        .unwrap();
+    assert!(
+        s.eval::<bool>("return ChatFrame1:IsShown()").unwrap(),
+        "the corpus guard brings the default frame back"
+    );
+
+    assert!(
+        s.run("FCF_SelectDockFrame(ChatFrame5)").is_err(),
+        "an undocked window raises — benilla has no dock model for it (0288 §2)"
+    );
+}

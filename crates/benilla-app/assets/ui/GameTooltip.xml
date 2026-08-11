@@ -305,6 +305,85 @@
                     <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
                 </Texture>
             </Layer>
+            <Layer level="ARTWORK">
+                <!-- **The 30 pre-declared line pairs, exactly as ref-GameTooltipTemplate.xml l.17-627.**
+
+                     They exist so `GameTooltipTextLeft1` is a REAL GLOBAL FROM LOAD, hidden, before any
+                     line has been added. Ours were engine-created purely on demand, so cold they were
+                     nil — and the corpus pattern that breaks on is a GUARD, not a read:
+                     `Participant/Resurrection.lua:294` and `CT_RaidAssist/CT_RADetectSpells.lua:47` both
+                     say `GameTooltipTextLeft1:IsVisible()` to ask whether the tooltip is showing
+                     anything. On the reference that is safe and answers false; for us it raised on the
+                     check itself. 7 corpus addons index the name (decision 1220).
+
+                     The engine ADOPTS these (`script::tooltip::ensure_lines` — the same path
+                     ShoppingTooltipTemplate's ladder already uses): their faces ride, the engine owns
+                     justify, visibility and anchors, so no anchors are declared here. Faces match what
+                     `ensure_lines` picks for a created line — header for pair 1, GameTooltipText after —
+                     which is why this changes nothing on screen. `NumLines()` is `num_lines`, not the
+                     pool size, and `layout_tooltips` sizes from `num_lines`, so a declared-but-unfilled
+                     pair adds no height and no width. -->
+                <FontString name="$parentTextLeft1" inherits="GameTooltipHeaderText" hidden="true"/>
+                <FontString name="$parentTextRight1" inherits="GameTooltipHeaderText" hidden="true"/>
+                <FontString name="$parentTextLeft2" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight2" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft3" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight3" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft4" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight4" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft5" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight5" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft6" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight6" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft7" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight7" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft8" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight8" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft9" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight9" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft10" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight10" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft11" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight11" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft12" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight12" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft13" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight13" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft14" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight14" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft15" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight15" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft16" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight16" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft17" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight17" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft18" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight18" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft19" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight19" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft20" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight20" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft21" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight21" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft22" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight22" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft23" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight23" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft24" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight24" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft25" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight25" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft26" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight26" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft27" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight27" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft28" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight28" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft29" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight29" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextLeft30" inherits="GameTooltipText" hidden="true"/>
+                <FontString name="$parentTextRight30" inherits="GameTooltipText" hidden="true"/>
+            </Layer>
         </Layers>
         <Frames>
             <!-- The mouseover health bar (ref-GameTooltipTemplate.xml l.575-597, quoted): 8px

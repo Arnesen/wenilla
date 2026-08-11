@@ -67,6 +67,7 @@ fn bootstrap_positions(script: &UiScript) -> Vec<String> {
 /// the addon harness ([`crate::addon_harness`]), which needs our entire interface under each
 /// surveyed addon.
 pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
+    super::reference_ui::load_sourced(script);
     let builtin = Addon::builtin();
     let mut failures = builtin.load_files(script, &builtin.toc.files);
     failures.extend(bootstrap_positions(script));
@@ -103,6 +104,11 @@ pub(crate) fn load_ingame_ui(
     script: &mut UiScript,
     identity: Option<&(String, String)>,
 ) -> Vec<String> {
+    // The reference FrameXML this client SOURCES off the patch chain rather than transcribing
+    // ([`super::reference_ui`], whose header is the rule). It runs FIRST, before our own files,
+    // precisely so that every global we define ourselves overwrites the reference's — its
+    // `ToggleBackpack` walks twelve `ContainerFrame`s we do not build; ours walks our windows.
+    super::reference_ui::load_sourced(script);
     let builtin = Addon::builtin();
     let mut failures = builtin.load_files(script, builtin.toc.files.get(1..).unwrap_or_default());
     failures.extend(bootstrap_positions(script));

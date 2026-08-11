@@ -49,11 +49,29 @@ impl PluginGroup for WorldPlugins {
             .add(crate::shaders::plugin)
             .add(MaterialPlugin::<TerrainMaterial>::default())
             .add(MaterialPlugin::<WowModelMaterial>::default())
-            // Physics (avian3d): collider storage + broadphase BVH + shape-casts for the character
+            // Physics (avian3d): collider storage + collider BVH + shape-casts for the character
             // controller (decision 0009). The streamed terrain/placement entities carry
             // `Collider`s; the player drives `MoveAndSlide` against them. No character controller
             // rides them in the viewer, but the ray-caster and the shape queries do.
             .add_group(PhysicsPlugins::default())
+            // ...but NOT the contact pipeline. Nothing in this workspace reads a contact:
+            // `CollisionStart`, `CollisionEnd`, `ContactPair` and `Collisions` have zero
+            // consumers, because the player is a shape-cast controller and units carry no
+            // colliders at all. The broad phase is the only thing that *creates* contact pairs,
+            // so disabling it leaves the narrow phase and the solver iterating an empty
+            // `ContactGraph` — every resource still exists (`BroadPhaseCorePlugin` owns
+            // `ContactGraph`/`JointGraph`), and the collider BVH the shape-casts actually ride
+            // is `ColliderTreePlugin`'s, untouched.
+            //
+            // This is not a micro-optimisation. Pairs were still generated for every
+            // kinematic-or-standalone collider overlapping the static world, and each one cost a
+            // parry `contact_manifolds_composite_shape_composite_shape` — trimesh vs trimesh,
+            // against 65k-triangle terrain tiles — recomputed every physics tick, and Bevy's
+            // fixed-timestep catch-up runs up to 16 ticks in one frame (`Time<Virtual>`'s stock
+            // 250 ms `max_delta`). Four stall captures across three sessions caught the main
+            // thread inside `update_narrow_phase` for 12–41% of their samples; the run that
+            // prompted this stalled >600 ms three times in five minutes. Decision 1232.
+            .disable::<BvhBroadPhasePlugin>()
             .add(WorldFoundation)
             // The per-frame world-transition ordering (Input → Stream → Present) the loading
             // screen relies on to cover a teleport the same frame it happens. See `schedule.rs`.

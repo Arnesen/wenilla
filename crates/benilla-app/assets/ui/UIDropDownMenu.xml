@@ -1074,7 +1074,54 @@
         </Scripts>
     </Frame>
 
-    <!-- The two shared lists (the ref authors DropDownList1..3; level 3 waits for a customer). -->
-    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" parent="UIParent"/>
-    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" parent="UIParent"/>
+    <!-- The two shared lists (the ref authors DropDownList1..3; level 3 waits for a customer).
+
+         The per-instance <Scripts> are the ref's own (UIDropDownMenu.xml l.9-18, l.25-28) and were
+         missing here until they were measured; each line earns its place separately:
+
+         · `CloseDropDownMenus(level+1)` is the SUBMENU CATCH-ALL, and it is why the ref hangs it
+           off OnHide rather than off the toggle. `ToggleDropDownMenu`'s close arm is a bare
+           `listFrame:Hide()` (l.15-19 of the function) — so with no OnHide, opening a menu with a
+           `hasArrow` row, hovering the submenu open and then toggling level 1 shut LEFT
+           DropDownList2 on screen with its parent gone. OnHide catches that path and every other
+           one that hides level 1 (a parent Hide, the ESC ladder, an addon calling
+           `DropDownList1:Hide()` itself) — which is the point of putting it on the event.
+
+         · `OPEN_DROPDOWNMENUS[level] = nil` closes a real leak: UnitPopup.xml WRITES the level
+           (l.191, l.239) and its every-frame driver READS it (l.481), and nothing here ever
+           cleared it, so an entry survived its menu forever. No player-visible symptom is
+           reachable today and that is stated rather than implied — `UnitPopup_OnUpdate` returns
+           early unless DropDownList1 is visible AND a UnitPopupFrame owns the open menu, and
+           `UIDropDownMenu_AddButton` calls `button:Enable()` unconditionally, so a stale level's
+           Disable is undone the next time that list is built. Both of those are guards belonging
+           to other code; the divergence from the ref is here, so it is fixed here.
+
+         · UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT is DERIVED, never a literal. The ref forward-declares
+           it nil (UIDropDownMenu.lua l.16) and this OnLoad is the only thing that ever assigns it,
+           reading the height off Button1's own NormalText. `UIDropDownMenu_AddButton` then passes
+           it straight into `SetFont` (l.187) for every row without an explicit `info.textHeight`.
+           Dewdrop-2.0 does the same at its own l.489 — 64 corpus addon folders embed a copy, but
+           it is ONE library file replicated, and only that one of its two sites is unguarded (the
+           other is `info.textHeight or UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT or 10`). Writing a
+           literal here would have been a silent fidelity divergence, not a fix. -->
+    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" parent="UIParent">
+        <Scripts>
+            <OnLoad>
+                local fontName, fontHeight, fontFlags = getglobal("DropDownList1Button1NormalText"):GetFont();
+                UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT = fontHeight;
+            </OnLoad>
+            <OnHide>
+                CloseDropDownMenus(2);
+                OPEN_DROPDOWNMENUS[1] = nil;
+            </OnHide>
+        </Scripts>
+    </Button>
+    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" parent="UIParent">
+        <Scripts>
+            <OnHide>
+                CloseDropDownMenus(3);
+                OPEN_DROPDOWNMENUS[2] = nil;
+            </OnHide>
+        </Scripts>
+    </Button>
 </Ui>

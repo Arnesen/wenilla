@@ -64,6 +64,36 @@ impl Loader<'_> {
     /// Compile a handler element into `function(self, ...) <body> end`, or resolve its
     /// `function="Global"` reference. A syntax error in the body is recorded as an error (and the
     /// handler dropped), never a panic.
+    ///
+    /// ## `self` falls back to `this`, and that one clause is a whole class of addon bug
+    ///
+    /// The 1.12 contract for an XML script body is that it takes **no arguments**: the frame
+    /// arrives as the `this` global, which [`crate::script::event::invoke_with_globals`] sets
+    /// around every dispatch. This engine also passes the modern `(self, event, …)` positionals —
+    /// convenient, and what Era-era addons expect — and our own FrameXML is written against
+    /// *that* spelling (`<OnEnter>BenillaBagToggle_OnEnter(self)</OnEnter>`).
+    ///
+    /// The two spellings agree right up until **an addon captures a script and calls it back**,
+    /// which is the standard 1.12 hook idiom and the reason `GetScript` exists:
+    ///
+    /// ```lua
+    /// bMainBag_OnEnter = MainMenuBarBackpackButton:GetScript("OnEnter")  -- Bagnon.lua:61
+    /// MainMenuBarBackpackButton:SetScript("OnEnter", BagnonBlizMainBag_OnEnter)
+    /// function BagnonBlizMainBag_OnEnter()
+    ///     …
+    ///     bMainBag_OnEnter()      -- l.87: no arguments. The reference's contract.
+    /// end
+    /// ```
+    ///
+    /// The re-entry is perfectly legal, `this` is correctly set (Bagnon's own body reads
+    /// `this:GetID()` one line above), and our compiled body still took `self` from argument 1 —
+    /// which was nil. The director saw it as `bad argument #2: error converting Lua nil to table`
+    /// out of `GameTooltip:SetOwner`, from a handler that works perfectly when the engine calls it.
+    ///
+    /// So the fallback lives **here**, once, rather than as `(self or this)` sprinkled through
+    /// ~20 handler bodies: any XML body in any file — ours or an addon's — now works under both
+    /// callers. It is written on line 1 of the wrapper on purpose, so `{body}` still starts at
+    /// line 2 and every traceback line number keeps pointing at the source the author wrote.
     pub(super) fn compile_handler(
         &mut self,
         handler: &Element,
@@ -72,7 +102,9 @@ impl Loader<'_> {
     ) -> Option<Function> {
         let body = handler.body.trim();
         if !body.is_empty() {
-            let src = format!("return function(self, ...)\n{body}\nend");
+            let src = format!(
+                "return function(self, ...) if self == nil then self = this end\n{body}\nend"
+            );
             match self
                 .lua()
                 .load(&src)

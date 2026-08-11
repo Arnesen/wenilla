@@ -61,7 +61,14 @@
 
         function BankFrame_OnLoad()
             local frame = this
-            SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
+            -- Named directly rather than through `$parent .. "Portrait"`: the reference's bank
+            -- portrait is the UNPREFIXED global `BankPortraitTexture` (ref BankFrame.xml l.93),
+            -- one of the reference's own naming inconsistencies, and it is the name addons write.
+            -- `Bagnon_Core/Events.lua:41` does `SetPortraitTexture(BankPortraitTexture, "npc")`
+            -- when its "show Bagnon's bank instead" option is off, and against a nil first argument
+            -- that binding raises. Same standing lesson as `ToggleBackpack` / `CharacterBag0Slot`:
+            -- the name an addon reaches for is the reference's, not ours.
+            SetPortraitTexture(BankPortraitTexture, "npc")
             frame:RegisterEvent("BANKFRAME_OPENED")
             frame:RegisterEvent("BANKFRAME_CLOSED")
             frame:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
@@ -130,6 +137,21 @@
             else
                 purchaseFrame:Show()
             end
+        end
+
+        -- `UpdateBagSlotStatus()` — THE REFERENCE'S NAME for the pass above, published for the same
+        -- standing reason `ToggleBackpack` and `BagSlotButton_OnEnter` are: an addon calls the
+        -- client's global, and it must exist and do the job. `Bagnon_Core/Events.lua:46` calls it
+        -- from its own `ShowBlizBank()`, two lines after `SetPortraitTexture(BankPortraitTexture, …)`
+        -- above — the path taken whenever a player turns Bagnon's "show Bagnon at the bank" option
+        -- OFF and gets the stock window instead. It was nil, so that whole handler died there.
+        --
+        -- The reference's own body walks its `BankFrameBag1..6` and repaints
+        -- `BankFrameDetailMoneyFrame`; ours is the same pass over our own bag row and cost frame,
+        -- which is exactly what the reference's does for its window (it is not a shim: it is this
+        -- window's real update, under the name the client publishes it as).
+        function UpdateBagSlotStatus()
+            BenillaBankFrame_UpdateBagRow()
         end
 
         function BankFrame_OnEvent(event)
@@ -283,8 +305,10 @@
         <Layers>
             <Layer level="BACKGROUND">
                 <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref l.93-104), bound in OnLoad via
-                     SetPortraitTexture(region, "npc") — the Merchant/Trainer/Gossip convention. -->
-                <Texture name="BankFramePortrait">
+                     SetPortraitTexture(region, "npc"). The name is the REFERENCE'S, unprefixed —
+                     its bank frame breaks the $parentPortrait convention every other window here
+                     follows, and addons write the name the reference gave them. -->
+                <Texture name="BankPortraitTexture">
                     <Size><AbsDimension x="60" y="60"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
                 </Texture>

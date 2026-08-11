@@ -3,7 +3,7 @@
 //! modeled per-kind behavior ([`KindState`]) that a `CSimple*` subtype adds over `CSimpleFrame`
 //! (RF-28 tables; decision 0068). Split from the arena so each grows independently.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use super::{FrameHandle, RegionHandle};
 
@@ -27,6 +27,10 @@ pub enum FrameKind {
     Slider,
     ScrollFrame,
     Model,
+    /// `CSimpleMessageFrame` — the non-scrolling message frame (`UIErrorsFrame`'s class, and the
+    /// one `CreateFrame("MessageFrame")` makes). Its behaviour (the display lines, the per-line
+    /// fade, `insertMode`) is modeled in [`KindState::Message`]. Sibling of
+    /// [`FrameKind::ScrollingMessageFrame`], not a base or a subset of it.
     MessageFrame,
     /// `CSimpleMessageScrollFrame` — the scrolling, ring-buffered message frame (the chat window's
     /// class). Its behavior (the line ring, per-line fade, wheel scrollback) is modeled in
@@ -88,6 +92,11 @@ pub enum KindState {
     /// `CSimpleMessageScrollFrame` (ctor `0x787670`; runtime model msgframe-runtime.md): the line
     /// ring, the per-line fade snapshots + phases, and the scrollback cursor.
     ScrollingMessage(ScrollingMessageState),
+    /// `CSimpleMessageFrame` (ctor `0x785640`; same runtime model) — the `UIErrorsFrame` class:
+    /// display lines with no ring and no scrollback, plus `insertMode`. A **sibling** of
+    /// [`KindState::ScrollingMessage`], not a subset of it ([`MessageFrameState`]'s doc has the
+    /// contract table).
+    Message(MessageFrameState),
     /// `CSimpleScrollFrame` (decision 0112 — the ScrollFrame mechanism, the engine's last structural
     /// gap: the quest log's detail pane, chat history, and every long-content window need it): the
     /// scroll child + the vertical scroll offset. The mechanism is spec-faithful (the documented
@@ -114,6 +123,34 @@ pub enum KindState {
     Cooldown(CooldownState),
     /// The GameTooltip widget's line stack + owner/fade state ([`TooltipState`], decision 0274).
     Tooltip(TooltipState),
+}
+
+impl KindState {
+    /// The display lines of **either** message-frame class, or `None` for every other kind.
+    ///
+    /// The two classes are siblings with different stores, different `AddMessage` tails and
+    /// different scrollback (see [`MessageFrameState`]), but the *line record* they display is the
+    /// same [`MessageLine`] — text, quantized colour, fade phases, wrapped row count. This pair of
+    /// accessors is the only place that likeness is spent: the wrapped-row measure round-trip and
+    /// the band emit are one code path for both, while every behaviour that actually differs stays
+    /// on its own state. Matching on the two variants at those sites instead would have been two
+    /// near-copies of the round-trip, which is how the second one silently rots.
+    pub fn message_lines(&self) -> Option<&VecDeque<MessageLine>> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(&smf.lines),
+            KindState::Message(mf) => Some(&mf.lines),
+            _ => None,
+        }
+    }
+
+    /// [`Self::message_lines`], mutably — the measure round-trip's write-back half.
+    pub fn message_lines_mut(&mut self) -> Option<&mut VecDeque<MessageLine>> {
+        match self {
+            KindState::ScrollingMessage(smf) => Some(&mut smf.lines),
+            KindState::Message(mf) => Some(&mut mf.lines),
+            _ => None,
+        }
+    }
 }
 
 /// A `GameTooltip`'s runtime state (decision 0274). The line *text/color/wrap* is not duplicated
@@ -304,6 +341,34 @@ pub struct ScrollFrameState {
     pub vertical: f32,
 }
 
+/// The face/size/flags one `Button:SetFont(file, height [, flags])` call writes.
+///
+/// **One record, not three, and that is the faithful shape here rather than a shortcut.** The
+/// client's Button embeds three `CSimpleFont` sub-objects — normal `+0x33c`, disabled `+0x434`,
+/// highlight `+0x3b8` — and `SetFont` (`0x780880`) retunes **all three with the same values**
+/// (`GetFont` reads only the normal one). Nothing in the 1.12 Lua surface can set them apart: a
+/// Button has `SetFont` and the `*FontObject` triple, and the latter changes which object each
+/// state *inherits*, never its local face. So three identical copies could only ever diverge by
+/// our own bug (wow-re `system/ui/scratch/widget-api-batch-benilla.md` Q8).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ButtonFont {
+    /// The TTF path (`"Fonts\\FRIZQT__.TTF"`).
+    pub path: String,
+    /// The font height in logical px.
+    pub height: f32,
+    /// The **normalized** OUTLINETYPE token — `""`, `"OUTLINE"` or `"THICKOUTLINE"` — so
+    /// `GetFont`'s third return reads like the FontString/Font-object one rather than echoing
+    /// whatever the addon spelled. Kept as a string, not `script::Outline`, because this module is
+    /// the arena's vocabulary and deliberately names no script type.
+    ///
+    /// **An omitted `flags` argument clears the outline** (this is `""`), which is the reading the
+    /// batch does not pin: it records arg4 as parsed against `{OUTLINE, THICKOUTLINE, MONOCHROME}`
+    /// and says nothing about its absence. A `lua_tostring` on a missing argument yields no flags,
+    /// so "absent means none" is what the shared impl most plausibly does, and it is the reading
+    /// an addon setting a plain face expects.
+    pub flags: String,
+}
+
 /// A Button's state model: which of the state textures draws is a *function of interaction state*
 /// (the client's texture array `+0x4b8` with a current-shown pointer `+0x4c4`), so the regions all
 /// exist in the arena and [`Self::region_visible`] picks at extract time.
@@ -351,6 +416,17 @@ pub struct ButtonState {
     pub highlight_font: Option<String>,
     /// See [`ButtonState::normal_font`] — the disabled state.
     pub disabled_font: Option<String>,
+    /// `Button:SetFont(file, height [, flags])` — the button's own face/size/flags, set on the
+    /// embedded font objects themselves rather than on any font object they inherit. See
+    /// [`ButtonFont`] for why one record covers the client's three.
+    ///
+    /// It lives here, not on the ButtonText's [`crate::script::RegionData`], because the reference
+    /// **never dereferences the label pointer** (`+0x338`) in `SetFont`/`GetFont`: styling a
+    /// `CreateFrame("Button")` with no `<ButtonText>` is a silent no-op there, and writing to a
+    /// label would have meant lazily creating one — observable through `GetFontString()`, which
+    /// must stay nil. `extract` applies it to the label whenever there is one, which also makes a
+    /// later `SetText` (which *does* create the FontString) pick the style up for free.
+    pub font: Option<ButtonFont>,
     /// Per-state label COLOR overrides (`Button:SetTextColor` and the Highlight/Disabled pair):
     /// when the matching state is current, extract repaints the ButtonText with this color over
     /// the state font object's own paint — the dropdown kit's rows lean on all three
@@ -384,6 +460,7 @@ impl Default for ButtonState {
             normal_font: None,
             highlight_font: None,
             disabled_font: None,
+            font: None,
             normal_color: None,
             highlight_color: None,
             disabled_color: None,

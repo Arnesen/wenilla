@@ -75,7 +75,16 @@ impl Element {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptRef {
     File(String),
-    Inline(String),
+    Inline {
+        body: String,
+        /// The 1-based line **of this XML file** that `body`'s first character sits on.
+        ///
+        /// Carried so the loader can pad the chunk out to that offset, making Lua's own error
+        /// lines the file's lines. Without it every inline block starts at line 1 and a raise
+        /// reports a number belonging to no file — worse than no number, because it looks like one
+        /// you could go and read (decision 1214).
+        line: u32,
+    },
 }
 
 /// One top-level item of a FrameXML document, in document order. Modeled as an order-preserving
@@ -187,7 +196,10 @@ pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
         } else if tag.eq_ignore_ascii_case("Script") {
             match attr_ci(child, "file") {
                 Some(file) => items.push(TopLevel::Script(ScriptRef::File(file))),
-                None => items.push(TopLevel::Script(ScriptRef::Inline(direct_text(child)))),
+                None => items.push(TopLevel::Script(ScriptRef::Inline {
+                    body: direct_text(child),
+                    line: inline_start_line(&doc, child),
+                })),
             }
         } else if tag.eq_ignore_ascii_case("Font") {
             let el = element_from_node(child);
@@ -224,6 +236,22 @@ fn attr_ci(node: roxmltree::Node, name: &str) -> Option<String> {
 
 /// Concatenates a node's own direct text/CDATA children (not descending into child elements) —
 /// the XML node struct's `body-text @ +0xc` (rf24-framexml-loader.md, header).
+/// The 1-based line of the first text byte inside a `<Script>` element.
+///
+/// Taken from the first text child's own range rather than the element's, because a CDATA section
+/// puts `<![CDATA[` between the two and every FrameXML script block in this project uses one — the
+/// element's start line would be off by however much of the opening tag precedes the body.
+/// Falls back to the element's line for a `<Script></Script>` with no text at all.
+fn inline_start_line(doc: &roxmltree::Document, node: roxmltree::Node) -> u32 {
+    let at = node
+        .children()
+        .find(|n| n.is_text())
+        .unwrap_or(node)
+        .range()
+        .start;
+    doc.text_pos_at(at).row
+}
+
 fn direct_text(node: roxmltree::Node) -> String {
     node.children()
         .filter(|n| n.is_text())
@@ -438,7 +466,7 @@ mod tests {
             .map(|item| match item {
                 TopLevel::Include(_) => "include",
                 TopLevel::Script(ScriptRef::File(_)) => "script-file",
-                TopLevel::Script(ScriptRef::Inline(_)) => "script-inline",
+                TopLevel::Script(ScriptRef::Inline { .. }) => "script-inline",
                 TopLevel::Font(_) => "font",
                 TopLevel::Template(_) => "template",
                 TopLevel::Instance(_) => "instance",
@@ -478,9 +506,11 @@ print(x)</Script>
             TopLevel::Script(ScriptRef::File("Foo.lua".to_string()))
         );
         match &doc.items[1] {
-            TopLevel::Script(ScriptRef::Inline(body)) => {
+            TopLevel::Script(ScriptRef::Inline { body, line }) => {
                 assert!(body.contains("local x = 1"));
                 assert!(body.contains("print(x)"));
+                // Line 3 of the literal above: `<Ui>`, `<Script file=…>`, then this one.
+                assert_eq!(*line, 3, "the inline body's own line in the file");
             }
             other => panic!("expected inline script, got {other:?}"),
         }

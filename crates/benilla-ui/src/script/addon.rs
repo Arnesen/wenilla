@@ -28,11 +28,23 @@
 //! ## What we deliberately do not enforce: `INTERFACE_VERSION`
 //!
 //! The reference refuses to load an addon whose `## Interface` does not match the build, unless the
-//! glue AddOn list's *Load out of date AddOns* checkbox is ticked. **We have no such checkbox** —
-//! decision 0465 hides the glue's AddOns button entirely — so enforcing the rule would silently
-//! drop most of a real vanilla corpus (whose manifests say 11100, 10900, anything) with no way for
-//! a player to override it. The version is reported (`GetAddOnMetadata(name, "Interface")`) and not
-//! acted on. Revisit when the AddOn list lands and there is somewhere to put the toggle.
+//! glue AddOn list's *Load out of date AddOns* checkbox is ticked. Enforcing that here would
+//! silently drop most of a real vanilla corpus (whose manifests say 11100, 10900, anything), so the
+//! version is reported (`GetAddOnMetadata(name, "Interface")`) and never acted on — 1191 §6.
+//!
+//! **That is a choice, not an absence, and the sentence that used to stand here had gone stale.**
+//! It read *"we have no such checkbox — decision 0465 hides the glue's AddOns button entirely …
+//! revisit when the AddOn list lands and there is somewhere to put the toggle"*. The list landed
+//! (1197: both screens, and 0465's hidden button is the one it un-hid), so the stated precondition
+//! expired and the comment went on telling every reader the question was settled. 1212's shape, in
+//! an instrument, for the fifth time this arc.
+//!
+//! What is still true and still open: the mismatch is REPORTED — the ESC-menu list shows
+//! `ADDON_INTERFACE_VERSION` beside the row and the char-select panel shows the same string — and
+//! `loadable` deliberately stays true, so `not_loadable` below has no interface arm. What is not
+//! built is the *Load out of date AddOns* toggle itself, and it needs an RE answer we do not have:
+//! how the reference couples `loadable`/`reason` when force-load is ON. Neither `AddonList.lua` nor
+//! `GlueXML` is in the wow-re extract, so that question is dispatched, not guessed.
 
 use std::path::PathBuf;
 
@@ -152,9 +164,32 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // name, title, notes, url, loadable, reason, security, newVersion
-    // `newVersion` is always nil: it is the reference's addon-version-check service reporting an
-    // update is available, and there is no such service to ask.
+    // `name, title, notes, enabled, loadable, reason, security` — SEVEN values, and slot 4 is
+    // **`enabled`**, not `url`.
+    //
+    // **The client registers `GetAddOnInfo` TWICE, as two different functions**, and this is the
+    // in-game one. wow-re `system/ui/scratch/addon-version-gate.md`: glue `0x46d460` returns EIGHT
+    // with `url` at slot 4 and `newVersion` at 8; in-game `0x48e390` returns SEVEN with `enabled`
+    // at slot 4 and no `url` at all. They differ in behaviour too — the in-game one passes `dl=1`,
+    // so `NOT_DEMAND_LOADED` is reachable here and never from glue, and it short-circuits an
+    // already-loaded addon to `1, nil` before the gate.
+    //
+    // We shipped the GLUE shape in the IN-GAME VM. Slots 5/6/7 aligned by luck; slot 4 did not, and
+    // it is the one the ecosystem reads:
+    //
+    //     local name, _, _, enabled, loadable = GetAddOnInfo(major)   -- AceLibrary-1.0:400
+    //
+    // `## URL` is rare, so `enabled` came back nil for nearly every addon and Ace's
+    // `if enabled and loadable` refused to load its own dependency. 70 corpus folders reach it
+    // (AceLibrary/AceAddon replicated — one library, which is what makes it wide rather than
+    // narrow). Nothing errored: a nil where a flag belongs is a legal Lua value.
+    //
+    // `enabled` is the number 1 or nil, never boolean `true` — every push in these functions is
+    // `lua_pushnumber(1.0)` via `0x6f3810`, with no `lua_pushboolean` anywhere. Same for
+    // `loadable`. `flag` already answers in that shape.
+    //
+    // `url` is not lost, it moves to where the client keeps it in-game: `GetAddOnMetadata(name,
+    // "URL")`, which is how our own AddonList tooltip reads it now.
     g.set(
         "GetAddOnInfo",
         lua.create_function(|lua, key: Value| {
@@ -168,14 +203,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 lua_str(lua, &a.name)?,
                 opt_str(lua, &a.title)?,
                 opt_str(lua, &a.notes)?,
-                opt_str(lua, &a.url)?,
+                flag(a.enabled),
                 flag(reason.is_none()),
                 match reason {
                     Some(r) => lua_str(lua, r)?,
                     None => Value::Nil,
                 },
                 lua_str(lua, if a.secure { "SECURE" } else { "INSECURE" })?,
-                Value::Nil,
             ]))
         })?,
     )?;
@@ -435,7 +469,11 @@ fn load_saved_variables(lua: &Lua, i: usize) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue; // absent is the first-run case
         };
-        if let Err(e) = run_chunk(lua, &bytes) {
+        if let Err(e) = run_chunk(
+            lua,
+            &bytes,
+            &crate::script::addon_chunk_name(&name.to_string(), &format!("{name}.lua")),
+        ) {
             // The reference fails this silently. We do not: a settings file that stopped parsing
             // is exactly the thing a player needs told, and the file is left on disk untouched.
             log_error(lua, &format!("{}: {e}", path.display()));
@@ -459,7 +497,7 @@ fn run_files(lua: &Lua, name: &str, root: &std::path::Path, files: &[String]) {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("lua"))
         {
-            if let Err(e) = run_chunk(lua, &bytes) {
+            if let Err(e) = run_chunk(lua, &bytes, &crate::script::addon_chunk_name(name, file)) {
                 log_error(lua, &format!("{name}/{file}: {e}"));
             }
             continue;
@@ -471,8 +509,7 @@ fn run_files(lua: &Lua, name: &str, root: &std::path::Path, files: &[String]) {
                 continue;
             }
         };
-        let base = path.rfind('/').map_or("", |i| &path[..i]);
-        let report = crate::loader::load_into(lua, &doc, base, &provider);
+        let report = crate::loader::load_into(lua, &doc, &path, &provider);
         for e in report.errors {
             log_error(lua, &format!("{name}/{file}: {e}"));
         }
@@ -496,8 +533,9 @@ fn read_under(root: &std::path::Path, rel: &str) -> Option<Vec<u8>> {
 /// Run a chunk that came off disk, from `&Lua` — [`crate::script::UiScript::run_chunk`]'s body for
 /// the demand-load path, which never holds a `UiScript` (1191 §4). Bytes and a BOM strip, for the
 /// reasons in [`crate::source`].
-fn run_chunk(lua: &Lua, bytes: &[u8]) -> mlua::Result<()> {
+fn run_chunk(lua: &Lua, bytes: &[u8], name: &str) -> mlua::Result<()> {
     lua.load(crate::source::chunk(bytes))
+        .set_name(name)
         .set_mode(mlua::ChunkMode::Text)
         .exec()
 }

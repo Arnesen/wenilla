@@ -7,6 +7,7 @@
 mod anchors;
 mod backdrop;
 mod button;
+mod channel;
 mod common;
 mod cooldown;
 mod create_frame_template;
@@ -14,6 +15,7 @@ mod end_to_end;
 mod events;
 mod font_object;
 mod frame_api;
+mod generic_for;
 mod input;
 mod layout_gate;
 mod measure;

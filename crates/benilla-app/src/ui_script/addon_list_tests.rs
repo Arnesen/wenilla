@@ -358,3 +358,60 @@ fn hovering_a_row_raises_the_tooltip_with_notes_and_dependencies() {
     s.run("AddonList_RowEnter(AddonListEntry1)").unwrap();
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **The ESC-menu list reports an out-of-date `## Interface`, exactly like its char-select twin.**
+///
+/// The two screens are the same job over two views of one folder (1197 §1, §3), and they were
+/// answering *differently* about the same addon: the glue panel read `## Interface` off the manifest
+/// and showed "Out of date", while this one asked `GetAddOnInfo` — whose `reason` has no interface
+/// arm, and correctly so, because 1191 §6 reports the mismatch and never enforces it. Not being a
+/// reason the addon cannot load, it was simply never shown here. Nothing errored; the column was
+/// just blank, which is the silent-gap shape this arc keeps finding.
+///
+/// The three arms are the whole rule: mismatched reports, matching does not, and **absent is silent
+/// rather than out-of-date** — the same case `a manifest with no ## Interface is silent` pins on the
+/// glue side.
+/// Asserted on the STATUS COLUMN the player reads, not on the helper — the helper being right
+/// while the column stayed blank is precisely the bug this replaces.
+#[test]
+fn the_list_reports_an_out_of_date_interface_like_the_char_select_twin() {
+    let mut s = harness();
+
+    // Three real manifests, differing only in `## Interface` — the directive `GetAddOnMetadata`
+    // reads, so this drives the production path rather than stubbing it.
+    let with_interface = |name: &str, declared: Option<&str>| AddOnInfo {
+        name: name.into(),
+        title: Some(name.into()),
+        directives: declared
+            .map(|v| vec![("Interface".to_string(), v.to_string())])
+            .unwrap_or_default(),
+        enabled: true,
+        ..Default::default()
+    };
+    s.register_addons(
+        vec![
+            with_interface("Old", Some("11100")),
+            with_interface("Current", Some("11200")),
+            with_interface("Silent", None),
+        ],
+        None,
+        None,
+        None,
+    );
+
+    s.run("AddonList_Show()").unwrap();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    assert_eq!(
+        row(&s, 1).1,
+        "Out of date",
+        "an older `## Interface` must reach the status column — it was blank here while the \
+         char-select twin said so about the same addon"
+    );
+    assert_eq!(row(&s, 2).1, "", "our own interface is current");
+    assert_eq!(
+        row(&s, 3).1,
+        "",
+        "no `## Interface` at all is silent, not out of date"
+    );
+}

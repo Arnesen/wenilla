@@ -1,0 +1,174 @@
+<!--
+    The reference's `ItemButtonTemplate.lua` helper family (transcribed whole, like
+    TextStatusBar.xml) — the eight `SetItemButton*` globals every 1.12 window uses to paint an item
+    slot: its icon, its stack count, its merchant stock line, and the four vertex-colour verbs.
+
+    **Why this file exists, and what it cost to be without it.** The director installed Bagnon, hit
+    B, and got a frame with a title and a gold line and NO BAG SLOTS. `Bagnon_Core/core/Item.lua`
+    ends every slot update with
+
+        l.204   SetItemButtonDesaturated(item, locked, 0.5, 0.5, 0.5)
+        l.209   SetItemButtonTexture(item, texture)
+        l.210   SetItemButtonCount(item, itemCount)
+
+    and all three were nil. The raise lands inside `BagnonFrame_AddBag`'s per-slot loop, so the
+    FIRST slot aborts the loop, `frame.size` never advances, `BagnonFrame_Layout` never runs and
+    the window is left exactly as wide as its own border. `ui_script::bagnon_render_tests` is the
+    reproduction.
+
+    These are FrameXML, not engine (decision 1190's split): the real client ships them as Lua in
+    `Interface\FrameXML\ItemButtonTemplate.lua`, so they belong here beside our other
+    transcriptions rather than in a Rust binding. Read off the install's own copy with the
+    `mpqcat` example over `WoW/Data/interface.MPQ` — not from memory.
+    (An XML comment may not contain a double hyphen, which is why no command line is spelled out
+    here; `benilla-mpq/examples/mpqcat.rs`'s own header carries the invocation.)
+
+    **Corpus demand, counted rather than assumed** (the 218-addon vanilla corpus; `grep -rl`, one
+    row per verb, addons/sites):
+
+        SetItemButtonTexture                    4 addons / 19 sites
+        SetItemButtonDesaturated                3 addons /  8 sites
+        SetItemButtonCount                      3 addons /  7 sites
+        SetItemButtonTextureVertexColor         3 addons /  7 sites
+        SetItemButtonNormalTextureVertexColor   1 addon  /  2 sites
+        SetItemButtonNameFrameVertexColor       1 addon  /  2 sites
+        SetItemButtonSlotVertexColor            0        /  0
+        SetItemButtonStock                      0        /  0
+
+    Six addons in all — Bagnon_Core, CT_MailMod, CT_MasterMod, AdvancedTradeSkillWindow,
+    QuestHistory, SpecialTalentUI. The last two rows have **zero** corpus callers and are here
+    anyway because this is one reference file transcribed whole and they are two lines each; that
+    is stated rather than dressed up as demand (1210).
+
+    **The virtual `ItemButtonTemplate` Button is deliberately NOT here.** The harness's template
+    demand ranks it at zero on both axes — no corpus addon names it in a `CreateFrame` fourth
+    argument or an XML `inherits=` (they name their own `*ItemButtonTemplate`s, or
+    `ContainerFrameItemButtonTemplate`) — and our own bag windows already have
+    `BenillaBagSlotTemplate`. Building an unwanted template is exactly the unmeasured work 1210
+    was written about.
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        -- The naming contract every verb below rests on: an "item button" is a Button whose own
+        -- name prefixes its regions — `<name>IconTexture`, `<name>Count`, `<name>Stock`,
+        -- `<name>NormalTexture`, `<name>NameFrame`, `<name>SlotTexture`. That is the reference's
+        -- `$parent…` template shape, and it is why these are free functions taking a button rather
+        -- than widget methods: any button that follows the naming works, whoever built it.
+        --
+        -- Nil guards are the REFERENCE's, not ours — one on `button` per verb, and one on the icon
+        -- region in SetItemButtonDesaturated. A missing region anywhere else raises, and that is
+        -- the right loudness: "this is not an item button" is a real mistake, and 1203's lesson is
+        -- that the silent version of a failure is the expensive one.
+
+        function SetItemButtonCount(button, count)
+            if not button then
+                return
+            end
+            if not count then
+                count = 0
+            end
+            button.count = count
+            -- `isBag` is the reference's own flag for a bag button, where even a single item
+            -- counts as a number worth showing.
+            if count > 1 or (button.isBag and count > 0) then
+                if count > 999 then
+                    count = "*"
+                end
+                getglobal(button:GetName() .. "Count"):SetText(count)
+                getglobal(button:GetName() .. "Count"):Show()
+            else
+                getglobal(button:GetName() .. "Count"):Hide()
+            end
+        end
+
+        function SetItemButtonStock(button, numInStock)
+            if not button then
+                return
+            end
+            -- The reference defaults this to `""` and then compares it with `> 0`, which is a
+            -- string/number comparison Lua refuses — a raise on the only path the default can
+            -- reach. Ours defaults to 0, which is what the branch below actually means. Not aping
+            -- a quirk (method step 3); the behaviour on every reachable path is identical.
+            if not numInStock then
+                numInStock = 0
+            end
+            button.numInStock = numInStock
+            if numInStock > 0 then
+                getglobal(button:GetName() .. "Stock"):SetText(format(MERCHANT_STOCK, numInStock))
+                getglobal(button:GetName() .. "Stock"):Show()
+            else
+                getglobal(button:GetName() .. "Stock"):Hide()
+            end
+        end
+
+        function SetItemButtonTexture(button, texture)
+            if not button then
+                return
+            end
+            -- Show/Hide FIRST, then SetTexture — the reference's order, and it matters: a nil
+            -- texture hides the region rather than leaving an empty quad behind.
+            if texture then
+                getglobal(button:GetName() .. "IconTexture"):Show()
+            else
+                getglobal(button:GetName() .. "IconTexture"):Hide()
+            end
+            getglobal(button:GetName() .. "IconTexture"):SetTexture(texture)
+        end
+
+        function SetItemButtonTextureVertexColor(button, r, g, b)
+            if not button then
+                return
+            end
+            getglobal(button:GetName() .. "IconTexture"):SetVertexColor(r, g, b)
+        end
+
+        function SetItemButtonDesaturated(button, desaturated, r, g, b)
+            if not button then
+                return
+            end
+            local icon = getglobal(button:GetName() .. "IconTexture")
+            if not icon then
+                return
+            end
+            -- The reference asks the texture itself whether the desaturating shader is available
+            -- (`local shaderSupported = icon:SetDesaturated(desaturated)`) and falls through to a
+            -- flat grey tint when it is not — 1.12 ran on fixed-function hardware where that was
+            -- the ordinary answer. benilla has no `Texture:SetDesaturated` at all (it is the top
+            -- row of the harness's missing-METHODS ranking, 61 corpus addons), so the feature test
+            -- is on the METHOD's existence and the no-shader branch is the one we take. When the
+            -- real verb lands this line starts using it with nothing else to change.
+            local shaderSupported = icon.SetDesaturated and icon:SetDesaturated(desaturated)
+            if not desaturated then
+                r = 1.0
+                g = 1.0
+                b = 1.0
+            elseif not r or not shaderSupported then
+                r = 0.5
+                g = 0.5
+                b = 0.5
+            end
+            icon:SetVertexColor(r, g, b)
+        end
+
+        function SetItemButtonNormalTextureVertexColor(button, r, g, b)
+            if not button then
+                return
+            end
+            getglobal(button:GetName() .. "NormalTexture"):SetVertexColor(r, g, b)
+        end
+
+        function SetItemButtonNameFrameVertexColor(button, r, g, b)
+            if not button then
+                return
+            end
+            getglobal(button:GetName() .. "NameFrame"):SetVertexColor(r, g, b)
+        end
+
+        function SetItemButtonSlotVertexColor(button, r, g, b)
+            if not button then
+                return
+            end
+            getglobal(button:GetName() .. "SlotTexture"):SetVertexColor(r, g, b)
+        end
+    ]]></Script>
+</Ui>

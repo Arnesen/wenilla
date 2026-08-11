@@ -52,6 +52,18 @@
             this:RegisterEvent("SPELLCAST_CHANNEL_STOP")
             this.casting = nil
             this.holdTime = 0
+            -- The ref's own last line of this function (`CastingBarFrame.lua:16`), and the one
+            -- line of it we dropped: a plain alias global. `CastingBarFrame` IS the StatusBar in
+            -- 1.12 — there is no separate child frame — so the reference publishes the name an
+            -- addon would look for, and then uses it itself for the rest of the file.
+            --
+            -- 11 corpus addons index `CastingBarFrameStatusBar`, and it was the largest single
+            -- name in the whole session-start `attempt to index global` row. Nothing warned:
+            -- a line dropped INSIDE a function we otherwise transcribed verbatim is invisible to
+            -- every instrument here. `framexml-transcription-diff.py` compares elements and
+            -- handlers, not function bodies, and would not even pair these two files (ours is
+            -- CastingBar.xml, the reference's is CastingBarFrame.xml).
+            CastingBarFrameStatusBar = CastingBarFrame
             this:Hide()
         end
 

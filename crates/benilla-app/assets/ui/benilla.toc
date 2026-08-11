@@ -25,6 +25,11 @@ Fonts.xml
 # Straight after Fonts.xml because those are the only things it needs (GameFontRedLarge,
 # DialogButtonNormalText/HighlightText) and everything above it in FrameXML.toc is engine.
 BasicControls.xml
+# The `SetItemButton*` family (ref ItemButtonTemplate.lua) — script-only, no frames and no
+# dependencies of its own, so it sits as early as it can be read. Every window that paints an item
+# slot calls these, ours and third-party alike: their absence is what left the director's Bagnon
+# window with a title, a gold line and no bag slots at all (see the file's own header).
+ItemButtonTemplate.xml
 # The UIPanel slot manager (decision 0084 §2): script-only, no frames of its own — must load
 # before any panel frame (Gossip/Merchant today) so ShowUIPanel/HideUIPanel already exist
 # when those frames' OnLoad/OnEvent reference them.
@@ -194,6 +199,11 @@ BagFrame.xml
 # two doesn't matter for correctness (Lua globals resolve at call time, and neither file's
 # XML `inherits=` reaches into the other's templates) — kept adjacent for legibility.
 StackSplit.xml
+# Our ADAPTERS over the reference's own `Interface\\FrameXML\\ContainerFrame.lua`, which this
+# client EXECUTES off the patch chain rather than transcribing (`ui_script::reference_ui`) — see
+# that file's header for the rule. Must load AFTER the sourced reference file (every builtin does)
+# and after BagFrame/StackSplit, whose globals it leans on.
+ContainerFrameAdapters.xml
 # The character window (decision 0208 phase 1a): the C-key paper doll. Loaded after BagFrame
 # (needs nothing from it, but keeps player-state windows grouped) and before the NPC session
 # windows (Gossip/Merchant/Quest*) — it depends only on Fonts/UiPanels/GameTooltip, all

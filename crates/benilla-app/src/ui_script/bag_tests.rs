@@ -224,10 +224,13 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
 
     // Open-all: the backpack button and the equipped bag's slot light; the empty slots don't.
     s.run("BenillaBagToggle_OnClick()").unwrap();
-    assert!(checked(&mut s, "BenillaBagToggle"), "backpack ring lights");
-    assert!(checked(&mut s, "BenillaBagBarSlot2"), "bag 2's ring lights");
     assert!(
-        !checked(&mut s, "BenillaBagBarSlot1"),
+        checked(&mut s, "MainMenuBarBackpackButton"),
+        "backpack ring lights"
+    );
+    assert!(checked(&mut s, "CharacterBag1Slot"), "bag 2's ring lights");
+    assert!(
+        !checked(&mut s, "CharacterBag0Slot"),
         "empty slot stays dark"
     );
 
@@ -261,11 +264,11 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     // Closing ONE window (its close button / any Hide path) clears just its ring.
     s.run("BenillaBagFrame2:Hide()").unwrap();
     assert!(
-        !checked(&mut s, "BenillaBagBarSlot2"),
+        !checked(&mut s, "CharacterBag1Slot"),
         "closing bag 2 clears its ring"
     );
     assert!(
-        checked(&mut s, "BenillaBagToggle"),
+        checked(&mut s, "MainMenuBarBackpackButton"),
         "the backpack ring stays"
     );
 
@@ -276,21 +279,21 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     // no button, so either one opens the bag. Ours registered LeftButtonUp only until 0908.
     let (cx, cy): (f64, f64) = s
         .eval(
-            "return (BenillaBagBarSlot2:GetLeft() + BenillaBagBarSlot2:GetRight()) / 2, \
-                    (BenillaBagBarSlot2:GetTop() + BenillaBagBarSlot2:GetBottom()) / 2",
+            "return (CharacterBag1Slot:GetLeft() + CharacterBag1Slot:GetRight()) / 2, \
+                    (CharacterBag1Slot:GetTop() + CharacterBag1Slot:GetBottom()) / 2",
         )
         .unwrap();
     s.mouse_button(cx as f32, cy as f32, "RightButton", true);
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
     assert!(
-        checked(&mut s, "BenillaBagBarSlot2"),
+        checked(&mut s, "CharacterBag1Slot"),
         "a RIGHT-click on the bar slot reopens bag 2, exactly as a left one does"
     );
 
     // ESC's sweep closes everything → every ring dark.
     s.run("CloseAllWindows()").unwrap();
     assert!(
-        !checked(&mut s, "BenillaBagToggle") && !checked(&mut s, "BenillaBagBarSlot2"),
+        !checked(&mut s, "MainMenuBarBackpackButton") && !checked(&mut s, "CharacterBag1Slot"),
         "close-all clears every ring"
     );
     let _ = s.take_sounds();
@@ -830,8 +833,8 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
         !s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
         "hidden by default"
     );
-    // BenillaBagBarSlot1 == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
-    s.run("BenillaBagBarSlot_OnClick(BenillaBagBarSlot1)")
+    // CharacterBag0Slot == bag id 1 (BenillaBagBarSlot_OnLoad(self, 1) in BagFrame.xml).
+    s.run("BenillaBagBarSlot_OnClick(CharacterBag0Slot)")
         .unwrap();
     let _ = s.take_sounds();
     assert!(
@@ -1120,7 +1123,7 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     };
     // 12 s remain of the potion category's 60 s: started at GetTime 52 (absolute-start triple).
     s.set_container(0, Some(backpack(Some((52_000, 60_000, true)))));
-    s.run("BenillaOpenAllBags()").unwrap();
+    s.run("OpenAllBags()").unwrap();
     s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(0)]);
     s.resolve();
 
@@ -1171,7 +1174,8 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     s.resolve();
 
     // The backpack: its label plus OPENALLBAGS's live key (default B; 0997's divergence note).
-    s.run("BenillaBagToggle_OnEnter(BenillaBagToggle)").unwrap();
+    s.run("BenillaBagToggle_OnEnter(MainMenuBarBackpackButton)")
+        .unwrap();
     let line = s
         .eval::<String>("return GameTooltipTextLeft1:GetText()")
         .unwrap();
@@ -1185,13 +1189,13 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         "a bag button's plate is owner-anchored, never the default corner"
     );
     assert!(
-        s.eval::<bool>("return GameTooltip:IsOwned(BenillaBagToggle)")
+        s.eval::<bool>("return GameTooltip:IsOwned(MainMenuBarBackpackButton)")
             .unwrap(),
         "…owned by the button it opened from"
     );
 
     // An empty bag slot falls back to the ref's EQUIP_CONTAINER rather than showing nothing.
-    s.run("BenillaBagBarSlot_OnEnter(BenillaBagBarSlot1)")
+    s.run("BenillaBagBarSlot_OnEnter(CharacterBag0Slot)")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -1219,7 +1223,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         enchants: Vec::new(),
     });
     s.set_inventory_slots(inv);
-    s.run("BenillaBagBarSlot_OnEnter(BenillaBagBarSlot1)")
+    s.run("BenillaBagBarSlot_OnEnter(CharacterBag0Slot)")
         .unwrap();
     assert_eq!(
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
@@ -1512,11 +1516,16 @@ fn a_key_dropped_on_the_button_files_itself() {
         s.take_container_moves().is_empty(),
         "a full keyring queues no move"
     );
-    assert_eq!(
-        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
-            .unwrap(),
-        "Your keyring is full.",
-        "and says so — the reference's own dangling string name prints nothing"
+    // ...and says so, on the errors frame — read where a player reads it, off the drawn quads.
+    // (`UIErrorsFrame` is a real `<MessageFrame>`; its lines are the widget's, not FontStrings.)
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            QuadContent::Text { text: Some(t), .. } if t == "Your keyring is full."
+        )),
+        "the refusal posts to UIErrorsFrame — the reference's own dangling string name prints \
+         nothing"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -1569,7 +1578,11 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     };
 
     // Nothing is animating until a push arrives.
-    for b in ["BenillaBagToggle", "BenillaBagBarSlot2", "KeyRingButton"] {
+    for b in [
+        "MainMenuBarBackpackButton",
+        "CharacterBag1Slot",
+        "KeyRingButton",
+    ] {
         assert!(!shown(&s, b), "{b}'s card starts hidden");
     }
 
@@ -1582,8 +1595,12 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         ],
     );
     s.resolve();
-    assert!(shown(&s, "BenillaBagBarSlot2"), "bag 2's card plays");
-    for b in ["BenillaBagToggle", "BenillaBagBarSlot1", "KeyRingButton"] {
+    assert!(shown(&s, "CharacterBag1Slot"), "bag 2's card plays");
+    for b in [
+        "MainMenuBarBackpackButton",
+        "CharacterBag0Slot",
+        "KeyRingButton",
+    ] {
         assert!(!shown(&s, b), "{b} took nothing, so {b} animates nothing");
     }
     // The pushed icon reaches the RENDERER, not just the Lua state — exactly one quad carries it.
@@ -1603,13 +1620,13 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
 
     // t=0: invisible, full size, held a whole fall above the button (and a drift to its left) —
     // the .m2's alpha key (0.000, 0.0), scale key (0.000, 1.0), translation (0.000, (0,0)).
-    let (dx, dy) = offset(&s, "BenillaBagBarSlot2");
+    let (dx, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
         (dy - 48.0).abs() < 0.5 && (dx + 12.0).abs() < 0.5,
         "starts one fall (48px) above and one drift (12px) left of the button: got ({dx}, {dy})"
     );
     assert!(
-        alpha(&s, "BenillaBagBarSlot2") < 0.01,
+        alpha(&s, "CharacterBag1Slot") < 0.01,
         "fades in from nothing"
     );
 
@@ -1617,11 +1634,11 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.tick(0.133);
     s.resolve();
     assert!(
-        (alpha(&s, "BenillaBagBarSlot2") - 1.0).abs() < 0.02,
+        (alpha(&s, "CharacterBag1Slot") - 1.0).abs() < 0.02,
         "opaque by the alpha track's second key"
     );
     assert!(
-        (size(&s, "BenillaBagBarSlot2") - 36.0 * 1.2).abs() < 0.5,
+        (size(&s, "CharacterBag1Slot") - 36.0 * 1.2).abs() < 0.5,
         "swollen to 1.2x the 36px icon at the scale track's peak"
     );
 
@@ -1629,10 +1646,10 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.tick(0.134);
     s.resolve();
     assert!(
-        (size(&s, "BenillaBagBarSlot2") - 36.0).abs() < 0.5,
+        (size(&s, "CharacterBag1Slot") - 36.0).abs() < 0.5,
         "settled back to the 36px icon at the scale track's third key"
     );
-    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    let (_, dy) = offset(&s, "CharacterBag1Slot");
     assert!((dy - 48.0).abs() < 0.5, "has not started falling: got {dy}");
 
     // t=0.5: STILL PARKED — the translation track's second key is (0,0), so the whole first half
@@ -1641,26 +1658,26 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     // reading would get wrong (scale/alpha ≈ 0.686/0.682 here, the 0.267→1.000 ramps at t=0.5).
     s.tick(0.233);
     s.resolve();
-    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    let (_, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
         (dy - 48.0).abs() < 0.5,
         "has not moved yet at the half second: got {dy}"
     );
     assert!(
-        (size(&s, "BenillaBagBarSlot2") - 36.0 * 0.686).abs() < 0.5,
+        (size(&s, "CharacterBag1Slot") - 36.0 * 0.686).abs() < 0.5,
         "but is already dwindling: got {}",
-        size(&s, "BenillaBagBarSlot2")
+        size(&s, "CharacterBag1Slot")
     );
     assert!(
-        (alpha(&s, "BenillaBagBarSlot2") - 0.682).abs() < 0.02,
+        (alpha(&s, "CharacterBag1Slot") - 0.682).abs() < 0.02,
         "and already fading: got {}",
-        alpha(&s, "BenillaBagBarSlot2")
+        alpha(&s, "CharacterBag1Slot")
     );
 
     // t=0.75: halfway down.
     s.tick(0.25);
     s.resolve();
-    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    let (_, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
         (dy - 24.0).abs() < 0.5,
         "half the fall travelled by t=0.75: got {dy}"
@@ -1669,21 +1686,21 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     // Just short of the end: landed on the button, shrunk to nothing, faded out.
     s.tick(0.24);
     s.resolve();
-    let (dx, dy) = offset(&s, "BenillaBagBarSlot2");
+    let (dx, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
         dx.abs() < 1.0 && dy.abs() < 1.5,
         "lands centred on the button it went into: got ({dx}, {dy})"
     );
     assert!(
-        size(&s, "BenillaBagBarSlot2") < 2.0,
+        size(&s, "CharacterBag1Slot") < 2.0,
         "collapsed to the scale track's 0.014"
     );
-    assert!(alpha(&s, "BenillaBagBarSlot2") < 0.05, "faded out");
+    assert!(alpha(&s, "CharacterBag1Slot") < 0.05, "faded out");
 
     // Past 1.000s the CLAMP sequence is over — the ref's OnAnimFinished → Hide.
     s.tick(0.05);
     assert!(
-        !shown(&s, "BenillaBagBarSlot2"),
+        !shown(&s, "CharacterBag1Slot"),
         "one play, then gone (and no OnUpdate left running)"
     );
 
@@ -1697,9 +1714,123 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     );
     assert!(shown(&s, "KeyRingButton"), "the keyring card plays");
     assert!(
-        !shown(&s, "BenillaBagToggle"),
+        !shown(&s, "MainMenuBarBackpackButton"),
         "and the backpack's does not"
     );
 
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **An addon that replaces `ToggleBackpack` gets the bag button's click.**
+///
+/// This is how a 1.12 addon customises anything — replace a global, expect the client to call your
+/// replacement. `Bagnon_Core/core/Overrides.lua` is the canonical shape:
+///
+/// ```lua
+/// local bToggleBackpack = ToggleBackpack
+/// ToggleBackpack = function() … end
+/// ```
+///
+/// It was inert here. The 'B' binding and the bag button called `BenillaBagToggle_OnClick`
+/// directly, so nothing ever looked up `ToggleBackpack`; Bagnon loaded, showed up in the AddOns
+/// list, replaced the globals, and the player still got the stock bags. **The director saw that and
+/// no instrument here could** — the corpus survey loads addons and fires events, but never clicks.
+///
+/// The class is much wider than one addon: every hook-a-global addon is silently inert wherever our
+/// UI calls a benilla-named equivalent. This test pins the bag path; the rule is general.
+#[test]
+fn an_addon_that_hooks_toggle_backpack_receives_the_click() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    s.set_money(0);
+
+    // Bagnon's exact idiom: capture the original, replace the global.
+    s.run(
+        r#"
+        HOOK_RAN = 0
+        local original = ToggleBackpack
+        ToggleBackpack = function() HOOK_RAN = HOOK_RAN + 1 end
+    "#,
+    )
+    .unwrap();
+
+    // The button's own OnClick path — what the 'B' binding and the backpack button both run.
+    s.run("BenillaBagToggle_OnClick()").unwrap();
+
+    assert_eq!(
+        s.eval::<i64>("return HOOK_RAN").unwrap(),
+        1,
+        "the click must reach the addon's replacement, not our own function"
+    );
+    // And the addon's override SUPPRESSED the stock behaviour, which is the point of hooking.
+    assert!(
+        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "the stock bag must not open when an addon has taken the verb over"
+    );
+
+    // The reference's other two names exist and are callable by an addon that wants the original.
+    assert!(
+        s.eval::<bool>("return type(OpenAllBags) == 'function' and type(ToggleBag) == 'function'")
+            .unwrap(),
+        "OpenAllBags and ToggleBag are the ref's names and addons hook them too"
+    );
+}
+
+/// **The equipped-bag slots carry the REFERENCE's names, and so do their icons.**
+///
+/// Ours were `BenillaBagBarSlot1..4`; the reference's are `CharacterBag0Slot..3` — 0-based, so
+/// `CharacterBag0Slot` IS bag 1. Eight corpus addons index those names and found nil, including
+/// **Bagnon**, which does `getglobal("CharacterBag0Slot"):GetScript("OnClick")`.
+///
+/// The same class as the `ToggleBackpack` bug the director found: our own name where the reference
+/// has one, so every addon reaching for it is silently inert.
+///
+/// A Lua alias would not have been enough. `Bartender2/Alias.lua:352` takes
+/// `CharacterBag0SlotIconTexture` — a name DERIVED from the frame's own, which only a real rename
+/// produces. The icon is `$parentIconTexture` now, matching the reference's
+/// `PaperDollItemSlotButtonTemplate`.
+#[test]
+fn the_bag_slots_carry_the_references_names_and_icon_names() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+
+    for i in 0..4 {
+        assert!(
+            s.eval::<bool>(&format!("return CharacterBag{i}Slot ~= nil"))
+                .unwrap(),
+            "CharacterBag{i}Slot must exist — 8 corpus addons index these"
+        );
+        assert!(
+            s.eval::<bool>(&format!(
+                "return getglobal('CharacterBag{i}SlotIconTexture') ~= nil"
+            ))
+            .unwrap(),
+            "and its icon under the derived name Bartender2 aliases"
+        );
+    }
+
+    // 0-based: CharacterBag0Slot is bag 1. Pinned because the off-by-one is the whole trap, and
+    // two name-building call sites had to learn it.
+    assert_eq!(
+        s.eval::<i64>("return CharacterBag0Slot.bagId").unwrap(),
+        1,
+        "CharacterBag0Slot IS bag 1 — the reference names them 0-based"
+    );
+
+    // Bagnon's exact reach.
+    assert!(
+        s.eval::<bool>("return getglobal('CharacterBag0Slot'):GetScript('OnClick') ~= nil")
+            .unwrap(),
+        "Bagnon captures this OnClick to replace the bag behaviour"
+    );
 }

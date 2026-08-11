@@ -458,3 +458,66 @@ fn button_label_repaints_by_state_font_object() {
     let c = label_color(&mut s).expect("colored");
     assert!((c[0] - 0.1).abs() < 1e-6 && (c[1] - 0.2).abs() < 1e-6);
 }
+
+/// **`Button:GetTextWidth` / `GetTextHeight`** — the reference's own Button text-extent readers
+/// (`0x782290` / `0x782390`; wow-re `widget-api-batch-benilla.md` Q8 carves them present on Button
+/// and `GetStringWidth` **absent**). Both forward to the label FontString's own extent slots, which
+/// is what this asserts: answer a host measure for the label, and the BUTTON must report it.
+///
+/// `Bagnon_Forever/database/ui.lua:61` sizes its character-switch dropdown from
+/// `button:GetTextWidth() + 40`, so a nil method took the whole dropdown down — the director could
+/// not switch characters in Bagnon at all.
+#[test]
+fn a_button_reports_its_labels_extent() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        b = CreateFrame("Button", "WidthBtn", UIParent)
+        b:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        b:SetWidth(120) b:SetHeight(24)
+        b:SetText("A Label")
+        plain = CreateFrame("Button", "LabellessBtn", UIParent)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // Unmeasured is 0 — the same "converges next frame" contract every other metric read has.
+    assert_eq!(
+        s.eval::<f64>("return WidthBtn:GetTextWidth()").unwrap(),
+        0.0
+    );
+
+    let req = s
+        .fontstrings_needing_measure()
+        .into_iter()
+        .find(|r| r.text == "A Label")
+        .expect("the label asks the host for its extent");
+    s.set_measured_text_unwrapped(&[(req.id, 47.0, 14.0, req.key)]);
+
+    assert_eq!(
+        s.eval::<f64>("return WidthBtn:GetTextWidth()").unwrap(),
+        47.0,
+        "the Button forwards to its own label"
+    );
+    assert_eq!(
+        s.eval::<f64>("return WidthBtn:GetTextHeight()").unwrap(),
+        14.0
+    );
+
+    // A Button with no label at all answers 0 rather than raising: the reference dereferences a
+    // FontString pointer (`+0x338`) here that a bare CreateFrame("Button") leaves null, and what it
+    // does then is not byte-read — so this takes the harmless number instead of guessing a crash.
+    assert_eq!(
+        s.eval::<f64>("return LabellessBtn:GetTextWidth()").unwrap(),
+        0.0
+    );
+
+    // …and it is a BUTTON method: a plain Frame must not have grown one.
+    assert!(
+        s.eval::<bool>(r#"return CreateFrame("Frame").GetTextWidth == nil"#)
+            .unwrap(),
+        "GetTextWidth is Button's, not Region's (wow-re Q8's own split)"
+    );
+}

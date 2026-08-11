@@ -44,6 +44,20 @@ use benilla_world::view::{ViewDistance, FARCLIP_RANGE};
 /// The host-backed CVars: `(registered name, default)`. Grows one row per knob a settings page
 /// actually wires — never ahead of the knob (see the module doc).
 pub(crate) const REGISTERED: &[(&str, &str)] = &[
+    // The realm the session is on — a REAL 1.12 CVar (`0x83f2d0`, persisted, wow-re
+    // `savedvariables-protocol.md`: the client builds its SavedVariables path from it), and a live
+    // Lua consumer in the strongest sense the honest-tree rule asks for. `Ace/AceState.lua:27` does
+    // `ace.trim(GetCVar("realmName"))` inside `SetGameState`, which every Ace addon runs at
+    // PLAYER_ENTERING_WORLD — so a nil there was `gsub(nil)` and took the whole Ace family down.
+    // 18 corpus folders read the name.
+    //
+    // The default is EMPTY, deliberately and not as a guess: the value is written from the session's
+    // real realm the moment addons load (`ui_script::addons::load_third_party`), so the default only
+    // ever describes a client that has not connected. wow-re records a string
+    // `"Last realm connected to"` beside the registration, but that reads like the CVar's HELP text
+    // rather than its value and nothing here needs to resolve it — `""` is what `ace.trim` handles
+    // cleanly, and inventing a realm name would be worse than admitting we have none yet.
+    ("realmName", ""),
     ("MasterVolume", "1"),
     ("SoundVolume", "1"),
     ("MusicVolume", "0.4"),
@@ -472,11 +486,18 @@ mod tests {
 
     /// Every registered default IS the code constant it mirrors — parse-compared so "1" vs
     /// "1.0" cannot fail it, welded so neither side can drift alone.
+    ///
+    /// **The numeric ones**, which was every one of them until `realmName` — the first
+    /// string-valued CVar in the table, and the reason this now filters rather than unwraps. It is
+    /// asserted on its own terms in
+    /// [`the_only_string_valued_cvar_is_the_realm_and_it_defaults_empty`]; a `parse::<f32>()` over
+    /// the whole table would either panic (it did) or quietly need every future string CVar to be
+    /// numeric.
     #[test]
     fn registered_defaults_mirror_the_code_truths() {
         let d: BTreeMap<&str, f32> = REGISTERED
             .iter()
-            .map(|(n, v)| (*n, v.parse::<f32>().unwrap()))
+            .filter_map(|(n, v)| v.parse::<f32>().ok().map(|f| (*n, f)))
             .collect();
         let sound = SoundConfig::default();
         assert_eq!(d["MasterVolume"], sound.master);
@@ -803,5 +824,30 @@ mod tests {
         let hand = "# my note\n[cvars]\nFarclip = \"500\"\n";
         let parsed: LocalConfig = toml::from_str(hand).unwrap();
         assert_eq!(parsed.cvars.get("Farclip").map(String::as_str), Some("500"));
+    }
+    /// **`realmName` is the table's one string-valued CVar, and it defaults EMPTY.**
+    ///
+    /// Empty rather than a guess: the value is written from the session's real realm by
+    /// `set_realm_name`, so the default only ever describes a client that has not connected.
+    /// wow-re records `"Last realm connected to"` beside the registration, but that reads like the
+    /// CVar's HELP text rather than its value, and nothing here needs it resolved — `""` is what
+    /// `Ace/AceState.lua:27`'s `ace.trim(GetCVar("realmName"))` handles cleanly, and inventing a
+    /// realm name would be worse than admitting we have none yet.
+    ///
+    /// Pinned as "the ONE" so a second string CVar has to come here and think about the numeric
+    /// test above rather than silently widening it.
+    #[test]
+    fn the_only_string_valued_cvar_is_the_realm_and_it_defaults_empty() {
+        let strings: Vec<&str> = REGISTERED
+            .iter()
+            .filter(|(_, v)| v.parse::<f32>().is_err())
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(strings, vec!["realmName"]);
+        let realm = REGISTERED
+            .iter()
+            .find(|(n, _)| *n == "realmName")
+            .map(|(_, v)| *v);
+        assert_eq!(realm, Some(""));
     }
 }

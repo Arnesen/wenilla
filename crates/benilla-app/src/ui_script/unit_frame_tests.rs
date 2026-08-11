@@ -1644,3 +1644,61 @@ fn no_two_numeral_strings_overlap_on_any_frame() {
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **`UnitFrame_OnEnter`/`OnLeave` exist under the REFERENCE's names, `this`-shaped, so an addon
+/// that hooks them is reached.**
+///
+/// `TipBuddy.lua:2770-2773` is the exact idiom, and it is the 1.12 customisation model in general:
+///
+/// ```lua
+/// originalUnitFrame_OnEnter = UnitFrame_OnEnter
+/// function UnitFrame_OnEnter() originalUnitFrame_OnEnter() … end
+/// ```
+///
+/// Against a missing global that captured nil and raised on the first hover. Note these are
+/// ADAPTERS, not renames: the reference's contract takes no arguments and reads `this`, ours takes
+/// the frame explicitly, so a rename would have reached our body with a nil frame — reachable but
+/// broken, which is worse than inert.
+///
+/// The same class as the Bagnon bag bug, and equally invisible to the corpus survey: it loads
+/// addons and fires events, but never hovers anything.
+#[test]
+fn the_unit_frame_hover_hooks_carry_the_references_names() {
+    let s = UiScript::new().unwrap();
+    load_unit_frames(&s);
+
+    assert!(
+        s.eval::<bool>(
+            "return type(UnitFrame_OnEnter) == 'function' \
+             and type(UnitFrame_OnLeave) == 'function'"
+        )
+        .unwrap(),
+        "the reference's names must exist for an addon to capture"
+    );
+
+    // TipBuddy's idiom, run for real against a live unit frame.
+    s.run(
+        r#"
+        HOVERS = 0
+        local original = UnitFrame_OnEnter
+        function UnitFrame_OnEnter()
+            HOVERS = HOVERS + 1
+            original()
+        end
+        this = PlayerFrame
+        UnitFrame_OnEnter()
+    "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        s.eval::<i64>("return HOVERS").unwrap(),
+        1,
+        "the addon's replacement must run"
+    );
+    assert!(
+        s.errors().is_empty(),
+        "and calling through to the original must not raise: {:?}",
+        s.errors()
+    );
+}

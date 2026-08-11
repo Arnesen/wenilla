@@ -1,0 +1,82 @@
+<!--
+    OUR adapters over the reference's own `Interface\FrameXML\ContainerFrame.lua`.
+
+    **This client does not transcribe that file — it EXECUTES it, off the player's own patch
+    chain**, before any of our `assets/ui` files (`ui_script::reference_ui`, whose header carries
+    the rule and the licensing reason: Blizzard's Lua is never committed here). What is in THIS
+    file is only benilla's, and only where a reference body reaches for something this client
+    genuinely does not have.
+
+    The rule, restated in one line so it can be applied without re-reading the module: the sourced
+    file's globals stand unmodified; ours (loading after) win where both define a name; and where a
+    reference body needs a benilla answer, it is WRAPPED here — never silently stubbed.
+
+    ── The one adapter, and why it is not a stub ────────────────────────────────────────────────
+    `ContainerFrameItemButton_OnEnter` opens with a keyring fork (ref l.615-620):
+
+        if this:GetParent():GetID() == KEYRING_CONTAINER then
+            GameTooltip:SetInventoryItem("player", KeyRingButtonIDToInvSlotID(this:GetID()))
+            CursorUpdate()
+            return
+        end
+
+    That fork exists because the REAL client's keyring items are inventory slots, not container
+    slots, so it has to detour out of the container API to describe one. benilla's keyring is an
+    ordinary container (id -2, decision 0765): its slots come through `GetContainerItemInfo` and
+    `GameTooltip:SetBagItem` like every other bag's. So the detour is not merely unavailable here
+    (neither `KeyRingButtonIDToInvSlotID` nor `CursorUpdate` is a binding) — it is *wrong* here,
+    and supplying the two verbs would buy an empty tooltip, because our keyring items were never
+    fed into the inventory-slot space it reads.
+
+    So the wrapper below answers the keyring case the way benilla answers every other bag, and
+    hands EVERY other slot straight to the reference's own body. The path the player is actually
+    on — hovering an ordinary bag slot — runs the real client's code, unedited.
+
+    ── Named, not hidden: what still does not work through the sourced file ─────────────────────
+    · `MerchantItemButton_OnClick`. The reference's `ContainerFrameItemButton_OnClick` closes its
+      shift-right-click-at-a-vendor arm with a `SplitStack` closure that calls that global, and
+      benilla's merchant window publishes `BenillaMerchantItem_OnClick` instead. Confirming a stack
+      split with a vendor open therefore raises. That is the same "a Benilla name shadows the
+      reference's" class this whole seam exists to close, one window over, and it is left loud
+      rather than guarded (1203): the fix is to publish the merchant global, not to hide the call.
+    · `REPAIR_COST` is read by the reference's repair-mode arm. It is a `GlobalStrings.lua` key and
+      this client sources that file too, so it resolves at runtime — and the arm is unreachable
+      today regardless, since `GameTooltip:SetBagItem`'s repairCost is an INTERIM 0.
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        -- The reference's own body, captured before we shadow the name. Nil on a machine with no
+        -- client data (nothing was sourced) — which must be LOUD at the call, not a quiet no-op:
+        -- a bag hover that silently does nothing is precisely the failure mode that let Bagnon
+        -- ship "working" through four green survey columns.
+        local refItemButtonOnEnter = ContainerFrameItemButton_OnEnter
+
+        function ContainerFrameItemButton_OnEnter(button)
+            if not button then
+                button = this
+            end
+            if not button then return end
+
+            -- benilla's keyring is a CONTAINER (0765), so the reference's inventory-slot detour is
+            -- both unavailable and wrong here; this is the same pair of calls its general path
+            -- makes for every other bag, which is all a keyring slot ever needed.
+            if button:GetParent():GetID() == KEYRING_CONTAINER then
+                if (button:GetRight() or 0) >= (GetScreenWidth() / 2) then
+                    GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+                else
+                    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                end
+                GameTooltip:SetBagItem(KEYRING_CONTAINER, button:GetID())
+                ResetCursor()
+                return
+            end
+
+            if not refItemButtonOnEnter then
+                message("benilla: Interface\\FrameXML\\ContainerFrame.lua was not sourced from the "
+                    .. "game data, so bag-slot tooltips cannot work. Check the client data path.")
+                return
+            end
+            refItemButtonOnEnter(button)
+        end
+    ]]></Script>
+</Ui>

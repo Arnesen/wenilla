@@ -505,7 +505,7 @@
         function OpenBackpack()
             for bagId = 0, 4 do
                 -- The backpack (bag 0) always exists; an equipped-bag window only when a bag is in
-                -- the slot (the same existence test as BagFrame.xml's BenillaOpenAllBags).
+                -- the slot (the same existence test as BagFrame.xml's OpenAllBags).
                 local exists = bagId == 0
                     or (GetContainerNumSlots and GetContainerNumSlots(bagId) > 0)
                 local bag = exists and getglobal(BAG_WINDOWS[bagId + 1])

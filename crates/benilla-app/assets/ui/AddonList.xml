@@ -43,6 +43,32 @@
         ADDON_BUTTON_HEIGHT = 16
         MAX_ADDONS_DISPLAYED = 19
 
+        -- The interface benilla implements. Kept as a name rather than a literal at the call site
+        -- because `ui_script::addons::INTERFACE_VERSION` is the same constant on the Rust side and
+        -- the two must not drift.
+        BENILLA_INTERFACE_VERSION = 11200
+
+        -- **`## Interface` mismatch, which `GetAddOnInfo`'s `reason` cannot carry.** 1191 §6 reports
+        -- the mismatch and never enforces it — enforcing would refuse most of a real vanilla corpus,
+        -- whose manifests say 11100, 10900, anything — so it is not a reason the addon *cannot*
+        -- load, and `not_loadable` rightly has no arm for it. That left this screen silent about a
+        -- status its char-select twin has always shown, for the same addon: two views of one folder
+        -- (1197 §3) disagreeing. This is the missing half.
+        --
+        -- Stated divergence, measured: `GetAddOnMetadata` returns the FIRST `## Interface` line
+        -- while the Rust `out_of_date()` accepts a match among ALL of them. **Zero of the 218 corpus
+        -- addons declare it twice**, so the two agree everywhere it is currently observable; a
+        -- manifest that declared 11100 and 11200 would read out-of-date here and current there.
+        function AddonList_OutOfDate(name)
+            local declared = GetAddOnMetadata(name, "Interface")
+            if not declared then
+                -- No `## Interface` at all is SILENT, not out of date — the same rule the char
+                -- select panel pins in `a_manifest_with_no_interface_is_silent`.
+                return nil
+            end
+            return tonumber(declared) ~= BENILLA_INTERFACE_VERSION
+        end
+
         -- The staged edit. `AddonList.original` is the enable state as the panel found it, so
         -- Cancel can put it back — the reference's `ResetAddOns` over the client's own records,
         -- which we do not have an engine verb for (SaveAddOns/ResetAddOns are GLUE-namespace
@@ -72,10 +98,16 @@
 
         -- One row's worth of facts, so the row painter below reads as a list of assignments
         -- rather than as a pile of GetAddOnInfo returns.
+        -- Slot 4 is `enabled`, and `url` is not in the in-game return at all: the client registers
+        -- GetAddOnInfo twice and the in-game one (`0x48e390`) answers seven values without a URL,
+        -- where glue's (`0x46d460`) answers eight with one. We had the glue shape here, so this
+        -- read `url` out of slot 4 and then had to RECONSTRUCT `enabled` from the reason token —
+        -- a workaround that existed only because the slot it wanted was occupied by the wrong
+        -- value. `## URL` lives in the manifest either way, so the tooltip asks for it directly.
         local function rowFacts(index)
-            local name, title, notes, url, loadable, reason = GetAddOnInfo(index)
-            local enabled = not (reason == "DISABLED")
-            return name, (title or name), loadable, reason, enabled, notes, url
+            local name, title, notes, enabled, loadable, reason = GetAddOnInfo(index)
+            return name, (title or name), loadable, reason, enabled, notes,
+                GetAddOnMetadata(name, "URL")
         end
 
         function AddonList_Update()
@@ -117,6 +149,16 @@
                     local status = getglobal("AddonListEntry" .. i .. "Status")
                     if reason then
                         status:SetText(getglobal("ADDON_" .. reason) or reason)
+                    elseif AddonList_OutOfDate(name) then
+                        -- INTERFACE_VERSION ("Out of date"), which `reason` can never carry here
+                        -- and which the char-select twin has always shown. The two screens are the
+                        -- same job (1197 §1) and were answering DIFFERENTLY about the same addon:
+                        -- glue read `## Interface` off the folder, this one asked `GetAddOnInfo`,
+                        -- and `not_loadable` has no interface arm — because 1191 §6 reports the
+                        -- mismatch and never enforces it, so it is not a reason the addon cannot
+                        -- load. Surfaced separately for exactly that reason: `loadable` stays true
+                        -- and most of a real vanilla corpus keeps loading.
+                        status:SetText(ADDON_INTERFACE_VERSION or "Out of date")
                     else
                         status:SetText("")
                     end

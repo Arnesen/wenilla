@@ -446,6 +446,34 @@
             end
         end
 
+        -- ── The reference's names, so an addon that hooks them is reached ──────────────────────
+        --
+        -- The 1.12 customisation model is "replace a global and the client calls your replacement"
+        -- (Bagnon does it to `ToggleBackpack`; `zBar`/`zBarEx` do
+        -- `SetScript("OnShow", ActionButton_Update)`; `CT_BarMod` calls `ActionButton_Update()`
+        -- outright). Wherever our UI calls a `Benilla`-named function and never the reference's
+        -- name, every one of those addons is SILENTLY INERT — the override is installed and never
+        -- invoked. A survey cannot see it; it loads addons and fires events but never clicks.
+        --
+        -- These are ADAPTERS, not renames, and the distinction is the whole point: the reference's
+        -- contract is `this`-shaped and no-argument, ours takes the button explicitly. Renaming
+        -- would let `TipBuddy`'s `originalUnitFrame_OnEnter()` reach us with a nil frame — reachable
+        -- but broken, which is worse than inert. The adapter publishes the reference's SHAPE and
+        -- delegates.
+        --
+        -- NOT adapted, and named so nobody assumes it was missed: `ActionButton_OnLoad`. Ours is
+        -- `(button, index, base, commandPrefix)` and the reference's takes nothing — the extra
+        -- arguments are real state our per-container registration needs, so no adapter can supply
+        -- them. That is the per-button event registration change already at the top of the arc
+        -- queue, not a naming fix.
+        function ActionButton_Update()
+            BenillaActionButton_Update(this)
+        end
+
+        function ActionButton_UpdateUsable()
+            BenillaActionButton_UpdateUsable(this)
+        end
+
         function BenillaActionButton_Update(button)
             local action = BenillaActionButton_Action(button)
             if HasAction(action) then
@@ -1360,5 +1388,89 @@
             <OnLoad>BenillaActionBar_OnLoad(self)</OnLoad>
             <OnEvent>BenillaActionBar_OnEvent(self)</OnEvent>
         </Scripts>
+    </Frame>
+
+    <!-- **The bonus action bar, built but never shown** — the same posture 1219 gave the vertical
+         multibars, and for the same reason: `ref-BonusActionBarFrame.xml` l.54 instantiates
+         `BonusActionBarFrame` as a real `parent="MainMenuBar"` frame carrying `hidden="true"`, with
+         `BonusActionButton1..12` inside (l.88+). It exists from load on the real client and shows
+         only while a form/stealth page is active.
+
+         benilla models the bonus page by RE-PAGING THE MAIN BAR (`set_bonus_bar_offset` +
+         UPDATE_BONUS_ACTIONBAR — the main bar's own fork), so this bar is never shown by us. It is
+         declared because addons reach for it by name and die when it is absent: the largest single
+         session-start row in the corpus was `CT_BarMod\CT_BarModOptions.lua:154`,
+
+             getglobal("BonusActionButton" .. i):ClearAllPoints();
+
+         which is pure LAYOUT — four addons (Bongos_MapBar, Bongos_Options, Bongos_RollBar,
+         CT_BottomBar) only need the buttons to exist and accept ClearAllPoints/SetPoint. Five more
+         index `BonusActionBarFrame` (decision 1218's corrected ranking).
+
+         The buttons wire to the MAIN bar's paged slots — `BenillaActionButton_OnLoad(self, i)`,
+         exactly as ActionButton1..12 do. That is not a placeholder: our bonus model re-pages the
+         main bar, so a bonus button showing the main bar's current paged slot is the coherent
+         answer, and it is also the reference's binding story (vanilla's ACTIONBUTTON1-12 drive the
+         bonus bar while a form is up, so sharing the command prefix is faithful). Wiring them also
+         means the template's OnUpdate cannot meet a button with no `.index` if an addon shows one.
+
+         Geometry quoted from the reference: a 505x43 frame anchored TOPLEFT to MainMenuBar's
+         BOTTOMLEFT +(40,0); button 1 at BOTTOMLEFT +(5,4), each next LEFT-of-previous-RIGHT +6
+         (l.55-62, l.88-105). -->
+    <Frame name="BonusActionBarFrame" frameStrata="HIGH" parent="MainMenuBar" enableMouse="true" toplevel="true" hidden="true">
+        <Size><AbsDimension x="505" y="43"/></Size>
+        <Anchors>
+            <Anchor point="TOPLEFT" relativeTo="MainMenuBar" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="40" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <CheckButton name="BonusActionButton1" inherits="BenillaActionButtonTemplate" id="1">
+                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton2" inherits="BenillaActionButtonTemplate" id="2">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton3" inherits="BenillaActionButtonTemplate" id="3">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton4" inherits="BenillaActionButtonTemplate" id="4">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton5" inherits="BenillaActionButtonTemplate" id="5">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton6" inherits="BenillaActionButtonTemplate" id="6">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton7" inherits="BenillaActionButtonTemplate" id="7">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton8" inherits="BenillaActionButtonTemplate" id="8">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton9" inherits="BenillaActionButtonTemplate" id="9">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton10" inherits="BenillaActionButtonTemplate" id="10">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton11" inherits="BenillaActionButtonTemplate" id="11">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton10" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BonusActionButton12" inherits="BenillaActionButtonTemplate" id="12">
+                <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12)</OnLoad></Scripts>
+            </CheckButton>
+        </Frames>
     </Frame>
 </Ui>

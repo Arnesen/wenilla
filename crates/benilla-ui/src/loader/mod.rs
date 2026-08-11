@@ -103,18 +103,25 @@ pub fn load(
 
 /// [`load`] for a document that does **not** sit at the provider's root.
 ///
-/// `base` is the document's own directory, in the provider's path space (`/`-separated, no
-/// trailing slash; `""` is the root). Every `<Include>`/`<Script file=>` inside resolves against
-/// it, and each nested include resolves against *its* own directory in turn — so an addon whose
-/// manifest lists `src\main.xml` passes `"<Addon>/src"` here and its `<Include file="templates.xml">`
-/// reaches `<Addon>/src/templates.xml` (decision 1186).
+/// `path` is the document's **own path** in the provider's path space (`/`-separated; `""` for a
+/// document with no path, which only tests have). Its directory is what every `<Include>`/`<Script
+/// file=>` inside resolves against, and each nested include resolves against *its* own directory in
+/// turn — so an addon whose manifest lists `src\main.xml` passes `"<Addon>/src/main.xml"` here and
+/// its `<Include file="templates.xml">` reaches `<Addon>/src/templates.xml` (decision 1186).
+///
+/// **The path, not the directory, because the loader has to be able to say where a raise came
+/// from.** Every `<Script>` chunk is named after the file carrying it; an unnamed chunk takes
+/// mlua's `#[track_caller]` default, which is *this file's* Rust source line, and 26 of the corpus
+/// survey's 70 readable failures pointed at `crates/benilla-ui/src/loader/mod.rs` instead of the
+/// addon (decision 1217). Three callers used to derive this directory themselves with the same
+/// three lines; they pass the path now and [`dir_of`] does it once.
 pub fn load_in(
     script: &UiScript,
     doc: &ParsedDocument,
-    base: &str,
+    path: &str,
     files: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> LoadReport {
-    load_into(script.lua(), doc, base, files)
+    load_into(script.lua(), doc, path, files)
 }
 
 /// [`load_in`] against the VM directly, for a caller that holds `&Lua` rather than `&UiScript` —
@@ -123,13 +130,13 @@ pub fn load_in(
 pub fn load_into(
     lua: &mlua::Lua,
     doc: &ParsedDocument,
-    base: &str,
+    path: &str,
     files: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> LoadReport {
     let mut loader = Loader {
         lua,
         files,
-        base: base.to_string(),
+        path: path.to_string(),
         report: LoadReport::default(),
         warned: HashSet::new(),
     };
@@ -182,7 +189,7 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
     let mut loader = Loader {
         lua,
         files: &no_files,
-        base: String::new(),
+        path: String::new(),
         report: LoadReport::default(),
         warned: HashSet::new(),
     };
@@ -297,10 +304,12 @@ struct Loader<'a> {
     /// `&Lua` and can never obtain the `&UiScript` that owns it.
     pub(super) lua: &'a mlua::Lua,
     pub(super) files: &'a dyn Fn(&str) -> Option<Vec<u8>>,
-    /// The current document's own directory in the provider's path space — what a relative
-    /// `<Include>`/`<Script file=>` inside it resolves against. Saved and restored around each
-    /// nested include, so depth-1 and depth-5 both resolve against their own file's folder.
-    pub(super) base: String,
+    /// The current document's own path in the provider's path space. Its **directory**
+    /// ([`Loader::base`]) is what a relative `<Include>`/`<Script file=>` inside it resolves
+    /// against; its **whole path** is what names an inline `<Script>`'s chunk. Saved and restored
+    /// around each nested include, so depth-1 and depth-5 both resolve — and report — against
+    /// their own file.
+    pub(super) path: String,
     // The template + font-element registries live on the `Model` (`framexml_templates` /
     // `framexml_fonts`), persisted ACROSS `load` calls — the client's template table is global
     // (`0x6ee500`), so a file may `inherits=` a template an earlier file registered (the real
@@ -318,13 +327,30 @@ impl Loader<'_> {
         self.lua
     }
 
+    /// The current document's own directory — what a relative `<Include>`/`<Script file=>` inside
+    /// it resolves against.
+    fn base(&self) -> &str {
+        dir_of(&self.path)
+    }
+
     /// Run a chunk in the one global state — `UiScript::run`'s body, reachable from `&Lua`.
     ///
     /// Takes **bytes**, because a `<Script file=>` chunk is whatever is on disk (decision 1193) and
     /// Lua 5.0 strings are byte strings. An inline `<Script>` body arrives as `&str` from the XML
     /// and is passed through as its own bytes, which is the same thing.
-    fn run(&self, chunk: &[u8]) -> mlua::Result<()> {
-        self.lua.load(chunk).set_mode(mlua::ChunkMode::Text).exec()
+    ///
+    /// `path` names the chunk, and **naming it is not cosmetic**: mlua's `load` is `#[track_caller]`
+    /// and an unnamed chunk is named after the Rust line that loaded it, so every raise from every
+    /// FrameXML and addon `<Script>` block in this project reported `loader/mod.rs` as its source
+    /// (decision 1217). Lua's leading `@` is what makes it a *file* name rather than a quoted
+    /// source snippet, and the separator is `\` because that is the shape an addon parsing its own
+    /// `debugstack()` matches against (`crate::script::addon_chunk_name`).
+    fn run(&self, chunk: &[u8], path: &str) -> mlua::Result<()> {
+        self.lua
+            .load(chunk)
+            .set_name(format!("@{}", path.replace('/', "\\")))
+            .set_mode(mlua::ChunkMode::Text)
+            .exec()
     }
 
     /// The model, for the two FrameXML registries below.
@@ -389,10 +415,10 @@ impl Loader<'_> {
             match item {
                 TopLevel::Include(path) => self.do_include(path),
                 TopLevel::Script(ScriptRef::File(path)) => {
-                    let joined = join_ref(&self.base, path);
+                    let joined = join_ref(self.base(), path);
                     match (self.files)(&joined) {
                         Some(bytes) => {
-                            if let Err(e) = self.run(crate::source::chunk(&bytes)) {
+                            if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
                                 self.report
                                     .errors
                                     .push(format!("<Script file=\"{path}\">: {e}"));
@@ -404,8 +430,14 @@ impl Loader<'_> {
                         )),
                     }
                 }
-                TopLevel::Script(ScriptRef::Inline(body)) => {
-                    if let Err(e) = self.run(body.as_bytes()) {
+                TopLevel::Script(ScriptRef::Inline { body, line }) => {
+                    // Padded to the block's own offset in the XML, so Lua counts from where the
+                    // file does. A chunk always starts at line 1; naming it after the file without
+                    // this would make every reported line a confident, checkable lie.
+                    let mut chunk = "\n".repeat(line.saturating_sub(1) as usize).into_bytes();
+                    chunk.extend_from_slice(body.as_bytes());
+                    let path = self.path.clone();
+                    if let Err(e) = self.run(&chunk, &path) {
                         self.report.errors.push(format!("inline <Script>: {e}"));
                     }
                 }
@@ -430,7 +462,7 @@ impl Loader<'_> {
     }
 
     pub(super) fn do_include(&mut self, path: &str) {
-        let joined = join_ref(&self.base, path);
+        let joined = join_ref(self.base(), path);
         let Some(bytes) = (self.files)(&joined) else {
             self.report.errors.push(format!(
                 "<Include file=\"{path}\">: no provider hit for \"{joined}\"; the whole \
@@ -442,11 +474,12 @@ impl Loader<'_> {
         match framexml::parse(&crate::source::decode(&bytes)) {
             Ok(sub) => {
                 self.report.warnings.extend(sub.warnings.iter().cloned());
-                // The included document's OWN directory is what ITS relative references resolve
-                // against — restored after, so a sibling include at this level is unaffected.
-                let outer = std::mem::replace(&mut self.base, dir_of(&joined).to_string());
+                // The included document's OWN path is what ITS relative references resolve against
+                // and what ITS inline scripts are named after — restored after, so a sibling
+                // include at this level is unaffected.
+                let outer = std::mem::replace(&mut self.path, joined.clone());
                 self.load_doc(&sub);
-                self.base = outer;
+                self.path = outer;
             }
             Err(e) => self
                 .report

@@ -160,6 +160,20 @@ pub(crate) struct Roster {
 }
 
 impl Roster {
+    /// A roster with a pick already in flight — the state world entry runs in.
+    ///
+    /// `#[cfg(test)]` and `pub(crate)` because the fields are `pub(super)`: a test outside this
+    /// module cannot build one, and `ui_script`'s does exactly that to drive
+    /// `seat_from_roster` over a real row rather than a copy of its logic.
+    #[cfg(test)]
+    pub(crate) fn with_pending_pick(chars: Vec<Character>, guid: u64) -> Self {
+        Self {
+            chars,
+            pending_pick: Some(guid),
+            ..Self::default()
+        }
+    }
+
     /// Note a character the create screen just made, and select its row.
     ///
     /// **The consume happens here, not on the next roster message** (B119): the IO thread
@@ -219,7 +233,13 @@ impl Roster {
     }
 
     /// The roster row for the pick in flight.
-    fn pending_row(&self) -> Option<&Character> {
+    ///
+    /// `pub(crate)` because this row is the ONLY description of the character that exists during
+    /// world entry: `Connected` flips us `InWorld` a whole server round-trip before the self
+    /// descriptor streams in, and the in-game UI — plus every addon's file scope — materializes
+    /// inside that window. `ui_script::load_ingame_ui_on_world_entry` seats
+    /// `UnitName("player")` from here for exactly that reason.
+    pub(crate) fn pending_row(&self) -> Option<&Character> {
         self.pending_pick
             .and_then(|g| self.chars.iter().find(|c| c.guid == g))
     }

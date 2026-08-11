@@ -221,6 +221,10 @@ pub(crate) struct Model {
     /// §2) — `GetNumPartyMembers`/`GetPartyLeaderIndex`/`GetLootMethod`/… read it ([`party`]).
     /// `PartyState::default()` = not in a group (every getter reports the solo-player shape).
     /// Per-member game state rides the `units` map above, under `"party1"`..`"party4"` tokens.
+    /// The channels this session has CONFIRMED joining, in join order — the client-side number
+    /// law `GetChannelName` answers with ([`super::channel`]). Mirrored from `ui_chat`'s
+    /// `ChannelState` by `set_joined_channels`; empty until the server's first YOU_JOINED.
+    pub(crate) joined_channels: Vec<String>,
     pub(crate) party: party::PartyState,
     /// Party/loot intents (`AcceptGroup`/`InviteToParty`/`SetLootMethod`/…) queued since the
     /// app's last [`super::UiScript::take_party_requests`] drain — the outbound seam ([`party`]).
@@ -237,6 +241,10 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
     pub(crate) tell_requests: Vec<String>,
+    /// Prefill texts `ChatFrame_OpenChat` queued since the app's last
+    /// [`super::UiScript::take_open_chat_requests`] drain — `tell_requests`' sibling, one step
+    /// less resolved: a name there, a whole draft line here ([`chat_window`] registers the global).
+    pub(crate) open_chat_requests: Vec<String>,
     /// The player's default chat language name, app-resolved from `ChrRaces.BaseLanguage` ×
     /// `Languages.dbc` ([`super::UiScript::set_default_language`]). `None` = the reference's
     /// no-player-object state, where `GetDefaultLanguage()` returns **zero Lua values**
@@ -960,11 +968,13 @@ impl Model {
             target_by_name_requests: Vec::new(),
             drop_item_on_unit: Vec::new(),
             target_clear: false,
+            joined_channels: Vec::new(),
             party: party::PartyState::default(),
             party_requests: Vec::new(),
             social: social::SocialState::default(),
             social_requests: Vec::new(),
             tell_requests: Vec::new(),
+            open_chat_requests: Vec::new(),
             default_language: None,
             duel_requests: Vec::new(),
             follow_requests: Vec::new(),

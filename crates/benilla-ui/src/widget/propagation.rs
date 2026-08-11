@@ -7,7 +7,7 @@
 
 use crate::order::Strata;
 
-use super::{FrameHandle, WidgetArena, SCALE_EPS};
+use super::{FrameHandle, RegionHandle, WidgetArena, SCALE_EPS};
 
 impl WidgetArena {
     // ── Visibility (effective_visible_show/_hide) ────────────────────────────────────────────────
@@ -290,6 +290,76 @@ impl WidgetArena {
         // Alpha: untouched by a reparent — the client only pushes alpha at SetAlpha time
         // (module alpha section), so the moved subtree keeps its last-written values.
         changed
+    }
+
+    /// Re-link a **region leaf** (Texture/FontString) to a new owner frame — the arena half of
+    /// `Region:SetParent`. `None` detaches ([`super::Region::detached`]). Returns whether anything
+    /// moved (a same-owner call and a stale handle both report `false`).
+    ///
+    /// **This is a different mechanism from the frame reparent above, and the difference is
+    /// verified.** `SetParent` is one Region-table binding (`0x7a1550`) dispatching a per-class
+    /// virtual: a plain Region gets `0x76c430`, which writes the geometry parent and nothing else,
+    /// but a Texture or FontString gets `0x7733d0` → `0x77fd10`, a **full re-link** — remove from
+    /// the old parent's draw layer (`0x77fc60`) and region list (`vtbl+0x2c`), store the new
+    /// parent, insert into its region list (`0x76a750`) and re-register in its draw layer
+    /// (`0x77fcb0`), **preserving layer and sub-level** (wow-re `widget-api-batch-benilla.md` Q7).
+    /// So the layer/sub-level fields are deliberately untouched here and only the membership moves;
+    /// the fresh `decl_seq` is the "insert into the new parent's region list" half, which lands the
+    /// region at the tail of that frame's list exactly as the client's insert does.
+    ///
+    /// Nothing propagates, unlike the frame reparent: a region has no effective-visible/scale/alpha
+    /// of its own here — every reader (`IsVisible`, the measure key, `extract`'s alpha product)
+    /// resolves the owner frame's live values through [`super::Region::owner`], so re-pointing that
+    /// field *is* the propagation the client does eagerly (`0x77fd10` pushes the new parent's shown
+    /// bit into the region).
+    ///
+    /// **A same-owner call is a no-op, and that is the conservative reading, not a verified one.**
+    /// `0x77fd10` is unconditional, so the reference may re-tail a region within its own layer when
+    /// an addon re-parents it to the frame it already belongs to. Not reproducing that can only
+    /// ever *preserve* declared draw order, never invent one; and the corpus's only region
+    /// `SetParent` caller — `FuBar_FuXPFu.lua:210-211`, which re-parents two `XPBar:CreateTexture`
+    /// sparks to `XPBar` — moves both in declaration order, so the two readings agree there.
+    pub fn set_region_owner(&mut self, rh: RegionHandle, new_owner: Option<FrameHandle>) -> bool {
+        let Some(region) = self.region(rh) else {
+            return false;
+        };
+        let (old_owner, was_detached) = (region.owner, region.detached);
+        // Keep only a live new owner. No cycle check: the client's (`0x7a177f`) walks the new
+        // parent's frame chain looking for the receiver, and a Texture/FontString is never a frame,
+        // so for a region it can never fire.
+        let new_owner = new_owner.filter(|&f| self.frame(f).is_some());
+        match new_owner {
+            Some(f) if f == old_owner && !was_detached => return false,
+            None if was_detached => return false,
+            _ => {}
+        }
+        let Some(new_owner) = new_owner else {
+            // Detached: the entry stays in its last owner's list (so `destroy` still frees it) and
+            // the flag alone takes it out of the draw.
+            if let Some(r) = self.region_mut(rh) {
+                r.detached = true;
+            }
+            return true;
+        };
+        if let Some(of) = self.frame_mut(old_owner) {
+            of.regions.retain(|&r| r != rh);
+        }
+        let decl_seq = {
+            let f = self.frame_mut(new_owner).expect("live new owner");
+            let d = f.next_decl;
+            f.next_decl += 1;
+            d
+        };
+        if let Some(r) = self.region_mut(rh) {
+            r.owner = new_owner;
+            r.decl_seq = decl_seq;
+            r.detached = false;
+        }
+        self.frame_mut(new_owner)
+            .expect("live new owner")
+            .regions
+            .push(rh);
+        true
     }
 
     // ── Mouse interaction (the hit-test flag) ────────────────────────────────────────────────────

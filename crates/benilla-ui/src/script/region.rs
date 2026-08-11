@@ -127,6 +127,79 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // SetParent(frame) — **a Texture/FontString really does have this**, and we were the ones
+    // missing it. `SetParent` lives in the REGION method table (`0x7a1550`); Texture's class lookup
+    // falls back to Region's at `0x79c650` and FontString's at `0x79ee50`, so both reach it (wow-re
+    // `system/ui/scratch/widget-api-batch-benilla.md` Q7, §5-verified). `FuBar_FuXPFu.lua:210`'s
+    // `self.Spark:SetParent(self.XPBar)` is not a broken addon.
+    //
+    // Four contract traps, each spelled out because each is a plausible implementation's silent
+    // divergence:
+    //
+    //  · **The argument must be a FRAME.** `0x7a16ea` runs `IsA(FrameTag)` on it, and a Texture or
+    //    Region argument raises `"…Wrong parent object type, expected frame"` (`0x87cb78`). Ours
+    //    raises too — a re-parent that quietly did nothing is the silent-drop class of 1203/1205.
+    //  · **A missing argument is NOT the nil form.** TNONE fails the `== LUA_TNIL` test and falls
+    //    through to `"…Couldn't find region named '%s'"` (`0x87cb48`), so `tex:SetParent()` raises
+    //    while `tex:SetParent(nil)` detaches. That is why this reads a `MultiValue`: mlua cannot
+    //    tell an absent argument from an explicit nil any other way.
+    //  · **Anchors are untouched.** The re-link moves draw-layer/region-list membership only; a
+    //    re-parented Texture still anchors to whatever `SetPoint` named — which is why FuXPFu
+    //    re-points its spark afterwards, and why our anchors (which store the resolved target id)
+    //    need no fixing up at all.
+    //  · **Zero return values**, on every path.
+    //
+    // The mechanism half — full re-link, layer and sub-level preserved, `nil` = orphaned but not
+    // destroyed — is [`crate::widget::WidgetArena::set_region_owner`]'s doc.
+    m.set(
+        "SetParent",
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let Some(Value::Table(this)) = it.next() else {
+                return Err(mlua::Error::runtime("SetParent: expected a region"));
+            };
+            let rh = region_handle_of(lua, &this)?;
+            let Some(parent) = it.next() else {
+                return Err(mlua::Error::runtime(
+                    "SetParent(): Couldn't find region named '' (no argument)",
+                ));
+            };
+            let wrong_type =
+                || mlua::Error::runtime("SetParent(): Wrong parent object type, expected frame");
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let new_owner = match &parent {
+                Value::Nil => None,
+                // A region/font-object wrapper decodes to an id that is not a frame's (or to no id
+                // at all) — both land on the same "expected frame" the reference raises.
+                Value::Table(t) => Some(
+                    decode_id(t)
+                        .ok()
+                        .and_then(|id| model.id_to_frame.get(&id).copied())
+                        .ok_or_else(wrong_type)?,
+                ),
+                // A name resolves through the frame registry, as every other frame-target argument
+                // does (`SetPoint`'s relativeTo, `SetParent` on the frame side).
+                Value::String(s) => {
+                    let name = s.to_str()?;
+                    Some(model.arena.lookup(name.as_ref()).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "SetParent(): Couldn't find region named '{}'",
+                            name.as_ref()
+                        ))
+                    })?)
+                }
+                _ => return Err(wrong_type()),
+            };
+            if model.arena.set_region_owner(rh, new_owner) {
+                // An un-anchored region draws relative to its owner, and an anchored one resolves
+                // against the owner's rect and effective scale (`layout.rs`'s region sweep) — the
+                // owner is a layout input, so a re-link is a layout change.
+                model.touch_layout();
+            }
+            Ok(())
+        })?,
+    )?;
+
     // Region-level visibility — the real VisibleRegion Show/Hide on Textures/FontStrings (the
     // ref kit hides tab slices, cooldown swipes, money coins…). A hidden region draws nothing;
     // IsVisible additionally requires the owner frame's effective visibility, mirroring the
@@ -234,10 +307,72 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             Ok((c[0], c[1], c[2], c[3]))
         })?,
     )?;
+    // SetGradientAlpha(orientation, r1,g1,b1,a1, r2,g2,b2,a2) and its alpha-less twin
+    // SetGradient(orientation, r1,g1,b1, r2,g2,b2) — the two-stop linear gradient the client
+    // generates into the same `+0xcc` texture slot the colour form of SetTexture fills.
+    //
+    // These were missing, and they were the single wall in front of the corpus's largest family:
+    // `FuBar\FuBar_Panel.lua:144` calls SetGradientAlpha while building the bar, so all 20 FuBar
+    // plugins died there — after the debugstack/chunk-name fix got them that far.
+    //
+    // The orientation token is matched case-insensitively and anything that is not "VERTICAL" is
+    // horizontal, which is the client's own leniency and matters because addons spell it both ways.
+    // The gradient is stored WHOLE (see `RegionData::gradient`); the paint folds it to its midpoint
+    // because a quad carries one tint today. That approximation is visible and is recorded at the
+    // field, not hidden here.
+    for (name, with_alpha) in [("SetGradientAlpha", true), ("SetGradient", false)] {
+        m.set(
+            name,
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let mut it = args.into_iter();
+                let this: Table = match it.next() {
+                    Some(Value::Table(t)) => t,
+                    _ => return Err(mlua::Error::runtime("expected a region")),
+                };
+                let orientation = match it.next() {
+                    Some(Value::String(s)) => s.to_str()?.to_string(),
+                    // A missing/!string orientation is horizontal, like any non-"VERTICAL" token.
+                    _ => String::new(),
+                };
+                let n = if with_alpha { 8 } else { 6 };
+                let mut c = [0.0f32; 8];
+                for slot in c.iter_mut().take(n) {
+                    *slot = it.next().as_ref().map(as_f32).unwrap_or(0.0);
+                }
+                let (start, end) = if with_alpha {
+                    ([c[0], c[1], c[2], c[3]], [c[4], c[5], c[6], c[7]])
+                } else {
+                    // SetGradient has no alpha stops: both ends are opaque.
+                    ([c[0], c[1], c[2], 1.0], [c[3], c[4], c[5], 1.0])
+                };
+                let rh = region_handle_of(lua, &this)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let d = model.region_data.entry(rh).or_default();
+                d.gradient = Some(super::Gradient {
+                    vertical: orientation.eq_ignore_ascii_case("VERTICAL"),
+                    start,
+                    end,
+                });
+                Ok(())
+            })?,
+        )?;
+    }
     m.set(
         "SetTexture",
+        // The trailing three are `Value`, not `Option<f32>`, and that is a fidelity fix rather than
+        // laxity. The path form reads ONE argument (`0x770200`); only the colour form
+        // (`0x770360`) reads up to four. A C function takes what it wants off the Lua stack and
+        // ignores the rest, so `SetTexture(path, true)` is fine on the real client — and typing
+        // these as `Option<f32>` made us raise on it, `bad argument #3: error converting Lua
+        // boolean to f32`, in a call the client accepts silently.
+        //
+        // Found by `_LazyPig/LazyPigMenu.lua:182`
+        // (`texture_title:SetTexture("Interface\DialogFrame\UI-DialogBox-Header", true)`), which
+        // reached us only once the survey started seating the addon registry — the whole point of
+        // that instrument fix. The stray `true` is meaningless in 1.12 and the addon author
+        // presumably meant a later client's second parameter; either way the client shrugs.
         lua.create_function(
-            |lua, (this, arg, g, b, a): (Table, Value, Option<f32>, Option<f32>, Option<f32>)| {
+            |lua, (this, arg, g, b, a): (Table, Value, Value, Value, Value)| {
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let data = model.region_data.entry(rh).or_default();
@@ -260,13 +395,21 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                         data.texture = Some(s.to_str()?.to_string());
                         data.fill = None;
                     }
+                    // The colour form, and the ONLY branch that looks at the trailing three. A
+                    // non-numeric there takes the same default a missing one does, which is what
+                    // reading off a C stack does: `lua_tonumber` on a non-number yields 0.
                     Value::Number(_) | Value::Integer(_) => {
-                        data.fill = Some([
-                            as_f32(&arg),
-                            g.unwrap_or(0.0),
-                            b.unwrap_or(0.0),
-                            a.unwrap_or(1.0),
-                        ]);
+                        let chan = |v: &Value, dflt: f32| match v {
+                            Value::Number(_) | Value::Integer(_) => as_f32(v),
+                            Value::String(s) => s
+                                .to_str()
+                                .ok()
+                                .and_then(|s| s.parse::<f32>().ok())
+                                .unwrap_or(dflt),
+                            _ => dflt,
+                        };
+                        data.fill =
+                            Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
                         data.texture = None;
                     }
                     // SetTexture(nil) clears (the live API's blank-the-region form); a cleared
@@ -280,6 +423,73 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 Ok(())
             },
         )?,
+    )?;
+    // SetDesaturated(flag) -> shaderSupported — Texture only (`0x79c1e0`, wow-re ledger; the
+    // reference's own `ItemButtonTemplate.lua:69` is `local shaderSupported =
+    // icon:SetDesaturated(desaturated)`).
+    //
+    // **The RETURN is the whole design, and it is the half a plausible implementation drops.**
+    // 1.12 ran on cards that could not do the shader, so the verb reports whether it took effect
+    // and FrameXML falls back by hand:
+    //
+    //     if ( not desaturated ) then r,g,b = 1,1,1
+    //     elseif ( not r or not shaderSupported ) then r,g,b = 0.5,0.5,0.5 end
+    //     icon:SetVertexColor(r, g, b)
+    //
+    // We have no desaturation in the renderer, so we answer **nil — unsupported**, which is a real
+    // 1.12 machine's answer and not a lie. Claiming support would suppress that grey fallback and
+    // leave disabled icons drawn at full colour: strictly worse-looking than saying no. When a
+    // desaturating shader lands, flip the return and this comment with it.
+    //
+    // Why it matters far past one verb: **98 of the 109 addons that draw and then raise on being
+    // used, raise here** — `FuBar_Panel.lua:43`'s right-click reaches Dewdrop's `AddLine`
+    // (`Dewdrop-2.0.lua:2172`), which calls `button.arrow:SetDesaturated(true)` unguarded. A
+    // static scan costed this at 61 addons and it was declined; the use-probe costed it at 98 the
+    // moment anyone right-clicks.
+    m.set(
+        "SetDesaturated",
+        lua.create_function(|lua, (this, flag): (Table, Value)| {
+            let on = !matches!(flag, Value::Nil | Value::Boolean(false));
+            let rh = region_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            model.region_data.entry(rh).or_default().desaturated = on;
+            // nil, not false: the reference's `shaderSupported` is a 1|nil C answer and callers
+            // write `not shaderSupported`.
+            Ok(Value::Nil)
+        })?,
+    )?;
+    // GetTexture() — Texture only (`0x79ba70`), verified in wow-re's widget-method batch
+    // (`system/ui/scratch/widget-api-batch-benilla.md`). Three contract details are each the kind a
+    // plausible implementation gets silently wrong, so each is spelled out:
+    //
+    //  · **Exactly ONE return value**, never a multi-return.
+    //  · **The colour form returns the literal string `"Solid Texture"`** (`0x835708`), NOT nil.
+    //    `SetTexture(r,g,b)` synthesizes an 8x8 solid, and the getter reports that name — so an
+    //    addon's `if not tex then` passes straight through on a colour-filled region. Returning nil
+    //    here would look tidier and would be wrong in the one direction callers test for.
+    //  · **The path is stripped at the LAST `.`** (`0x79baf0`): the loader appends `.blp`/`.tga` to
+    //    what was set and the getter strips an extension back off. Taken verbatim rather than
+    //    "strip only a real extension" — a directory containing a dot is mangled by the real client
+    //    too, and this surface is a transcription, not an improvement.
+    //
+    // Four corpus addons: `AtlasQuest.lua:228` (`AQATLASMAP = AtlasMap:GetTexture()`) and
+    // `FuBarPlugin-2.0.lua:343` (`return self.iconFrame:GetTexture()`), each reached by two addons.
+    m.set(
+        "GetTexture",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_mut::<Model>().expect("model");
+            let Some(data) = model.region_data.get(&rh) else {
+                return Ok(None);
+            };
+            if data.fill.is_some() {
+                return Ok(Some("Solid Texture".to_string()));
+            }
+            Ok(data.texture.as_ref().map(|t| match t.rfind('.') {
+                Some(i) => t[..i].to_string(),
+                None => t.clone(),
+            }))
+        })?,
     )?;
     // SetPortraitToTexture(path) — set the texture AND mark the region a portrait (drawn masked to
     // its inscribed circle). The client's portraits are circular (model or icon fallback); the frame
@@ -745,6 +955,114 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // SetNonSpaceWrap(enable) / CanNonSpaceWrap() — FontString only (`0x79e9f0` / `0x79ead0`).
+    //
+    // Two contract details from wow-re's batch, both easy to get wrong:
+    //  · the getter is **`CanNonSpaceWrap`**, not `GetNonSpaceWrap`, and it answers **`1` or nil**,
+    //    not a boolean — 1.12 predates that convention and an addon may compare against 1.
+    //  · a **no-argument call ENABLES** it (the default is on), rather than being a query.
+    //
+    // `oRA2/Leader/Item.lua:561` is `f.textname:SetNonSpaceWrap(false)`, reached by two addons.
+    m.set(
+        "SetNonSpaceWrap",
+        lua.create_function(|lua, (this, enable): (Table, Value)| {
+            let on = match &enable {
+                Value::Nil => true,
+                Value::Boolean(b) => *b,
+                _ => true,
+            };
+            let rh = region_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            model.region_data.entry(rh).or_default().non_space_wrap = Some(on);
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "CanNonSpaceWrap",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_mut::<Model>().expect("model");
+            let on = model
+                .region_data
+                .get(&rh)
+                .and_then(|d| d.non_space_wrap)
+                .unwrap_or(true);
+            Ok(if on { Some(1i64) } else { None })
+        })?,
+    )?;
+    // ── shadow, on the REGION ────────────────────────────────────────────────────────────────
+    // These already existed on the font-object table; a FontString made by `CreateFontString` had
+    // none of them, and that is where the corpus calls them:
+    // `FuBar_NavigatorFu/NavigatorFu.lua:31` does
+    // `coordText:SetShadowColor(GameFontNormal:GetShadowColor())` — the GETTER on a font object,
+    // the SETTER on a fresh region — and `KLHThreatMeter/.../KTM_Gui.lua:404` is
+    // `fontstring:SetShadowColor(0,0,0,0.3)`.
+    //
+    // **`GetShadowColor` returns FOUR values, not three** (`0x79dd2f`, `mov eax,0x4` — wow-re's
+    // widget-method batch). Three is the plausible wrong answer and it silently drops the alpha
+    // that NavigatorFu is round-tripping. `GetShadowOffset` returns two, in UI units.
+    //
+    // Either half may be set before the other, so each starts from whatever is there — the same
+    // rule the font-object versions already follow.
+    m.set(
+        "SetShadowColor",
+        lua.create_function(
+            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+                let rh = region_handle_of(lua, &this)?;
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let d = model.region_data.entry(rh).or_default();
+                let offset = d.font_shadow.map_or([0.0, 0.0], |s| s.offset);
+                d.font_shadow = Some(crate::script::FontShadow {
+                    offset,
+                    color: [r, g, b, a.unwrap_or(1.0)],
+                });
+                d.font_explicit.shadow = true;
+                Ok(())
+            },
+        )?,
+    )?;
+    m.set(
+        "GetShadowColor",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_mut::<Model>().expect("model");
+            let c = model
+                .region_data
+                .get(&rh)
+                .and_then(|d| d.font_shadow)
+                .map_or([0.0, 0.0, 0.0, 1.0], |s| s.color);
+            Ok((c[0], c[1], c[2], c[3]))
+        })?,
+    )?;
+    m.set(
+        "SetShadowOffset",
+        lua.create_function(|lua, (this, x, y): (Table, f32, f32)| {
+            let rh = region_handle_of(lua, &this)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let d = model.region_data.entry(rh).or_default();
+            let color = d.font_shadow.map_or([0.0, 0.0, 0.0, 1.0], |s| s.color);
+            d.font_shadow = Some(crate::script::FontShadow {
+                offset: [x, y],
+                color,
+            });
+            d.font_explicit.shadow = true;
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "GetShadowOffset",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_mut::<Model>().expect("model");
+            let o = model
+                .region_data
+                .get(&rh)
+                .and_then(|d| d.font_shadow)
+                .map_or([0.0, 0.0], |s| s.offset);
+            Ok((o[0], o[1]))
+        })?,
+    )?;
+
     // SetFont(path, height [, flags]) — the direct face/size/outline setter (the real region API and
     // the XML `font=`/`<FontHeight>`/`outline=` join). `flags` is an OUTLINETYPE-ish string
     // ("OUTLINE"/"THICKOUTLINE"/…"); anything else clears the outline. A nil/empty `path` keeps the
@@ -769,11 +1087,7 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                     d.font_explicit.height = true;
                 }
                 if let Some(f) = flags {
-                    d.outline = match f.to_ascii_uppercase() {
-                        f if f.contains("THICK") => Outline::Thick,
-                        f if f.contains("OUTLINE") => Outline::Normal,
-                        _ => Outline::None,
-                    };
+                    d.outline = Outline::flags(&f);
                     d.font_explicit.outline = true;
                 }
                 Ok(true)

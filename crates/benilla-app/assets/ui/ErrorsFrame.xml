@@ -1,123 +1,68 @@
 <Ui>
     <!--
-        The real client's UIErrorsFrame (ref UIErrorsFrame.xml/.lua; ErrorFont =
-        GameFontNormalLarge, ref Fonts.xml:258): a 512×60 MessageFrame at TOP (0,-122),
-        displayDuration 5, insertMode TOP — the newest message takes the top line and older ones
-        shift down, up to the ~3 lines the 60px box holds. UI_INFO_MESSAGE shows YELLOW (1,1,0) —
-        the quest objective-progress toasts land here — and UI_ERROR_MESSAGE red (1,0.1,0.1), the
-        ref handler verbatim (UIErrorsFrame.lua:8-16; its SYSMSG arm is unwired — no engine
-        producer yet). This engine has no MessageFrame widget, so the message list is this file's
-        Lua over three stacked FontStrings: hold 5 s (the ref displayDuration), then fade out
-        (INTERIM 1 s — the ref MessageFrame's post-hold fade curve is unpinned), oldest dropped
-        past the visible three. `BenillaErrorsFrame_AddMessage(text, r, g, b)` is the Lua-callable
-        seam (the ref's `UIErrorsFrame:AddMessage`) for FrameXML-side producers — the quest log's
-        watch guards use it.
+        The real client's UIErrorsFrame, now transcribed as what it actually IS: a
+        `<MessageFrame>` (ref UIErrorsFrame.xml:4 — 512×60 at TOP (0,-122), displayDuration="5",
+        insertMode="TOP", with `<FontString inherits="ErrorFont" justifyH="CENTER"/>` as its line
+        font). UI_INFO_MESSAGE shows YELLOW (1,1,0) — the quest objective-progress toasts land
+        here — and UI_ERROR_MESSAGE red (1,0.1,0.1), the ref handler verbatim (UIErrorsFrame.lua:8-16;
+        its SYSMSG arm is unwired, no engine producer yet).
+
+        It used to be a hand-rolled `<Frame>` painting three stacked FontStrings from Lua, because
+        this engine had no MessageFrame widget. It has one now (`script::messageframe::plain`,
+        `widget::MessageFrameState`), so the file that stood in for it is gone and the display —
+        insertMode, the vertical cap, the two-phase fade — is the widget's own, exactly as in the
+        reference. Two consequences worth naming:
+
+          * `UIErrorsFrame:AddMessage(text, r, g, b, a)` is REAL now, so FrameXML producers call it
+            the way the reference does (the old `BenillaErrorsFrame_AddMessage` seam is retired),
+            and so does an addon: `EasyCopy`, `QuestHistory` and `QuestItem` each died on that exact
+            line at load. A sixth argument (all three pass one, believing it is a hold time) is
+            silently IGNORED — the real binding reads five, and honouring it would be unfaithful.
+          * The post-hold fade is the class ctor's 3.0 s (msgframe-runtime.md, byte-verified), not
+            the 1.0 s this file used to carry as an explicitly INTERIM guess while that curve was
+            unpinned. The 5 s hold is unchanged.
+
+        frameStrata HIGH is the ref's own (`UIErrorsFrame.xml:4`) and decision 0597's: this frame
+        overlaps the right edge of every left-slot panel window (character, quest log, loot,
+        merchant, mail, trainer, taxi — all at TOPLEFT (0,-104)), so in the default MEDIUM its
+        toasts draw UNDER whichever panel is open, invisible in exactly the state you most want to
+        read them. The ref also carries toplevel="true"; that is deliberately not transcribed —
+        HIGH already wins the strata and 0597's fix is the one that was looked at.
     -->
     <Script><![CDATA[
-        BENILLA_ERRORS_LINES = 3
-        BENILLA_ERRORS_HOLD = 5.0   -- ref displayDuration="5"
-        BENILLA_ERRORS_FADE = 1.0   -- INTERIM (comment above)
-
-        function BenillaErrorsFrame_AddMessage(text, r, g, b)
-            local frame = getglobal("UIErrorsFrame")
-            -- insertMode="TOP": newest first, older lines shift down and off the list.
-            table.insert(frame.messages, 1, { text = text, r = r, g = g, b = b, age = 0 })
-            while table.getn(frame.messages) > BENILLA_ERRORS_LINES do
-                table.remove(frame.messages)
-            end
-            BenillaErrorsFrame_Paint(frame)
-            frame:Show()
-        end
-
-        function BenillaErrorsFrame_Paint(frame)
-            for i = 1, BENILLA_ERRORS_LINES do
-                local line = getglobal("UIErrorsFrameLine" .. i)
-                local msg = frame.messages[i]
-                if msg then
-                    line:SetText(msg.text)
-                    line:SetTextColor(msg.r, msg.g, msg.b)
-                    local over = msg.age - BENILLA_ERRORS_HOLD
-                    if over > 0 then
-                        line:SetAlpha(1.0 - over / BENILLA_ERRORS_FADE)
-                    else
-                        line:SetAlpha(1.0)
-                    end
-                    line:Show()
-                else
-                    line:Hide()
-                end
-            end
-        end
-
         function UIErrorsFrame_OnLoad()
-            local frame = this
-            frame.messages = {}
-            frame:RegisterEvent("UI_INFO_MESSAGE")
-            frame:RegisterEvent("UI_ERROR_MESSAGE")
-            frame:Hide()
+            this:RegisterEvent("UI_INFO_MESSAGE")
+            this:RegisterEvent("UI_ERROR_MESSAGE")
         end
 
         -- ref UIErrorsFrame_OnEvent(event, message) (UIErrorsFrame.lua:8-15) — the message is the
         -- DECLARED second parameter, not the `arg1` global: the XML passes `arg1` into it exactly
         -- as the reference's own does, and an addon calling the 1.12 arity is then read correctly.
         function UIErrorsFrame_OnEvent(event, message)
-            local frame = this
             if not message then return end
             if event == "UI_INFO_MESSAGE" then
-                BenillaErrorsFrame_AddMessage(message, 1.0, 1.0, 0.0) -- ref UIErrorsFrame.lua:12
+                this:AddMessage(message, 1.0, 1.0, 0.0, 1.0)  -- ref UIErrorsFrame.lua:12
             elseif event == "UI_ERROR_MESSAGE" then
-                BenillaErrorsFrame_AddMessage(message, 1.0, 0.1, 0.1) -- ref UIErrorsFrame.lua:14
-            end
-        end
-
-        function BenillaErrorsFrame_OnUpdate(frame, elapsed)
-            for i = table.getn(frame.messages), 1, -1 do
-                local msg = frame.messages[i]
-                msg.age = msg.age + elapsed
-                if msg.age > BENILLA_ERRORS_HOLD + BENILLA_ERRORS_FADE then
-                    table.remove(frame.messages, i)
-                end
-            end
-            BenillaErrorsFrame_Paint(frame)
-            if table.getn(frame.messages) == 0 then
-                frame:Hide()
+                this:AddMessage(message, 1.0, 0.1, 0.1, 1.0)  -- ref UIErrorsFrame.lua:14
             end
         end
     ]]></Script>
 
-    <!-- frameStrata HIGH is the ref's own (`UIErrorsFrame.xml` l.4). It matters here: this frame is
-         512x60 anchored TOP (0,-122), which overlaps the right edge of every left-slot panel window
-         (character, quest log, loot, merchant, mail, trainer, taxi — all at TOPLEFT (0,-104)). Its
-         own content is flat FontString REGIONS at level 0 while those panels carry dozens of nested
-         child frames at level 1+, so left in the default MEDIUM its toasts draw UNDER whichever
-         panel is open — invisible in exactly the state you most want to read them. Decision 0597. -->
-    <Frame name="UIErrorsFrame" frameStrata="HIGH">
+    <MessageFrame name="UIErrorsFrame" displayDuration="5" insertMode="TOP" frameStrata="HIGH">
         <Size><AbsDimension x="512" y="60"/></Size>
         <Anchors>
             <Anchor point="TOP" relativePoint="TOP">
                 <Offset><AbsDimension x="0" y="-122"/></Offset>
             </Anchor>
         </Anchors>
-        <Layers>
-            <Layer level="OVERLAY">
-                <FontString name="UIErrorsFrameLine1" inherits="GameFontNormalLarge" justifyH="CENTER">
-                    <Size><AbsDimension x="512" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativePoint="TOP"/></Anchors>
-                </FontString>
-                <FontString name="UIErrorsFrameLine2" inherits="GameFontNormalLarge" justifyH="CENTER">
-                    <Size><AbsDimension x="512" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativeTo="UIErrorsFrameLine1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
-                </FontString>
-                <FontString name="UIErrorsFrameLine3" inherits="GameFontNormalLarge" justifyH="CENTER">
-                    <Size><AbsDimension x="512" y="0"/></Size>
-                    <Anchors><Anchor point="TOP" relativeTo="UIErrorsFrameLine2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
-                </FontString>
-            </Layer>
-        </Layers>
         <Scripts>
             <OnLoad>UIErrorsFrame_OnLoad()</OnLoad>
             <OnEvent>UIErrorsFrame_OnEvent(event, arg1)</OnEvent>
-            <OnUpdate>BenillaErrorsFrame_OnUpdate(self, arg1)</OnUpdate>
         </Scripts>
-    </Frame>
+        <!-- The line font AND the centring, both: the class draws its messages through this
+             declared child, so `justifyH="CENTER"` is what keeps the toasts centred in the 512-wide
+             box (a chat frame's own child says LEFT). ErrorFont = GameFontNormalLarge (ref
+             Fonts.xml:258), which is the face the hand-rolled version used too. -->
+        <FontString inherits="ErrorFont" justifyH="CENTER"/>
+    </MessageFrame>
 </Ui>

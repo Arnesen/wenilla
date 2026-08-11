@@ -312,6 +312,20 @@
             end
         end
 
+        -- The reference's names for the two unit-frame hover hooks, `this`-shaped, delegating to
+        -- ours. `TipBuddy.lua:2770-2773` is the exact idiom this exists for:
+        --     originalUnitFrame_OnEnter = UnitFrame_OnEnter
+        --     function UnitFrame_OnEnter() originalUnitFrame_OnEnter() ... end
+        -- Against a missing global that captured nil and raised on the first hover; against a
+        -- RENAMED one it would have called ours with no frame. See ActionBar.xml for the full note.
+        function UnitFrame_OnEnter()
+            BenillaUnitFrame_OnEnter(this)
+        end
+
+        function UnitFrame_OnLeave()
+            BenillaUnitFrame_OnLeave(this)
+        end
+
         function BenillaUnitFrame_OnEnter(frame)
             local unit = frame.unit
             if SpellIsTargeting() then

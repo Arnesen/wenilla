@@ -325,6 +325,12 @@ pub(super) fn feed_chat(
                         }
                         _ => {}
                     }
+                    // Mirror the confirmed list into the VM, where `GetChannelName` reads it
+                    // (17 corpus sites across 6 addons). Here rather than beside either arm
+                    // because this is the ONLY place the list changes, so one push cannot drift
+                    // from it — and unconditional within the notice branch so a notice that
+                    // changed nothing still costs one clone rather than risking a missed edge.
+                    script.set_joined_channels(channels.joined.clone());
                 }
                 // A member-line / notice channel renders numbered when we know its slot.
                 channels.stamp_channel(&mut event);

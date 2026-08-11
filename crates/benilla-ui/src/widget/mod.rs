@@ -173,11 +173,11 @@ impl<T> Arena<T> {
 
 mod kinds;
 pub use kinds::{
-    ButtonState, ColorSelectState, CooldownState, EditAction, EditBoxState, EditOutcome, EditUnit,
-    FrameKind, KindState, MessageLine, MinimapState, RegionKind, ScrollFrameState,
-    ScrollingMessageState, SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS,
-    MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS,
-    TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
+    ButtonFont, ButtonState, ColorSelectState, CooldownState, EditAction, EditBoxState,
+    EditOutcome, EditUnit, FrameKind, InsertMode, KindState, MessageFrameState, MessageLine,
+    MinimapState, RegionKind, ScrollFrameState, ScrollingMessageState, SliderState, StatusBarState,
+    TooltipState, COOLDOWN_FLASH_SECS, MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS,
+    TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -204,7 +204,9 @@ pub struct Frame {
     /// Child frames in **insertion order** (the client's `+0x300` child list order) — this order is
     /// the draw-order tiebreak within a `(strata, level)` bucket for equal-insertion children.
     pub children: Vec<FrameHandle>,
-    /// Owned region leaves (textures/fontstrings), in creation order.
+    /// Owned region leaves (textures/fontstrings), in creation order. A region detached by
+    /// `SetParent(nil)` stays in this list so [`WidgetArena::destroy`] still frees it — see
+    /// [`Region::detached`], which is what actually takes it out of the draw.
     pub regions: Vec<RegionHandle>,
     /// The draw stratum (`frameStrata +0xc0`, default MEDIUM).
     pub strata: Strata,
@@ -309,6 +311,16 @@ pub struct Region {
     pub sub_level: i8,
     /// Declaration index within the owner frame — the final within-layer draw tiebreak.
     pub decl_seq: u32,
+    /// `Region:SetParent(nil)` — the region is **orphaned and unrendered, not destroyed** (wow-re
+    /// `widget-api-batch-benilla.md` Q7: the re-link virtual `0x77fd10` with a null parent unlinks
+    /// from the old parent's draw layer and region list and stores nothing in their place).
+    ///
+    /// Modelled as a flag rather than as an owner-less region: [`Frame::regions`] keeps the entry
+    /// so [`WidgetArena::destroy`] still frees the slab slot, and
+    /// [`crate::order::traversal`] skips it, so it emits no quad. A later
+    /// `SetParent(frame)` clears it and re-links for real
+    /// ([`WidgetArena::set_region_owner`]).
+    pub detached: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -533,6 +545,7 @@ impl WidgetArena {
                 FrameKind::ScrollingMessageFrame => {
                     KindState::ScrollingMessage(kinds::ScrollingMessageState::default())
                 }
+                FrameKind::MessageFrame => KindState::Message(kinds::MessageFrameState::default()),
                 FrameKind::ScrollFrame => KindState::Scroll(kinds::ScrollFrameState::default()),
                 FrameKind::Slider => KindState::Slider(kinds::SliderState::default()),
                 FrameKind::ColorSelect => {
@@ -612,6 +625,7 @@ impl WidgetArena {
             draw_layer,
             sub_level,
             decl_seq,
+            detached: false,
         });
         let handle = RegionHandle { index, generation };
         self.frame_mut(owner)

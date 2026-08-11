@@ -35,6 +35,9 @@
         -- base = (page - 1) * 12.
         BENILLA_MULTIBAR_BOTTOMLEFT_BASE = 60
         BENILLA_MULTIBAR_BOTTOMRIGHT_BASE = 48
+        -- ref ActionButton.lua:8-9 — LEFT_ACTIONBAR_PAGE = 4, RIGHT_ACTIONBAR_PAGE = 3.
+        BENILLA_MULTIBAR_LEFT_BASE = 36
+        BENILLA_MULTIBAR_RIGHT_BASE = 24
 
         -- The MULTIACTIONBAR keybind pair — ref MultiActionBars.lua:24-45 MultiActionButtonDown/Up,
         -- the same NORMAL→PUSHED debounce dance as the main bar's ActionButtonDown/Up
@@ -182,6 +185,150 @@
             <CheckButton name="MultiBarBottomRightButton12" inherits="BenillaActionButtonTemplate">
                 <Anchors><Anchor point="LEFT" relativeTo="MultiBarBottomRightButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12, BENILLA_MULTIBAR_BOTTOMRIGHT_BASE, "MULTIACTIONBAR2BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+        </Frames>
+    </Frame>
+
+    <!-- **The two VERTICAL bars, built but never shown.**
+
+         They were scoped out (see the header's ref-divergence note) on the reasonable reading that
+         a bar nobody asked for should not exist. Measuring the corpus corrected the reading: the
+         reference does not choose between "shown" and "absent" — `MultiActionBars.xml` l.515/523
+         instantiates BOTH as real `parent="UIParent"` frames whose templates (VerticalMultiBar3/4,
+         l.266/381) carry `hidden="true"`. On the real client they exist from load and stay hidden
+         until SHOW_MULTI_ACTIONBAR_3/4. So declaring them costs nothing on screen and is what the
+         reference actually does.
+
+         What it buys: Atlas, Bartender2 and FuBartender2 all DIE at session start on
+         `MultiBarLeft` — Atlas at `Atlas.lua:387` (`MultiBarLeft:SetFrameStrata("MEDIUM")`),
+         Bartender2 at `Bartender2.lua:74` (`MultiBarLeft:ClearAllPoints()`). Neither shows the bar;
+         both only need it to be there. Five more addons index `MultiBarRight` (decision 1218's
+         corrected ranking).
+
+         Still no SHOW_MULTI_ACTIONBAR_* state and still no options toggle — 0270's call stands, and
+         these two are simply hidden rather than optional. An addon that calls `MultiBarLeft:Show()`
+         gets a working bar on actions 37..48, which is exactly what the reference gives it.
+
+         The buttons carry the reference's own MULTIACTIONBAR3/4BUTTON command names, and those
+         commands stay OUT of `bindings::commands` — 1008's "honest tree" holds: the keybind screen
+         lists what the player can actually reach, and a bar we never show is not that. Painting a
+         hotkey from an unregistered command is a no-op (GetBindingKey answers nil), so the label is
+         simply blank until someone registers them.
+
+         Pages from ref-ActionButton.lua l.8-9: LEFT_ACTIONBAR_PAGE = 4 (actions 37..48),
+         RIGHT_ACTIONBAR_PAGE = 3 (actions 25..36). Geometry from ref-MultiActionBars.xml: a 38x500
+         frame, button 1 at TOPRIGHT, each next TOP-to-BOTTOM of the previous at -6. -->
+
+    <Frame name="MultiBarRight" frameStrata="HIGH" hidden="true">
+        <Size><AbsDimension x="38" y="500"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-7" y="98"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <CheckButton name="MultiBarRightButton1" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton2" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton3" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton4" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton5" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton4" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton6" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton5" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton7" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton6" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton8" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton7" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton9" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton8" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton10" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton9" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton11" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton10" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarRightButton12" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarRightButton11" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12, BENILLA_MULTIBAR_RIGHT_BASE, "MULTIACTIONBAR3BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+        </Frames>
+    </Frame>
+
+    <Frame name="MultiBarLeft" frameStrata="HIGH" hidden="true">
+        <Size><AbsDimension x="38" y="500"/></Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="MultiBarRight" relativePoint="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <CheckButton name="MultiBarLeftButton1" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton2" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton3" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton4" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton3" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton5" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton4" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton6" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton5" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton7" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton6" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton8" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton7" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton9" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton8" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton10" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton9" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton11" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton10" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="MultiBarLeftButton12" inherits="BenillaActionButtonTemplate">
+                <Anchors><Anchor point="TOP" relativeTo="MultiBarLeftButton11" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12, BENILLA_MULTIBAR_LEFT_BASE, "MULTIACTIONBAR4BUTTON")</OnLoad></Scripts>
             </CheckButton>
         </Frames>
     </Frame>

@@ -144,27 +144,6 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetBlinkSpeed",
         lua.create_function(|lua, this: Table| with_editbox(lua, &this, |eb| eb.blink_period))?,
     )?;
-    // SetTextColor(r, g, b [, a]) — the FontInstance half an EditBox inherits in the client
-    // (`ChatEdit_UpdateHeader` colors the typed text this way): tint the box's text region,
-    // creating it lazily like every text-touching path.
-    m.set(
-        "SetTextColor",
-        lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
-                let h = frame_handle_of(lua, &this)?;
-                let Some(rh) = super::ensure_text_region(lua, h) else {
-                    return Err(mlua::Error::runtime("not an EditBox"));
-                };
-                lua.app_data_mut::<Model>()
-                    .expect("model app_data")
-                    .region_data
-                    .entry(rh)
-                    .or_default()
-                    .vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
-                Ok(())
-            },
-        )?,
-    )?;
     m.set(
         "SetTextInsets",
         lua.create_function(
@@ -229,7 +208,93 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         )?;
     }
 
+    install_font_block(lua, &m)?;
+
     lua.set_named_registry_value(REG_EDITBOX_METHODS, m)?;
+    Ok(())
+}
+
+/// **The font block — entries #0–#15 of the EditBox method table**, and the largest single gap the
+/// per-kind widget-method census found in the 218-addon corpus (decision 1229).
+///
+/// `EditBox` is one of the six text-bearing types, so it re-declares the whole font block in its own
+/// flat table (`.data 0x87bb68`, 48 entries, count read from `mov edx,0x30` at `0x799ab5`; there is
+/// no `FontInstance` class in the 1.12 Lua chain). We had written every one of these verbs already —
+/// on `FontString` and on the `<Font>` object — and never wired them to the kind that wanted them.
+/// The census row is `63 EditBox:SetFontObject (on Texture, FontString)`, and its `(on …)` tail is
+/// exactly that: *a verb we have, on the wrong kinds*.
+///
+/// **The 63 is one library, not 63 independent addons.** Every one of those call sites is the same
+/// three lines of an embedded `Dewdrop-2.0.lua` —
+/// ```lua
+/// local editBox = CreateFrame("EditBox", nil, editBoxFrame)
+/// editBoxFrame.editBox = editBox
+/// editBox:SetFontObject(ChatFontNormal)
+/// ```
+/// — vendored into 63 addon folders (65 copies of the file: `FuBar` and its ~50 plugins, `BigWigs`,
+/// `AtlasLoot`, `oRA2`, …). One library replicated, so 63 chances to hit the *same* next wall
+/// (decision 1207).
+///
+/// Ten of the sixteen are the shared block and come from [`super::super::font_block`], which carries
+/// the per-verb byte evidence and the return-shape traps. Two are deliberately absent and four are
+/// installed here:
+///
+/// - **`SetSpacing`/`GetSpacing` (#10–#11) are NOT installed.** Nothing in this client models line
+///   spacing, so they could only store a number no renderer reads — the silently-ignored-setter
+///   failure of 1203/1205/1211 — while their absence raises a nil-value call that names itself.
+///   Corpus demand is zero: `:SetSpacing(`/`:GetSpacing(` appear in **0** of 218 addons.
+///   `script::font` withholds the same pair for the same reason.
+/// - **The justify four (#12–#15) are installed here**, against the box's own
+///   [`EditBoxState::justify`] word rather than its text region — the field's doc has the why (our
+///   editbox draw law seats that region LEFT unconditionally) and states the divergence.
+fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
+    // Every font method acts on the box's implicit FontString: each binding's shim loads
+    // `[this+0x324]` and hands it to the shared implementation, and that offset is
+    // `EditBoxState::text_region`. Created on demand, exactly like every other text-touching path.
+    crate::script::font_block::install(lua, m, |lua, this| {
+        let h = frame_handle_of(lua, this)?;
+        super::ensure_text_region(lua, h).ok_or_else(|| mlua::Error::runtime("not an EditBox"))
+    })?;
+
+    // SetJustifyH("LEFT"|"CENTER"|"RIGHT") / SetJustifyV("TOP"|"MIDDLE"|"BOTTOM") → 0 values.
+    //
+    // Two verified traps, both of which a plausible implementation gets wrong, and both of which
+    // our older FontString/Font copies of these verbs do get wrong (they coerce anything unknown to
+    // CENTER/MIDDLE — noted, not fixed here):
+    //  · an **unrecognised token RAISES** `Usage: %s:SetJustifyH("justify")` (`0x87c77c`), rather
+    //    than falling back to a default;
+    //  · a token from the **other axis** parses fine and then masks to nothing — `SetJustifyH("TOP")`
+    //    yields 0x08, `0x08 & 0x07 == 0`, so it CLEARS justifyH and `GetJustifyH()` answers
+    //    `"UNKNOWN"`. No error either way.
+    //
+    // `AceGUIWidget-Slider.lua:210` (`editbox:SetJustifyH("CENTER")`, three addons) is the demand.
+    for (name, mask) in [
+        ("SetJustifyH", EditBoxState::JUSTIFY_H_MASK),
+        ("SetJustifyV", EditBoxState::JUSTIFY_V_MASK),
+    ] {
+        m.set(
+            name,
+            lua.create_function(move |lua, (this, token): (Table, String)| {
+                let bits = EditBoxState::justify_bit(&token).ok_or_else(|| {
+                    mlua::Error::runtime(format!("Usage: <EditBox>:{name}(\"justify\")"))
+                })?;
+                with_editbox(lua, &this, |eb| eb.set_justify_axis(mask, bits))
+            })?,
+        )?;
+    }
+    // GetJustifyH()/GetJustifyV() → exactly 1 string, the first set bit's token in the reference's
+    // own table order, or the literal "UNKNOWN".
+    for (name, mask) in [
+        ("GetJustifyH", EditBoxState::JUSTIFY_H_MASK),
+        ("GetJustifyV", EditBoxState::JUSTIFY_V_MASK),
+    ] {
+        m.set(
+            name,
+            lua.create_function(move |lua, this: Table| {
+                with_editbox(lua, &this, |eb| eb.justify_token(mask))
+            })?,
+        )?;
+    }
     Ok(())
 }
 

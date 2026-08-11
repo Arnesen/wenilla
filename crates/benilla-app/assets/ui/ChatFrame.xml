@@ -17,6 +17,22 @@
         "Say:" with static insets.
     -->
     <Script><![CDATA[
+        -- ── NUM_CHAT_WINDOWS — how many chat windows the UI declares ─────────────────────────
+        -- `NUM_CHAT_WINDOWS = 7` is ChatFrame.lua line 5, verbatim. It is a FrameXML constant, not
+        -- an engine one, and the number is NOT the engine's: the chat-cache and the per-window
+        -- struct array `0xb4fe50` (wow-re `chat-color-table.md`, stride 0x98) both hold **10**
+        -- windows, and FloatingChatFrame.xml duly declares ChatFrame1TabDockRegion..10 — but only
+        -- seven ChatFrames. 7 is the count an addon iterates.
+        --
+        -- Measured demand: **5 corpus addons, all genuinely distinct** (no replicated library —
+        -- the one clean count in this area). Two idioms, and they need different things from us:
+        --   getglobal("ChatFrame"..i)   Outfitter, _LazyPig — _LazyPig indexes the result
+        --                               UNGUARDED (`ChatFrame:IsVisible()`), so it dies at i=3
+        --                               unless ChatFrame3..7 are real frames. They are, below.
+        --   GetChatWindowInfo(i)        EnhTooltip, MikScrollingBattleText, Enchantrix — the
+        --                               engine getter, `benilla_ui::script::chat_window`.
+        NUM_CHAT_WINDOWS = 7
+
         -- ── SlashCmdList — the addon slash-command registry (decision 1195) ────────────────────
         -- Declared HERE, not in Rust, because the 1.12 client declares it in ChatFrame.lua and the
         -- captured `_G` attributes it `table framexml`. An addon's registration is three lines at
@@ -231,6 +247,39 @@
                 local flash = getglobal("ChatFrame" .. id .. "TabFlash")
                 if flash then flash:Hide() end
             end
+        end
+
+        -- FCF_SelectDockFrame(frame) — the reference's own name for the operation above, taking a
+        -- FRAME where ours takes a dock id. Both corpus callers pass DEFAULT_CHAT_FRAME:
+        --
+        --     if not DEFAULT_CHAT_FRAME:IsVisible() then
+        --         FCF_SelectDockFrame(DEFAULT_CHAT_FRAME)
+        --     end
+        --     DEFAULT_CHAT_FRAME:AddMessage(out)
+        --
+        -- verbatim in both CustomNameplates (`CustomNameplates.lua:69`) and Roid-Macros
+        -- (`Utility.lua:40`) — "un-hide the chat window before printing into it". Two addons,
+        -- two independent files, not a replicated library.
+        --
+        -- Ours does the dock half and NOT the rest of ref FCF_SelectDockFrame l.1204-1217: the ref
+        -- also assigns `SELECTED_DOCK_FRAME` (a global no corpus addon reads — 0 hits) and calls
+        -- `FCF_DockUpdate()` (tab geometry, which FCF_OnUpdate below re-derives every frame).
+        --
+        -- An UNDOCKED frame RAISES rather than quietly doing nothing. ChatFrame3..7 exist as real
+        -- frames but benilla has no undock/dock model at all (0288 §2 — window management is chat
+        -- settings, deliberately out), so "select ChatFrame5" has no meaning here; answering it
+        -- with silence would leave the caller's next AddMessage landing in a window that is still
+        -- hidden, which is the bug the guard was written to prevent.
+        function FCF_SelectDockFrame(frame)
+            if not frame then
+                error("FCF_SelectDockFrame: nil frame", 2)
+            end
+            local id = frame:GetID()
+            if id ~= 1 and id ~= 2 then
+                error("FCF_SelectDockFrame: " .. (frame:GetName() or "?")
+                      .. " is not docked — benilla docks only ChatFrame1/ChatFrame2 (decision 0288 §2)", 2)
+            end
+            BenillaFCF_SelectDock(id)
         end
 
         function BenillaFCF_TabClick(id)
@@ -568,7 +617,7 @@
         them through its resize buttons' textures; benilla authors them as plain textures — the
         hover LOOK without the resize mechanics). Everything starts alpha 0; BenillaFCF fades.
     -->
-    <ScrollingMessageFrame name="ChatFrame1" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128">
+    <ScrollingMessageFrame name="ChatFrame1" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" id="1">
         <Size><AbsDimension x="430" y="120"/></Size>
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT">
@@ -750,7 +799,7 @@
     <!-- ChatFrame2 "Combat Log": docked — shares ChatFrame1's rect (ref FCF_DockUpdate anchors),
          hidden until its tab selects it. Its message-group wiring (the chat-cache combat set)
          lands with the router (0288 P4); until then it renders what it's given: nothing. -->
-    <ScrollingMessageFrame name="ChatFrame2" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true">
+    <ScrollingMessageFrame name="ChatFrame2" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="2">
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="TOPLEFT"/>
             <Anchor point="BOTTOMRIGHT" relativeTo="ChatFrame1" relativePoint="BOTTOMRIGHT"/>
@@ -772,6 +821,111 @@
             <OnClick>
                 BenillaChatFrame_DismissCursor(arg1)
             </OnClick>
+            <OnHyperlinkClick>
+                SetItemRef(arg1, arg2, arg3)
+            </OnHyperlinkClick>
+        </Scripts>
+        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+    </ScrollingMessageFrame>
+
+    <!-- ── ChatFrame3..ChatFrame7: the five undocked windows ────────────────────────────────
+         The reference declares seven ScrollingMessageFrames (FloatingChatFrame.xml l.822-832,
+         `inherits="FloatingChatFrameTemplate"`), of which 3..7 ship HIDDEN and UNDOCKED — the
+         shipped chat-cache says so in as many words, and it is the state that matters here:
+
+             WINDOW 3 … 10:  SIZE 0 / COLOR 0 0 0 0 / LOCKED 1 / DOCKED 0 / SHOWN 0
+                             MESSAGES <empty>  CHANNELS <empty>  ZONECHANNELS 0
+
+         (`wow-5875-re/WoW/WTF/.../chat-cache.txt`, a real 1.12 character). So these are not
+         placeholders standing in for something richer — hidden, empty, unsubscribed IS what
+         ChatFrame3 is on a stock client, and an `AddMessage` into one lands in a ring nobody is
+         looking at, exactly as it does there.
+
+         **They are load-bearing for two different reasons, both measured:**
+
+         1. `_LazyPig/LazyPig.lua:1992` walks `for i = 1, NUM_CHAT_WINDOWS` and calls
+            `getglobal("ChatFrame"..i):IsVisible()` with NO nil guard — it dies at i=3 the moment
+            NUM_CHAT_WINDOWS exists without the frames behind it. Declaring the constant alone
+            would have *created* that crash.
+         2. `ChatFrame3` and `ChatFrame5` are named directly as debug sinks by five distinct
+            addons: IgniteStatus (7 unguarded `ChatFrame3:AddMessage` sites), TipBuddy, Radar
+            (the one guarded read), and FuBar_CorkFu + FuBar_oRA2CooldownFu, which store the frame
+            as AceDebug's `debugFrame`. A sixth "consumer", RosterLib-2.0's
+            `local function print(text) ChatFrame3:AddMessage(text) end`, is dead code replicated
+            into four folders — the count that looks like 12 files is 7 real sites.
+
+         No tabs (`ChatFrame3Tab`..`ChatFrame7Tab`) and no dock regions. The reference builds
+         both; here they would be furniture for a dock model we do not have (0288 §2), and
+         nothing reads them while these frames stay hidden and undocked. Outfitter.lua:3099 is
+         the one addon that would touch a tab — `local vTab = getglobal("ChatFrame"..i.."Tab")`
+         then `vTab:GetText()`, unguarded — but only INSIDE `if vChatFrame:IsVisible() or
+         vChatFrame.isDocked`, so a hidden, `isDocked`-less window never reaches it. That is also
+         precisely why `isDocked` is not set on ChatFrame2 either: our Combat Log tab is
+         deliberately unbuilt (see the tab section below), and marking window 2 docked — which
+         the reference does — would walk Outfitter straight into a nil tab.
+
+         No background/border art: the ref's own defaults put every one of these at window alpha
+         0 (COLOR's fourth byte), and BenillaFCF only fades the dock's two. A shown ChatFrame5
+         renders its text over the world with no box — which is what the reference gives you. ── -->
+    <ScrollingMessageFrame name="ChatFrame3" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="3">
+        <Size><AbsDimension x="430" y="128"/></Size>
+        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+        <Scripts>
+            <OnMouseWheel>
+                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
+            </OnMouseWheel>
+            <OnHyperlinkClick>
+                SetItemRef(arg1, arg2, arg3)
+            </OnHyperlinkClick>
+        </Scripts>
+        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+    </ScrollingMessageFrame>
+    <ScrollingMessageFrame name="ChatFrame4" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="4">
+        <Size><AbsDimension x="430" y="128"/></Size>
+        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+        <Scripts>
+            <OnMouseWheel>
+                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
+            </OnMouseWheel>
+            <OnHyperlinkClick>
+                SetItemRef(arg1, arg2, arg3)
+            </OnHyperlinkClick>
+        </Scripts>
+        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+    </ScrollingMessageFrame>
+    <ScrollingMessageFrame name="ChatFrame5" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="5">
+        <Size><AbsDimension x="430" y="128"/></Size>
+        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+        <Scripts>
+            <OnMouseWheel>
+                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
+            </OnMouseWheel>
+            <OnHyperlinkClick>
+                SetItemRef(arg1, arg2, arg3)
+            </OnHyperlinkClick>
+        </Scripts>
+        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+    </ScrollingMessageFrame>
+    <ScrollingMessageFrame name="ChatFrame6" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="6">
+        <Size><AbsDimension x="430" y="128"/></Size>
+        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+        <Scripts>
+            <OnMouseWheel>
+                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
+            </OnMouseWheel>
+            <OnHyperlinkClick>
+                SetItemRef(arg1, arg2, arg3)
+            </OnHyperlinkClick>
+        </Scripts>
+        <FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+    </ScrollingMessageFrame>
+    <ScrollingMessageFrame name="ChatFrame7" frameStrata="BACKGROUND" displayDuration="120.0" maxLines="128" hidden="true" id="7">
+        <Size><AbsDimension x="430" y="128"/></Size>
+        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor></Anchors>
+        <Scripts>
+            <OnMouseWheel>
+                if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
+            </OnMouseWheel>
             <OnHyperlinkClick>
                 SetItemRef(arg1, arg2, arg3)
             </OnHyperlinkClick>

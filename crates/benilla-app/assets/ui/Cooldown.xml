@@ -3,19 +3,60 @@
         The shared cooldown-frame machine — the ref's own file split (Cooldown.lua/Cooldown.xml,
         loaded before every consumer): CooldownFrame_SetTimer drives BOTH the action buttons
         (ActionBar.xml) and the bag slots (BagFrame.xml), exactly as the reference shares it.
-        The ref's Model template + OnUpdateModel scrub/finish-flash machine live inside our
-        native <Cooldown> widget instead (decision 0263), armed by SetCooldown.
+        The ref's OnUpdateModel scrub/finish-flash machine lives inside our native <Cooldown>
+        widget instead (decision 0263), armed by SetCooldown.
+
+        `CooldownFrameTemplate` below is the reference's own declaration, and it is here because
+        it was MISSING: three corpus addons name it in an XML `inherits=` (Bagnon_Core,
+        Bongos_ActionBar, BuffCheck2), and Bagnon hangs one off EVERY item button, so a single
+        session logged roughly sixty
+            WARN ui_script: unknown template 'CooldownFrameTemplate' referenced by inherits
+        lines while each of those children came out as a bare, attribute-less frame.
     -->
     <Script><![CDATA[
         -- Ref Cooldown.lua's CooldownFrame_SetTimer, transcribed: show-and-arm only when all three
         -- are positive, else hide.
+        --
+        -- THE ONE FORK, and why it is two faithful branches rather than a guard. The reference's
+        -- body arms a Model (`this.start = start … this:SetSequence(0)`); ours arms our native
+        -- <Cooldown> widget, which is where 0263 put that machine. Both kinds really do reach this
+        -- function: our own windows pass a <Cooldown>, and an addon inheriting the template below
+        -- passes a <Model>, because an XML instance is created from ITS OWN tag and every real
+        -- caller writes the reference's `<Model … inherits="CooldownFrameTemplate"/>`.
+        --
+        -- Calling SetCooldown unconditionally is what shipped, and it raised on exactly that case:
+        -- a Bagnon slot holding an item with a live cooldown died on
+        -- `attempt to call method 'SetCooldown' (a nil value)` — and, because !OmniCC wraps this
+        -- very function, it took OmniCC's countdown down with it. A Model has no sweep for this
+        -- engine to arm (`SetSequence`/`AdvanceTime` are not bindings here), so that branch shows
+        -- and hides the frame and nothing more: the addon's own cooldown child stays inert, which
+        -- is a missing visual, not a broken window.
         function CooldownFrame_SetTimer(this, start, duration, enable)
             if ( start > 0 and duration > 0 and enable > 0 ) then
-                this:SetCooldown(start, duration)
+                if ( this.SetCooldown ) then
+                    this:SetCooldown(start, duration)
+                end
                 this:Show()
             else
                 this:Hide()
             end
         end
     ]]></Script>
+
+    <!--
+        ref Cooldown.xml l.4-14, transcribed. The reference's own attributes are kept verbatim
+        (its .mdx file, its 0.75 scale, setAllPoints, hidden) even where this engine has no use for
+        the model file: the template's JOB here is to exist under the reference's name so an
+        addon's `inherits=` resolves and its cooldown child inherits the geometry the addon is
+        counting on.
+
+        Its two `<Scripts>` — OnUpdateModel / OnAnimFinished — are deliberately NOT transcribed.
+        Both are real 1.12 script slots that this engine does not fire (see
+        `benilla-ui/src/script/object/events_regions.rs`, which raises on any name nothing fires,
+        and measured both at zero corpus call sites), so declaring them would trade sixty
+        `unknown template` warnings for sixty `SetScript unsupported` ones and change nothing else.
+        The scrub they drive is our <Cooldown> widget's, not this frame's.
+    -->
+    <Model name="CooldownFrameTemplate" file="Interface\Cooldown\UI-Cooldown-Indicator.mdx"
+           scale="0.75" setAllPoints="true" hidden="true" virtual="true"/>
 </Ui>

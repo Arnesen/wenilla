@@ -67,6 +67,10 @@ impl Plugin for UiChatPlugin {
                 (
                     edit::open_chat_keys,
                     edit::open_tell_requests,
+                    // An addon's `ChatFrame_OpenChat` — before the live parse in the same chain,
+                    // so a box opened prefilled `/w Bob ` has its type switched on the very next
+                    // frame rather than showing the raw slash to the user first.
+                    edit::open_chat_requests,
                     edit::chat_edit_live,
                     edit::chat_tab_cycle,
                     input::drain_chat_input,

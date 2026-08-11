@@ -221,7 +221,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     super::statusbar::install(lua)?;
     super::button::install(lua)?;
     super::editbox::install(lua)?;
-    super::messageframe::install(lua)?;
 
     // Shared frame metatable: __index is a Rust dispatcher over the frame method table (RF-0023),
     // checking the frame's *kind-specific* method table first. Per-kind resolution matters beyond
@@ -315,7 +314,14 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
     match model.arena.frame(*h).map(|f| f.kind) {
         Some(FrameKind::StatusBar) => &[super::statusbar::REG_STATUSBAR_METHODS],
         Some(FrameKind::EditBox) => &[super::editbox::REG_EDITBOX_METHODS],
-        Some(FrameKind::ScrollingMessageFrame) => &[super::messageframe::REG_MESSAGEFRAME_METHODS],
+        Some(FrameKind::ScrollingMessageFrame) => {
+            &[super::messageframe::REG_SCROLLINGMESSAGEFRAME_METHODS]
+        }
+        // Its SIBLING, with its own table — not a fallthrough to the scrolling one. Until this arm
+        // existed a `<MessageFrame>` resolved no kind-specific method at all, which is what blocked
+        // `EasyCopy`, `QuestHistory` and `QuestItem` on `UIErrorsFrame:AddMessage` (three of the
+        // corpus's six method-class blockers) and made `SetInsertMode` unreachable.
+        Some(FrameKind::MessageFrame) => &[super::messageframe::REG_MESSAGEFRAME_METHODS],
         Some(FrameKind::ScrollFrame) => &[super::scrollframe::REG_SCROLLFRAME_METHODS],
         Some(FrameKind::Slider) => &[super::slider::REG_SLIDER_METHODS],
         Some(FrameKind::ColorSelect) => &[super::colorselect::REG_COLORSELECT_METHODS],

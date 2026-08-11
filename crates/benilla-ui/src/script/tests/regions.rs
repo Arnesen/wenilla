@@ -574,3 +574,91 @@ fn a_vertex_colour_without_a_texture_draws_nothing() {
         "no texture at +0xcc -> emit NOTHING, never a solid plate of the surviving tint"
     );
 }
+
+/// **`SetTexture` ignores arguments past the path**, because the client's does.
+///
+/// The path form reads ONE argument (`0x770200`); only the colour form (`0x770360`) reads up to
+/// four, and a C function takes what it wants off the Lua stack and ignores the rest. We typed the
+/// trailing three as `Option<f32>` and so RAISED on a stray extra — `bad argument #3: error
+/// converting Lua boolean to f32` — where the client silently accepts.
+///
+/// The live case is `_LazyPig/LazyPigMenu.lua:182`:
+/// `texture_title:SetTexture("Interface\DialogFrame\UI-DialogBox-Header", true)`. The `true` is
+/// meaningless in 1.12; the addon reached us only once the survey began seating the addon registry.
+///
+/// Asserted as "does not raise", which is the whole claim — there is no `GetTexture` binding to read
+/// the path back through, and inventing one to satisfy a test would be the tail wagging the dog.
+/// The colour form is exercised alongside so the fix cannot have made it lax: a non-numeric channel
+/// must take the same default a missing one does, exactly as `lua_tonumber` of a non-number is 0.
+#[test]
+fn set_texture_ignores_arguments_past_the_path_like_the_client_does() {
+    let s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "SetTexArgs")
+        t = f:CreateTexture(nil, "ARTWORK")
+        t:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header", true)
+    "#,
+    )
+    .expect("a stray extra argument must not raise — the client ignores it");
+
+    // The colour form, with a boolean and a numeric string among the channels.
+    s.run("t:SetTexture(0.25, '0.5', true)")
+        .expect("the colour form must tolerate what lua_tonumber tolerates");
+
+    // And the ordinary shapes still work.
+    s.run("t:SetTexture(nil) t:SetTexture('') t:SetTexture(1, 0, 0, 1)")
+        .expect("clear, blank and the plain colour form are unaffected");
+}
+
+/// **`SetGradientAlpha` / `SetGradient` exist, store both stops, and paint.**
+///
+/// These were the single wall in front of the corpus's largest family: `FuBar\FuBar_Panel.lua:144`
+/// calls `SetGradientAlpha` while building the bar, so all 20 FuBar plugins died there — right after
+/// the chunk-name/`debugstack` fix got them that far.
+///
+/// Asserted on the region PAINTING (a gradient-only region must emit a quad, because the client
+/// generates the gradient into the same texture slot the colour form fills) and on the midpoint
+/// being what a one-tint quad shows. The full gradient stays on the region for a renderer that
+/// grows a second stop.
+#[test]
+fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
+    let mut s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "GradProbe")
+        f:SetWidth(100) f:SetHeight(20)
+        f:SetPoint("TOPLEFT", 0, 0)
+        t = f:CreateTexture(nil, "ARTWORK")
+        t:SetAllPoints(f)
+        -- FuBar's own call: white at both stops, ALPHA only, vertical.
+        t:SetGradientAlpha("VERTICAL", 1, 1, 1, 0, 1, 1, 1, 0.5)
+    "#,
+    )
+    .expect("SetGradientAlpha must exist and accept the client's argument shape");
+
+    s.resolve();
+    let painted = s.extract().iter().any(|q| {
+        matches!(&q.content, crate::script::QuadContent::Texture { color: Some(c), .. }
+            // midpoint of alpha 0.0 and 0.5
+            if (c[3] - 0.25).abs() < 1e-6 && c[0] == 1.0)
+    });
+    assert!(
+        painted,
+        "a region carrying only a gradient must paint, at the midpoint of its two stops"
+    );
+
+    // The alpha-less twin: both stops opaque, and a non-"VERTICAL" token is horizontal.
+    s.run("t:SetGradient('HORIZONTAL', 1, 0, 0, 0, 0, 1)")
+        .expect("SetGradient takes six colour arguments and no alpha");
+    s.resolve();
+    let mid = s.extract().iter().find_map(|q| match &q.content {
+        crate::script::QuadContent::Texture { color: Some(c), .. } => Some(*c),
+        _ => None,
+    });
+    assert_eq!(
+        mid.map(|c| [c[0], c[1], c[2], c[3]]),
+        Some([0.5, 0.0, 0.5, 1.0]),
+        "SetGradient's stops are opaque, so the midpoint alpha is 1"
+    );
+}

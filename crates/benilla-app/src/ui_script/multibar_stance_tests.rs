@@ -54,8 +54,9 @@ fn shipped_multibars_drive_end_to_end() {
         report.errors
     );
     assert_eq!(
-        report.frames, 50,
-        "2 bar frames + 24 buttons, each with a Cooldown child"
+        report.frames, 100,
+        "4 bar frames + 48 buttons, each with a Cooldown child — the two VERTICAL bars joined \
+         (hidden, as the reference's VerticalMultiBar3/4 are), which doubled this count"
     );
 
     // Occupy main slot 1, BottomLeft slot 1 (action 61), BottomRight slot 1 (action 49).
@@ -467,4 +468,49 @@ fn multibar_hover_renders_the_buttons_own_action() {
         "a bonus page never re-pages a multibar hover"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The two vertical multibars exist and stay hidden** — the reference's own posture, and the
+/// reason three corpus addons stopped dying at session start.
+///
+/// `MultiActionBars.xml` l.515/523 instantiates `MultiBarRight`/`MultiBarLeft` as real
+/// `parent="UIParent"` frames; their templates (VerticalMultiBar3/4, l.266/381) carry
+/// `hidden="true"`. Atlas (`Atlas.lua:387`, `MultiBarLeft:SetFrameStrata`) and Bartender2
+/// (`Bartender2.lua:74`, `MultiBarLeft:ClearAllPoints`) only need them to BE there — neither shows
+/// one. So all three claims below are the fix: present, hidden, and on the reference's pages.
+#[test]
+fn the_vertical_multibars_exist_hidden_on_the_reference_pages() {
+    let s = UiScript::new().unwrap();
+    load_action_bar(&s);
+    load_xml(&s, "MultiBars.xml");
+
+    for bar in ["MultiBarRight", "MultiBarLeft"] {
+        assert!(
+            s.eval::<bool>(&format!("return {bar} ~= nil")).unwrap(),
+            "{bar} must exist — Atlas and Bartender2 index it by name at session start"
+        );
+        assert!(
+            !s.eval::<bool>(&format!("return {bar}:IsShown()")).unwrap(),
+            "{bar} must ship HIDDEN, exactly as VerticalMultiBar3/4 do"
+        );
+        // The two calls the corpus actually makes, verbatim in shape.
+        s.run(&format!("{bar}:SetFrameStrata(\"MEDIUM\")")).unwrap();
+        s.run(&format!("{bar}:ClearAllPoints()")).unwrap();
+    }
+
+    // ref ActionButton.lua:8-9 — RIGHT_ACTIONBAR_PAGE = 3 (actions 25..36), LEFT = 4 (37..48).
+    for (bar, first, last) in [("MultiBarRight", 25, 36), ("MultiBarLeft", 37, 48)] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return {bar}Button1.base + {bar}Button1.index"))
+                .unwrap(),
+            first,
+            "{bar}'s first slot"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!("return {bar}Button12.base + {bar}Button12.index"))
+                .unwrap(),
+            last,
+            "{bar}'s last slot"
+        );
+    }
 }

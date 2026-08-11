@@ -352,11 +352,19 @@ fn the_two_tabs_fit_inside_the_window() {
     for (label_width, expect_tab2) in [
         // A short name: under the cap, so the tab is text + PAD + SIDES.
         (121.0, 121.0 + PAD + SIDES),
-        // A long one: the reference's cap would give CAP + PAD + SIDES = 167, but the structural
-        // clamp is tighter here and wins at 164 — the room left between tab 1's right edge and the
-        // window's DRAWN edge (decision 1002). Pinned as the smaller of the two on purpose: the
-        // whole point of the clamp is that it, not the hand-tuned cap, is what holds the line.
-        (240.0, 164.0),
+        // A long one: the reference's cap binds at CAP + PAD + SIDES = 167, and the structural
+        // clamp does NOT — it measures 184 units of room (tab 2's left 160, the parent's right 384,
+        // less the 40-unit drawn-plate inset), which is looser.
+        //
+        // **This pinned 164 until geometry getters settled on demand.** The clamp reads
+        // `tab:GetLeft()`, and before that change the read could return a rect from BEFORE tab 1
+        // was resized — a stale left of 180, giving room 164 and making the clamp appear to be what
+        // held the line. It never was, for this window. The 3-unit difference was a stale read.
+        //
+        // The clamp is still the guarantee that matters, and it is asserted directly below rather
+        // than inferred from a width: tab 2's right edge must stay inside the DRAWN plate (unit
+        // 349, decision 1002's DXT3 alpha measurement), which 160 + 167 = 327 does.
+        (240.0, 167.0),
     ] {
         assert!(
             expect_tab2 <= CAP + PAD + SIDES,
@@ -396,6 +404,15 @@ fn the_two_tabs_fit_inside_the_window() {
             "tab 1 is text − 15 + the end slices"
         );
         assert_eq!(w2, expect_tab2, "tab 2, label width {label_width}");
+        // The property the clamp exists for, checked outright: the tab ends inside the plate the
+        // player can actually see, not merely inside the 384-unit frame rect.
+        let tab2_right: f64 = s
+            .eval("return BenillaMacroFrameTab2:GetLeft() + BenillaMacroFrameTab2:GetWidth()")
+            .unwrap();
+        assert!(
+            tab2_right <= 349.0,
+            "tab 2 ends at {tab2_right}, past the drawn plate's last opaque column (349)"
+        );
         assert!(
             left1 + w1 + w2 <= 384.0,
             "the tab row ({left1} + {w1} + {w2}) runs off the 384-wide window"

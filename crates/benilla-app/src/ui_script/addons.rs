@@ -185,7 +185,10 @@ impl Addon {
                 // The same execution `<Script file=>` gets (`loader::mod.rs`): one chunk, run in
                 // the one global state, in manifest order. The reference does exactly this —
                 // `AddOn_Load 0x51f240` hands each listed file to `0x6edb90` regardless of kind.
-                match script.run_chunk(&bytes) {
+                match script.run_chunk_named(
+                    &bytes,
+                    &benilla_ui::script::addon_chunk_name(&self.name, file),
+                ) {
                     Ok(()) => info!("ui_script: {}/{file} ran", self.name),
                     Err(e) => {
                         let e = format!("{}/{file}: {e}", self.name);
@@ -206,12 +209,10 @@ impl Addon {
             };
             // The document's OWN directory is what its relative references resolve against — a
             // manifest listing `src\main.xml` means `<Include file="templates.xml">` inside it is
-            // `<Addon>/src/templates.xml`, and `..\..\Lib\lib.xml` is a sibling addon (1186).
-            let base = match path.rfind('/') {
-                Some(i) => &path[..i],
-                None => "",
-            };
-            let report = benilla_ui::loader::load_in(script, &doc, base, &provider);
+            // `<Addon>/src/templates.xml`, and `..\..\Lib\lib.xml` is a sibling addon (1186). The
+            // loader takes the path and does that itself, so it can also name the file a raise
+            // came from (1217).
+            let report = benilla_ui::loader::load_in(script, &doc, &path, &provider);
             for w in &report.warnings {
                 warn!("ui_script({}/{file}): {w}", self.name);
             }
@@ -348,31 +349,34 @@ fn manifest_in(dir: &Path, name: &str) -> Option<String> {
 /// Build the AddOn API's registry row for one discovered addon — every `.toc` directive the
 /// eleven verbs can be asked about, read once here rather than re-parsed per call.
 fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
+    info_from_toc(&addon.name, &addon.toc)
+}
+
+/// [`info_for`]'s body, over the two things it actually reads.
+///
+/// Split out because `addon_harness` needs the same row and must not build its own: a survey that
+/// seats a DIFFERENT registry shape from production is measuring a client nobody runs, which is the
+/// fault 1193 was written to fix. One converter, two callers — the harness's own `Toc` goes through
+/// this, so a directive added here reaches the survey for free.
+pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnInfo {
     benilla_ui::script::AddOnInfo {
-        name: addon.name.clone(),
-        title: addon.toc.directive("Title").map(str::to_owned),
-        notes: addon.toc.directive("Notes").map(str::to_owned),
-        url: addon.toc.directive("URL").map(str::to_owned),
+        name: name.to_owned(),
+        title: toc.directive("Title").map(str::to_owned),
+        notes: toc.directive("Notes").map(str::to_owned),
+        url: toc.directive("URL").map(str::to_owned),
         // `## Secure: 1` is Blizzard's own marker; nothing a player installs carries it honestly,
         // and we do not treat it as granting anything — it only picks the glue's icon.
-        secure: addon.toc.directive("Secure").map(str::trim) == Some("1"),
-        load_on_demand: addon.toc.load_on_demand(),
-        dependencies: addon
-            .toc
-            .dependencies()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        directives: addon.toc.directives.clone(),
-        files: addon.toc.files.clone(),
-        saved_variables: addon
-            .toc
+        secure: toc.directive("Secure").map(str::trim) == Some("1"),
+        load_on_demand: toc.load_on_demand(),
+        dependencies: toc.dependencies().into_iter().map(str::to_owned).collect(),
+        directives: toc.directives.clone(),
+        files: toc.files.clone(),
+        saved_variables: toc
             .list("SavedVariables")
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        saved_variables_per_character: addon
-            .toc
+        saved_variables_per_character: toc
             .list("SavedVariablesPerCharacter")
             .into_iter()
             .map(str::to_owned)
@@ -1469,10 +1473,27 @@ mod tests {
     /// **`GetAddOnInfo` returns the manifest's own `## Title` and `## Notes`** — 1188 phase 2's
     /// first acceptance test, and the reason the registry carries directives rather than a name.
     ///
-    /// The return shape is the reference's, read off `Interface\GlueXML\AddonList.lua`:
-    /// `name, title, notes, url, loadable, reason, security, newVersion`. A row that shifts by one
-    /// puts an addon's notes in its URL field, which nothing would notice until a manager rendered
-    /// it, so the whole tuple is asserted rather than the two fields the phase names.
+    /// The return shape is the **in-game** one — `name, title, notes, enabled, loadable, reason,
+    /// security`, SEVEN values — because that is the VM this runs in.
+    ///
+    /// **The client registers `GetAddOnInfo` twice, as two different functions**, and this test
+    /// used to assert the wrong one. It was written off `Interface\GlueXML\AddonList.lua`, which
+    /// describes glue's `0x46d460`: eight values, `url` at slot 4, `newVersion` at 8. The in-game
+    /// binding `0x48e390` answers seven, with **`enabled`** at slot 4 and no `url` at all
+    /// (wow-re `system/ui/scratch/addon-version-gate.md`).
+    ///
+    /// Its own doc comment named the failure it then failed to catch — *"a row that shifts by one
+    /// puts an addon's notes in its URL field, which nothing would notice"*. The row was shifted at
+    /// slot 4 the whole time, and the test asserted the shift. That is what a falsifier copied from
+    /// the wrong reference buys: it pins the bug.
+    ///
+    /// What it cost: `local name, _, _, enabled, loadable = GetAddOnInfo(major)` is AceLibrary's
+    /// and AceAddon's shape, reached by 70 corpus folders. They read `url` as `enabled`, and since
+    /// `## URL` is rare that is nil for nearly every addon, so `if enabled and loadable` refused to
+    /// load the dependency. Silent — a nil where a flag belongs is legal Lua.
+    ///
+    /// The whole tuple is still asserted rather than the fields the phase names, for the original
+    /// and still-correct reason.
     #[test]
     fn get_addon_info_returns_the_manifests_own_title_and_notes() {
         let _l = crate::local_state::test_env::ENV_LOCK
@@ -1493,21 +1514,41 @@ mod tests {
         assert_eq!(
             script
                 .eval::<Vec<String>>(
-                    "local n,t,no,u,l,r,s,nv = GetAddOnInfo(1) \
-                     return { n, t, no, u, tostring(l), tostring(r), s, tostring(nv) }"
+                    "local n,t,no,e,l,r,s,extra = GetAddOnInfo(1) \
+                     return { n, t, no, tostring(e), tostring(l), tostring(r), s, \
+                              tostring(extra) }"
                 )
                 .ok(),
             Some(vec![
                 "Probe".into(),
                 "Probe Title".into(),
                 "What it does".into(),
-                "http://example".into(),
-                "1".into(),   // loadable
+                "1".into(), // enabled — slot 4 in-game, NOT url (which glue's binding returns)
+                "1".into(), // loadable
                 "nil".into(), // no reason — it loads
                 "INSECURE".into(),
-                "nil".into(), // no version-check service to report a new version
+                // The in-game binding returns SEVEN values, so there is no eighth. Asserted as
+                // absent rather than trimmed off the query: glue's `newVersion` sat here, and a
+                // future edit that re-adds an eighth return has to face this line.
+                "nil".into(),
             ])
         );
+        // AceLibrary's and AceAddon's literal shape, which is how 70 corpus folders reach this
+        // verb: `local name, _, _, enabled, loadable = GetAddOnInfo(major)`. Asserted as the
+        // GUARD they actually write, not as a tuple, because the guard is what silently failed —
+        // with `url` in slot 4 and no `## URL` in the manifest, `enabled` was nil and Ace declined
+        // to load its own dependency without erroring.
+        assert_eq!(
+            script
+                .eval::<bool>(
+                    "local _, _, _, enabled, loadable = GetAddOnInfo('Probe') \
+                     if enabled and loadable then return true else return false end"
+                )
+                .ok(),
+            Some(true),
+            "Ace's `if enabled and loadable` must pass for an enabled, loadable addon"
+        );
+
         // Both spellings of the argument, and the raw directives.
         assert_eq!(
             script

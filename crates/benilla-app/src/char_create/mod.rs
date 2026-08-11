@@ -44,7 +44,12 @@ use crate::sound::GlueSound;
 /// right of button 1 (+46) and 6–8 chained below it — so the flat engine order fills Alliance then
 /// Horde, ascending race id within each. (`RACE_ICON_TCOORDS` is a name→UV lookup; its literal table
 /// order never reaches layout — reading it as the button order is what got this wrong before.)
-const ALLIANCE: [u8; 4] = [1, 3, 4, 7]; // Human, Dwarf, Night Elf, Gnome
+///
+/// `pub(crate)` on the Alliance half because it is also the race→side split
+/// `ui_unit::race_faction_group` answers `UnitFactionGroup("player")` with during world entry —
+/// one home for the mapping, pinned by [`tests::race_columns_match_the_reference_screen`], rather
+/// than a second copy that can disagree with this one.
+pub(crate) const ALLIANCE: [u8; 4] = [1, 3, 4, 7]; // Human, Dwarf, Night Elf, Gnome
 const HORDE: [u8; 4] = [2, 5, 6, 8]; // Orc, Scourge, Tauren, Troll
 /// The ref's initial model facing (`SetCharacterCreateFacing(-15)`), reset on every race switch.
 const INITIAL_FACING: f32 = -15.0 * std::f32::consts::PI / 180.0;

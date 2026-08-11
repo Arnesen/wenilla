@@ -59,15 +59,12 @@
             `QuestLogTitleButton_OnClick`, `QuestLogFrame.lua:469-505`). The modifier plumbing this
             note once named as the missing engine slice (`IsShiftKeyDown` + the app's per-frame
             mirror) landed with the cursor arc; the interim right-click substitute is retired.
-          - **The two ref watch errors (`QUEST_WATCH_NO_OBJECTIVES`/`QUEST_WATCH_TOO_MANY`,
-            `UIErrorsFrame:AddMessage`) have no seam to reach `UIErrorsFrame` from Lua**: that
-            frame only reacts to the `UI_ERROR_MESSAGE` *event*, and firing an event is a method on
-            `UiScript` (`fire_event`) — there is no Lua-callable "fire this event"/"post this error"
-            global anywhere in this engine (grepped; every `UI_ERROR_MESSAGE` fire in this codebase is
-            Rust-side, e.g. `ui_merchant.rs`/`ui_action.rs`). The two guards below therefore no-op
-            silently instead of erroring — a real (if narrow) gap: right-clicking a no-objectives or
-            6th-watch row does nothing visible rather than explaining why. Worth a small Lua-callable
-            error-post global as a follow-up once a second caller wants one too.
+          - The two ref watch errors (`QUEST_WATCH_NO_OBJECTIVES`/`QUEST_WATCH_TOO_MANY`) go out
+            through the reference's own `UIErrorsFrame:AddMessage`. That was once impossible here —
+            `UIErrorsFrame` was a hand-rolled `<Frame>` reachable only by firing `UI_ERROR_MESSAGE`
+            from Rust — and the guards no-opped silently in the interim; the MessageFrame widget
+            (`script::messageframe::plain`) closed it, and the seam this note asked for turned out
+            to be the real widget method rather than a benilla global.
     -->
     <Script><![CDATA[
         BENILLA_QUESTLOG_ROWS = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
@@ -201,8 +198,7 @@
             -- Guard order inside the watch arm matches the ref exactly: already watched → unwatch,
             -- unconditionally; else zero objectives (QUEST_WATCH_NO_OBJECTIVES) or the watch list
             -- full (QUEST_WATCH_TOO_MANY) put the ref's red line on the errors frame
-            -- (BenillaErrorsFrame_AddMessage — the ref's UIErrorsFrame:AddMessage call sites,
-            -- lua:490/495), else watch it. The ref calls QuestWatch_Update() itself
+            -- (UIErrorsFrame:AddMessage, the ref's own call — lua:490/495), else watch it. The ref calls QuestWatch_Update() itself
             -- right after each Add/RemoveQuestWatch (same two call sites) — it does NOT lean on
             -- the QUEST_LOG_UPDATE/QUEST_WATCH_UPDATE events alone for this, since neither engine
             -- fires an event off a plain Add/RemoveQuestWatch call; we mirror that exactly.
@@ -220,12 +216,11 @@
                     RemoveQuestWatch(index)
                     QuestWatch_Update()
                 elseif GetNumQuestLeaderBoards(index) == 0 then
-                    -- ref QUEST_WATCH_NO_OBJECTIVES, red, straight onto the errors frame
-                    -- (the ref calls UIErrorsFrame:AddMessage the same way).
-                    BenillaErrorsFrame_AddMessage("This quest has no objectives to track", 1.0, 0.1, 0.1)
+                    -- ref QUEST_WATCH_NO_OBJECTIVES, red, straight onto the errors frame.
+                    UIErrorsFrame:AddMessage("This quest has no objectives to track", 1.0, 0.1, 0.1)
                 elseif GetNumQuestWatches() >= BENILLA_QUESTLOG_MAX_WATCHES then
                     -- ref QUEST_WATCH_TOO_MANY, red.
-                    BenillaErrorsFrame_AddMessage("You may only watch " .. BENILLA_QUESTLOG_MAX_WATCHES .. " quests at a time", 1.0, 0.1, 0.1)
+                    UIErrorsFrame:AddMessage("You may only watch " .. BENILLA_QUESTLOG_MAX_WATCHES .. " quests at a time", 1.0, 0.1, 0.1)
                 else
                     -- A manual watch is PERMANENT (ref: QUEST_WATCH_NO_EXPIRE) — drop any timed
                     -- entry the auto-watch may have armed for it.

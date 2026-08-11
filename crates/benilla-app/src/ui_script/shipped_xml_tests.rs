@@ -107,6 +107,14 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
     // `file=` on a texture element is an ARCHIVE path; `<Script file=>`/`<Include file=>` name our
     // own source files and are top-level items, not elements, so walking elements can't see them.
     fn walk(el: &Element, file: &str, out: &mut Vec<(String, String, String)>) {
+        // `<Model file=>` names a **model** (`.mdx`), not a texture: it never reaches
+        // `sprite_candidates` and it cannot draw a white quad, because this engine renders no
+        // FrameXML models at all. The one shipped case is the reference's `CooldownFrameTemplate`,
+        // transcribed with its own attributes so an addon's `inherits=` resolves, while the sweep
+        // it drives lives in our native `<Cooldown>` widget instead (decision 0263).
+        if el.tag.eq_ignore_ascii_case("Model") {
+            return;
+        }
         for (key, value) in el.attrs() {
             let archive_path = ["file", "bgfile", "edgefile"]
                 .contains(&key.to_ascii_lowercase().as_str())

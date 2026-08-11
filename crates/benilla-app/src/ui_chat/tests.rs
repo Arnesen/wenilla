@@ -1083,3 +1083,37 @@ fn unconditional_and_sleep_dead_rules() {
     assert!(!emote_send_eligible(0, 7, false)); // DEAD without the allow bit
     assert!(emote_send_eligible(0x0200, 3, false)); // "allowed while asleep/dead"
 }
+
+// ── The open-the-box law, shared by the ENTER key and an addon's ChatFrame_OpenChat ──────────
+
+/// A sticky type whose group is gone opens as SAY (ref `ChatFrame_OpenChat` l.1554-1565), and the
+/// sticky itself survives. The point of the test is that there is **one** implementation of that
+/// law: `ChatFrame_OpenChat` (3 corpus callers) and the ENTER binding both call this, so an addon
+/// opening the box lands in the same type the player's own keypress would.
+#[test]
+fn a_sticky_whose_group_is_gone_opens_as_say() {
+    use super::edit::{sticky_on_open, SendType};
+    use crate::ui_party::GroupState;
+
+    let solo = GroupState::default();
+    let party = GroupState {
+        in_group: true,
+        group_type: 0,
+        ..GroupState::default()
+    };
+    let raid = GroupState {
+        in_group: true,
+        group_type: 1,
+        ..GroupState::default()
+    };
+
+    assert_eq!(sticky_on_open(SendType::Party, &solo), SendType::Say);
+    assert_eq!(sticky_on_open(SendType::Party, &party), SendType::Party);
+    // RAID needs an actual raid — a plain party is not one.
+    assert_eq!(sticky_on_open(SendType::Raid, &party), SendType::Say);
+    assert_eq!(sticky_on_open(SendType::Raid, &raid), SendType::Raid);
+    assert_eq!(sticky_on_open(SendType::RaidWarning, &party), SendType::Say);
+    // Everything ungated passes through untouched.
+    assert_eq!(sticky_on_open(SendType::Guild, &solo), SendType::Guild);
+    assert_eq!(sticky_on_open(SendType::Say, &solo), SendType::Say);
+}

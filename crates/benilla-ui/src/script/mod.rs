@@ -42,8 +42,10 @@ mod backdrop;
 mod bank;
 mod binding_abi;
 mod button;
+mod channel;
 mod char_stats;
 mod chat_send;
+mod chat_window;
 mod clip;
 mod colorselect;
 mod container;
@@ -62,6 +64,7 @@ pub(crate) mod event;
 mod extract;
 mod follow;
 pub(crate) mod font;
+mod font_block;
 mod gossip;
 mod inspect;
 mod item_stats;
@@ -167,8 +170,8 @@ pub use trainer::{
 };
 pub use types::{
     EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,
-    JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent, ScriptValue,
-    TexCoords,
+    Gradient, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent,
+    ScriptValue, TexCoords,
 };
 pub(crate) use types::{MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
@@ -298,6 +301,23 @@ pub struct UiScript {
     lua: Lua,
 }
 
+/// The chunk name the CLIENT gives an addon's file: `Interface\AddOns\<Folder>\<File>`.
+///
+/// Backslashes, and the `Interface\AddOns\` prefix, because addons PARSE this. `FuBarPlugin-2.0`
+/// derives each plugin's own folder from a stack trace —
+/// `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")` (`FuBarPlugin-2.0.lua:752`) — and
+/// feeds the capture straight into `format("Interface\\AddOns\\%s\\icon", self.folderName)`.
+/// With no name set, mlua defaults the chunk to the Rust caller location, the pattern misses,
+/// `folderName` is nil, and every FuBar plugin dies formatting it. That was 20 addons.
+///
+/// The greedy `(.*)` in their pattern is why the FILE has to be in the name too: it captures up to
+/// the LAST backslash, so `…\AddOns\FuBar_BagFu\FuBar_BagFu.lua` yields `FuBar_BagFu`. A name
+/// stopping at the folder would capture the empty string.
+pub fn addon_chunk_name(folder: &str, file: &str) -> String {
+    // `@` is Lua's "this chunk is a file" marker; the traceback then prints the path plainly.
+    format!("@Interface\\AddOns\\{folder}\\{}", file.replace('/', "\\"))
+}
+
 impl UiScript {
     /// Build a fully sandboxed, stdlib- and object-model-equipped host.
     pub fn new() -> mlua::Result<UiScript> {
@@ -306,6 +326,8 @@ impl UiScript {
 
         addon::install(&lua)?;
         chat_send::install(&lua)?;
+        channel::install(&lua)?;
+        chat_window::install(&lua)?;
         client::install(&lua)?;
         stdlib::sandbox(&lua)?;
         // Before the stdlib layer, so its aliases bind the 5.0-shaped functions (decision 1194).
@@ -456,8 +478,21 @@ impl UiScript {
     /// odd glyph. The two front-door transforms the reference's own compiler applies — the UTF-8
     /// BOM strip and the `#`-line skip — are applied here ([`crate::source::chunk`]).
     pub fn run_chunk(&self, chunk: &[u8]) -> mlua::Result<()> {
+        self.run_chunk_named(chunk, "(chunk)")
+    }
+
+    /// Run a chunk under the name the CLIENT would give it — `Interface\AddOns\<Folder>\<File>`
+    /// for an addon file (build it with [`addon_chunk_name`]).
+    ///
+    /// The name is not cosmetic. Without `set_name`, mlua defaults a chunk to the **Rust** caller
+    /// location, so every error an addon raised was reported against `crates/benilla-ui/src/...`
+    /// — wrong in any error an addon shows a player, and load-bearing for the addons that PARSE a
+    /// traceback. `FuBarPlugin-2.0.lua:752` derives a plugin's own folder with
+    /// `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")`, which cannot match a Rust path.
+    pub fn run_chunk_named(&self, chunk: &[u8], name: &str) -> mlua::Result<()> {
         self.lua
             .load(crate::source::chunk(chunk))
+            .set_name(name)
             .set_mode(mlua::ChunkMode::Text)
             .exec()
     }
@@ -786,6 +821,57 @@ impl UiScript {
     /// the corpus as a missing template.
     pub fn has_font_object(&self, name: &str) -> bool {
         self.model_ref().font_objects.contains_key(name)
+    }
+
+    /// The **widget kind of a published name** — `"MessageFrame"`, `"Button"`, `"Texture"`, … — or
+    /// `None` if nothing by that name is a live widget.
+    ///
+    /// [`Self::has_framexml_template`]'s sibling, and the same kind of thing: a pure Rust-side query
+    /// on the live model, for the corpus harness. The harness needs to know what `UIErrorsFrame` in
+    /// `UIErrorsFrame:AddMessage(…)` actually *is* in our object graph, because a widget-method
+    /// census that asks "does ANY kind answer this name" cannot see a verb wired to one class and
+    /// forgotten on its sibling (decision 1228). Attributing the call site to a kind is what makes
+    /// that question askable, and this is the only honest answer to "what kind is that global": the
+    /// arena's own record, not a name list.
+    ///
+    /// **Deliberately NOT a Lua binding.** The reference publishes this as `GetObjectType`, which we
+    /// do not implement outside font objects; adding it here would put a new verb in front of every
+    /// addon and move the very numbers the census is measured by. An instrument must be able to
+    /// claim it perturbed nothing, so it stays on the Rust side where no addon can observe it.
+    ///
+    /// The spellings are `CreateFrame`'s own (`SimpleHTML`, not `SimpleHtml`), so a caller can
+    /// compare a name here against a kind it passed to `CreateFrame`.
+    pub fn widget_kind(&self, name: &str) -> Option<&'static str> {
+        let model = self.model_ref();
+        if let Some(h) = model.arena.lookup(name) {
+            return model.arena.frame(h).map(|f| match f.kind {
+                crate::widget::FrameKind::Frame => "Frame",
+                crate::widget::FrameKind::Button => "Button",
+                crate::widget::FrameKind::CheckButton => "CheckButton",
+                crate::widget::FrameKind::EditBox => "EditBox",
+                crate::widget::FrameKind::StatusBar => "StatusBar",
+                crate::widget::FrameKind::Slider => "Slider",
+                crate::widget::FrameKind::ScrollFrame => "ScrollFrame",
+                crate::widget::FrameKind::Model => "Model",
+                crate::widget::FrameKind::MessageFrame => "MessageFrame",
+                crate::widget::FrameKind::ScrollingMessageFrame => "ScrollingMessageFrame",
+                crate::widget::FrameKind::ColorSelect => "ColorSelect",
+                crate::widget::FrameKind::SimpleHtml => "SimpleHTML",
+                crate::widget::FrameKind::MovieFrame => "MovieFrame",
+                crate::widget::FrameKind::GameTooltip => "GameTooltip",
+                crate::widget::FrameKind::Minimap => "Minimap",
+                crate::widget::FrameKind::Cooldown => "Cooldown",
+            });
+        }
+        // The region leaves publish into their own name table (`region_names`), not the arena's —
+        // and they matter here: `GameTooltipTextLeft1:GetText()` is a FontString call, and the
+        // corpus scrapes those constantly.
+        let id = *model.region_names.get(name)?;
+        let h = *model.id_to_region.get(&id)?;
+        model.arena.region(h).map(|r| match r.kind {
+            crate::widget::RegionKind::Texture => "Texture",
+            crate::widget::RegionKind::FontString => "FontString",
+        })
     }
 
     /// A snapshot of the script errors collected so far (from `pcall`'d handlers).

@@ -255,6 +255,82 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // `GetBackdrop()` (`0x777370`; wow-re `ui/scratch/widget-api-batch-benilla.md` Q5) — five things
+    // a plausible implementation gets wrong, so each is spelled out with its reason:
+    //
+    // 1. It is a **reconstruction from the struct**, never the caller's table. The reference stores
+    //    no Lua reference anywhere: `SetBackdrop` reads six keys into a fresh 0x68-byte struct at
+    //    `frame+0x1ac` and drops the table, so `0x777426`–`0x7776b9` re-push every key from those
+    //    fields. Handing back a stored clone would leak keys the reader never accepted and would
+    //    keep stale values a later `SetBackdropColor` changed.
+    // 2. **No backdrop ⇒ ZERO Lua values, not `nil`** — the early bail is `xor eax,eax; ret`, which
+    //    for a *return* path really is "no values" (contrast `binding_abi`'s note: the same two
+    //    bytes after a `luaL_error` are unreachable boilerplate). Observable through `select('#')`,
+    //    and it is the shape our `GetTitleRegion` will *not* have when it lands — that one pushes
+    //    nil, i.e. one value. The client cannot distinguish "never set" from `SetBackdrop(nil)`.
+    // 3. **A partial `SetBackdrop` omits nothing on the way out.** Every `SetBackdrop` allocates a
+    //    fresh struct (`0x777801`, ctor `0x77e5f0`), so a key the caller left out is a *ctor
+    //    default* here, not an absent key and not the previous backdrop's value: `bgFile`/`edgeFile`
+    //    `""`, `tileSize` 0, `edgeSize` **32**. Our `backdrop_from_table` already builds on
+    //    `Backdrop::default()`, so this falls out — but only because `None` maps to `""` below
+    //    rather than to nil.
+    // 4. **`tile` is the NUMBER `1`, or the key is ABSENT — never `true`/`false`.** The push is
+    //    `0x3ff00000` (the double 1.0) on true and `lua_pushnil` on false, and `lua_settable` with a
+    //    nil value creates no key (and *erases* one from a recycled table, which is why the nil is
+    //    written rather than skipped). An addon reading `if backdrop.tile then` sees the same truth
+    //    either way; one that round-trips the table into `SetBackdrop` is why the number matters,
+    //    since `tile` there goes through a coercer that takes numbers.
+    // 5. The undocumented **in-place form** (`0x77740e`): `lua_type(L,2) == LUA_TTABLE` skips
+    //    `lua_newtable` and fills arg 2, reusing an existing `insets` subtable rather than replacing
+    //    it. Implemented — it is four lines, and an addon caching one table across frames would
+    //    otherwise silently get a new one each call. A non-table arg 2 is ignored, not an error.
+    //
+    // No `bgColor`/`edgeColor`/`alpha` key exists: the two colors live in the struct but the reader
+    // never pushes them (`GetBackdropColor`/`GetBackdropBorderColor` are their only accessors).
+    m.set(
+        "GetBackdrop",
+        lua.create_function(|lua, (this, target): (Table, Value)| {
+            let h = frame_handle_of(lua, &this)?;
+            // Copied out before a single Lua write: filling a *caller-supplied* table can run a
+            // `__newindex` metamethod, which can re-enter us and would panic on the app-data borrow.
+            let bd = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                model.backdrops.get(&h).cloned()
+            };
+            let Some(bd) = bd else {
+                return Ok(mlua::MultiValue::new()); // trap 2 — zero values, not nil
+            };
+            let t = match target {
+                Value::Table(t) => t,
+                _ => lua.create_table()?,
+            };
+            t.set("bgFile", bd.bg_file.as_deref().unwrap_or(""))?;
+            t.set("edgeFile", bd.edge_file.as_deref().unwrap_or(""))?;
+            t.set(
+                "tile",
+                if bd.tile {
+                    Value::Number(1.0) // trap 4
+                } else {
+                    Value::Nil // trap 4 — erases the key from a recycled table
+                },
+            )?;
+            t.set("tileSize", f64::from(bd.tile_size))?;
+            t.set("edgeSize", f64::from(bd.edge_size))?;
+            let insets = match t.get::<Value>("insets") {
+                Ok(Value::Table(existing)) => existing, // trap 5 — reuse, don't replace
+                _ => {
+                    let fresh = lua.create_table()?;
+                    t.set("insets", &fresh)?;
+                    fresh
+                }
+            };
+            insets.set("left", f64::from(bd.insets.left))?;
+            insets.set("right", f64::from(bd.insets.right))?;
+            insets.set("top", f64::from(bd.insets.top))?;
+            insets.set("bottom", f64::from(bd.insets.bottom))?;
+            Ok(mlua::MultiValue::from_vec(vec![Value::Table(t)]))
+        })?,
+    )?;
     m.set(
         "SetBackdropColor",
         lua.create_function(

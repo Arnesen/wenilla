@@ -439,3 +439,39 @@ fn managed_positions_track_the_bottom_bar_stack() {
     assert_eq!(bottom(&s, "CastingBarFrame"), 100.0);
     assert_eq!(bottom(&s, "ChatFrame1"), 102.0);
 }
+
+/// **`CastingBarFrameStatusBar` is published, and it IS `CastingBarFrame`.**
+///
+/// `CastingBarFrame.lua:16` ends `CastingBarFrame_OnLoad` with `CastingBarFrameStatusBar =
+/// CastingBarFrame` — a plain alias, because in 1.12 the casting bar is itself the StatusBar and
+/// there is no separate child. Our transcription copied the eight `RegisterEvent`s and both field
+/// inits and dropped that one line.
+///
+/// It cost 11 corpus addons, the largest single name in the session-start `attempt to index global`
+/// row, and implementing it moved survivors 74 -> 85.
+///
+/// **This is the second time this file has been caught dropping lines from the same function** (see
+/// the module doc: the original transcription also lost two `CastingBarFlash:Hide()` calls). A line
+/// missing from INSIDE an otherwise-verbatim function is invisible to every instrument here —
+/// `framexml-transcription-diff.py` compares elements and handlers, not bodies.
+///
+/// Asserted as identity, not just non-nil: an alias that pointed at some other frame would satisfy
+/// "exists" and still break every addon that drives the bar through it.
+#[test]
+fn the_casting_bar_publishes_its_status_bar_alias() {
+    let s = harness();
+    assert!(
+        s.eval::<bool>("return CastingBarFrameStatusBar ~= nil")
+            .unwrap(),
+        "the reference publishes this name in CastingBarFrame_OnLoad"
+    );
+    assert!(
+        s.eval::<bool>("return CastingBarFrameStatusBar == CastingBarFrame")
+            .unwrap(),
+        "the alias IS the bar — 1.12 has no separate child StatusBar"
+    );
+    // And it drives: the addons that index it call StatusBar methods straight through.
+    s.run("CastingBarFrameStatusBar:SetMinMaxValues(0, 10) CastingBarFrameStatusBar:SetValue(4)")
+        .unwrap();
+    assert!((bar_value(&s) - 4.0).abs() < 1e-9);
+}

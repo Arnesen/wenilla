@@ -345,7 +345,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                         fo.height = Some(h);
                     }
                     if let Some(f) = flags {
-                        fo.outline = Outline::parse(&f);
+                        // The LUA flags spelling ("OUTLINE"/"THICKOUTLINE"), not the XML
+                        // attribute's ("NORMAL"/"THICK") — this read the XML one, so every
+                        // `GameFontNormal:SetFont(f, h, "OUTLINE")` silently cleared the outline.
+                        fo.outline = Outline::flags(&f);
                     }
                 })?;
                 Ok(if ok { Value::Number(1.0) } else { Value::Nil })

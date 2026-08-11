@@ -112,3 +112,63 @@ fn events_fire_in_registration_order_fifo() {
     s.fire_event("E", vec![]);
     assert_eq!(s.eval::<String>("return order").unwrap(), "ACB");
 }
+
+/// **`HasScript` answers "can this widget CARRY that kind", not "does it have one set".**
+///
+/// That distinction is the verb's whole purpose, and every corpus caller depends on it: they ask
+/// before hooking, precisely when nothing is set yet.
+///
+/// ```lua
+/// if parent:HasScript("OnMouseDown") then          -- Tablet-2.0.lua:2409
+///     local script = parent:GetScript("OnMouseDown")
+///     parent:SetScript("OnMouseDown", function() … end)
+/// end
+/// ```
+///
+/// It was the top session-start blocker — 32 of 39 `attempt to call method` failures were this one
+/// name — and implementing it took survivors from 41 to 69.
+///
+/// The known over-permission is asserted too, so it is a recorded divergence rather than a
+/// discovery: our table is flat where the reference's is per widget type, so a plain Frame answers
+/// true for a Button-only kind. Exact for the base kinds, which is what the corpus asks about.
+#[test]
+fn has_script_reports_the_kind_is_supported_not_that_one_is_set() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "HasScriptProbe")"#)
+        .unwrap();
+
+    // True with NOTHING set — the case every caller is actually in.
+    assert!(
+        s.eval::<bool>(r#"return f:HasScript("OnMouseDown")"#)
+            .unwrap(),
+        "a frame must report it can carry OnMouseDown before one is set"
+    );
+    assert!(
+        !s.eval::<bool>(r#"return f:HasScript("OnNotARealScript")"#)
+            .unwrap(),
+        "an unknown kind is false, not true"
+    );
+
+    // Tablet's exact idiom, run end to end: guard, read the (absent) handler, install one, fire it.
+    let fired: bool = s
+        .eval(
+            r#"
+            RAN = false
+            if f:HasScript("OnMouseDown") then
+                local prev = f:GetScript("OnMouseDown")
+                f:SetScript("OnMouseDown", function() RAN = true end)
+            end
+            f:GetScript("OnMouseDown")()
+            return RAN
+        "#,
+        )
+        .unwrap();
+    assert!(fired, "the guarded hook must install and run");
+
+    // The recorded divergence: flat table, so a Frame says true for a Button-only kind. The
+    // reference says false. Pinned so making SCRIPT_KINDS per-type has to come here and decide.
+    assert!(
+        s.eval::<bool>(r#"return f:HasScript("OnClick")"#).unwrap(),
+        "over-permissive by design today — see the comment at the binding"
+    );
+}

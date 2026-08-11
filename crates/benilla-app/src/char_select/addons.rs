@@ -137,13 +137,26 @@ impl AddonsPanel {
         self.list.len().saturating_sub(MAX_ROWS)
     }
 
-    /// **Why a row will not load, as the reference's `reason` token** — the string the status
-    /// column shows and the colour rule keys on.
+    /// **Why a row will not load** — the string the status column shows and the colour rule keys on.
     ///
-    /// `DEP_DISABLED`/`DEP_MISSING` come from the dependency walk; `DISABLED` from the checkbox;
-    /// `INCOMPATIBLE` from `## Interface`. Reported and never enforced for the last one (1191 §6),
-    /// which is why an out-of-date addon still shows gold-if-enabled: the status column says so
-    /// and the client still loads it, and those two facts must not contradict each other.
+    /// These are the reference's status LABELS, not its tokens, because the glue side has no VM to
+    /// splice `getglobal("ADDON_"..reason)` against (1197 §3). Each is the exact value its token
+    /// carries in the shipped `GlobalStrings.lua`, and
+    /// `the_status_labels_are_the_reference_globalstrings_values` pins all four so they cannot
+    /// drift from the ESC-menu twin, which DOES go through the globals:
+    ///
+    /// | here | token | `GlobalStrings.lua` |
+    /// |---|---|---|
+    /// | `"Disabled"` | `ADDON_DISABLED` | `"Disabled"` |
+    /// | `"Dependency missing"` | `ADDON_DEP_MISSING` | `"Dependency missing"` |
+    /// | `"Dependency disabled"` | `ADDON_DEP_DISABLED` | `"Dependency disabled"` |
+    /// | `"Out of date"` | `ADDON_INTERFACE_VERSION` | `"Out of date"` |
+    ///
+    /// The last row is why this comment was rewritten: it used to name the token `INCOMPATIBLE`,
+    /// **which does not exist** — the reference has no `ADDON_INCOMPATIBLE`, and a reader who
+    /// trusted the name would have spliced a nil global. Out-of-date is reported and never enforced
+    /// (1191 §6), which is why such a row still shows gold-if-enabled: the status column says so and
+    /// the client still loads it, and those two facts must not contradict each other.
     fn reason(&self, i: usize) -> Option<&'static str> {
         let addon = self.list.get(i)?;
         if !self.staged.get(i).copied().unwrap_or(addon.enabled) {
@@ -643,6 +656,46 @@ mod tests {
             list,
             staged,
             ..Default::default()
+        }
+    }
+
+    /// **Every label this panel shows is the value its reference token carries**, so the glue
+    /// screen and the ESC-menu screen cannot say different things about the same addon.
+    ///
+    /// The glue side has no VM to splice `getglobal("ADDON_"..reason)` against (1197 §3), so it
+    /// hardcodes the English. That is fine and it is also exactly how the two screens drift: the
+    /// twin resolves through `GlobalStrings.lua` and this one does not, so nothing but a test
+    /// connects them. The values below are quoted from the shipped 1.12 `GlobalStrings.lua`
+    /// (l.16-31, the `ADDON_*` block) — which the client itself loads at boot.
+    ///
+    /// This test exists because the comment on [`AddonsPanel::reason`] used to name the token
+    /// `INCOMPATIBLE`, and **there is no `ADDON_INCOMPATIBLE`**; the real one is
+    /// `ADDON_INTERFACE_VERSION`. A wrong token name is invisible until somebody splices it.
+    #[test]
+    fn the_status_labels_are_the_reference_globalstrings_values() {
+        let mut p = panel(vec![
+            addon("Off", &[], &[11200]),
+            addon("Lib", &[], &[11200]),
+            addon("Needs", &["Lib"], &[11200]),
+            addon("Orphan", &["Nowhere"], &[11200]),
+            addon("Old", &[], &[11100]),
+        ]);
+        p.staged[0] = false;
+        p.staged[1] = false;
+
+        // (label, the token it must equal, the value GlobalStrings.lua gives that token)
+        for (got, token, want) in [
+            (p.reason(0), "ADDON_DISABLED", "Disabled"),
+            (p.reason(2), "ADDON_DEP_DISABLED", "Dependency disabled"),
+            (p.reason(3), "ADDON_DEP_MISSING", "Dependency missing"),
+            (p.reason(4), "ADDON_INTERFACE_VERSION", "Out of date"),
+        ] {
+            assert_eq!(
+                got,
+                Some(want),
+                "this label must be {token}'s value verbatim, or the ESC-menu twin — which \
+                 resolves the token through GlobalStrings — will show a different string"
+            );
         }
     }
 

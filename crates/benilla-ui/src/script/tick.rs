@@ -78,7 +78,21 @@ impl UiScript {
                 .map(|(&h, _)| h)
                 .filter(|&h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
                 .collect();
-            frames.into_iter().map(|h| model.frame_id(h)).collect()
+            let mut ids: Vec<u32> = frames.into_iter().map(|h| model.frame_id(h)).collect();
+            // **Deterministic order, by frame id — i.e. creation order.**
+            //
+            // `model.scripts` is a hash map, so this sweep used to fire OnUpdate in an order that
+            // varied per process. That was invisible for as long as every geometry getter answered
+            // from the PREVIOUS frame's resolve: each handler saw the same stale world regardless
+            // of when it ran. The moment the getters began settling on demand (so a handler can
+            // observe work an earlier handler did this same sweep), the order became load-bearing
+            // and the macro window's tab width started flipping 164/167 run to run.
+            //
+            // Random order was always wrong — the reference sweeps a defined order — the staleness
+            // was merely hiding it. Creation order is stable, matches FrameXML declaration order,
+            // and is what a handler reading a sibling's geometry should see.
+            ids.sort_unstable();
+            ids
         };
         for id in ids {
             if let Err(e) = event::fire_update_handler(&self.lua, id, elapsed) {
@@ -90,6 +104,27 @@ impl UiScript {
         // AtBottom freeze gate lives inside `ScrollingMessageState::tick`.
         let now = self.now();
         let mut model = self.model_mut();
+        // The sibling class's OnUpdate (`0x786200`): the same two-phase fade with no scroll gate,
+        // plus the capacity law that is this class's stand-in for `maxLines` — the cap is what fits
+        // vertically, so it needs the frame's resolved rect and is collected first (the arena walk
+        // below holds a mutable borrow that cannot also read `model.resolved`).
+        let message_frames: Vec<(FrameHandle, usize)> = model
+            .arena
+            .iter_frames()
+            .filter(|(_, f)| matches!(f.kind_state, crate::widget::KindState::Message(_)))
+            .map(|(h, _)| h)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| (h, Self::message_viewport_rows(&model, h)))
+            .collect();
+        for (h, viewport_rows) in message_frames {
+            if let Some(crate::widget::KindState::Message(mf)) =
+                model.arena.frame_mut(h).map(|f| &mut f.kind_state)
+            {
+                mf.tick(elapsed);
+                mf.trim_to_viewport(viewport_rows);
+            }
+        }
         let mut finished_cooldowns: Vec<FrameHandle> = Vec::new();
         for (h, frame) in model.arena.iter_frames_mut() {
             if let crate::widget::KindState::ScrollingMessage(smf) = &mut frame.kind_state {

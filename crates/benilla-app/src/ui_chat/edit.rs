@@ -527,15 +527,7 @@ pub(super) fn open_chat_keys(
         state.chat_type = SendType::Whisper;
         state.tell_target = state.last_tell.front().cloned().unwrap_or_default();
     } else {
-        state.chat_type = match state.sticky {
-            SendType::Party if !group.in_group => SendType::Say,
-            SendType::Raid | SendType::RaidWarning
-                if !(group.in_group && group.group_type == 1) =>
-            {
-                SendType::Say
-            }
-            sticky => sticky,
-        };
+        state.chat_type = sticky_on_open(state.sticky, &group);
     }
     state.header_dirty = true;
     state.last_text.clear();
@@ -544,6 +536,56 @@ pub(super) fn open_chat_keys(
         run_or_warn(&script, "ChatFrameEditBox:SetText(\"/\")");
         state.last_text = "/".into();
     }
+}
+
+/// The type a freshly opened box starts in: the sticky, **downgraded to SAY when the group it
+/// names is gone** (ref `ChatFrame_OpenChat` l.1554-1565 — a sticky PARTY with an empty party opens
+/// as SAY, and so does a sticky RAID outside a raid). The sticky itself is untouched, so rejoining
+/// restores it. One function because two callers need the identical law: the ENTER binding
+/// ([`open_chat_keys`]) and an addon's `ChatFrame_OpenChat` ([`open_chat_requests`]).
+pub(super) fn sticky_on_open(sticky: SendType, group: &crate::ui_party::GroupState) -> SendType {
+    match sticky {
+        SendType::Party if !group.in_group => SendType::Say,
+        SendType::Raid | SendType::RaidWarning if !(group.in_group && group.group_type == 1) => {
+            SendType::Say
+        }
+        sticky => sticky,
+    }
+}
+
+/// `ChatFrame_OpenChat(text[, chatFrame])` — an addon asking for the chat box, prefilled
+/// (`benilla_ui::script::chat_window` registers the verb and queues the text).
+///
+/// The reference shows the box, stashes the text on it, and lets `ChatEdit_OnUpdate` type it in
+/// (`this.setText == 1` → `this:SetText(this.text)`, ChatFrame.lua l.1795) — the fill is a frame
+/// late there too. Ours focuses the box (which shows it) and writes the text now; `last_text` is
+/// deliberately left EMPTY rather than mirroring what we just wrote, so the next frame's
+/// [`chat_edit_live`] sees a change and runs the live parse over it. That is the whole point for
+/// two of the three corpus callers: they prefill `"/w <name> "`, and it is the live parse — not
+/// this function — that turns those characters into whisper mode with the target extracted,
+/// exactly as it would for a human typing them.
+pub(super) fn open_chat_requests(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut state: ResMut<ChatEditState>,
+    group: Res<crate::ui_party::GroupState>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    // Last request wins — two opens in one frame are one box, and the later caller is the one
+    // whose text the user is about to see.
+    let Some(text) = script.take_open_chat_requests().pop() else {
+        return;
+    };
+    state.chat_type = sticky_on_open(state.sticky, &group);
+    state.header_dirty = true;
+    state.last_text.clear();
+    script.focus_editbox("ChatFrameEditBox");
+    let lua_text = text.replace('\\', "\\\\").replace('"', "\\\"");
+    run_or_warn(
+        &script,
+        &format!("ChatFrameEditBox:SetText(\"{lua_text}\")"),
+    );
 }
 
 /// The unit popup's WHISPER action (`ChatFrame_SendTell` → the engine's tell queue, decision

@@ -18,10 +18,14 @@ pub struct MessageLine {
     /// Remaining phase-2 countdown (the `fadeDuration` snapshot). Once `time_left` hits `0` this
     /// counts down and drives [`Self::alpha`].
     pub fade_left: f32,
-    /// The current display alpha in `[0, 1]` (byte-quantized in the fade tick,
-    /// `trunc(remaining/fadeDuration*255)`). `0` once fully faded — the line stays in the ring
-    /// (a ring slot is freed only by drop-oldest / `SetMaxLines`), it just draws nothing (its rows
-    /// still hold their place — the reference's chat never re-packs when old lines fade).
+    /// The current display alpha in `[0, 1]`. Phase 1 leaves it at whatever `AddMessage` set —
+    /// forced opaque on a ScrollingMessageFrame (`792add: or edi,0xffffff00`), the caller's real
+    /// alpha arg on a MessageFrame (`795752`, default 1.0) — and phase 2 **overwrites** it with the
+    /// byte-quantized ramp `trunc(remaining/fadeDuration*255)`, the client's own store into the
+    /// line's alpha byte (`0x788547` / `786364`→`[edi+0xb]`). `0` once fully faded — in a
+    /// ScrollingMessageFrame the line stays in the ring (a slot is freed only by drop-oldest /
+    /// `SetMaxLines`) and merely draws nothing, its rows still holding their place; a MessageFrame
+    /// has no ring, so its retire helper (`0x786570`) frees the line outright and the rest re-pack.
     pub alpha: f32,
     /// How many display rows the line wraps into at the frame's current width/font — host-measured
     /// through the message-line measure round-trip
@@ -230,4 +234,163 @@ impl ScrollingMessageState {
 /// Phase-2 alpha quantization: `trunc(x*255)` (no `+0.5` — the fade tick truncates, `0x788547`).
 fn quantize_fade(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0).trunc() as u8
+}
+
+/// Where a [`MessageFrameState`]'s newest message enters the display stack — the `insertMode` XML
+/// attribute (`0x87a618`) and the `SetInsertMode`/`GetInsertMode` pair (`0x794ed0`/`0x794ff0`).
+///
+/// **MessageFrame only**, which is why it lives here and not on [`ScrollingMessageState`]: the
+/// scrolling class has neither binding and no such XML attribute (msgframe-runtime.md's
+/// binding-family table; wow-re `widget-api-batch-benilla.md` Q4, byte-verified).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InsertMode {
+    /// `"TOP"` (the client's `0`): the newest message takes the frame's **top** line and older ones
+    /// step down. The reference's own `UIErrorsFrame.xml:4` asks for this, and so does every corpus
+    /// caller of `SetInsertMode` (`BigWigs/Plugins/Messages.lua:209`).
+    Top,
+    /// `"BOTTOM"` (the client's `1`, and the **ctor default**): newest at the bottom, older stepping
+    /// up — the chat shape.
+    #[default]
+    Bottom,
+}
+
+/// A `CSimpleMessageFrame`'s runtime state (ctor `0x785640`; msgframe-runtime.md, byte-verified §5
+/// pair) — the class `UIErrorsFrame` is, and [`ScrollingMessageState`]'s **sibling, never its
+/// base**. The two come from different ctors and their `AddMessage` bindings are different
+/// functions with different tails, so nothing is shared here beyond the line record itself:
+///
+/// | | MessageFrame (this) | ScrollingMessageFrame |
+/// |---|---|---|
+/// | store | display lines only — no ring, **no `maxLines`**; the cap is what fits vertically | a true ring of `maxLines`, drop-oldest |
+/// | `AddMessage` tail | a real **alpha**, default 1.0 (`0x795590`) | an **id**; alpha forced `0xFF` (`0x792900`) |
+/// | scrollback | none at all | cursor + scroll/page set |
+/// | `SetInsertMode` | yes ([`InsertMode`]) | no binding, no attribute |
+/// | a fully-faded line | retired and the rest re-pack (`0x786570`) | keeps its ring slot and its rows |
+///
+/// The one recorded shape this does **not** model is the pending queue: the real class only
+/// *enqueues* in `AddMessage` and drains at OnUpdate, dropping the message outright if
+/// `numLinesDisplayed` is 0 at drain time (`786265`). Here a message lands in [`Self::lines`]
+/// immediately and [`Self::trim_to_viewport`] applies the vertical cap at the next tick — the same
+/// observable result one tick earlier, without a second buffer whose only visible consequence is
+/// that a message added to a zero-height frame vanishes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageFrameState {
+    /// The display lines, **newest at the back always** — [`InsertMode`] is a *display direction*
+    /// resolved at emit, not a storage order, so "evict the oldest" is one `pop_front` in both
+    /// modes.
+    pub lines: VecDeque<MessageLine>,
+    /// `insertMode` — which end of the frame new messages enter from (ctor default BOTTOM).
+    pub insert_mode: InsertMode,
+    /// `timeVisible`/`displayDuration` — phase-1 duration a new line holds its insert alpha (ctor
+    /// 10.0s; `UIErrorsFrame.xml` sets 5).
+    pub time_visible: f32,
+    /// `fadeDuration` — phase-2 ramp length (ctor 3.0s). `0` ⇒ the line vanishes at phase-1 expiry
+    /// with no ramp.
+    pub fade_duration: f32,
+    /// `fadingEnabled` (ctor 1). While false nothing fades — and, because retirement is what bounds
+    /// this list, nothing retires either; the vertical cap is then the only bound (which is exactly
+    /// the client's own arrangement).
+    pub fading_enabled: bool,
+}
+
+impl Default for MessageFrameState {
+    fn default() -> MessageFrameState {
+        // The CSimpleMessageFrame ctor defaults (msgframe-runtime.md §"Shared ctor defaults":
+        // fadingEnabled=1, timeVisible=10.0, fadeDuration=3.0; insertMode 1 = BOTTOM). Note the
+        // fade pair is shared with the scrolling class but `maxLines` has no counterpart here.
+        MessageFrameState {
+            lines: VecDeque::new(),
+            insert_mode: InsertMode::default(),
+            time_visible: 10.0,
+            fade_duration: 3.0,
+            fading_enabled: true,
+        }
+    }
+}
+
+impl MessageFrameState {
+    /// `AddMessage(text, r, g, b, a)` (`0x795590` → `0x785d00`): quantize the colour the same
+    /// round-half-up way the scrolling class does, take the **alpha argument** as the line's
+    /// starting alpha (this class's fourth numeric really is alpha — the scrolling one's is an id
+    /// and forces `0xFF`), snapshot the frame's fade config, and append.
+    pub fn add(&mut self, text: String, r: f32, g: f32, b: f32, a: f32) {
+        self.lines.push_back(MessageLine {
+            text,
+            color: [quantize_u8(r), quantize_u8(g), quantize_u8(b)],
+            time_left: self.time_visible,
+            fade_left: self.fade_duration,
+            // Quantized like the colour: the client packs all four channels into one 0xAARRGGBB
+            // dword through the same `ftol(v*255 + 0.5)`.
+            alpha: f32::from(quantize_u8(a)) / 255.0,
+            rows: 1,
+            rows_key: 0,
+        });
+    }
+
+    /// `Clear` — retire every line immediately, no fade. (`_LazyPig` calls `UIErrorsFrame:Clear()`
+    /// eleven times; it is the one non-`AddMessage` verb the corpus actually uses on this class.)
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+
+    /// Advance the fade by `dt` — the OnUpdate virtual `0x786200`, whose gate is
+    /// `activeCount != 0 && fadingEnabled != 0 && numLinesDisplayed > 0`. **No scroll gate**: this
+    /// class has no scrollback, so unlike [`ScrollingMessageState::tick`] nothing can freeze it.
+    ///
+    /// Two phases per line, identical formula to the scrolling class: `time_left` counts down at the
+    /// insert alpha, then `fade_left` counts down and *overwrites* the alpha with
+    /// `trunc(fade_left/fade_duration*255)` against the **live** frame `fade_duration`. A finished
+    /// line is then **freed** rather than left in place — this class has no ring to hold a slot, so
+    /// the survivors re-pack (`0x786570`, the retire helper that decrements the active count).
+    pub fn tick(&mut self, dt: f32) {
+        if !self.fading_enabled {
+            return;
+        }
+        for line in &mut self.lines {
+            if line.time_left > 0.0 {
+                line.time_left -= dt;
+                continue;
+            }
+            if self.fade_duration <= 0.0 {
+                line.alpha = 0.0;
+                continue;
+            }
+            line.fade_left -= dt;
+            if line.fade_left <= 0.0 {
+                line.fade_left = 0.0;
+                line.alpha = 0.0;
+            } else {
+                line.alpha = f32::from(quantize_fade(line.fade_left / self.fade_duration)) / 255.0;
+            }
+        }
+        // Retired lines are gone, not blank: `alpha == 0` past phase 1 is the finished state.
+        self.lines.retain(|l| l.time_left > 0.0 || l.alpha > 0.0);
+    }
+
+    /// Evict the oldest lines until only what fits in `viewport_rows` display rows remains — this
+    /// class's whole capacity law ("no `maxLines` anywhere on this class — the cap is what fits
+    /// vertically"), with each line costing its host-measured wrapped [`MessageLine::rows`].
+    ///
+    /// `viewport_rows == 0` means the frame has no resolved rect yet (or a degenerate one) and is
+    /// left alone rather than emptied: dropping there would lose a message posted from an `OnLoad`
+    /// before the first solve, which is a v1 ordering artefact and not the client's zero-height
+    /// case. The fade is what bounds the list in that window — and with `fading_enabled` false it
+    /// is unbounded until the frame resolves, which is stated rather than papered over.
+    pub fn trim_to_viewport(&mut self, viewport_rows: usize) {
+        if viewport_rows == 0 {
+            return;
+        }
+        let mut used = 0usize;
+        let mut keep = 0usize;
+        for line in self.lines.iter().rev() {
+            if used >= viewport_rows {
+                break;
+            }
+            used += usize::from(line.rows.max(1));
+            keep += 1;
+        }
+        while self.lines.len() > keep.max(1) {
+            self.lines.pop_front();
+        }
+    }
 }

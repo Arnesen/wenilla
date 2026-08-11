@@ -145,6 +145,100 @@ pub struct EditBoxState {
     /// The selection highlight tint (`SetHighlightColor`, the `E+0x350` texture trio's color;
     /// ctor default **0xFF606060** — opaque medium gray). RGBA 0..1.
     pub highlight_color: [f32; 4],
+    /// The justification bit word behind `Set/GetJustifyH` and `Set/GetJustifyV` — entries #12–#15
+    /// of the EditBox method table (`0x797990`/`0x797a50`/`0x797b10`/`0x797bd0`, tail-calling the
+    /// shared `0x79fc20`/`0x79fcb0`/`0x79fce0`/`0x79fd70`).
+    ///
+    /// **One dword, two axes** (`CSimpleFont+0x54` / `CSimpleFontString+0x120`), from the 6-entry
+    /// enum at `.rdata 0x811ad0`: bits 0–2 horizontal (`LEFT` 0x01, `CENTER` 0x02, `RIGHT` 0x04),
+    /// bits 3–5 vertical (`TOP` 0x08, `MIDDLE` 0x10, `BOTTOM` 0x20).
+    ///
+    /// **An EditBox's default is `0x211` — LEFT, not the generic CENTER.** The `CSimpleFont` ctor
+    /// default really is `0x212` (`CENTER | MIDDLE | 0x200`), but the EditBox constructor
+    /// *overrides* the horizontal axis immediately after linking its font instance —
+    /// `0x779bcd mov ecx,[edi+0x54]; and eax,~6; or eax,1; 0x779be4 mov [edi+0x54],eax` — so
+    /// `GetJustifyH()` on a fresh box answers **`"LEFT"`**. Bit `0x200` falls outside both axis
+    /// masks and neither accessor reads it, so only `0x11` is modelled. (wow-re
+    /// `system/ui/scratch/editbox-font-surface.md` §6.2; this **corrected** our first cut, which
+    /// took the generic `0x212` and answered `"CENTER"`.)
+    ///
+    /// **Kept on the box, not on its text region.** Each font binding's shim hands the shared
+    /// implementation `[this+0x324]` — the box's implicit FontString, i.e. [`Self::text_region`] —
+    /// so on the reference these do write that string's justify field. But our EditBox draw law
+    /// seats that region's vertical justification by `multiLine` (TOP / MIDDLE) and its horizontal
+    /// one LEFT, and writing the region here would fight that law *and* be clobbered by the next
+    /// `SetMultiLine`.
+    ///
+    /// **The vertical half of that is now VERIFIED to be exactly right, and for a reason worth
+    /// keeping** (§6 of the note above). `CSimpleFontString+0x124` is a per-bit *inherit* mask over
+    /// `+0x120`, and `SetMultiLine 0x77a4a0` clears the whole vertical group `0x38` from it on
+    /// **both** legs while writing the V bits locally (multi-line → TOP, single-line → MIDDLE) —
+    /// and the EditBox ctor calls `SetMultiLine` unconditionally at birth (`0x779c2f`, with the
+    /// ctor's zero register). A census of all 256 `+0x124` operands image-wide found every
+    /// `CSimpleFontString` writer to be an AND: **nothing ever ORs an inherit bit back.** So
+    /// `SetJustifyV` writes the instance and is masked out at `0x77086e`, never reaching the
+    /// rendered text, while `GetJustifyV` reads the instance (`0x79fd73`) and echoes it back:
+    /// **the getter and the pixels disagree permanently, by construction, on the real client too.**
+    /// Our rendered V justify is decided solely by `multiLine`, which is the same rule.
+    ///
+    /// **The horizontal half stays open, and is deliberately not guessed.** `SetMultiLine` never
+    /// clears the `0x7` bits, so `SetJustifyH`'s value *does* reach the FontString's `+0x120` —
+    /// but whether the editbox's own draw `0x77da80` reads it for placement, rather than
+    /// left-anchoring at the insets rect the way rf82's windowed draw describes, is untraced.
+    /// Verifying that the value propagates is not verifying that the draw honours it, so the
+    /// reading that changes no pixels is the one taken and the question is named. It is the whole
+    /// visible difference for `AceGUIWidget-Slider.lua:210`'s `editbox:SetJustifyH("CENTER")`
+    /// (3 corpus addons), whose call now round-trips either way.
+    pub justify: u32,
+}
+
+/// The justify enum, `.rdata 0x811ad0` — `{bits, token}`, in the reference's own table order, which
+/// is the order [`EditBoxState::justify_token`] scans (the getter returns the **first** set bit's
+/// token).
+const JUSTIFY_TOKENS: [(u32, &str); 6] = [
+    (0x01, "LEFT"),
+    (0x02, "CENTER"),
+    (0x04, "RIGHT"),
+    (0x08, "TOP"),
+    (0x10, "MIDDLE"),
+    (0x20, "BOTTOM"),
+];
+
+impl EditBoxState {
+    /// The horizontal axis mask (bits 0–2) — `SetJustifyH`'s `(cur & ~7) | (parsed & 7)`.
+    pub const JUSTIFY_H_MASK: u32 = 0x07;
+    /// The vertical axis mask (bits 3–5) — `SetJustifyV`'s.
+    pub const JUSTIFY_V_MASK: u32 = 0x38;
+
+    /// Parse a justify token to its bit, case-insensitively and whole-string (`0x6f1990`, a linear
+    /// `SStrCmpI` scan of all six). `None` = no match, which is what makes the caller raise
+    /// `Usage: %s:SetJustifyH("justify")` — the reference checks this one, unlike `SetTextColor`.
+    pub fn justify_bit(token: &str) -> Option<u32> {
+        JUSTIFY_TOKENS
+            .iter()
+            .find(|(_, name)| token.eq_ignore_ascii_case(name))
+            .map(|(bits, _)| *bits)
+    }
+
+    /// Replace one axis's bits with `parsed`'s, masked to that axis (`0x79fc5d`:
+    /// `(cur ^ parsed) & mask ^ cur`, i.e. `(cur & !mask) | (parsed & mask)`).
+    ///
+    /// **The verified trap this reproduces:** `SetJustifyH("TOP")` *parses* (0x08) but
+    /// `0x08 & 0x07 == 0`, so it **clears** justifyH and a later `GetJustifyH()` answers
+    /// `"UNKNOWN"` — no error is raised. A plausible implementation that maps unknown-to-CENTER
+    /// silently answers something the client never would.
+    pub fn set_justify_axis(&mut self, mask: u32, parsed: u32) {
+        self.justify = (self.justify & !mask) | (parsed & mask);
+    }
+
+    /// The token for one axis: the **first** entry in table order whose bit is set, else the
+    /// literal `"UNKNOWN"` (`0x6f1a00`, string `.data 0x838044`).
+    pub fn justify_token(&self, mask: u32) -> &'static str {
+        JUSTIFY_TOKENS
+            .iter()
+            .find(|(bits, _)| self.justify & mask & bits != 0)
+            .map_or("UNKNOWN", |(_, name)| *name)
+    }
 }
 
 impl Default for EditBoxState {
@@ -177,6 +271,9 @@ impl Default for EditBoxState {
             blink_accum: 0.0,
             caret_shown: true,
             highlight_color: [96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0],
+            // The EditBox ctor's `0x211` minus the unread bit 0x200 — `LEFT | MIDDLE`. LEFT, not
+            // the generic font default CENTER: `0x779be4` overrides the H axis at construction.
+            justify: 0x01 | 0x10,
         }
     }
 }

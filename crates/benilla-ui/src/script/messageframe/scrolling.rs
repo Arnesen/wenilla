@@ -7,21 +7,25 @@
 //! while **AtBottom** (scrolled up freezes every alpha), and 1-slot scrollback. The heavy lifting
 //! (the ring, the fade phases, the scroll clamps) lives on [`ScrollingMessageState`]
 //! (`crate::widget`), unit-tested there; this module is the thin Lua binding over it, plus the
-//! host-facing [`super::UiScript::add_chat_message`]/fade advance the app drives.
+//! host-facing [`UiScript::add_chat_message`]/fade advance the app drives.
 //!
 //! The methods live in their own registry table, consulted by the frame `__index` dispatcher only
 //! for ScrollingMessageFrame frames — so duck-typing addons (`if frame.AddMessage then …`) see `nil`
-//! on every other kind, exactly as against the client's per-class method sets.
+//! on every other kind, exactly as against the client's per-class method sets. **Its sibling class
+//! `MessageFrame` has its own table next door** ([`super::plain`]) carrying a *different*
+//! `AddMessage`: merging the two would hand a chat frame a `SetInsertMode` it does not have, and a
+//! MessageFrame an id argument where its alpha belongs.
 
 use mlua::{Lua, Table, Value};
 
-use super::object::frame_handle_of;
-use super::Model;
+use crate::script::object::frame_handle_of;
+use crate::script::{Model, UiScript};
 use crate::widget::{KindState, ScrollingMessageState};
 
 /// Registry key of the ScrollingMessageFrame method table (the MAXCSTACK discipline: Lua-side root,
 /// named key).
-pub(super) const REG_MESSAGEFRAME_METHODS: &str = "__benilla_messageframe_methods";
+pub(crate) const REG_SCROLLINGMESSAGEFRAME_METHODS: &str =
+    "__benilla_scrollingmessageframe_methods";
 
 /// Run `f` over a frame's message-frame state under one short write borrow. Errors if `this` is not a
 /// live ScrollingMessageFrame (unreachable through the kind dispatcher, but the method table is a
@@ -59,11 +63,7 @@ fn num_f32(v: &Value) -> f32 {
 fn page(lua: &Lua, this: &Table, up: bool) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let (_, height, _, _) = super::UiScript::message_frame_font(&model, h);
-    let pitch = height.unwrap_or(14.0).max(1.0);
-    let viewport_rows = model.resolved.get(&h).map_or(0, |r| {
-        ((r.top - r.bottom) / pitch).floor().max(0.0) as usize
-    });
+    let viewport_rows = UiScript::message_viewport_rows(&model, h);
     let frame = model
         .arena
         .frame_mut(h)
@@ -200,7 +200,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| with_smf(lua, &this, |smf| smf.fade_duration))?,
     )?;
 
-    lua.set_named_registry_value(REG_MESSAGEFRAME_METHODS, m)?;
+    lua.set_named_registry_value(REG_SCROLLINGMESSAGEFRAME_METHODS, m)?;
 
     // SubmitChatInput(text) — the chat input EditBox's OnEnterPressed hands the typed line here; it
     // queues into the model for the app to parse into a chat command (the outbound Lua→app seam, the

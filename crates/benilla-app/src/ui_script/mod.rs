@@ -34,6 +34,10 @@ mod extract;
 mod input;
 mod manifest;
 
+/// The reference FrameXML this client EXECUTES off the player's own patch chain instead of
+/// transcribing it — the rule, the list, and the licensing reason are that module's header.
+mod reference_ui;
+
 // The manifest's loaders read as `ui_script::…` at every call site, including the tests' `super::`.
 // `load_default_ui` is no longer test-only: the addon harness (1188 phase 6) loads the whole
 // shipped interface under each surveyed addon, because roughly half of what an addon calls is
@@ -400,6 +404,14 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
         .and_then(|r| r.realm.as_ref().map(|r| r.name.clone()))
         .unwrap_or_default();
     script.set_realm_name(&realm);
+    // …and so does the PLAYER, for the same reason and with more riding on it — see
+    // [`seat_from_roster`], which is where the why lives.
+    if let Some(seat) = world
+        .get_resource::<crate::char_select::Roster>()
+        .and_then(seat_from_roster)
+    {
+        script.set_unit("player", Some(seat));
+    }
     let _ = load_ingame_ui(&mut script, identity.as_ref());
     // The Minimap widget was born a moment ago with `MinimapState::default()`; seed its two live
     // zoom indices from the persisted CVars now, before anything reads them — the reference's own
@@ -416,6 +428,59 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
     world.insert_non_send_resource(script);
     world.insert_resource(AddOnIdentity(identity));
     world.resource_mut::<IngameUiLoaded>().0 = true;
+}
+
+/// The `"player"` snapshot the UI loads **under**, built from the roster row of the pick in
+/// flight — `None` when there is no pick (a capture, a scenario, a test world).
+///
+/// **The reference's invariant is that addon file scope always sees a real character**:
+/// `AddOn_Load 0x51f240` runs from inside `UI_Init 0x48fbf0`, which is after the world is entered.
+/// benilla's does not. `Connected` flips us `InWorld` a whole server round-trip before the self
+/// descriptor streams in ([`crate::ui_unit`]'s own comment measures that gap in *seconds*), and
+/// `feed_units` — the only writer of the `"player"` token — is gated on that descriptor existing.
+/// So until this existed, every addon's file scope ran in a VM where `UnitName("player")` was
+/// **nil**, which is a state a real session cannot present. It is the same argument, at the same
+/// line, as the `set_realm_name` above it (decision 1195) — and this is the more load-bearing half.
+///
+/// **The failure it fixes is silent, which is why it survived every instrument.** The director
+/// installed Bagnon, opened their bags, and got a window with a title, a gold line and **no bag
+/// slots at all**. `Bagnon_Core/core/Utility.lua:5` opens `local currentPlayer =
+/// UnitName("player")`, and every one of Bagnon's "am I looking at a cached snapshot of some OTHER
+/// character?" predicates is `currentPlayer ~= frame.player`. With `currentPlayer` nil, Bagnon
+/// concluded the live player's own bags belonged to somebody else, took every bag size from
+/// Bagnon_Forever's (empty) offline cache instead of `GetContainerNumSlots`, created zero item
+/// buttons — and raised nothing, so `loaded`, `session` and the UI probe all scored it a pass.
+/// Reproduced both ways in [`bagnon_render_tests`].
+///
+/// **What is filled is what the roster actually knows**: name, race, class, gender and level, all
+/// a round-trip ahead of the descriptor (the same fact [`crate::char_select::Roster::pending_entry`]
+/// already exploits for the streamers). Health and power are deliberately left at zero — those are
+/// the descriptor's to say, they land within the second, and inventing them would be a different
+/// lie from the one being fixed.
+fn seat_from_roster(roster: &crate::char_select::Roster) -> Option<benilla_ui::script::UnitState> {
+    let row = roster.pending_row()?;
+    let race = crate::ui_unit::race_names(row.race);
+    let class = crate::ui_unit::class_names(row.class);
+    Some(benilla_ui::script::UnitState {
+        exists: true,
+        name: Some(row.name.clone()),
+        level: u32::from(row.level),
+        race: race.map(|(n, _)| n.to_string()),
+        race_file: race.map(|(_, f)| f.to_string()),
+        class: class.map(|(n, _)| n.to_string()),
+        class_file: class.map(|(_, f)| f.to_string()),
+        // The wire's 0/1 on `UnitSex`'s 2/3 scale — `ui_unit::snapshot`'s own mapping.
+        sex: match row.gender {
+            0 => 2,
+            1 => 3,
+            _ => 0,
+        },
+        is_player: true,
+        // Nil here is not "no faction", it is a state a player character cannot be in, and
+        // AceDB-2.0 concatenates it at file scope — see [`crate::ui_unit::race_faction_group`].
+        faction_group: crate::ui_unit::race_faction_group(row.race).map(str::to_string),
+        ..Default::default()
+    })
 }
 
 /// `GetFramerate()`'s host half: push a **smoothed** frames-per-second into the VM each frame
@@ -843,6 +908,9 @@ mod unit_frame_tests;
 mod unit_popup_tests;
 
 #[cfg(test)]
+mod dropdown_tests;
+
+#[cfg(test)]
 mod action_bar_tests;
 
 #[cfg(test)]
@@ -1013,6 +1081,9 @@ mod errors_tests;
 
 #[cfg(test)]
 mod shipped_xml_tests;
+
+#[cfg(test)]
+mod bagnon_render_tests;
 
 #[cfg(test)]
 mod seam_scale_tests {

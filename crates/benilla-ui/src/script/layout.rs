@@ -5,10 +5,7 @@ use crate::order::ZTarget;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle};
 
 use super::backdrop;
-use super::{
-    ExtractedQuad, FontShadow, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Model,
-    Outline, QuadContent, UiScript, SCREEN,
-};
+use super::{ExtractedQuad, MeasureRequest, Model, QuadContent, UiScript, SCREEN};
 
 /// The paint a frame slot's derived quads inherit — its `effective_alpha` and `effective_scale`
 /// travelling together (backdrop pieces and message-frame ring lines are emitted BY the frame,
@@ -521,9 +518,24 @@ impl UiScript {
                 }) else {
                     continue;
                 };
-                let Some(owner_rect) = resolved.get(&owner).copied() else {
-                    continue;
-                };
+                // An owner with NO resolved rect does not disqualify its regions. `owner_rect`
+                // is only the fallback for the axes this region's own anchors do not pin (see the
+                // two `axis(..)` calls below) — a region anchored fully to some OTHER frame needs
+                // nothing from its owner, and the reference resolves it.
+                //
+                // Skipping here made a whole shape silently invisible: a bare container frame
+                // (`CreateFrame("Frame", n, UIParent)` with no size and no SetPoint) holding a
+                // region anchored elsewhere. That is ordinary addon code — MapCoords builds three
+                // of them, and its world-map coordinate readout computed the right string every
+                // frame and was never positioned, with no error anywhere. Degenerate rather than
+                // absent: an unpositioned owner contributes a zero rect, which is what an
+                // unpositioned frame IS.
+                let owner_rect = resolved.get(&owner).copied().unwrap_or(Rect {
+                    left: 0.0,
+                    bottom: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                });
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
                 // A FontString with no explicit height takes its host-measured wrapped size
                 // (the measure round-trip — the client's layout↔font-engine seam).
@@ -702,93 +714,6 @@ impl UiScript {
         out
     }
 
-    /// Ring lines whose wrapped **row count** needs a host measurement (new line, or the frame's
-    /// width/font changed under it) — the message-frame half of the measure round-trip. Call after
-    /// [`UiScript::resolve`] (widths must be resolved); answer with
-    /// [`UiScript::set_message_line_rows`] before extract. Cache keys keep this empty on quiet
-    /// frames.
-    pub fn message_lines_needing_measure(&mut self) -> Vec<LineMeasureRequest> {
-        use std::hash::{Hash, Hasher};
-        let mut model = self.model_mut();
-        let mut out = Vec::new();
-        let frames: Vec<(FrameHandle, Rect)> = model
-            .resolved
-            .iter()
-            .filter(|(&fh, _)| {
-                model.arena.frame(fh).is_some_and(|f| {
-                    matches!(f.kind_state, KindState::ScrollingMessage(_)) && f.effective_visible
-                })
-            })
-            .map(|(&fh, &fr)| (fh, fr))
-            .collect();
-        for (fh, fr) in frames {
-            let wrap_width = fr.right - fr.left;
-            if wrap_width <= 1.0 {
-                continue; // unresolved/degenerate width — nothing meaningful to wrap against
-            }
-            let scale = model
-                .arena
-                .frame(fh)
-                .map(|f| f.effective_scale)
-                .unwrap_or(1.0);
-            let (font, height, _, outline) = Self::message_frame_font(&model, fh);
-            let frame_id = model.frame_id(fh);
-            let Some(frame) = model.arena.frame(fh) else {
-                continue;
-            };
-            let KindState::ScrollingMessage(smf) = &frame.kind_state else {
-                continue;
-            };
-            for (index, line) in smf.lines.iter().enumerate() {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                line.text.hash(&mut hasher);
-                font.hash(&mut hasher);
-                height.map(f32::to_bits).hash(&mut hasher);
-                wrap_width.to_bits().hash(&mut hasher);
-                (outline as u8).hash(&mut hasher);
-                scale.to_bits().hash(&mut hasher);
-                let key = hasher.finish();
-                if line.rows_key == key {
-                    continue;
-                }
-                out.push(LineMeasureRequest {
-                    frame: frame_id,
-                    index: index as u32,
-                    font: font.clone(),
-                    height,
-                    wrap_width,
-                    outline,
-                    scale,
-                    text: line.text.clone(),
-                    key,
-                });
-            }
-        }
-        out
-    }
-
-    /// Store host row-count answers for [`LineMeasureRequest`]s (`(frame, index, rows, key)` —
-    /// frame/index/key verbatim from the request). The key is stored beside the rows, so a line
-    /// whose width/font changed again since the request simply re-requests next frame.
-    pub fn set_message_line_rows(&mut self, rows: &[(u32, u32, u16, u64)]) {
-        let mut model = self.model_mut();
-        for &(frame_id, index, n, key) in rows {
-            let Some(&fh) = model.id_to_frame.get(&frame_id) else {
-                continue;
-            };
-            let Some(frame) = model.arena.frame_mut(fh) else {
-                continue;
-            };
-            let KindState::ScrollingMessage(smf) = &mut frame.kind_state else {
-                continue;
-            };
-            if let Some(line) = smf.lines.get_mut(index as usize) {
-                line.rows = n.max(1);
-                line.rows_key = key;
-            }
-        }
-    }
-
     /// Push one [`QuadContent::Backdrop`] per piece of frame `fh`'s installed backdrop (no-op if the
     /// frame has none). Pieces carry the frame slot's `z` — behind the frame's regions (which sort
     /// after it) and, among themselves, bg-then-border in paint order (the stable z-sort keeps the
@@ -845,127 +770,5 @@ impl UiScript {
                 scale: paint.scale,
             });
         }
-    }
-
-    /// Push one [`QuadContent::Text`] per visible message of a ScrollingMessageFrame `fh` (no-op for
-    /// any other kind). Messages stack bottom-up from `fr`'s bottom edge; each occupies
-    /// `rows × pitch` (its host-measured wrapped row count — the message-line measure round-trip),
-    /// so a long line pushes everything above it up by its real height. The pitch is the **font
-    /// height itself** — the client's own line-step law (`LayoutLines` 0x5cdc20: step =
-    /// px(size) + spacing, spacing 0), the same law the app's text renderer lays wrapped rows at,
-    /// so band grid and glyph rows coincide by construction. (The msgframe's own relayout
-    /// `0x788750/0x788c00` is only partially read in wow-re — if the look pass ever shows the ref
-    /// spacing chat lines wider than the font height, that residual is the place to pin.)
-    ///
-    /// `scroll_offset` picks which message sits at the bottom. A message that only partially fits
-    /// at the frame's top still draws — clipped to the frame rect, so its lower wrapped rows show
-    /// (a reader mid-scrollback), never ink outside the frame. A fully-faded line draws nothing but
-    /// its rows still hold their place: the reference's chat never re-packs as old lines fade.
-    pub(super) fn emit_message_lines(
-        model: &Model,
-        fh: FrameHandle,
-        fr: Rect,
-        z: u64,
-        paint: FramePaint,
-        clip: Option<Rect>,
-        out: &mut Vec<ExtractedQuad>,
-    ) {
-        let Some(frame) = model.arena.frame(fh) else {
-            return;
-        };
-        let crate::widget::KindState::ScrollingMessage(smf) = &frame.kind_state else {
-            return;
-        };
-        if smf.lines.is_empty() {
-            return;
-        }
-        let (font, font_height, font_shadow, outline) = Self::message_frame_font(model, fh);
-        // The band grid lives in the frame's RESOLVED (scale-multiplied) rect, so the row pitch
-        // rides the frame scale exactly like the glyphs it must coincide with (the font height
-        // itself is frame-local).
-        let pitch = font_height.unwrap_or(14.0) * paint.scale;
-        if pitch <= 0.0 || fr.top <= fr.bottom {
-            return;
-        }
-        // Message text never inks outside its frame: a partially-fitting top message is scissored
-        // at the frame edge (intersected with any ScrollFrame ancestor clip).
-        let line_clip = Some(match clip {
-            Some(c) => super::clip::intersect_rect(c, fr),
-            None => fr,
-        });
-        // The newest message the view shows sits `scroll_offset` up from the ring's back.
-        let top_index = smf.lines.len().saturating_sub(1 + smf.scroll_offset);
-        let mut used = 0.0f32; // rows already consumed, in px up from fr.bottom
-        for idx in (0..=top_index).rev() {
-            if used >= fr.top - fr.bottom {
-                break; // the next band would start above the frame — nothing more can show
-            }
-            let line = &smf.lines[idx];
-            let band_h = f32::from(line.rows.max(1)) * pitch;
-            let bottom = fr.bottom + used;
-            used += band_h;
-            if line.alpha <= 0.0 {
-                continue; // fully faded — holds its place, draws nothing
-            }
-            let band = Rect::new(bottom, fr.left, bottom + band_h, fr.right);
-            out.push(ExtractedQuad {
-                target: ZTarget::Frame(fh),
-                z,
-                rect: Some(band),
-                alpha: paint.alpha,
-                clip: line_clip,
-                content: QuadContent::Text {
-                    text: Some(line.text.clone()),
-                    color: Some([
-                        f32::from(line.color[0]) / 255.0,
-                        f32::from(line.color[1]) / 255.0,
-                        f32::from(line.color[2]) / 255.0,
-                        line.alpha,
-                    ]),
-                    justify_h: JustifyH::Left,
-                    // The band is our own per-message construct (rows × pitch tall, not a
-                    // FontString rect) — keep the block at its top so the band math, not MIDDLE
-                    // centering, owns the vertical rhythm; the band height equals the wrapped
-                    // block height exactly, so Top means "fills the band".
-                    justify_v: JustifyV::Top,
-                    font: font.clone(),
-                    // The chat font object's own drop shadow (ChatFontNormal's `(1,-1)` black) — what
-                    // makes the lines read against the world behind the transparent frame.
-                    shadow: font_shadow,
-                    font_height,
-                    text_height: None, // message lines are never SetTextHeight'd
-                    outline,
-                    alpha_gradient: None,
-                },
-                scale: paint.scale,
-            });
-        }
-    }
-
-    /// The font a ScrollingMessageFrame's ring lines draw with: its declared `<FontString>` child
-    /// (ChatFontNormal for the chat window). Shared by [`Self::emit_message_lines`] and the
-    /// message-line measure round-trip so bands, measures, and glyphs agree. Missing ⇒ the
-    /// renderer's default face at the ~14px chat default.
-    pub(super) fn message_frame_font(
-        model: &Model,
-        fh: FrameHandle,
-    ) -> (Option<String>, Option<f32>, Option<FontShadow>, Outline) {
-        model
-            .arena
-            .frame(fh)
-            .and_then(|frame| {
-                frame
-                    .regions
-                    .iter()
-                    .find(|&&rh| {
-                        matches!(
-                            model.arena.region(rh).map(|r| r.kind),
-                            Some(crate::widget::RegionKind::FontString)
-                        )
-                    })
-                    .and_then(|rh| model.region_data.get(rh))
-                    .map(|d| (d.font_path.clone(), d.font_height, d.font_shadow, d.outline))
-            })
-            .unwrap_or((None, None, None, Outline::default()))
     }
 }

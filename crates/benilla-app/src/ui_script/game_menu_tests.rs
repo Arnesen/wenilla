@@ -626,11 +626,11 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     };
 
     for owner in [
-        "BenillaBagToggle",
-        "BenillaBagBarSlot1",
-        "BenillaBagBarSlot2",
-        "BenillaBagBarSlot3",
-        "BenillaBagBarSlot4",
+        "MainMenuBarBackpackButton",
+        "CharacterBag0Slot",
+        "CharacterBag1Slot",
+        "CharacterBag2Slot",
+        "CharacterBag3Slot",
     ] {
         assert!(
             !art(&s, owner).is_empty(),
@@ -641,11 +641,11 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     s.run("ToggleGameMenu(1)").unwrap();
     s.resolve();
     for owner in [
-        "BenillaBagToggle",
-        "BenillaBagBarSlot1",
-        "BenillaBagBarSlot2",
-        "BenillaBagBarSlot3",
-        "BenillaBagBarSlot4",
+        "MainMenuBarBackpackButton",
+        "CharacterBag0Slot",
+        "CharacterBag1Slot",
+        "CharacterBag2Slot",
+        "CharacterBag3Slot",
     ] {
         let drawn = art(&s, owner);
         assert!(
@@ -654,7 +654,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
         );
     }
     // The backpack icon specifically: still its own art, and tinted to SetDesaturation's grey.
-    let toggle = art(&s, "BenillaBagToggle");
+    let toggle = art(&s, "MainMenuBarBackpackButton");
     assert!(
         toggle
             .iter()
@@ -671,7 +671,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
 
     s.run("ToggleGameMenu(1)").unwrap();
     s.resolve();
-    let toggle = art(&s, "BenillaBagToggle");
+    let toggle = art(&s, "MainMenuBarBackpackButton");
     assert!(
         toggle
             .iter()
@@ -680,7 +680,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
         "closing the menu restores full colour: {toggle:?}"
     );
     assert!(
-        s.eval::<bool>("return BenillaBagToggle:IsEnabled()")
+        s.eval::<bool>("return MainMenuBarBackpackButton:IsEnabled()")
             .unwrap(),
         "…and the button works again"
     );

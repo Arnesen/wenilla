@@ -176,6 +176,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetWidth",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
+            settle(lua);
             let model = lua.app_data_ref::<Model>().expect("model");
             Ok(size_read(&model, h, true))
         })?,
@@ -184,6 +185,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetHeight",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
+            settle(lua);
             let model = lua.app_data_ref::<Model>().expect("model");
             Ok(size_read(&model, h, false))
         })?,
@@ -198,6 +200,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetCenter",
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
+            settle(lua);
             let model = lua.app_data_ref::<Model>().expect("model");
             let inv = 1.0 / eff_scale(&model, h);
             Ok(match model.resolved.get(&h) {
@@ -238,6 +241,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, this: Table| {
                 let h = frame_handle_of(lua, &this)?;
+                settle(lua);
                 let model = lua.app_data_mut::<Model>().expect("model");
                 let inv = 1.0 / eff_scale(&model, h);
                 Ok(model.resolved.get(&h).map(|r| {
@@ -255,6 +259,33 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 }
 
 /// The frame's effective scale, ε-guarded (a zero would poison the local-unit division).
+/// **Resolve the layout graph NOW if anything has moved since the last pass.**
+///
+/// The client answers a geometry query against current layout; ours cached rects in a per-frame
+/// `resolve()` pass, so a query made EARLIER IN THE SAME CALL STACK than that pass read nil. That
+/// is not an edge case — it is what every menu does. `Dewdrop-2.0.lua` (embedded in ~65 corpus
+/// addons) creates its menu frame, anchors it, shows it and then measures it inside one `OnClick`:
+///
+/// ```lua
+/// local left = frame:GetLeft()                                              -- l.1942, nil for us
+/// frame:SetPoint(point, parent, relativePoint, curX - left - width / 2, 0)  -- l.1960, dies
+/// ```
+///
+/// **97 of the 108 addons that drew and then raised on being touched died on that one line.** No
+/// missing verb: `GetLeft` was always there, and always answered nil.
+///
+/// Cheap: `resolve_layout`'s tier-1 gate is one epoch comparison that returns immediately when
+/// nothing has been touched, so a settled tree pays a compare per getter.
+///
+/// **It deliberately does NOT fire `OnSizeChanged`.** That drain runs Lua handlers, and re-entering
+/// Lua from inside a binding is how a borrow panic or an unbounded recursion happens. The
+/// size-change queue is drained by the next real `UiScript::resolve`, one tick later than the
+/// reference's per-rect-application fire (`ApplyRect 0x76b580`). Stated rather than hidden.
+fn settle(lua: &Lua) {
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    crate::script::UiScript::resolve_layout(&mut model);
+}
+
 pub(super) fn eff_scale(model: &Model, h: FrameHandle) -> f32 {
     let s = model
         .arena

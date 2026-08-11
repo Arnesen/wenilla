@@ -439,7 +439,7 @@
         -- `frame` IS the backpack — preserving that global's observability (existing tests patch it
         -- directly to count backpack repaints, e.g. delete_item_tests.rs's stuck-darkening
         -- regression check) — and BenillaBagWindow_Update generically for every other window. Every
-        -- runtime repaint trigger (a slot click, an event, BenillaOpenAllBags' pre-show paint) goes
+        -- runtime repaint trigger (a slot click, an event, OpenAllBags' pre-show paint) goes
         -- through this; BenillaBagBarSlot_OnClick calls BenillaBagWindow_Update directly (it only ever
         -- targets bags 1..4).
         function BenillaBagWindow_Repaint(frame)
@@ -507,7 +507,23 @@
         -- by bag id (BENILLA_BAG_WINDOWS[bagId+1]) — one code path over all of them.
         BENILLA_BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2", "BenillaBagFrame3", "BenillaBagFrame4" }
 
-        function BenillaOpenAllBags()
+        -- THE REFERENCE'S NAMES ARE THE REAL ENTRY POINTS, and our own UI calls THEM.
+        --
+        -- This is how a 1.12 addon customises anything: it replaces a global and expects the
+        -- client to call its replacement. `Bagnon_Core/core/Overrides.lua` is the canonical shape —
+        --     local bToggleBackpack = ToggleBackpack
+        --     ToggleBackpack = function() ... end
+        -- and until now that override was INERT here, because the 'B' binding and the bag button
+        -- called `BenillaBagToggle_OnClick` directly and nothing ever looked up `ToggleBackpack`.
+        -- Bagnon loaded, appeared in the AddOns list, replaced the globals, and the player still
+        -- got the stock bags. The director saw that; no instrument here could, because the corpus
+        -- survey loads addons and fires events but never CLICKS anything.
+        --
+        -- The class is far wider than one addon: every "hook a global to change behaviour" addon is
+        -- silently inert wherever our UI calls a benilla-named equivalent instead of the
+        -- reference's name. `CloseAllBags`/`OpenBackpack`/`CloseBackpack` already lived under the
+        -- ref's names in UiPanels.xml for exactly this reason; these are the three that did not.
+        function OpenAllBags()
             for bagId = 0, 4 do
                 -- The backpack always exists; an equipped-bag slot only when a bag is in it.
                 if bagId == 0 or GetContainerNumSlots(bagId) > 0 then
@@ -520,27 +536,79 @@
             end
         end
 
-        function BenillaCloseAllBags()
-            for _, name in ipairs(BENILLA_BAG_WINDOWS) do
-                local frame = getglobal(name)
-                if frame and frame:IsShown() then frame:Hide() end
+        -- `ToggleBag(id)` — the ref's per-bag toggle (ContainerFrame.lua l.152-170), and the other
+        -- global Bagnon replaces. Ours drives the same window the all-bags path does.
+        function ToggleBag(id)
+            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
+            if not frame then return end
+            if frame:IsShown() then
+                frame:Hide()
+            else
+                BenillaBagWindow_Repaint(frame)
+                frame:Show()
             end
         end
 
-        -- The backpack button (BenillaBagToggle) and the 'B' binding: if any bag window is open,
-        -- close them all; otherwise open every existing bag (ref ToggleBackpack — "if numOpen > 0
-        -- then CloseAllBags() else OpenAllBags()").
-        function BenillaBagToggle_OnClick()
+        -- `OpenBag(id)` / `CloseBag(id)` / `IsBagOpen(id)` — ToggleBag's three siblings from the
+        -- same reference file (ContainerFrame.lua l.144-185), and the last of that family that was
+        -- still missing here. `Bagnon_Core/core/Overrides.lua` l.42/51 captures BOTH of the first
+        -- two and calls the capture back for any bag Bagnon does not control — a nil call, on the
+        -- ordinary path, for an addon that only *partly* takes the bags over.
+        --
+        -- The reference's `OpenBag` opens a bag only when `GetContainerNumSlots(id) > 0`; ours keeps
+        -- that gate for 1..4 and exempts bag 0, which always exists (the same rule `OpenAllBags`
+        -- above already applies, for the same reason).
+        function OpenBag(id)
+            id = id or 0
+            if id ~= 0 and GetContainerNumSlots(id) <= 0 then return end
+            local frame = getglobal(BENILLA_BAG_WINDOWS[id + 1])
+            if frame and not frame:IsShown() then
+                BenillaBagWindow_Repaint(frame)
+                frame:Show()
+            end
+        end
+
+        function CloseBag(id)
+            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
+            if frame and frame:IsShown() then frame:Hide() end
+        end
+
+        -- ONE STATED DIVERGENCE. The reference returns the INDEX of the ContainerFrame showing that
+        -- bag (1..NUM_CONTAINER_FRAMES) so its own code can `getglobal("ContainerFrame"..i)`; we
+        -- ship no such pool (each bag has one fixed window), so there is no index to name and this
+        -- answers 1 / nil. Every corpus caller — and the reference's own `ToggleBackpack` — uses it
+        -- as a boolean; a caller that indexed the result would already be reaching for frames that
+        -- do not exist here.
+        function IsBagOpen(id)
+            local frame = getglobal(BENILLA_BAG_WINDOWS[(id or 0) + 1])
+            if frame and frame:IsShown() then return 1 end
+            return nil
+        end
+
+        -- `ToggleBackpack()` — the ref's all-bags toggle ("if numOpen > 0 then CloseAllBags() else
+        -- OpenAllBags()"). It calls the two GLOBALS by name rather than local bodies, so hooking
+        -- either of those works too.
+        function ToggleBackpack()
             local anyOpen = false
             for _, name in ipairs(BENILLA_BAG_WINDOWS) do
                 local frame = getglobal(name)
                 if frame and frame:IsShown() then anyOpen = true end
             end
-            if anyOpen then BenillaCloseAllBags() else BenillaOpenAllBags() end
+            if anyOpen then CloseAllBags() else OpenAllBags() end
+        end
+
+        -- The backpack button (MainMenuBarBackpackButton) and the 'B' binding: if any bag window is open,
+        -- close them all; otherwise open every existing bag (ref ToggleBackpack — "if numOpen > 0
+        -- then CloseAllBags() else OpenAllBags()").
+        function BenillaBagToggle_OnClick()
+            -- Through the GLOBAL, so an addon that replaced `ToggleBackpack` gets the click. This
+            -- one line is the whole Bagnon fix; the rest below is our own button's checked art,
+            -- which is ours to keep whatever the bag window turns out to be.
+            ToggleBackpack()
             -- The auto-toggle is provisional (ref BackpackButton_OnClick l.58-67): the button
             -- lights for the BACKPACK window specifically, whatever the all-toggle just did.
             local backpack = getglobal(BENILLA_BAG_WINDOWS[1])
-            getglobal("BenillaBagToggle"):SetChecked(backpack and backpack:IsShown())
+            getglobal("MainMenuBarBackpackButton"):SetChecked(backpack and backpack:IsShown())
         end
 
         -- The window's bar button (ref ContainerFrame_OnShow/OnHide: bag 0 →
@@ -550,8 +618,8 @@
             if name == "BenillaKeyRingFrame" then return getglobal("KeyRingButton") end
             for bagId = 0, 4 do
                 if name == BENILLA_BAG_WINDOWS[bagId + 1] then
-                    if bagId == 0 then return getglobal("BenillaBagToggle") end
-                    return getglobal("BenillaBagBarSlot" .. bagId)
+                    if bagId == 0 then return getglobal("MainMenuBarBackpackButton") end
+                    return getglobal("CharacterBag" .. (bagId - 1) .. "Slot")
                 end
             end
         end
@@ -647,7 +715,7 @@
             end
         end
 
-        -- ── The bag bar (decision 0216 slice 2) — four 30×30 buttons left of BenillaBagToggle,
+        -- ── The bag bar (decision 0216 slice 2) — four 30×30 buttons left of MainMenuBarBackpackButton,
         -- mirroring the reference main-bar bag buttons (CharacterBag0..3Slot). No exact reference
         -- XML was available to transcribe (not in the session's extracted set) — size (30×30) and
         -- placement (left of the backpack button) are per the brief; inter-button spacing is an
@@ -674,7 +742,17 @@
 
         function BenillaBagBarSlot_OnLoad(button, bagId)
             button.bagId = bagId
-            button.icon = getglobal(button:GetName() .. "Icon")
+            -- The button's ID is the REFERENCE's: its 1-based inventory slot, 20..23 (the real
+            -- client gets there through PaperDollItemSlotButton_OnLoad, which resolves
+            -- "CharacterBag0Slot" → "Bag0Slot" → GetInventorySlotInfo → 20). Nothing of ours reads
+            -- it — every body here goes through `button.bagId` — but every ADDON does:
+            -- `Bagnon.lua:104` computes its highlight target as `this:GetID() - 19`, and against
+            -- an unset id that is -19, so Bagnon highlighted the wrong bag (silently, with no
+            -- raise) on every bag-slot hover. `isBag` is the same story from the same template
+            -- (ref BagSlotButtonTemplate OnLoad l.33), read by KeyRingItemButton_OnClick.
+            button:SetID(19 + bagId)
+            button.isBag = 1
+            button.icon = getglobal(button:GetName() .. "IconTexture")
             if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(button) end
             -- Both buttons (ref BagSlotButtonTemplate inherits PaperDollItemSlotButtonTemplate, and
             -- its OnLoad calls PaperDollItemSlotButton_OnLoad — PaperDollFrame.lua:86 — so a bag-bar
@@ -776,6 +854,26 @@
             end
         end
 
+        -- `BagSlotButton_OnEnter()` — THE REFERENCE'S NAME for the hover above, and the entry point
+        -- the four `CharacterBag<N>Slot` buttons actually call (their XML below). Published for the
+        -- same standing reason `ToggleBackpack` is: an addon replaces the client's global and
+        -- expects the client to call the replacement.
+        --
+        -- `Bagnon.lua:67` is the exact shape, and it is a hover-frequency call, not a rare one:
+        --     bBagSlotButton_OnEnter = BagSlotButton_OnEnter      -- capture ours
+        --     BagSlotButton_OnEnter  = BagnonBlizBag_OnEnter      -- replace the global
+        -- Bagnon's replacement highlights the matching slots in its own window and then calls the
+        -- capture. With the global absent that capture was nil, and — because nothing here ever
+        -- looked the global up — the replacement was never reached to raise on it: Bagnon's
+        -- highlight was simply, silently inert. Corpus demand is exactly one addon (this one) at
+        -- two sites; its siblings `BagSlotButton_OnClick`/`_OnDrag`/`_OnShiftClick`/
+        -- `BackpackButton_OnClick` score ZERO and are deliberately not published (1210).
+        --
+        -- The reference's body takes no argument and reads `this`; so does this one.
+        function BagSlotButton_OnEnter()
+            BenillaBagBarSlot_OnEnter(this)
+        end
+
         -- ref OnLeave for both (l.100-102 / the template's own): a plain Hide, no fade — the item
         -- half of the split BenillaUnitFrame_OnLeave's comment describes.
         function BenillaBagBarButton_OnLeave()
@@ -821,8 +919,8 @@
                     return
                 end
             end
-            if BenillaErrorsFrame_AddMessage then
-                BenillaErrorsFrame_AddMessage(NO_EMPTY_KEYRING_SLOTS_ERROR, 1.0, 0.1, 0.1)
+            if UIErrorsFrame then
+                UIErrorsFrame:AddMessage(NO_EMPTY_KEYRING_SLOTS_ERROR, 1.0, 0.1, 0.1)
             end
         end
 
@@ -1011,8 +1109,8 @@
         -- The bag BAR's five buttons (the backpack toggle + the four equipped-bag slots) — the row
         -- Disable_/Enable_BagButtons greys as a unit. Distinct from UiPanels.xml's BAG_WINDOWS,
         -- which is the five bag *windows* those buttons open.
-        BENILLA_BAG_BUTTONS = { "BenillaBagToggle", "BenillaBagBarSlot1", "BenillaBagBarSlot2",
-                                "BenillaBagBarSlot3", "BenillaBagBarSlot4" }
+        BENILLA_BAG_BUTTONS = { "MainMenuBarBackpackButton", "CharacterBag0Slot", "CharacterBag1Slot",
+                                "CharacterBag2Slot", "CharacterBag3Slot" }
 
         -- Disable_BagButtons / Enable_BagButtons — ref MainMenuBarBagButtons.lua l.102-128, called
         -- by GameMenuFrame's OnShow/OnHide (decision 0674) and by nothing else: while the game menu
@@ -1021,8 +1119,8 @@
         -- while the menu is up — UiPanels.xml `CanOpenPanels`); without it the bags would look
         -- clickable and simply do nothing.
         --
-        -- Mapping onto benilla's row: the ref's MainMenuBarBackpackButton is BenillaBagToggle and
-        -- CharacterBag0..3Slot are BenillaBagBarSlot1..4 — and in BOTH cases the greying goes onto
+        -- Mapping onto benilla's row: the ref's MainMenuBarBackpackButton is MainMenuBarBackpackButton and
+        -- CharacterBag0..3Slot are CharacterBag0Slot..4 — and in BOTH cases the greying goes onto
         -- the button's `$parentIcon` LAYER texture, never onto a state texture. That is the
         -- reference's own structure and it is load-bearing here: a disabled button draws its
         -- DisabledTexture, and with none set it draws no state texture at all
@@ -1048,7 +1146,7 @@
             -- The four slots' own paint decides their restored colour: an item locked on the cursor
             -- wants 0.4 grey, not the flat white SetDesaturation(nil) just left.
             for i = 1, 4 do
-                BenillaBagBarSlot_Update(getglobal("BenillaBagBarSlot" .. i))
+                BenillaBagBarSlot_Update(getglobal("CharacterBag" .. (i - 1) .. "Slot"))
             end
         end
     ]]></Script>
@@ -1569,7 +1667,7 @@
         the bar. (MainMenuBarArtFrame is defined in ActionBar.xml, which the loader loads before
         this file; the anchor resolves by name.)
     -->
-    <CheckButton name="BenillaBagToggle">
+    <CheckButton name="MainMenuBarBackpackButton">
         <Size><AbsDimension x="37" y="37"/></Size>
         <Anchors>
             <Anchor point="BOTTOMRIGHT" relativeTo="MainMenuBarArtFrame" relativePoint="BOTTOMRIGHT">
@@ -1587,7 +1685,7 @@
              bag-bar slots' own `$parentIcon`, and the greying is the vertex tint on it. -->
         <Layers>
             <Layer level="BACKGROUND">
-                <Texture name="$parentIcon" file="Interface\Buttons\Button-Backpack-Up"/>
+                <Texture name="$parentIconTexture" file="Interface\Buttons\Button-Backpack-Up"/>
             </Layer>
         </Layers>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
@@ -1616,7 +1714,7 @@
             <!-- Seat the backpack icon above the bar art too (same reason as the bag-bar slots —
                  BenillaActionBarArt_SeatAbove's comment). -->
             <OnLoad>
-                self.icon = getglobal("BenillaBagToggleIcon")
+                self.icon = getglobal("MainMenuBarBackpackButtonIconTexture")
                 if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(self) end
             </OnLoad>
             <OnClick>BenillaBagToggle_OnClick()</OnClick>
@@ -1627,19 +1725,19 @@
 
     <!--
         The bag bar (decision 0216 slice 2, BenillaBagBarSlot_* above): four 36×36 buttons to the
-        LEFT of BenillaBagToggle, mirroring the reference CharacterBag0..3Slot row. Bar slot N (1..4)
-        sits at chain position N counting away from the backpack button — BenillaBagBarSlot1 (bagId
-        1, Bag0Slot) is CLOSEST to the backpack, BenillaBagBarSlot4 (bagId 4, Bag3Slot) FARTHEST —
+        LEFT of MainMenuBarBackpackButton, mirroring the reference CharacterBag0..3Slot row. Bar slot N (1..4)
+        sits at chain position N counting away from the backpack button — CharacterBag0Slot (bagId
+        1, Bag0Slot) is CLOSEST to the backpack, CharacterBag3Slot (bagId 4, Bag3Slot) FARTHEST —
         the real bar's own left-to-right order. Sized to MATCH the action buttons (36×36 icon in a
         66×66 UI-Quickslot2 ring, 6px chain gap = the 42px stride), so the bag icons fill their slots
         exactly like the spell icons instead of floating undersized (the earlier 30×30 guess).
     -->
-    <CheckButton name="BenillaBagBarSlot1">
+    <CheckButton name="CharacterBag0Slot">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
-            <Anchor point="RIGHT" relativeTo="BenillaBagToggle" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+            <Anchor point="RIGHT" relativeTo="MainMenuBarBackpackButton" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
-        <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentIconTexture"/></Layer></Layers>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
              $parentItemAnim, one per bag button; container id 1. -->
         <Frames>
@@ -1680,7 +1778,7 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 1)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
-            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnEnter>BagSlotButton_OnEnter()</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
@@ -1689,12 +1787,12 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="BenillaBagBarSlot2">
+    <CheckButton name="CharacterBag1Slot">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
-            <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot1" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+            <Anchor point="RIGHT" relativeTo="CharacterBag0Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
-        <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentIconTexture"/></Layer></Layers>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
              $parentItemAnim, one per bag button; container id 2. -->
         <Frames>
@@ -1734,7 +1832,7 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 2)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
-            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnEnter>BagSlotButton_OnEnter()</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
@@ -1743,12 +1841,12 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="BenillaBagBarSlot3">
+    <CheckButton name="CharacterBag2Slot">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
-            <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot2" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+            <Anchor point="RIGHT" relativeTo="CharacterBag1Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
-        <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentIconTexture"/></Layer></Layers>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
              $parentItemAnim, one per bag button; container id 3. -->
         <Frames>
@@ -1788,7 +1886,7 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 3)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
-            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnEnter>BagSlotButton_OnEnter()</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
@@ -1797,12 +1895,12 @@
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
         </Scripts>
     </CheckButton>
-    <CheckButton name="BenillaBagBarSlot4">
+    <CheckButton name="CharacterBag3Slot">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Anchors>
-            <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot3" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+            <Anchor point="RIGHT" relativeTo="CharacterBag2Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
-        <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentIconTexture"/></Layer></Layers>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
              $parentItemAnim, one per bag button; container id 4. -->
         <Frames>
@@ -1842,7 +1940,7 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 4)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
-            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnEnter>BagSlotButton_OnEnter()</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
@@ -1854,7 +1952,7 @@
 
     <!--
         The keyring button (decision 0765) — ref KeyRingButton, MainMenuBarBagButtons.xml l.142-199.
-        Sits at the FAR left of the bag row, past BenillaBagBarSlot4 (the ref's CharacterBag3Slot),
+        Sits at the FAR left of the bag row, past CharacterBag3Slot (the ref's CharacterBag3Slot),
         and is authored HIDDEN: nothing reveals it but MainMenuBar_UpdateKeyRing, and only
         while HasKey() — the point being that a character with no key has no keyring at all, and the
         bar's plate has no socket for one.
@@ -1871,7 +1969,7 @@
     <CheckButton name="KeyRingButton" hidden="true">
         <Size><AbsDimension x="18" y="39"/></Size>
         <Anchors>
-            <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot4" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+            <Anchor point="RIGHT" relativeTo="CharacterBag3Slot" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
         <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
              $parentItemAnim, one per bag button; container id -2 (KEYRING_CONTAINER). The ref gives

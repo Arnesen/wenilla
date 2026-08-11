@@ -38,10 +38,40 @@ pub(super) fn sandbox(lua: &Lua) -> mlua::Result<()> {
         g.set(name, Value::Nil)?;
     }
 
-    // A `debugstack` stub: real addons call it in error paths; returning "" keeps them running.
+    // `debugstack([start [, count1 [, count2]]])` — a REAL traceback, not the `""` stub this used
+    // to be.
+    //
+    // The stub was justified as "real addons call it in error paths; returning \"\" keeps them
+    // running", and that was true of the addons that only ever DISPLAY it. It is false of the ones
+    // that PARSE it, and the biggest family in the corpus is one of those: `FuBarPlugin-2.0.lua:752`
+    // derives every plugin's own folder with
+    // `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")`, then formats the capture into an
+    // icon path. Against `""` the find returns nil, `folderName` stays nil, and the plugin dies in
+    // `format` — 20 corpus addons, every one of them a FuBar plugin, and the error surfaced as a
+    // `format` complaint three frames away from the cause.
+    //
+    // `start` is the stack level to begin at and defaults to 1, matching the client's own callers
+    // (`debugstack(6, 1, 0)` walks past FuBar's own wrapper frames to the plugin file). The two
+    // count arguments bound how many frames are shown at the top and bottom; mlua's traceback does
+    // not take them, so they are accepted and ignored — stated rather than silently dropped, and
+    // harmless because every corpus caller passes a shape whose whole purpose is "give me the
+    // frames", never an exact line count.
     g.set(
         "debugstack",
-        lua.create_function(|_, _: Variadic<Value>| Ok(String::new()))?,
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let start = match args.first() {
+                Some(Value::Integer(i)) => *i as usize,
+                Some(Value::Number(n)) => *n as usize,
+                _ => 1,
+            };
+            // A level past the top of the stack is not an error here, it is an empty trace — the
+            // same shape the old stub returned, so a caller that guessed too deep still gets a
+            // string rather than a raise.
+            Ok(lua
+                .traceback(None, start)
+                .and_then(|t| t.to_str().map(|s| s.to_owned()))
+                .unwrap_or_default())
+        })?,
     )?;
 
     // Text-only `loadstring`: compile a *source* string (never bytecode). Returns `function` on
@@ -93,6 +123,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    install_time(lua)?;
     lua.load(WOW_STDLIB)
         .set_name("=[benilla wow stdlib]")
         .set_mode(mlua::ChunkMode::Text)
@@ -388,3 +419,173 @@ do
     format = reformat
 end
 "#;
+
+/// `time()` and `date([format [, when]])` — engine globals in the 1.12 client's own `_G`, slots 34
+/// and 33 of its base registry (`0x7035a0` / `0x7033a0`, wow-re `lua-dialect.md`).
+///
+/// They are Lua 5.0's `os.time`/`os.date` hoisted to globals, and we lacked both because the
+/// sandbox strips `os` wholesale. `time` was the top name in the session-start
+/// `attempt to call global` row (6 addons); `date` is a handful more. Every corpus `time()` site is
+/// the same shape — an epoch stamp persisted into SavedVariables and compared across sessions
+/// (`FTC_Save[k].LastCheck = time()`) — so it has to be real wall-clock seconds, not a
+/// session-relative clock like `GetTime`.
+///
+/// **UTC, and that is a stated divergence.** `os.date` uses LOCAL time and this uses UTC, because
+/// resolving a local offset needs a timezone database and this tree has no date dependency at all
+/// (deliberately — the format crates here are all in-repo). The corpus's uses are a debug
+/// timestamp, a "last scanned" string, and `%M:%S` over a DURATION; only the first two shift, and
+/// they shift by a constant. Fixing it means a tz source, not a different algorithm.
+fn install_time(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+    g.set("time", lua.create_function(|_, ()| Ok(unix_seconds()))?)?;
+    g.set(
+        "date",
+        lua.create_function(|_, (fmt, when): (Option<String>, Option<i64>)| {
+            // Bare `date()` is `%c`, as in Lua — `Recap.lua:2690` calls it with no arguments.
+            let fmt = fmt.unwrap_or_else(|| "%c".to_string());
+            Ok(format_epoch(when.unwrap_or_else(unix_seconds), &fmt))
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Wall-clock seconds since the Unix epoch. Before the epoch is not a state a game client is in;
+/// a clock that somehow reports it clamps to 0 rather than raising inside an addon's file scope.
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+const DAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Broken-down UTC time from an epoch second: (year, month 1-12, day 1-31, hour, min, sec,
+/// weekday 0=Sunday, yearday 1-366).
+///
+/// The civil-from-days conversion is Howard Hinnant's, shifted to a March-based year so the leap
+/// day lands at the end and no month-length table is needed. Chosen over a hand-rolled loop because
+/// it is a known-correct closed form with no accumulation error, which matters for the "persisted
+/// last session, compared this session" use every corpus caller has.
+fn civil_from_epoch(secs: i64) -> (i64, u32, u32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hour, min, sec) = (
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    );
+    // 1970-01-01 was a Thursday (4).
+    let weekday = (days + 4).rem_euclid(7) as u32;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { y + 1 } else { y };
+
+    // Day of the year, from the same conversion applied to Jan 1.
+    let jan1 = days_from_civil(year, 1, 1);
+    let yearday = (days - jan1 + 1) as u32;
+    (year, month, day, hour, min, sec, weekday, yearday)
+}
+
+/// Days since the epoch for a civil date — the inverse of the above, used only for `%j`.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The `strftime` subset the corpus actually uses, plus the obvious neighbours.
+///
+/// Bounded on purpose: the specifiers here are the ones read off real call sites —
+/// `%H:%M:%S` (AceDebug), `%A, %B %d, %Y - %H:%M` (FuBar_PotHerbFu), `%M:%S` (FuBar_AnkhTimerFu),
+/// `%c` (bare `date()`). An unknown specifier is emitted VERBATIM rather than swallowed, so a
+/// format this does not know shows up in the output instead of silently vanishing.
+fn format_epoch(secs: i64, fmt: &str) -> String {
+    let (year, month, day, hour, min, sec, wday, yday) = civil_from_epoch(secs);
+    let mut out = String::with_capacity(fmt.len() + 16);
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            out.push('%');
+            break;
+        };
+        let hour12 = match hour % 12 {
+            0 => 12,
+            h => h,
+        };
+        match spec {
+            'a' => out.push_str(&DAYS[wday as usize][..3]),
+            'A' => out.push_str(DAYS[wday as usize]),
+            'b' | 'h' => out.push_str(&MONTHS[(month - 1) as usize][..3]),
+            'B' => out.push_str(MONTHS[(month - 1) as usize]),
+            'c' => out.push_str(&format!(
+                "{} {} {:2} {:02}:{:02}:{:02} {}",
+                &DAYS[wday as usize][..3],
+                &MONTHS[(month - 1) as usize][..3],
+                day,
+                hour,
+                min,
+                sec,
+                year
+            )),
+            'd' => out.push_str(&format!("{day:02}")),
+            'H' => out.push_str(&format!("{hour:02}")),
+            'I' => out.push_str(&format!("{hour12:02}")),
+            'j' => out.push_str(&format!("{yday:03}")),
+            'm' => out.push_str(&format!("{month:02}")),
+            'M' => out.push_str(&format!("{min:02}")),
+            'p' => out.push_str(if hour < 12 { "AM" } else { "PM" }),
+            'S' => out.push_str(&format!("{sec:02}")),
+            'w' => out.push_str(&format!("{wday}")),
+            'x' => out.push_str(&format!("{month:02}/{day:02}/{:02}", year.rem_euclid(100))),
+            'X' => out.push_str(&format!("{hour:02}:{min:02}:{sec:02}")),
+            'y' => out.push_str(&format!("{:02}", year.rem_euclid(100))),
+            'Y' => out.push_str(&format!("{year}")),
+            '%' => out.push('%'),
+            // Unknown: verbatim, so it is visible rather than swallowed.
+            other => {
+                out.push('%');
+                out.push(other);
+            }
+        }
+    }
+    out
+}

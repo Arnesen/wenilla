@@ -263,22 +263,40 @@ impl Loader<'_> {
         }
     }
 
-    /// `<ScrollingMessageFrame>` LoadXML extras (msgframe-runtime.md `0x787b20`): `maxLines`
-    /// (int, `> 0` — destructive `SetMaxLines`), `displayDuration`/`fadeDuration` (float, `> 0` →
-    /// SetTimeVisible/SetFadeDuration), and the `fade` bool (→ SetFading). A missing attr keeps the
-    /// ctor default (fading on, 10s/3s, 8 lines). The `<FontString>` child renders through the
-    /// generic `<Layers>` path; its resolved font is what the frame's lines bake and stack at
-    /// (read at extract, `crate::script::UiScript::extract`).
+    /// The two message-frame classes' LoadXML extras — **`0x787b20` and `0x785910`, two separate
+    /// tables** (msgframe-runtime.md's XML-attribute section), which is why the shared attrs are
+    /// applied for either tag and the two divergent ones are gated on the tag that has them:
+    ///
+    /// - both: `displayDuration`/`fadeDuration` (float, applied **iff `> 0`** — the client's own
+    ///   gate) → SetTimeVisible/SetFadeDuration, and the `fade` bool → SetFading.
+    /// - `<ScrollingMessageFrame>` only: `maxLines` (int, `> 0`, destructive `SetMaxLines`).
+    /// - `<MessageFrame>` only: `insertMode` → SetInsertMode. The scrolling class has no such
+    ///   attribute and no such binding.
+    ///
+    /// A missing attr keeps the ctor default (fading on, 10s/3s; 8 lines / insertMode BOTTOM). The
+    /// `<FontString>` child renders through the generic `<Layers>` path; its resolved font **and its
+    /// `justifyH`** are what the frame's lines bake, stack and align at (read at extract,
+    /// `crate::script::UiScript::extract`) — that child is how `UIErrorsFrame.xml` centres its
+    /// toasts and how a chat frame keeps its lines flush left.
     pub(super) fn apply_messageframe(&mut self, el: &Element, wrapper: &Table, dbg: &str) {
-        if !el.tag.eq_ignore_ascii_case("ScrollingMessageFrame") {
+        let scrolling = el.tag.eq_ignore_ascii_case("ScrollingMessageFrame");
+        let plain = el.tag.eq_ignore_ascii_case("MessageFrame");
+        if !scrolling && !plain {
             return;
         }
-        if let Some(n) = el
-            .attr("maxLines")
-            .and_then(|v| v.trim().parse::<i64>().ok())
-        {
-            if n > 0 {
-                self.call(wrapper, "SetMaxLines", n, dbg);
+        if scrolling {
+            if let Some(n) = el
+                .attr("maxLines")
+                .and_then(|v| v.trim().parse::<i64>().ok())
+            {
+                if n > 0 {
+                    self.call(wrapper, "SetMaxLines", n, dbg);
+                }
+            }
+        }
+        if plain {
+            if let Some(mode) = el.attr("insertMode") {
+                self.call(wrapper, "SetInsertMode", mode.trim().to_string(), dbg);
             }
         }
         if let Some(s) = el

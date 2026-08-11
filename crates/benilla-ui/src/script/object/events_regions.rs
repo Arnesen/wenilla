@@ -81,6 +81,36 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "GetScript",
         lua.create_function(|lua, (this, name): (Table, String)| get_script(lua, &this, &name))?,
     )?;
+    // HasScript(name) — "can this widget carry that script kind at all", NOT "does it have one
+    // set". The distinction is the whole point of the verb: every caller in the corpus uses it to
+    // decide whether it is safe to hook, then reads the current handler separately.
+    //
+    //     if parent:HasScript("OnMouseDown") then                    -- Tablet-2.0.lua:2409
+    //         local script = parent:GetScript("OnMouseDown")         -- FuBar-compat:2422
+    //         parent:SetScript("OnMouseDown", function() … end)
+    //     end
+    //
+    // It was the top session-start blocker: 32 of the 39 `attempt to call method` failures were
+    // this one name, across the Tablet/FuBar/oRA2 stack.
+    //
+    // ANSWERED FROM THE FLAT `SCRIPT_KINDS`, and that is a deliberate, stated approximation rather
+    // than the full answer. The reference's table is PER WIDGET TYPE — a plain Frame really does
+    // answer false for `OnClick` — so ours is over-permissive for the type-specific kinds. It is
+    // exactly right for the base kinds, which is what every corpus caller asks about
+    // (`OnMouseDown` here; a Frame genuinely has it). The cost of the over-permission is small and
+    // worth naming: an addon that asks about a type-specific kind installs a handler that never
+    // fires, where the reference would have had it skip. That is the same latitude `SetScript`
+    // already takes — this verb does not widen it, it just stops lying about its existence.
+    //
+    // Making it exact means per-type SCRIPT_KINDS, which newly RAISES on 30 sites that work today
+    // (9 in our own FrameXML). That is behaviour removal and belongs in its own change, with its
+    // own measurement; it is not a tail on this one.
+    m.set(
+        "HasScript",
+        lua.create_function(|_, (_this, name): (Table, String)| {
+            Ok(SCRIPT_KINDS.iter().any(|k| k.eq_ignore_ascii_case(&name)))
+        })?,
+    )?;
     // RegisterForDrag(...varargs of button names) — the drag-gesture twin of `RegisterForClicks`
     // (decision 0216 §3), but on the SHARED table: any Frame can be a drag source, not just a
     // Button. Replace-the-set semantics (empty varargs clears); `crate::script::cursor`'s
@@ -140,16 +170,35 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// `system/ui/ui.md` l.544-556 summarises it), so what is missing here is never a mystery — it is a
 /// deliberate not-yet. What the corpus actually asks for, and why each answer is what it is:
 ///
-/// * **`OnKeyDown` / `OnKeyUp` / `OnChar`** (14 + 1 + 4 corpus sites over 13 addons) — **raising.**
-///   They are in the base map, so *every* frame type has them, and the delivery mechanism is
-///   `EnableKeyboard` + the hit-test root's **kind-0/kind-1 index** (wow-re
-///   `scratch/scripts-auto-enable.md` §1-2: `0x76af00(kind, -1)`, `OnChar` = kind 0,
-///   `OnKeyDown`/`OnKeyUp` = kind 1) with the frame-script pre-gate `0x76bba0` consuming the key
-///   ahead of the whole binding dispatch (`scratch/keybinding-dispatch-law.md` §1). benilla has
-///   none of that: no `EnableKeyboard`, no keyboard index, and its keys go straight to the focused
-///   EditBox (whose C++ override replaces these slots anyway — RF-0082 §2). Accepting the names
-///   before the index exists is the exact silent-no-op trap above; the ordering/consumption law is
-///   dispatched to wow-re.
+/// * **`OnKeyDown` / `OnKeyUp` / `OnChar`** (14 + 1 + 4 corpus sites over 13 addons) — **raising,
+///   and now unblocked**: the delivery law was the second §5 this work dispatched, and it landed
+///   (wow-re `scratch/frame-key-script-delivery.md`). benilla still has none of the machinery it
+///   describes — no `EnableKeyboard`, no keyboard index, keys routed straight to the focused
+///   EditBox — so the names stay out until it exists, which is the whole rule above. What has to
+///   get built, so the next pass does not have to re-derive it:
+///
+///   The frame must be in the hit-test root's **kind-0 / kind-1 bucket**
+///   (`scratch/scripts-auto-enable.md` §1-2: `0x76af00(kind, …)`, `OnChar` = kind 0,
+///   `OnKeyDown`/`OnKeyUp` = kind 1; XML `enableKeyboard` enables both, a `<Scripts>` block
+///   auto-enables per handler, and Lua `SetScript` auto-enables **nothing** — so a Lua-only frame
+///   is not in the bucket at all and its bound handler can never fire). The dispatcher then walks
+///   **strata 8 → 0, level high → low, ties oldest-registration-first**, calling each frame's base
+///   input virtual (`0x765f10` key-down → vtable `+0x60`; `0x765df0` char → `+0x5c`) and
+///   **stopping at the first nonzero return**. `arg1` is a **key-name string** with no modifier
+///   prefix, decoded from the *same* table the keybinding chord names use — verified byte-identical
+///   over 273 codes, which is the opposite of the mouse case's two-table shape. `OnChar` gets the
+///   literal character, UTF-8.
+///
+///   Two findings that will bite whoever implements it. The consumption gate is **existence, not
+///   handling** — a 1.12 handler cannot signal "handled" (the fire's return is discarded at all
+///   three sites), so merely having a key script bound suppresses the key's binding; and
+///   asymmetrically, a frame with **only** an `OnKeyUp` script consumes every key-down and runs
+///   nothing. And `CGWorldFrame` sits at **strata 0 / level 0** — last in the walk — which is
+///   precisely why any keyboard-enabled frame pre-empts the entire binding system.
+///
+///   (The old gloss here called `0x76bba0` a "frame-script pre-gate" walking the index, after
+///   `scratch/keybinding-dispatch-law.md` §1. That is refuted: `0x76bba0` is `CSimpleFrame::OnKeyUp`,
+///   one frame's base virtual. The walk is one level up, in the dispatcher.)
 /// * **`OnCursorChanged`** (4 sites over 3 addons — all of them the Era `ScrollingEdit_OnCursorChanged`
 ///   auto-scroll idiom) — **raising.** It is the EditBox's own slot (RF-28 `+0x428`), fired by the
 ///   caret flush `0x77da80` with **four float caret-POSITION args**, and caret geometry is the one

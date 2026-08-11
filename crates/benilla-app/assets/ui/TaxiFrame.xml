@@ -38,12 +38,11 @@
            identical gap and all solve it the same way: the app resolves the flight master's name
            through the `NameCache` and rides it in as the open event's arg1 — done here too
            (`BenillaTaxiFrame_SetTitle`, fed by `TAXIMAP_OPENED`'s arg1).
-        3. THE "NO SINGLE-HOP DESTINATION" REFUSAL (`DrawOneHopLines`, ref l.161-164) calls
-           `BenillaErrorsFrame_AddMessage` (`ErrorsFrame.xml`'s real Lua-callable seam, byte-exact
-           `ERR_TAXINOPATHS` text below) rather than the reference's `UIErrorsFrame:AddMessage` —
-           this engine's error toast is `UIErrorsFrame`, not an intrinsic `MessageFrame`
-           object, so the ref's OO call becomes the plain function call. `ErrorsFrame.xml` loads
-           well before this file in the shipped list (`ui_script/mod.rs`), so the global already
+        3. (Retired.) The "no single-hop destination" refusal (`DrawOneHopLines`, ref l.161-164)
+           used to call a plain `BenillaErrorsFrame_AddMessage` global because this engine had no
+           MessageFrame widget for `UIErrorsFrame` to be. It has one now, so the line below is the
+           reference's own `UIErrorsFrame:AddMessage(ERR_TAXINOPATHS, ...)`. `ErrorsFrame.xml` loads
+           well before this file in the shipped list (`ui_script/mod.rs`), so the frame already
            exists by the time this ever runs.
 
         `<TaxiRouteFrame>` (an intrinsic type this engine doesn't have) becomes a plain `<Frame>`
@@ -195,9 +194,7 @@
         NUM_TAXI_ROUTES = 0
 
         -- Draw all flightpaths within one hop of current location — ref TaxiFrame.lua:129-165,
-        -- verbatim except the canvas name ("TaxiRouteMap" -> "TaxiRouteMap") and the
-        -- no-single-hop refusal (deviation 3 above: BenillaErrorsFrame_AddMessage, not
-        -- UIErrorsFrame:AddMessage).
+        -- verbatim except the canvas name ("TaxiRouteMap" -> "TaxiRouteMap").
         function DrawOneHopLines()
             local line
             local sX, sY, dX, dY
@@ -231,7 +228,7 @@
                 getglobal("TaxiRoute" .. i):Hide()
             end
             if numSingleHops == 0 then
-                BenillaErrorsFrame_AddMessage(ERR_TAXINOPATHS, 1.0, 0.1, 0.1)
+                UIErrorsFrame:AddMessage(ERR_TAXINOPATHS, 1.0, 0.1, 0.1)
                 HideUIPanel(TaxiFrame)
             end
         end

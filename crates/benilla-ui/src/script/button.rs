@@ -8,19 +8,24 @@
 //! is interaction state ([`ButtonState::region_visible`], applied at extract) — faithful to the
 //! documented widget model (texture array + current pointer `+0x4c4`), not byte-pinned. Two stated
 //! v1 gaps: the highlight draws with normal blending (the client ADD-blends it; the quad pass has
-//! no blend modes yet), and `PushedTextOffset`/per-state fonts are not modeled.
+//! no blend modes yet), and `PushedTextOffset` is not modeled. Per-state label fonts *are*: the
+//! `*FontObject` trio picks which object each state inherits and `extract` re-resolves it every
+//! frame, while `SetFont` writes the button's own face/size/flags over all of them
+//! ([`crate::widget::ButtonFont`]).
 //!
 //! Method resolution: CheckButton's table is consulted first, then Button's, then the shared frame
 //! table — mirroring the client's class chain, and keeping duck-typing honest (`frame.SetChecked`
 //! is nil on a plain Button; `frame.GetText` is nil on a plain Frame).
 
-use mlua::{Lua, MultiValue, Table, Value};
+use mlua::{Lua, MultiValue, ObjectLike, Table, Value};
 
 use super::object::{as_f32, frame_handle_of};
 use super::region::region_wrapper;
 use super::{event, Model, RegionData};
 use crate::order::DrawLayer;
-use crate::widget::{ButtonState, FrameHandle, FrameKind, KindState, RegionKind};
+use crate::widget::{
+    ButtonFont, ButtonState, FrameHandle, FrameKind, KindState, RegionHandle, RegionKind,
+};
 
 pub(super) const REG_BUTTON_METHODS: &str = "__benilla_button_methods";
 pub(super) const REG_CHECKBUTTON_METHODS: &str = "__benilla_checkbutton_methods";
@@ -74,6 +79,48 @@ impl Slot {
             Slot::Text => (RegionKind::FontString, DrawLayer::Overlay),
         }
     }
+}
+
+/// Point the ButtonText at the button's NORMAL font object, so the label's *query* surface answers
+/// what its paint already shows.
+///
+/// Before this, the two disagreed. `extract` resolves the per-state font object every frame and
+/// overlays it onto a CLONE of the region's data (`extract.rs` l.114-122), so the label painted
+/// correctly while `region_data.font_object` stayed `None` — and a dropdown row's
+/// `GetFontObject()` answered **nil**, `GetFont()` answered **nil, nil**. Nothing errored: a
+/// FontString with no font of its own is a legal state, so this was invisible in exactly the way
+/// 1205's silent-drop class predicts.
+///
+/// The measured consequence is smaller than it first looks, and that is stated rather than implied.
+/// The corpus's 65 `GetFontObject` sites are on FontStrings the addon created and linked itself
+/// (Dewdrop-2.0 calls `text:SetFontObject(GameFontHighlightSmall)` one line before it reads the
+/// object back), so none of them were reaching this. What WAS reaching it is the reference's own
+/// `DropDownList1` OnLoad, which derives `UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT` from
+/// `DropDownList1Button1NormalText:GetFont()` and got nil.
+///
+/// **Normal only, deliberately.** The highlight and disabled objects are transient states that
+/// extract overlays at paint time; linking either here would make a resting button report its hover
+/// font. The remaining divergence, stated: while a button is disabled or hovered, the reference's
+/// label reports that state's font and ours still reports the normal one. The paint is unaffected
+/// either way, and no corpus site reads a label's font mid-state.
+///
+/// `font::repaint` honours the severance mask, so a `<FontHeight>` or `SetTextColor` the label set
+/// for itself survives the link (the rule wow-re pinned in `font-object-lua-surface.md`).
+fn link_label_to_font_object(lua: &Lua, text: Option<RegionHandle>, name: Option<&str>) {
+    let Some(rh) = text else { return };
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let Some(name) = name else {
+        model.region_data.entry(rh).or_default().font_object = None;
+        return;
+    };
+    // An unregistered name is not an error here: `SetTextFontObject` already accepted it, and the
+    // loader's own log-and-continue rule (0068) owns the reporting.
+    let Some(fo) = model.font_objects.get(name).cloned() else {
+        return;
+    };
+    let d = model.region_data.entry(rh).or_default();
+    d.font_object = Some(name.to_string());
+    super::font::repaint(d, &fo);
 }
 
 /// Run `f` over a frame's Button state under one short write borrow.
@@ -239,6 +286,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| get_slot_texture(lua, &this, Slot::Text))?,
     )?;
 
+    // GetTextWidth / GetTextHeight — the Button's OWN text-extent readers (`0x782290` / `0x782390`,
+    // wow-re `system/ui/scratch/item9-firing34-merge.md` l.36 and the Button method carve in
+    // `widget-api-batch-benilla.md` Q8, which lists both present on Button and `GetStringWidth`
+    // absent). Both are thin forwards onto the label FontString's own extent vtable slots
+    // (`0x1c` / `0x20`), which is exactly what this delegation is.
+    //
+    // **Who asks.** `Bagnon_Forever/database/ui.lua:61` sizes its character-switch dropdown from
+    // `button:GetTextWidth() + 40` over every saved character — with the method nil the whole
+    // dropdown died on the first row, so the director could not switch characters in Bagnon at all.
+    // The idiom generalises: it is how a 1.12 kit fits a button to its label, and the reference's
+    // own `MoneyFrame.lua` l.202 (`SetWidth(GetTextWidth() + iconWidth)`) is the same shape.
+    //
+    // **Which measurement**, since a FontString carries two. The label's `GetStringWidth` — the
+    // NATURAL, unwrapped extent — never the laid-out `GetWidth`. A button label does not wrap, so
+    // the two agree in the ordinary case; where they differ, serving the laid-out width would hand
+    // every "size the button to its text" caller its own previous output as its next input, which
+    // is decision 0997's measured feedback loop (the macro window's tab that changed width every
+    // frame). The unwrapped extent is the one that settles.
+    //
+    // `0` before the host has measured the string (a frame's latency, as everywhere else), and `0`
+    // for a Button with no label at all — the reference dereferences its FontString pointer `+0x338`
+    // here where `SetFont`/`GetFont` deliberately do not, and what a null one does is NOT byte-read,
+    // so this answers the harmless number rather than raising on a guess.
+    for (name, region_getter) in [
+        ("GetTextWidth", "GetStringWidth"),
+        ("GetTextHeight", "GetStringHeight"),
+    ] {
+        m.set(
+            name,
+            lua.create_function(move |lua, this: Table| {
+                let label = get_slot_texture(lua, &this, Slot::Text)?;
+                match label {
+                    Value::Table(t) => t.call_method::<f32>(region_getter, ()),
+                    _ => Ok(0.0),
+                }
+            })?,
+        )?;
+    }
+
     // The per-state label fonts (the 1.12 API trio; XML `<NormalFont>/<HighlightFont>/
     // <DisabledFont>` route here through the loader). Stored as font-object NAMES — extract
     // re-points the ButtonText to the current state's object each frame, so Enable/Disable and
@@ -254,7 +340,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetTextFontObject",
         lua.create_function(|lua, (this, font): (Table, Value)| {
             let name = super::font::resolve("SetTextFontObject", &font)?;
-            with_button(lua, &this, |bs| bs.normal_font = name)
+            let text = with_button(lua, &this, |bs| {
+                bs.normal_font.clone_from(&name);
+                bs.text
+            })?;
+            link_label_to_font_object(lua, text, name.as_deref());
+            Ok(())
         })?,
     )?;
     m.set(
@@ -269,6 +360,97 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, font): (Table, Value)| {
             let name = super::font::resolve("SetDisabledFontObject", &font)?;
             with_button(lua, &this, |bs| bs.disabled_font = name)
+        })?,
+    )?;
+
+    // SetFont(file, height [, flags]) / GetFont() — the Button's own font, `0x780880`/`0x79f3b0`
+    // (wow-re `system/ui/scratch/widget-api-batch-benilla.md` Q8, §5-verified).
+    // `_LazyPig/LazyPigMenu.lua:214` calls it straight on a `CreateFrame("Button", …)`, and it is
+    // that addon's only blocker.
+    //
+    // Three contract details, each a plausible implementation's silent divergence:
+    //
+    //  · **It returns ZERO values.** The shared impl `0x79f210` pushes `1`/nil (a real font-load
+    //    probe on a Font object — `!OmniCC` uses it), but `Button:SetFont` DISCARDS it
+    //    (`xor eax,eax`), so a failed font load is undetectable from a Button. Returning `true`
+    //    here would look harmless and would hand an addon a probe the client does not have.
+    //  · **It never touches the label.** `SetFont`/`GetFont` do not dereference the FontString
+    //    pointer `+0x338` at all, so styling a bare `CreateFrame("Button")` with no `<ButtonText>`
+    //    is no error, no crash and **no lazy creation** — which is why the style is stored on the
+    //    button ([`ButtonState::font`]) and `extract` applies it to whatever label exists. A later
+    //    `SetText` (which *does* lazily create one, `0x778dc0`) then picks it up, so either call
+    //    order works, exactly as the reference's does.
+    //  · **It retunes all three embedded fonts** (normal `+0x33c`, disabled `+0x434`, highlight
+    //    `+0x3b8`) and `GetFont` reads back only the normal one — see [`ButtonFont`] for why one
+    //    record is the faithful shape for three identical writes.
+    //
+    // The argument gate is the shared impl's: arg2 `lua_isstring` and arg3 `lua_isnumber`, else
+    // `luaL_error("Usage: %s:SetFont(\"font\", fontHeight [, flags])")` (`0x87c69c`). Both
+    // predicates are the *coercing* ones in 5.0 — `lua_isstring` takes a number, `lua_isnumber`
+    // takes a numeric string — so the leniency is transcribed rather than tightened.
+    m.set(
+        "SetFont",
+        lua.create_function(
+            |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
+                let usage = || {
+                    mlua::Error::runtime(
+                        "Usage: <Button>:SetFont(\"font\", fontHeight [, flags])".to_string(),
+                    )
+                };
+                let path = match &file {
+                    Value::String(s) => s.to_str()?.to_string(),
+                    Value::Number(_) | Value::Integer(_) => as_f32(&file).to_string(),
+                    _ => return Err(usage()),
+                };
+                let height = match &height {
+                    Value::Number(_) | Value::Integer(_) => as_f32(&height),
+                    Value::String(s) => s.to_str()?.parse::<f32>().map_err(|_| usage())?,
+                    _ => return Err(usage()),
+                };
+                let flags = super::Outline::flags(flags.as_deref().unwrap_or(""))
+                    .as_str()
+                    .to_string();
+                with_button(lua, &this, |bs| {
+                    bs.font = Some(ButtonFont {
+                        path,
+                        height,
+                        flags,
+                    })
+                })
+                // …and nothing is returned: `with_button` yields `()`.
+            },
+        )?,
+    )?;
+    // GetFont() → file, height, flags — **3 values**, read off the NORMAL embedded font. Unset
+    // locally, that font still resolves through what the normal state inherits
+    // (`<NormalFont>`/`SetTextFontObject`), which is how a `GameMenuButtonTemplate` button answers
+    // GameFontNormal's face before anything calls `SetFont`. Nil path / nil height when neither
+    // exists, still 3 values.
+    m.set(
+        "GetFont",
+        lua.create_function(|lua, this: Table| {
+            let (own, inherits) =
+                with_button(lua, &this, |bs| (bs.font.clone(), bs.normal_font.clone()))?;
+            let (path, height, flags) = match own {
+                Some(f) => (Some(f.path), Some(f.height), f.flags),
+                None => {
+                    let model = lua.app_data_ref::<Model>().expect("model app_data");
+                    let fo = inherits.and_then(|n| model.font_objects.get(&n));
+                    (
+                        fo.and_then(|f| f.font.clone()),
+                        fo.and_then(|f| f.height),
+                        fo.map(|f| f.outline)
+                            .unwrap_or_default()
+                            .as_str()
+                            .to_string(),
+                    )
+                }
+            };
+            let path = match path {
+                Some(p) => Value::String(lua.create_string(&p)?),
+                None => Value::Nil,
+            };
+            Ok((path, height, flags))
         })?,
     )?;
 

@@ -5,11 +5,88 @@
 
 use crate::layout::Rect;
 use crate::order::{self, ZTarget};
+use crate::widget::FrameHandle;
 
 use super::clip::{effective_clip, scroll_clip_sources};
 use super::{slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
 
 impl UiScript {
+    /// **Every live draw target in the VM**, whether or not it is currently visible — each frame's
+    /// own slot followed by its region leaves, in arena order.
+    ///
+    /// [`Self::extract`] answers *what is being drawn*; this answers *what exists*, and the two
+    /// together are what let an instrument say **who drew a quad**. Diff this across a load and the
+    /// new targets are exactly the ones that load created: no name prefixes, no heuristics, and no
+    /// dependence on an addon naming anything at all. That is the oracle behind the addon
+    /// harness's render column, and it is written this way because the obvious alternatives are
+    /// both wrong — a with/without **quad-count diff** reads zero for an addon that *replaces* a
+    /// window rather than adding one (Bagnon takes the bags over), and a **name-prefix** match
+    /// cannot see an anonymous frame or a region an addon hangs off one of ours.
+    ///
+    /// Handles are generational, so a destroyed-and-reused slot can never be mistaken for a
+    /// survivor of the baseline.
+    pub fn live_targets(&self) -> Vec<ZTarget> {
+        let model = self.model_ref();
+        let mut out = Vec::new();
+        for (fh, frame) in model.arena.iter_frames() {
+            out.push(ZTarget::Frame(fh));
+            out.extend(frame.regions.iter().copied().map(ZTarget::Region));
+        }
+        out
+    }
+
+    /// The frame a draw target belongs to — itself for a frame slot, the owner for a region.
+    ///
+    /// The half of the attribution that separates *created a window of its own* from *painted onto
+    /// one of ours*: a new `Region` whose owner frame is **not** new is an addon hooking an
+    /// existing frame, which is precisely what `!OmniCC` does to a cooldown and what a check built
+    /// only on new frames would score as "drew nothing".
+    pub fn target_frame(&self, target: ZTarget) -> Option<FrameHandle> {
+        match target {
+            ZTarget::Frame(fh) => self.model_ref().arena.frame(fh).map(|_| fh),
+            ZTarget::Region(rh) => self.model_ref().arena.region(rh).map(|r| r.owner),
+        }
+    }
+
+    /// A frame's parent, or `None` for a top-level frame (or a stale handle).
+    ///
+    /// The other half of the attribution walk: a frame being **new** does not make it the addon's
+    /// own window — `!OmniCC` creates a brand-new anonymous frame *parented to one of our action
+    /// buttons*, and only the chain tells an overlay from a window.
+    pub fn frame_parent(&self, frame: FrameHandle) -> Option<FrameHandle> {
+        self.model_ref().arena.frame(frame)?.parent
+    }
+
+    /// A frame's name, or `None` — it is anonymous, or the handle is stale.
+    ///
+    /// For reporting only. Nothing above depends on a frame being named; this is what turns an
+    /// attributed handle into a row a human can act on.
+    pub fn frame_name(&self, frame: FrameHandle) -> Option<String> {
+        self.model_ref().arena.frame(frame)?.name.clone()
+    }
+
+    /// The nearest **named** frame at or above `target` — its own frame's name, else the closest
+    /// named ancestor.
+    ///
+    /// An addon's slot buttons are usually named and its inner art usually is not, so a bare
+    /// [`Self::frame_name`] would report a hole exactly where the interesting quads are. Walking up
+    /// answers "which window is this part of", which is the question a report is asking.
+    pub fn target_owner_name(&self, target: ZTarget) -> Option<String> {
+        let model = self.model_ref();
+        let mut frame = match target {
+            ZTarget::Frame(fh) => Some(fh),
+            ZTarget::Region(rh) => Some(model.arena.region(rh)?.owner),
+        };
+        while let Some(fh) = frame {
+            let f = model.arena.frame(fh)?;
+            if let Some(name) = &f.name {
+                return Some(name.clone());
+            }
+            frame = f.parent;
+        }
+        None
+    }
+
     /// The render list in the client's painter order (decision 0068): the visible-tree
     /// [`crate::order::traversal`] zipped with the resolved rects and region visuals. Already sorted
     /// ascending by `ZKey`. Call [`UiScript::resolve`] first for populated rects.
@@ -100,6 +177,9 @@ impl UiScript {
                     // per-state label font swap (UIPanelButtonTemplate's gold/white/gray trio).
                     let mut state_font: Option<&FontObject> = None;
                     let mut state_color: Option<[f32; 4]> = None;
+                    // `Button:SetFont` — the face/size/flags written on the button's own embedded
+                    // fonts rather than on any object they inherit.
+                    let mut button_font: Option<&crate::widget::ButtonFont> = None;
                     if let Some(crate::widget::KindState::Button(bs)) =
                         owner_frame.map(|f| &f.kind_state)
                     {
@@ -120,6 +200,7 @@ impl UiScript {
                                 bs.normal_font.as_ref()
                             };
                             state_font = name.and_then(|n| model.font_objects.get(n));
+                            button_font = bs.font.as_ref();
                             // The per-state color override (Button:Set*TextColor) — hover falls
                             // back to the normal color, mirroring the font fallback above.
                             state_color = if !bs.enabled {
@@ -147,10 +228,24 @@ impl UiScript {
                         // FONTINSTANCE+0x38, color bit 0x404).
                         data.font_path = fo.font.clone().or(data.font_path);
                         data.font_height = fo.height.or(data.font_height);
-                        data.font_shadow = fo.shadow.or(data.font_shadow);
+                        // Same severance as the colour below: a region that called
+                        // `SetShadowColor`/`SetShadowOffset` keeps its own, or the font object it
+                        // inherits would silently overwrite the value the addon just set.
+                        if !data.font_explicit.shadow {
+                            data.font_shadow = fo.shadow.or(data.font_shadow);
+                        }
                         data.outline = fo.outline;
-                        if data.vertex_color.is_none() {
-                            data.vertex_color = fo.color;
+                        // Test the severance MASK, which is what the sentence above claims and what
+                        // wow-re pinned, not `vertex_color.is_none()`. The nil-check was an
+                        // equivalent proxy for exactly as long as an explicit `SetTextColor` was the
+                        // only way a button label's colour could be populated at all; the moment
+                        // `SetTextFontObject` began linking the label to its font object (so
+                        // `GetFont`/`GetFontObject` stop answering nil), a label carried the NORMAL
+                        // object's colour and the disabled state's gray silently stopped applying.
+                        // Caught by `button_label_repaints_by_state_font_object`, which is the test
+                        // that exists for this.
+                        if !data.font_explicit.color {
+                            data.vertex_color = fo.color.or(data.vertex_color);
                         }
                         // The object's own justify (`<NormalFont inherits=… justifyH="LEFT"/>` —
                         // how the ref left-aligns a ButtonText).
@@ -159,6 +254,23 @@ impl UiScript {
                         }
                         if let Some(j) = fo.justify_v {
                             data.justify_v = j;
+                        }
+                    }
+                    // `Button:SetFont` sits BETWEEN the two: it is a local set on the button's own
+                    // embedded font, so it outranks the font object that font inherits (a locally
+                    // set axis severs inheritance and is never restored — wow-re
+                    // `font-object-lua-surface.md`), but it loses to a face the label FontString
+                    // set for *itself*, which severs one level further down. That is what
+                    // `font_explicit` is, so it is the gate here too.
+                    if let Some(bf) = button_font {
+                        if !data.font_explicit.face {
+                            data.font_path = Some(bf.path.clone());
+                        }
+                        if !data.font_explicit.height {
+                            data.font_height = Some(bf.height);
+                        }
+                        if !data.font_explicit.outline {
+                            data.outline = super::Outline::flags(&bf.flags);
                         }
                     }
                     // The button-level state color wins over the font object AND the region's own
@@ -216,11 +328,19 @@ impl UiScript {
                         // outlives the art it was tinting") and used to leak out of here as a
                         // solid plate the moment the art was cleared (the white action buttons on
                         // a character switch; the 2026-07-10 grey wells were the same class).
-                        let has_texture = data.texture.is_some() || data.fill.is_some();
+                        // A GRADIENT is drawable content in its own right — the client generates it
+                        // into the same texture slot the colour form of `SetTexture` fills, so a
+                        // region carrying only a gradient still paints. Folded to its midpoint here
+                        // because a quad carries ONE tint; the whole gradient stays on the region
+                        // (`RegionData::gradient`) so a renderer that grows a second stop needs no
+                        // API change. The approximation is visible, and it is stated there and here
+                        // rather than discovered later.
+                        let fill = data.fill.or_else(|| data.gradient.map(|g| g.midpoint()));
+                        let has_texture = data.texture.is_some() || fill.is_some();
                         QuadContent::Texture {
                             path: data.texture,
                             color: has_texture
-                                .then(|| texture_color(data.fill, data.vertex_color))
+                                .then(|| texture_color(fill, data.vertex_color))
                                 .flatten(),
                             additive: data.additive,
                             tex_coords: data.tex_coords,

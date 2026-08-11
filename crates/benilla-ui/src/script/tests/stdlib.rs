@@ -92,8 +92,60 @@ fn sandbox_removes_dangerous_globals() {
         )
         .unwrap();
     assert!(all_nil);
-    // debugstack stub survives and returns "".
-    assert_eq!(s.eval::<String>("return debugstack()").unwrap(), "");
+    // `debugstack` survives the sandbox — and now returns a REAL traceback, not the `""` this
+    // used to assert. The stub was fine for addons that only DISPLAY it and wrong for the ones
+    // that PARSE it: `FuBarPlugin-2.0.lua:752` finds each plugin's own folder in
+    // `debugstack(6, 1, 0)`, and against `""` that returned nil and killed 20 corpus addons.
+    let trace = s.eval::<String>("return debugstack()").unwrap();
+    assert!(
+        trace.contains("traceback"),
+        "debugstack must return a real traceback: {trace:?}"
+    );
+    // A level far past the top of the stack yields the bare header and never raises — a caller
+    // that guesses too deep still gets a string it can `string.find` against, which is exactly how
+    // every corpus caller uses it.
+    assert_eq!(
+        s.eval::<String>("return debugstack(99)").unwrap().trim(),
+        "stack traceback:"
+    );
+}
+
+/// **An addon's chunk is named the way the CLIENT names it**, because addons parse that name.
+///
+/// `FuBarPlugin-2.0.lua:752` is `string.find(debugstack(6, 1, 0), "\\AddOns\\(.*)\\")`, and it
+/// feeds the capture into `format("Interface\\AddOns\\%s\\icon", folderName)`. Without a name
+/// mlua defaults the chunk to the RUST caller location, that pattern misses, and every FuBar plugin
+/// dies formatting a nil three frames from the cause.
+///
+/// The greedy `(.*)` is why the file has to be in the name too: it captures to the LAST backslash.
+#[test]
+fn an_addon_chunk_is_named_the_way_the_client_names_it() {
+    let name = crate::script::addon_chunk_name("FuBar_BagFu", "FuBar_BagFu.lua");
+    assert_eq!(name, "@Interface\\AddOns\\FuBar_BagFu\\FuBar_BagFu.lua");
+
+    // FuBar's own pattern, run for real against a traceback from a chunk loaded under that name.
+    let s = script();
+    s.run_chunk_named(
+        b"function BenillaProbeFolder() return debugstack(1, 1, 0) end",
+        &name,
+    )
+    .unwrap();
+    let folder: String = s
+        .eval(
+            "local _, _, f = string.find(BenillaProbeFolder(), \"\\\\AddOns\\\\(.*)\\\\\") \
+             return f or '<no match>'",
+        )
+        .unwrap();
+    assert_eq!(
+        folder, "FuBar_BagFu",
+        "FuBarPlugin's own capture must yield the folder name"
+    );
+
+    // A nested path in the manifest keeps its separators as backslashes.
+    assert_eq!(
+        crate::script::addon_chunk_name("Big", "libs/Thing/Thing.lua"),
+        "@Interface\\AddOns\\Big\\libs\\Thing\\Thing.lua"
+    );
 }
 
 #[test]
@@ -210,4 +262,61 @@ fn the_lua_5_0_dialect_vanilla_addons_are_written_in_runs_here() {
     "##,
     )
     .unwrap();
+}
+
+/// **`time()` is real epoch seconds and `date()` formats them** — engine globals in the 1.12
+/// client's own `_G` (slots 34/33 of its base registry) that we lacked entirely, because the
+/// sandbox strips `os`.
+///
+/// `time` was the top name in the session-start `attempt to call global` row. Every corpus site
+/// persists it into SavedVariables and compares across sessions
+/// (`FTC_Save[k].LastCheck = time()`), so a session-relative clock like `GetTime` would be wrong in
+/// a way that only shows up on the SECOND login.
+///
+/// The formats asserted are the ones read off real call sites, against a FIXED epoch so the
+/// conversion is checked rather than the machine's clock: 2001-09-09 01:46:40 UTC, a Sunday.
+#[test]
+fn time_is_epoch_seconds_and_date_formats_them() {
+    let s = script();
+
+    // A plausible wall clock: after 2020, before 2100. Pins that this is not GetTime's 0-based one.
+    let now: i64 = s.eval("return time()").unwrap();
+    assert!(
+        (1_577_836_800..4_102_444_800).contains(&now),
+        "time() must be wall-clock epoch seconds, got {now}"
+    );
+
+    // 1_000_000_000 = 2001-09-09 01:46:40 UTC, a Sunday, day 252 of the year.
+    for (fmt, want) in [
+        ("%Y-%m-%d", "2001-09-09"),
+        ("%H:%M:%S", "01:46:40"),
+        (
+            "%A, %B %d, %Y - %H:%M",
+            "Sunday, September 09, 2001 - 01:46",
+        ),
+        ("%a %b %y", "Sun Sep 01"),
+        ("%I:%M %p", "01:46 AM"),
+        ("%j", "252"),
+        ("%w", "0"),
+        ("%c", "Sun Sep  9 01:46:40 2001"),
+        ("100%%", "100%"),
+        // An unknown specifier is emitted verbatim rather than swallowed.
+        ("%Q", "%Q"),
+    ] {
+        let got: String = s
+            .eval(&format!(r#"return date("{fmt}", 1000000000)"#))
+            .unwrap();
+        assert_eq!(got, want, "date({fmt:?})");
+    }
+
+    // Bare `date()` is `%c` (Recap.lua:2690 calls it with no arguments) and must not raise.
+    let bare: String = s.eval("return date()").unwrap();
+    assert!(
+        bare.len() > 10,
+        "bare date() must format something: {bare:?}"
+    );
+
+    // A leap day, because the civil conversion is where a date implementation goes wrong.
+    let leap: String = s.eval(r#"return date("%Y-%m-%d %A", 951782400)"#).unwrap();
+    assert_eq!(leap, "2000-02-29 Tuesday");
 }

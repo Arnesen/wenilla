@@ -236,7 +236,7 @@ fn bag_buttons_tint_by_purchase_count_and_texture_from_the_bank_bag_feed() {
     s.resolve();
     let quads = s.extract();
 
-    // BagFrame.xml's own bag-bar slots (BenillaBagBarSlot1..4) fall back to this SAME empty-slot
+    // BagFrame.xml's own bag-bar slots (CharacterBag0Slot..4) fall back to this SAME empty-slot
     // texture, so the search must be scoped to each named bank button's own rect, not the path
     // alone — get each button's center via eval, then read the color off the quad sitting there.
     let center = |name: &str| -> (f32, f32) {

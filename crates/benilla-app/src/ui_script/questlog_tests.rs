@@ -393,9 +393,8 @@ fn shift_click_toggles_the_watch_checkbox_and_the_tracker_hud() {
 
 /// Shift-clicking a quest with zero objectives (ref `QUEST_WATCH_NO_OBJECTIVES`) and shift-clicking
 /// past `GetNumQuestWatches() >= 5` (ref `QUEST_WATCH_TOO_MANY`) both refuse the watch and put the
-/// ref's red line on the errors frame (`BenillaErrorsFrame_AddMessage` — the ref's
-/// `UIErrorsFrame:AddMessage` call sites); the click still selects the row exactly like any other
-/// click (pin §5).
+/// ref's red line on the errors frame through its own `UIErrorsFrame:AddMessage`; the click still
+/// selects the row exactly like any other click (pin §5).
 #[test]
 fn watch_guards_no_op_without_erroring() {
     let mut s = UiScript::new().unwrap();
@@ -428,10 +427,14 @@ fn watch_guards_no_op_without_erroring() {
         s.errors()
     );
     assert!(!s.eval::<bool>("return IsQuestWatched(2)").unwrap());
-    assert_eq!(
-        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
-            .unwrap(),
-        "This quest has no objectives to track",
+    // Read the toast off the drawn quads: `UIErrorsFrame` is a real `<MessageFrame>` and its
+    // lines are the widget's own bands, not named FontStrings.
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            QuadContent::Text { text: Some(t), .. } if t == "This quest has no objectives to track"
+        )),
         "the ref's QUEST_WATCH_NO_OBJECTIVES red line surfaces"
     );
     assert_eq!(
@@ -463,10 +466,12 @@ fn watch_guards_no_op_without_erroring() {
     );
     assert!(!s.eval::<bool>("return IsQuestWatched(1)").unwrap());
     assert_eq!(s.eval::<i64>("return GetNumQuestWatches()").unwrap(), 5);
-    assert_eq!(
-        s.eval::<String>("return UIErrorsFrameLine1:GetText()")
-            .unwrap(),
-        "You may only watch 5 quests at a time",
+    s.resolve();
+    assert!(
+        s.extract().iter().any(|q| matches!(
+            &q.content,
+            QuadContent::Text { text: Some(t), .. } if t == "You may only watch 5 quests at a time"
+        )),
         "the ref's QUEST_WATCH_TOO_MANY red line surfaces"
     );
 }

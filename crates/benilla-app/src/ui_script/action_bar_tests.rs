@@ -24,8 +24,9 @@ fn shipped_action_bar_drives_end_to_end() {
         );
         if file == "ActionBar.xml" {
             assert_eq!(
-                report.frames, 34,
-                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button"
+                report.frames, 59,
+                "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
+                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223)"
             );
         }
     }
@@ -681,6 +682,19 @@ fn shipped_bag_frame_drives_end_to_end() {
         let abdoc = benilla_ui::framexml::parse(&abtext).unwrap();
         benilla_ui::loader::load(&s, &abdoc, &|_| None);
     }
+    // UiPanels.xml before the bag file: `ToggleBackpack` calls the GLOBAL `CloseAllBags`, which
+    // lives there (homed in the panel glue rather than the bag's own file, deliberately — see its
+    // comment). Production loads both; this test was under-loading relative to it, and started
+    // failing the moment the toggle went through the reference's names instead of a local body.
+    // Loading it is the honest fix: the dependency is real, not an artifact.
+    {
+        let panels = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/UiPanels.xml"),
+        )
+        .unwrap();
+        let pdoc = benilla_ui::framexml::parse(&panels).unwrap();
+        let _ = benilla_ui::loader::load(&s, &pdoc, &|_| None);
+    }
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/BagFrame.xml"),
     )
@@ -962,5 +976,56 @@ fn an_occupied_slot_going_empty_leaves_no_white_plate() {
             _ => {}
         }
     }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **The bonus action bar exists and stays hidden** — the same posture 1219 gave the vertical
+/// multibars, and the largest single session-start row in the corpus.
+///
+/// `ref-BonusActionBarFrame.xml` l.54 instantiates `BonusActionBarFrame` as a real
+/// `parent="MainMenuBar"` frame carrying `hidden="true"`, with `BonusActionButton1..12` inside.
+/// benilla models the bonus page by re-paging the MAIN bar, so we never show this one — but four
+/// addons died at `CT_BarMod\CT_BarModOptions.lua:154`,
+/// `getglobal("BonusActionButton" .. i):ClearAllPoints()`, which is pure layout and needs only
+/// that the buttons be there.
+///
+/// The last assertion is the one that keeps it honest: declaring a hidden bar must not change what
+/// the visible bar shows.
+#[test]
+fn the_bonus_action_bar_exists_hidden_and_takes_layout_calls() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+
+    assert!(
+        s.eval::<bool>("return BonusActionBarFrame ~= nil").unwrap(),
+        "5 corpus addons index BonusActionBarFrame by name"
+    );
+    assert!(
+        !s.eval::<bool>("return BonusActionBarFrame:IsShown()")
+            .unwrap(),
+        "it must ship HIDDEN — benilla re-pages the main bar instead of showing this one"
+    );
+
+    for i in [1, 12] {
+        assert!(
+            s.eval::<bool>(&format!("return BonusActionButton{i} ~= nil"))
+                .unwrap(),
+            "BonusActionButton{i} must exist"
+        );
+        // CT_BarModOptions.lua:154's exact pair, on a bar that has never been shown.
+        s.run(&format!("BonusActionButton{i}:ClearAllPoints()"))
+            .unwrap();
+        s.run(&format!(
+            "BonusActionButton{i}:SetPoint(\"TOP\", \"ActionButton1\", \"BOTTOM\", 0, -4)"
+        ))
+        .unwrap();
+    }
+
+    // A hidden bar changes nothing about the visible one.
+    assert!(
+        s.eval::<bool>("return ActionButton1:IsShown()").unwrap(),
+        "the main bar is untouched"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -47,6 +47,7 @@ use mlua::Value;
 
 use crate::layout::Rect;
 use crate::order;
+use crate::widget::FrameHandle;
 
 use super::clip::{effective_clip, scroll_clip_sources};
 use super::{button, cursor, editbox, event, UiScript};
@@ -127,25 +128,40 @@ pub(super) fn install(lua: &mlua::Lua) -> mlua::Result<()> {
 }
 
 impl UiScript {
-    /// Hit-test the cursor at `(x, y)` and return the **id** of the captured frame (the topmost-drawn
-    /// mouse-enabled, effective-visible frame whose rect contains the point **and** whose effective
-    /// ScrollFrame clip, if any, also contains it — decision 0112 §5: a button scrolled out of its
-    /// ScrollFrame's rect must not hit), or `None`. Pure query — fires nothing, mutates nothing. The
-    /// id is the same one used across this host (e.g. the layout [`crate::layout::Handle`]); the app
-    /// can hand it back or map it as it likes.
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<u32> {
+    /// Hit-test the cursor at `(x, y)` and return the **handle** of the captured frame (the
+    /// topmost-drawn mouse-enabled, effective-visible frame whose rect contains the point **and**
+    /// whose effective ScrollFrame clip, if any, also contains it — decision 0112 §5: a button
+    /// scrolled out of its ScrollFrame's rect must not hit), or `None`. Pure query — fires nothing,
+    /// mutates nothing. Call [`Self::resolve`] first; a frame with no resolved rect never captures.
+    ///
+    /// **The handle form exists because a name is not always available and an id is not always
+    /// comparable.** [`Self::hit_test`] answers in ids (what the app and the Lua bindings speak) and
+    /// [`Self::hit_test_name`] answers in names (what a human reads). An instrument that has to ask
+    /// *whose* frame ate a click needs neither: the frame may be **anonymous**, and the only set it
+    /// can be checked against is a handle set snapshotted earlier ([`Self::live_targets`]'s). The
+    /// addon harness's use probe asks exactly that — a pointer event is only an addon's to be
+    /// judged by when the frame under the cursor is one the addon itself created.
+    pub fn hit_test_frame(&self, x: f32, y: f32) -> Option<FrameHandle> {
         let model = self.model_ref();
         let sorted = order::traversal(&model.arena);
         let scroll_sources = scroll_clip_sources(&model);
-        let hit = order::hit_test(&sorted, |fh| {
+        order::hit_test(&sorted, |fh| {
             model.arena.is_mouse_enabled(fh)
                 && model.resolved.get(&fh).is_some_and(|r| {
                     point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
                 })
                 && effective_clip(&model, &scroll_sources, fh)
                     .is_none_or(|c| point_in_rect(c, x, y))
-        });
-        hit.and_then(|h| model.frame_to_id.get(&h).copied())
+        })
+    }
+
+    /// Hit-test the cursor at `(x, y)` and return the **id** of the captured frame, or `None` —
+    /// [`Self::hit_test_frame`] with the id lookup every caller in the input path wants. The id is
+    /// the same one used across this host (e.g. the layout [`crate::layout::Handle`]); the app can
+    /// hand it back or map it as it likes.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<u32> {
+        let hit = self.hit_test_frame(x, y)?;
+        self.model_ref().frame_to_id.get(&hit).copied()
     }
 
     /// The NAME of the frame [`Self::hit_test`] captures at `(x, y)` — the pointer twin of

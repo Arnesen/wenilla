@@ -191,3 +191,112 @@ impl WorldCollision<'_, '_> {
         one_sided::faces_near(&self.ms, at, half, &Self::body_filter(), limit)
     }
 }
+
+/// The contact pipeline we deliberately do not run (decision 1232, disabled in `world_plugins`).
+///
+/// These two tests are a matched pair: the first shows the cost was real — a kinematic trimesh
+/// resting in the static world generates contact pairs, and avian then computes a trimesh-vs-trimesh
+/// manifold for each, every physics tick — and the second shows that dropping the broad phase
+/// removes them *without* costing the shape-casts the character controller actually rides.
+#[cfg(test)]
+mod contact_pipeline {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    /// A static 10×10 floor plus a kinematic 4×4 slab overlapping it — the transport-on-terrain
+    /// shape that was generating manifolds against 65k-triangle tiles in the real world.
+    fn overlapping_world(broad_phase: bool) -> App {
+        let mut app = App::new();
+        let physics = PhysicsPlugins::new(bevy::app::PostUpdate);
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+        ));
+        if broad_phase {
+            app.add_plugins(physics);
+        } else {
+            app.add_plugins(physics.build().disable::<BvhBroadPhasePlugin>());
+        }
+        app.init_asset::<Mesh>();
+        // `update()` never runs plugin `finish()`, where avian seats its diagnostics resources.
+        app.finish();
+        app.cleanup();
+
+        let quad = |half: f32, y: f32| {
+            (
+                vec![
+                    Vec3::new(-half, y, -half),
+                    Vec3::new(half, y, -half),
+                    Vec3::new(half, y, half),
+                    Vec3::new(-half, y, half),
+                ],
+                vec![[0u32, 2, 1], [0, 3, 2]],
+            )
+        };
+        let (fv, ft) = quad(5.0, 0.0);
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::trimesh(fv, ft),
+            Transform::default(),
+        ));
+        // Overlapping, not merely adjacent: same plane, so the AABBs intersect and the narrow
+        // phase has real triangle work to do.
+        let (sv, st) = quad(2.0, 0.0);
+        app.world_mut().spawn((
+            RigidBody::Kinematic,
+            Collider::trimesh(sv, st),
+            Transform::default(),
+        ));
+        // Two frames, not one: the first seats `Position`/`Rotation` and the collider trees, and
+        // the physics schedule first steps on the second. A single-`update()` fixture (which is
+        // what `one_sided`'s is) never runs a physics step at all.
+        app.update();
+        app.update();
+        app
+    }
+
+    fn active_pairs(app: &App) -> usize {
+        app.world().resource::<ContactGraph>().active_pairs().len()
+    }
+
+    #[test]
+    fn the_stock_plugin_set_generates_contact_pairs_we_never_read() {
+        // The bug's premise. If this ever reads 0, avian changed and 1232's reasoning needs a
+        // re-read before the disable below can still be justified as a saving.
+        assert!(
+            active_pairs(&overlapping_world(true)) > 0,
+            "expected the stock broad phase to pair the kinematic slab with the static floor"
+        );
+    }
+
+    #[test]
+    fn dropping_the_broad_phase_removes_the_pairs_but_not_the_shape_casts() {
+        let mut app = overlapping_world(false);
+        assert_eq!(
+            active_pairs(&app),
+            0,
+            "no broad phase means no contact pairs, so nothing to build manifolds for"
+        );
+        // The half that must NOT regress: the collider BVH is `ColliderTreePlugin`'s, not the
+        // broad phase's, so a downward cast still finds the floor the player walks on.
+        let hit = app
+            .world_mut()
+            .run_system_once(|spatial: SpatialQuery| {
+                spatial.cast_ray(
+                    Vec3::new(0.0, 5.0, 0.0),
+                    Dir3::NEG_Y,
+                    10.0,
+                    true,
+                    &SpatialQueryFilter::default(),
+                )
+            })
+            .expect("run_system_once");
+        assert!(
+            hit.is_some(),
+            "the shape-cast lane must survive the broad phase being gone"
+        );
+    }
+}

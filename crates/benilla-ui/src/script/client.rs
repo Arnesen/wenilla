@@ -110,9 +110,24 @@ impl super::UiScript {
     /// Set at world entry from the realm the session actually connected to. Idempotent, and the
     /// empty string is a legitimate value (no realm yet), not a "clear".
     pub fn set_realm_name(&mut self, realm: &str) {
-        let mut model = self.model_mut();
-        if model.realm_name != realm {
-            model.realm_name = realm.to_string();
+        {
+            let mut model = self.model_mut();
+            if model.realm_name != realm {
+                model.realm_name = realm.to_string();
+            }
+            // The `realmName` CVar is the SAME fact, and it is set here so it cannot drift from
+            // `GetRealmName()`. It is a real 1.12 CVar (`0x83f2d0`, persisted — the client builds
+            // its SavedVariables path from it, wow-re `savedvariables-protocol.md`), and it had no
+            // value at all here: `Ace/AceState.lua:27` is
+            // `ace.trim(GetCVar("realmName"))` inside `SetGameState`, which EVERY Ace addon runs at
+            // PLAYER_ENTERING_WORLD, so the nil became `gsub(nil, ...)` and took the family down.
+            //
+            // Written straight into the slot rather than through `set_cvar_host` because that
+            // borrows the model again, and warns on an unknown name — this is the host declaring
+            // the value, not looking it up.
+            if let Some(slot) = model.cvars.get_mut("realmname") {
+                slot.value = realm.to_string();
+            }
         }
     }
 

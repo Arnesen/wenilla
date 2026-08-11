@@ -446,3 +446,69 @@ fn an_instance_attribute_beats_the_templates() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **`GameTooltipTextLeft1` is a real global from LOAD, hidden — before any line exists.**
+///
+/// Ours were engine-created purely on demand, so a cold VM had no such global. The corpus pattern
+/// that breaks on is a **guard**, not a read: `Participant/Resurrection.lua:294` and
+/// `CT_RaidAssist/CT_RADetectSpells.lua:47` both write
+/// `... and GameTooltipTextLeft1:IsVisible() then` to ask whether the tooltip is currently showing
+/// anything. On the reference that is safe and answers false; for us it raised on the check itself,
+/// which is the worst shape — the addon was being careful and got punished for it.
+///
+/// `ref-GameTooltipTemplate.xml` declares 30 pairs, all `hidden="true"` (l.17-627). We now declare
+/// the same 30, and the engine's existing adoption path takes them over when lines are added.
+///
+/// The second half of the assertion is what makes this safe: a declared-but-unfilled pair must not
+/// count as a line. `NumLines()` reads `num_lines`, and `layout_tooltips` sizes from `num_lines`,
+/// so 30 hidden pairs add no height and no width.
+#[test]
+fn the_tooltip_line_globals_exist_cold_and_do_not_count_as_lines() {
+    let mut s = harness();
+
+    for name in [
+        "GameTooltipTextLeft1",
+        "GameTooltipTextRight1",
+        "GameTooltipTextLeft30",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {name} ~= nil")).unwrap(),
+            "{name} must exist before any line is added — it is declared, not grown"
+        );
+        assert!(
+            !s.eval::<bool>(&format!("return {name}:IsVisible()"))
+                .unwrap(),
+            "{name} must be HIDDEN cold, so the corpus guard answers false instead of raising"
+        );
+    }
+
+    // The corpus guard itself, verbatim in shape, on a tooltip that has never shown anything.
+    assert!(
+        !s.eval::<bool>("return GameTooltipTextLeft1:IsVisible()")
+            .unwrap(),
+        "Participant/Resurrection.lua:294's guard"
+    );
+    // A declared pair is not a line.
+    assert_eq!(
+        s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),
+        0,
+        "30 declared pairs must not inflate NumLines"
+    );
+
+    // And the pairs still work as lines once filled — the adoption path, not a parallel set.
+    s.run("GameTooltip:SetOwner(UIParent, \"ANCHOR_NONE\") GameTooltip:AddLine(\"Corpse of Bob\") GameTooltip:Show()")
+        .unwrap();
+    answer_measures(&mut s);
+    assert_eq!(s.eval::<i64>("return GameTooltip:NumLines()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Corpse of Bob",
+        "the DECLARED region must be the one the line stack filled, not a sibling"
+    );
+    assert!(
+        s.eval::<bool>("return GameTooltipTextLeft1:IsVisible()")
+            .unwrap(),
+        "a filled line shows"
+    );
+}

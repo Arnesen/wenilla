@@ -395,6 +395,32 @@ pub(crate) fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// A playable race id → `UnitFactionGroup`'s token (`"Alliance"`/`"Horde"`), or `None` for a race
+/// id that is not one of the eight.
+///
+/// **A side derived from the RACE, not from the faction template** — deliberately, and only for
+/// the one window in which the template does not exist yet. [`faction_group`] is the real answer
+/// and reads `UNIT_FIELD_FACTIONTEMPLATE` off the descriptor; during world entry there is no
+/// descriptor, and `UnitFactionGroup("player")` answering nil there is not "no faction", it is a
+/// state a real player character cannot be in. AceDB-2.0 — embedded across a large slice of the
+/// corpus — builds its per-realm key as `realm .. " - " .. faction` at **file scope**, so a nil
+/// side is 24 corpus addons stopping on `attempt to concatenate local 'faction'`
+/// (`addon_harness::seat_a_session`, decision 1195, which seats exactly this in the survey's VM).
+///
+/// Every playable race has a fixed side in 1.12, so this is a lookup rather than a guess — and it
+/// reads the [`crate::char_create::ALLIANCE`] column the create screen already keeps, so the two
+/// cannot drift apart.
+pub(crate) fn race_faction_group(race: u8) -> Option<&'static str> {
+    if !(1..=8).contains(&race) {
+        return None;
+    }
+    Some(if crate::char_create::ALLIANCE.contains(&race) {
+        "Alliance"
+    } else {
+        "Horde"
+    })
+}
+
 /// Resolve a UnitPopup unit token to the **player guid** it names — `"target"` through the
 /// selection iff it really is a player (the target frame's PLAYER menu), a `"partyN"` token through
 /// the roster (the party frame's PARTY menu). `"player"` (yourself) and any unresolved token answer
