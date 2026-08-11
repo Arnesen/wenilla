@@ -169,7 +169,9 @@ pub(super) fn classify_breath(
             Some(id) if areas.0.is_cold(id) => Breath::Cold,
             _ => Breath::None,
         };
-        commands.entity(entity).insert(BreathEnv {
+        // try_insert: a streamed unit can despawn (teardown, teleport, range-out) between this
+        // system's parallel run and its sync point — a plain insert panics on the dead entity.
+        commands.entity(entity).try_insert(BreathEnv {
             kind,
             stale_at: now + RECLASSIFY_SECS,
         });

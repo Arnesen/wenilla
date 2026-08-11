@@ -1073,3 +1073,85 @@ fn the_reference_action_bar_constants_are_defined() {
         "CURRENT_ACTIONBAR_PAGE is mutable page state we do not keep — nil fails loudly, a frozen 1 lies"
     );
 }
+
+/// **The reference's two-level action-button split, both halves inheritable by name.**
+///
+/// `ActionButtonTemplate` (ref ActionButtonTemplate.xml:3) is regions only and carries NO scripts;
+/// `ActionBarButtonTemplate` (ref ActionBarFrame.xml:4) inherits it and adds the handlers. Ours
+/// conflated them under one `Benilla*` name, so an addon inheriting either reference name got a
+/// bare frame — no art, no regions, and no error (1203's silent shape).
+///
+/// `zBar.xml:7` is the corpus shape: it inherits `ActionBarButtonTemplate`, wires its own OnLoad,
+/// and then reads `getglobal(button:GetName().."NormalTexture")` — a derived name it only has
+/// because the template declares `$parentNormalTexture`. That read is where it died.
+///
+/// The last assertion is the one that keeps our own bars safe: the alias must still resolve to the
+/// full thing, or 48 `inherits=` sites across four files silently lose their handlers.
+#[test]
+fn both_reference_action_button_templates_are_inheritable() {
+    let s = UiScript::new().unwrap();
+    load_action_bar(&s);
+
+    // zBar's exact shape: inherit the bar template, supply your own OnLoad.
+    let doc = benilla_ui::framexml::parse(
+        r#"<Ui>
+            <CheckButton name="ZLikeButton" inherits="ActionBarButtonTemplate" id="1">
+                <Anchors><Anchor point="CENTER"/></Anchors>
+            </CheckButton>
+            <CheckButton name="BareLikeButton" inherits="ActionButtonTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+            </CheckButton>
+        </Ui>"#,
+    )
+    .unwrap();
+    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "loader errors: {:?}",
+        report.errors
+    );
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.contains("unknown template")),
+        "both names must resolve: {:?}",
+        report.warnings
+    );
+
+    // The derived name zBar reads, on a button built from each half.
+    for owner in ["ZLikeButton", "BareLikeButton"] {
+        assert!(
+            s.eval::<bool>(&format!("return {owner}NormalTexture ~= nil"))
+                .unwrap(),
+            "{owner}NormalTexture — zBar.lua:88's read"
+        );
+        assert!(
+            s.eval::<bool>(&format!(
+                "return {owner}Icon ~= nil and {owner}Cooldown ~= nil"
+            ))
+            .unwrap(),
+            "{owner} must carry the template's regions"
+        );
+    }
+
+    // The base half carries NO handlers, exactly as the reference's does — an addon inheriting it
+    // wires its own, and must not silently receive ours.
+    assert!(
+        !s.eval::<bool>("return BareLikeButton:GetScript(\"OnClick\") ~= nil")
+            .unwrap(),
+        "ActionButtonTemplate is regions only; handlers belong to the bar half"
+    );
+    assert!(
+        s.eval::<bool>("return ZLikeButton:GetScript(\"OnClick\") ~= nil")
+            .unwrap(),
+        "ActionBarButtonTemplate carries the handler set"
+    );
+
+    // ...and our own alias still resolves to the full thing.
+    assert!(
+        s.eval::<bool>("return ActionButton1NormalTexture ~= nil and ActionButton1:GetScript(\"OnClick\") ~= nil")
+            .unwrap(),
+        "BenillaActionButtonTemplate's 48 inherits= sites must be untouched by the split"
+    );
+}

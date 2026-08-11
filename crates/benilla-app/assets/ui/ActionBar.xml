@@ -233,10 +233,21 @@
         -- page 5, else the paged/bonus formula); we carry the fork as data — a fixed per-button
         -- page base set at OnLoad (MultiBars.xml), nil for the bonus-paged main bar.
         function BenillaActionButton_Action(button)
+            -- `index` falls back to the button's ID, which is where the REFERENCE reads it from:
+            -- `ActionButton_GetPagedID` uses `this:GetID()`, and our `.index` is only that value
+            -- cached at OnLoad. A button that inherits `ActionBarButtonTemplate` and wires its own
+            -- OnLoad — zBar.xml:7 does exactly this — never runs ours, so `.index` is nil while
+            -- `GetID()` is set from the XML `id=`. Before the fallback, our own handler raised
+            -- `ActionBar.xml:228: arithmetic on local 'index'` on somebody else's button.
+            --
+            -- Still nothing? Action 0, which is not a real slot: every reader answers nil for it
+            -- and the button draws empty. Deliberately not an early `return nil` — the callers are
+            -- arithmetic all the way down, and a nil would move the raise rather than remove it.
+            local index = button.index or button:GetID() or 0
             if button.base then
-                return button.base + button.index
+                return button.base + index
             end
-            return BenillaActionBar_ActionFor(button.index)
+            return BenillaActionBar_ActionFor(index)
         end
 
         -- Hover: SetAction's pure delegation (decision 0276 — a SPELL slot renders the spell
@@ -991,7 +1002,19 @@
         ButtonHilight-Square ADD (l.87); CheckedTexture CheckButtonHilight ADD (l.88 — the
         IsCurrentAction/IsAutoRepeatAction ring). Only Name (macros) stays OUT.
     -->
-    <CheckButton name="BenillaActionButtonTemplate" virtual="true">
+    <!-- **The reference's own two-level split, which ours used to conflate into one template.**
+         `ActionButtonTemplate` (ref ActionButtonTemplate.xml:3) is REGIONS ONLY and carries no
+         scripts at all; `ActionBarButtonTemplate` (ref ActionBarFrame.xml:4) inherits it and adds
+         the handler set. Addons rely on both halves being separately inheritable: `zBar.xml:7` is
+         `<CheckButton name="zBarButtonTemplate" inherits="ActionBarButtonTemplate">` and then
+         wires its OWN OnLoad, and its per-button code reads
+         `getglobal(button:GetName().."NormalTexture")` — a derived name it only gets by inheriting
+         a template that declares `$parentNormalTexture`.
+         2 corpus addons name `ActionBarButtonTemplate` in an XML `inherits=`; with neither name
+         published they got a bare frame, no art, no regions, and no error (1203's silent shape).
+         `BenillaActionButtonTemplate` survives below as a pure alias so every one of our own
+         `inherits=` sites is untouched. -->
+    <CheckButton name="ActionButtonTemplate" virtual="true">
         <Size><AbsDimension x="36" y="36"/></Size>
         <Layers>
             <Layer level="BACKGROUND">
@@ -1008,6 +1031,16 @@
                 <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
                     <Anchors>
                         <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <!-- ref ActionButtonTemplate.xml's `$parentName` — the macro-name line along the
+                     button's bottom edge. Empty by default, so it draws nothing until something
+                     sets it; declared because it is part of the template's published contract and
+                     an addon indexing `<button>Name` would otherwise get nil. -->
+                <FontString name="$parentName" inherits="GameFontHighlightSmallOutline">
+                    <Size><AbsDimension x="36" y="10"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
             </Layer>
@@ -1037,6 +1070,10 @@
         <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+    </CheckButton>
+
+    <!-- The bar half: the reference's `ActionBarButtonTemplate`, regions inherited, handlers added. -->
+    <CheckButton name="ActionBarButtonTemplate" inherits="ActionButtonTemplate" virtual="true">
         <Scripts>
             <OnClick>BenillaActionButton_OnClick(self)</OnClick>
             <OnDragStart>BenillaActionButton_OnDragStart(self)</OnDragStart>
@@ -1046,6 +1083,11 @@
             <OnLeave>if GameTooltip then GameTooltip:Hide() end</OnLeave>
         </Scripts>
     </CheckButton>
+
+    <!-- Pure alias, so every existing `inherits="BenillaActionButtonTemplate"` in this file,
+         MultiBars.xml, StanceBar.xml and PetActionBar.xml keeps resolving to exactly what it did
+         before the split. -->
+    <CheckButton name="BenillaActionButtonTemplate" inherits="ActionBarButtonTemplate" virtual="true"/>
 
     <!-- The bar: 1024x53 anchored BOTTOM of the screen (ref-MainMenuBar.xml l.4-10). -->
     <Frame name="MainMenuBar">
