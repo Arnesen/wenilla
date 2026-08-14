@@ -1006,10 +1006,9 @@ fn shift_click_on_a_stack_opens_the_split_frame() {
 /// B180 — the split dialog's parchment plate fills the whole 172×96 frame. The reference authors
 /// the plate 256×32 with NO anchors, a vestigial size the real client never renders (the TexCoords
 /// crop exactly 172×96 out of the 256×128 art — the frame's own size, a complete panel drawn 1:1
-/// over it). Our sized-anchor-less fallback draws CENTERED at the authored size instead, which
-/// squashed the dialog to a 32-tall bar: the count and arrows floated above it and Okay/Cancel
-/// straddled its bottom edge. The plate's authored size is dropped (StackSplit.xml says why); this
-/// pins the render so the vestigial size cannot come back.
+/// over it). 1308 first dodged this by dropping the size; 1310 then landed the byte-verified law
+/// (an anchor-less region gets an implicit SetAllPoints at creation, size unread under the two
+/// corners) and restored the ref's own text — this pins the render through the real mechanism.
 #[test]
 fn the_split_frame_plate_fills_the_dialog() {
     let mut s = UiScript::new().unwrap();
@@ -1054,6 +1053,132 @@ fn the_split_frame_plate_fills_the_dialog() {
             "plate {edge} = {got}, frame {edge} = {want} — the plate must fill the dialog"
         );
     }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// B180's Bagnon follow-on (director, 08-14): the dialog opened UNDER an addon bag window —
+/// Bagnon's windows are `frameStrata="HIGH"`, the dialog's own stratum, and our re-expression had
+/// dropped the reference's `toplevel="true"`, so the dialog's Show raised nothing and lost the
+/// level tie to the later-shown window (its child buttons at level+1 poked through; the plate did
+/// not). With the ref's attrs restored, Show runs the verified raise (toplevel.rs: compact, then
+/// top-occupied-plus-one) and the whole dialog lands above. The synthetic window stands in for
+/// Bagnon: same stratum, shown after load, overlapping the dialog.
+#[test]
+fn the_split_frame_raises_over_a_same_stratum_window() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let (x, y) = open_backpack_with_a_five_stack(&mut s);
+
+    s.run(
+        r#"
+        local w = CreateFrame("Frame", "FakeBagnon", UIParent)
+        w:SetFrameStrata("HIGH")
+        w:SetPoint("BOTTOMLEFT", 0, 0)
+        w:SetSize(1024, 768)
+        local bg = w:CreateTexture(nil, "BACKGROUND")
+        bg:SetTexture("Interface\\FakeBagnonBG")
+        bg:SetAllPoints()
+        w:Show()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    s.set_modifiers(true, false, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    s.resolve();
+
+    assert!(
+        s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
+        "the spinner opened"
+    );
+    let (dialog, bagnon) = s
+        .eval::<(i64, i64)>("return StackSplitFrame:GetFrameLevel(), FakeBagnon:GetFrameLevel()")
+        .unwrap();
+    assert!(
+        dialog > bagnon,
+        "Show must raise the toplevel dialog over the same-stratum window \
+         (dialog level {dialog}, window level {bagnon})"
+    );
+    // The symptom itself: the plate paints AFTER the window's background in draw order.
+    let order: Vec<String> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture { path: Some(p), .. }
+                if p.contains("FakeBagnonBG") || p.contains("UI-MoneyFrame") =>
+            {
+                Some(p.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order.len(), 2, "both textures on screen: {order:?}");
+    assert!(
+        order[0].contains("FakeBagnonBG"),
+        "the plate must draw over the window, not under it: {order:?}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Typed-digit entry in the split spinner (decision 1319) — the director's ask, and the deferral
+/// this file's header carried since 0216. Pins the whole chain in one go: the dialog is in the
+/// keyboard walk (`enableKeyboard`), a digit reaches its `OnChar`, the first digit REPLACES the
+/// seeded 1 while later digits append, an over-max entry clamps instead of being rejected,
+/// BACKSPACE drops a digit, and ENTER commits exactly as Okay does.
+#[test]
+fn typing_a_number_into_the_split_spinner_sets_the_count() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let (x, y) = open_backpack_with_a_five_stack(&mut s);
+
+    s.set_modifiers(true, false, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    s.resolve();
+    assert_eq!(
+        s.eval::<i64>("return StackSplitFrame.split").unwrap(),
+        1,
+        "opens seeded at 1"
+    );
+
+    // A digit is consumed by the dialog — which is also what stops it firing action button 3.
+    assert!(s.char_input("3"), "the spinner consumed the digit");
+    assert_eq!(
+        s.eval::<i64>("return StackSplitFrame.split").unwrap(),
+        3,
+        "the first digit REPLACES the seed rather than appending to it"
+    );
+    assert_eq!(
+        s.eval::<String>("return StackSplitText:GetText()").unwrap(),
+        "3",
+        "and the label follows"
+    );
+
+    // A second digit appends, then clamps to the 5-stack rather than being thrown away.
+    assert!(s.char_input("7"));
+    assert_eq!(
+        s.eval::<i64>("return StackSplitFrame.split").unwrap(),
+        5,
+        "37 against a 5-stack clamps to 5"
+    );
+    // BACKSPACE drops a digit off the clamped value.
+    assert!(s.frame_key_input("BACKSPACE"), "the dialog took BACKSPACE");
+    assert_eq!(s.eval::<i64>("return StackSplitFrame.split").unwrap(), 1);
+
+    // Type a real value and commit with ENTER — the Okay path, so the carry is picked up.
+    assert!(s.char_input("4"));
+    assert_eq!(s.eval::<i64>("return StackSplitFrame.split").unwrap(), 4);
+    assert!(s.key_input("ENTER"), "ENTER is consumed by the dialog");
+    assert!(
+        !s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap(),
+        "ENTER commits and closes, like Okay"
+    );
+    let held = s.cursor_item().expect("ENTER committed the split");
+    assert_eq!(held.count, Some(4), "the typed count is what got picked up");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

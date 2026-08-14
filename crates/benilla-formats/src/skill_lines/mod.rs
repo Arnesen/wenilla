@@ -337,7 +337,7 @@ impl SkillLineCatalog {
     pub fn highest_known_rank(
         &self,
         spell_id: u32,
-        known: &std::collections::HashSet<u32>,
+        known: &std::collections::BTreeSet<u32>,
     ) -> Option<u32> {
         let mut cur = self.chain_head(spell_id);
         let mut best = known.contains(&cur).then_some(cur);

@@ -205,6 +205,30 @@ pub(super) fn feed_ui_input(
         // route law decides; unfocused they return unconsumed, and the camera/turn keys that
         // read arrows after UiInput see them exactly as before).
         let chord = keymap::chord(ev.key_code, mods, mac);
+        // A KEYBOARD FRAME gets these by NAME before their chord runs (decision 1319). They are
+        // the keys a focused EditBox receives as a semantic `EditAction` instead of a name, so
+        // they never reached `key_input` at all — and a dialog you type into needs its BACKSPACE.
+        // `frame_key_input` walks in the engine's own order and declines at a focused box, so the
+        // box's editing keys can never be stolen by a frame below it; a `true` here means a frame
+        // consumed the key, which suppresses BOTH the chord below and the key's binding (the
+        // reference's existence gate, wow-re `frame-key-script-delivery.md` §3).
+        let frame_named = match ev.key_code {
+            KeyCode::Backspace => Some("BACKSPACE"),
+            KeyCode::Delete => Some("DELETE"),
+            KeyCode::ArrowLeft => Some("LEFT"),
+            KeyCode::ArrowRight => Some("RIGHT"),
+            KeyCode::ArrowUp => Some("UP"),
+            KeyCode::ArrowDown => Some("DOWN"),
+            KeyCode::Home => Some("HOME"),
+            KeyCode::End => Some("END"),
+            _ => None,
+        };
+        if let Some(name) = frame_named {
+            if script.frame_key_input(name) {
+                capture.0 = true; // consumed by a frame: its binding must not also fire
+                continue;
+            }
+        }
         if let Some(name) = named {
             // The three box-event keys. An unconsumed press is not acted on here: every GAME
             // action of a key — ESCAPE's close/cancel ladder (TOGGLEGAMEMENU), TAB's targeting,
@@ -212,7 +236,12 @@ pub(super) fn feed_ui_input(
             // dispatch (decision 0997, `crate::bindings`), which runs right after this pass and
             // reads the capture gate written above, so a key a focused box consumed this frame
             // never also fires its binding — the real client's ESC precedence, table-wide.
-            script.key_input(name);
+            // Consumption suppresses the binding — a keyboard FRAME that took this key counts
+            // exactly as a focused box does (decision 1319; `capture.0` above already covers the
+            // box case, and this adds the frame one).
+            if script.key_input(name) {
+                capture.0 = true;
+            }
         } else if let Some(chord) = chord {
             match chord {
                 keymap::Chord::Edit(action) => {
@@ -244,7 +273,12 @@ pub(super) fn feed_ui_input(
             // plane European layouts type real text with (and macOS Option+letter comes through
             // with only `alt`, composing its special characters).
             if let Some(text) = &ev.text {
-                script.char_input(text);
+                // Same suppression as the named keys, and this is the case that bites: the number
+                // row IS a binding (the action buttons), so a digit typed into a keyboard frame —
+                // the stack-split spinner — must not also fire action button 3 (decision 1319).
+                if script.char_input(text) {
+                    capture.0 = true;
+                }
             }
         }
     }

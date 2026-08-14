@@ -10,18 +10,33 @@
 //!    screen shows "Spell is not ready yet." while `SPELL_FAILED_NOT_READY` reads
 //!    "Not yet recovered", and "Not enough rage" for a rage spell's NO_POWER.
 //!
+//! 3. A per-reason **argument arm** (the second dispatch `0x6e1d8e`, 13 targets) fills that
+//!    message's own `%s`/`%d` from a DBC or item name before it is displayed. The two arms whose
+//!    tables benilla already loads live in [`FailArgs::fill`]; the drain fills three more before
+//!    calling here (below), and the rest strip.
+//!
 //! Strings are never hardcoded here: every message resolves from the VM's loaded
 //! `GlobalStrings.lua` by key, so localization rides for free. Suppression is faithful on
 //! both mechanisms: reason `0x17` (DONT_REPORT) never reaches display (control-flow), and a
 //! key absent from GlobalStrings displays as nothing (data — 0x08/0x21/0x75, happiness
-//! NO_POWER). Known approximations, each marked below: the DBC-name `%s` fills of the
-//! argument-formatted reasons are stripped instead of filled — except `0x78` TOTEMS and
-//! `0x5c` REAGENTS, whose item-name fills (and query-then-redisplay cache-miss behavior) the
-//! drain models before calling here ("Requires Mining Pick", decisions 0545 + 0552) — and
-//! `0x0a`'s item-spell leg (`ERR_INVALID_ITEM_TARGET`) is unmodeled — the drain does not
-//! know item-ness.
+//! NO_POWER).
+//!
+//! **The argument arms, and what is still approximate.** Filled: `0x5e` REQUIRES_SPELL_FOCUS and
+//! `0x5d` REQUIRES_AREA here (decision 1313 — `0x6e1f62`/`0x6e1fad`), and `0x78` TOTEMS / `0x5c`
+//! REAGENTS / `0x19`–`0x1b` EQUIPPED_ITEM_CLASS\* in the drain, which owns them because their
+//! fills need the item caches and the query-then-redisplay cache-miss behavior ("Requires Mining
+//! Pick", decisions 0545 + 0552). Still stripped rather than filled — each needs a DBC we do not
+//! load yet: `0x56` ONLY_SHAPESHIFT (form-name list), `0x8d` PREVENTED_BY_MECHANIC
+//! (`SpellMechanic.dbc`), `0x90` MIN_SKILL (`SkillLine.dbc`), `0x31` NEED_EXOTIC_AMMO and `0x84`
+//! PROSPECT_NEED_MORE. Stripping is a **deliberate divergence**, now byte-confirmed as one: on a
+//! bad id or an absent word the reference jumps to the default arm with the pointer still on the
+//! *unfilled* template, so it displays a literal `Requires %s` (wow-re §WIRE-ARGS C3 — the fill
+//! path's own buffer swap sits after the printf and is skipped). We show the bare stem instead:
+//! "Requires" reads as terse, "Requires %s" reads as broken software (§7 — judge by the result).
+//! `0x0a`'s item-spell leg (`ERR_INVALID_ITEM_TARGET`) is unmodeled — the drain does not know
+//! item-ness.
 
-use benilla_formats::SpellDisplay;
+use benilla_formats::{AreaTableCatalog, SpellDisplay, SpellFocusCatalog};
 
 /// Wire reason → its `SPELL_FAILED_*` GlobalStrings key (the `0x6e23e0` table, byte-exact).
 pub(super) const CAST_FAIL_KEYS: [&str; 146] = [
@@ -194,12 +209,64 @@ fn is_food(spell: Option<&SpellDisplay>) -> bool {
     spell.is_some_and(|d| matches!(d.category, 0xA | 0xB))
 }
 
+/// The argument arms' inputs: the wire's reason-specific word ([`super::CastFail::arg`]) and the
+/// DBC name tables the arms read. Both catalogs are `Option` because a client without game data
+/// has neither — the arm then declines and the template strips, exactly as an unmodeled arm does.
+#[derive(Default, Clone, Copy)]
+pub(super) struct FailArgs<'a> {
+    pub(super) arg: Option<u32>,
+    /// `SpellFocusObject.dbc` (`0xc0d800`) — the `0x5e` arm's names ("Anvil", "Forge", and the
+    /// Teldrassil moonwells the Crown of the Earth phials name).
+    pub(super) focus: Option<&'a SpellFocusCatalog>,
+    /// `AreaTable.dbc` (`0xc0e048`) — the `0x5d` arm's `AreaName`.
+    pub(super) areas: Option<&'a AreaTableCatalog>,
+}
+
+impl FailArgs<'_> {
+    /// The `%s` fill for the argument-formatted reasons this module owns, or `None` to leave the
+    /// template to the strip fallback.
+    ///
+    /// Both arms are byte-verified and §5 cross-checked (wow-re `cast-fail-strings.md`
+    /// §WIRE-ARGS): each reads the **wire's** first argument word — `[ebx+8]`, the handler's own
+    /// stack slot, never a re-read of `Spell.dbc` — indexes its DBC store, and `SStrPrintf`s the
+    /// reason's `SPELL_FAILED_*` template. The errorId stays the default `0x2c` (`"%s"`) for both,
+    /// so what the player reads IS the filled template. A single-`%s` template is what makes a
+    /// plain `replace` faithful here; the reference runs a real two-pass printf, which would
+    /// matter for a multi-specifier format.
+    ///
+    /// **`0x5e` REQUIRES_SPELL_FOCUS** (`0x6e1f62`) → `SpellFocusObject.dbc` (`0xc0d800`)
+    /// `Name_Lang` at `row + 0x4 + locale*4`, so `"Requires %s"` reads "Requires Starbreeze
+    /// Village Moonwell". The failing spell's own `RequiresSpellFocus` column holds the same
+    /// number vmangos copied onto the wire, so we fall back to it when the word is absent — a
+    /// benilla-side robustness margin, not a transcription: the client itself never reads
+    /// `SpellRec+0x3c` on this path.
+    ///
+    /// **`0x5d` REQUIRES_AREA** (`0x6e1fad`) → `AreaTable.dbc` (`0xc0e048`) `AreaName_Lang` at
+    /// `row + 0x2c + locale*4`, so `"You need to be in %s"` names the zone. This one has **no**
+    /// client-side stand-in: the server derives the id from its own `spell_area` rows and nothing
+    /// in `Spell.dbc` holds it, so an absent word means an unfilled message.
+    fn fill(&self, reason: u8, spell: Option<&SpellDisplay>) -> Option<String> {
+        match reason {
+            0x5D => self.areas?.name(self.arg?).map(str::to_string),
+            0x5E => {
+                let id = self
+                    .arg
+                    .filter(|&id| id != 0)
+                    .or_else(|| Some(spell?.requires_spell_focus).filter(|&id| id != 0))?;
+                self.focus?.name(id).map(str::to_string)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The displayed text for a failed cast — `None` = the reference shows nothing. `get` is the
 /// VM's GlobalStrings lookup (an absent or empty key resolves to `None`, the data-suppression
 /// face). Reasons beyond the table print their code — our debug affordance, not a ref string.
 pub(super) fn cast_fail_text(
     reason: u8,
     spell: Option<&SpellDisplay>,
+    args: FailArgs<'_>,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let get_display = |key: &str| get(key).filter(|s| !s.is_empty());
@@ -248,9 +315,12 @@ pub(super) fn cast_fail_text(
         return Some(format!("Spell failed ({reason:#04x})"));
     };
     let text = get_display(key)?;
-    // The argument-formatted reasons fill %s/%d from DBC names (0x6e1d8e's arm table) —
-    // unmodeled: strip the tokens so the stem reads clean ("Missing reagent: %s" →
-    // "Missing reagent"), never a raw % on screen.
+    // The argument arms (`0x6e1d8e`): fill the template's `%s` from the reason's own DBC.
+    if let Some(name) = args.fill(reason, spell) {
+        return Some(text.replace("%s", &name));
+    }
+    // An arm we don't model (or one whose lookup missed) — strip the tokens so the stem reads
+    // clean ("Missing reagent: %s" → "Missing reagent"), never a raw % on screen.
     if text.contains('%') {
         let stripped = text
             .replace("%s", "")
@@ -321,27 +391,36 @@ mod tests {
     fn overrides_replace_and_passthrough_reads() {
         let m = gs();
         let g = getter(&m);
-        assert_eq!(cast_fail_text(0x43, None, &g).unwrap(), "Out of ammo");
-        assert_eq!(cast_fail_text(0x59, None, &g).unwrap(), "Out of range.");
-        assert_eq!(cast_fail_text(0x76, None, &g).unwrap(), "Target too close");
         assert_eq!(
-            cast_fail_text(0x09, None, &g).unwrap(),
+            cast_fail_text(0x43, None, FailArgs::default(), &g).unwrap(),
+            "Out of ammo"
+        );
+        assert_eq!(
+            cast_fail_text(0x59, None, FailArgs::default(), &g).unwrap(),
+            "Out of range."
+        );
+        assert_eq!(
+            cast_fail_text(0x76, None, FailArgs::default(), &g).unwrap(),
+            "Target too close"
+        );
+        assert_eq!(
+            cast_fail_text(0x09, None, FailArgs::default(), &g).unwrap(),
             "You have no target."
         );
         // 0x3c: plain spell → spell cooldown; Attr&0x10 → ability; potion category → potion.
         let plain = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&plain), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&plain), FailArgs::default(), &g).unwrap(),
             "Spell is not ready yet."
         );
         let ability = spell(1, 0, 0x10);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&ability), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&ability), FailArgs::default(), &g).unwrap(),
             "Ability is not ready yet."
         );
         let potion = spell(0, 4, 0);
         assert_eq!(
-            cast_fail_text(0x3C, Some(&potion), &g).unwrap(),
+            cast_fail_text(0x3C, Some(&potion), FailArgs::default(), &g).unwrap(),
             "Item is not ready yet."
         );
     }
@@ -354,12 +433,12 @@ mod tests {
         let g = getter(&m);
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g).unwrap(),
             "Not enough rage"
         );
         let mana = spell(0, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&mana), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&mana), FailArgs::default(), &g).unwrap(),
             "Not enough mana"
         );
     }
@@ -371,13 +450,16 @@ mod tests {
     fn suppression_hex_fallback_and_template_strip() {
         let m = gs();
         let g = getter(&m);
-        assert_eq!(cast_fail_text(0x17, None, &g), None);
-        assert_eq!(cast_fail_text(0x08, None, &g), None);
+        assert_eq!(cast_fail_text(0x17, None, FailArgs::default(), &g), None);
+        assert_eq!(cast_fail_text(0x08, None, FailArgs::default(), &g), None);
         assert_eq!(
-            cast_fail_text(0x92, None, &g).unwrap(),
+            cast_fail_text(0x92, None, FailArgs::default(), &g).unwrap(),
             "Spell failed (0x92)"
         );
-        assert_eq!(cast_fail_text(0x5C, None, &g).unwrap(), "Missing reagent");
+        assert_eq!(
+            cast_fail_text(0x5C, None, FailArgs::default(), &g).unwrap(),
+            "Missing reagent"
+        );
     }
 
     /// The RUNTIME leg, end to end on the real data: the shipped `GlobalStrings.lua` executed
@@ -396,30 +478,93 @@ mod tests {
         s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
         let g = |key: &str| s.lua().globals().get::<String>(key).ok();
 
-        assert_eq!(cast_fail_text(0x43, None, &g).unwrap(), "Out of ammo");
-        assert_eq!(cast_fail_text(0x59, None, &g).unwrap(), "Out of range.");
         assert_eq!(
-            cast_fail_text(0x3C, None, &g).unwrap(),
+            cast_fail_text(0x43, None, FailArgs::default(), &g).unwrap(),
+            "Out of ammo"
+        );
+        assert_eq!(
+            cast_fail_text(0x59, None, FailArgs::default(), &g).unwrap(),
+            "Out of range."
+        );
+        assert_eq!(
+            cast_fail_text(0x3C, None, FailArgs::default(), &g).unwrap(),
             "Spell is not ready yet."
         );
         let rage = spell(1, 0, 0);
         assert_eq!(
-            cast_fail_text(0x4D, Some(&rage), &g).unwrap(),
+            cast_fail_text(0x4D, Some(&rage), FailArgs::default(), &g).unwrap(),
             "Not enough rage"
         );
         // The environment gate's pair (decision 1056) — both are plain passthroughs, so what the
         // player reads IS the GlobalStrings value. A typo'd key here would degrade a real refusal
         // to a dead-looking button, which is what this test exists to catch.
         assert_eq!(
-            cast_fail_text(0x50, None, &g).unwrap(),
+            cast_fail_text(0x50, None, FailArgs::default(), &g).unwrap(),
             "Cannot use while swimming"
         );
         assert_eq!(
-            cast_fail_text(0x58, None, &g).unwrap(),
+            cast_fail_text(0x58, None, FailArgs::default(), &g).unwrap(),
             "Can only use while swimming"
         );
         // The data-suppression face on the real file: the absent keys show nothing.
-        assert_eq!(cast_fail_text(0x08, None, &g), None);
-        assert_eq!(cast_fail_text(0x21, None, &g), None);
+        assert_eq!(cast_fail_text(0x08, None, FailArgs::default(), &g), None);
+        assert_eq!(cast_fail_text(0x21, None, FailArgs::default(), &g), None);
+
+        // B255, end to end on the real data: the argument arms against the real DBCs and the real
+        // GlobalStrings templates. Without the fill these read as the bare stems "Requires" and
+        // "You need to be in" — which is exactly what shipped.
+        let focus =
+            benilla_formats::load_spell_focus_catalog(&mut chain).expect("SpellFocusObject");
+        let areas = benilla_formats::load_area_table_catalog(&mut chain).expect("AreaTable");
+        let args = |arg: u32| FailArgs {
+            arg: Some(arg),
+            focus: Some(&focus),
+            areas: Some(&areas),
+        };
+        // 0x5e REQUIRES_SPELL_FOCUS: the Crown of the Earth phials' own refusal. Focus 12 is the
+        // Starbreeze Village moonwell — using the Jade Phial at any *other* pool is the report.
+        assert_eq!(
+            cast_fail_text(0x5E, None, args(12), &g).unwrap(),
+            "Requires Starbreeze Village Moonwell"
+        );
+        assert_eq!(
+            cast_fail_text(0x5E, None, args(1), &g).unwrap(),
+            "Requires Anvil"
+        );
+        // 0x5d REQUIRES_AREA: area 1657 is Darnassus.
+        assert_eq!(
+            cast_fail_text(0x5D, None, args(1657), &g).unwrap(),
+            "You need to be in Darnassus"
+        );
+        // The fallbacks. An id the DBC doesn't name, and a wire word the server never sent, both
+        // decline the arm and fall through to the strip — never a raw `%s` on screen.
+        assert_eq!(
+            cast_fail_text(0x5E, None, args(999_999), &g).unwrap(),
+            "Requires"
+        );
+        assert_eq!(
+            cast_fail_text(0x5D, None, FailArgs::default(), &g).unwrap(),
+            "You need to be in"
+        );
+        // 0x5e alone has a client-side stand-in: the failing spell's own `RequiresSpellFocus`
+        // column is the very number the server copied onto the wire, so an absent word still
+        // fills. (Spell 4976 "Filling" — the Crystal Phial's — carries focus 11.)
+        let filling = SpellDisplay {
+            requires_spell_focus: 11,
+            ..Default::default()
+        };
+        assert_eq!(
+            cast_fail_text(
+                0x5E,
+                Some(&filling),
+                FailArgs {
+                    focus: Some(&focus),
+                    ..FailArgs::default()
+                },
+                &g
+            )
+            .unwrap(),
+            "Requires Shadowglen Moonwell"
+        );
     }
 }

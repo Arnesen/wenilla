@@ -28,24 +28,52 @@ use crate::wire::{
 };
 
 /// `SMSG_CAST_RESULT`'s verdict: `u32 spellId, u8 status` — status `0` (`SPELL_RESULT_STATUS_OKAY`)
-/// ends the packet, status `2` (`SPELL_RESULT_STATUS_FAIL`) appends a `u8` failure reason
-/// (vmangos `CastResult::AppendBodyTo`; some reasons append extra arg words we skip).
+/// ends the packet, status `2` (`SPELL_RESULT_STATUS_FAIL`) appends a `u8` failure reason and then
+/// up to two **reason-specific argument words** (vmangos `CastResult::AppendBodyTo`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastOutcome {
     Ok,
-    Failed { reason: u8 },
+    Failed {
+        reason: u8,
+        /// The failure's first argument word, when the server sent one — the `%s` source of the
+        /// client's argument-formatted messages (the arm table at `0x6e1d8e`): a
+        /// `SpellFocusObject.dbc` id for `REQUIRES_SPELL_FOCUS` (0x5e), an `AreaTable.dbc` id for
+        /// `REQUIRES_AREA` (0x5d), an `EquippedItemClass` for the 0x19–0x1b family, a
+        /// permanent-cooldown flag for `NOT_READY` (0x3c). `None` = the packet ended at the reason.
+        arg: Option<u32>,
+    },
 }
 
-/// Read `SMSG_CAST_RESULT` → `(spell_id, outcome)`. Reason-specific trailing args (a required
-/// spell-focus id, an equip class) are left unread — the slice ends with the packet, nothing
-/// follows in the stream.
-pub(super) fn read_cast_result(r: &mut impl Read) -> io::Result<(u32, CastOutcome)> {
+/// Read `SMSG_CAST_RESULT` → `(spell_id, outcome)`.
+///
+/// The trailing argument words are **positional, gated on the remaining body length** — and that
+/// is the reference's own decode, not merely a convenient one. `CastResultHandler 0x6e7330`
+/// (registered at `0x6e7155`) reads `u32 spellId`, `u8 status`, then on `status == 2` a
+/// `u8 reason`, then each word only `if cursor < size` (`0x6e737a` and `0x6e738c`, comparing
+/// CDataStore `+0x14` against `+0x10`) — never keyed off the reason value (wow-re
+/// `system/spell/scratch/cast-fail-strings.md` §WIRE-ARGS, §5 cross-checked). It has to be: vmangos
+/// writes `if (arg1 || arg2) << u32 arg1; if (arg2) << u32 arg2;`
+/// (`Server/Packets/Spell.cpp`, `CastResult::AppendBodyTo`), so a reason whose argument is
+/// legitimately 0 with no second argument behind it sends no word at all, and a reason-keyed decode
+/// would desync on exactly that case.
+///
+/// **The reference's absent value is `-1`, not zero** (`0x6e736e or eax,0xffffffff` initializes both
+/// slots before the gated reads). `None` here is that sentinel: every consumer treats it and an
+/// out-of-range id the same way — decline the fill — so the two encodings are behaviourally
+/// identical, and `Option` says which case it is at the type level.
+///
+/// The second word is read to keep the shape documented, then dropped: only the
+/// `EQUIPPED_ITEM_CLASS*` family (0x19–0x1b) sends one, and that arm's `%s` fill reads the failing
+/// spell's own `EquippedItemClass`/`EquippedItemSubClassMask` columns — the same two values the
+/// server copied out of `SpellEntry` to build the packet (`Spell::SendCastResult`).
+pub(super) fn read_cast_result(r: &mut &[u8]) -> io::Result<(u32, CastOutcome)> {
     let spell_id = read_u32_le(r)?;
     let status = read_u8(r)?;
     let outcome = if status == 2 {
-        CastOutcome::Failed {
-            reason: read_u8(r)?,
-        }
+        let reason = read_u8(r)?;
+        let arg = (r.len() >= 4).then(|| read_u32_le(r)).transpose()?;
+        let _arg2 = (r.len() >= 4).then(|| read_u32_le(r)).transpose()?;
+        CastOutcome::Failed { reason, arg }
     } else {
         CastOutcome::Ok
     };

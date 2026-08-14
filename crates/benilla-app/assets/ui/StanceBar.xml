@@ -62,11 +62,16 @@
         -- Hover: the form's spell tooltip through the engine channel (ref ShapeshiftBar's
         -- GameTooltip:SetShapeshift; decision 0274 P2). Anchor: the ref's ShapeshiftButton
         -- OnEnter (BonusActionBarFrame.xml l.40-45) takes the default corner when UberTooltips
-        -- is "1" — its byte-verified stock default (ActionBar.xml has the read) — so the branch
-        -- collapses to the default corner here too.
+        -- is "1" — its byte-verified stock default — and sits beside the button otherwise. Like
+        -- the action bar's, that fork was collapsed to the "1" leg until B230 registered the CVar
+        -- (cvars.rs carries the byte-read); the stock look is unchanged, the off leg is reachable.
         function BenillaShapeshiftButton_OnEnter(button)
             if not GameTooltip then return end -- engine tests load file subsets
-            GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            if GetCVar("UberTooltips") == "0" then
+                GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            else
+                GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            end
             GameTooltip:SetShapeshift(button.index)
         end
 

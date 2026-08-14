@@ -72,6 +72,7 @@ mod inspect;
 mod item_stats;
 mod item_text;
 pub mod keybind;
+mod keyboard;
 mod layout;
 mod loot;
 mod loot_roll;
@@ -353,7 +354,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// corpus call sites across 91 addons), but it removes working behaviour from those 30 sites, so it
 /// is a change to make deliberately with FrameXML fixed first — not a side effect of widening this
 /// list.
-const SCRIPT_KINDS: [&str; 32] = [
+const SCRIPT_KINDS: [&str; 35] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -404,6 +405,16 @@ const SCRIPT_KINDS: [&str; 32] = [
     // [`crate::layout::size_changed`]'s byte-verified epsilon test — see
     // [`UiScript::resolve_layout`]. `OnSizeChanged(self, width, height)`.
     "OnSizeChanged",
+    // The three KEY channels, unblocked by [`keyboard`]'s walk (wow-re
+    // `scratch/frame-key-script-delivery.md`, VERIFIED). They were the standing exception in
+    // [`object::events_regions`]'s note — accepted only once something fired them, which is that
+    // module's whole rule. `OnKeyUp` rides in with the other two deliberately: it is *gated* today
+    // (a frame carrying only an OnKeyUp consumes every key-down and runs nothing — the reference's
+    // own asymmetry) even though this engine's host feeds no key-up to fire it with, and accepting
+    // the name is what makes that consumption reachable.
+    "OnChar",
+    "OnKeyDown",
+    "OnKeyUp",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -968,7 +979,11 @@ impl UiScript {
     /// focused box, inserts it (numeric/cap/password rules apply) or — for the Ctrl+A control code —
     /// selects all. Returns `true` if consumed (a focused box consumes every char).
     pub fn char_input(&mut self, text: &str) -> bool {
-        editbox::char_input(&self.lua, text)
+        // The frame walk first ([`keyboard`]): the focused box is a PARTICIPANT in it, at its own
+        // strata/level, so this is not "frames before boxes" — it is the reference's one dispatcher
+        // in the reference's order. An event no frame consumed still falls through to the box
+        // routing, which owns focus acquisition (`autoFocus` self-acquire and kin).
+        keyboard::char_input(&self.lua, text) || editbox::char_input(&self.lua, text)
     }
 
     /// Paste text from the host OS clipboard into the focused EditBox. The engine-free runtime can't
@@ -985,7 +1000,20 @@ impl UiScript {
     /// owns which chord means what). Routes per §1/§2; a focused box consumes the key even when
     /// it does nothing with it. Returns `true` if consumed.
     pub fn key_input(&mut self, key: &str) -> bool {
-        editbox::key_input(&self.lua, key)
+        // Same two-stage shape as `char_input` — see its note.
+        keyboard::key_input(&self.lua, key) || editbox::key_input(&self.lua, key)
+    }
+
+    /// A key the host delivers to a focused EditBox as an [`EditAction`] chord rather than by name
+    /// (BACKSPACE, DELETE, the arrows, HOME, END), offered to the **keyboard frames** first.
+    ///
+    /// Returns `true` if a frame consumed it, in which case the caller must NOT also dispatch the
+    /// chord — and the key's binding must not fire either (consumption suppresses it, wow-re §3).
+    /// A `false` means either nothing wanted it or the focused box owns it; the caller proceeds
+    /// exactly as it did before this entry point existed. See [`keyboard::frame_key_input`] for
+    /// why declining at the box is the faithful answer rather than skipping it.
+    pub fn frame_key_input(&mut self, key: &str) -> bool {
+        keyboard::frame_key_input(&self.lua, key)
     }
 
     /// One semantic text-editing operation on the focused EditBox — the output of the host's

@@ -509,6 +509,23 @@ static void constructor (LexState *ls, expdesc *t) {
   checknext(ls, '{');
   do {
     lua_assert(cc.v.k == VVOID || cc.tostore > 0);
+    /* BENILLA: Lua 5.0's constructor compat-semicolon, restored (decision 1315;
+    ** see third_party/lua-src/BENILLA.md). 5.0 opened this loop with exactly the
+    ** line below -- its own comment read "compatibility only", a Lua 4.0 leftover
+    ** (4.0 separated a constructor's list part from its record part with `;`).
+    ** 5.1 deleted the line, so one extra `;` after a field separator -- the
+    ** `Back_Title = AL["Factions"];;` shape AtlasLoot's ButtonRegistry.lua writes
+    ** twenty times -- became "unexpected symbol near ';'" here while the 1.12.1
+    ** client (Lua 5.0) accepts it. Statement-level `;;` stays rejected by both,
+    ** which is the half wow-5875-re byte-verified first (system/ui/scratch/
+    ** lua-dialect.md 9.1), and byte-verified in the client itself rather than
+    ** inferred from stock 5.0: constructor is 0x6fd430, and its loop head
+    ** 0x6fd4a0 calls testnext(ls,';') WITHOUT testing EAX -- a skip, not a
+    ** separator check -- while the loop's continuation at 0x6fd4f5/0x6fd505 does
+    ** test it. Of the 16 call sites of testnext 0x6fccf0 image-wide, the only
+    ** other consumer of `;' is chunk 0x6fcccc, at STATEMENT level, with no such
+    ** head skip. This line restores the constructor context only. */
+    testnext(ls, ';');  /* compatibility only */
     if (ls->t.token == '}') break;
     closelistfield(fs, &cc);
     switch(ls->t.token) {

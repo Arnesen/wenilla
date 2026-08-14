@@ -1347,13 +1347,23 @@ pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
             println!("     recursion model (child emitters): {r}");
         }
         if let Some(s) = &e.spline {
-            let pt = |p: &[f32; 3]| format!("({:.2},{:.2},{:.2})", p[0], p[1], p[2]);
+            // EVERY control point, and at full precision. This used to print `first .. last`,
+            // which is actively misleading on a cubic Bézier: the path is `3K+1` points and the
+            // two INTERIOR handles of each segment are what bend it, so an emitter whose ends
+            // both sit at the origin can still fling its particles a long way — or not move them
+            // at all. Reading "(0,0,0) .. (0,0,0)" as "the particles never travel" is a guess
+            // the truncated line invites and cannot support (B228 nearly rested on it).
+            // Wrapped at 4 per line so a long path stays readable.
+            let pt = |p: &[f32; 3]| format!("({:.4},{:.4},{:.4})", p[0], p[1], p[2]);
             println!(
-                "     spline: {} control points, {} .. {}",
+                "     spline: {} control points ({} cubic segment(s)), model-local:",
                 s.points.len(),
-                s.points.first().map(pt).unwrap_or_default(),
-                s.points.last().map(pt).unwrap_or_default(),
+                s.points.len().saturating_sub(1) / 3,
             );
+            for (i, chunk) in s.points.chunks(4).enumerate() {
+                let row: Vec<String> = chunk.iter().map(pt).collect();
+                println!("       [{:>2}] {}", i * 4, row.join("  "));
+            }
         }
 
         // Emission timing: the rate/gate pair, per file sequence slot.
@@ -1454,8 +1464,12 @@ pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
                 c[0], c[1], c[2], c[3]
             );
         }
+        // 4 decimals, not 3: UI models author their sizes in thousandths, where `{:.3}` turns the
+        // autocast shine's 0.0015 mid-key into a printed "0.002" — a 33% error that a transcriber
+        // reads as authored truth (B228). The colour ramp above stays at 3 because 0..1 channels
+        // do not have that problem.
         println!(
-            "       size    {:.3} -> {:.3} -> {:.3} yd (half-extent)",
+            "       size    {:.4} -> {:.4} -> {:.4} yd (half-extent)",
             ol.scale[0], ol.scale[1], ol.scale[2]
         );
         println!(

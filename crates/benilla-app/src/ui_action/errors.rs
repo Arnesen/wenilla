@@ -1,8 +1,8 @@
 //! The red error line's queues and resolvers — every route into `UIErrorsFrame`'s top line
 //! except the cast-fail two-layer display (its own module, [`super::cast_fail`]):
 //!
-//! - [`CastErrors`] — the wire `(spell_id, reason)` pairs (`SMSG_CAST_RESULT` + local cast
-//!   refusals), resolved by [`super::cast_fail`] at the drain.
+//! - [`CastErrors`] — the wire [`CastFail`]s (`SMSG_CAST_RESULT` + local cast refusals), resolved
+//!   by [`super::cast_fail`] at the drain.
 //! - [`MountErrors`] — the `SMSG_MOUNTRESULT`/`SMSG_DISMOUNTRESULT` code pairs, resolved by
 //!   [`mount_result_key`] (decision 0441 P2).
 //! - [`UiErrorKeys`] — client-LOCAL refusals straight by GlobalStrings key, the
@@ -21,12 +21,45 @@ use bevy::prelude::*;
 
 use crate::net::ObjectStore;
 
-/// Cast failures queued for the UI error line, as `(spell_id, reason)` — the wire pair from
-/// `SMSG_CAST_RESULT` and the local refusals alike. The spell id rides along because the
-/// display layer keys several messages on the failing spell's record ([`super::cast_fail`]:
-/// NO_POWER's power family, the 0x28/0x3c cooldown families).
+/// Cast failures queued for the UI error line — the wire triple from `SMSG_CAST_RESULT` and the
+/// local refusals alike. The spell id rides along because the display layer keys several messages
+/// on the failing spell's record ([`super::cast_fail`]: NO_POWER's power family, the 0x28/0x3c
+/// cooldown families).
 #[derive(Resource, Default)]
-pub(crate) struct CastErrors(pub Vec<(u32, u8)>);
+pub(crate) struct CastErrors(pub Vec<CastFail>);
+
+/// One queued cast failure: the failing spell, the wire reason, and the reason-specific argument
+/// word that fills the message's `%s` (the arm table at `0x6e1d8e` — a `SpellFocusObject.dbc` id
+/// for 0x5e, an `AreaTable.dbc` id for 0x5d).
+///
+/// `arg` is `None` for every **client-local** refusal, and that is faithful rather than a gap: the
+/// local refusals the reference raises itself go through `DisplayError` with no argText, and the
+/// two client-generated argument messages it *does* build (the lock toasts, MIN_SKILL) are
+/// [`UiError`]'s tenants, not this queue's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CastFail {
+    pub spell_id: u32,
+    pub reason: u8,
+    pub arg: Option<u32>,
+}
+
+impl CastFail {
+    /// A **client-local** refusal — no wire argument (see [`Self::arg`]).
+    pub(crate) const fn local(spell_id: u32, reason: u8) -> Self {
+        Self {
+            spell_id,
+            reason,
+            arg: None,
+        }
+    }
+}
+
+impl CastErrors {
+    /// Queue a [`CastFail::local`] refusal.
+    pub(crate) fn push_local(&mut self, spell_id: u32, reason: u8) {
+        self.0.push(CastFail::local(spell_id, reason));
+    }
+}
 
 /// (Dis)mount refusals queued for the UI error line, as the wire pair `(mount, code)` from
 /// `SMSG_MOUNTRESULT`/`SMSG_DISMOUNTRESULT` (decision 0441 P2) — resolved to text through the
@@ -200,7 +233,7 @@ pub(crate) fn reagent_totem_refusal(
         return false;
     };
     debug!("cast {spell_id} refused locally — missing totem/reagent ({reason:#04x})");
-    errors.0.push((spell_id, reason));
+    errors.push_local(spell_id, reason);
     true
 }
 
@@ -567,7 +600,7 @@ mod totem_reagent_tests {
             &items,
             &mut errors
         ));
-        assert_eq!(errors.0.as_slice(), &[(2575, 0x78)]);
+        assert_eq!(errors.0.as_slice(), &[CastFail::local(2575, 0x78)]);
 
         let mut reagents = [(0, 0); 8];
         reagents[0] = (17056, 1); // Slow Fall's Light Feather
@@ -580,7 +613,7 @@ mod totem_reagent_tests {
             &items,
             &mut errors
         ));
-        assert_eq!(errors.0.as_slice(), &[(130, 0x5c)]);
+        assert_eq!(errors.0.as_slice(), &[CastFail::local(130, 0x5c)]);
 
         let both = spell([2901, 0], reagents);
         let mut errors = CastErrors::default();
@@ -591,7 +624,7 @@ mod totem_reagent_tests {
             &items,
             &mut errors
         ));
-        assert_eq!(errors.0.as_slice(), &[(1, 0x78)]);
+        assert_eq!(errors.0.as_slice(), &[CastFail::local(1, 0x78)]);
 
         let plain = spell([0, 0], [(0, 0); 8]);
         let mut errors = CastErrors::default();

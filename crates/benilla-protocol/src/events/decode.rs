@@ -80,7 +80,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             success: outcome == CastOutcome::Ok,
             reason: match outcome {
                 CastOutcome::Ok => None,
-                CastOutcome::Failed { reason } => Some(reason),
+                CastOutcome::Failed { reason, .. } => Some(reason),
+            },
+            arg: match outcome {
+                CastOutcome::Ok => None,
+                CastOutcome::Failed { arg, .. } => arg,
             },
         }],
         ServerPacket::PetSpells(spells) => vec![SessionEvent::PetSpells(Box::new(spells))],
@@ -92,7 +96,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             spell_id,
             reason: match outcome {
                 CastOutcome::Ok => None,
-                CastOutcome::Failed { reason } => Some(reason),
+                CastOutcome::Failed { reason, .. } => Some(reason),
             },
         }],
         ServerPacket::ItemQueryResponse { entry, info } => {

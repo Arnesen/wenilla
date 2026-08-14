@@ -380,12 +380,16 @@ pub(super) fn read_pet_action_feedback(r: &mut impl Read) -> io::Result<u8> {
 /// `SMSG_CAST_RESULT` — the same `SpellCastResult` vocabulary, decoded the same way (status `2` =
 /// fail) so the one message table renders both. vmangos only ever sends the fail status here, but
 /// reading it the shared way costs nothing and keeps the two decodes from drifting.
+///
+/// The body stops at the reason: unlike `CastResult`, `PetCastFailed::AppendBodyTo` writes **no
+/// argument words** at all, so a pet failure never carries a `%s` fill.
 pub(super) fn read_pet_cast_failed(r: &mut impl Read) -> io::Result<(u32, super::CastOutcome)> {
     let spell_id = read_u32_le(r)?;
     let status = read_u8(r)?;
     let outcome = if status == 2 {
         super::CastOutcome::Failed {
             reason: read_u8(r)?,
+            arg: None,
         }
     } else {
         super::CastOutcome::Ok

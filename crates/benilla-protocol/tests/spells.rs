@@ -142,7 +142,43 @@ fn spell_and_action_wire() {
             spell_id,
             success,
             reason,
-        } => assert_eq!((spell_id, success, reason), (6673, false, Some(0x55))),
+            arg,
+        } => assert_eq!(
+            (spell_id, success, reason, arg),
+            (6673, false, Some(0x55), None),
+            "a reason carrying no argument ends the body at the reason byte"
+        ),
+        _ => panic!("cast fail event"),
+    }
+    // The reason-specific argument words (`CastResult::AppendBodyTo`) are POSITIONAL — read by
+    // what is left in the body, never keyed off the reason. One word for 0x5e
+    // REQUIRES_SPELL_FOCUS (the `SpellFocusObject.dbc` id: 12 = "Starbreeze Village Moonwell",
+    // the `%s` of "Requires %s"); two for the 0x19 EQUIPPED_ITEM_CLASS family (class + subclass
+    // mask), whose second is read and dropped.
+    let focus = messages::parse_server(
+        messages::opcode::SMSG_CAST_RESULT,
+        &hx("111a0000025e0c000000"),
+    )
+    .unwrap();
+    match decode(focus).pop().unwrap() {
+        SessionEvent::CastResult { reason, arg, .. } => {
+            assert_eq!((reason, arg), (Some(0x5e), Some(12)));
+        }
+        _ => panic!("cast fail event"),
+    }
+    let equip = messages::parse_server(
+        messages::opcode::SMSG_CAST_RESULT,
+        &hx("111a0000021902000000f3a50200"),
+    )
+    .unwrap();
+    match decode(equip).pop().unwrap() {
+        SessionEvent::CastResult { reason, arg, .. } => {
+            assert_eq!(
+                (reason, arg),
+                (Some(0x19), Some(2)),
+                "arg2 read and dropped"
+            );
+        }
         _ => panic!("cast fail event"),
     }
 

@@ -518,6 +518,30 @@ fn local_self_cancel(
     }
 }
 
+/// The casting bar's **label** for a spell — the `name` argument of `SPELLCAST_START` /
+/// `SPELLCAST_CHANNEL_START`, which the reference `CastingBarFrame` puts straight into
+/// `CastingBarText:SetText(...)`.
+///
+/// Almost always the spell's `Spell.dbc` name, with two ways to come back empty:
+///
+/// - **`AttributesEx3 & 0x4`** (`SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`,
+///   [`SpellDisplay::no_casting_bar_text`]) — the attribute that exists precisely so an internal
+///   spell with no player-facing name never puts one on the bar. Three shipped rows carry it, and
+///   one of them is *named after the bit*: **22810 "Opening - No Text"**, the opener the client
+///   casts at `LockType 13` ground containers. Printing the name unconditionally is what put that
+///   placeholder over a gathered Hyacinth Mushroom (B247, decision 1312).
+/// - **no catalog row** (an unknown id, or no client data) — the empty string this always
+///   returned in that case.
+///
+/// The bar still shows, fills and sweeps either way; only the text is suppressed.
+fn cast_bar_label(spells: Option<&crate::ui_action::Spells>, id: u32) -> String {
+    spells
+        .and_then(|s| s.catalog.get(id))
+        .filter(|d| !d.no_casting_bar_text())
+        .map(|d| d.name.clone())
+        .unwrap_or_default()
+}
+
 /// Drain the queue into FrameScript events — the reference `CastingBarFrame` contract
 /// (extracted 1.12 `CastingBarFrame.lua`): `SPELLCAST_START(name, ms)`,
 /// `SPELLCAST_CHANNEL_START(ms, name)`, `SPELLCAST_CHANNEL_UPDATE(remaining_ms)`, and the
@@ -561,13 +585,7 @@ fn feed_cast_bar(
     script.set_casting(
         auto_repeat.0.is_some() || inflight(&pending, &queued_melee, started, now).is_some(),
     );
-    let name = |id: u32| -> String {
-        spells
-            .as_ref()
-            .and_then(|s| s.catalog.get(id))
-            .map(|d| d.name.clone())
-            .unwrap_or_default()
-    };
+    let name = |id: u32| cast_bar_label(spells.as_deref(), id);
     for edge in feed.0.drain(..) {
         let (event, args): (&str, Vec<ScriptValue>) = match edge {
             CastBarEdge::Start {
@@ -635,6 +653,39 @@ mod tests {
     use super::*;
 
     const FIREBALL: u32 = 133;
+
+    /// **B247** (decision 1312): the bar's label honours `SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`.
+    /// Spell 22810's Spell.dbc name — "Opening - No Text" — is Blizzard's own annotation of the
+    /// attribute, and it reached a player's screen because we printed the name regardless.
+    #[test]
+    fn the_no_casting_bar_text_attribute_blanks_the_label() {
+        use benilla_formats::{SpellCatalog, SpellDisplay};
+        let named = |name: &str, attributes_ex3: u32| SpellDisplay {
+            name: name.to_string(),
+            attributes_ex3,
+            ..Default::default()
+        };
+        let spells = crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays(
+                [
+                    (6478, named("Opening", 0)),
+                    (22810, named("Opening - No Text", 0x4)),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..crate::ui_action::Spells::empty_for_tests()
+        };
+        assert_eq!(cast_bar_label(Some(&spells), 6478), "Opening");
+        assert_eq!(
+            cast_bar_label(Some(&spells), 22810),
+            "",
+            "the bar fills and sweeps, but shows no name"
+        );
+        // The pre-existing empty cases are untouched: an unknown id, and no client data at all.
+        assert_eq!(cast_bar_label(Some(&spells), 133), "");
+        assert_eq!(cast_bar_label(None, 6478), "");
+    }
 
     #[test]
     fn a_fresh_guard_is_open() {

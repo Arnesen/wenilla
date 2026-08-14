@@ -487,7 +487,7 @@ enum KeyFact {
 fn resolve_go_action(
     guid: u64,
     inputs: &mut GoLockInputs,
-    known: &std::collections::HashSet<u32>,
+    known: &std::collections::BTreeSet<u32>,
     go: Option<(&ObjectStore, u32)>,
     me_store: Option<&ObjectStore>,
     net: &NetCommands,
@@ -516,7 +516,14 @@ fn resolve_go_action(
     );
     let key_entry = match outcome {
         super::lock::LockOutcome::Unlocked => return GoAction::Use,
-        super::lock::LockOutcome::OpenBySpell(spell_id) => return GoAction::OpenLock(spell_id),
+        super::lock::LockOutcome::OpenBySpell(spell_id) => {
+            // The retest instrument for B247 (decision 1312): which of the player's openers this
+            // lock resolved to, by id. The spell's Spell.dbc name is what the cast bar prints, so
+            // reading the id off a probe run is how "the bar says Opening - No Text" becomes a
+            // machine-checkable fact instead of a screenshot.
+            debug!("target: lock {} → open by spell {spell_id}", tmpl.lock_id);
+            return GoAction::OpenLock(spell_id);
+        }
         super::lock::LockOutcome::OpenByKey(entry) => entry,
         super::lock::LockOutcome::Unmet => {
             // Unopenable — §8.8's routing, which keys off Lock.dbc **slot 0** regardless of which

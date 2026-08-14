@@ -120,6 +120,7 @@ fn main() -> Result<()> {
             spell_id,
             success,
             reason,
+            ..
         } => println!(
             "  pre: cast_result spell={spell_id} success={success} reason={reason:?} ({})",
             reason.map(fail_name).unwrap_or("-")
@@ -149,6 +150,7 @@ fn main() -> Result<()> {
                 spell_id,
                 success: false,
                 reason,
+                ..
             } if spell_id == CHARGE => {
                 println!(
                     "  refused: {:?} ({})",
@@ -183,6 +185,7 @@ fn main() -> Result<()> {
                     spell_id,
                     success,
                     reason,
+                    ..
                 } if spell_id == CHARGE => {
                     let name = reason.map(fail_name).unwrap_or("-");
                     println!(

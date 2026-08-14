@@ -111,6 +111,16 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // out-of-box look is hover-only numerals. That default is BEHAVIOUR-derived, not byte-read —
     // 1.12's registrar value for this var is not pinned in wow-re yet.
     ("statusBarText", "0"),
+    // Enhanced Tooltips (B230): 1.12's `UberTooltips`, the *Enhanced Tooltips* checkbox
+    // (`UIOptionsFrame.lua:15`, `USE_UBERTOOLTIPS`). **No host knob** — its consumers are Lua, and
+    // there are three: PetActionBar.xml forks the whole tooltip on it (a token's own text with the
+    // binding appended, vs the engine's pet-spell channel), ActionBar.xml and StanceBar.xml fork
+    // their anchor. Registered "1" — byte-read, not behaviour-derived: WoW.exe `0x48fdd9`, default
+    // string `0x82e748`, with the sibling rows `BlockTrades`→"0" and `UnitNameRenderMode`→"2"
+    // confirming the layout. Those three Lua sites each carried the reference's fork in prose and
+    // then collapsed it to this default, on the stated premise that benilla shipped no CVar state
+    // for anything to move. That premise expired with 0954, and this row is what un-collapses them.
+    ("UberTooltips", "1"),
     // The two chat-bubble switches (1139): 1.12's own registrar CVars over the bubble gate,
     // which held them as `const bool` from 0598 until this window had a page for them.
     // `ChatBubbles` is the reference's registered "1"; `ChatBubblesParty` is ON where the binary
@@ -236,9 +246,9 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         "unitnameplayer" => knobs.names.player = v != 0.0,
         "unitnamenpc" => knobs.names.npc = v != 0.0,
         "unitnameown" => knobs.names.own = v != 0.0,
-        // A CVar with no HOST knob, because its consumer is Lua (1140). Known — so the caller
-        // dirties the config and the value persists — with nothing to apply on this side.
-        "statusbartext" => {}
+        // Two CVars with no HOST knob, because their consumers are Lua (1140, B230). Known — so
+        // the caller dirties the config and the value persists — with nothing to apply this side.
+        "statusbartext" | "ubertooltips" => {}
         // The two bubble switches (1139) — flags, like every other pair here.
         "chatbubbles" => knobs.bubbles.all = v != 0.0,
         "chatbubblesparty" => knobs.bubbles.party = v != 0.0,

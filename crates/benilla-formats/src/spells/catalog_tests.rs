@@ -247,6 +247,43 @@ fn real_spell_catalog_reads_open_lock_types() {
         "Fireball opens no lock"
     );
 
+    // **B247's data fact** (decision 1312): `LockType 13` "Open Kneeling" — what lock 43 carries,
+    // and with it every ground container from the Hyacinth Mushroom up — has TWO shipped openers
+    // that `playercreateinfo_spell` grants to every race/class, and one of them wears Blizzard's
+    // own placeholder name. The lock resolver returns the FIRST sufficient match in the
+    // known-spell array's order, so which of these it reaches is what the cast bar prints; this
+    // pins the ambiguity to the data instead of leaving it a surprise.
+    assert_eq!(cat.get(6478).unwrap().open_lock_type(), Some(13));
+    assert_eq!(cat.get(6478).unwrap().name, "Opening");
+    assert_eq!(cat.get(22810).unwrap().open_lock_type(), Some(13));
+    assert_eq!(
+        cat.get(22810).unwrap().name,
+        "Opening - No Text",
+        "the placeholder is Blizzard's own Spell.dbc string, not a formatting bug of ours"
+    );
+
+    // ...and the attribute that says never to show it. `AttributesEx3 & 0x4`
+    // (`SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`) is what the cast bar must honour — 22810 carries it,
+    // 6478 does not, and that ONE bit is the only column separating two otherwise byte-identical
+    // rows. Exactly three rows in the shipped file carry it, so the whole set is pinned here: a
+    // fourth appearing means the data is not what this law was derived from.
+    assert!(cat.get(22810).unwrap().no_casting_bar_text());
+    assert!(!cat.get(6478).unwrap().no_casting_bar_text());
+    let silent: Vec<u32> = {
+        let mut v: Vec<u32> = cat
+            .iter()
+            .filter(|(_, d)| d.no_casting_bar_text())
+            .map(|(id, _)| id)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        silent,
+        vec![6477, 22810, 26380],
+        "6477 Opening / 22810 Opening - No Text / 26380 zzOLDSummon Mouth Tentacle Visual"
+    );
+
     // The totem (tool) and reagent columns the pre-send possession check reads (decision 0552;
     // the ref's `0x6e4000` at SpellRec+0xA0/+0xA8 = cols 40-41 / 42-49+50-57). A column slip
     // here silently breaks "Requires Mining Pick" / "Missing reagent: …".

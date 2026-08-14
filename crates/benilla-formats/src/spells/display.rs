@@ -407,6 +407,19 @@ impl SpellDisplay {
         self.attributes_ex3 & ATTR_EX3_NORMAL_RANGED_ATTACK != 0
     }
 
+    /// `AttributesEx3 & 0x4` — **the casting bar shows no name for this spell**
+    /// ([`ATTR_EX3_NO_CASTING_BAR_TEXT`], `SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`). The cast-bar feed
+    /// hands `SPELLCAST_START`/`SPELLCAST_CHANNEL_START` an empty name string when this is set, so
+    /// the bar fills and sweeps with a blank label.
+    ///
+    /// Only the *name* is suppressed, and only on the bar: the spell still casts, still animates,
+    /// and its failures still name it. Three shipped rows carry the bit; the one that reached a
+    /// player is 22810 **"Opening - No Text"**, the internal opener for `LockType 13` ground
+    /// containers, whose own name spells out what the attribute is for (decision 1312, B247).
+    pub fn no_casting_bar_text(&self) -> bool {
+        self.attributes_ex3 & ATTR_EX3_NO_CASTING_BAR_TEXT != 0
+    }
+
     /// The ranged-shot cooldown pad's gate (`0x6e2b60` at `0x6e2c2c`–`0x6e2c47`, byte-verified —
     /// wow-re `ranged-cooldown-sweep.md`): on the caster's own SPELL_GO self-insert, a
     /// `Attributes & 0x2` spell WITHOUT `AttributesEx2 & 0x20000`

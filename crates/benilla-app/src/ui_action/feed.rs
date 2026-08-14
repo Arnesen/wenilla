@@ -84,6 +84,10 @@ pub(super) fn feed_actions(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
+    // The two DBC name tables the cast-fail argument arms read (`FailArgs`): the crafting book's
+    // SpellFocusObject catalog and the map arc's AreaTable one, both already loaded.
+    spell_focus: Option<Res<crate::ui_tradeskill::SpellFocus>>,
+    areas: Option<Res<crate::area::AreaTableRes>>,
     commands: Res<NetCommands>,
     mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
@@ -102,12 +106,22 @@ pub(super) fn feed_actions(
     // item-cache miss the ref queries and shows nothing that frame, then its DBCACHECALLBACK
     // `0x6e29b0` REDISPLAYS when the answer lands — modeled by keeping the entry queued: the
     // ask-once query is away, and the frame the template answers, the fill succeeds and fires.
+    // The DBC-only arms (0x5d REQUIRES_AREA, 0x5e REQUIRES_SPELL_FOCUS) need no round trip and
+    // are filled inside [`cast_fail`] itself, off the wire's argument word.
     let self_store = self_q.iter().next();
-    let mut await_template: Vec<(u32, u8)> = Vec::new();
+    let mut await_template: Vec<crate::ui_action::CastFail> = Vec::new();
+    let fail_args = cast_fail::FailArgs {
+        arg: None,
+        focus: spell_focus.as_deref().map(|f| &f.catalog),
+        areas: areas.as_deref().map(|a| &a.0),
+    };
     let texts: Vec<String> = cast_errors
         .0
         .drain(..)
-        .filter_map(|(spell_id, reason)| {
+        .filter_map(|fail| {
+            let crate::ui_action::CastFail {
+                spell_id, reason, ..
+            } = fail;
             let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
             // 0x19/0x1a/0x1b EQUIPPED_ITEM_CLASS* — the other argument-formatted family whose
@@ -154,7 +168,7 @@ pub(super) fn feed_actions(
                     // still pending → keep the entry queued for the redisplay.
                     None if items.template_answered_unknown(failing) => "UNKNOWN".to_string(),
                     None => {
-                        await_template.push((spell_id, reason));
+                        await_template.push(fail);
                         return None;
                     }
                 };
@@ -167,7 +181,25 @@ pub(super) fn feed_actions(
                     .filter(|s| !s.is_empty())
                     .map(|t| t.replace("%s", &name));
             }
-            cast_fail::cast_fail_text(reason, d, &get)
+            let text = cast_fail::cast_fail_text(
+                reason,
+                d,
+                cast_fail::FailArgs {
+                    arg: fail.arg,
+                    ..fail_args
+                },
+                &get,
+            );
+            // The retest instrument for this whole bug class (decision 1313). A red-line defect is
+            // reported as *seen* — B255 arrived as a screenshot of the word "Requires" — and until
+            // this line the only way to read what the client resolved was to look at the screen.
+            // Logging the reason, its wire argument and the resolved text makes an argument arm
+            // that silently declined (a missing word, an unnamed id) legible from a probe run.
+            debug!(
+                "ui_action: cast fail — spell {spell_id} reason {reason:#04x} arg {:?} → {:?}",
+                fail.arg, text
+            );
+            text
         })
         .collect();
     cast_errors.0.extend(await_template);

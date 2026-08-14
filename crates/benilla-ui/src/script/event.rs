@@ -162,6 +162,23 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
     }
 }
 
+/// Is a handler bound under `script` for this frame id? — the **existence** question, asked
+/// without firing anything.
+///
+/// It exists for the keyboard walk ([`super::keyboard`]), where the reference's consumption gate is
+/// the presence of the slot rather than anything the handler does: `0x76b7d0` reads `[+0x188]`/
+/// `[+0x190]`, consumes on either, and fires only the first. A lookup failure reads as "absent" —
+/// the gate must never be able to raise out of the middle of a walk.
+pub(super) fn has_widget_handler(lua: &Lua, id: u32, script: &str) -> bool {
+    let Ok(scripts) = lua.named_registry_value::<Table>(REG_SCRIPTS) else {
+        return false;
+    };
+    match scripts.get::<Value>(id) {
+        Ok(Value::Table(per)) => matches!(per.get::<Value>(script), Ok(Value::Function(_))),
+        _ => false,
+    }
+}
+
 /// The one firing path. `event_name` is the `event` global + first modern positional (OnEvent only);
 /// `extra` are the `arg1..argN` globals + the trailing modern positionals. Globals are saved before
 /// and restored after (even on error) — nesting-safe. Holds no model borrow across the call.

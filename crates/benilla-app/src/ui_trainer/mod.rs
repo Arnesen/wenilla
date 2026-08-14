@@ -22,7 +22,7 @@
 //! when the player walks out of the trainer's service range (or the trainer despawns) — the same
 //! `CloseTrainer` clear.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use benilla_formats::{SkillLineCatalog, SpellCatalog};
 use benilla_protocol::messages::TrainerSpell;
@@ -157,7 +157,7 @@ fn resolve_service(
     trainer_type: u32,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
-    known: &HashSet<u32>,
+    known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
     items: &mut Items,
     commands: &NetCommands,
@@ -269,7 +269,7 @@ fn snapshot(
     open: &TrainerOpen,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
-    known: &HashSet<u32>,
+    known: &BTreeSet<u32>,
     icons: Option<&ItemDisplays>,
     items: &mut Items,
     commands: &NetCommands,

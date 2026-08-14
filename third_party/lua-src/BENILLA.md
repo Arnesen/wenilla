@@ -35,7 +35,7 @@ downgrade, and it is the entire reason this is a one-hunk fork rather than a ven
 
 ## The delta, and the command that proves it
 
-**Current state: two hunks, in two files.** `src/lib.rs` additionally differs by having Lua
+**Current state: three hunks, in three files.** `src/lib.rs` additionally differs by having Lua
 5.2/5.3/5.4/5.5 stripped from the `Version` enum (with their source trees deleted) — benilla builds
 5.1 and only 5.1, and a fork that still *offered* the other four would answer a request for one with
 a missing directory at build time instead of a compile error.
@@ -44,6 +44,7 @@ a missing directory at build time instead of a compile error.
 |---|---|---|---|
 | `lvm.c` | 5.0's `OP_TFORPREP` table→`next` substitution, folded into the top of `OP_TFORLOOP` | `for k, v in someTable do` raised "attempt to call a table value"; it was the first session-start error for **60** corpus addons | 1215 |
 | `luaconf.h` | `LUA_COMPAT_LSTR` `1` → `2` | 5.1 kept 5.0's nesting machinery and put an advisory error in front of it; two corpus addons died on "nesting of `[[...]]` is deprecated" | — |
+| `lparser.c` | 5.0's compat-semicolon skip restored at the top of `constructor()`'s field loop — 5.0's own line, verbatim, comment included | one extra `;` after a field separator inside a table constructor (`Back_Title = AL["Factions"];;`, ×20 in AtlasLoot's `ButtonRegistry.lua`) parses on the client and died here with "unexpected symbol near `;`"; statement-level `;;` stays rejected by both dialects | 1315 |
 
 The ordering was deliberate and it held: the fork landed **inert**, byte-identical to upstream, so
 the build pipeline was proven transparent *before* any behavioural payload went into it — and when
@@ -59,7 +60,7 @@ diff -r third_party/lua-src/lua-5.1.5 \
   ~/.cargo/registry/src/*/lua-src-550.0.0/lua-5.1.5
 ```
 
-That must print **exactly** the two hunks in the table above and nothing else. If it ever prints
+That must print **exactly** the three hunks in the table above and nothing else. If it ever prints
 more, something crept in.
 
 ## Status of the payload

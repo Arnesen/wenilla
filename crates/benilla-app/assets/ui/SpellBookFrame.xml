@@ -292,8 +292,8 @@
             -- The ref's `$parentAutoCast` is a <Model> playing UI-AutoCastButton.mdx; we have no
             -- Model widget, so the pet bar's byte-derived sparkle emitter stands in for it
             -- (decision 0982 — PetActionBar.xml owns the numbers and both surfaces share them).
-            -- Guarded because several engine test harnesses load this file without the pet bar.
-            if BenillaPetAutocast_Create then BenillaPetAutocast_Create(button) end
+            -- Nothing to build here: that emitter pools itself lazily, on the first frame a
+            -- button autocasts, which on this page is a pet-book spell and never a player one.
             BenillaSpellButton_UpdateButton(button)
         end
 

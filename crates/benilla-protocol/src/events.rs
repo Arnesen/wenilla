@@ -467,11 +467,15 @@ pub enum SessionEvent {
         new_spell_id: u32,
     },
     /// The server's verdict on our cast (`SMSG_CAST_RESULT`): `reason` is the failure code when
-    /// `success` is false (the client's error-text table keys on it; surfaced raw for now).
+    /// `success` is false (the client's error-text table keys on it), and `arg` the reason-specific
+    /// argument word that fills that message's `%s` — a `SpellFocusObject.dbc` id for
+    /// `REQUIRES_SPELL_FOCUS`, an `AreaTable.dbc` id for `REQUIRES_AREA`
+    /// ([`crate::messages::CastOutcome::Failed`]).
     CastResult {
         spell_id: u32,
         success: bool,
         reason: Option<u8>,
+        arg: Option<u32>,
     },
     /// The pet action bar's whole state (`SMSG_PET_SPELLS`, decision 0982) — or its **teardown**,
     /// which is the same event carrying a zero `pet_guid`. Server-authoritative: this is not a

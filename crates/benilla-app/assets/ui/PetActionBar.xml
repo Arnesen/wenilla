@@ -98,13 +98,18 @@
         --
         --   4 bones, pivoting at the corners of a 0.02 x 0.02 unit square, each keyed with the
         --   SAME 5-key 2.000 s translation loop walking the square edge by edge (0.5 s per edge) —
-        --   the four phase-shifted by one corner each, so they chase one another round it.
+        --   the four phase-shifted by one corner each, so they chase one another round it. The
+        --   tracks are `interp == 1`, LINEAR (read at the bone record's M2Track word, not assumed):
+        --   constant speed along each edge, no easing into the corners, which is what the walk
+        --   below reproduces.
         --   4 particle emitters, one per bone: 300/s, life 1.000 s, Add blend, unlit, texture
-        --   Interface\Buttons\GlowStar.blp, size half-extent 0.005 -> 0.002 -> 0.001 over life,
-        --   colour (0.976,0.875,0.192,1) -> (0.996,0.945,0.745,1) -> (1,1,1,0). Its spline has 4
-        --   control points ALL AT THE ORIGIN, so a particle never travels: it is born where the
-        --   bone is and shrinks away there. The effect is therefore four comet trails running
-        --   round the button's rim, not a rotating ring.
+        --   Interface\Buttons\GlowStar.blp, size half-extent 0.005 -> 0.0015 -> 0.001 over life,
+        --   colour (0.976,0.875,0.192,1) -> (0.996,0.945,0.745,1) -> (1,1,1,0). Its spline is one
+        --   cubic Bezier segment whose 4 control points are ALL AT THE ORIGIN — checked, all four,
+        --   because the two INTERIOR handles are what would bend the path and reading only the
+        --   endpoints proves nothing — so a particle never travels: it is born where the bone is
+        --   and shrinks away there. The effect is therefore four comet trails running round the
+        --   button's rim, not a rotating ring.
         --
         -- Model units -> pixels is the same 1200 px/unit calibration BagFrame.xml derived from the
         -- Cooldown model (its own header carries the derivation), and it CROSS-CHECKS here: the
@@ -114,22 +119,44 @@
         -- number rather than eyeball a size.
         --
         -- OUR ONE DEPARTURE is the particle COUNT: 300 live per emitter is 12 000 quads across a
-        -- full bar, for a trail that reads identically at a fraction of that. We draw
-        -- BENILLA_PET_AUTOCAST_TRAIL per emitter, evenly spaced in AGE, which samples the same
-        -- position/size/colour ramps at the same times — the trail's shape, speed and colour are
-        -- the file's; only its density is ours.
+        -- full bar. We draw a SAMPLE of the same trail — each sample sits where the bone was `age`
+        -- ago and reads the same position/size/colour ramps at that age — so the trail's shape,
+        -- speed and colour are the file's; only its density is ours.
+        --
+        -- **How many samples is DERIVED, not chosen** (B228). It was 8, evenly spaced in age, on
+        -- the claim that the trail "reads identically at a fraction" of 300. Nobody had checked
+        -- that claim, and the arithmetic says it is false. The rim is 4 x 28.8 = 115.2 px round and
+        -- the lap is 2.0 s, so the bone travels 57.6 px/s and a particle's 1.0 s life spans 57.6 px
+        -- of rim — two whole edges. Eight even samples therefore sit 7.2 px apart, while the stars
+        -- behind the head are 4.3 px and then 2.9 px across: the back half of every trail was a row
+        -- of SEPARATED DOTS where the file draws one continuous streak. Marching dots are legible
+        -- motion in a way a smooth streak is not, which is the shape of thing a reporter reads as
+        -- "too fast" (nazriel, B228) even at the right period — and the period IS right, measured
+        -- through this file's own OnUpdate in `pet_bar_tests`.
+        --
+        -- So the samples are spaced by the file's own SIZE ramp rather than evenly: each step
+        -- advances one star-width / OVERLAP of arc. That spends samples in the tail where the
+        -- stars are small and saves them at the head where a 14.4 px star covers everything —
+        -- continuous everywhere, and cheaper than a uniform spacing fine enough for the tail.
         BENILLA_PET_AUTOCAST_PX_PER_UNIT = 1200
         BENILLA_PET_AUTOCAST_SCALE   = 1.2                                   -- the ref Model's
         BENILLA_PET_AUTOCAST_PERIOD  = 2.0                                   -- seq0 loop, seconds
         BENILLA_PET_AUTOCAST_LIFE    = 1.0                                   -- particle lifespan
-        BENILLA_PET_AUTOCAST_TRAIL   = 8                                     -- ours (see above)
         BENILLA_PET_AUTOCAST_EMITTERS = 4
+        -- Star-widths of cover on every point of the trail. 1 would put neighbours exactly edge to
+        -- edge, and a GlowStar fades out toward its own edge, so the seam would show; 2 (centres
+        -- half a width apart) is the cheapest value with no seam.
+        BENILLA_PET_AUTOCAST_OVERLAP = 2
         -- 0.02 units square, in pixels.
         BENILLA_PET_AUTOCAST_SIZE = 0.02 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE
-        -- Half-extent -> full width, in pixels: {0.005, 0.002, 0.001} * 2 * K * scale.
+        -- Half-extent -> full width, in pixels: {0.005, 0.0015, 0.001} * 2 * K * scale.
+        -- The MID key is 0.0015, not the 0.002 this table carried until B228: `m2part` printed the
+        -- ramp at 3 decimals and rounded it up, and the transcription took the printout at its
+        -- word. (Fixed at the instrument too — that column prints 4 decimals now.) 33% of the
+        -- mid-life star, so the trail was reading thicker than the file authors it.
         BENILLA_PET_AUTOCAST_STAR = {
             0.010 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
-            0.004 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
+            0.003 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
             0.002 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
         }
         -- The over-life colour ramp's three keys (the file's), as {r, g, b, a}.
@@ -167,15 +194,60 @@
             return out
         end
 
+        -- The trail's sample AGES, walked once off the size ramp above (the header has the why).
+        -- Each step advances by one local star-width / OVERLAP of rim, converted to seconds at the
+        -- bone's own rim speed — so the spacing tightens as the stars shrink and the streak stays
+        -- unbroken end to end. The count falls out of the file's numbers; nothing here picks it.
+        function BenillaPetAutocast_TrailAges()
+            local speed = 4 * BENILLA_PET_AUTOCAST_SIZE / BENILLA_PET_AUTOCAST_PERIOD  -- px/s of rim
+            local ages, age = {}, 0
+            while age < BENILLA_PET_AUTOCAST_LIFE do
+                table.insert(ages, age)
+                local w = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, age / BENILLA_PET_AUTOCAST_LIFE)
+                -- The step is only positive while the ramp is. This runs at FILE LOAD, so a future
+                -- edit that put a zero in the size table would hang the whole UI before a frame
+                -- ever drew — the failure mode decision 1306 exists for. Bail instead.
+                if w <= 0 then break end
+                age = age + w / BENILLA_PET_AUTOCAST_OVERLAP / speed
+            end
+            return ages
+        end
+        BENILLA_PET_AUTOCAST_AGES  = BenillaPetAutocast_TrailAges()
+        BENILLA_PET_AUTOCAST_TRAIL = table.getn(BENILLA_PET_AUTOCAST_AGES)
+
         -- Build one button's sparkle pool: EMITTERS x TRAIL textures, hidden until autocast is on.
+        --
+        -- Everything about a sample EXCEPT where it is right now is fixed by its age — size,
+        -- colour and alpha are reads of the over-life ramps at an age that never changes for a
+        -- given slot — so all of it is set HERE, once. The per-frame pass moves the texture and
+        -- touches nothing else, which is why tripling the sample count still costs less per frame
+        -- than the eight-sample version did (it re-derived all five values for every spark, every
+        -- frame). Each spark also carries its fixed place in the loop: its emitter's quarter-lap
+        -- offset, less how far the bone has moved on since this star was born.
+        --
+        -- Built LAZILY, on the first frame the button actually autocasts. Most never do, and a
+        -- pool that is only ever hidden is pure cost — 22 buttons' worth of it across the bar and
+        -- the spell book.
         function BenillaPetAutocast_Create(button)
             button.sparks = {}
-            for i = 1, BENILLA_PET_AUTOCAST_EMITTERS * BENILLA_PET_AUTOCAST_TRAIL do
-                local t = button:CreateTexture(nil, "OVERLAY")
-                t:SetTexture("Interface\\Buttons\\GlowStar")
-                t:SetBlendMode("ADD")
-                t:Hide()
-                table.insert(button.sparks, t)
+            for e = 0, BENILLA_PET_AUTOCAST_EMITTERS - 1 do
+                for k = 1, BENILLA_PET_AUTOCAST_TRAIL do
+                    local age = BENILLA_PET_AUTOCAST_AGES[k]
+                    local life = age / BENILLA_PET_AUTOCAST_LIFE
+                    local size = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, life)
+                    local c = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_COLOR, life)
+                    local spark = button:CreateTexture(nil, "OVERLAY")
+                    spark:SetTexture("Interface\\Buttons\\GlowStar")
+                    spark:SetBlendMode("ADD")
+                    spark:SetWidth(size)
+                    spark:SetHeight(size)
+                    spark:SetVertexColor(c[1], c[2], c[3])
+                    spark:SetAlpha(c[4])
+                    spark:Hide()
+                    spark.phase = e / BENILLA_PET_AUTOCAST_EMITTERS
+                        - age / BENILLA_PET_AUTOCAST_PERIOD
+                    table.insert(button.sparks, spark)
+                end
             end
         end
 
@@ -183,34 +255,30 @@
         -- emitters are one model, and every autocasting button plays the same loop in step, which
         -- is what the reference's per-button Models do too (each starts at sequence time 0 and
         -- they never drift, the loop being exact).
+        --
+        -- Show and hide are EDGE work, not per-frame work: this runs for all ten buttons every
+        -- frame and all but one or two of them are dark, so the old unconditional Hide loop was
+        -- spending most of the bar's frame budget re-hiding what was already hidden.
         function BenillaPetAutocast_Update(button, clock)
-            if not button.sparks then return end
             if not button.autocasting then
-                for i = 1, table.getn(button.sparks) do button.sparks[i]:Hide() end
+                if button.sparksLit then
+                    for i = 1, table.getn(button.sparks) do button.sparks[i]:Hide() end
+                    button.sparksLit = nil
+                end
                 return
             end
-            local n = 1
-            for e = 0, BENILLA_PET_AUTOCAST_EMITTERS - 1 do
-                -- The four bones are the same lap, a quarter apart.
-                local phase = clock / BENILLA_PET_AUTOCAST_PERIOD + e / BENILLA_PET_AUTOCAST_EMITTERS
-                for k = 0, BENILLA_PET_AUTOCAST_TRAIL - 1 do
-                    -- Evenly spaced in AGE: this star was emitted `age` seconds ago, so it sits
-                    -- where the bone was then and has aged that far along the ramps.
-                    local age = (k / BENILLA_PET_AUTOCAST_TRAIL) * BENILLA_PET_AUTOCAST_LIFE
-                    local x, y = BenillaPetAutocast_Point(phase - age / BENILLA_PET_AUTOCAST_PERIOD)
-                    local life = age / BENILLA_PET_AUTOCAST_LIFE
-                    local size = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, life)
-                    local c = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_COLOR, life)
-                    local spark = button.sparks[n]
-                    n = n + 1
-                    spark:SetWidth(size)
-                    spark:SetHeight(size)
-                    spark:ClearAllPoints()
-                    spark:SetPoint("CENTER", button, "CENTER", x, y)
-                    spark:SetVertexColor(c[1], c[2], c[3])
-                    spark:SetAlpha(c[4])
-                    spark:Show()
-                end
+            if not button.sparks then BenillaPetAutocast_Create(button) end
+            local sparks = button.sparks
+            local lap = clock / BENILLA_PET_AUTOCAST_PERIOD
+            for i = 1, table.getn(sparks) do
+                local spark = sparks[i]
+                -- SetPoint on the SAME point replaces it, so no ClearAllPoints is needed.
+                local x, y = BenillaPetAutocast_Point(lap + spark.phase)
+                spark:SetPoint("CENTER", button, "CENTER", x, y)
+            end
+            if not button.sparksLit then
+                for i = 1, table.getn(sparks) do sparks[i]:Show() end
+                button.sparksLit = 1
             end
         end
 
@@ -233,7 +301,8 @@
             button.icon = getglobal(button:GetName() .. "Icon")
             button.cooldown = getglobal(button:GetName() .. "Cooldown")
             button.autocastable = getglobal(button:GetName() .. "AutoCastable")
-            BenillaPetAutocast_Create(button)
+            -- No sparkle pool here: BenillaPetAutocast_Update builds it on the first frame this
+            -- button actually autocasts, and most buttons never do.
         end
 
         -- Ref PetActionButton_OnClick. The CheckButton widget toggles itself BEFORE OnClick fires,
@@ -311,21 +380,49 @@
             PetActionBar_Update()
         end
 
-        -- Ref PetActionButton_OnEnter. A token slot has no spell to look up, so its tooltip is
-        -- built from the two strings the info call already returned (the ref's own `isToken` fork);
-        -- a spell slot goes through the engine's tooltip channel.
+        -- Ref PetActionButton_OnEnter (PetActionBarFrame.lua l.285-305). ONE predicate,
+        -- `isToken or UberTooltips == "0"`, decides two things at once:
+        --
+        --   * WHICH TOOLTIP. A token slot has no spell to look up, so its tooltip is built here out
+        --     of the two strings the info call already returned — and the BINDING (B230). Anything
+        --     else is a real pet SPELL and goes through the engine's tooltip channel, which appends
+        --     nothing. So the parenthesised key belongs to Attack/Follow/Stay and the reactions, and
+        --     NOT to the pet's own spells: putting it on every slot would be the wrong fix.
+        --   * WHERE IT SITS. Only the UberTooltips-off leg moves the tooltip beside the button
+        --     (ANCHOR_RIGHT); a token with the CVar on, and every spell, take the default corner.
+        --     The CVar registers "1" (cvars.rs carries the byte-read), so the off leg is the
+        --     player's to reach and not what ships.
+        --
+        -- The suffix is the ref's own expression and it is UNCONDITIONAL — no `if the key exists`
+        -- guard, unlike MicroButtonTooltipText's version of the same idea (MicroMenu.xml). That is
+        -- visible, not academic: GetBindingText answers "" for a nil key (UIParent.xml, transcribed
+        -- from the ref's own l.1819-1821), so 1.12 really does render "Attack ()" on a token slot
+        -- whose row is unbound. Stock, none are: BONUSACTIONBUTTON1-10 default to CTRL-1..CTRL-0
+        -- (bindings/commands.rs, byte-real from the install's bindings-cache.wtf).
+        --
+        -- Those same ten rows are the binding B218 found the CORNER hotkey glyph can never show
+        -- (the header's ref-divergence list has the `bindingSuffix == this:GetID()` string-vs-number
+        -- reason). Corner empty, tooltip parenthesised — both faithful, at once.
         function PetActionButton_OnEnter()
             local button = this
             if not GameTooltip then return end -- engine tests load file subsets
             if not button.tooltipName then return end
-            GameTooltip_SetDefaultAnchor(GameTooltip, button)
-            if button.isToken then
-                GameTooltip:SetText(button.tooltipName, 1.0, 1.0, 1.0)
+            local uber = GetCVar("UberTooltips")
+            if button.isToken or uber == "0" then
+                if uber == "0" then
+                    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                else
+                    GameTooltip_SetDefaultAnchor(GameTooltip, button)
+                end
+                local key = GetBindingText(GetBindingKey("BONUSACTIONBUTTON" .. button.index), "KEY_")
+                GameTooltip:SetText(button.tooltipName .. NORMAL_FONT_COLOR_CODE .. " (" .. key .. ")"
+                    .. FONT_COLOR_CODE_CLOSE, 1.0, 1.0, 1.0)
                 if button.tooltipSubtext then
                     GameTooltip:AddLine(button.tooltipSubtext, "", 0.5, 0.5, 0.5)
                 end
                 GameTooltip:Show()
             else
+                GameTooltip_SetDefaultAnchor(GameTooltip, button)
                 GameTooltip:SetPetAction(button.index)
             end
         end

@@ -77,6 +77,7 @@ pub(super) fn cast_result(
     spell_id: u32,
     success: bool,
     reason: Option<u8>,
+    arg: Option<u32>,
     commands: &mut Commands,
     self_guid: &SelfGuid,
     index: &GuidIndex,
@@ -153,7 +154,11 @@ pub(super) fn cast_result(
         // still shows "out of range"/"line of sight" even though no bar is (or should be) up.
         if let Some(reason) = reason {
             if !dont_report {
-                cast_errors.0.push((spell_id, reason));
+                cast_errors.0.push(crate::ui_action::CastFail {
+                    spell_id,
+                    reason,
+                    arg,
+                });
             }
         }
         // The cast bar's red "Failed" — only the showing cast's own failure turns it red.
@@ -1336,6 +1341,7 @@ mod tests {
                             75,
                             false,
                             Some(reason),
+                            None,
                             &mut commands,
                             &self_guid,
                             &index,

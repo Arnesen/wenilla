@@ -1119,7 +1119,8 @@
            it is ONE library file replicated, and only that one of its two sites is unguarded (the
            other is `info.textHeight or UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT or 10`). Writing a
            literal here would have been a silent fidelity divergence, not a fix. -->
-    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" parent="UIParent">
+    <!-- `toplevel` is authored on the ref's INSTANCES, not its template (decision 1318). -->
+    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" toplevel="true" parent="UIParent">
         <Scripts>
             <OnLoad>
                 local fontName, fontHeight, fontFlags = getglobal("DropDownList1Button1NormalText"):GetFont();
@@ -1131,7 +1132,7 @@
             </OnHide>
         </Scripts>
     </Button>
-    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" parent="UIParent">
+    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" toplevel="true" parent="UIParent">
         <Scripts>
             <OnHide>
                 CloseDropDownMenus(3);

@@ -290,7 +290,7 @@ fn send_spell_cast(
         // `HandleCastFailed`) — the inflight rec here is always an ordinary cast, so even an
         // on-next-swing press is refused while it holds.
         if pending.current(now) != Some(spell_id) {
-            cast_errors.0.push((spell_id, 0x61));
+            cast_errors.push_local(spell_id, 0x61);
         }
         debug!("ui_action: cast {spell_id} suppressed — a cast is already in flight");
         return;
@@ -343,7 +343,7 @@ fn send_spell_cast(
                 debug!(
                     "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
                 );
-                cast_errors.0.push((spell_id, reason));
+                cast_errors.push_local(spell_id, reason);
                 return;
             }
         },
@@ -371,7 +371,7 @@ fn send_spell_cast(
                 dist_sq,
             ) {
                 debug!("ui_action: cast {spell_id} refused locally — range ({reason:#x})");
-                cast_errors.0.push((spell_id, reason));
+                cast_errors.push_local(spell_id, reason);
                 return;
             }
         }
@@ -417,7 +417,7 @@ fn send_spell_cast(
                 }
             }
         }
-        cast_errors.0.push((spell_id, commit.not_ready_reason()));
+        cast_errors.push_local(spell_id, commit.not_ready_reason());
         return;
     }
     // Rung 2 — the power gate (`0x60962c`, SPELL presses only: the item fork's clear-query jump
@@ -430,7 +430,7 @@ fn send_spell_cast(
         if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
             if !super::usable::can_afford(d, store) {
                 debug!("ui_action: cast {spell_id} refused locally — not enough power (0x4d)");
-                cast_errors.0.push((spell_id, 0x4d));
+                cast_errors.push_local(spell_id, 0x4d);
                 return;
             }
         }
@@ -451,7 +451,7 @@ fn send_spell_cast(
         def,
     ) {
         debug!("ui_action: cast {spell_id} refused locally — mounted (0x39)");
-        cast_errors.0.push((spell_id, 0x39));
+        cast_errors.push_local(spell_id, 0x39);
         return;
     }
     // The ENVIRONMENT leg of the SAME requirement validator (`0x609d39–0x609d7b`, between the
@@ -463,7 +463,7 @@ fn send_spell_cast(
     // (ledger B176) and lets you eat mid-swim (B155's eating half). The condition is [`state`]'s.
     if let Some(reason) = state::cast_water_refusal(ctx.self_move_flags, def) {
         debug!("ui_action: cast {spell_id} refused locally — water side ({reason:#x})");
-        cast_errors.0.push((spell_id, reason));
+        cast_errors.push_local(spell_id, reason);
         return;
     }
     // The moving leg of the SAME requirement validator (`0x609de3`, after the mounted/posture/
@@ -482,7 +482,7 @@ fn send_spell_cast(
         let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, caster_level));
         if state::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
             debug!("ui_action: cast {spell_id} refused locally — moving (0x2e)");
-            cast_errors.0.push((spell_id, 0x2e));
+            cast_errors.push_local(spell_id, 0x2e);
             return;
         }
     }
@@ -507,7 +507,7 @@ fn send_spell_cast(
         if let Some(refusal) = d.form_refusal(form, form_is_stance) {
             let reason = refusal.reason();
             debug!("ui_action: cast {spell_id} refused locally — the form gate ({reason:#x})");
-            cast_errors.0.push((spell_id, reason));
+            cast_errors.push_local(spell_id, reason);
             return;
         }
     }
@@ -651,6 +651,7 @@ fn send_spell_cast(
 mod tests {
     use super::*;
     use crate::net::Reputations;
+    use crate::ui_action::CastFail;
     use bevy::ecs::system::RunSystemOnce;
     use crossbeam_channel::Receiver;
 
@@ -934,7 +935,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(
             world.resource::<CastErrors>().0,
-            vec![(MOUNT, 0x61)],
+            vec![CastFail::local(MOUNT, 0x61)],
             "a different spell mid-cast is 6e4d97's \"Another action is in progress\""
         );
     }
@@ -959,7 +960,10 @@ mod tests {
 
         send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
         assert!(rx.try_recv().is_err(), "an item on cooldown never sends");
-        assert_eq!(world.resource::<CastErrors>().0, vec![(HEARTHSTONE, 0x28)]);
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![CastFail::local(HEARTHSTONE, 0x28)]
+        );
 
         // The byte law's other half (0948, correcting this test's pre-§5 shape): the record is
         // keyed (use-spell, item ENTRY), and a bare SPELL press queries (spell, 0) — the item
@@ -1075,7 +1079,10 @@ mod tests {
             })
             .expect("one-shot");
         assert!(rx.try_recv().is_err(), "an unaffordable press never sends");
-        assert_eq!(world.resource::<CastErrors>().0, vec![(HEARTHSTONE, 0x4d)]);
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![CastFail::local(HEARTHSTONE, 0x4d)]
+        );
 
         world.resource_mut::<CastErrors>().0.clear();
         let base = ctx();
@@ -1122,7 +1129,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(
             world.resource::<CastErrors>().0,
-            vec![(MOUNT, 0x61)],
+            vec![CastFail::local(MOUNT, 0x61)],
             "mid-cast outranks the cooldown rung (the ref's IsCasting precedes the validator)"
         );
     }

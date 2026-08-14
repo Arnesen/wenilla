@@ -17,6 +17,7 @@ mod font_object;
 mod frame_api;
 mod generic_for;
 mod input;
+mod keyboard;
 mod layout_gate;
 mod measure;
 mod minimap;

@@ -363,15 +363,27 @@
         -- tooltip with its rank column, an ITEM slot the shared item renderer; ref
         -- ActionButton_SetTooltip). The re-enter keeps it live across page flips.
         -- Anchor: ref ActionButton_SetTooltip (ActionButton.lua l.366-372) branches on the
-        -- UberTooltips CVar — "1" → the default corner, else RIGHT/LEFT by bar. UberTooltips
-        -- registers with default "1" (byte-read: WoW.exe 0x48fdd9, default string 0x82e748;
-        -- sibling rows BlockTrades→"0", UnitNameRenderMode→"2" confirm the layout), and benilla
-        -- ships no CVar state, so the branch collapses to the stock-client one: action-bar
-        -- tooltips live at the screen's bottom-right, above the bags.
+        -- UberTooltips CVar — "1" → the default corner, else beside the button, LEFT for the bars
+        -- that sit at the screen edge and RIGHT for the rest. This branch was collapsed to the "1"
+        -- leg until B230, on the reason that benilla shipped no CVar state for anything to move
+        -- it; 0954 ended that and cvars.rs now registers the key (default "1", byte-read — the
+        -- evidence lives on that row), so the fork is live and the stock look is unchanged.
+        --
+        -- The ref's LEFT set is {MultiBarBottomRight, MultiBarRight, MultiBarLeft}. Only the first
+        -- exists here — the two VERTICAL bars are deliberately not shipped (see the header of
+        -- MultiBars.xml) — so it is the whole test, and the day they land they join it.
         function BenillaActionButton_OnEnter(button)
             BenillaActionButton_Adopt(button)
             if not GameTooltip then return end -- engine tests load file subsets
-            GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            if GetCVar("UberTooltips") == "0" then
+                if button:GetParent() == MultiBarBottomRight then
+                    GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+                else
+                    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                end
+            else
+                GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            end
             GameTooltip:SetAction(BenillaActionButton_Action(button))
         end
 

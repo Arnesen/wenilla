@@ -714,10 +714,12 @@ pub(super) fn apply_net_updates(
                 spell_id,
                 success,
                 reason,
+                arg,
             } => cast_result(
                 spell_id,
                 success,
                 reason,
+                arg,
                 &mut commands,
                 &self_guid,
                 &index,

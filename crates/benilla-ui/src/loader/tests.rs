@@ -461,18 +461,24 @@ mod loader_tests {
         assert!(s.eval::<bool>("return FineRan == true").unwrap());
     }
 
-    /// Unsupported handler names (e.g. the keyboard-focus handlers `OnKeyDown`/`OnChar`, not yet
-    /// modeled) are warn-once gaps, not hard errors, and don't stop the frame from building.
+    /// Unsupported handler names are warn-once gaps, not hard errors, and don't stop the frame
+    /// from building. The example is `OnCursorChanged` — caret geometry is host-side here, so its
+    /// four float args would all be zero, which is the silent-drop this warn exists to avoid.
+    /// (It used to be `OnKeyDown`: that one is *fired* since decision 1319 and now belongs to
+    /// `script::tests::keyboard`.)
     #[test]
     fn unsupported_script_name_is_a_warning() {
         let s = UiScript::new().unwrap();
         let doc = parse(
-            r#"<Ui><Frame name="Keyed"><Scripts><OnKeyDown>x = 1</OnKeyDown></Scripts></Frame></Ui>"#,
+            r#"<Ui><Frame name="Keyed"><Scripts><OnCursorChanged>x = 1</OnCursorChanged></Scripts></Frame></Ui>"#,
         );
         let report = load(&s, &doc, &no_files);
         assert_eq!(report.frames, 1);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(report.warnings.iter().any(|w| w.contains("OnKeyDown")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("OnCursorChanged")));
     }
 
     /// An unknown frame type is an error that drops that subtree but not the rest of the load.

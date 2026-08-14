@@ -22,7 +22,7 @@
 //! [`errors`] (the red error line's two layers), [`usable`] (the castability walk the stance bar
 //! shares), [`weapon_icon`] (the auto-attack's borrowed weapon icon).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
 
@@ -65,8 +65,8 @@ pub(crate) struct CooldownEvents;
 // `cast_send`, so a second send path cannot be written by accident (decision 0914).
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
-    attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
-    UiErrorKeys,
+    attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, CastFail, MountErrors,
+    UiError, UiErrorKeys,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
@@ -96,8 +96,17 @@ pub(crate) const SPELL_ATTACK: u32 = 6603;
 pub(crate) struct PlayerActions {
     /// Wire slot (0-based) → the slot's packed action. Lua action id = slot + 1.
     pub buttons: HashMap<u8, ActionButton>,
-    /// The spell book (`SMSG_INITIAL_SPELLS`), for gating/consumers to come.
-    pub spells: HashSet<u32>,
+    /// The spell book (`SMSG_INITIAL_SPELLS`).
+    ///
+    /// **Ordered, and that is load-bearing** (decision 1312). The reference keeps its known spells
+    /// in an ARRAY and the scans that hunt it — the GameObject lock resolver `0x5f83d0` above all —
+    /// stop at the first hit, so the visit order picks *which* of several equally-qualified spells
+    /// wins. A `HashSet` made that pick nondeterministic: every character knows both 6478
+    /// "Opening" and 22810 "Opening - No Text" (both `LockType 13`, both trivially sufficient), and
+    /// whichever the hash happened to reach first went on the cast bar (B247). Ascending spell id
+    /// is the array's own order after login — the server sends the initial batch out of a
+    /// `std::map`, so the wire arrives sorted.
+    pub spells: BTreeSet<u32>,
     /// Set on every book/bar arrival AND every local `action_sets` drain; cleared by the feed
     /// after re-resolving each slot's identity (icon/kind/action) and pushing. It is only ONE of
     /// the identity resolve's two triggers — a landed item template is the other (decision 0660,
@@ -226,8 +235,13 @@ fn track_learned_abilities(
     if !actions.is_changed() && !spells.is_changed() {
         return;
     }
-    let first_with = |effect: u32| {
-        actions.spells.iter().copied().find(|&id| {
+    // The **last** matching spell in ascending-id order, not the first: the reference latches at
+    // learn time and each new rank overwrites the global, so what it holds is the newest rank
+    // learned — and a rank chain is ascending by id (Skinning 8613 → 8617 → 8618 → 10768). Which
+    // end we take is only visible when a chain's ranks are known together, but "arbitrary" was
+    // never an answer: the set was a `HashSet` until 1312 and this picked at the hash's whim.
+    let last_with = |effect: u32| {
+        actions.spells.iter().copied().rfind(|&id| {
             spells
                 .catalog
                 .get(id)
@@ -235,9 +249,9 @@ fn track_learned_abilities(
         })
     };
     let (skinning, skin_player_corpse, feed_pet) = (
-        first_with(benilla_formats::SPELL_EFFECT_SKINNING),
-        first_with(SPELL_EFFECT_SKIN_PLAYER_CORPSE),
-        first_with(SPELL_EFFECT_FEED_PET),
+        last_with(benilla_formats::SPELL_EFFECT_SKINNING),
+        last_with(SPELL_EFFECT_SKIN_PLAYER_CORPSE),
+        last_with(SPELL_EFFECT_FEED_PET),
     );
     if (skinning, skin_player_corpse, feed_pet)
         != (

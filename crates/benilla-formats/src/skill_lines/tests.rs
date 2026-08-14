@@ -361,12 +361,12 @@ fn real_rank_chains_resolve_the_highest_known_rank() {
 
     // From ANY rank, knowing only rank 8, the answer is rank 8 — the walk starts at the
     // chain head, so it works downward as well as upward.
-    let top: std::collections::HashSet<u32> = [11294].into_iter().collect();
+    let top: std::collections::BTreeSet<u32> = [11294].into_iter().collect();
     for id in SS {
         assert_eq!(cat.highest_known_rank(id, &top), Some(11294), "from {id}");
     }
     // Knowing an intermediate rank resolves to it, not to the top of the chain.
-    let mid: std::collections::HashSet<u32> = [1759].into_iter().collect();
+    let mid: std::collections::BTreeSet<u32> = [1759].into_iter().collect();
     assert_eq!(cat.highest_known_rank(1752, &mid), Some(1759));
     assert_eq!(cat.highest_known_rank(11294, &mid), Some(1759));
     // No rank of the chain known → no answer (the caller leaves the slot alone).
@@ -377,11 +377,11 @@ fn real_rank_chains_resolve_the_highest_known_rank() {
     // Frostbolt r1, Healing Touch r1, Renew r1, Immolate r1, Lightning Bolt r1.
     for id in [133u32, 143, 116, 5185, 139, 348, 403] {
         assert_eq!(cat.rank_successor(id), None, "spell {id} is not chained");
-        let known: std::collections::HashSet<u32> = [id].into_iter().collect();
+        let known: std::collections::BTreeSet<u32> = [id].into_iter().collect();
         assert_eq!(cat.highest_known_rank(id, &known), Some(id));
     }
     // A spell with no `SkillLineAbility` row at all (the auto-attack) is its own chain.
-    let attack: std::collections::HashSet<u32> = [6603].into_iter().collect();
+    let attack: std::collections::BTreeSet<u32> = [6603].into_iter().collect();
     assert_eq!(cat.rank_successor(6603), None);
     assert_eq!(cat.highest_known_rank(6603, &attack), Some(6603));
 }

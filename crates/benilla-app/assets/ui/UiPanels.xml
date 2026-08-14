@@ -1712,7 +1712,9 @@
          the click's hide so a second instance must be free; the ref's own StaticPopup2 case).
          Extend toward 4 the day a third coexists. StaticPopup2 seats below 1 (the ref's
          StaticPopup_SetUpPosition stack, simplified to a static anchor). -->
-    <Frame name="StaticPopupTemplate" virtual="true" enableMouse="true" frameStrata="DIALOG" hidden="true">
+    <!-- `toplevel` is the ref's (StaticPopup.xml l.3): a confirm popup must come to the front over
+         whatever DIALOG-strata window raised it (decision 1318). -->
+    <Frame name="StaticPopupTemplate" virtual="true" toplevel="true" enableMouse="true" frameStrata="DIALOG" hidden="true">
         <Size><AbsDimension x="320" y="72"/></Size>
         <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>

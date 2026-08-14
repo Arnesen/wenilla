@@ -350,6 +350,15 @@ const COL_EFFECT_ITEM_TYPE_1: usize = 103;
 /// `AttributesEx3` bit `0x8000` — damage renders melee-white (`SPELL_ATTR3_NORMAL_RANGED_ATTACK`;
 /// the combat-text emitter's `B`-bit flip, wow-re `combattext-color-law.md`).
 const ATTR_EX3_NORMAL_RANGED_ATTACK: u32 = 0x8000;
+/// `AttributesEx3` bit `0x4` — **the cast bar shows no name for this spell**
+/// (`SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`, vmangos `Spells/SpellDefines.h:907`). Decision 1312.
+///
+/// Exactly three rows in the shipped 5875 file carry it, and one of them is *named after the bit*:
+/// 6477 "Opening", **22810 "Opening - No Text"**, 26380 "zzOLDSummon Mouth Tentacle Visual". That
+/// placeholder name is not a string benilla was ever meant to render — it is Blizzard's own note
+/// to themselves about what this attribute does to the spell, and it reached a player's screen
+/// because we printed the name unconditionally.
+const ATTR_EX3_NO_CASTING_BAR_TEXT: u32 = 0x4;
 /// `Attributes` bit `0x2` — the "uses the ranged slot" attribute (mangos `SPELL_ATTR_RANGED`).
 /// One half of the client's ranged-stance gate (module docs).
 const ATTR_RANGED: u32 = 0x2;

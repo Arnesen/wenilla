@@ -160,7 +160,7 @@ fn pet_feedback_key(reason: u8) -> Option<&'static str> {
 pub(super) fn pet_cast_failed(spell_id: u32, reason: Option<u8>, errors: &mut CastErrors) {
     debug!("net: pet cast failed — spell {spell_id} reason {reason:?}");
     if let Some(reason) = reason {
-        errors.0.push((spell_id, reason));
+        errors.push_local(spell_id, reason);
     }
 }
 

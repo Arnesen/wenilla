@@ -459,13 +459,38 @@ fn get_number_parses_the_text() {
 
 #[test]
 fn key_and_char_paths_never_fire_generic_handlers() {
-    // OnKeyDown/OnChar aren't even in SCRIPT_KINDS, so SetScript rejects them — proving the runtime
-    // has no generic keyboard slots to fire (the C++ override replaced them).
-    let s = script();
-    let err = s
-        .run(r#"CreateFrame("EditBox", "E"):SetScript("OnChar", function() end)"#)
-        .unwrap_err();
-    assert!(err.to_string().contains("OnChar"), "{err}");
+    // The law (wow-re `frame-key-script-delivery.md` §1): `CSimpleEditBox` has its OWN input
+    // vtable (`0x77a900` char / `0x77b160` key-down) which handles the event and **never chains to
+    // the base implementation** — so a focused box's typing does not also run a generic `OnChar`
+    // bound on that same box.
+    //
+    // This used to be proved by `SetScript("OnChar", …)` *raising*, which it no longer does
+    // (decision 1319 made the three key names real). The invariant is unchanged and is now
+    // asserted directly: bind the generic handler, type into the focused box, and watch the text
+    // arrive with the handler never called.
+    let mut s = script();
+    s.run(
+        r#"
+        fired = 0
+        E = CreateFrame("EditBox", "E")
+        E:EnableKeyboard(true)
+        E:SetScript("OnChar", function() fired = fired + 1 end)
+        E:SetFocus()
+    "#,
+    )
+    .unwrap();
+    assert!(s.char_input("k"), "the focused box consumed the character");
+    assert_eq!(
+        s.eval::<String>("return E:GetText()").unwrap(),
+        "k",
+        "…by inserting it through its own path"
+    );
+    assert_eq!(
+        s.eval::<i64>("return fired").unwrap(),
+        0,
+        "the box's own vtable never chains to the generic OnChar"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
 // ── history recall (`historyLines` / AddHistoryLine — decision 0288 P2) ──────────────────────

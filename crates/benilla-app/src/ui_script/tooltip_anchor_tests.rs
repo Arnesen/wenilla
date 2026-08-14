@@ -192,11 +192,16 @@ fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
 
 /// Action-bar hovers take the default corner too — ref ActionButton_SetTooltip l.366-372
 /// branches on the UberTooltips CVar, whose stock default is "1" (byte-read from WoW.exe
-/// 0x48fdd9 / default string 0x82e748; see ActionBar.xml). An empty slot renders nothing,
+/// 0x48fdd9 / default string 0x82e748; see `cvars::REGISTERED`). An empty slot renders nothing,
 /// but the anchor must already be seated — asserted through GetPoint, resolved rect or not.
+///
+/// Registered, not merely absent: before B230 the CVar was not in the table at all, so `GetCVar`
+/// answered nil and the "1" leg was reached by accident rather than by value. This seeds the real
+/// table so the pass means what it says.
 #[test]
 fn action_button_hover_takes_the_default_corner() {
-    let s = harness(&["Cooldown.xml", "ActionBar.xml"]);
+    let mut s = harness(&["Cooldown.xml", "ActionBar.xml"]);
+    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
     s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
     assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
     let ok: bool = s
@@ -210,6 +215,105 @@ fn action_button_hover_takes_the_default_corner() {
         ok,
         "action-button hover anchors the plate to UIParent's bottom-right"
     );
+}
+
+/// The other leg of that same branch, live since B230 registered the CVar: with `UberTooltips`
+/// off, an action button's plate leaves the screen corner and seats BESIDE the button — LEFT for
+/// the bars the reference lists (`MultiBarBottomRight` is the only one benilla ships; the two
+/// vertical bars are not), RIGHT for everything else, including the main bar.
+///
+/// The two anchors are read off the resolved SetPoint pair, which is what `SetOwner` actually
+/// writes: ANCHOR_RIGHT = the plate's BOTTOMLEFT on the button's TOPRIGHT, ANCHOR_LEFT its mirror
+/// (`script/tooltip/verbs.rs`).
+#[test]
+fn ubertooltips_off_seats_action_bar_plates_beside_the_button() {
+    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "MultiBars.xml"]);
+    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    s.set_cvar_engine("UberTooltips", "0");
+
+    let seat = |s: &UiScript| {
+        s.eval::<String>(
+            "local p, rel, rp = GameTooltip:GetPoint() \
+             return p .. \"/\" .. (rel and rel:GetName() or \"?\") .. \"/\" .. rp",
+        )
+        .unwrap()
+    };
+
+    s.run("BenillaActionButton_OnEnter(ActionButton3)").unwrap();
+    assert!(
+        s.eval::<bool>("return GameTooltip.default == nil").unwrap(),
+        "off: the main bar's plate is owner-anchored, not the default corner"
+    );
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsOwned(ActionButton3)")
+            .unwrap(),
+        "…owned by the button it opened from"
+    );
+    assert_eq!(
+        seat(&s),
+        "BOTTOMLEFT/ActionButton3/TOPRIGHT",
+        "ANCHOR_RIGHT — the main bar is not in the ref's LEFT set"
+    );
+
+    // MultiBarBottomRight IS in that set — the one shipped member of it.
+    s.run("BenillaActionButton_OnEnter(MultiBarBottomRightButton1)")
+        .unwrap();
+    assert_eq!(
+        seat(&s),
+        "BOTTOMRIGHT/MultiBarBottomRightButton1/TOPLEFT",
+        "ANCHOR_LEFT — MultiBarBottomRight opens toward screen centre"
+    );
+
+    // And the CVar back on restores the corner — the fork is a fork, not a one-way door.
+    s.set_cvar_engine("UberTooltips", "1");
+    s.run("BenillaActionButton_OnEnter(MultiBarBottomRightButton1)")
+        .unwrap();
+    assert!(
+        s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
+        "on: back to the screen corner"
+    );
+    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
+}
+
+/// The stance bar's own leg of the same branch (ref BonusActionBarFrame.xml l.40-45 — ANCHOR_RIGHT
+/// with no bar fork of its own), pinned separately because it is a different file's handler and a
+/// different tooltip verb; it was collapsed to the "1" leg alongside the action bar's and
+/// un-collapsed with it.
+#[test]
+fn ubertooltips_off_seats_stance_plates_beside_the_button() {
+    let mut s = harness(&["Cooldown.xml", "ActionBar.xml", "StanceBar.xml"]);
+    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    s.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
+        spell_id: 5487,
+        name: "Bear Form".into(),
+        texture: Some("Interface\\Icons\\Ability_Racial_BearForm".into()),
+        active: false,
+        castable: true,
+        cooldown: None,
+    }]);
+    s.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+    s.resolve();
+
+    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+        .unwrap();
+    assert!(
+        s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
+        "on (the stock default): the screen corner"
+    );
+
+    s.set_cvar_engine("UberTooltips", "0");
+    s.run("BenillaShapeshiftButton_OnEnter(ShapeshiftButton1)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "local p, rel, rp = GameTooltip:GetPoint() \
+             return p .. \"/\" .. (rel and rel:GetName() or \"?\") .. \"/\" .. rp",
+        )
+        .unwrap(),
+        "BOTTOMLEFT/ShapeshiftButton1/TOPRIGHT",
+        "off: ANCHOR_RIGHT, beside the button"
+    );
+    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
 }
 
 /// Buff hovers hang BELOW the button — ref BuffFrame.xml l.37 is ANCHOR_BOTTOMLEFT (the buff

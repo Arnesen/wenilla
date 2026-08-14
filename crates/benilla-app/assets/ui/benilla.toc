@@ -106,8 +106,10 @@ StanceBar.xml
 # i.e. until the server sends `SMSG_PET_SPELLS` for a live pet or charm — so a class that
 # never has one never sees it. Right after the stance bar, whose row it shares (either
 # one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
-# (CooldownFrame_SetTimer), ActionBar.xml (the `MainMenuBar` anchor target) and
-# GameTooltip.xml (its hover). It is also the pet ARC's file, so decision 1066's three
+# (CooldownFrame_SetTimer), ActionBar.xml (the `MainMenuBar` anchor target),
+# GameTooltip.xml (its hover), Fonts.xml (NORMAL_FONT_COLOR_CODE, which wraps the binding
+# a token slot's tooltip appends) and UIParent.xml (GetBindingText, which renders it).
+# It is also the pet ARC's file, so decision 1066's three
 # right-click-menu dialogs (ABANDON_PET / RENAME_PET / PETRENAMECONFIRM) register here —
 # which adds UiPanels.xml to its dependency set, already far above.
 PetActionBar.xml

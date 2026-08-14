@@ -28,7 +28,7 @@
 //! composed here on a cp2 rise: this feed owns the points diff, and the chat arc's own kinds
 //! carry it as a SYSTEM line.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use bevy::prelude::*;
 
@@ -151,7 +151,7 @@ fn feed_talents(
 }
 
 /// One talent's current rank: the highest rank whose spell is known (module doc).
-fn rank_of(t: &Talent, known: &HashSet<u32>) -> u32 {
+fn rank_of(t: &Talent, known: &BTreeSet<u32>) -> u32 {
     t.ranks
         .iter()
         .enumerate()
@@ -164,7 +164,7 @@ fn rank_of(t: &Talent, known: &HashSet<u32>) -> u32 {
 /// Build the pushed snapshot — the app's whole resolve (module doc).
 fn build_pages(
     catalog: &TalentCatalog,
-    known: &HashSet<u32>,
+    known: &BTreeSet<u32>,
     spells: &Spells,
     race: u8,
     class: u8,
@@ -341,11 +341,11 @@ mod tests {
     #[test]
     fn rank_is_the_highest_known_rank_spell() {
         let t = talent(1, 81, 0, 0, &[100, 101, 102]);
-        let known: HashSet<u32> = [100, 101].into_iter().collect();
+        let known: BTreeSet<u32> = [100, 101].into_iter().collect();
         assert_eq!(rank_of(&t, &known), 2);
-        assert_eq!(rank_of(&t, &HashSet::new()), 0);
+        assert_eq!(rank_of(&t, &BTreeSet::new()), 0);
         // A gap never happens on the live wire (learn-up-to), but the max() read stays honest.
-        let holey: HashSet<u32> = [102].into_iter().collect();
+        let holey: BTreeSet<u32> = [102].into_iter().collect();
         assert_eq!(rank_of(&t, &holey), 3);
     }
 }

@@ -27,7 +27,7 @@
 //! the skill block. That is not an approximation on the client's part: the DBC encodes the same
 //! number (Pick Lock at 60 → 300, a rogue's cap; Mining at 60 → 300).
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use benilla_formats::{LockSlot, LOCK_KEY_ITEM, LOCK_KEY_SKILL};
 use bevy::prelude::*;
@@ -129,13 +129,20 @@ pub(crate) const GO_FLAG_LOCKED: u32 = 0x2;
 /// `matched_spell` is the out-param the toast routing needs; it is written for a LockType match
 /// even when the value test then fails.
 ///
-/// One deliberate difference: the reference walks its known-spell **array** in index order, while
-/// `known` is a set. That only decides *which* of several equally-matching spells lands in
-/// `matched_spell` (a miner knows four Mining ranks, all `LockType 3`), never the outcome — the
-/// scan keeps going past an insufficient one, so the best-valued opener still wins.
+/// **The scan order is part of the answer, not an implementation detail** (decision 1312). The
+/// reference walks its known-spell **array** in index order and *returns on the first sufficient
+/// match*, so when two known spells both match the LockType and both clear the requirement, the
+/// order decides which one is cast — and that spell's name is what the cast bar reads. This was
+/// documented here for a long time as a harmless difference ("it only decides which spell lands in
+/// `matched_spell`, never the outcome"), which is false: every character knows both 6478 "Opening"
+/// and 22810 **"Opening - No Text"** — both `SPELL_EFFECT_OPEN_LOCK` on `LockType 13` (Open
+/// Kneeling), both trivially sufficient against the `Skill == 0` slots the ground containers carry
+/// — so iterating a `HashSet` put Blizzard's placeholder name on the cast bar at the hash's whim
+/// (B247). `known` is a [`BTreeSet`] for exactly that reason: ascending spell id is the reference
+/// array's own order after login, the server building `SMSG_INITIAL_SPELLS` out of a `std::map`.
 pub(crate) fn resolve_lock(
     slots: &[LockSlot],
-    known: &HashSet<u32>,
+    known: &BTreeSet<u32>,
     spells: Option<&crate::ui_action::Spells>,
     me: Option<&ObjectStore>,
     items: &crate::items::Items,
@@ -375,7 +382,7 @@ mod tests {
         let mut matched = None;
         let out = resolve_lock(
             &slots,
-            &HashSet::new(),
+            &BTreeSet::new(),
             None,
             None,
             &items,
@@ -461,7 +468,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &scholomance,
-                &HashSet::from([6247]),
+                &BTreeSet::from([6247]),
                 Some(&spells),
                 None,
                 &items,
@@ -480,7 +487,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &scholomance,
-                &HashSet::from([6247]),
+                &BTreeSet::from([6247]),
                 Some(&spells),
                 None,
                 &items,
@@ -500,7 +507,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &scholomance,
-                &HashSet::from([1804]),
+                &BTreeSet::from([1804]),
                 Some(&spells),
                 None,
                 &items,
@@ -528,7 +535,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &searing_gorge,
-                &HashSet::from([6247]),
+                &BTreeSet::from([6247]),
                 Some(&spells),
                 None,
                 &items,
@@ -559,7 +566,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &vein,
-                &HashSet::from([2575]),
+                &BTreeSet::from([2575]),
                 Some(&with_mining),
                 None,
                 &items,
@@ -574,6 +581,83 @@ mod tests {
         );
     }
 
+    /// **B247** (decision 1312): two known openers on one LockType, both sufficient — the LOWEST
+    /// spell id wins, deterministically, because that is the reference array's order and the scan
+    /// returns on its first sufficient match.
+    ///
+    /// The real values: lock 43 (Hyacinth Mushroom and every other ground container) carries one
+    /// SKILL slot, `LockType 13` "Open Kneeling", `Skill 0`, `Action 0`. Three shipped spells carry
+    /// `SPELL_EFFECT_OPEN_LOCK` on type 13 — 6478 "Opening", 17667 "Light On Fire", and 22810
+    /// **"Opening - No Text"** — and `playercreateinfo_spell` grants 6478 *and* 22810 to every
+    /// race/class. Whichever this scan returns is the spell the click casts, so its Spell.dbc name
+    /// is what the cast bar prints: with a `HashSet` here the bar read Blizzard's placeholder about
+    /// half the time.
+    #[test]
+    fn two_sufficient_openers_pick_the_lower_spell_id() {
+        use benilla_formats::{OpenLock, SpellCatalog, SpellDisplay};
+
+        let mut mushroom = [LockSlot::default(); 8];
+        mushroom[0] = skill_slot(13, 0, 0);
+
+        // Both "Opening" spells: OPEN_LOCK on type 13, flat value 100 (base 99 + dice 1), which
+        // clears the slot's `Skill 0`. Identical in every input the resolver reads — the pick is
+        // decided by visit order and nothing else, which is the whole point.
+        let kneeling_opener = || SpellDisplay {
+            open_lock: Some(OpenLock {
+                lock_type: 13,
+                effect: 0,
+            }),
+            effect_base_points: [99, 0, 0],
+            effect_base_dice: [1, 0, 0],
+            ..Default::default()
+        };
+        let spells = crate::ui_action::Spells {
+            catalog: SpellCatalog::from_displays(
+                [(6478, kneeling_opener()), (22810, kneeling_opener())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..crate::ui_action::Spells::empty_for_tests()
+        };
+        let items = crate::items::Items::default();
+        let unlocked = GoFacts {
+            state: GO_STATE_READY,
+            flag_locked: false,
+            level: 0,
+        };
+
+        let mut matched = None;
+        assert_eq!(
+            resolve_lock(
+                &mushroom,
+                &BTreeSet::from([6478, 22810]),
+                Some(&spells),
+                None,
+                &items,
+                unlocked,
+                &mut matched,
+            ),
+            LockOutcome::OpenBySpell(6478),
+            "6478 \"Opening\", never 22810 \"Opening - No Text\""
+        );
+        assert_eq!(matched, Some(6478), "the toast's out-param agrees");
+
+        // Insertion order cannot change it — the set is ordered, so the scan is too.
+        let mut matched = None;
+        assert_eq!(
+            resolve_lock(
+                &mushroom,
+                &BTreeSet::from([22810, 6478]),
+                Some(&spells),
+                None,
+                &items,
+                unlocked,
+                &mut matched,
+            ),
+            LockOutcome::OpenBySpell(6478),
+        );
+    }
+
     /// An all-empty row is not a lock at all — `CMSG_GAMEOBJ_USE`.
     #[test]
     fn an_empty_row_is_unlocked() {
@@ -583,7 +667,7 @@ mod tests {
         assert_eq!(
             resolve_lock(
                 &slots,
-                &HashSet::new(),
+                &BTreeSet::new(),
                 None,
                 None,
                 &items,

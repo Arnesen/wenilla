@@ -1475,7 +1475,10 @@
         </Scripts>
     </Frame>
 
-    <Frame name="OptionsFrame" frameStrata="HIGH" enableMouse="true" hidden="true">
+    <!-- `toplevel` restored (ref OptionsFrame.xml l.3) — same class as the B180/Bagnon dialog
+         (decision 1318). NOTE our strata is HIGH where the ref is DIALOG; left as-is, flagged in
+         the record rather than silently changed. -->
+    <Frame name="OptionsFrame" frameStrata="HIGH" toplevel="true" enableMouse="true" hidden="true">
         <Size><AbsDimension x="920" y="724"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <!-- The 1.14 System-window dialog, verbatim (BACKDROP_DIALOG_32_32 — wow-ui-source

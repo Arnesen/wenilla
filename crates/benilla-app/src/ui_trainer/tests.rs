@@ -26,7 +26,7 @@ fn resolve_service(
     trainer_type: u32,
     spells: &SpellCatalog,
     skill_lines: Option<&SkillLineCatalog>,
-    known: &HashSet<u32>,
+    known: &BTreeSet<u32>,
 ) -> TrainerService {
     let mut deps = Deps::new();
     super::resolve_service(
@@ -62,7 +62,7 @@ fn snap(open: &TrainerOpen, spells: &SpellCatalog) -> Option<TrainerState> {
         open,
         spells,
         None,
-        &HashSet::new(),
+        &BTreeSet::new(),
         None,
         &mut deps.items,
         &deps.commands,
@@ -306,7 +306,7 @@ fn resolve_hops_the_learn_wrapper_to_the_taught_ability() {
         0,
         &spells,
         Some(&skills),
-        &HashSet::new(),
+        &BTreeSet::new(),
     );
     assert_eq!(svc.spell_id, 1605, "the buy id stays the wire wrapper");
     assert_eq!(
@@ -340,7 +340,7 @@ fn display_name_is_the_wire_spell_not_the_taught_one() {
         TRAINER_TYPE_TRADESKILL,
         &spells,
         Some(&skills),
-        &HashSet::new(),
+        &BTreeSet::new(),
     );
     assert_eq!(svc.name.as_deref(), Some("Apprentice Blacksmith"));
     assert_eq!(svc.subtext.as_deref(), None);
@@ -359,7 +359,7 @@ fn display_name_is_the_wire_spell_not_the_taught_one() {
         TRAINER_TYPE_TRADESKILL,
         &spells,
         Some(&skills),
-        &HashSet::new(),
+        &BTreeSet::new(),
     );
     assert_eq!(recipe.group_key, 2);
     assert_eq!(recipe.group_name, "Recipes");
@@ -392,7 +392,7 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
     let mut w = wire(2018, trainer_spell_state::RED, 1000, 20, 164);
     w.req_spells = [78, 0, 0];
     // Empty known set: the player knows nothing → the ability gate reads unmet on its own terms.
-    let svc = resolve_service(&w, TRAINER_TYPE_TRADESKILL, &spells, None, &HashSet::new());
+    let svc = resolve_service(&w, TRAINER_TYPE_TRADESKILL, &spells, None, &BTreeSet::new());
     assert_eq!(svc.spell_id, 2018);
     assert!(svc.name.is_none(), "no catalog → name in flight");
     assert_eq!(svc.cost, 1000);
@@ -429,7 +429,7 @@ fn resolve_reads_cost_state_and_gates_with_no_catalog() {
         0,
         &spells,
         None,
-        &HashSet::new(),
+        &BTreeSet::new(),
     );
     assert_eq!(plain.skill_req, None);
     assert!(plain.ability_reqs.is_empty());
@@ -447,12 +447,12 @@ fn ability_req_met_tracks_known_spells_not_the_service_category() {
     w.req_spells = [78, 0, 0]; // requires Heroic Strike (78)
 
     // Player doesn't know 78 → the prerequisite is unmet (red).
-    let unknown = resolve_service(&w, 0, &spells, None, &HashSet::new());
+    let unknown = resolve_service(&w, 0, &spells, None, &BTreeSet::new());
     assert_eq!(unknown.category, TrainerServiceCategory::Unavailable);
     assert!(!unknown.ability_reqs[0].met, "prereq unknown → unmet");
 
     // Player knows 78 → the prerequisite is met (white) EVEN THOUGH the service stays unavailable.
-    let known: HashSet<u32> = [78].into_iter().collect();
+    let known: BTreeSet<u32> = [78].into_iter().collect();
     let learned = resolve_service(&w, 0, &spells, None, &known);
     assert_eq!(learned.category, TrainerServiceCategory::Unavailable);
     assert!(
@@ -473,7 +473,7 @@ fn ability_req_shows_the_required_rank_on_real_data() {
     let mut w = wire(846, trainer_spell_state::RED, 100, 20, 0);
     w.req_spells = [78, 0, 0]; // Heroic Strike Rank 1
 
-    let known: HashSet<u32> = [78].into_iter().collect();
+    let known: BTreeSet<u32> = [78].into_iter().collect();
     let svc = resolve_service(&w, 0, &spells, None, &known);
     assert_eq!(
         svc.ability_reqs,
@@ -484,7 +484,7 @@ fn ability_req_shows_the_required_rank_on_real_data() {
         "the prereq shows its rank and reads met because the player knows it"
     );
     // Not known → same name, but unmet (red).
-    let svc = resolve_service(&w, 0, &spells, None, &HashSet::new());
+    let svc = resolve_service(&w, 0, &spells, None, &BTreeSet::new());
     assert!(!svc.ability_reqs[0].met);
     assert_eq!(svc.ability_reqs[0].name, "Heroic Strike (Rank 1)");
 }

@@ -221,3 +221,65 @@ fn a_nested_long_string_parses_as_lua_50_does() {
         .expect("nested long string must parse");
     assert_eq!(v, "a [[b]] c");
 }
+
+/// **5.0's constructor compat-semicolon, restored** — the third dialect divergence (decision 1315).
+///
+/// Lua 5.0's `constructor()` opens its field loop with `testnext(ls, ';')  /* compatibility
+/// only */` — a Lua 4.0 leftover (4.0 separated a constructor's list part from its record part
+/// with `;`) that silently eats ONE extra `;` per separator position inside a table constructor.
+/// 5.1 deleted the line. AtlasLoot's `ButtonRegistry.lua` writes `Back_Title = AL["Factions"];;`
+/// twenty times; the real client loads it (director-verified on the live 1.12.1 client), stock
+/// 5.1 answered "unexpected symbol near ';'" and the addon's registry global never existed (B266).
+#[test]
+fn a_double_semicolon_inside_a_constructor_parses_as_lua_50_does() {
+    let s = script();
+
+    // The exact corpus shape: a record field, its `;` separator, and the compat extra.
+    let out: String = s
+        .eval(
+            r#"
+            local AL = { Factions = "Factions" }
+            local reg = {
+                ["REP1"] = { Title = "The Aldor"; Back_Page = "REPMENU"; Back_Title = AL["Factions"];; };
+            }
+            return reg["REP1"].Back_Title
+        "#,
+        )
+        .expect("the ButtonRegistry shape must parse");
+    assert_eq!(out, "Factions");
+
+    // The compat skip runs at loop TOP, so a lone `;` before `}` — legal 5.0, an empty record
+    // part in 4.0 terms — is eaten the same way.
+    assert_eq!(s.eval::<i64>("local t = {;} return 1").unwrap(), 1);
+
+    // List context too: the separator may be `;` and the extra one is still absorbed.
+    let n: i64 = s.eval("local t = { 1;; 2 } return t[1] + t[2]").unwrap();
+    assert_eq!(n, 3);
+}
+
+/// **The restoration is exactly one semicolon wide, and constructor-only.** Both halves of the
+/// boundary are the client's: 5.0 eats ONE extra `;` per position (a third dies in `listfield`),
+/// and statement-level `;;` is rejected by 5.0 and 5.1 alike — the half wow-5875-re byte-verified
+/// in the client's `luaL_loadbuffer` first (`system/ui/scratch/lua-dialect.md`).
+#[test]
+fn the_compat_semicolon_is_one_wide_and_statement_level_stays_rejected() {
+    let s = script();
+
+    let err = s
+        .eval::<i64>("local t = { 1;;; 2 } return t[1]")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unexpected symbol"),
+        "a THIRD semicolon must still be a syntax error, as on 5.0: {err}"
+    );
+
+    let err = s
+        .eval::<i64>("local x = 1;; return x")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unexpected symbol"),
+        "statement-level `;;` must stay rejected — that half is byte-verified: {err}"
+    );
+}

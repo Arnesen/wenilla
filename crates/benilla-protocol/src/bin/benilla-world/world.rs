@@ -436,8 +436,11 @@ impl World {
                 spell_id,
                 success,
                 reason,
+                arg,
             } => {
-                println!("SMSG_CAST_RESULT: spell {spell_id} success={success} reason={reason:?}");
+                println!(
+                    "SMSG_CAST_RESULT: spell {spell_id} success={success} reason={reason:?} arg={arg:?}"
+                );
                 if self.dest_spell == Some(*spell_id) {
                     self.dest_verdict = Some((*spell_id, *success, *reason));
                 } else if self.cast_verdict.is_none() {

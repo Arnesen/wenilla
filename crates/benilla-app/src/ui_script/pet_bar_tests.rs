@@ -184,10 +184,23 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         1,
         "only Claw can autocast"
     );
+    // 4 emitters x the DERIVED trail length, on the one autocasting slot — and on that slot only,
+    // which is the lazy pool's own pin: the other nine buttons have no sparks at all, where they
+    // used to carry a full hidden set each.
+    let trail: usize = s.eval("return BENILLA_PET_AUTOCAST_TRAIL").unwrap();
+    assert_eq!(
+        trail, 23,
+        "the size ramp's own spacing (see PetActionBar.xml's header) comes out at 23 samples"
+    );
     assert_eq!(
         textures(&quads, "Interface\\Buttons\\GlowStar"),
-        32,
-        "4 emitters x 8 trail stars, on the one autocasting slot"
+        4 * trail,
+        "4 emitters x the trail, on the one autocasting slot"
+    );
+    assert!(
+        s.eval::<bool>("return PetActionButton1.sparks == nil")
+            .unwrap(),
+        "a button that never autocasts never pools a spark"
     );
 
     // Geometry, quoted from the ref: the bar's TOPLEFT is MainMenuBar's BOTTOMLEFT +(36,97),
@@ -628,6 +641,285 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     assert!(
         s.take_pet_actions().is_empty(),
         "an unnamed slot queues nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// **B228 — the autocast trail's motion, MEASURED off the shipped handler.**
+///
+/// nazriel reads the shine as "a bit too fast". The health pass answered that from the constants —
+/// the .m2 authors a 2.000 s loop and `BENILLA_PET_AUTOCAST_PERIOD` is 2.0 — which is a read, not a
+/// measurement: it says nothing about whether the OnUpdate wiring turns wall-clock seconds into
+/// that period, and an `elapsed` in the wrong unit would be invisible to it. So this drives the
+/// real `<OnUpdate>` with real seconds and reads the head spark's own SetPoint back.
+///
+/// What is pinned, all of it off the file (`m2bones` on `Interface\Buttons\UI-AutoCastButton.m2`):
+/// a 28.8 px square (0.02 units × 1200 px/unit × the ref Model's 1.2), one lap per 2.000 s, a
+/// corner every 0.500 s, LINEAR between them (`interp == 1` at the bone record's translation
+/// M2Track — so the half-edge sample sits at the half-time, no easing), and the four emitters one
+/// quarter-lap apart. If the reported overspeed is in the period, it fails here; if this holds and
+/// the report stands, the period is exonerated and the gap is in the trail's SHAPE.
+#[test]
+fn the_autocast_trail_laps_the_rim_once_every_two_seconds() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+
+    // Slot 4 is Claw, the one slot in the fixture with autocast RUNNING. `sparks[n]` is the pool
+    // `BenillaPetAutocast_Create` built: emitter-major, so emitter e's HEAD (age 0, the bone's own
+    // position) is index e·TRAIL + 1.
+    let head = |s: &UiScript, emitter: usize| -> (f32, f32) {
+        let expr = |axis: usize| {
+            format!(
+                "local n = {emitter} * BENILLA_PET_AUTOCAST_TRAIL + 1 \
+                 local a, b, c, x, y = PetActionButton4.sparks[n]:GetPoint() \
+                 return ({axis} == 0) and x or y"
+            )
+        };
+        (
+            s.eval::<f32>(&expr(0)).unwrap(),
+            s.eval::<f32>(&expr(1)).unwrap(),
+        )
+    };
+    let near = |got: (f32, f32), want: (f32, f32), what: &str| {
+        assert!(
+            (got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01,
+            "{what}: at {got:?}, expected {want:?}"
+        );
+    };
+
+    // 0.02 units × 1200 px/unit × 1.2 = 28.8 px across, so the corners sit ±14.4 from centre.
+    const H: f32 = 14.4;
+    let (bl, tl, tr, br) = ((-H, -H), (-H, H), (H, H), (H, -H));
+
+    // ── The clock WIRING: four half-second ticks of the shipped OnUpdate, one corner each. This
+    // is the half a constants read cannot reach — `arg1` really is seconds, and the bar's clock
+    // advances 1:1 with it.
+    let corner = |s: &mut UiScript, dt: f32, want: (f32, f32), what: &str| {
+        s.tick(dt);
+        near(head(s, 0), want, what);
+    };
+    corner(
+        &mut s,
+        0.5,
+        tl,
+        "0.5 s in: one edge, at the top-left corner",
+    );
+    corner(&mut s, 0.5, tr, "1.0 s: half a lap");
+    corner(&mut s, 0.5, br, "1.5 s: three quarters");
+    corner(
+        &mut s,
+        0.5,
+        bl,
+        "2.0 s: exactly one lap, back where it started",
+    );
+
+    // ── The position LAW, driven at exact clocks so no tick accumulation can blur it. The
+    // mid-edge sample is the `interp == 1` pin: linear means the half-time is the half-edge, and
+    // a spline-eased track would sit short of it.
+    let at = |s: &UiScript, clock: f32| -> (f32, f32) {
+        s.run(&format!(
+            "BenillaPetAutocast_Update(PetActionButton4, {clock})"
+        ))
+        .unwrap();
+        head(s, 0)
+    };
+    near(at(&s, 0.0), bl, "clock 0");
+    near(
+        at(&s, 0.25),
+        (-H, 0.0),
+        "quarter edge in: the LEFT edge's midpoint",
+    );
+    near(at(&s, 0.5), tl, "clock 0.5");
+    near(at(&s, 1.0), tr, "clock 1.0");
+    near(at(&s, 1.5), br, "clock 1.5");
+    near(at(&s, 2.0), bl, "clock 2.0 wraps onto clock 0");
+
+    // ── The trail is CONTINUOUS, which is what deriving the sample count buys (B228). No two
+    // neighbours in a trail sit further apart than the smaller of their two stars is wide, so the
+    // streak has no seam at any age. The 8-even-samples version failed this from mid-life back —
+    // 7.2 px apart with 4.3 px stars — and a row of separated dots is what reads as marching.
+    let worst_gap: f32 = s
+        .eval(
+            "local worst = 0 \
+             for k = 1, BENILLA_PET_AUTOCAST_TRAIL - 1 do \
+                 local a, b = PetActionButton4.sparks[k], PetActionButton4.sparks[k + 1] \
+                 local _, _, _, ax, ay = a:GetPoint() \
+                 local _, _, _, bx, by = b:GetPoint() \
+                 local d = math.sqrt((ax - bx) * (ax - bx) + (ay - by) * (ay - by)) \
+                 local w = math.min(a:GetWidth(), b:GetWidth()) \
+                 if d / w > worst then worst = d / w end \
+             end \
+             return worst",
+        )
+        .unwrap();
+    assert!(
+        worst_gap <= 1.0,
+        "the widest neighbour gap is {worst_gap:.2} star-widths — the streak has a seam"
+    );
+
+    // ── The four emitters are ONE LAP, a quarter apart — the file's four bones at the four
+    // corners, chasing each other (m2bones: pivots at (-0.001,0), (0.019,0), (0.019,0.02),
+    // (-0.001,0.02), same track, one corner of phase between neighbours).
+    s.run("BenillaPetAutocast_Update(PetActionButton4, 0.0)")
+        .unwrap();
+    for (e, want, name) in [
+        (0, bl, "emitter 0"),
+        (1, tl, "emitter 1"),
+        (2, tr, "emitter 2"),
+        (3, br, "emitter 3"),
+    ] {
+        near(head(&s, e), want, name);
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The pet bar plus the three files its TOOLTIP needs, in the TOC's own order: Fonts.xml (the
+/// colour codes that wrap the binding), GameTooltip.xml (the plate), and UIParent.xml — already a
+/// prerequisite for the managed stack — for `GetBindingText`, which renders the key.
+fn load_pet_bar_with_tooltip(s: &UiScript) {
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "UIParent.xml",
+        "GameTooltip.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "PetActionBar.xml",
+    ] {
+        load_xml(s, file);
+    }
+}
+
+/// A hunter bar hovered through the REAL gesture, with the real binding registry and the real CVar
+/// table behind it — `mouse_move` runs the shipped `<OnEnter>` with `this` bound, which is the only
+/// way this fork gets exercised the way nazriel exercised it.
+///
+/// Buttons are 30 px chained +8 from the bar's own origin: button 1 spans x[72,102] y[56,86] ⇒
+/// centre (87,71), button 4's left = 72 + 3·38 ⇒ centre (201,71) — the geometry
+/// `clicks_route_through_the_attack_toggle_fork` already leans on.
+const ATTACK_BUTTON: (f32, f32) = (87.0, 71.0);
+const CLAW_BUTTON: (f32, f32) = (201.0, 71.0);
+
+fn hovered_pet_bar() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The real command set and the real registered defaults, the way the app's own seed installs
+    // them — so `GetBindingKey("BONUSACTIONBUTTON1")` answers CTRL-1 (its byte-real default) and
+    // `GetCVar("UberTooltips")` answers "1" (its byte-read registrar value) rather than nil.
+    s.register_bindings(&crate::bindings::registry_commands());
+    s.register_cvars(crate::cvars::REGISTERED.iter().copied());
+    load_pet_bar_with_tooltip(&s);
+    declare_token_strings(&s);
+    s.set_pet_actions(true, true, true, hunter_slots());
+    s.fire_event("PET_BAR_UPDATE", vec![]);
+    s.resolve();
+    s
+}
+
+fn tooltip_line1(s: &UiScript) -> String {
+    s.eval::<String>("return GameTooltipTextLeft1:GetText() or \"\"")
+        .unwrap()
+}
+
+/// **B230 — Attack/Follow/Stay name their keybinding; the pet's own spells do not.**
+///
+/// nazriel: *"On 1.12 when you hover over Attack, Follow, Stay pet action buttons they show the
+/// keybinding - which is not the case with Benilla"*. The reference agrees with him and is
+/// narrower than "the pet bar": `PetActionButton_OnEnter` (PetActionBarFrame.lua l.285-305) forks
+/// on `isToken or UberTooltips == "0"`, and only THAT branch concatenates
+/// `NORMAL_FONT_COLOR_CODE.." ("..GetBindingText(GetBindingKey("BONUSACTIONBUTTON"..id), "KEY_")..")"`.
+/// The other branch is a bare `SetPetAction` and appends nothing — so a fix that suffixed every
+/// slot would be wrong, and the control below is what says ours doesn't.
+///
+/// The exact string is pinned, colour codes and all, because the ref's concatenation puts the
+/// colour BEFORE the space (`Attack|cffffd200 (CTRL-1)|r`, not `Attack |cffffd200(CTRL-1)|r` —
+/// which is what MicroMenu.xml's different-shaped version of the same idea produces).
+#[test]
+fn token_tooltips_name_their_binding_and_pet_spells_do_not() {
+    let mut s = hovered_pet_bar();
+
+    s.mouse_move(ATTACK_BUTTON.0, ATTACK_BUTTON.1);
+    s.resolve();
+    assert_eq!(
+        tooltip_line1(&s),
+        "Attack|cffffd200 (CTRL-1)|r",
+        "a command token carries BONUSACTIONBUTTON1's key in the normal-font colour"
+    );
+    // Uber on + a token ⇒ still the default corner; only the CVar-off leg owner-anchors.
+    assert!(
+        s.eval::<bool>("return GameTooltip.default ~= nil").unwrap(),
+        "a token's plate takes the default corner while UberTooltips is on"
+    );
+
+    // The CONTROL: slot 4 is Claw, a real pet spell, and it goes through the engine channel —
+    // its name, and nothing in parentheses.
+    s.mouse_move(CLAW_BUTTON.0, CLAW_BUTTON.1);
+    s.resolve();
+    let claw = tooltip_line1(&s);
+    assert_eq!(claw, "Claw", "a pet SPELL renders through SetPetAction");
+    assert!(
+        !claw.contains('('),
+        "…and appends no binding: {claw:?} (the ref's other branch)"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The append is UNCONDITIONAL in that branch, so an unbound row really does render empty
+/// parentheses — `GetBindingText` answers `""` for a nil key (UIParent.xml, transcribed from the
+/// ref's own l.1819-1821), and nothing guards the `"("`. That is the reference's behaviour, not a
+/// slip of ours: MicroButtonTooltipText guards its own suffix and this one does not.
+///
+/// Stock it is unreachable — BONUSACTIONBUTTON1-10 default to CTRL-1..CTRL-0 — so it takes a
+/// deliberate unbind to see, which is exactly what this does.
+#[test]
+fn an_unbound_token_row_renders_the_references_empty_parentheses() {
+    let mut s = hovered_pet_bar();
+    s.run(r#"SetBinding("CTRL-1")"#).unwrap();
+    assert!(
+        s.eval::<Option<String>>(r#"return GetBindingKey("BONUSACTIONBUTTON1")"#)
+            .unwrap()
+            .is_none(),
+        "the row really is unbound now"
+    );
+
+    s.mouse_move(ATTACK_BUTTON.0, ATTACK_BUTTON.1);
+    s.resolve();
+    assert_eq!(
+        tooltip_line1(&s),
+        "Attack|cffffd200 ()|r",
+        "unbound: the parentheses stay, empty — the ref's own unguarded concatenation"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The CVar is the fork's OTHER half, and it is not decoration: with `UberTooltips` off, a real pet
+/// SPELL stops going through the engine channel and takes the token branch too — same built text,
+/// same binding suffix — and the plate moves from the screen corner to beside the button
+/// (`SetOwner(this, "ANCHOR_RIGHT")`). Both are the reference's, in the same five lines.
+///
+/// This is also the row's reason to exist in `cvars::REGISTERED`: benilla registers `UberTooltips`
+/// at all because these Lua sites read it (the honest-tree rule's live-consumer half).
+#[test]
+fn ubertooltips_off_takes_the_spells_through_the_token_branch_and_moves_the_plate() {
+    let mut s = hovered_pet_bar();
+    s.set_cvar_engine("UberTooltips", "0");
+
+    s.mouse_move(CLAW_BUTTON.0, CLAW_BUTTON.1);
+    s.resolve();
+    assert_eq!(
+        tooltip_line1(&s),
+        "Claw|cffffd200 (CTRL-4)|r",
+        "with the CVar off a pet spell is built here too, binding and all"
+    );
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsOwned(PetActionButton4)")
+            .unwrap(),
+        "…and the plate sits beside the button, not at the screen corner"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
