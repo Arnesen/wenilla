@@ -833,7 +833,10 @@ pub(super) fn attach_entity_visuals(
                         benilla_world::ribbons::RibbonSeq::Host(entity),
                         // The unit's own render alpha gates its trail (0827).
                         Some(entity),
-                        None, // a streamed unit belongs to no building's doodad set
+                        // No fade sphere: a streamed unit is not a placed model — its
+                        // population is bounded by server visibility, and its trail by the
+                        // unit's own render alpha one line up.
+                        None,
                     );
                 }
             }

@@ -24,6 +24,8 @@ use std::collections::VecDeque;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::ModelRibbon;
 use benilla_formats::ParticleBlend;
+use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
+use bevy::camera::Projection;
 use bevy::prelude::*;
 
 use crate::particles::buffer::{EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
@@ -46,29 +48,6 @@ pub struct RibbonVerdict {
     pub trails: usize,
     /// …and how many committed a strip into the shared effect stream.
     pub drawn: usize,
-}
-
-/// **May a trail draw, given the rooms it belongs to?** — the room half of the draw gate, pure and
-/// total so the rule is pinned by tests without an ECS (the [`crate::model_fade`] pattern that
-/// [`crate::particles::EmitterFade::in_draw_set`] already follows).
-///
-/// - No room ([`RibbonTrail::room`] `None`) — not a building's prop. Admitted; nothing claims it.
-/// - A room whose placement is resident — [`WmoGroupVis::drawn_by`], the same predicate the prop's
-///   own submeshes are culled by, so the trail and its mesh can never disagree.
-/// - A room whose placement is **gone** — refused. This is the one place the ribbon lane must NOT
-///   take the cull's usual fail-open arm: a trail outlives its building by the frame between the
-///   placement despawning and the owner cascade reaching the trail, and one frame of an additive
-///   strip hanging where a building used to be is a bright artefact, where one frame of a missing
-///   trail is nothing at all. `crate::wmo_sky`'s skybox resolve refuses on the same asymmetry.
-fn room_admits(
-    room: Option<&crate::wmo_portal::WmoGroupVis>,
-    instance: Option<&crate::wmo_portal::WmoPortalInstance>,
-) -> bool {
-    match (room, instance) {
-        (None, _) => true,
-        (Some(r), Some(inst)) => r.drawn_by(inst),
-        (Some(_), None) => false,
-    }
 }
 
 /// One committed trail edge: the vertex pair across the node, world (Bevy) space, and its birth
@@ -127,23 +106,29 @@ pub struct RibbonTrail {
     /// particle's, and inventing a ramp on top of a gate would be building past the evidence.
     /// `None` ⇒ always drawn (a placed prop, an effect instance).
     alpha_src: Option<Entity>,
-    /// The **rooms whose visibility this trail rides** — a WMO prop's own
-    /// [`crate::wmo_portal::WmoGroupVis`], carried by value because a trail entity must not hold
-    /// that component (it would enlist the trail in `apply_model_visibility`'s group query, a
-    /// second `Visibility` writer on an entity whose `Visibility` nobody reads — decision 0025).
+    /// **Is this trail's model in the frame's scene at all?** — the placed model's own
+    /// [`crate::particles::EmitterFade`], carried by value.
     ///
-    /// It exists because **a trail is one of its model's emitters, and the reference draws a
-    /// WMO's props out of each VISIBLE group's own MODR list** (`0x695aa0` from the visible-group
-    /// walk `0x698720`, decision 0689) — a prop in a culled room is never instantiated, so it
-    /// trails nothing. We culled the prop's *mesh* and left its ribbons streaming, which is the
-    /// same omission decision 0786 fixed one lane over for particle emitters, and the same shape
-    /// as 1283's shadow/nameplate/picker: a rider that never asked whether its owner was in the
-    /// scene. Standing in Tanaris, Caverns of Time's twelve energy-trail props kept ninety
-    /// additive trails burning up through 200 yd of rock (decision 1289).
+    /// A trail is one of its model's emitters, and the reference ticks and draws a model's
+    /// emitters — quad clouds and ribbons alike — inside **that model's** draw step. So a trail
+    /// takes exactly the gate the quad clouds beside it take, from the same construction at the
+    /// same spawn site: distance fade, the far-clip wall, the lateral frustum, the exterior window,
+    /// and the room ([`crate::particles::EmitterFade::in_draw_set`]). The ribbon lane used to have
+    /// **no term of any kind** here, which is how ninety Caverns of Time trails burned up through
+    /// 200 yd of Tanaris rock (decision 1289, the room term) and how a placed prop's streamer drew
+    /// past the far-clip wall its own mesh had already been culled by (bug B39, decision 0678 —
+    /// fixed for the quad clouds and left open here).
     ///
-    /// `None` = not a building's prop (an ADT map doodad, a creature, a missile, a held item):
-    /// nothing claims it, so nothing gates it here.
-    room: Option<crate::wmo_portal::WmoGroupVis>,
+    /// By value and not as a component, because a trail entity holding an `EmitterFade` would be
+    /// picked up by the particle sim's own optional-fade query, and its `WmoGroupVis` inside would
+    /// enlist it in `apply_model_visibility`'s group query — a second `Visibility` writer on an
+    /// entity whose `Visibility` nobody reads (decision 0025).
+    ///
+    /// `None` = an ENTITY-owned trail (a creature, a GameObject, a missile, a held item), bounded
+    /// by server visibility and by [`Self::alpha_src`] instead — the same split
+    /// [`crate::particles::EmitterFade`] itself takes, and with the same far-clip backstop applied
+    /// in [`simulate_ribbons`] for the one lane server visibility does not bound (transports).
+    fade: Option<crate::particles::EmitterFade>,
     /// Committed edges, newest at the back. The live head (the current node) is appended at
     /// render time only, so the trail always connects to the emitter between commits.
     edges: VecDeque<Edge>,
@@ -211,7 +196,7 @@ pub fn spawn_ribbon(
     owner_scale: f32,
     seq: RibbonSeq,
     alpha_src: Option<Entity>,
-    room: Option<crate::wmo_portal::WmoGroupVis>,
+    fade: Option<crate::particles::EmitterFade>,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES also spawns no ribbons (one switch, whole family).
     if std::env::var_os("WOW_NO_PARTICLES").is_some() {
@@ -248,7 +233,7 @@ pub fn spawn_ribbon(
                     owner: Some(owner),
                     seq,
                     alpha_src,
-                    room,
+                    fade,
                     edges: VecDeque::new(),
                     accumulator: 0.0,
                     age: 0.0,
@@ -281,25 +266,38 @@ pub(crate) fn simulate_ribbons(
     // attached-model chain (0833).
     model_alphas: crate::model_fade::ModelAlphas,
     // Trails belong to the world lane (no booth ribbons; a booth-parked owner's strip is eaten
-    // by the shader's farclip wall, exactly as on the material path).
-    world_cam: Query<Entity, With<WorldCamera>>,
+    // by the shader's farclip wall, exactly as on the material path). The frustum/projection come
+    // with it because the draw-set gate below needs the same lateral test the quad clouds take.
+    world_cam: Query<(Entity, &GlobalTransform, &Frustum, &Projection), With<WorldCamera>>,
     // The water-plane interleave inputs — a trail is one of the model's emitters and classifies
     // above/below water like the quad clouds ([`crate::particles::far_side_of_water`]).
     interleave: crate::particles::WaterInterleave,
-    // The per-frame portal PVS, for the room gate ([`RibbonTrail::room`]).
-    portal_instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    // The draw-set gate's scene inputs — far-clip wall, exterior window, portal PVS — the SAME
+    // bundle `simulate_particles` reads, so the two emitter families cannot answer differently
+    // ([`RibbonTrail::fade`]).
+    gates: crate::particles::sim::SceneGates,
     mut verdict: ResMut<RibbonVerdict>,
-    mut trails: Query<(
-        Entity,
-        &mut RibbonTrail,
-        &mut Transform,
-        &mut GlobalTransform,
-    )>,
+    mut trails: Query<
+        (
+            Entity,
+            &mut RibbonTrail,
+            &mut Transform,
+            &mut GlobalTransform,
+        ),
+        // The camera's `&GlobalTransform` read above must be provably disjoint from these writes
+        // (a trail never rides the camera entity) — the particle sim's emitter query says the same.
+        Without<WorldCamera>,
+    >,
 ) {
     *verdict = RibbonVerdict::default();
-    let Ok(cam) = world_cam.single() else {
+    let Ok((cam, cam_tf, frustum, projection)) = world_cam.single() else {
         return;
     };
+    let cam_pos = cam_tf.translation();
+    // The far-clip wall's axis — the same forward the owner mesh's own cull measures along, so a
+    // trail and the model it belongs to cross the wall together.
+    let cam_fwd = Vec3::from(cam_tf.forward());
+    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((cam_tf, projection)));
     let dt = time.delta_secs().min(0.1);
     let now = time.elapsed_secs();
     for (entity, mut trail, mut entity_tf, mut entity_global) in &mut trails {
@@ -309,7 +307,7 @@ pub(crate) fn simulate_ribbons(
             owner,
             seq,
             alpha_src,
-            room,
+            fade,
             edges,
             accumulator,
             age,
@@ -317,13 +315,6 @@ pub(crate) fn simulate_ribbons(
             bias,
             water_bound,
         } = &mut *trail;
-        // The keyed look tracks sample on the trail's clip clock (see [`RibbonTrail::age`]):
-        // heights at edge-commit time (each edge keeps the width it was born with — the
-        // reference stores the vertex pair per edge), colour/alpha per frame for the whole strip.
-        *age += dt;
-        let ms = *age * 1000.0;
-        let h_above = def.height_above.sample_ms(ms).max(0.0);
-        let h_below = def.height_below.sample_ms(ms).max(0.0);
 
         // Owner gone (despawned missile/creature, unequipped item root) → DRAIN: no new
         // commits, the committed edges age out, and the trail despawns with its last edge
@@ -348,6 +339,70 @@ pub(crate) fn simulate_ribbons(
             continue;
         }
         verdict.trails += 1;
+
+        // The **draw-set** gate: is this trail's MODEL in the frame's scene at all? A trail is one
+        // of its model's emitters, and the reference ticks a model's emitters inside that model's
+        // draw step — so a culled model's trail neither commits nor ages. FROZEN, the same shape
+        // `simulate_particles` freezes a culled owner's pool in, resuming from frozen state with
+        // one frame's dt rather than catching up. Until now the ribbon lane had no term here at
+        // all: not distance, not the far-clip wall, not the frustum, not the exterior window, not
+        // the portal PVS (decisions 0678 / 0786 / 1289 — each of which closed this hole for the
+        // quad clouds and left it open for the strips).
+        //
+        // Only while the owner LIVES. Freezing a DRAINING trail strands it — it can never empty
+        // its edges, so it never reaches the self-despawn above and leaks for the session; the
+        // particle sim states the identical exclusion.
+        let admitted = match (head, fade.as_ref()) {
+            // A placed model — an ADT map doodad or a WMO prop. The full five-term rule, in its
+            // one spelling, against the owner model's fade sphere.
+            (Some(_), Some(f)) => f.in_draw_set(
+                cam_pos,
+                cam_fwd,
+                farclip,
+                // Lateral planes only (`intersect_far = false`): the depth bound is the far-clip
+                // term inside `in_draw_set`, deliberately — see `view::within_farclip`.
+                frustum.intersects_sphere(
+                    &CullSphere {
+                        center: f.center.into(),
+                        radius: f.radius,
+                    },
+                    false,
+                ),
+                f.exterior_admitted(&exterior_gate, camera_instance),
+                gates.room_admits(f),
+            ),
+            // ENTITY-owned — a creature, a GameObject, a missile, a held item. No fade sphere:
+            // the population is bounded by server visibility, and by `alpha_src` below. Except
+            // transports, which vmangos streams MAP-WIDE, so the bare wall applies to every
+            // world-lane trail exactly as decision 0678 applies it to every world-lane emitter.
+            // Measured live from the owner, never from a stored anchor: a frozen trail stops
+            // refreshing its anchor, so gating on that would latch a moving owner out of
+            // existence the first time it crossed the wall.
+            (Some((node, _)), None) => {
+                crate::view::within_farclip(farclip, cam_pos, cam_fwd, node, 0.0)
+            }
+            // Draining — never frozen (see above).
+            (None, _) => true,
+        };
+        if !admitted {
+            // Hold the clock with the trail. Edge expiry is measured against the SHARED clock
+            // (`now - born`), so a freeze that let `now` run on would age every stored edge out
+            // while the model was away and hand back an empty strip on re-entry — the opposite of
+            // "resumes from frozen state". Advancing `born` by the frame's dt keeps each edge's
+            // relative age exactly where the freeze found it.
+            for e in edges.iter_mut() {
+                e.born += dt;
+            }
+            continue;
+        }
+
+        // The keyed look tracks sample on the trail's clip clock (see [`RibbonTrail::age`]):
+        // heights at edge-commit time (each edge keeps the width it was born with — the
+        // reference stores the vertex pair per edge), colour/alpha per frame for the whole strip.
+        *age += dt;
+        let ms = *age * 1000.0;
+        let h_above = def.height_above.sample_ms(ms).max(0.0);
+        let h_below = def.height_below.sample_ms(ms).max(0.0);
 
         // The `+0xc0` **enable** gate, sampled LIVE against the sequence the host is playing.
         // SETTLED at the bytes (wow-re `ribbon-emitter-spec.md` §7, closed — the dispatch this
@@ -467,16 +522,6 @@ pub(crate) fn simulate_ribbons(
         // takes your own weapon's enchant trail out of your face in first person, and keeps a
         // not-yet-shown unit's trail off the screen while its body is still at alpha 0.
         if alpha_src.is_some_and(|e| model_alphas.get(e) <= 1e-3) {
-            continue;
-        }
-        // …and the room gate, for the same reason one line up and with the same shape as `lit`:
-        // the sim above still ran, only the DRAW is skipped, so walking back into the room resumes
-        // mid-strip instead of from empty ([`RibbonTrail::room`]).
-        if !room_admits(
-            room.as_ref(),
-            room.as_ref()
-                .and_then(|r| portal_instances.get(r.instance).ok()),
-        ) {
             continue;
         }
         let n = edges.len() + usize::from(head.is_some());
@@ -606,52 +651,7 @@ impl Plugin for RibbonPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{gravity_step, room_admits};
-    use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
-    use bevy::math::Affine3A;
-    use bevy::prelude::*;
-
-    /// **A trail is one of its model's emitters, so it rides the rooms its model is drawn by.**
-    ///
-    /// The reference instantiates a WMO's props out of each VISIBLE group's own MODR list
-    /// (`0x695aa0` from the visible-group walk `0x698720`, decision 0689) — a prop in a culled
-    /// room is never created, so it trails nothing. Our prop's *mesh* was culled by exactly this
-    /// predicate and its ribbons were not, which is how Caverns of Time's twelve energy-trail
-    /// props kept ninety additive strips burning up through 200 yd of rock into Tanaris while
-    /// every one of their submeshes was correctly hidden (decision 1289).
-    #[test]
-    fn a_prop_in_a_culled_room_trails_nothing_and_an_orphan_trail_refuses() {
-        let inst = |visible: Vec<bool>| WmoPortalInstance {
-            handle: Handle::default(),
-            world_from_local: Affine3A::IDENTITY,
-            name_set: 0,
-            liquid_visited: vec![false; visible.len()],
-            flooded: vec![None; visible.len()],
-            visible,
-        };
-        let room = |groups: &[u16]| WmoGroupVis {
-            instance: Entity::PLACEHOLDER,
-            groups: groups.into(),
-        };
-        let cot = inst(vec![true, false, false]);
-
-        // Not a building's prop at all — an ADT map doodad, a creature, a held item's streak.
-        assert!(room_admits(None, None), "an unclaimed trail is never gated");
-        // The room the flood reached draws; the ones it did not, do not.
-        assert!(room_admits(Some(&room(&[0])), Some(&cot)));
-        assert!(!room_admits(Some(&room(&[1, 2])), Some(&cot)));
-        // A prop several rooms name draws while ANY of them is visible — the same
-        // `drawn_by` law the submeshes take, which is the point of sharing the predicate.
-        assert!(room_admits(Some(&room(&[1, 0])), Some(&cot)));
-
-        // …and the asymmetry that must NOT be the cull's usual fail-open: a trail whose
-        // placement has despawned refuses, rather than drawing one last frame through the hole
-        // where a building used to be.
-        assert!(
-            !room_admits(Some(&room(&[0])), None),
-            "an orphaned trail draws nothing"
-        );
-    }
+    use super::gravity_step;
 
     /// The per-frame gravity term telescopes to the closed form the bytes imply: stepping
     /// `gravity · ((2·age) + dt) · dt` and advancing `age` by `dt` leaves an edge exactly

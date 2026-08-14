@@ -61,6 +61,9 @@ impl Plugin for UiChatPlugin {
             // Push before the input pass so a line is on screen the same frame it decodes (mirrors
             // the loot/merchant feeds).
             .add_systems(Update, feed::feed_chat.before(UiInput))
+            // A fresh VM gets the joined-channel mirror re-pushed once (decision 1291) — before
+            // the feed, so the reload frame's first routed line already renders numbered.
+            .add_systems(Update, channels::seed_channels.before(feed::feed_chat))
             // RequestTimePlayed() -> CMSG_PLAYED_TIME, and SMSG_PLAYED_TIME -> TIME_PLAYED_MSG.
             // Beside the chat feed because /played is a chat command and the answer prints there
             // too; before the input pass for the same reason feed_chat is.

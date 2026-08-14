@@ -1,5 +1,5 @@
-//! The **session-exit API** (decision 0674) — the four globals the game menu's Logout and Exit
-//! Game buttons call, and the two dialogs' answers to them.
+//! The **session API** (decisions 0674, 1291) — the four exit globals the game menu's Logout and
+//! Exit Game buttons call, the two dialogs' answers to them, and `ReloadUI()`.
 //!
 //! The shape is [`super::duel`]'s: nothing to read, only the outbound half. Each call queues a
 //! [`SessionRequest`] the app drains ([`super::UiScript::take_session_requests`]) and turns into a
@@ -38,6 +38,15 @@ pub enum SessionRequest {
     CancelLogout,
     /// `ForceQuit()` — end the process now, no server round trip.
     ForceQuit,
+    /// `ReloadUI()` — tear this VM down and build a fresh one, without leaving the world.
+    ///
+    /// The reference's `ReloadUI 0x4884d0` reads no arguments and returns no values; it only sets
+    /// `ds:0xb4b3f4`, and the per-frame callback `0x495590` runs the teardown/rebuild pair
+    /// (`0x490bd0` → `0x48fbf0`) on the NEXT frame — a deferral that doubles as the reentrancy
+    /// guard: the Lua state being destroyed is never the one mid-way through executing the call.
+    /// Queuing an intent the app runs outside any VM call is that same guard in this engine's
+    /// shape (wow-re `system/ui/scratch/savedvariables-protocol.md` §2, byte-verified).
+    ReloadUi,
 }
 
 impl super::UiScript {
@@ -54,7 +63,7 @@ impl super::UiScript {
     }
 }
 
-/// Register the four session-exit globals.
+/// Register the five session globals — the four exit verbs, and `ReloadUI`.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
@@ -63,6 +72,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         ("Quit", SessionRequest::Quit),
         ("CancelLogout", SessionRequest::CancelLogout),
         ("ForceQuit", SessionRequest::ForceQuit),
+        ("ReloadUI", SessionRequest::ReloadUi),
     ] {
         g.set(
             name,

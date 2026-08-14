@@ -407,6 +407,9 @@ fn gate_doodad_anim(
                     radius,
                     center,
                     instance: None,
+                    // …and no rooms either, for the same reason: a placement's particles-only
+                    // model is not a building's prop, so nothing gates it on a portal PVS.
+                    room: None,
                 };
                 fade.in_draw_set(
                     cam_pos,
@@ -420,6 +423,7 @@ fn gate_doodad_anim(
                         false,
                     ),
                     fade.exterior_admitted(&exterior_gate, camera_instance),
+                    fade.room_admitted(None), // no rooms ⇒ admitted; the single spelling, not `true`
                 )
             })
         } else {

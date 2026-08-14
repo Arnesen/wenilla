@@ -81,18 +81,37 @@ pub(crate) struct DeathNet {
     pub(crate) water_walk: bool,
 }
 
-/// The feed's change-tracking memory (the [`crate::ui_unit::UnitFeedState`] pattern — guid-keyed,
-/// first-snapshot-counts-as-edge so logging in dead brings the popup up).
+/// The feed's memory, in **two scopes** (decisions 1290/1291): the body's own state machine is
+/// world memory and survives a `/reload`; what this VM has been *told* dies with the VM.
+///
+/// The reference draws the same line by construction — its death mirror is engine-side (wow-re
+/// death-ui.md §1), so a `ReloadUI` neither re-arms the release window nor loses it, while the
+/// rebuilt UI repaints from the surviving state. Ours mirrors that: `mirror`/`died_at` stay put
+/// across a VM replacement, and the announce latches reset with the VM so the fresh frame tree
+/// hears the events the old one consumed.
 #[derive(Resource, Default)]
 struct DeathFeedState {
-    /// The last `(guid, dead, ghost)` we saw for the self player; `None` before the first
-    /// snapshot (and after a despawn — a worldport recreates the entity, same guid).
-    last: Option<(u64, bool, bool)>,
-    /// `Time::elapsed_secs_f64` at the death edge — the anchor of the client-side release window
-    /// (byte-VERIFIED, wow-re death-ui.md §1: the wire carries only the PLAYER_FIELD_BYTES timer
-    /// BIT; the client arms `now + 360000 ms` at its own alive→dead mirror-edge — so a
-    /// login-while-dead re-arms at login exactly like ours, and expiry reads 0, never negative).
+    /// **World-scoped.** The last `(guid, dead, ghost)` the self body showed — the edge that
+    /// arms and clears the release window. `None` before a world session's first snapshot.
+    mirror: Option<(u64, bool, bool)>,
+    /// **World-scoped.** `Time::elapsed_secs_f64` at the death edge — the anchor of the
+    /// client-side release window (byte-VERIFIED, wow-re death-ui.md §1: the wire carries only
+    /// the PLAYER_FIELD_BYTES timer BIT; the client arms `now + 360000 ms` at its own
+    /// alive→dead mirror-edge — so a login-while-dead re-arms at login exactly like ours, and
+    /// expiry reads 0, never negative). Deliberately NOT per-VM: a `/reload` must not restart
+    /// the six minutes — the reference's engine-side window keeps running through one.
     died_at: Option<f64>,
+    /// **VM-scoped** — the announce latches, keyed on the VM they announced to.
+    vm: crate::ui_script::VmMemo<DeathAnnounced>,
+}
+
+/// What the live VM has been told about the death state — [`DeathFeedState::vm`]'s payload
+/// (guid-keyed, first-snapshot-counts-as-edge so logging in dead brings the popup up — and so
+/// does reloading dead, which is the same situation from the frame tree's point of view).
+#[derive(Default)]
+struct DeathAnnounced {
+    /// The last `(guid, dead, ghost)` THIS VM was given an event for; `None` for a fresh VM.
+    last: Option<(u64, bool, bool)>,
     /// The last corpse-range verdict announced to the UI (`None` = nothing announced): the
     /// CORPSE_IN_RANGE / CORPSE_OUT_OF_RANGE / CORPSE_IN_INSTANCE edge memory (decision 0308 §5).
     corpse_range: Option<CorpseRange>,
@@ -196,20 +215,19 @@ fn feed_death(
         sickness_duration: sickness_duration(store.0.unit_level().unwrap_or(0)),
     });
 
-    // ── The state-machine edges (classic event semantics — module doc) ─────────────────────────
-    let prev = feed.last.filter(|&(g, ..)| g == guid);
-    feed.last = Some((guid, dead, ghost));
+    // ── The WORLD edges (the body's own state machine): the release-window anchor and the
+    // corpse asks. These run off `mirror`, which survives a VM replacement — a `/reload` while
+    // dead must neither restart the six minutes nor re-query the corpse (the cache has it).
+    let prev = feed.mirror.filter(|&(g, ..)| g == guid);
+    feed.mirror = Some((guid, dead, ghost));
     match (prev, dead, ghost) {
-        // Alive → dead (and the login-while-dead first snapshot): the DEATH popup's trigger.
+        // Alive → dead (and the login-while-dead first snapshot): arm the release window.
         (Some((_, false, false)) | None, true, false) => {
             feed.died_at = Some(now);
-            script.fire_event("PLAYER_DEAD", vec![]);
         }
-        // Dead-unreleased → ghost (the release landed: ghost aura + graveyard teleport), or →
-        // alive (a pre-release res): both are the classic PLAYER_ALIVE.
+        // Dead-unreleased → ghost (the release landed), or → alive (a pre-release res).
         (Some((_, true, false)), d, g) if g || !d => {
             feed.died_at = None;
-            script.fire_event("PLAYER_ALIVE", vec![]);
             if g {
                 // Now a ghost: ask where the corpse is (feeds the slice-2 markers + range gate).
                 let _ = net.0.send(ClientCommand::CorpseQuery);
@@ -218,7 +236,6 @@ fn feed_death(
         // Ghost → alive (reclaim / spirit healer / accepted res).
         (Some((_, _, true)), false, false) => {
             feed.died_at = None;
-            script.fire_event("PLAYER_UNGHOST", vec![]);
             // Re-ask where the corpse is — the answer is the authoritative NOT-FOUND that drops
             // the map markers. The server's own "corpse gone" push is LOOTER-gated (vmangos
             // Map.cpp:3617-3629: the unprompted u8(0) goes out only when a PvP looter exists), so
@@ -228,16 +245,36 @@ fn feed_death(
             // Director-reported: the map tombstone survived a spirit-healer res without this.
             let _ = net.0.send(ClientCommand::CorpseQuery);
         }
-        // Logging in already a ghost: no edge event (nothing was open), just the corpse ask.
+        // Logging in already a ghost: no edge, just the corpse ask.
         (None, _, true) => {
             let _ = net.0.send(ClientCommand::CorpseQuery);
         }
         _ => {}
     }
 
+    // ── The VM edges: the classic events, fired off what THIS VM has heard (module doc). A
+    // fresh VM's memo is empty, so a reload-while-dead re-fires PLAYER_DEAD to the rebuilt
+    // frame tree — the same first-snapshot-counts-as-edge that brings the popup up at a
+    // login-while-dead, which is our design's own posture for both (decision 1291).
+    let memo = feed.vm.get(&script);
+    let prev = memo.last.filter(|&(g, ..)| g == guid);
+    memo.last = Some((guid, dead, ghost));
+    match (prev, dead, ghost) {
+        (Some((_, false, false)) | None, true, false) => {
+            script.fire_event("PLAYER_DEAD", vec![]);
+        }
+        (Some((_, true, false)), d, g) if g || !d => {
+            script.fire_event("PLAYER_ALIVE", vec![]);
+        }
+        (Some((_, _, true)), false, false) => {
+            script.fire_event("PLAYER_UNGHOST", vec![]);
+        }
+        _ => {}
+    }
+
     // ── The offer/confirm announcements (edge-fired, name-gated) ───────────────────────────────
     match &death_net.resurrect {
-        Some(offer) if !feed.offer_announced => {
+        Some(offer) if !memo.offer_announced => {
             // A player caster's wire name is empty — resolve through the ask-once name cache and
             // hold the popup until it lands (the ref popup formats "%s wants to resurrect you").
             let name = if offer.name.is_empty() {
@@ -246,18 +283,18 @@ fn feed_death(
                 Some(offer.name.clone())
             };
             if let Some(name) = name {
-                feed.offer_announced = true;
+                memo.offer_announced = true;
                 script.fire_event("RESURRECT_REQUEST", vec![ScriptValue::Str(name)]);
             }
         }
-        None => feed.offer_announced = false,
+        None => memo.offer_announced = false,
         _ => {}
     }
     // The confirm is message-fired, not state-edged (decision 1068): each SMSG bumps the
     // generation, so asking the healer again after a Cancel brings the dialog back.
-    if death_net.spirit_healer.is_some() && feed.confirm_generation != death_net.confirm_generation
+    if death_net.spirit_healer.is_some() && memo.confirm_generation != death_net.confirm_generation
     {
-        feed.confirm_generation = death_net.confirm_generation;
+        memo.confirm_generation = death_net.confirm_generation;
         script.fire_event("CONFIRM_XP_LOSS", vec![]);
     }
 
@@ -286,22 +323,22 @@ fn feed_death(
     } else {
         None
     };
-    if feed.reclaim_generation != death_net.reclaim_generation {
-        feed.reclaim_generation = death_net.reclaim_generation;
-        feed.corpse_range = None; // re-announce whatever holds now (the client's 0x269 re-fire)
+    if memo.reclaim_generation != death_net.reclaim_generation {
+        memo.reclaim_generation = death_net.reclaim_generation;
+        memo.corpse_range = None; // re-announce whatever holds now (the client's 0x269 re-fire)
     }
-    if range != feed.corpse_range {
+    if range != memo.corpse_range {
         match range {
             Some(CorpseRange::In) => script.fire_event("CORPSE_IN_RANGE", vec![]),
             Some(CorpseRange::InInstance) => script.fire_event("CORPSE_IN_INSTANCE", vec![]),
             // Leaving range — and the corpse/ghost state ENDING while a range dialog could be
             // up — both land on the same hide event (the ref's OUT arm hides all three).
-            Some(CorpseRange::Out) | None if feed.corpse_range.is_some() => {
+            Some(CorpseRange::Out) | None if memo.corpse_range.is_some() => {
                 script.fire_event("CORPSE_OUT_OF_RANGE", vec![]);
             }
             _ => {}
         }
-        feed.corpse_range = range;
+        memo.corpse_range = range;
     }
 }
 

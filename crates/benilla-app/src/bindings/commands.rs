@@ -1124,4 +1124,82 @@ mod tests {
             assert!(seen.insert(s.name), "duplicate command {}", s.name);
         }
     }
+
+    /// **The registry against the real client's own two files.** Two columns of this table are
+    /// pure transcription from the 1.12 install, and both are load-bearing in a way nothing else
+    /// here can see: `runOnUp` — the mousewheel-refusal law rides it, and B265 turned entirely on
+    /// whether ours matched — and every command's default chords. A hand-typed table drifts; this
+    /// reads the source of truth instead of trusting the typing.
+    ///
+    /// `Interface\FrameXML\Bindings.xml` carries the flag, `WTF\DefaultBindings.wtf` the chords.
+    /// Both are install content, read at runtime, never committed; the test skips (passes)
+    /// without a client, the house pattern for a real-data test. Running Blizzard's own 234-row
+    /// file through our [`benilla_ui::bindings_xml`] is a second gate riding along — that is the
+    /// parser every addon's `Bindings.xml` lands in.
+    #[test]
+    fn the_registry_matches_the_installs_own_bindings() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open the 1.12 patch chain");
+
+        let xml = String::from_utf8_lossy(
+            &chain
+                .read_file("Interface\\FrameXML\\Bindings.xml")
+                .expect("the install carries Bindings.xml"),
+        )
+        .into_owned();
+        let reference = benilla_ui::bindings_xml::parse(&xml).expect("Blizzard's own file parses");
+        let run_on_up: std::collections::HashMap<&str, bool> = reference
+            .iter()
+            .map(|b| (b.name.as_str(), b.run_on_up))
+            .collect();
+
+        // `bind <CHORD> <COMMAND>`, in the file's own order — which is the order the command's
+        // Key 1 and Key 2 slots take.
+        let wtf = String::from_utf8_lossy(
+            &chain
+                .read_file("WTF\\DefaultBindings.wtf")
+                .expect("the install carries DefaultBindings.wtf"),
+        )
+        .into_owned();
+        let mut defaults: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for line in wtf.lines() {
+            let mut it = line.split_whitespace();
+            if let (Some("bind"), Some(chord), Some(command), None) =
+                (it.next(), it.next(), it.next(), it.next())
+            {
+                defaults.entry(command).or_default().push(chord);
+            }
+        }
+
+        for s in SPECS {
+            let Some(&reference_run_on_up) = run_on_up.get(s.name) else {
+                panic!(
+                    "{} is not a 1.12 binding at all — the tree is meant to be honest",
+                    s.name
+                );
+            };
+            assert_eq!(
+                s.run_on_up(),
+                reference_run_on_up,
+                "{}: runOnUp disagrees with the install's Bindings.xml — that flag decides \
+                 whether the mousewheel may be bound to this command (B265)",
+                s.name
+            );
+            let ours: Vec<&str> = [s.d1, s.d2].into_iter().flatten().collect();
+            if s.name == "OPENALLBAGS" {
+                // The one recorded divergence (0997): 1.12 splits `B`/TOGGLEBACKPACK from
+                // `SHIFT-B`/OPENALLBAGS, and benilla's single bag knob is the open-all toggle
+                // that already lived on B — so it ships wearing both.
+                assert_eq!(ours, ["B", "SHIFT-B"]);
+                continue;
+            }
+            assert_eq!(
+                ours,
+                defaults.get(s.name).cloned().unwrap_or_default(),
+                "{}: default chords disagree with the install's DefaultBindings.wtf",
+                s.name
+            );
+        }
+    }
 }

@@ -3,19 +3,25 @@
 //! In the reference every player setting is a CVar: a case-insensitively named string value with
 //! a registered default, read and written from Lua through `GetCVar`/`SetCVar`/`GetCVarDefault`
 //! (the 1.12 options panels are thin UI over this table). benilla keeps the same shape at the
-//! same seam: the **host registers** the vars it actually backs with engine knobs
-//! ([`super::UiScript::register_cvars`] — the honest-tree rule: no key without a knob), Lua
-//! reads/writes them synchronously, and each Lua write lands on the **change queue** the host
+//! same seam: the **host registers** the vars it implements
+//! ([`super::UiScript::register_cvars`] — most backed by an engine knob, a few consumed by Lua
+//! alone), Lua reads/writes them synchronously, and each Lua write lands on the **change queue** the host
 //! drains per frame ([`super::UiScript::take_cvar_changes`]) to sync its resources and mark the
 //! config file dirty. Host-side writes ([`super::UiScript::set_cvar_host`] — the loaded config,
 //! an env override) do NOT ride the queue: the host already knows, and an echo would re-dirty
 //! the file it just loaded.
 //!
 //! Values are **strings**, like the client's (`GetCVar` returns a string; consumers parse and
-//! clamp at their own edge). An unknown name warns once and no-ops — every benilla CVar is
-//! host-registered, so an unknown key is a typo or an unshipped feature, never a storage slot.
-//! Divergence, disclosed: the client also surfaces `RegisterCVar` to Lua; nothing in our shipped
-//! XML calls it, so it is not modeled until something does.
+//! clamp at their own edge). An unknown name warns once and no-ops — a benilla CVar is either
+//! host-registered or addon-declared through `RegisterCVar` (decision 1195), so an unknown key
+//! is a typo or an unshipped feature, never a storage slot.
+//!
+//! **The table dies with the VM, so persistence bridges it** (decision 1291): in the reference
+//! this store is engine memory and survives every `ReloadUI`; ours is per-VM state, replaced at
+//! every login and reload (1290/1291). The host hands each fresh VM the config file's values
+//! ([`super::UiScript::set_cvar_saved_base`]) before anything registers, and registration —
+//! either kind — starts a key at its saved value. The host folds the dying VM's table back into
+//! its persist state on the session edge, so the two halves meet.
 
 use mlua::{Lua, Value};
 
@@ -33,8 +39,26 @@ pub(crate) struct CvarSlot {
 }
 
 impl super::UiScript {
+    /// Hand registration the config file's persisted values (decision 1291): name → value, keys
+    /// lowercased here. Set **before** any `register_cvars` / addon `RegisterCVar` runs in this
+    /// VM; a name registered while present here starts at the saved value instead of its default.
+    ///
+    /// This is the bridge that makes the per-VM table behave like the reference's engine-side
+    /// one (where the store outlives every `ReloadUI`): a CVar with no host knob
+    /// (`statusBarText`) and a CVar only an addon declares would otherwise revert to default on
+    /// every VM replacement — and the saver, seeing value == default, would then *strip the
+    /// player's setting from the file*.
+    pub fn set_cvar_saved_base(&mut self, entries: impl IntoIterator<Item = (String, String)>) {
+        self.model_mut().cvars_saved_base = entries
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+    }
+
     /// Register the host-backed CVars (name, default) — boot-time, idempotent. A re-register of
-    /// a live table refreshes defaults but never clobbers a value someone already set.
+    /// a live table refreshes defaults but never clobbers a value someone already set. A fresh
+    /// registration starts at the saved-base value when the config file carries one
+    /// ([`Self::set_cvar_saved_base`]), else at the default.
     pub fn register_cvars<'a>(&mut self, vars: impl IntoIterator<Item = (&'a str, &'a str)>) {
         let mut model = self.model_mut();
         for (name, default) in vars {
@@ -42,11 +66,16 @@ impl super::UiScript {
             match model.cvars.get_mut(&key) {
                 Some(slot) => slot.default = default.to_string(),
                 None => {
+                    let value = model
+                        .cvars_saved_base
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| default.to_string());
                     model.cvars.insert(
                         key,
                         CvarSlot {
                             name: name.to_string(),
-                            value: default.to_string(),
+                            value,
                             default: default.to_string(),
                         },
                     );
@@ -153,9 +182,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let value = value.as_ref().and_then(value_to_string).unwrap_or_default();
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             let key = name.to_ascii_lowercase();
+            // The saved base outranks the declared default (decision 1291): an addon-declared
+            // CVar the player has set persists in the config file, and this lookup is how the
+            // saved value survives the VM being replaced — the declared value stays the DEFAULT,
+            // so the saver still knows what "moved off default" means for this key.
+            let saved = model.cvars_saved_base.get(&key).cloned();
             model.cvars.entry(key).or_insert(CvarSlot {
                 name,
-                value: value.clone(),
+                value: saved.unwrap_or_else(|| value.clone()),
                 default: value,
             });
             Ok(())
@@ -353,6 +387,55 @@ mod tests {
     ///
     /// It is a real 1.12 CVar (`0x83f2d0`, persisted — the client builds its SavedVariables path
     /// from it) and it had no value here at all. `Ace/AceState.lua:27` is
+    /// **Registration honors the saved base** (decision 1291) — the bridge that makes the
+    /// per-VM table behave like the reference's engine-side store: a knobless CVar keeps the
+    /// player's persisted value across a VM replacement, and the default stays the DEFAULT so
+    /// "moved off default" still means something to the saver.
+    #[test]
+    fn registration_starts_at_the_saved_value_not_the_default() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cvar_saved_base([("StatusBarText".to_string(), "1".to_string())]);
+        s.register_cvars([("statusBarText", "0"), ("farclip", "500")]);
+
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("statusBarText")"#)
+                .unwrap(),
+            "1",
+            "a saved value outranks the registered default (any key case)"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVarDefault("statusBarText")"#)
+                .unwrap(),
+            "0",
+            "…while the default stays the default"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("farclip")"#).unwrap(),
+            "500",
+            "a key the file never carried starts at its default"
+        );
+    }
+
+    /// The same law through the Lua half: an addon's `RegisterCVar` (decision 1195) starts at
+    /// the persisted value, so its setting survives the VM being replaced (1290/1291).
+    #[test]
+    fn an_addon_registered_cvar_starts_at_its_saved_value() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cvar_saved_base([("myaddon_scale".to_string(), "2.5".to_string())]);
+        s.run(r#"RegisterCVar("MyAddon_Scale", "1.0")"#).unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVar("MyAddon_Scale")"#)
+                .unwrap(),
+            "2.5"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return GetCVarDefault("MyAddon_Scale")"#)
+                .unwrap(),
+            "1.0",
+            "the declared value is the DEFAULT, not the live value"
+        );
+    }
+
     /// `ace.trim(GetCVar("realmName"))` inside `SetGameState`, which EVERY Ace addon runs at
     /// PLAYER_ENTERING_WORLD, so nil became `gsub(nil, ...)` and took the whole family down.
     ///

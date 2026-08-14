@@ -27,7 +27,7 @@ use crate::bindings::commands::SPECS;
 
 /// The page's real neighbourhood, in the manifest's own order, with the registry seeded the
 /// way the app seeds it (`crate::bindings::seed_bindings` — registration before any show).
-fn harness() -> UiScript {
+pub(crate) fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
     let cmds: Vec<KeybindCommand> = SPECS
         .iter()
@@ -78,7 +78,7 @@ fn harness() -> UiScript {
 }
 
 /// Open the options window on the Keybindings page.
-fn on_page(s: &mut UiScript) {
+pub(crate) fn on_page(s: &mut UiScript) {
     s.run(r#"ShowUIPanel(OptionsFrame); OptionsFrame_SelectCategory("Keybindings")"#)
         .unwrap();
     assert!(s.errors().is_empty(), "on page: {:?}", s.errors());

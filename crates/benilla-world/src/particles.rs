@@ -35,7 +35,7 @@ mod emitdump;
 mod model;
 mod quads;
 pub mod render;
-mod sim;
+pub(crate) mod sim; // `SceneGates` is the ribbon sim's draw-set input too (decision 1291)
 
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
@@ -459,7 +459,10 @@ impl ParticleEmitter {
 /// particle-side rule (emission LOD, no cull — decision 0151) applies only WITHIN the draw set.
 /// Attached by the terrain spawn path; entity-owned emitters (creatures/GameObjects/spells) are
 /// bounded by server visibility instead and carry no fade.
-#[derive(Component)]
+/// The rule is shared by BOTH emitter families — the quad clouds here and the ribbon trails in
+/// [`crate::ribbons`], which take this by value. `Clone` so one call site can build a placed
+/// model's gate ONCE and hand the same value to both, rather than two constructions that can drift.
+#[derive(Component, Clone)]
 pub struct EmitterFade {
     /// World bounding-sphere radius of the OWNER doodad (selects the fade band).
     pub radius: f32,
@@ -472,6 +475,27 @@ pub struct EmitterFade {
     /// which the owner submesh gets through `WmoGroupVis` — an emitter carries no such component,
     /// so it carries the instance directly).
     pub(crate) instance: Option<Entity>,
+    /// The **rooms** of [`Self::instance`] that name this owner — the prop's own
+    /// [`crate::wmo_portal::WmoGroupVis`], by value.
+    ///
+    /// It answers the question [`Self::instance`] cannot: not *which building am I furniture of*
+    /// (identity, for the exemption above) but *is the room I stand in drawn this frame*. The
+    /// reference never has to ask, because it instantiates a WMO's props out of each **visible**
+    /// group's own MODR list (`0x695aa0` from the visible-group walk `0x698720`, decision 0689) —
+    /// a prop in a culled room is never created, so it has no emitters to tick. We create props
+    /// once and cull them per frame, so every rider of a prop has to ask for itself, and this is
+    /// the one place the answer is spelled.
+    ///
+    /// `None` = not a building's prop (an ADT map doodad, a creature, a GameObject, a spell kit),
+    /// or a prop no group names at all — nothing claims it, so nothing gates it here. When it is
+    /// `Some`, its `instance` is the same entity as [`Self::instance`]: both are built from one
+    /// expression at one call site (`terrain_stream::spawn`), which is what keeps them from
+    /// drifting.
+    ///
+    /// By value and not as a component on the emitter entity, because a `WmoGroupVis` there would
+    /// enlist it in `apply_model_visibility`'s `group_only` query — a second `Visibility` writer on
+    /// an entity whose `Visibility` this lane does not read (decision 0025).
+    pub(crate) room: Option<crate::wmo_portal::WmoGroupVis>,
 }
 
 impl EmitterFade {
@@ -488,11 +512,12 @@ impl EmitterFade {
     /// The **draw-set admission rule** in one place: is the owner doodad in the frame's scene
     /// worklist, and therefore does its emitter tick and draw this frame?
     ///
-    /// Four terms, all against the owner's fade sphere (the reference's `[rec+0x68]`):
+    /// Five terms, the first four against the owner's fade sphere (the reference's `[rec+0x68]`):
     /// 1. the radius-tiered distance fade hasn't reached zero (`FUN_00683f80`),
     /// 2. the sphere is inside the far-clip wall ([`crate::view::within_farclip`]),
     /// 3. `lateral_in_frustum` — the caller's frustum sphere test on the side/near planes,
-    /// 4. `exterior_admitted` — the caller's exterior-window test (decision 0786).
+    /// 4. `exterior_admitted` — the caller's exterior-window test (decision 0786),
+    /// 5. `room_admitted` — the caller's portal-PVS test ([`Self::room_admitted`], decision 0689).
     ///
     /// Term 2 is the one bug B39 was missing (decision 0678), and it cannot be folded into term 1:
     /// [`crate::model_fade::doodad_fade_alpha`] returns a flat `1.0` for any owner bigger than
@@ -505,6 +530,12 @@ impl EmitterFade {
     /// left its emitter running, which is a mushroom's spore cloud hanging in a sealed dungeon (the
     /// director's report: `plaguelandmushroom01`, 3 emitters, 59.7 yd through a wall).
     ///
+    /// Term 5 is the same omission one layer *in*: the exterior window asks whether the BUILDING is
+    /// in the scene, and answers "yes" for every building the camera can see — which says nothing
+    /// about the sealed room inside it that this emitter's owner actually stands in. Ninety Caverns
+    /// of Time ribbon trails burned up through 200 yd of Tanaris rock on exactly that gap
+    /// (decision 1289); this is the shared spelling that decision named as the fix.
+    ///
     /// Pure and total so the rule is pinned by tests without an ECS (the `model_fade` pattern).
     pub fn in_draw_set(
         &self,
@@ -513,6 +544,7 @@ impl EmitterFade {
         farclip: f32,
         lateral_in_frustum: bool,
         exterior_admitted: bool,
+        room_admitted: bool,
     ) -> bool {
         let (dx, dz) = (self.center.x - cam_pos.x, self.center.z - cam_pos.z);
         let horiz = (dx * dx + dz * dz).sqrt();
@@ -520,6 +552,16 @@ impl EmitterFade {
             && crate::view::within_farclip(farclip, cam_pos, cam_fwd, self.center, self.radius)
             && lateral_in_frustum
             && exterior_admitted
+            && room_admitted
+    }
+
+    /// **Term 5 for this emitter, given the live placement its rooms belong to** — kept beside the
+    /// rule for the same reason [`Self::exterior_admitted`] is, so the particle sim, the ribbon sim
+    /// and the meshless-host anim gate ask one question instead of three. The arms, and why the
+    /// last one fails CLOSED, are [`crate::wmo_portal::room_admits`] — shared with the light lane,
+    /// which rides the same rooms for the same reason.
+    pub fn room_admitted(&self, instance: Option<&crate::wmo_portal::WmoPortalInstance>) -> bool {
+        crate::wmo_portal::room_admits(self.room.as_ref(), instance)
     }
 
     /// Term 4 for this emitter, given the frame's gate and the placement the camera is inside. Kept
@@ -899,8 +941,9 @@ pub(crate) mod tests {
             radius,
             center: Vec3::new(0.0, 0.0, -depth),
             instance: None,
+            room: None,
         }
-        .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true, true)
+        .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true, true, true)
     }
 
     /// **The owner-last rung, pinned** (decisions 0719/0721), through the wrapper the renderer
@@ -959,12 +1002,16 @@ pub(crate) mod tests {
             radius: 2.0,
             center: Vec3::new(0.0, 0.0, -60.0),
             instance: None,
+            room: None,
         };
-        assert!(f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, true));
-        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, false, true));
+        assert!(f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, true, true));
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, false, true, true));
         // …and the exterior-window term is ANDed the same way (0786): a doodad no portal window
         // admits is not in the worklist, so its emitter neither ticks nor draws.
-        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, false));
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, false, true));
+        // …as is the room term (0689/1289): the window admits the BUILDING, the PVS admits the
+        // ROOM, and a prop in a culled room is one the reference never instantiated at all.
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, true, false));
     }
 
     /// **The exemption, on the emitter lane.** A sealed room (no windows) admits no exterior scene
@@ -984,6 +1031,7 @@ pub(crate) mod tests {
             radius: 2.0,
             center: Vec3::new(0.0, 0.0, -60.0),
             instance,
+            room: None,
         };
 
         assert!(
@@ -1004,6 +1052,57 @@ pub(crate) mod tests {
         }
         // …and with no room claimed at all, `None == None` must NOT read as "my own building".
         assert!(!fade(None).exterior_admitted(&sealed, None));
+    }
+
+    /// **A prop in a culled room emits nothing, and an orphaned emitter refuses.**
+    ///
+    /// The reference instantiates a WMO's props out of each VISIBLE group's own MODR list
+    /// (`0x695aa0` from the visible-group walk `0x698720`, decision 0689) — a prop in a culled room
+    /// is never created, so it has no emitters to tick. Our props' *meshes* are culled by exactly
+    /// this predicate and their emitters were not, which is how Caverns of Time's twelve
+    /// energy-trail props kept ninety additive ribbon strips burning up through 200 yd of rock into
+    /// Tanaris while every one of their submeshes was correctly hidden (decision 1289).
+    ///
+    /// All four arms, including the one that fails CLOSED where the rest of the cull fails open.
+    #[test]
+    fn a_prop_in_a_culled_room_emits_nothing_and_an_orphan_refuses() {
+        use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
+        let cot = WmoPortalInstance {
+            handle: Handle::default(),
+            world_from_local: bevy::math::Affine3A::IDENTITY,
+            name_set: 0,
+            liquid_visited: vec![false; 3],
+            flooded: vec![None; 3],
+            visible: vec![true, false, false],
+        };
+        let fade = |groups: Option<&[u16]>| EmitterFade {
+            radius: 2.0,
+            center: Vec3::new(0.0, 0.0, -60.0),
+            instance: None,
+            room: groups.map(|g| WmoGroupVis {
+                instance: Entity::PLACEHOLDER,
+                groups: g.into(),
+            }),
+        };
+
+        // Not a building's prop at all — an ADT map doodad, a creature, a held item's streak.
+        assert!(
+            fade(None).room_admitted(Some(&cot)),
+            "an unclaimed emitter is never gated"
+        );
+        // The room the flood reached draws; the ones it did not, do not.
+        assert!(fade(Some(&[0])).room_admitted(Some(&cot)));
+        assert!(!fade(Some(&[1, 2])).room_admitted(Some(&cot)));
+        // A prop several rooms name draws while ANY of them is visible — the same `drawn_by` law
+        // the submeshes take, which is the whole point of sharing the predicate.
+        assert!(fade(Some(&[1, 0])).room_admitted(Some(&cot)));
+        // …and the asymmetry that must NOT be the cull's usual fail-open: an emitter whose
+        // placement has despawned refuses, rather than drawing one last frame through the hole
+        // where a building used to be.
+        assert!(
+            !fade(Some(&[0])).room_admitted(None),
+            "an orphaned emitter draws nothing"
+        );
     }
 
     /// The emitter gate and the owner mesh's own cull must agree on the boundary — they read the
@@ -1032,8 +1131,9 @@ pub(crate) mod tests {
                         radius,
                         center,
                         instance: None,
+                        room: None,
                     }
-                    .in_draw_set(cam, fwd, farclip, true, true);
+                    .in_draw_set(cam, fwd, farclip, true, true, true);
                     assert_eq!(
                         mesh_drawn, emitter_drawn,
                         "wall disagreement at farclip {farclip} depth {depth} radius {radius}"

@@ -758,6 +758,24 @@ pub(super) fn drain_chat_input(
             ParsedChat::Quit => {
                 script.queue_session_request(benilla_ui::script::SessionRequest::Quit)
             }
+            // `/reload` and `/console reloadUI` — the same deferred rebuild `ReloadUI()` queues
+            // (decision 1291), through the same session seam as the exit verbs above.
+            ParsedChat::ReloadUi => {
+                script.queue_session_request(benilla_ui::script::SessionRequest::ReloadUi)
+            }
+            ParsedChat::ConsoleUnknown { cmd } => {
+                let text = if cmd.is_empty() {
+                    "console: no command given (this client implements: reloadUI)".to_string()
+                } else {
+                    format!(
+                        "console: '{cmd}' is not implemented (this client implements: reloadUI)"
+                    )
+                };
+                chat_log.push_event(super::event::ChatEvent::text_only(
+                    super::event::ChatEventKind::System,
+                    text,
+                ));
+            }
             // The reference's own handler body, run in the VM (the 0668 posture) — `/trade`,
             // `/inspect`, the loot-method trio, and `/script`'s raw chunk.
             ParsedChat::Lua { body } => {

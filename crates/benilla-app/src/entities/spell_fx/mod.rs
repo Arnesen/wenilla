@@ -466,7 +466,9 @@ pub(crate) fn attach_effect_visuals(
             // This instance's own model alpha, chained to its host (0827/0833): a standalone
             // instance has none above it and draws exactly as before.
             Some(root),
-            None, // an effect instance belongs to no building's doodad set
+            // No fade sphere: an effect instance is not a placed model — it lives for its
+            // clip and is gated by its own model alpha one line up.
+            None,
         );
     }
     true

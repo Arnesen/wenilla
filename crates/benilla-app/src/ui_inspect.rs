@@ -83,8 +83,18 @@ pub(crate) struct InspectTarget {
 
 /// The last pushed view + the last level seen, so the feed pushes and fires only on real change
 /// (the `ui_char`/`ui_unit` discipline).
+///
+/// Both are claims about what THIS VM holds, so both sit behind a [`crate::ui_script::VmMemo`]
+/// (1290): against a `/reload`'s replacement VM (1291) the memo reads fresh, and the view is
+/// re-pushed and its events re-fired for a window the new VM has yet to hear about.
 #[derive(Resource, Default)]
 struct InspectFeedState {
+    vm: crate::ui_script::VmMemo<InspectFeedMemo>,
+}
+
+/// The per-VM half of [`InspectFeedState`] — the change bases.
+#[derive(Default)]
+struct InspectFeedMemo {
     last: Option<InspectView>,
     last_level: Option<u32>,
 }
@@ -176,6 +186,9 @@ fn feed_inspect(
     let Some(mut script) = script else {
         return;
     };
+    // Resolved against THIS VM (1290/1291): a `/reload` keeps the latched token, and the fresh
+    // memo re-pushes the view into the VM that replaced the one which last saw it.
+    let memo = feed.vm.get(&script);
 
     // The reach map: for every popup token that resolves to a live, inspectable player, its squared
     // distance from us. A token is entered ONLY if it passes the two non-distance refusals vmangos
@@ -239,10 +252,10 @@ fn feed_inspect(
 
     let Some((token, guid, entity)) = resolved else {
         // Nothing inspected (or the target isn't streamed): clear the view and empty the booth.
-        if feed.last.is_some() {
+        if memo.last.is_some() {
             script.set_inspect(None);
-            feed.last = None;
-            feed.last_level = None;
+            memo.last = None;
+            memo.last_level = None;
         }
         booth.unit = None;
         return;
@@ -270,9 +283,9 @@ fn feed_inspect(
         guid,
         slots,
     };
-    if feed.last.as_ref() != Some(&view) {
+    if memo.last.as_ref() != Some(&view) {
         script.set_inspect(Some(view.clone()));
-        feed.last = Some(view);
+        memo.last = Some(view);
         // The ref's InspectPaperDollItemSlotButton_OnEvent listens for exactly this, filtered on
         // arg1 == the inspected unit.
         script.fire_event(
@@ -281,8 +294,8 @@ fn feed_inspect(
         );
     }
     let level = store.0.unit_level();
-    if feed.last_level != level {
-        feed.last_level = level;
+    if memo.last_level != level {
+        memo.last_level = level;
         script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str(token)]);
     }
 }

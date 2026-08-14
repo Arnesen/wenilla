@@ -101,6 +101,17 @@ pub(crate) struct ReadSession {
     /// frame until ready, and re-using the *same* object closes the reader (the reference's toggle).
     pub(crate) object_guid: u64,
     pub(crate) source: ReadSource,
+    /// What the live VM has been told about this session — keyed on the VM (decisions
+    /// 1290/1291), because the session is world state (the letter is still open) while the
+    /// fires are VM state: a `/reload` with a book up replaces the frame tree, and the fresh
+    /// one needs the `ITEM_TEXT_BEGIN` and repaint the old one already consumed. Before this,
+    /// the reader never came back after a reload while the host still believed it was open.
+    told: crate::ui_script::VmMemo<ItemTextTold>,
+}
+
+/// [`ReadSession::told`]'s payload — the per-VM fire latches.
+#[derive(Default)]
+struct ItemTextTold {
     /// `ITEM_TEXT_BEGIN` fired (the reference fires it once per open, before the text lands).
     begun: bool,
     /// `ITEM_TEXT_READY` fired — the session is fully painted.
@@ -160,8 +171,7 @@ impl ItemTextOpen {
         self.pending = Some(ReadSession {
             object_guid,
             source,
-            begun: false,
-            ready: false,
+            told: Default::default(),
         });
     }
 }
@@ -257,7 +267,7 @@ fn feed_item_text(
     let Some(sess) = open.pending.as_mut() else {
         return;
     };
-    if sess.ready {
+    if sess.told.get(&script).ready {
         return;
     }
     let Some(readable) = readable(
@@ -281,7 +291,7 @@ fn feed_item_text(
         return;
     }
 
-    if !sess.begun {
+    if !sess.told.get(&script).begun {
         script.set_item_text(Some(ItemTextState {
             item: readable.title.clone(),
             creator: None,
@@ -291,7 +301,7 @@ fn feed_item_text(
             material: readable.material.clone(),
         }));
         script.fire_event("ITEM_TEXT_BEGIN", vec![]);
-        sess.begun = true;
+        sess.told.get(&script).begun = true;
     }
 
     let (creator, text, page, has_next) = match &mut sess.source {
@@ -358,7 +368,7 @@ fn feed_item_text(
         material: readable.material,
     }));
     script.fire_event("ITEM_TEXT_READY", vec![]);
-    sess.ready = true;
+    sess.told.get(&script).ready = true;
 }
 
 /// `PageTextMaterial.dbc` as a resource (decision 1105) — the reader frame's material basename,
@@ -387,7 +397,9 @@ fn drain_item_text(
             continue; // a letter has no pages; its buttons never show
         };
         if turn_page(visited, delta, |id| pages.pages.get(&id).map(|p| p.next)) {
-            sess.ready = false; // repaint on the next feed, without re-firing BEGIN
+            // Repaint on the next feed, without re-firing BEGIN (within this VM; a fresh VM
+            // re-begins regardless, which is the reload repaint).
+            sess.told.get(&script).ready = false;
         }
     }
     if script.take_item_text_close() && open.pending.take().is_some() {

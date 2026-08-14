@@ -97,8 +97,17 @@ fn booted_world() -> World {
     let mut world = World::new();
     world.init_resource::<super::AddOnIdentity>();
     world.init_resource::<crate::minimap::MinimapZoom>();
+    world.init_resource::<super::ReloadUiPending>();
     super::setup_script(&mut world);
     world
+}
+
+/// Queue and run a `ReloadUI()` the way the app does: the pending flag, then
+/// [`super::run_pending_reload`] — which checks the client state itself, so the test states it.
+fn reload(world: &mut World, state: crate::char_select::ClientState) {
+    world.insert_resource(State::new(state));
+    world.resource_mut::<super::ReloadUiPending>().0 = true;
+    super::run_pending_reload(world);
 }
 
 /// One login, driven exactly as the app drives it: the roster carries the pick, then the world-entry
@@ -293,6 +302,174 @@ fn logging_out_leaves_no_in_game_frames_behind() {
             .get_non_send_resource::<benilla_ui::script::UiScript>()
             .is_some(),
         "a boot VM stays: the character screen's text still bakes off the shared font registry"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ───────────────────────────────── ReloadUI (decision 1291) ─────────────────────────────────
+
+/// **`ReloadUI()` is a real login run in place** — the reference's teardown/rebuild pair
+/// (`0x495664`/`0x495669`), which for us is the same two edge functions the logout/login cycle
+/// runs. A fresh VM, a fresh file scope, the same character, and the UI back up — without leaving
+/// the world.
+#[test]
+fn reload_ui_is_a_fresh_login_in_place() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("reload");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    let first_session = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .session();
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "the reloaded session ran the addon's file scope again, under the same character"
+    );
+    assert_eq!(
+        probe_loads(&world),
+        1,
+        "…in a FRESH VM — a reload stacked onto the live state would count 2"
+    );
+    assert_ne!(
+        world
+            .get_non_send_resource::<benilla_ui::script::UiScript>()
+            .expect("in-world VM")
+            .session(),
+        first_session,
+        "the VM identity changed, so every VmMemo about the old session expires (1290)"
+    );
+    assert!(
+        frame_exists(&world, "PlayerFrame"),
+        "and the in-game UI is back up"
+    );
+    assert!(
+        !world.resource::<super::ReloadUiPending>().0,
+        "the request was consumed"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **A toggle staged through the API takes effect at the reload** — the whole point of the verb.
+/// `DisableAddOn` only marks the live registry; the reload's shutdown tail writes `AddOns.txt`
+/// (the reference's own last write before the state dies), and the rebuild reads it back — so the
+/// addon is genuinely not loaded, not hidden.
+#[test]
+fn a_disable_staged_in_the_session_applies_at_the_reload() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("disable");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        probe_saw(&world).is_some(),
+        "the probe loaded to begin with"
+    );
+    world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .run("DisableAddOn('SwitchProbe')")
+        .expect("DisableAddOn");
+    assert!(
+        probe_saw(&world).is_some(),
+        "disabling alone changes nothing in the live session — there is no unload (1197)"
+    );
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+
+    assert_eq!(
+        probe_saw(&world),
+        None,
+        "after the reload the disabled addon's file scope never ran"
+    );
+    let enable_file = super::addons::enable_state_path(Some(&("Realm".into(), "Onehunter".into())))
+        .expect("hermetic enable path");
+    let text = std::fs::read_to_string(&enable_file).expect("the teardown wrote AddOns.txt");
+    assert!(
+        text.contains("SwitchProbe: disabled"),
+        "…because the choice reached disk on the way down: {text}"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **Saved variables survive the reload** — written by the teardown (after `PLAYER_LOGOUT`),
+/// restored by the rebuild after file scope, so the saved value wins over the file-scope default
+/// (the byte-verified `AddOn_Load` order, 1128).
+#[test]
+fn saved_variables_round_trip_through_a_reload() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("saved");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .run("SwitchProbeDB.mark = 41")
+        .expect("mutate the saved table");
+
+    reload(&mut world, crate::char_select::ClientState::InWorld);
+
+    let mark = world
+        .get_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("in-world VM")
+        .eval::<Option<u32>>("return SwitchProbeDB and SwitchProbeDB.mark")
+        .expect("read back")
+        .unwrap_or(0);
+    assert_eq!(
+        mark, 41,
+        "the reload wrote the table down and the rebuild restored it OVER the file-scope default"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A `ReloadUI()` that fires outside the world is dropped, not deferred: at the glue there is no
+/// in-game UI to rebuild and no identity to load addons under (the reference's own gate,
+/// `0x494a50(0xa)`, refuses there too).
+#[test]
+fn reload_outside_the_world_is_dropped() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("glue-reload");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    super::end_ui_session(&mut world);
+
+    reload(&mut world, crate::char_select::ClientState::CharSelect);
+
+    assert_eq!(
+        probe_saw(&world),
+        None,
+        "no addon loaded — the request was dropped, not run against the glue"
+    );
+    assert!(
+        !frame_exists(&world, "PlayerFrame"),
+        "and no in-game UI appeared behind the character screen"
+    );
+    assert!(
+        !world.resource::<super::ReloadUiPending>().0,
+        "the stale request is consumed, so it cannot fire on the NEXT login's first frame"
     );
 
     drop(world);

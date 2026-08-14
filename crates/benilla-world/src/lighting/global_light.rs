@@ -153,6 +153,28 @@ pub(super) const MAX_POINT_LIGHTS: usize = 256;
 /// (0285: each unit picks its ≤3 nearest from this table) bounded.
 const POINT_PACK_RADIUS: f32 = 300.0;
 
+/// **The rooms a point light belongs to** — a WMO's own MOLT fixture (the groups whose MOLR names
+/// it) or one of its props' M2 lights (the groups whose MODR names the prop). Absent on an ADT map
+/// doodad's light, a creature's, a GameObject's: nothing claims those.
+///
+/// The fourth rider of decision 0689's law, after the prop's mesh, its particle clouds and its
+/// ribbon trails. The reference never needs it: a WMO's furniture is instantiated out of each
+/// **visible** group's MODR list, so a torch in a culled room does not exist and registers no
+/// light. Its light-register walk really does have no visibility term of its own — byte-verified,
+/// wow-re `m2-light-emitter-instances.md` §4: the gate for a model entering the register walk is
+/// the scene update-list activation flag `[model+0x10]`, "not visibility, not distance, not LOD",
+/// and the ≤4 cap is purely receiver-side. So the faithful fix is NOT a visibility test bolted onto
+/// the gather; it is that the SOURCE should not be there at all, which is what this component says.
+/// [`build_light_data`] drops the light while its rooms are culled, exactly as the model-visibility
+/// authority drops the prop's own submeshes.
+///
+/// A newtype rather than a bare [`crate::wmo_portal::WmoGroupVis`] on purpose: that component on a
+/// light entity would enlist it in `apply_model_visibility`'s `group_only` query — a `PointLight`
+/// carries `Visibility` and `GlobalTransform`, so it matches — making the model-visibility
+/// authority a second writer on an entity whose `Visibility` nothing reads (decision 0025).
+#[derive(Component)]
+pub struct LightRooms(pub(crate) crate::wmo_portal::WmoGroupVis);
+
 /// Main-world resource holding the packed light for this frame; extracted into the render world where
 /// [`upload_light`] writes it. Rebuilt every frame by [`build_light_data`] (cheap — one std430 pack).
 #[derive(Resource, Clone, Copy, ExtractResource)]
@@ -249,7 +271,9 @@ fn build_light_data(
     debug: Res<DebugState>,
     view: Res<ViewDistance>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    lights_q: Query<(&PointLight, &GlobalTransform)>,
+    lights_q: Query<(&PointLight, &GlobalTransform, Option<&LightRooms>)>,
+    // The per-frame portal PVS, for the room term below ([`LightRooms`]).
+    portals: Query<&crate::wmo_portal::WmoPortalInstance>,
     mut data: ResMut<WowLightData>,
     time: Res<Time>,
     mut last_dump: Local<f64>,
@@ -299,7 +323,17 @@ fn build_light_data(
     let cam_pos = cam.single().map(|t| t.translation()).unwrap_or(Vec3::ZERO);
     let mut pts: Vec<(f32, Vec3, f32, [f32; 3])> = lights_q
         .iter()
-        .filter_map(|(pl, gt)| {
+        .filter(|(_, _, rooms)| {
+            // The ROOM term (decision 0689's law, fourth lane — see [`LightRooms`]). Not a
+            // visibility test bolted onto a faithful gather: the reference's register walk has no
+            // such term either, it simply never has a culled room's torch to register. Ungated for
+            // every light that names no rooms, which is every light outside a building.
+            crate::wmo_portal::room_admits(
+                rooms.map(|r| &r.0),
+                rooms.and_then(|r| portals.get(r.0.instance).ok()),
+            )
+        })
+        .filter_map(|(pl, gt, _)| {
             let p = gt.translation();
             let d2 = p.distance_squared(cam_pos);
             (d2 < POINT_PACK_RADIUS * POINT_PACK_RADIUS).then(|| {

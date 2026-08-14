@@ -302,6 +302,13 @@ pub(crate) struct Model {
     /// The CVar table (decision 0954, [`super::cvars`]): lowercase name → slot. Host-registered
     /// only; Lua reads/writes through `GetCVar`/`SetCVar`/`GetCVarDefault`.
     pub(crate) cvars: HashMap<String, super::cvars::CvarSlot>,
+    /// The persisted values registration honors (decision 1291): lowercase name → the config
+    /// file's value, set by the host **before** any registration. A CVar registered while its
+    /// name is in here — host-registered or an addon's `RegisterCVar` — starts at the saved
+    /// value, not the default. This is what makes a knobless CVar (`statusBarText`) and an
+    /// addon-declared one survive the VM being replaced: in the reference the table is engine
+    /// memory and outlives every `ReloadUI`; ours is per-VM, so the file value is the bridge.
+    pub(crate) cvars_saved_base: HashMap<String, String>,
     /// `(registered name, new value)` per Lua `SetCVar` since the app's last
     /// [`super::UiScript::take_cvar_changes`] drain — the knob-sync + config-dirty cue.
     pub(crate) cvar_changes: Vec<(String, String)>,
@@ -1075,6 +1082,7 @@ impl Model {
             pvp_toggles: 0,
             sound_queue: Vec::new(),
             cvars: HashMap::new(),
+            cvars_saved_base: HashMap::new(),
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
             saved_names: Vec::new(),

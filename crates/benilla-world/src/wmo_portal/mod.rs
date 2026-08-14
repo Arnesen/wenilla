@@ -153,6 +153,36 @@ impl WmoGroupVis {
     }
 }
 
+/// **Is a room-bound RIDER drawn this frame?** — [`WmoGroupVis::drawn_by`] resolved for the lanes
+/// that carry their rooms *by value* rather than as a component, because their entity is not a
+/// model submesh: a prop's particle clouds and ribbon trails
+/// ([`crate::particles::EmitterFade::room_admitted`]) and a building's point-light sources
+/// ([`crate::lighting::LightRooms`]).
+///
+/// Every one of them exists for the same reason. The reference instantiates a WMO's furniture out
+/// of each **visible** group's own MODR list (`0x695aa0` from the visible-group walk `0x698720`,
+/// decision 0689), so a prop in a culled room is never created and has nothing to tick, draw or
+/// light with. We create props once and cull them per frame, so each rider has to ask for itself —
+/// and this is where the question is spelled, once, for all of them.
+///
+/// - **No rooms** — admitted. An ADT map doodad, a creature, a held item: nothing claims it.
+/// - **Rooms, placement resident** — `drawn_by`: the identical predicate the owner's own submeshes
+///   are culled by, so a model and its riders can never disagree about which frame they are in.
+/// - **Rooms, placement gone** — refused, where `drawn_by` itself fails OPEN. Deliberate, and the
+///   one asymmetric arm: a rider outlives its building by the frame between the placement
+///   despawning and the cascade reaching it, and one frame of an additive strip — or a torch —
+///   hanging where a building used to be is a bright artefact, where one frame of a missing one is
+///   nothing at all. [`crate::wmo_sky`]'s skybox resolve refuses on the same asymmetry, and 1276 is
+///   the general rule: an unknown with a testable answer must be tested, but where the error
+///   directions are lopsided, take the cheap one.
+pub fn room_admits(room: Option<&WmoGroupVis>, instance: Option<&WmoPortalInstance>) -> bool {
+    match (room, instance) {
+        (None, _) => true,
+        (Some(r), Some(inst)) => r.drawn_by(inst),
+        (Some(_), None) => false,
+    }
+}
+
 /// One placed WMO building's portal-cull state. Spawned alongside the building's geometry; despawns
 /// with the placement (it's pushed into the placement's entity list).
 #[derive(Component)]

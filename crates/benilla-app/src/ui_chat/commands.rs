@@ -82,6 +82,17 @@ pub(crate) enum SlashIndex {
     MacroUi,
     /// `/macrohelp` — the reference's own five-line help text.
     MacroHelp,
+    /// `/console <cmd>` — the reference's `SlashCmdList["CONSOLE"]` pipes into the engine's
+    /// debug-console command table. Ours implements the one console command this client has:
+    /// `reloadUI` (the reference's `"reloadUI" 0x82ea38` → `CCommand::ReloadUI 0x4035f0` →
+    /// `0x491380`, the same flag `ReloadUI()` sets). Anything else answers a plain system line
+    /// rather than silently doing nothing.
+    Console,
+    /// `/reload` — **benilla's own addition** (decision 1291): 1.12 ships `ReloadUI()` and
+    /// `/console reloadUI` but no slash alias for it (that arrived in later clients — the shipped
+    /// `GlobalStrings.lua` has no `SLASH_RELOADUI`), so this alias is a literal in [`Self::build`]
+    /// rather than data read off the chain, exactly like the ESC-menu AddOns window is ours (1197).
+    ReloadUi,
 }
 
 impl SlashIndex {
@@ -122,13 +133,17 @@ impl SlashIndex {
             Self::Cast => "CAST",
             Self::MacroUi => "MACRO",
             Self::MacroHelp => "MACROHELP",
+            Self::Console => "CONSOLE",
+            // No shipped alias string exists under this key (the walk finds nothing); the `/reload`
+            // alias is inserted as a literal in `build` — see the variant's doc.
+            Self::ReloadUi => "RELOADUI",
         }
     }
 
     /// Every registered index — the registry proper. A reference command NOT in this list resolves
     /// nowhere and answers `HELP_TEXT_SIMPLE`, exactly as an unknown command does in the reference
     /// (better than a registered handler that silently does nothing).
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 36] = [
         Self::Reply,
         Self::Join,
         Self::Leave,
@@ -163,6 +178,8 @@ impl SlashIndex {
         Self::Cast,
         Self::MacroUi,
         Self::MacroHelp,
+        Self::Console,
+        Self::ReloadUi,
     ];
 }
 
@@ -218,8 +235,8 @@ pub(crate) struct SlashCommands {
     by_alias: HashMap<String, Command>,
     /// How many aliases each source contributed — the boot line that makes a broken table (an
     /// unreadable `GlobalStrings.lua`, a missing token table) visible immediately instead of at
-    /// the first command someone types.
-    counts: (usize, usize, usize),
+    /// the first command someone types. `(slash, emote, benilla additions, dev instruments)`.
+    counts: (usize, usize, usize, usize),
 }
 
 impl SlashCommands {
@@ -270,7 +287,19 @@ impl SlashCommands {
         }
         let emote_aliases = by_alias.len() - slash_aliases;
 
-        // 3 · benilla's instruments, last so they can never shadow a shipped command.
+        // 3 · benilla's own player-facing additions — literals, because they are OURS and no
+        // shipped string carries them (each variant's doc records the why). NOT gated on dev
+        // affordances: `/reload` belongs to a player build as much as the ESC-menu AddOns window
+        // does (1197, 1291). Inserted after the walks so a shipped alias could never be shadowed
+        // even if a later client's strings arrived on the chain.
+        insert(
+            &mut by_alias,
+            "reload",
+            Command::Slash(SlashIndex::ReloadUi),
+        );
+        let added_aliases = by_alias.len() - slash_aliases - emote_aliases;
+
+        // 4 · benilla's instruments, last so they can never shadow a shipped command.
         // benilla's own instruments — `/castvis`, `/partytest`, `/chattest`, `/shot`, `/liquid`,
         // `/reaction`. A player build claims none of the aliases, so typing one falls through to
         // the reference's "unknown command" exactly as it should (decision 1179). They are gated
@@ -287,18 +316,20 @@ impl SlashCommands {
 
         Self {
             by_alias,
-            counts: (slash_aliases, emote_aliases, dev_aliases),
+            counts: (slash_aliases, emote_aliases, added_aliases, dev_aliases),
         }
     }
 
-    /// `(slash aliases, emote aliases, dev aliases)` — how many DISTINCT commands each source made
-    /// reachable (the shipped strings repeat: `EMOTE87_CMD1` and `_CMD2` are both `"/sit"`). The
-    /// boot report.
+    /// `(slash aliases, emote aliases, benilla additions, dev aliases)` — how many DISTINCT
+    /// commands each source made reachable (the shipped strings repeat: `EMOTE87_CMD1` and `_CMD2`
+    /// are both `"/sit"`). The boot report.
     ///
-    /// The third number is the seam, **made observable** (decision 1179): benilla's own instrument
+    /// The last number is the seam, **made observable** (decision 1179): benilla's own instrument
     /// commands are gated on `run_mode::dev_affordances()`, and a gate nobody can see the effect of
     /// is a gate nobody checks. A player build must print `0`, and one line of its own log says so.
-    pub(super) fn counts(&self) -> (usize, usize, usize) {
+    /// The third — the player-facing additions (`/reload`, 1291) — is deliberately separate from
+    /// both: present in every build, and never passed off as a shipped command.
+    pub(super) fn counts(&self) -> (usize, usize, usize, usize) {
         self.counts
     }
 }
@@ -330,13 +361,12 @@ pub(crate) fn build_slash_commands(
         |name| globals.get::<String>(name).ok().filter(|s| !s.is_empty()),
         |token| emotes.text_id(token),
     );
-    let (slash, emote, dev) = table.counts();
-    // The "it loaded" signal: the shipped 1.12 data yields 55 distinct aliases across the
-    // registered indices and 225 emote commands (pinned by `real_alias_table_resolves_the_shipped_
-    // commands`).
+    let (slash, emote, added, dev) = table.counts();
+    // The "it loaded" signal: the shipped 1.12 data yields the pinned alias counts (see
+    // `real_alias_table_resolves_the_shipped_commands`), plus benilla's own additions (1291).
     info!(
         "chat: slash table — {slash} command aliases, {emote} emote aliases, \
-         {dev} instrument aliases"
+         {added} benilla additions, {dev} instrument aliases"
     );
     if emote == 0 {
         error!("chat: NO emote aliases — every /wave-style command is dead (GlobalStrings?)");

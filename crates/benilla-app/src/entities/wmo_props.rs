@@ -370,11 +370,19 @@ pub(super) fn spawn_wmo_gameobject_props(
                         benilla_world::ribbons::RibbonSeq::Host(entity),
                         // No model-alpha source: a placed prop / effect instance is always drawn (0827).
                         None,
-                        // A GameObject's props ride the GameObject, not a portal-culled placement:
-                        // this WMO is the boat, and nothing floods it. (Its off-map hide reaches
-                        // the trail no better than before — a `Visibility`-hidden transport still
-                        // trails. No 1.12 transport prop authors a ribbon, so nothing renders it
-                        // today; it is named in decision 1289's residuals rather than guessed at.)
+                        // No fade sphere: a GameObject's props ride the GameObject, not a
+                        // baked world placement — that gate's centre is a fixed world point and a
+                        // mover would drag away from it (the same reason the emitters beside them
+                        // take none, stated at the top of this file), and nothing floods this WMO
+                        // to give it rooms. The far-clip wall still applies: `simulate_ribbons`
+                        // bounds a fade-less trail at the wall exactly as `simulate_particles`
+                        // bounds a fade-less emitter, which is what a map-wide-streamed transport
+                        // five kilometres away needs (decision 0678).
+                        //
+                        // Still open, and named rather than guessed at: a `Visibility`-hidden
+                        // transport trails. The trail reads its owner's render alpha, not its
+                        // `Visibility`, and the off-map hide writes the latter. No 1.12 transport
+                        // prop authors a ribbon, so nothing renders it today.
                         None,
                     )
                     .is_some()

@@ -665,7 +665,9 @@ fn spawn_slot(
             // Its own model instance — chained to the wearer above — so an enchant streamer is
             // gone with the avatar in first person and absent until the body is shown (0827/0833).
             Some(root),
-            None, // a carried item belongs to no building's doodad set
+            // No fade sphere: a carried item is not a placed model — it rides its wearer's
+            // residency, and its streamer the wearer's render alpha one line up.
+            None,
         );
     }
     debug!(

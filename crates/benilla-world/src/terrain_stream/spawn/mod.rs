@@ -9,7 +9,9 @@ pub(crate) mod prop_light;
 
 pub use assemble::spawn_model_entities;
 pub use fx::point_light;
-use fx::{spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for};
+use fx::{
+    emitter_fade, spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for,
+};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -214,14 +216,17 @@ pub(super) fn spawn_loaded_placements(
                                 .id(),
                         );
                     }
+                    // One gate for both emitter families. `None`/empty: an ADT map doodad
+                    // belongs to no building, so neither the window exemption nor the room
+                    // term has anything to key on.
+                    let fade = emitter_fade(p.transform, (radius, center), None, None);
                     spawn_emitters_for(
                         &mut commands,
                         &m.emitters,
                         p.transform,
                         host.as_ref().map(|h| h.joints.as_slice()),
                         host.as_ref().and_then(|h| h.arm),
-                        (radius, center),
-                        None, // an ADT map doodad belongs to no building
+                        &fade,
                         &mut ents,
                     );
                     spawn_ribbons_for(
@@ -231,9 +236,9 @@ pub(super) fn spawn_loaded_placements(
                         host.as_ref().map(|h| h.joints.as_slice()),
                         host.as_ref().and_then(|h| h.arm),
                         ents.first().copied(),
-                        None, // an ADT map doodad belongs to no building
+                        &fade,
                     );
-                    spawn_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
+                    spawn_lights_for(&mut commands, &m.lights, p.transform, None, &mut ents);
                     tag_world_object(
                         &mut commands,
                         &ents,
@@ -449,7 +454,14 @@ pub(super) fn spawn_loaded_placements(
                     // Interior MOLT lights (forge fire, inn fireplaces, chapel candles) — the radiating
                     // sources that light nearby NPCs/doodads AND the building's own walls/floor over
                     // their baked MOCV (decision 0273).
-                    spawn_wmo_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
+                    spawn_wmo_lights_for(
+                        &mut commands,
+                        &m.lights,
+                        &m.group_light_refs,
+                        p.portal_instance,
+                        p.transform,
+                        &mut ents,
+                    );
                     tag_world_object(
                         &mut commands,
                         &ents,
@@ -606,14 +618,23 @@ pub(super) fn spawn_loaded_placements(
                         .id(),
                 );
             }
+            // One gate for both emitter families: the prop rides its building's exterior-window
+            // exemption AND the portal PVS of the rooms that name it — the same `WmoGroupVis` the
+            // submeshes above are culled by, so a prop's mesh, its flames and its streamers are
+            // admitted or refused together (decisions 0786 / 0689 / 1289).
+            let fade = emitter_fade(
+                d.transform,
+                (radius, center),
+                portal_instance,
+                Some(&d.groups),
+            );
             spawn_emitters_for(
                 &mut commands,
                 &m.emitters,
                 d.transform,
                 host.as_ref().map(|h| h.joints.as_slice()),
                 host.as_ref().and_then(|h| h.arm),
-                (radius, center),
-                portal_instance, // a WMO prop rides its building's exemption
+                &fade,
                 &mut ents,
             );
             spawn_ribbons_for(
@@ -623,16 +644,15 @@ pub(super) fn spawn_loaded_placements(
                 host.as_ref().map(|h| h.joints.as_slice()),
                 host.as_ref().and_then(|h| h.arm),
                 ents.first().copied(),
-                // The prop's own rooms — the trail is gated by them exactly as the submeshes
-                // above are, because it is one of this model's emitters (decision 1289).
-                portal_instance
-                    .filter(|_| !d.groups.is_empty())
-                    .map(|instance| WmoGroupVis {
-                        instance,
-                        groups: d.groups.clone(),
-                    }),
+                &fade,
             );
-            spawn_lights_for(&mut commands, &m.lights, d.transform, &mut ents);
+            spawn_lights_for(
+                &mut commands,
+                &m.lights,
+                d.transform,
+                fade.room.as_ref(), // the prop's glow rides its rooms like its mesh (0689)
+                &mut ents,
+            );
             tag_world_object(
                 &mut commands,
                 &ents,

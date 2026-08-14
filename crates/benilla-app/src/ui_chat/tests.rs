@@ -1345,12 +1345,17 @@ fn real_alias_table_resolves_the_shipped_commands() {
     assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
-    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **67 distinct
-    // aliases** across the 34 registered `SlashCmdList` indices (0886 added TARGET's `/target`
+    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **68 distinct
+    // aliases** across the 36 registered `SlashCmdList` indices (0886 added TARGET's `/target`
     // `/tar` and ASSIST's `/assist` `/a` to 0881's 55; 0890 added FOLLOW's `/f` `/follow` `/fol`;
-    // 0983 added CAST's `/cast` `/spell`, MACRO's `/macro` `/m`, and MACROHELP's `/macrohelp`).
+    // 0983 added CAST's `/cast` `/spell`, MACRO's `/macro` `/m`, and MACROHELP's `/macrohelp`;
+    // 1291 added CONSOLE's `/console` — one distinct alias, SLASH_CONSOLE1 and 2 are both the
+    // same string).
     //
-    // The third number is the **seam** (decision 1179): benilla's own instrument commands
+    // The third number is benilla's own player-facing additions (1291): `/reload` — present in
+    // every build, deliberately counted apart from the shipped surface so the seam stays visible.
+    //
+    // The fourth is the instrument **seam** (decision 1179): benilla's own instrument commands
     // (`/castvis` `/chattest` `/partytest` `/shot` `/liquid` `/reaction` `/react` — 7 aliases over 6
     // commands) are registered only when `run_mode::dev_affordances()`, so a player build claims
     // none of them and `/partytest` falls through to the reference's "unknown command". Asserted
@@ -1362,8 +1367,8 @@ fn real_alias_table_resolves_the_shipped_commands() {
     };
     assert_eq!(
         table.counts(),
-        (67, 225, instruments),
-        "(slash, emote, instrument) aliases"
+        (68, 225, 1, instruments),
+        "(slash, emote, benilla addition, instrument) aliases"
     );
 }
 

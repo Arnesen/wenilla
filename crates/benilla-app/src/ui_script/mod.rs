@@ -278,6 +278,15 @@ impl Plugin for UiScriptPlugin {
                 end_ui_session,
             )
             .add_systems(Update, shutdown_on_exit)
+            // A queued `ReloadUI()` runs in `PreUpdate` — one whole frame after the drain that
+            // queued it (the reference's own deferral, `0x495590`), and BEFORE every `Update`
+            // system, so no per-VM seed or feed can run against the dying VM in the reload frame
+            // and then leave the new one unseeded until the next. In `Update` the exclusive
+            // system would float: the scheduler could place it between `sync_cvars` and
+            // `save_config`, discarding a dirty CVar edit, or after `seed_bindings`, giving one
+            // whole frame with an empty binding table. See [`run_pending_reload`].
+            .init_resource::<ReloadUiPending>()
+            .add_systems(PreUpdate, run_pending_reload)
             // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
             // handler reads this frame's number rather than the previous one's.
             .add_systems(Update, feed_framerate.before(UiInput))
@@ -607,6 +616,11 @@ pub(crate) fn end_ui_session(world: &mut World) {
     if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
         shutdown_ui_state(&mut script, identity.as_ref());
     }
+    // The CVar bridge (decision 1291): the dying VM's table folds into the persist state — after
+    // the shutdown events above (a `PLAYER_LOGOUT` handler may `SetCVar`, and in the reference
+    // that lands in an engine-side store that survives), before the VM is replaced. The next
+    // VM's registration seeds from what this writes ([`crate::cvars`]'s saved base).
+    crate::cvars::fold_dying_vm_cvars(world);
     world.insert_resource(AddOnIdentity(None));
 
     // **Everything the host is holding that came OUT of the dying VM goes with it.** A change memo
@@ -636,6 +650,52 @@ pub(crate) fn end_ui_session(world: &mut World) {
     }
 
     install_boot_vm(world);
+}
+
+/// A `ReloadUI()` waiting to run — set when [`crate::ui_logout`] drains
+/// [`benilla_ui::script::SessionRequest::ReloadUi`], consumed by [`run_pending_reload`] at the
+/// top of the next frame's `Update`.
+///
+/// A flag rather than an immediate call for the reference's own reason (`ds:0xb4b3f4`, its only
+/// writer `0x491380` and its only reader the per-frame callback `0x495590`): the VM that queued
+/// the request must not be mid-call when it is destroyed. Our drain already runs outside any VM
+/// dispatch, but the flag keeps the whole rebuild at one point in the frame — before the input
+/// pass — instead of wherever the drain happens to sit.
+#[derive(Resource, Default)]
+pub(crate) struct ReloadUiPending(pub(crate) bool);
+
+/// Run a pending `ReloadUI()`: the reference's teardown/rebuild pair (`0x495664 call 0x490bd0`,
+/// `0x495669 call 0x48fbf0`), which for us is [`end_ui_session`] then
+/// [`load_ingame_ui_on_world_entry`] — the same two functions the logout/login edges run, called
+/// back to back without leaving the world (decision 1291).
+///
+/// Everything that makes a login correct makes the reload correct **by construction**: the
+/// shutdown tail fires `PLAYER_LEAVING_WORLD`/`PLAYER_LOGOUT` and writes the four files (so a
+/// `DisableAddOn` staged in the dying VM reaches `AddOns.txt` before the rebuild reads it), the
+/// rebuild is a real login's load (fresh file scope, saved variables, `VARIABLES_LOADED`,
+/// `PLAYER_LOGIN`), and every host memory keyed on the VM's identity ([`VmMemo`], decision 1290)
+/// expires with the old session id. `PLAYER_ENTERING_WORLD` refires from [`crate::ui_unit`]'s
+/// feed once it notices the new VM, with the self descriptor already present — the reference's
+/// own ordering, where the event follows the rebuild.
+///
+/// **In-world only.** At the glue there is no in-game UI to rebuild and no identity to load
+/// addons under; the reference's own gate (`0x494a50(0xa)`) refuses there too. Dropped with a log
+/// line rather than deferred — a reload asked for at the character screen answers nothing.
+pub(crate) fn run_pending_reload(world: &mut World) {
+    if !std::mem::take(&mut world.resource_mut::<ReloadUiPending>().0) {
+        return;
+    }
+    let in_world = *world
+        .resource::<State<crate::char_select::ClientState>>()
+        .get()
+        == crate::char_select::ClientState::InWorld;
+    if !in_world {
+        info!("ui_script: ReloadUI outside the world — dropped");
+        return;
+    }
+    info!("ui_script: ReloadUI — ending the UI session and building a new one");
+    end_ui_session(world);
+    load_ingame_ui_on_world_entry(world);
 }
 
 /// `AppExit`: quitting the client — the quit / application-exit roots. Reads the message rather
@@ -1112,8 +1172,11 @@ mod game_menu_tests;
 #[cfg(test)]
 mod macro_tests;
 
+// `pub(crate)` for its `harness`/`on_page` alone: the bindings dispatch tests drive the real
+// Keybindings page through the real input systems, and building the page twice would let the two
+// copies drift.
 #[cfg(test)]
-mod keybindings_tests;
+pub(crate) mod keybindings_tests;
 #[cfg(test)]
 mod options_tests;
 

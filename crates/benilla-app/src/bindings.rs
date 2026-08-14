@@ -383,10 +383,24 @@ fn latch_and_dispatch(
     over_ui: Res<PointerOverUi>,
     dispatch: Res<BindingDispatch>,
     mut state: ResMut<BindingsState>,
+    mut same_vm: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     state.just.clear();
     state.fired.clear();
     state.amounts.clear();
+
+    // A latch indexes the dispatch table snapshotted from the VM that latched it. When the VM is
+    // replaced mid-hold (a `/reload` with a key down), releasing against the NEW table would run
+    // the wrong addon's `keystate="up"` body — or swallow the release and leave a Held latched
+    // with no Stop. So latches die with the VM they were made against (decision 1291); a key
+    // still physically down re-latches on its next press edge. The reference keeps a held key
+    // running through a `ReloadUI` (its dispatch is engine-side) — dropping is the safe
+    // divergence, over the moment the key is pressed again.
+    if let Some(script) = script.as_ref() {
+        if same_vm.claim(script) {
+            state.latched.clear();
+        }
+    }
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
@@ -552,8 +566,13 @@ fn latch_and_dispatch(
         }
     }
 
-    // ── Wheel ── a notch is a press with no release (which is exactly why the table refuses
-    // wheel chords on runOnUp commands); over UI the wheel belongs to the hovered frame.
+    // ── Wheel ── **a notch is a press AND its release, back to back.** The reference builds one
+    // chord and hands it to `CBindings::ExecuteBinding` twice — `isDown=1` at `0x483d6f`, then
+    // `isDown=0` at `0x483d82` (wow-re `system/ui/ui.md` §3, VERIFIED) — so a `runOnUp` command
+    // runs both halves in the same frame and a plain one runs its single half (the up leg is the
+    // `RunCommand 0x4b7b50` no-op: `UP + !runOnUp` returns without running anything). Before this
+    // the notch was a press with no release, which quietly made every press+release command a
+    // dead wheel binding. Over UI the wheel belongs to the hovered frame.
     // Trackpads report pixel deltas — normalized to line-equivalents so the zoom consumer's
     // feel is unchanged from when it read the scroll itself.
     let wheel = match scroll.unit {
@@ -575,25 +594,22 @@ fn latch_and_dispatch(
             key,
         };
         match dispatch.resolve(chord, false) {
-            Some(Bound::Spec(cmd)) => match &SPECS[cmd.0 as usize].kind {
-                Kind::Edge(lua) => run_lua(&mut script, lua, SPECS[cmd.0 as usize].name),
-                Kind::Host => {
-                    state.fired.push(cmd);
-                    state.amounts.push((cmd, amount));
-                }
-                // Unreachable by construction (SetBinding refuses these); harmless if a
-                // hand-edited file smuggles one in.
-                Kind::Held | Kind::EdgeUpDown(..) => {}
-            },
-            // An addon binding on the wheel is a one-shot press, the `Kind::Edge` case. A
-            // `runOnUp` one cannot be here at all — its entry carries the same press+release flag
-            // a Held/EdgeUpDown command does, and the table's wheel refusal reads exactly that.
-            Some(Bound::Addon(i)) => {
-                if let Some(a) = dispatch.addons.get(i as usize) {
-                    if !a.run_on_up {
-                        run_addon(&mut script, a, "down");
-                    }
-                }
+            // A host command is the one thing the press/release pair cannot carry: its input is
+            // the notch's ANALOG MAGNITUDE (the camera zoom's), where [`press`] can only spend
+            // the reference's 1.0 key step. It has no release half either way.
+            Some(Bound::Spec(cmd)) if matches!(SPECS[cmd.0 as usize].kind, Kind::Host) => {
+                state.fired.push(cmd);
+                state.amounts.push((cmd, amount));
+            }
+            // Everything else is the reference's own pair. `Kind::Edge` runs its one body and
+            // has nothing to release; `Kind::EdgeUpDown` runs BOTH halves now (a wheel-bound
+            // action button presses and releases in the notch, which is what makes it cast); an
+            // addon's `runOnUp` body runs twice, `keystate` "down" then "up". `Kind::Held`
+            // latches and unlatches before any consumer can observe it — which is the
+            // reference's behaviour too, its movement bit being set and cleared in the one tick.
+            Some(bound) => {
+                press(&mut state, &mut script, run_lua, &dispatch, bound, key);
+                release(&mut state, &mut script, run_lua, &dispatch, key);
             }
             None => {}
         }
@@ -983,6 +999,160 @@ mod tests {
             1,
             "the up half is delivered even while typing, like every other pressed binding's"
         );
+    }
+
+    /// **The armed capture seam, driven by real input events** (B265). The page's own tests call
+    /// `KeyBindings_OnHostKey` directly, so nothing asserted that a real notch/press ever
+    /// produces that call — and the wheel is the one input that reaches this branch through
+    /// neither `KeyboardInput` nor `MouseButtonInput`.
+    #[test]
+    fn an_armed_capture_takes_a_wheel_notch() {
+        let mut script = UiScript::new().expect("VM");
+        script.register_bindings(&registry_commands());
+        script
+            .run(
+                r#"CAPTURED = nil
+                   function KeyBindings_OnHostKey(chord) CAPTURED = chord end
+                   BenillaBindCapture(true)"#,
+            )
+            .expect("arm");
+        let mut app = vm_harness(script);
+
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert_eq!(
+            lua_str(&app, "tostring(CAPTURED)"),
+            "MOUSEWHEELUP",
+            "a wheel notch while armed is a binding key"
+        );
+        assert!(
+            !state(&app).fired(cmd::CAMERA_ZOOM_IN),
+            "the armed seam swallows the notch — it must not also zoom"
+        );
+
+        // Down, and a modified notch: the canonical prefix order rides the same path.
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: -1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert_eq!(lua_str(&app, "tostring(CAPTURED)"), "MOUSEWHEELDOWN");
+        press_key(&mut app, KeyCode::ShiftLeft);
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert_eq!(lua_str(&app, "tostring(CAPTURED)"), "SHIFT-MOUSEWHEELUP");
+    }
+
+    /// **The whole wheel-bind path in one harness** (B265): the real Keybindings page, a capsule
+    /// armed by a real click, a real notch fed the way winit feeds it, and then the bound chord
+    /// dispatching. The page's own tests call `KeyBindings_OnHostKey` by hand and this module's
+    /// tests carry no page — between them the join was never asserted.
+    #[test]
+    fn a_wheel_notch_binds_through_the_real_page_and_then_dispatches() {
+        let by_name =
+            |n: &str| Cmd(SPECS.iter().position(|s| s.name == n).expect("registered") as u16);
+        let mut s = crate::ui_script::keybindings_tests::harness();
+        crate::ui_script::keybindings_tests::on_page(&mut s);
+        const ROW: &str = "OptionsFrameContainerBodyKeybindingsRow";
+        // Expand Movement and arm JUMP's first capsule — JUMP is the classic wheel bind, and one
+        // of the 1.12 commands that is NOT `runOnUp`, so the reference accepts the wheel on it.
+        s.run(&format!("{ROW}1Header:Click()")).expect("expand");
+        s.run(&format!("{ROW}9Key1Button:Click()")).expect("select");
+        assert_eq!(
+            s.eval::<String>(&format!("return {ROW}9Description:GetText()"))
+                .unwrap(),
+            "JUMP"
+        );
+        assert!(s.bind_capture_armed());
+        let mut app = vm_harness(s);
+
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        {
+            let s = app.world().non_send_resource::<UiScript>();
+            assert_eq!(
+                s.eval::<String>(r#"return GetBindingAction("MOUSEWHEELUP")"#)
+                    .unwrap(),
+                "JUMP",
+                "a notch on an armed capsule is a bind"
+            );
+            assert!(!s.bind_capture_armed(), "the completed bind disarms");
+        }
+
+        // …and the bound chord now dispatches: the next notch jumps rather than binding.
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert!(state(&app).fired(by_name("JUMP")));
+        assert!(
+            !state(&app).fired(cmd::CAMERA_ZOOM_IN),
+            "JUMP stole the wheel from the camera, the 1.12 steal law"
+        );
+    }
+
+    /// **A notch is a press AND its release** — the reference dispatches the one chord twice,
+    /// `isDown=1` then `isDown=0` (`0x483d6f` / `0x483d82`). So a `runOnUp` binding on the wheel
+    /// runs both halves in the same frame; before this it ran neither, and the binding was dead.
+    ///
+    /// Seeded through the stored set rather than `SetBinding`, because the table refuses to put a
+    /// wheel chord on a press+release command — this is the "hand-edited file smuggles one in"
+    /// case, which is exactly the state the old arm silently dropped on the floor.
+    #[test]
+    fn a_wheel_notch_runs_both_halves_of_a_press_and_release_binding() {
+        let mut script = UiScript::new().expect("VM");
+        script.register_bindings(&registry_commands());
+        script.register_addon_bindings(
+            "ProbeAddon",
+            &benilla_ui::bindings_xml::parse(PROBE_BINDINGS).expect("well-formed"),
+        );
+        script.seed_binding_set(
+            1,
+            Some(vec![(
+                "PROBEHOLD".to_string(),
+                vec!["MOUSEWHEELUP".to_string()],
+            )]),
+        );
+        script.load_binding_set(1);
+        let mut app = vm_harness(script);
+
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 1.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert_eq!(lua_count(&app, "PROBE_DOWN"), 1, "the notch's press half");
+        assert_eq!(
+            lua_count(&app, "PROBE_UP"),
+            1,
+            "…and its release half, in the same frame — a notch has no key left to lift"
+        );
+        assert_eq!(lua_str(&app, "PROBE_LAST"), "up");
+        // Nothing is left latched: a wheel latch that outlived its notch would hold the down
+        // state forever, with no key to press to end it.
+        assert!(app.world().resource::<BindingsState>().latched.is_empty());
     }
 
     #[test]

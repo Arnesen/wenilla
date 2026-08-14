@@ -52,25 +52,35 @@ fn spawn_point_light(
     world: Vec3,
     color: [f32; 3],
     intensity_scale: f32,
+    // The rooms this source belongs to, for a light inside a building — `None` outdoors. A torch in
+    // a culled room is one the reference never instantiated, so it lights nothing
+    // ([`crate::lighting::LightRooms`], decision 0689).
+    room: Option<crate::wmo_portal::WmoGroupVis>,
     out: &mut Vec<Entity>,
 ) {
-    let e = commands
-        .spawn((
-            point_light(color, intensity_scale),
-            Transform::from_translation(world),
-        ))
-        .id();
-    out.push(e);
+    let mut e = commands.spawn((
+        point_light(color, intensity_scale),
+        Transform::from_translation(world),
+    ));
+    if let Some(room) = room {
+        e.insert(crate::lighting::LightRooms(room));
+    }
+    out.push(e.id());
 }
 
 /// Spawn a `PointLight` for each casting `type==1` (point) **M2** light of a prop at `transform` (the
 /// campfire/torch/brazier/lantern sources). Position is M2 model space at rest (bone matrix identity at
 /// rest), placed via the prop's transform like the emitters — a placed prop never animates its light
 /// bone, so the rest pose is exact here (the entity path, whose bones DO move, rides joints instead).
+///
+/// `room` is the prop's own rooms for a WMO prop (`None` for an ADT map doodad) — taken straight off
+/// the [`emitter_fade`] built for this placement, so the prop's mesh, its flames, its streamers and
+/// its glow are all admitted or refused by one value.
 pub(super) fn spawn_lights_for(
     commands: &mut Commands,
     lights: &[ModelLight],
     transform: Transform,
+    room: Option<&crate::wmo_portal::WmoGroupVis>,
     out: &mut Vec<Entity>,
 ) {
     for l in lights.iter().map(|l| &l.def) {
@@ -78,7 +88,14 @@ pub(super) fn spawn_lights_for(
             continue; // directional lights feed an ambient term; a static `0` visibility key is dark
         }
         let world = transform.transform_point(wow_to_bevy(l.position));
-        spawn_point_light(commands, world, l.diffuse_color, l.diffuse_intensity, out);
+        spawn_point_light(
+            commands,
+            world,
+            l.diffuse_color,
+            l.diffuse_intensity,
+            room.cloned(),
+            out,
+        );
     }
 }
 
@@ -88,18 +105,73 @@ pub(super) fn spawn_lights_for(
 /// is WMO model space. The MOLT curve is the same fixed WoW falloff as the M2 path — byte-verified
 /// (wow-re wmo-molt-runtime: the disk attenStart/End do not shape the GL falloff) and confirmed live in
 /// the reference GL trace (committed c/l/q = 0/0.7/0.03, diffuse = colour × intensity, ambient 0).
+///
+/// A fixture belongs to the rooms whose **MOLR** names it (`group_light_refs`, per absolute group
+/// index — the same list an interior GameObject's committed light folds), so a dungeon's brazier
+/// stops lighting the hillside above it the moment the flood leaves its room. The refs are inverted
+/// here, once per placement: a MOLT light no group names keeps no rooms and stays ungated, the same
+/// fail-open arm the prop path's empty MODR list takes.
 pub(super) fn spawn_wmo_lights_for(
     commands: &mut Commands,
     lights: &[WmoLight],
+    group_light_refs: &[Vec<u16>],
+    instance: Option<Entity>,
     transform: Transform,
     out: &mut Vec<Entity>,
 ) {
-    for l in lights {
+    for (i, l) in lights.iter().enumerate() {
         if !l.is_omni() {
             continue; // spot/directional/ambient MOLT types are not point sources
         }
+        let i = i as u16;
+        let groups: std::sync::Arc<[u16]> = group_light_refs
+            .iter()
+            .enumerate()
+            .filter(|(_, refs)| refs.contains(&i))
+            .map(|(g, _)| g as u16)
+            .collect();
         let world = transform.transform_point(wow_to_bevy(l.position));
-        spawn_point_light(commands, world, l.color, l.intensity, out);
+        spawn_point_light(
+            commands,
+            world,
+            l.color,
+            l.intensity,
+            instance
+                .filter(|_| !groups.is_empty())
+                .map(|instance| crate::wmo_portal::WmoGroupVis { instance, groups }),
+            out,
+        );
+    }
+}
+
+/// The **one draw-set gate a placed model's emitters share** — the quad clouds and the ribbon
+/// trails alike, built once per placement so the two families can never be handed different
+/// answers about whether their model is in the frame's scene.
+///
+/// `fade` is the owner's bounding sphere as `(radius, MODEL-space centre)`; the world centre is the
+/// placement applied to it — the same point the doodad's own visibility gate measures to.
+/// `instance` is the WMO placement this model's doodad set belongs to (`None` for an ADT map
+/// doodad), carrying the exterior-window exemption for a prop of the building the camera is
+/// standing in (0786). `groups` are the rooms of that placement which name this prop — `None` or
+/// empty ⇒ **no room gate**, which is the mesh path's own `d.groups.is_empty()` arm, spelled once
+/// here so the two cannot diverge (0689/1289). It is borrowed rather than owned because the shared
+/// `Arc` is exactly what wants cloning, and an ADT map doodad — the tens-of-thousands case — must
+/// not allocate an empty one per placement to say "I have no rooms".
+pub(super) fn emitter_fade(
+    transform: Transform,
+    fade: (f32, Vec3),
+    instance: Option<Entity>,
+    groups: Option<&std::sync::Arc<[u16]>>,
+) -> particles::EmitterFade {
+    let room = instance.zip(groups.filter(|g| !g.is_empty()));
+    particles::EmitterFade {
+        radius: fade.0,
+        center: transform.transform_point(fade.1),
+        instance,
+        room: room.map(|(instance, groups)| crate::wmo_portal::WmoGroupVis {
+            instance,
+            groups: groups.clone(),
+        }),
     }
 }
 
@@ -122,24 +194,16 @@ pub(super) fn spawn_wmo_lights_for(
 /// `benilla-extract partslotscan` counts **947** such emitters across **184** models; the one that
 /// surfaced it is the Blasted Lands lightning strike, whose whole burst lives in slot 1
 /// (decision 0760, bug B63).
-#[allow(clippy::too_many_arguments)] // a spawn plumbing fn: every arg is a distinct resource
 pub(super) fn spawn_emitters_for(
     commands: &mut Commands,
     emitters: &[ModelEmitter],
     transform: Transform,
     joints: Option<&[Entity]>,
     arm: Option<Entity>,
-    fade: (f32, Vec3),
-    // The WMO placement this model's doodad set belongs to (`None` for an ADT map doodad) — the
-    // exterior-window exemption for a prop of the building the camera is standing in (0786).
-    instance: Option<Entity>,
+    // The shared draw-set gate ([`emitter_fade`]), cloned onto every emitter this model spawns.
+    fade: &particles::EmitterFade,
     out: &mut Vec<Entity>,
 ) {
-    // The owner doodad's fade sphere (radius, local centre) → the emitter's draw-set gate
-    // ([`particles::EmitterFade`]): world centre = the placement applied to the bbox centre, the
-    // same point the doodad's own visibility gate measures to.
-    let (fade_radius, fade_center) = fade;
-    let world_center = transform.transform_point(fade_center);
     for em in emitters {
         // Static placements (no anim host — the ~90% tier, and every capture) have no owner to
         // follow; they despawn via the placement's entity list.
@@ -171,11 +235,7 @@ pub(super) fn spawn_emitters_for(
                 None => particles::EmitClock::Pinned,
             },
         ) {
-            commands.entity(e).insert(particles::EmitterFade {
-                radius: fade_radius,
-                center: world_center,
-                instance,
-            });
+            commands.entity(e).insert(fade.clone());
             out.push(e);
         }
     }
@@ -193,10 +253,11 @@ pub(super) fn spawn_ribbons_for(
     joints: Option<&[Entity]>,
     arm: Option<Entity>,
     fallback_owner: Option<Entity>,
-    // The rooms this placement is drawn by, for a WMO prop — `None` for an ADT map doodad. The
-    // trail's own gate, because a trail rides a joint or a submesh and neither of those states it
-    // ([`crate::ribbons::RibbonTrail::room`]).
-    room: Option<crate::wmo_portal::WmoGroupVis>,
+    // The SAME draw-set gate the quad clouds one function up are given ([`emitter_fade`]) — a trail
+    // is one of this model's emitters and is admitted by exactly the same five terms. It has to be
+    // carried explicitly because a trail rides a joint or a submesh, and neither of those states
+    // its owner model's fade sphere or its rooms ([`crate::ribbons::RibbonTrail::fade`]).
+    fade: &particles::EmitterFade,
 ) {
     for rb in ribbons {
         let (owner, use_pivot) = match joints.and_then(|js| js.get(rb.def.bone as usize)).copied() {
@@ -221,7 +282,7 @@ pub(super) fn spawn_ribbons_for(
             ),
             // No model-alpha source: a placed prop / effect instance is always drawn (0827).
             None,
-            room.clone(),
+            Some(fade.clone()),
         );
     }
 }

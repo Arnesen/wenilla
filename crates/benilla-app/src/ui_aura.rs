@@ -196,11 +196,26 @@ fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
 /// a `UNIT_AURA` trigger.
 type AuraProjection = (u32, u8, bool, Option<String>);
 
-/// The feed's edge-detection memory: per token, the projection of the list last pushed. A resource
-/// rather than a `Local` (the [`crate::ui_unit::UnitFeedState`] pattern) because the session-end
-/// teardown resets it from its own system — see [`end_session_aura_state`].
+/// The feed's edge-detection memory: per token, the projection of the list last pushed (the
+/// [`crate::ui_unit::UnitFeedState`] resource shape).
+///
+/// The edge keys live behind a [`crate::ui_script::VmMemo`]: what we last told the VM is a claim
+/// about THAT VM (1290), so against a `/reload`'s replacement (1291) — which swaps the VM while
+/// every aura stays live — the memo reads fresh and `UNIT_AURA` re-fires for the new frames. That
+/// key is also what retired the explicit reset [`end_session_aura_state`] used to run: the memo
+/// dies with the VM, while that system keeps its real job, dropping the server-side aura state.
 #[derive(Resource, Default)]
 struct AuraFeedMemory {
+    /// What we last told the VM — dies with the VM it was told to.
+    vm: crate::ui_script::VmMemo<AuraFeedMemo>,
+    /// The Bevy-clock instant [`trace_timers`] last printed (`BENILLA_AURA_TRACE`). Host
+    /// diagnostics, not VM memory — the trace cadence outlives any one VM, deliberately.
+    traced_at: f64,
+}
+
+/// The per-VM half of [`AuraFeedMemory`] — the `UNIT_AURA` edge keys.
+#[derive(Default)]
+struct AuraFeedMemo {
     present: bool,
     last: Vec<AuraProjection>,
     /// The tracking spell last pushed ([`tracking_state_of`]) — part of the player half's change
@@ -214,8 +229,6 @@ struct AuraFeedMemory {
     /// The pet half, same shape and same reason (decision 0990): a stable swap between two pets
     /// carrying identical auras must still re-fire, so the guid joins the key.
     pet_last: Option<(u64, Vec<AuraProjection>)>,
-    /// The Bevy-clock instant [`trace_timers`] last printed (`BENILLA_AURA_TRACE`).
-    traced_at: f64,
 }
 
 /// The `BENILLA_AURA_TRACE` period in seconds, or `None` when the trace is off. A set-but-unparsable
@@ -623,14 +636,19 @@ fn feed_auras(
         }
     }
 
+    // The VM half — resolved against THIS VM, so a `/reload`'s replacement (1291) reads a fresh
+    // memo and every edge below re-fires for it. Taken after the `traced_at` use above: the trace
+    // cadence is host diagnostics and must not expire with the VM.
+    let memo = mem.vm.get(&script);
+
     // Edge-trigger UNIT_AURA on a discrete change (the reference's PLAYER_AURAS_CHANGED), never on
     // the countdown alone — that's a per-frame OnUpdate on the button, not an event. The tracking
     // spell joins the key: a tracking *switch* changes no visible list, only the minimap icon.
     let projection = projection_of(&list);
-    let changed = !mem.present || projection != mem.last || tracking_spell != mem.tracking_last;
-    mem.last = projection;
-    mem.tracking_last = tracking_spell;
-    mem.present = true;
+    let changed = !memo.present || projection != memo.last || tracking_spell != memo.tracking_last;
+    memo.last = projection;
+    memo.tracking_last = tracking_spell;
+    memo.present = true;
 
     // Debug affordance (`BENILLA_AURA_DUMP=1`): when the visible set changes, log every slot the
     // player's bar will draw — raw slot, spell id, resolved name, class, and the flags nibble. The
@@ -715,8 +733,8 @@ fn feed_auras(
         .guid
         .zip(target_list.as_deref())
         .map(|(guid, l)| (guid, projection_of(l)));
-    let target_changed = target_cur.is_some() && target_cur != mem.target_last;
-    mem.target_last = target_cur;
+    let target_changed = target_cur.is_some() && target_cur != memo.target_last;
+    memo.target_last = target_cur;
 
     // The BENILLA_AURA_DUMP affordance's target half: what the target rows will draw, on change.
     if target_changed && std::env::var_os("BENILLA_AURA_DUMP").is_some() {
@@ -737,8 +755,8 @@ fn feed_auras(
         .then_some(pet_list.as_deref())
         .flatten()
         .map(|l| (pet_guid, projection_of(l)));
-    let pet_changed = pet_cur.is_some() && pet_cur != mem.pet_last;
-    mem.pet_last = pet_cur;
+    let pet_changed = pet_cur.is_some() && pet_cur != memo.pet_last;
+    memo.pet_last = pet_cur;
 
     script.set_auras("player", Some(list));
     // Clearing the token isn't a UNIT_* event (the frame reacts to PLAYER_TARGET_CHANGED, and the
@@ -808,7 +826,6 @@ fn end_session_aura_state(
     script: Option<NonSendMut<UiScript>>,
     mut durations: ResMut<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
-    mut mem: ResMut<AuraFeedMemory>,
 ) {
     if let Some(mut script) = script {
         script.set_auras("player", None);
@@ -817,7 +834,8 @@ fn end_session_aura_state(
     }
     cache.auras.clear();
     durations.by_slot.clear();
-    *mem = AuraFeedMemory::default();
+    // No [`AuraFeedMemory`] reset here: its edge keys live behind a `VmMemo` and die with the VM
+    // this session's pushes went to (1290/1291) — only the server-side state above needs a hand.
 }
 
 /// Drain the spell ids `CancelUnitBuff` queued this frame and send one `CMSG_CANCEL_AURA` each. The
@@ -878,7 +896,6 @@ mod tests {
                 level: 60,
                 stacks: 1,
             });
-        app.world_mut().resource_mut::<AuraFeedMemory>().present = true;
     }
 
     /// **Decision 0900, pinned.** A cross-map worldport despawns every tracked entity — our avatar
@@ -920,10 +937,9 @@ mod tests {
         app.update();
         assert!(app.world().resource::<PlayerAuraCache>().auras.is_empty());
         assert!(app.world().resource::<AuraDurations>().by_slot.is_empty());
-        assert!(
-            !app.world().resource::<AuraFeedMemory>().present,
-            "the edge memory resets too, so the next character's first list counts as an edge"
-        );
+        // The feed's edge memory needs no teardown assertion any more: it sits behind a `VmMemo`,
+        // so it dies with the VM rather than on this edge — the property `ui_script::session`'s
+        // own tests pin (1290/1291), and one a VM-less app cannot observe.
     }
 
     fn slot(slot: u8, spell_id: u32) -> UnitAuraSlot {

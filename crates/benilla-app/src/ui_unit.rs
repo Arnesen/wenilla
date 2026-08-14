@@ -85,10 +85,30 @@ pub(crate) struct CombatTextEvent {
     pub(crate) extra: Option<String>,
 }
 
-/// The feed's change-tracking memory: what we last told the VM, so we only fire events on transitions.
+/// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
+///
+/// The VM half lives behind a [`crate::ui_script::VmMemo`], **inside the resource** — the same
+/// law 1290 wrote for `Local` memos, reached the way a `ResMut` system has to reach it: a memory
+/// about what THIS VM was told is unreadable against the next VM, so a `/reload` (1291) — which
+/// replaces the VM without despawning the world — re-fires `PLAYER_ENTERING_WORLD` and re-runs
+/// every transition diff exactly as a fresh login does. Before this, every one of these fields
+/// survived the reload and the new VM never heard the events (the logout path re-armed off the
+/// self descriptor despawning, which a reload never does).
 #[derive(Resource, Default)]
 struct UnitFeedState {
-    /// Whether `PLAYER_ENTERING_WORLD` has been fired (once at startup).
+    /// What we last told the VM — dies with the VM it was told to.
+    vm: crate::ui_script::VmMemo<UnitFeedMemo>,
+    /// Whether we have already warned that our own faction template names no side (decision 0657).
+    /// Re-arms when a side resolves again, so a `.gm on` / `.gm off` cycle logs once each way.
+    /// **Server memory, not VM memory** — deliberately outside the memo: a `/reload` must not
+    /// re-log the GM-mode warning.
+    warned_sideless: bool,
+}
+
+/// The per-VM half of [`UnitFeedState`] — the event-trigger diffs.
+#[derive(Default)]
+struct UnitFeedMemo {
+    /// Whether `PLAYER_ENTERING_WORLD` has been fired (once per world entry, once per VM).
     entered_world: bool,
     /// Per token, the last snapshot we pushed — the per-field event triggers diff against it.
     last: HashMap<String, UnitState>,
@@ -118,9 +138,6 @@ struct UnitFeedState {
     /// (decision 0652). `None` until first seen: the reference reacts to a *changed*-bits mask, so
     /// the descriptor that first carries the flag at login announces nothing.
     pvp_desired: Option<bool>,
-    /// Whether we have already warned that our own faction template names no side (decision 0657).
-    /// Re-arms when a side resolves again, so a `.gm on` / `.gm off` cycle logs once each way.
-    warned_sideless: bool,
 }
 
 /// Adds the per-frame unit feed. The `Unit*` bindings themselves live in `benilla-ui`; this only
@@ -583,7 +600,7 @@ pub(crate) fn enrich_unit(
 /// caller the reference has (`SlashCmdList["PVP"]`), and the only one we have.
 ///
 /// This rides the unit feed's plugin rather than a `ui_pvp` of its own: the family's whole client
-/// state is one remembered bit ([`UnitFeedState::pvp_desired`]), which lives with the feed's other
+/// state is one remembered bit ([`UnitFeedMemo::pvp_desired`]), which lives with the feed's other
 /// self-flag edge (`in_combat`) rather than in a plugin of its own.
 fn drain_pvp_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
     let Some(mut script) = script else {
@@ -794,6 +811,10 @@ fn feed_units(
         }
         feed.warned_sideless = sideless;
     }
+    // The VM half — resolved against THIS VM, so a `/reload`'s fresh state reads a fresh memo and
+    // every event below re-fires for it (1291). Taken after the `warned_sideless` writes above:
+    // that field is server memory and must NOT expire with the VM.
+    let memo = feed.vm.get(&script);
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.get(e).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
@@ -842,8 +863,8 @@ fn feed_units(
     if let Some((store, _)) = self_q.iter().next() {
         let xp = store.0.player_xp().unwrap_or(0);
         let next = store.0.player_next_level_xp().unwrap_or(0);
-        if feed.last_xp != Some((xp, next)) {
-            feed.last_xp = Some((xp, next));
+        if memo.last_xp != Some((xp, next)) {
+            memo.last_xp = Some((xp, next));
             script.set_player_xp(xp, next);
             script.fire_event("PLAYER_XP_UPDATE", vec![]);
         }
@@ -865,9 +886,9 @@ fn feed_units(
             store.0.player_rest_state_experience().unwrap_or(0),
             store.0.player_flags(),
         );
-        if feed.last_rest != Some(rest) {
-            let prev = feed.last_rest;
-            feed.last_rest = Some(rest);
+        if memo.last_rest != Some(rest) {
+            let prev = memo.last_rest;
+            memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
             if prev.map(|p| (p.0, p.1)) != Some((rest.0, rest.1)) {
                 script.fire_event("UPDATE_EXHAUSTION", vec![]);
@@ -904,7 +925,7 @@ fn feed_units(
     // args wait for a consumer.
     if let Some((store, _)) = self_q.iter().next() {
         if let Some(level) = store.0.unit_level() {
-            let prev = feed.last_level.replace(level);
+            let prev = memo.last_level.replace(level);
             if prev.is_some_and(|p| level != p) {
                 script.fire_event("PLAYER_LEVEL_UP", vec![ScriptValue::Int(i64::from(level))]);
             }
@@ -929,40 +950,40 @@ fn feed_units(
     // 60→1 char switch latched the max-level rail shown over a level-1 body (1106's live
     // repro), and a normal→rested char switch would misfire "You feel rested." at login.
     if self_pair.is_some() {
-        if !feed.entered_world {
+        if !memo.entered_world {
             script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
-            feed.entered_world = true;
+            memo.entered_world = true;
         }
-    } else if feed.entered_world {
-        feed.entered_world = false;
-        feed.last_xp = None;
-        feed.last_rest = None;
-        feed.last_level = None;
-        feed.last_combo = None;
-        feed.in_combat = None;
-        feed.pvp_desired = None;
+    } else if memo.entered_world {
+        memo.entered_world = false;
+        memo.last_xp = None;
+        memo.last_rest = None;
+        memo.last_level = None;
+        memo.last_combo = None;
+        memo.in_combat = None;
+        memo.pvp_desired = None;
     }
 
     for (token, snap) in [("player", &player), ("target", &target)] {
         match snap {
             Some(cur) => {
-                let prev = feed.last.get(token);
+                let prev = memo.last.get(token);
                 if prev != Some(cur) {
                     fire_transitions(&mut script, token, prev, cur);
-                    feed.last.insert(token.to_string(), cur.clone());
+                    memo.last.insert(token.to_string(), cur.clone());
                 }
             }
             None => {
                 // Clearing a token isn't a UNIT_* event; the target frame reacts to
                 // PLAYER_TARGET_CHANGED below.
-                feed.last.remove(token);
+                memo.last.remove(token);
             }
         }
     }
 
     // PLAYER_TARGET_CHANGED (no args, real WoW's shape) when the selection changes.
-    if selection.guid != feed.target_guid {
-        feed.target_guid = selection.guid;
+    if selection.guid != memo.target_guid {
+        memo.target_guid = selection.guid;
         script.fire_event("PLAYER_TARGET_CHANGED", vec![]);
     }
 
@@ -972,9 +993,9 @@ fn feed_units(
     // the COMBAT_TEXT_UPDATE emission pin).
     if let Some((store, _)) = self_pair {
         let in_combat = store.0.unit_flags() & 0x0008_0000 != 0;
-        if feed.in_combat != Some(in_combat) {
-            let first_sight = feed.in_combat.is_none();
-            feed.in_combat = Some(in_combat);
+        if memo.in_combat != Some(in_combat) {
+            let first_sight = memo.in_combat.is_none();
+            memo.in_combat = Some(in_combat);
             if !first_sight || in_combat {
                 script.fire_event(
                     if in_combat {
@@ -997,14 +1018,14 @@ fn feed_units(
     // guid == localPlayer gate) and only on a change, never on the descriptor that first carries it.
     if let Some((store, _)) = self_pair {
         let desired = store.0.player_flags() & PLAYER_FLAGS_PVP_DESIRED != 0;
-        if let Some((toast, verbose)) = pvp_announcement(feed.pvp_desired, desired) {
+        if let Some((toast, verbose)) = pvp_announcement(memo.pvp_desired, desired) {
             script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(toast.to_string())]);
             chat.push_event(ChatEvent::text_only(
                 ChatEventKind::System,
                 verbose.to_string(),
             ));
         }
-        feed.pvp_desired = Some(desired);
+        memo.pvp_desired = Some(desired);
     }
 
     // The combo-point feed: `PLAYER_FIELD_BYTES` byte 1 and the `PLAYER_FIELD_COMBO_TARGET` GUID
@@ -1026,8 +1047,8 @@ fn feed_units(
             store.0.player_combo_points().unwrap_or(0),
             store.0.player_combo_target(),
         );
-        if let Some(fire) = combo_edge(feed.last_combo, banked) {
-            feed.last_combo = Some(banked);
+        if let Some(fire) = combo_edge(memo.last_combo, banked) {
+            memo.last_combo = Some(banked);
             script.set_combo_points(banked.0, banked.1);
             if fire {
                 script.fire_event("PLAYER_COMBO_POINTS", vec![]);

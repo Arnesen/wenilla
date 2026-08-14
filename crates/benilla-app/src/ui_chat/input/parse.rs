@@ -181,6 +181,15 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// straight out of the shipped `GlobalStrings.lua` (decision 0983). Resolved in the drain,
     /// which holds the VM, so the text can never go stale against the install.
     MacroHelp,
+    /// `/reload`, `/console reloadUI`, or `ReloadUI()` typed through `/script` — tear the UI
+    /// session down and build a new one without leaving the world (decision 1291). Queued on the
+    /// session seam like [`ParsedChat::Logout`]; [`crate::ui_script::run_pending_reload`] runs it
+    /// at the top of the next frame.
+    ReloadUi,
+    /// A `/console` command that is not `reloadUI` — the engine console this client does not
+    /// have. Answered with a system line naming what was asked, because a claimed alias that
+    /// silently drops its argument reads as a hang.
+    ConsoleUnknown { cmd: String },
     /// A slash line matching neither a chat command nor an `EmotesText` name — dropped.
     Unknown,
 }
@@ -387,6 +396,16 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
             body: "ShowMacroFrame()".into(),
         },
         S::MacroHelp => ParsedChat::MacroHelp,
+        // `/reload` (ours, 1291) and the reference's `/console reloadUI` are the same rebuild.
+        // The console command match is case-insensitive like the engine's console; `0x4035f0`
+        // reads no arguments, so anything after `reloadUI` is ignored rather than an error.
+        S::ReloadUi => ParsedChat::ReloadUi,
+        S::Console => match args.split_whitespace().next() {
+            Some(cmd) if cmd.eq_ignore_ascii_case("reloadui") => ParsedChat::ReloadUi,
+            _ => ParsedChat::ConsoleUnknown {
+                cmd: args.to_string(),
+            },
+        },
         // `/script` = the ref's `RunScript(msg)`: the typed text IS the chunk, un-escaped.
         S::Script => {
             if args.is_empty() {

@@ -130,6 +130,7 @@ fn drain_logout(
     self_guid: Res<SelfGuid>,
     commands: Res<NetCommands>,
     mut exit: MessageWriter<AppExit>,
+    mut reload: ResMut<crate::ui_script::ReloadUiPending>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -170,6 +171,9 @@ fn drain_logout(
                 info!("logout: force quit");
                 exit.write(AppExit::Success);
             }
+            // Not this module's business beyond routing: the rebuild itself is
+            // [`crate::ui_script::run_pending_reload`]'s, at the top of the next frame.
+            SessionRequest::ReloadUi => reload.0 = true,
         }
     }
 }

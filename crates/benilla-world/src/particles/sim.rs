@@ -198,14 +198,42 @@ fn drive_child(
 }
 
 /// The **draw-set gate's** scene inputs, bundled: the far-clip wall the gate bounds emitters at
-/// (0678) and the exterior-window test a WMO interior applies to everything outside it (0786),
-/// with the camera's own room as its one exemption. One `SystemParam` because they are read
-/// together, at one place, and Bevy caps a system at 16 parameters.
+/// (0678), the exterior-window test a WMO interior applies to everything outside it (0786) with the
+/// camera's own room as its one exemption, and the per-frame portal PVS the rooms *inside* a
+/// building are gated by (0689/1289). One `SystemParam` because they are read together, at one
+/// place, and Bevy caps a system at 16 parameters — which `simulate_particles` already sits at, so
+/// the portal query joins this bundle rather than becoming a seventeenth.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct SceneGates<'w> {
+pub(crate) struct SceneGates<'w, 's> {
     view: Res<'w, crate::view::ViewDistance>,
     exterior_windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
+    portals: Query<'w, 's, &'static crate::wmo_portal::WmoPortalInstance>,
+}
+
+impl SceneGates<'_, '_> {
+    /// The three per-frame values every draw-set caller needs before it can ask
+    /// [`EmitterFade::in_draw_set`]: the far-clip wall, the built exterior gate, and the placement
+    /// the camera is standing in. Built ONCE per walk (the gate is a handful of 6-plane frusta).
+    pub(crate) fn scene(
+        &self,
+        cam: Option<(&GlobalTransform, &Projection)>,
+    ) -> (f32, crate::exterior_cull::ExteriorGate, Option<Entity>) {
+        (
+            self.view.farclip,
+            crate::exterior_cull::ExteriorGate::build(&self.exterior_windows, cam),
+            self.camera_claim.0.map(|c| c.room.instance),
+        )
+    }
+
+    /// This emitter's term 5 — the live placement its rooms belong to, resolved and asked.
+    pub(crate) fn room_admits(&self, fade: &EmitterFade) -> bool {
+        fade.room_admitted(
+            fade.room
+                .as_ref()
+                .and_then(|r| self.portals.get(r.instance).ok()),
+        )
+    }
 }
 
 /// The **water-plane interleave** inputs ([`crate::sky_order::FAR_SIDE_BIAS`], where the
@@ -430,13 +458,10 @@ pub(super) fn simulate_particles(
     // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
     // doodad's own cull along, so an emitter and its owner cross the wall together.
     let cam_fwd = Vec3::from(cam_tf.forward());
-    // The exterior gate, built once for the whole emitter walk — the same value the model
-    // visibility authority and `exterior_cull` ask (0784/0786: one spelling of the window test).
-    let exterior_gate = crate::exterior_cull::ExteriorGate::build(
-        &gates.exterior_windows,
-        Some((cam_tf, projection)),
-    );
-    let camera_instance = gates.camera_claim.0.map(|c| c.room.instance);
+    // The far-clip wall, the exterior gate and the camera's own room — built once for the whole
+    // emitter walk, the same values the model visibility authority and `exterior_cull` ask
+    // (0784/0786: one spelling of the window test).
+    let (farclip, exterior_gate, camera_instance) = gates.scene(Some((cam_tf, projection)));
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = dumps.depth_frame(time.elapsed_secs());
     // `$WOW_EMIT_DUMP`: is this a dump tick? Decided once per frame, for the whole walk.
@@ -484,7 +509,7 @@ pub(super) fn simulate_particles(
             let in_set = f.in_draw_set(
                 cam_pos,
                 cam_fwd,
-                gates.view.farclip,
+                farclip,
                 // Lateral planes only (`intersect_far = false`) — the depth bound is the farclip
                 // term inside `in_draw_set`, deliberately; see `view::within_farclip`.
                 frustum.intersects_sphere(
@@ -498,6 +523,10 @@ pub(super) fn simulate_particles(
                 // outside is not in the worklist at all, so its emitter neither ticks nor draws —
                 // which the mesh gate already knew and this one did not.
                 f.exterior_admitted(&exterior_gate, camera_instance),
+                // …and the room term (0689/1289): the window above admits a whole BUILDING, which
+                // says nothing about the sealed room the owner prop actually stands in. The mesh
+                // gate has always known this one too, through the prop's own `WmoGroupVis`.
+                gates.room_admits(f),
             );
             if !in_set {
                 // Frozen: the pool writes no quads this frame (the shared stream is cleared
@@ -545,7 +574,7 @@ pub(super) fn simulate_particles(
                 None => Some(emitter.anchor_pos),
             };
             if let Some(at) = subject {
-                if !crate::view::within_farclip(gates.view.farclip, cam_pos, cam_fwd, at, 0.0) {
+                if !crate::view::within_farclip(farclip, cam_pos, cam_fwd, at, 0.0) {
                     if !emitter.gated {
                         emitter.gated = true;
                         for slot in &emitter.model_instances {

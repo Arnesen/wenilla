@@ -136,6 +136,26 @@ fn end_channel_session(
     }
 }
 
+/// Seed a fresh VM's joined-channel mirror (decision 1291). The mirror is otherwise pushed only
+/// on the join/leave edges ([`super::feed`]'s YOU_JOINED / YOU_LEFT arms), and a `/reload`
+/// replaces the VM *between* edges — `ChannelState` (server truth) survives, but the new VM's
+/// mirror would stay empty: `GetChannelName`/`GetChannelList` answer nothing, `/1`-`/9` routing
+/// is dead, and every channel line renders unnumbered until the player happens to join or leave
+/// something. A login goes through [`end_session_channels`] + the auto-join walk instead, where
+/// this claim pushes the just-cleared (empty) list — a no-op by construction.
+pub(super) fn seed_channels(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    channels: Res<ChannelState>,
+    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    if seeded.claim(&script) {
+        script.set_joined_channels(channels.joined.clone());
+    }
+}
+
 /// The session-end edge: a confirmed `/logout` back to the glue layer (`OnExit(InWorld)`), which is
 /// the character switch the director's screenshot caught.
 pub(super) fn end_session_channels(

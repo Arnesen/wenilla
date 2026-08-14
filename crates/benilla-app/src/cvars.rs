@@ -347,6 +347,18 @@ fn sync_cvars(
         return;
     };
     if persist.registered.claim(&script) {
+        // The config file's values go in FIRST (decision 1291): registration — ours below, or an
+        // addon's `RegisterCVar` later — starts a key at its saved value. This is what carries a
+        // knobless CVar (`statusBarText`) and an addon-declared one across a VM replacement; the
+        // knob-derived session rows below still win for every key a host knob backs, and an
+        // env-overridden key keeps its env value the same way (its knob carries it).
+        script.set_cvar_saved_base(
+            persist
+                .file
+                .iter()
+                .filter(|(k, _)| !persist.env_overridden.contains(&k.to_ascii_lowercase()))
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
         let session: [(&str, String); 23] = [
@@ -407,6 +419,106 @@ fn sync_cvars(
             persist.last_change = Some(Instant::now());
         }
     }
+}
+
+/// Fold the dying VM's CVar table into the persist state — the session edge's half of decision
+/// 1291's bridge (the seed in [`sync_cvars`] is the other). Called from
+/// [`crate::ui_script::end_ui_session`] **after** the shutdown events (an addon's
+/// `PLAYER_LOGOUT` handler may `SetCVar`, and in the reference that write lands in an
+/// engine-side store that survives) and **before** the VM is replaced.
+///
+/// Two steps, both about the writes the per-frame sync never got to see:
+/// 1. drain the dying VM's change queue into the host knobs — a `SetCVar` in the final frame
+///    would otherwise be overwritten by the stale knob when the next VM's seed runs;
+/// 2. fold the table into `persist.file` with the same compose the saver uses, so the next VM's
+///    saved base — and the next save — both start from what the player actually set.
+///
+/// `dirty` is left alone: if nothing changed, the fold is an identity; if something did, the
+/// change that did it already marked the config dirty.
+#[allow(clippy::type_complexity)] // one Option per knob resource, the same census sync_cvars keeps
+pub(crate) fn fold_dying_vm_cvars(world: &mut World) {
+    // Every param is `Option` because this runs from an exclusive edge function, not the app's
+    // schedule: a test world or a stripped scenario may not carry the cvar plugin at all, and
+    // "no persist state" simply means there is no file to bridge — not a panic.
+    let mut state: bevy::ecs::system::SystemState<(
+        Option<NonSendMut<UiScript>>,
+        Option<ResMut<CvarPersist>>,
+        Option<ResMut<SoundConfig>>,
+        Option<ResMut<UiScaleCvar>>,
+        Option<ResMut<ViewDistance>>,
+        Option<ResMut<LookConfig>>,
+        Option<ResMut<ClickConfig>>,
+        Option<ResMut<LootConfig>>,
+        Option<ResMut<NameConfig>>,
+        Option<ResMut<ClutterConfig>>,
+        Option<ResMut<MinimapZoom>>,
+        Option<ResMut<BubbleConfig>>,
+        Option<ResMut<ZoomLimit>>,
+    )> = bevy::ecs::system::SystemState::new(world);
+    let (
+        script,
+        persist,
+        sound,
+        scale,
+        view,
+        look,
+        click,
+        loot,
+        names,
+        clutter,
+        minimap,
+        bubbles,
+        zoom,
+    ) = state.get_mut(world);
+    let (Some(mut script), Some(mut persist)) = (script, persist) else {
+        return;
+    };
+    let changes = script.take_cvar_changes();
+    if !changes.is_empty() {
+        // The knobs exist whenever the app is real (each plugin inits its own); a world that
+        // carries CvarPersist but not the knobs is a partial test rig, where dropping the
+        // final-frame drain is the right degradation — the fold below still preserves the file.
+        if let (
+            Some(mut sound),
+            Some(mut scale),
+            Some(mut view),
+            Some(mut look),
+            Some(mut click),
+            Some(mut loot),
+            Some(mut names),
+            Some(mut clutter),
+            Some(mut minimap),
+            Some(mut bubbles),
+            Some(mut zoom),
+        ) = (
+            sound, scale, view, look, click, loot, names, clutter, minimap, bubbles, zoom,
+        ) {
+            let mut knobs = Knobs {
+                sound: &mut sound,
+                scale: &mut scale,
+                view: &mut view,
+                look: &mut look,
+                click: &mut click,
+                loot: &mut loot,
+                names: &mut names,
+                clutter: &mut clutter,
+                minimap: &mut minimap,
+                bubbles: &mut bubbles,
+                zoom: &mut zoom,
+            };
+            for (name, value) in changes {
+                if apply_to_knobs(&name, &value, &mut knobs) {
+                    persist.dirty = true;
+                    persist.last_change = Some(Instant::now());
+                }
+            }
+        }
+    }
+    let snapshot = script.cvars_snapshot();
+    if snapshot.is_empty() {
+        return; // a VM that never registered (a capture) has nothing to say about the file
+    }
+    persist.file = compose_file(&persist.file, &persist.env_overridden, &snapshot);
 }
 
 /// Compose the file to save: the previous file as the merge base, every registered var that

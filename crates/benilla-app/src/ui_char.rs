@@ -72,8 +72,19 @@ fn fixed(v: f32) -> i64 {
 
 /// The feed's change-tracking memory (the [`crate::ui_unit::UnitFeedState`] shape): the last
 /// snapshots pushed, so events fire on transitions only.
+///
+/// All of it is what-we-told-the-VM, so all of it lives behind a [`crate::ui_script::VmMemo`]: a
+/// memory about one VM is unreadable against the next (1290), so a `/reload` (1291) — which
+/// replaces the VM without despawning the avatar — re-pushes both snapshots and re-fires their
+/// events exactly as a fresh login does.
 #[derive(Resource, Default)]
 struct CharFeedState {
+    vm: crate::ui_script::VmMemo<CharFeedMemo>,
+}
+
+/// The per-VM half of [`CharFeedState`] — the transition-diff bases.
+#[derive(Default)]
+struct CharFeedMemo {
     last_stats: Option<UnitCombatStats>,
     last_inv: Option<InventorySlots>,
 }
@@ -808,25 +819,29 @@ fn feed_char(
     // The pane's Model:SetRotation transcription owns the yaw; the booth mirrors it (0208 §5).
     booth.yaw = script.paperdoll_yaw();
 
+    // Resolved against THIS VM (1290/1291): a `/reload`'s replacement reads a fresh memo, so both
+    // snapshots below re-push and their events re-fire for it.
+    let memo = feed.vm.get(&script);
+
     let Some(store) = self_q.iter().next() else {
-        if feed.last_stats.is_some() || feed.last_inv.is_some() {
+        if memo.last_stats.is_some() || memo.last_inv.is_some() {
             script.set_player_combat_stats(None);
             script.set_inventory_slots(Default::default());
-            feed.last_stats = None;
-            feed.last_inv = None;
+            memo.last_stats = None;
+            memo.last_inv = None;
         }
         return;
     };
 
     let stats = combat_stats(store, &mut items, &commands);
-    if feed.last_stats.as_ref() != Some(&stats) {
+    if memo.last_stats.as_ref() != Some(&stats) {
         // PUSH before firing: event dispatch runs the Lua handlers synchronously, so the snapshot
         // must already be in the VM when they repaint (the ui_unit rule — a fire-first ordering
         // paints the OLD values and, being transition-gated, never corrects itself).
-        let prev = feed.last_stats.take();
+        let prev = memo.last_stats.take();
         script.set_player_combat_stats(Some(stats.clone()));
         fire_stat_transitions(&mut script, "player", prev.as_ref(), &stats);
-        feed.last_stats = Some(stats);
+        memo.last_stats = Some(stats);
     }
 
     let inv = inventory_slots(
@@ -838,13 +853,13 @@ fn feed_char(
         &pending,
         &mut names,
     );
-    if feed.last_inv.as_ref() != Some(&inv) {
+    if memo.last_inv.as_ref() != Some(&inv) {
         script.set_inventory_slots(inv.clone());
         script.fire_event(
             "UNIT_INVENTORY_CHANGED",
             vec![ScriptValue::Str("player".to_string())],
         );
-        feed.last_inv = Some(inv);
+        memo.last_inv = Some(inv);
     }
 
     // `GetWeaponEnchantInfo`'s whole data path (the buff bar's TemporaryEnchantFrame row, plus 8

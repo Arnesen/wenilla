@@ -57,8 +57,19 @@ use crate::ui_script::UiInput;
 
 /// What the VM has last been told, so the two events fire exactly on transitions and never once a
 /// frame. Mirrors [`FollowState::guid`]; `None` means the VM believes no follow is running.
+///
+/// "What THIS VM has been told" is exactly what a [`crate::ui_script::VmMemo`] keys (1290): a
+/// `/reload` (1291) replaces the VM mid-follow without touching [`FollowState`], and the fresh
+/// memo's `None` makes the next frame re-fire `AUTOFOLLOW_BEGIN` — the replacement VM never heard
+/// it, so its status line has to be told again.
 #[derive(Resource, Default)]
 pub(crate) struct FollowFeed {
+    vm: crate::ui_script::VmMemo<FollowFeedMemo>,
+}
+
+/// The per-VM half of [`FollowFeed`] — the one transition base.
+#[derive(Default)]
+struct FollowFeedMemo {
     told: Option<u64>,
 }
 
@@ -71,7 +82,9 @@ fn feed_follow(
     let Some(mut script) = script else {
         return;
     };
-    match (follow.guid, feed.told) {
+    // Resolved against THIS VM (1290/1291): a replacement VM reads `told: None` and gets its BEGIN.
+    let memo = feed.vm.get(&script);
+    match (follow.guid, memo.told) {
         // Started, or switched subject. A switch emits END first, because the reference's arm
         // routine calls the canceller before arming (see the module header).
         (Some(guid), told) if told != Some(guid) => {
@@ -82,13 +95,13 @@ fn feed_follow(
                 "AUTOFOLLOW_BEGIN",
                 vec![ScriptValue::Str(follow.name.clone())],
             );
-            feed.told = Some(guid);
+            memo.told = Some(guid);
         }
         // Stopped — by arrival at an unresolvable followee, by the turn-away cancel, or by any of
         // the input cancels. END carries no argument: the frame reuses the name BEGIN latched.
         (None, Some(_)) => {
             script.fire_event("AUTOFOLLOW_END", vec![]);
-            feed.told = None;
+            memo.told = None;
         }
         _ => {}
     }
