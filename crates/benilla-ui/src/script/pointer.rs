@@ -204,6 +204,7 @@ impl UiScript {
             // crosses and a pump behind the early return would only ever advance when the cursor
             // left the frame it is dragging.
             super::object::advance_move(&mut model, (x, y));
+            super::object::advance_size(&mut model, (x, y));
             let drag_start = cursor::maybe_start_drag(&mut model, (x, y));
             let new_handle = new_id.and_then(|id| model.id_to_frame.get(&id).copied());
             if new_handle == model.mouseover {

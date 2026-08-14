@@ -348,3 +348,67 @@ fn the_xml_movable_and_resizable_attributes_reach_the_methods() {
         (true, true)
     );
 }
+
+/// **`StartSizing(grip)` moves the gripped edges and plants the opposite ones.**
+///
+/// `0x776830`, verified in wow-re's ledger; the reference's own caller is
+/// `FloatingChatFrame.lua:600`. Four corpus addons reach it through ONE line —
+/// `FuBar_Panel.lua:980`, replicated into FuBar_CorkFu, FuBar_FuXPFu, FuBar_SpellStatusFu and oRA2
+/// (1207: one library, not four votes).
+///
+/// What the ledger does NOT record is which edges a grip moves — it has the verb as pure
+/// orchestration with no inline math. Taken here as the plain meaning of an anchor point, which is
+/// how the reference's caller uses it. This test is where that reading is pinned, so an RE pass
+/// that contradicts it fails here first.
+#[test]
+fn start_sizing_moves_the_gripped_edge_and_plants_the_other() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "Sizer", UIParent)
+        f:SetResizable(true)
+        f:SetWidth(200) f:SetHeight(100)
+        f:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 100, 50)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // Grip the RIGHT edge and drag 40 right: width grows, the left edge stays planted.
+    s.mouse_move(300.0, 100.0);
+    s.run("Sizer:StartSizing(\"RIGHT\")").unwrap();
+    s.mouse_move(340.0, 100.0);
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Sizer:GetWidth()").unwrap(), 240.0);
+    assert_eq!(s.eval::<f32>("return Sizer:GetLeft()").unwrap(), 100.0);
+    s.run("Sizer:StopMovingOrSizing()").unwrap();
+
+    // Grip the LEFT edge and drag 30 right: width SHRINKS and the left edge follows the cursor,
+    // so the right edge is the one that stays put.
+    let right_before = s.eval::<f32>("return Sizer:GetRight()").unwrap();
+    s.run("Sizer:StartSizing(\"LEFT\")").unwrap();
+    s.mouse_move(370.0, 100.0);
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Sizer:GetWidth()").unwrap(), 210.0);
+    assert_eq!(s.eval::<f32>("return Sizer:GetLeft()").unwrap(), 130.0);
+    assert_eq!(
+        s.eval::<f32>("return Sizer:GetRight()").unwrap(),
+        right_before,
+        "the ungripped edge must not move"
+    );
+
+    // StopMovingOrSizing ends it: further motion changes nothing.
+    s.run("Sizer:StopMovingOrSizing()").unwrap();
+    s.mouse_move(500.0, 100.0);
+    s.resolve();
+    assert_eq!(s.eval::<f32>("return Sizer:GetWidth()").unwrap(), 210.0);
+
+    // A frame that is not resizable refuses, like the movable family's siblings.
+    s.run("g = CreateFrame(\"Frame\", \"NotSizer\", UIParent)")
+        .unwrap();
+    assert!(
+        s.run("NotSizer:StartSizing(\"RIGHT\")").is_err(),
+        "StartSizing must refuse a frame that is not resizable"
+    );
+}

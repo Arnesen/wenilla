@@ -176,8 +176,27 @@ fn main() {
         .map(|r| r.name.as_str())
         .collect();
     if !silent.is_empty() {
+        // **This list is a QUESTION, not a defect list, and the header used to say otherwise.**
+        //
+        // It read "read this list first", which invites treating every row as a bug. Most are not.
+        // The survey seats a player and an empty world: no buffs, no target, no combat, no cursor
+        // over an item. An addon with nothing to draw in that world draws nothing CORRECTLY — and
+        // that is most of this list. Measured on the vanilla corpus rather than assumed: of 48 rows
+        // checked, 6 ship no XML at all (pure libraries — Ace, LibStub, Stubby, DevTools), and of
+        // the rest the buff bars (CT_BuffMod 29 frames, ElkBuffBar 3, neither hidden at birth) are
+        // waiting on buffs that a fresh login does not have either.
+        //
+        // What the row DOES mean is "nothing here can be ruled out by the other four columns" —
+        // which is worth printing, and is not the same as "broken".
+        //
+        // The instrument change that would sharpen it is a POPULATED session fixture (a buff, a
+        // target, a live cooldown) so that "nothing to draw" and "failed to draw" stop sharing a
+        // row. Named here rather than done, because seating content changes the fixture for all
+        // 218 addons and deserves its own controlled A/B.
         println!(
-            "\n  CLEAN ON EVERY OTHER COLUMN AND DREW NOTHING ({}) — read this list first:",
+            "\n  DREW NOTHING, and clean on every other column ({}) — a QUESTION, not a defect\n  \
+             list: the seated world has one buff, one target and one running cooldown, so an addon\n  \
+             waiting on combat, a cursor over an item or a slash command belongs here too:",
             silent.len()
         );
         for chunk in silent.chunks(4) {

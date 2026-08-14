@@ -274,8 +274,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// **97 of the 108 addons that drew and then raised on being touched died on that one line.** No
 /// missing verb: `GetLeft` was always there, and always answered nil.
 ///
-/// Cheap: `resolve_layout`'s tier-1 gate is one epoch comparison that returns immediately when
-/// nothing has been touched, so a settled tree pays a compare per getter.
+/// Cheap on a SETTLED tree: `resolve_layout`'s tier-1 gate is one epoch comparison that returns
+/// immediately when nothing has been touched, so a run of getters pays a compare each.
+///
+/// **The interleaved case is not, and this is measured rather than asserted.** A write bumps the
+/// epoch, so `SetPoint; GetLeft; SetPoint; GetLeft; …` resolves the whole graph once per iteration.
+/// Timed on a 200-frame tree: 30 alternating pairs cost **1.41 ms** against **54 µs** for the same
+/// writes with a single read at the end — ~26x, about 47 µs per settle, and the per-settle half
+/// scales with the GRAPH, not the loop.
+///
+/// That is exactly the shape Dewdrop's menu builder has, so opening a menu pays it once. It buys a
+/// menu that works at all, which is the trade taken here. If it ever reads as a hitch, the fix is a
+/// narrower resolve (the queried frame's subtree), not a return to the stale cache.
 ///
 /// **It deliberately does NOT fire `OnSizeChanged`.** That drain runs Lua handlers, and re-entering
 /// Lua from inside a binding is how a borrow panic or an unbounded recursion happens. The

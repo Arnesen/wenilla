@@ -832,13 +832,26 @@ fn drive_session_start(script: &mut UiScript, name: &str, deps: &[String]) -> Ve
     // (`load_dependencies`) and there is no reason session errors should differ — charging it here
     // would count one library's fault once per addon that embeds it, which is the whole reason
     // one-VM-per-addon exists.
+    //
+    // **Attribution is by the RAISING CHUNK now, not by which event window the raise fell in**
+    // (decision 1226 — recorded when this was still window-based, fixed here). The window proxy
+    // broke on the shape it was written for: AceAddon drains its ENTIRE `nextAddon` queue on any
+    // `ADDON_LOADED` it sees (`AceAddon-2.0.lua:104-105`) and calls each consumer's
+    // `OnInitialize` there (`:230`). So the SURVEYED addon's own code runs inside a DEPENDENCY's
+    // window, and firing deps outside the mark charged those raises to nobody — the whole
+    // FuBar/Ace family was silently OVER-reported as surviving. `Region:SetParent` landing made
+    // FuBar_FuXPFu flip `ok -> fail` and that looked like a regression; it was this.
+    //
+    // Every `ADDON_LOADED` fires inside the mark now, and the dependency exemption is applied
+    // afterwards by asking WHOSE FILE raised. Chunk names have been truthful since 1217
+    // (`@Interface\AddOns\<Folder>\<File>`), which is what makes the honest key available at all.
+    let before = script.errors().len();
     for dep in deps {
         script.fire_event(
             "ADDON_LOADED",
             vec![benilla_ui::script::ScriptValue::Str(dep.clone())],
         );
     }
-    let before = script.errors().len();
     script.fire_event(
         "ADDON_LOADED",
         vec![benilla_ui::script::ScriptValue::Str(name.to_string())],
@@ -849,7 +862,37 @@ fn drive_session_start(script: &mut UiScript, name: &str, deps: &[String]) -> Ve
     for _ in 0..10 {
         script.tick(0.1);
     }
-    script.errors().split_off(before)
+    let raised = script.errors().split_off(before);
+    raised
+        .into_iter()
+        .filter(|e| !raised_inside_a_dependencys_own_file(e, name, deps))
+        .collect()
+}
+
+/// Does this raise belong to a DEPENDENCY's file rather than the surveyed addon's?
+///
+/// The rule `load_dependencies` already states for load errors, now enforceable for session errors
+/// too: *a library that fails is its own row; blaming its consumers would count one fault once per
+/// addon that embeds it.* Only the FIRST line is consulted — that is the raise site; the frames
+/// below it are the call path, and a consumer calling into a library that then raises is still the
+/// library's fault, exactly as it is at load time.
+///
+/// **Conservative on purpose.** A chunk that names no addon folder at all — our own FrameXML, an
+/// `[string "Frame:OnEvent"]` handler — is KEPT, because the surveyed addon is what drove it. Only
+/// a chunk that positively names one of this addon's own dependencies is dropped. Getting that
+/// backwards would swing the column the other way, and the whole point of 1226 is that a proxy
+/// which errs silently in one direction is how the number drifted in the first place.
+fn raised_inside_a_dependencys_own_file(err: &str, name: &str, deps: &[String]) -> bool {
+    let Some(first) = err.lines().next() else {
+        return false;
+    };
+    // The surveyed addon's own folder always wins, even when a dependency's name is a substring of
+    // a path inside it.
+    if first.contains(&format!("\\{name}\\")) || first.starts_with(&format!("{name}\\")) {
+        return false;
+    }
+    deps.iter()
+        .any(|d| first.contains(&format!("\\{d}\\")) || first.starts_with(&format!("{d}\\")))
 }
 
 /// Invoke the reference's own UI entry points, so an addon's OVERRIDES actually execute.
@@ -1203,6 +1246,69 @@ fn seat_a_session(script: &mut UiScript) {
             // `realm .. " - " .. faction` at file scope, so a nil faction is 24 addons stopping on
             // `attempt to concatenate local 'faction'`. Every playable race has a side.
             faction_group: Some("Alliance".into()),
+            ..Default::default()
+        }),
+    );
+
+    // ── A POPULATED world, not merely an inhabited one ──────────────────────────────────────
+    //
+    // The columns above answer "did it raise"; the render column answers "did it draw". Until
+    // now the survey seated a player into an EMPTY world — no buffs, no target, no live
+    // cooldown — so a buff bar, a target frame or a cooldown-text addon drew nothing and landed
+    // in the drew-nothing list beside the pure libraries. `CT_BuffMod` declares 29 frames with
+    // none hidden at birth and `ElkBuffBar` 3: neither was failing to build, both had nothing to
+    // put in them.
+    //
+    // That made "nothing to draw" and "failed to draw" share a row, and the second is the one
+    // worth finding. Seating content separates them — and, more usefully, exposes the addons
+    // that only fail WHEN there is something to draw, which no empty-world column can reach.
+    //
+    // Deliberately minimal and deliberately ordinary: one buff, one target, one occupied action
+    // with a running cooldown. Not a stress fixture — a Tuesday.
+    script.set_auras(
+        "player",
+        Some(vec![benilla_ui::script::AuraState {
+            spell_id: 1243,
+            name: Some("Power Word: Fortitude".into()),
+            icon: Some("Interface\\Icons\\Spell_Holy_WordFortitude".into()),
+            count: 1,
+            helpful: true,
+            cancelable: true,
+            ..Default::default()
+        }]),
+    );
+    script.set_unit(
+        "target",
+        Some(benilla_ui::script::UnitState {
+            exists: true,
+            name: Some("Target Dummy".into()),
+            health: 80,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 50,
+            max_power: 100,
+            class: Some("Warrior".into()),
+            class_file: Some("WARRIOR".into()),
+            ..Default::default()
+        }),
+    );
+    script.set_action(
+        1,
+        Some(benilla_ui::script::ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_SteelMelee".into()),
+            kind: 0x00,
+            action: 100,
+            count: 0,
+        }),
+    );
+    script.set_action_state(
+        1,
+        Some(benilla_ui::script::ActionState {
+            usable: true,
+            // (startTime ms, duration ms, enable) — a cooldown with time left on it, which is
+            // what a cooldown-text addon (OmniCC, CooldownCount) needs before it draws anything.
+            cooldown: Some((1, 30_000, true)),
             ..Default::default()
         }),
     );
@@ -2841,6 +2947,68 @@ mod dependency_tests {
     /// dependency's OWN handler raising is the dependency's row, never its consumers'. Those
     /// events fire outside the error-capture window, so one library's fault cannot be counted once
     /// per addon that embeds it.
+    /// **A consumer's OWN code raising inside a DEPENDENCY's window is the consumer's row.**
+    ///
+    /// 1226's finding, now enforced. `AceAddon-2.0.lua:104-105` drains its entire `nextAddon` queue
+    /// on ANY `ADDON_LOADED` it sees and calls each consumer's `OnInitialize` there (`:230`). So
+    /// the surveyed addon's own file runs inside a dependency's window — and while attribution was
+    /// by window, those raises were charged to nobody and the whole FuBar/Ace family read as
+    /// surviving when it was not.
+    ///
+    /// Attribution is by the raising CHUNK now, which 1217 made truthful. The fixture is AceAddon's
+    /// shape reduced: the library drains a queue on the first ADDON_LOADED it sees, whoever it
+    /// names, and the consumer's callback raises from the consumer's own file.
+    ///
+    /// The second half is the half that must not regress: the LIBRARY's own raise, in the same
+    /// window, still belongs to the library.
+    #[test]
+    fn a_consumers_raise_inside_a_dependency_window_is_the_consumers_row() {
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-harness-attrib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let write = |name: &str, toc: &str, file: &str, body: &str| {
+            let dir = tmp.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.toc")), toc).unwrap();
+            std::fs::write(dir.join(file), body).unwrap();
+        };
+        // AceAddon's shape: drain every queued consumer on the FIRST ADDON_LOADED, whoever it names.
+        write(
+            "QueueLib",
+            "## Interface: 11200\nlib.lua\n",
+            "lib.lua",
+            "QueueLibQueue = {}\n\
+             QueueLibFrame = CreateFrame(\"Frame\")\n\
+             QueueLibFrame:RegisterEvent(\"ADDON_LOADED\")\n\
+             QueueLibFrame:SetScript(\"OnEvent\", function()\n\
+             while table.getn(QueueLibQueue) > 0 do\n\
+             local f = table.remove(QueueLibQueue, 1) f()\n\
+             end\n\
+             end)\n",
+        );
+        // The consumer queues a callback that raises from ITS OWN file.
+        write(
+            "QueueUser",
+            "## Interface: 11200\n## Dependencies: QueueLib\nuse.lua\n",
+            "use.lua",
+            "table.insert(QueueLibQueue, function() error(\"consumer init blew up\") end)\n",
+        );
+
+        let reports = survey(&tmp);
+        let of = |n: &str| reports.iter().find(|r| r.name == n).unwrap();
+
+        assert!(
+            of("QueueUser")
+                .session_errors
+                .iter()
+                .any(|e| e.contains("consumer init blew up")),
+            "the consumer's own file raised — window or not, it is the consumer's row: {:?}",
+            of("QueueUser").session_errors
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn each_loaded_addon_gets_its_own_addon_loaded_event() {
         let tmp = std::env::temp_dir().join(format!(

@@ -31,7 +31,7 @@ mod layout_methods;
 mod movable;
 pub(crate) mod toplevel;
 pub(crate) use layout_methods::anchor_bits_eq;
-pub(crate) use movable::{advance_move, FrameMove};
+pub(crate) use movable::{advance_move, advance_size, FrameMove, FrameSizing};
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // id ↔ lightuserdata

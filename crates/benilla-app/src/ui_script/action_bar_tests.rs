@@ -24,9 +24,9 @@ fn shipped_action_bar_drives_end_to_end() {
         );
         if file == "ActionBar.xml" {
             assert_eq!(
-                report.frames, 59,
+                report.frames, 61,
                 "bar + XP StatusBar (+ its numerals overlay) + exhaustion tick + max-level rail + art frame + 12 buttons (each with a Cooldown child) + 2 page buttons + the performance meter and its hover button, \
-                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223)"
+                 + BonusActionBarFrame and its 12 buttons with their Cooldown children (25 — hidden, as the reference's is; decision 1223), + ReputationWatchBar and its status bar (2 — hidden, ref ReputationFrame.xml:869)"
             );
         }
     }

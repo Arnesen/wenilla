@@ -523,6 +523,9 @@ pub(crate) struct Model {
     /// with nothing moving, and a move outlives the mouse button (the reference's mouse-up
     /// auto-stop skips the Lua drag type).
     pub(crate) moving: Option<super::object::FrameMove>,
+    /// The in-flight `StartSizing` drag — the resize twin of [`Self::moving`], cleared by the same
+    /// `StopMovingOrSizing` (`0x776990`).
+    pub(crate) sizing: Option<super::object::FrameSizing>,
     /// The in-flight Slider thumb drag: set when a LeftButton press lands on a Slider's thumb, held
     /// until release / pointer-leave (decision 0250 §5, the engine's C++-equivalent thumb drag —
     /// like a scrollbar dragging in the real client, no Lua involved). `None` between drags
@@ -1038,6 +1041,7 @@ impl Model {
             drag_registered: HashMap::new(),
             drag: None,
             moving: None,
+            sizing: None,
             slider_drag: None,
             gossip: None,
             gossip_selects: Vec::new(),

@@ -304,6 +304,56 @@
                          cluster — hoisted to the cluster the same offset lands past the screen edge.
                          Unprefixed (this file's own convention: every frame here keeps the
                          reference's bare name, unlike the newer Benilla*-prefixed windows). -->
+                    <!-- **Two more of the reference's minimap icons, built and hidden** — the
+                         fourth time this posture has been the answer (1219's vertical multibars,
+                         1223's bonus bar, ReputationWatchBar, these). `ref-Minimap.xml` declares
+                         both `hidden="true"`: real on the client from load, shown only when there
+                         is a battleground queue or a meeting stone to advertise.
+
+                         benilla drives neither, so they stay hidden — but addons reposition the
+                         whole icon set by NAME. `CleanMinimap.lua:209` is
+                         `getglobal(frameName):ClearAllPoints()` over a list that includes both, and
+                         it died on the nil; `MiniMapBattlefieldFrame` alone is 5 addons in the
+                         corrected ranking (1218). Their icon regions are declared with them, since
+                         an addon that moves a frame expects its named children to exist.
+
+                         Geometry quoted from the reference: both 33x33 with an 18x18 icon at
+                         TOPLEFT (7,-6), Battlefield at BOTTOMLEFT (13,-13) of the cluster and
+                         MeetingStone at TOPRIGHT (23,-65). -->
+                    <Button name="MiniMapBattlefieldFrame" enableMouse="true" hidden="true">
+                        <Size><AbsDimension x="33" y="33"/></Size>
+                        <Anchors>
+                            <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="13" y="-13"/></Offset></Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="MiniMapBattlefieldIcon" file="Interface\BattlefieldFrame\UI-Battlefield-Icon">
+                                    <Size><AbsDimension x="32" y="32"/></Size>
+                                    <Anchors>
+                                        <Anchor point="CENTER"><Offset><AbsDimension x="-1" y="0"/></Offset></Anchor>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                    </Button>
+
+                    <Button name="MiniMapMeetingStoneFrame" enableMouse="true" hidden="true">
+                        <Size><AbsDimension x="33" y="33"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="23" y="-65"/></Offset></Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="MiniMapMeetingStoneIcon" file="Interface\Icons\INV_Misc_Rune_06">
+                                    <Size><AbsDimension x="18" y="18"/></Size>
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                    </Button>
+
                     <Frame name="MiniMapMailFrame" enableMouse="true" hidden="true">
                         <Size>
                             <AbsDimension x="33" y="33"/>

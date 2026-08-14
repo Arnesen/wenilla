@@ -232,6 +232,36 @@
         -- (ActionButton_GetPagedID:446-467 — MultiBarBottomLeft ⇒ page 6, MultiBarBottomRight ⇒
         -- page 5, else the paged/bonus formula); we carry the fork as data — a fixed per-button
         -- page base set at OnLoad (MultiBars.xml), nil for the bonus-paged main bar.
+        -- **Adopt a button that never ran our OnLoad.**
+        --
+        -- Our handlers read a region cache (`button.icon`, `.count`, `.cooldown`, …) that
+        -- `BenillaActionButton_OnLoad` fills. An addon inheriting `ActionBarButtonTemplate` gets
+        -- those handlers and supplies its OWN `<OnLoad>`, which REPLACES the template's rather
+        -- than chaining — so ours never runs and every one of those reads was nil. zBar.xml:7 is
+        -- the corpus shape; it died in OUR file at `ActionBar.xml:529` on `button.icon`.
+        --
+        -- Resolving from the derived names is not a fallback bolted on: it is exactly what our
+        -- OnLoad does, and what the REFERENCE does on every access (`ActionButton_Update` reads
+        -- `getglobal(this:GetName().."Icon")` each time rather than caching). We cache because it
+        -- is cheaper; this is the same lookup for the buttons that never got cached.
+        --
+        -- It deliberately does NOT join `BENILLA_ACTION_BUTTONS`. That roster is the event fan-out
+        -- for OUR bars, and a foreign button's owner drives its own updates — adding it would have
+        -- us repainting somebody else's button behind their back.
+        function BenillaActionButton_Adopt(button)
+            if not button or button.icon then return end
+            local n = button:GetName()
+            if not n then return end
+            button.icon = getglobal(n .. "Icon")
+            button.hotkey = getglobal(n .. "HotKey")
+            button.count = getglobal(n .. "Count")
+            button.flash = getglobal(n .. "Flash")
+            button.border = getglobal(n .. "Border")
+            button.cooldown = getglobal(n .. "Cooldown")
+            button.flashing = button.flashing or 0
+            button.flashtime = button.flashtime or 0
+        end
+
         function BenillaActionButton_Action(button)
             -- `index` falls back to the button's ID, which is where the REFERENCE reads it from:
             -- `ActionButton_GetPagedID` uses `this:GetID()`, and our `.index` is only that value
@@ -260,6 +290,7 @@
         -- ships no CVar state, so the branch collapses to the stock-client one: action-bar
         -- tooltips live at the screen's bottom-right, above the bags.
         function BenillaActionButton_OnEnter(button)
+            BenillaActionButton_Adopt(button)
             if not GameTooltip then return end -- engine tests load file subsets
             GameTooltip_SetDefaultAnchor(GameTooltip, button)
             GameTooltip:SetAction(BenillaActionButton_Action(button))
@@ -305,6 +336,7 @@
         -- Ref ActionBarFrame.xml:12-22's fork verbatim: shift picks up, else uses (checkCursor=1 —
         -- the engine routes a click-with-payload to PlaceAction instead, decision 0216 §7).
         function BenillaActionButton_OnClick(button)
+            BenillaActionButton_Adopt(button)
             local action = BenillaActionButton_Action(button)
             if IsShiftKeyDown() then
                 PickupAction(action)
@@ -320,12 +352,14 @@
         -- stops the *drag*, and shift-click stays the deliberate way to move an action with the bar
         -- locked — which is what makes the setting usable rather than a wall.
         function BenillaActionButton_OnDragStart(button)
+            BenillaActionButton_Adopt(button)
             if LOCK_ACTIONBAR == "1" then return end
             PickupAction(BenillaActionButton_Action(button))
             BenillaActionButton_Update(button)
         end
 
         function BenillaActionButton_OnReceiveDrag(button)
+            BenillaActionButton_Adopt(button)
             if LOCK_ACTIONBAR == "1" then return end
             PlaceAction(BenillaActionButton_Action(button))
             BenillaActionButton_Update(button)
@@ -427,6 +461,7 @@
         -- tints red/grey, an unbound one wears the RANGE_INDICATOR dot (both legs the ref's,
         -- unified in 1008 — the SCOPE note).
         function ActionButton_OnUpdate(elapsed)
+            BenillaActionButton_Adopt(this)
             local button = this
             if ( button.flashing == 1 ) then
                 button.flashtime = button.flashtime - elapsed
@@ -499,7 +534,78 @@
         -- arguments are real state our per-container registration needs, so no adapter can supply
         -- them. That is the per-button event registration change already at the top of the arc
         -- queue, not a naming fix.
+        -- **`ActionButton_OnLoad()` — the reference's own, taking nothing and reading `this`.**
+        --
+        -- This sat at the top of the arc queue for the whole wave, recorded as unadaptable: ours
+        -- takes `(button, index, base, commandPrefix)` and the reference's takes none, so "no
+        -- adapter can supply them". Reading ref ActionButton.lua:103-119 shows that was wrong —
+        -- the reference derives all three from `this` and it is our own signature that caches
+        -- them:
+        --
+        --   index          -> `this:GetID()` (what ActionButton_GetPagedID reads)
+        --   commandPrefix  -> `this.buttonType`, a field the BAR sets, "ACTIONBUTTON" by default
+        --                     (ref l.118 `ActionButton_UpdateHotkeys(this.buttonType)`)
+        --   base           -> not an OnLoad concept at all; the reference forks on the PARENT's
+        --                     NAME at read time. A foreign bar ("zBar1") matches no multibar, so
+        --                     the paged/bonus formula applies — which is what leaving `base` nil
+        --                     already does here.
+        --
+        -- The events are registered on the BUTTON, as the reference does, and reach it through the
+        -- `<OnEvent>` this change adds to `ActionBarButtonTemplate`. Our own bars do NOT call this
+        -- and never register, so they keep being driven by the BENILLA_ACTION_BUTTONS fan-out and
+        -- cannot be double-driven.
+        function ActionButton_OnLoad()
+            local button = this
+            if not button then return end
+            BenillaActionButton_Adopt(button)
+            button.index = button.index or button:GetID()
+            button.bindingCommand = (button.buttonType or "ACTIONBUTTON") .. (button.index or 1)
+            button.showgrid = 0
+            button.flashing = 0
+            button.flashtime = 0
+            button:RegisterForDrag("LeftButton", "RightButton")
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            button:RegisterEvent("PLAYER_ENTERING_WORLD")
+            button:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+            button:RegisterEvent("ACTIONBAR_SHOWGRID")
+            button:RegisterEvent("ACTIONBAR_HIDEGRID")
+            button:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
+            button:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            button:RegisterEvent("UPDATE_BINDINGS")
+            BenillaActionButton_PaintHotkey(button)
+            BenillaActionButton_Update(button)
+        end
+
+        -- The per-button event arm the reference's own template carries. Only buttons that ran
+        -- `ActionButton_OnLoad` ever registered, so this is a no-op for ours.
+        function ActionButton_OnEvent()
+            local button = this
+            if not button then return end
+            BenillaActionButton_Adopt(button)
+            if event == "ACTIONBAR_SHOWGRID" then
+                button.showgrid = 1
+            elseif event == "ACTIONBAR_HIDEGRID" then
+                button.showgrid = 0
+            elseif event == "UPDATE_BINDINGS" then
+                BenillaActionButton_PaintHotkey(button)
+            end
+            BenillaActionButton_Update(button)
+        end
+
+        -- ref ActionButton.lua:446 — the action id a button displays, forked on its parent bar.
+        -- `BenillaActionButton_Action` IS this function; only the name was ours. CT_BarMod calls it
+        -- the moment there is an action to page, which is why an EMPTY-world survey never saw it:
+        -- it surfaced only when the fixture started seating a populated session.
+        function ActionButton_GetPagedID(button)
+            return BenillaActionButton_Action(button or this)
+        end
+
         function ActionButton_Update()
+            -- Adopt here too: this adapter carries the REFERENCE's name, so `this` is very often a
+            -- button somebody else built (zBar's, CT_BarMod's) that never ran our OnLoad and so has
+            -- no region cache. The handler-boundary adopts do not cover it — an addon calls this
+            -- global directly, without any of our scripts in the stack.
+            BenillaActionButton_Adopt(this)
             BenillaActionButton_Update(this)
         end
 
@@ -1075,6 +1181,7 @@
     <!-- The bar half: the reference's `ActionBarButtonTemplate`, regions inherited, handlers added. -->
     <CheckButton name="ActionBarButtonTemplate" inherits="ActionButtonTemplate" virtual="true">
         <Scripts>
+            <OnEvent>ActionButton_OnEvent()</OnEvent>
             <OnClick>BenillaActionButton_OnClick(self)</OnClick>
             <OnDragStart>BenillaActionButton_OnDragStart(self)</OnDragStart>
             <OnReceiveDrag>BenillaActionButton_OnReceiveDrag(self)</OnReceiveDrag>
@@ -1535,6 +1642,46 @@
                 <Anchors><Anchor point="LEFT" relativeTo="BonusActionButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12)</OnLoad></Scripts>
             </CheckButton>
+        </Frames>
+    </Frame>
+
+    <!-- **The reputation watch bar, built and hidden** — the third time this posture has been the
+         answer (1219's vertical multibars, 1223's bonus bar, this). `ref-ReputationFrame.xml:869`
+         declares it `<Frame name="ReputationWatchBar" parent="MainMenuBar" hidden="true">`: real on
+         the client from load, shown only while a faction is being watched.
+
+         benilla does not drive reputation watching, so it stays hidden — but three corpus addons
+         index it by name (`FuBar_FuXPFu`, `CT_BottomBar`, `zBarEx`), and FuXPFu dies at
+         `FuBar_FuXPFu.lua:227` on the nil. Its own `OnEnable` reaches for it the moment the addon
+         enables, so nothing before the populated-session fixture ever got that far.
+
+         Geometry quoted: a 1024x11 frame whose BOTTOM sits on MainMenuBar's TOP at (0,-3), holding
+         a 1024x8 `ReputationWatchStatusBar` at TOP. The reference's two art slices
+         (`ReputationWatchBarTexture0/1`, `UI-ReputationWatchBar`) are declared with it — an addon
+         that repositions the bar expects the named regions to exist, and they draw nothing while
+         the frame is hidden. -->
+    <Frame name="ReputationWatchBar" enableMouse="true" parent="MainMenuBar" hidden="true">
+        <Size><AbsDimension x="1024" y="11"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOM" relativeTo="MainMenuBar" relativePoint="TOP"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <StatusBar name="ReputationWatchStatusBar" drawLayer="ARTWORK">
+                <Size><AbsDimension x="1024" y="8"/></Size>
+                <Anchors><Anchor point="TOP"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="ReputationWatchBarTexture0" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
+                            <Size><AbsDimension x="256" y="11"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="ReputationWatchBarTexture1" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
+                            <Size><AbsDimension x="256" y="11"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationWatchBarTexture0" relativePoint="RIGHT"/></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+            </StatusBar>
         </Frames>
     </Frame>
 </Ui>
