@@ -386,8 +386,6 @@ fn back_on_disconnect(
     mut msgs: MessageReader<crate::net::DisconnectedMessage>,
     mut roster: ResMut<Roster>,
     mut next: ResMut<NextState<ClientState>>,
-    mut ui_hover: ResMut<crate::ui_script::PlayerUiHover>,
-    mut ui_keys: ResMut<crate::ui_script::UiKeyboardCapture>,
 ) {
     if !msgs.read().any(|m| m.session_over) {
         return;
@@ -396,25 +394,23 @@ fn back_on_disconnect(
     // auto-answer the *next* roster — sending the player straight back into the world they were
     // just thrown out of, without ever seeing the screen.
     roster.pending_pick = None;
-    ui_hover.0 = None;
-    ui_keys.0 = false;
     next.set(ClientState::Login);
 }
 
 /// A confirmed `/logout` → back to the glue layer, pick cleared (the follow-up roster must be
-/// shown, not auto-answered). Also releases the in-world UI's input latches — `feed_ui_input`
-/// stops running outside `InWorld`, so whatever it last wrote would otherwise stick.
+/// shown, not auto-answered).
+///
+/// The in-world UI's input latches are released by [`crate::ui_script::end_ui_session`], on the
+/// `OnExit(InWorld)` edge this transition causes: they stick because `feed_ui_input` stops running
+/// outside `InWorld`, which is a fact about the edge and not about *why* we left it — so both this
+/// path and the disconnect above get it from one place (1290).
 fn back_on_logout(
     mut msgs: MessageReader<LoggedOutMessage>,
     mut roster: ResMut<Roster>,
     mut next: ResMut<NextState<ClientState>>,
-    mut ui_hover: ResMut<crate::ui_script::PlayerUiHover>,
-    mut ui_keys: ResMut<crate::ui_script::UiKeyboardCapture>,
 ) {
     if msgs.read().next().is_some() {
         roster.pending_pick = None;
-        ui_hover.0 = None;
-        ui_keys.0 = false;
         next.set(ClientState::CharSelect);
     }
 }
@@ -512,14 +508,26 @@ fn debug_logout_smoke(
             *phase = 2;
         }
         2 if *state.get() == ClientState::CharSelect => {
-            info!(
-                "logout-smoke: back at character select — {} tiles resident (must be 0)",
-                streamer.residency().1
-            );
+            info!("logout-smoke: back at character select — lingering");
             (*phase, *mark) = (3, now);
         }
+        // **The residency reading belongs HERE, not on arrival.** It used to print on the first
+        // frame at CharSelect and report "25 tiles resident (must be 0)" every single run — a
+        // permanent, alarming, wrong number. `release_world` runs ~150 ms later (it hangs off the
+        // world-live falling edge, not the state edge), so the probe was reading the count before
+        // the thing it is checking had happened, and reporting the world it had just left.
+        //
+        // It cost more than a wrong line: 1291 wrote the reading up as a live contradiction of
+        // 0777's release-world claim, on the strength of it reproducing identically on an older
+        // commit — which it did, because an instrument that measures too early does that reliably.
+        // A number that is always wrong teaches everyone to skip the line (0777's own lesson about
+        // tripwires nobody trips, from the other end).
         3 if now - *mark > 4.0 => match roster.chars.first().map(|c| (c.guid, c.name.clone())) {
             Some((guid, name)) => {
+                info!(
+                    "logout-smoke: {} tiles resident after the release (must be 0)",
+                    streamer.residency().1
+                );
                 info!("logout-smoke: re-entering the world as {name}");
                 send_pick(&mut roster, &pick, guid);
                 (*phase, *mark) = (4, now);

@@ -216,11 +216,14 @@ pub(super) fn feed_item_sets(
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
-    mut pending: Local<std::collections::HashMap<u32, benilla_ui::script::ItemSetView>>,
+    mut pending: Local<
+        crate::ui_script::VmMemo<std::collections::HashMap<u32, benilla_ui::script::ItemSetView>>,
+    >,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let pending = pending.get(&script);
     for id in script.take_item_set_asks() {
         pending.entry(id).or_default();
     }
@@ -304,12 +307,14 @@ pub(super) fn feed_item_stats(
     // ItemDisplayInfo icons the bag slots already resolve through.
     classes: Option<Res<super::ItemClasses>>,
     icons: Option<Res<ItemDisplays>>,
-    mut pending: Local<std::collections::HashSet<u32>>,
-    mut last_home: Local<Option<String>>,
+    mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
+    mut last_home: Local<crate::ui_script::VmMemo<Option<String>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let pending = pending.get(&script);
+    let last_home = last_home.get(&script);
     // **`GetBindLocation()`'s push, and it happens BEFORE the early return below.**
     //
     // The name resolution lives here because this system already owns it for the hearthstone's
@@ -375,11 +380,12 @@ pub(super) fn feed_player_req(
     factions: Option<Res<crate::target::Factions>>,
     actions: Res<crate::ui_action::PlayerActions>,
     spells: Option<Res<crate::ui_action::Spells>>,
-    mut last: Local<Option<benilla_ui::script::PlayerReqState>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<benilla_ui::script::PlayerReqState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let Some(store) = self_q.iter().next() else {
         return;
     };
@@ -614,11 +620,12 @@ pub(super) fn feed_containers(
     mut lock_cleared: ResMut<LockClearedByFailure>,
     mut names: ResMut<crate::names::NameCache>,
     clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<FeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     // The frame's atomic clock pair (`crate::ui_script::UiClock`): the slot resolves read the
     // cooldown store and convert triples through ONE coherent instant, so a running cooldown's
     // pushed start is frame-stable (the resource's own doc).

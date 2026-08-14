@@ -231,6 +231,7 @@ pub(super) fn spawn_loaded_placements(
                         host.as_ref().map(|h| h.joints.as_slice()),
                         host.as_ref().and_then(|h| h.arm),
                         ents.first().copied(),
+                        None, // an ADT map doodad belongs to no building
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
                     tag_world_object(
@@ -622,6 +623,14 @@ pub(super) fn spawn_loaded_placements(
                 host.as_ref().map(|h| h.joints.as_slice()),
                 host.as_ref().and_then(|h| h.arm),
                 ents.first().copied(),
+                // The prop's own rooms — the trail is gated by them exactly as the submeshes
+                // above are, because it is one of this model's emitters (decision 1289).
+                portal_instance
+                    .filter(|_| !d.groups.is_empty())
+                    .map(|instance| WmoGroupVis {
+                        instance,
+                        groups: d.groups.clone(),
+                    }),
             );
             spawn_lights_for(&mut commands, &m.lights, d.transform, &mut ents);
             tag_world_object(

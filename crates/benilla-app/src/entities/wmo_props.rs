@@ -370,6 +370,12 @@ pub(super) fn spawn_wmo_gameobject_props(
                         benilla_world::ribbons::RibbonSeq::Host(entity),
                         // No model-alpha source: a placed prop / effect instance is always drawn (0827).
                         None,
+                        // A GameObject's props ride the GameObject, not a portal-culled placement:
+                        // this WMO is the boat, and nothing floods it. (Its off-map hide reaches
+                        // the trail no better than before — a `Visibility`-hidden transport still
+                        // trails. No 1.12 transport prop authors a ribbon, so nothing renders it
+                        // today; it is named in decision 1289's residuals rather than guessed at.)
+                        None,
                     )
                     .is_some()
                     {

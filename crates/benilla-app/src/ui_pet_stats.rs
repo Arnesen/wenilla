@@ -235,11 +235,12 @@ fn feed_pet_stats(
     family_tables: Option<Res<PetFamilyTables>>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut last: Local<Option<(bool, PetStats)>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<(bool, PetStats)>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let store = pet.store(bar.spells.pet_guid);
     let family = family_for(store, &mut names, &commands, family_tables.as_deref());
     let fresh = stats_for(store, self_store.iter().next(), tables.as_deref(), family);

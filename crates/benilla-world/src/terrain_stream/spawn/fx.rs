@@ -193,6 +193,10 @@ pub(super) fn spawn_ribbons_for(
     joints: Option<&[Entity]>,
     arm: Option<Entity>,
     fallback_owner: Option<Entity>,
+    // The rooms this placement is drawn by, for a WMO prop — `None` for an ADT map doodad. The
+    // trail's own gate, because a trail rides a joint or a submesh and neither of those states it
+    // ([`crate::ribbons::RibbonTrail::room`]).
+    room: Option<crate::wmo_portal::WmoGroupVis>,
 ) {
     for rb in ribbons {
         let (owner, use_pivot) = match joints.and_then(|js| js.get(rb.def.bone as usize)).copied() {
@@ -217,6 +221,7 @@ pub(super) fn spawn_ribbons_for(
             ),
             // No model-alpha source: a placed prop / effect instance is always drawn (0827).
             None,
+            room.clone(),
         );
     }
 }

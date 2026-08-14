@@ -77,6 +77,11 @@ pub(super) fn drive_script(
     // The seam scale the engine's text-metric caches were answered under. When `s` moves (window
     // resize / fullscreen toggle / uiScale change), every cached measure is stale — see the
     // invalidation below.
+    //
+    // Deliberately NOT a `VmMemo` (decision 1290's sweep): this is a fact about the RASTER, not
+    // about what the VM has been told, and it stays true across the VM's death and rebirth. A fresh
+    // VM has no cached measures to invalidate and no measurer at all, and the re-seat below already
+    // catches that on its own test (`!script.has_text_measurer()`).
     mut last_seam: Local<f32>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
@@ -86,7 +91,12 @@ pub(super) fn drive_script(
     // caches are monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff
     // would then discard. Capture mode never skips (the harness wants exact per-frame output,
     // including the cursor-icon quad's live mouse position).
-    mut prev: Local<GateInputs>,
+    //
+    // A [`crate::ui_script::VmMemo`] because a skip is not only a quad-conversion skip: it also skips
+    // `set_link_spans` and the minimap-slot / booth-pane refills, which are pushes INTO the VM. The
+    // VM lives for one login (decision 1290), so a fresh VM must never be gated on what the previous
+    // one extracted — its first frame is always a real conversion.
+    mut prev: Local<crate::ui_script::VmMemo<GateInputs>>,
     // This frame's phase split, published for whoever asked (the `[ui-cost]` line, `hover_log`).
     mut ui_cost: ResMut<super::UiFrameCost>,
 ) {
@@ -94,6 +104,7 @@ pub(super) fn drive_script(
     let Some(mut script) = script else {
         return;
     };
+    let prev = prev.get(&script);
     let Ok(window) = window.single() else {
         return;
     };

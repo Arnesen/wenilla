@@ -38,6 +38,12 @@ mod manifest;
 /// transcribing it — the rule, the list, and the licensing reason are that module's header.
 mod reference_ui;
 
+/// What the host remembers about the VM, and how it forgets — the one mechanism that stops a seed
+/// or a change-memo outliving the VM it was written against (decision 1290).
+mod session;
+
+pub(crate) use session::VmMemo;
+
 // The manifest's loaders read as `ui_script::…` at every call site, including the tests' `super::`.
 // `load_default_ui` is no longer test-only: the addon harness (1188 phase 6) loads the whole
 // shipped interface under each surveyed addon, because roughly half of what an addon calls is
@@ -253,7 +259,6 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
-            .init_resource::<IngameUiLoaded>()
             .init_resource::<AddOnIdentity>()
             // After `AssetSet::Open` so the patch chain exists at boot: the VM's first load is
             // the real `GlobalStrings.lua` (the reference's own FrameXML order), which the
@@ -270,7 +275,7 @@ impl Plugin for UiScriptPlugin {
             // has them.
             .add_systems(
                 OnExit(crate::char_select::ClientState::InWorld),
-                shutdown_on_session_end,
+                end_ui_session,
             )
             .add_systems(Update, shutdown_on_exit)
             // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
@@ -338,21 +343,44 @@ fn arbitrate_pointer_over_ui(
 }
 
 fn setup_script(world: &mut World) {
+    install_boot_vm(world);
+}
+
+/// Build a **boot VM** and install it: a Lua state carrying the strings, the emote tokens and the
+/// font-object registry, and no frames at all.
+///
+/// This is the state the client sits at outside the world — the login and character screens — and
+/// the state a world entry loads the in-game UI *onto* ([`load_ingame_ui_on_world_entry`]). It is
+/// installed twice over a session: once at `Startup`, and again at every [`end_ui_session`], which
+/// is what makes a second login a genuine second load rather than a re-entry into the first
+/// login's Lua state.
+///
+/// ONLY the font-object registry at boot (1051). The glyph atlas bakes once, on the first `Update`,
+/// from `script.font_objects()` — and our native glue screens share that one atlas, so the registry
+/// has to exist before the login screen or in-game text loses its outlined variants and its
+/// registry-declared sizes for the whole session. The other 55 files are in-game UI and load at
+/// world entry ([`load_ingame_ui`]); the reference splits at exactly this seam, with GlueXML
+/// carrying its own `GlueFonts.xml`.
+///
+/// **Since 1290 this runs per login, and that is load-bearing rather than incidental.** The
+/// reference re-loads `Fonts.xml` on every rebuild and *must*: `0x48fbf0`'s toc loop has no
+/// already-loaded gate, and both halves of a font object die with the old session — the Lua handle
+/// with `_G`, and the native `CSimpleFont` registry with the frame-script owner (`0x7839c0`, torn
+/// down at `0x490c97`). Because [`end_ui_session`] routes every login through here, every session's
+/// VM gets the registry and every `inherits="GameFontNormal"` in FrameXML resolves. A design that
+/// dropped the VM and skipped index 0 on the in-game load would fail exactly there — verified in
+/// wow-re's §5 for this change (1291).
+fn install_boot_vm(world: &mut World) {
     let script = match UiScript::new() {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
+            world.remove_non_send_resource::<UiScript>();
             return;
         }
     };
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
-    // ONLY the font-object registry at boot (1051). The glyph atlas bakes once, on the first
-    // `Update`, from `script.font_objects()` — and our native glue screens share that one atlas, so
-    // the registry has to exist before the login screen or in-game text loses its outlined variants
-    // and its registry-declared sizes for the whole session. The other 55 files are in-game UI and
-    // load at world entry ([`load_ingame_ui`]); the reference splits at exactly this seam, with
-    // GlueXML carrying its own `GlueFonts.xml`.
     if ui_wanted(world) {
         // Errors are already logged per file as they happen; the returned list is the test-side
         // assertion (`shipped_xml_tests`), not a second reporting channel.
@@ -368,23 +396,25 @@ fn ui_wanted(world: &World) -> bool {
         || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
 }
 
-/// Has the in-game UI been materialized this process? The load is **once per process**, not once
-/// per world entry: nothing tears the frame tree down on `OnExit(InWorld)` yet, so a re-entry after
-/// `/logout` must not stack a second copy of every window.
+/// `OnEnter(InWorld)`: materialize the in-game UI for **this** session.
 ///
-/// The reference *does* tear down and rebuild (`ClientDestroyGame 0x401ee0` ↔ `0x401570`, and its
-/// `ReloadUI` is verified end to end doing exactly that). Matching it is the follow-on; this latch
-/// is what makes the move safe without it, and is the thing to delete when the teardown lands.
-#[derive(Resource, Default)]
-pub(crate) struct IngameUiLoaded(pub(crate) bool);
-
-/// `OnEnter(InWorld)`: materialize the in-game UI, once.
+/// **Once per world entry, not once per process** (decision 1290). The reference builds the whole
+/// in-game UI at `CGGameUI::Initialize 0x48fbf0` and destroys it again at `0x490bd0` on the way
+/// out, so every login runs every addon's file scope afresh — and that file scope is where the
+/// corpus reads the character it is looking at (`local currentPlayer = UnitName("player")`, the
+/// idiom [`seat_from_roster`] already documents). While this was latched per process, a second
+/// login kept the first login's captured name: the director's "the selected one is always
+/// Onewarrior no matter what char I log into", and, worse, its saved variables went to the first
+/// character's file. [`world_entry_tests`] holds both ends.
+///
+/// The load runs onto the fresh boot VM [`end_ui_session`] left behind (or, on the first login,
+/// `Startup`'s) — so nothing here has to unpick the previous session; there is nothing to unpick.
 ///
 /// Safe on the state edge only because 1038 moved the initial transition after `PostStartup` — a
 /// capture boots straight into `InWorld`, so before that this would have run ahead of
 /// [`benilla_assets::AssetSet::Open`] and loaded against no patch chain.
 fn load_ingame_ui_on_world_entry(world: &mut World) {
-    if world.resource::<IngameUiLoaded>().0 || !ui_wanted(world) {
+    if !ui_wanted(world) {
         return;
     }
     let Some(mut script) = world.remove_non_send_resource::<UiScript>() else {
@@ -427,7 +457,6 @@ fn load_ingame_ui_on_world_entry(world: &mut World) {
     finish_ui_load(&mut script);
     world.insert_non_send_resource(script);
     world.insert_resource(AddOnIdentity(identity));
-    world.resource_mut::<IngameUiLoaded>().0 = true;
 }
 
 /// The `"player"` snapshot the UI loads **under**, built from the roster row of the pick in
@@ -525,8 +554,19 @@ pub(crate) struct AddOnIdentity(pub(crate) Option<(String, String)>);
 /// carves as (`system/ui/ui.md`):
 ///
 /// > `PLAYER_LEAVING_WORLD` (273) → **`PLAYER_LOGOUT`** (271, `0x490c2a`) → `layout-cache.txt` →
-/// > **the flat saved file** (`0x490c7e`) → **the per-addon files** (`0x490c83`) → `AddOns.txt` →
-/// > destroy the Lua state
+/// > **the flat saved file** (`0x490c7e`) → **the per-addon files** (`0x490c83`) → `AddOns.txt`
+/// > (`0x490c88`) → destroy the frame-script owner (`0x490c97`) → nil all 216 C bindings out of
+/// > `_G` (`0x490cba` → `0x490ce0`)
+///
+/// **The last step is not "destroy the Lua state"** — which is what three of wow-re's own notes
+/// said, until this client's teardown made the question load-bearing and a §5 cross-check settled
+/// it (`system/ui/scratch/lua-state-lifecycle.md`; 1291). `0x490c97` is the frame-script owner's
+/// scalar-deleting destructor — the widget tree and the native virtual-font registry — and the Lua
+/// state outlives it. The state is closed and re-opened at `0x703b80`, which reaches `InitLua` by a
+/// **tail-`jmp`** (`0x703b8e`) rather than a call, which is exactly why a call-census missed it.
+/// Its three callers are `UI_Init 0x48fbf0` (at its *head*), `ShutdownGame 0x491180`, and the glue
+/// builder `0x46a7b0` — so a logout/login cycle runs through four distinct states, and the glue
+/// screen gets its own.
 ///
 /// **`PLAYER_LOGOUT` fires before any write, and that is the point**: it is an addon's last chance
 /// to mutate a saved global, so a handler that stores "where I left off" runs while the write is
@@ -548,11 +588,54 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 }
 
 /// `OnExit(InWorld)`: a `/logout` back to the glue, or a disconnect — two of the reference's five
-/// roots.
-fn shutdown_on_session_end(script: Option<NonSendMut<UiScript>>, id: Res<AddOnIdentity>) {
-    if let Some(mut script) = script {
-        shutdown_ui_state(&mut script, id.0.as_ref());
+/// roots — and, with the writes done, **the end of this session's Lua state**.
+///
+/// The reference's own shutdown ends by destroying the state (`0x490bd0`'s tail, after
+/// `AddOns.txt`); ours ends by replacing it with a fresh boot VM ([`install_boot_vm`]), which is the
+/// same guarantee expressed the way our two-phase load wants it — the character screen still needs
+/// a font-object registry for the shared glyph atlas, and the next login needs somewhere to load
+/// onto. What matters is that **no frame, no global and no addon upvalue crosses this edge**: that
+/// is what makes the next login a real login (decision 1290) instead of a re-entry into the
+/// previous character's UI.
+///
+/// Exclusive rather than a `NonSendMut` system because it both drops and installs a `NonSend`, and
+/// because the shutdown writes must be ordered against each other — see [`shutdown_ui_state`].
+pub(crate) fn end_ui_session(world: &mut World) {
+    let identity = world
+        .get_resource::<AddOnIdentity>()
+        .and_then(|id| id.0.clone());
+    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+        shutdown_ui_state(&mut script, identity.as_ref());
     }
+    world.insert_resource(AddOnIdentity(None));
+
+    // **Everything the host is holding that came OUT of the dying VM goes with it.** A change memo
+    // handles itself — it is keyed on [`benilla_ui::script::UiScript::session`] ([`VmMemo`]) — but
+    // these are plain values other systems read through `Res<…>`, with no VM in hand to key
+    // against, so the edge clears them. Each is a fact about a frame tree that is about to stop
+    // existing: a hovered frame id, the minimap's extracted hole, a payload the cursor is carrying,
+    // and the VM-relative clock the cooldown conversions run through.
+    //
+    // The two input latches were cleared by `char_select`'s logout and disconnect handlers, one
+    // copy each. They belong here: the reason they need clearing is that `feed_ui_input` stops
+    // running outside `InWorld`, which is this edge and nothing to do with *why* we left it.
+    if let Some(mut hover) = world.get_resource_mut::<PlayerUiHover>() {
+        hover.0 = None;
+    }
+    if let Some(mut keys) = world.get_resource_mut::<UiKeyboardCapture>() {
+        keys.0 = false;
+    }
+    if let Some(mut held) = world.get_resource_mut::<CursorPayloadHeld>() {
+        *held = CursorPayloadHeld::default();
+    }
+    if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
+        minimap.0 = None;
+    }
+    if let Some(mut clock) = world.get_resource_mut::<UiClock>() {
+        *clock = UiClock::default();
+    }
+
+    install_boot_vm(world);
 }
 
 /// `AppExit`: quitting the client — the quit / application-exit roots. Reads the message rather
@@ -590,10 +673,11 @@ fn shutdown_on_exit(
 ///
 /// **`PLAYER_LOGIN` is the conditional one; `PLAYER_ENTERING_WORLD` is not.** The cascade fires
 /// the former only when `[0xb4e260]` is set, and only the FrameXML-loader path sets it, clearing
-/// it immediately after — so it means "the UI came up", once, which is exactly the
-/// [`IngameUiLoaded`] latch this sits behind. `PLAYER_ENTERING_WORLD` keeps its own per-entry
-/// latch in [`crate::ui_unit`] and still lands after this, since it waits on the self descriptor
-/// arriving over the wire.
+/// it immediately after — so it means "the UI came up". That is once per **UI build**, which since
+/// 1290 is once per world entry here too: this runs from
+/// [`load_ingame_ui_on_world_entry`], on the same edge that built the tree.
+/// `PLAYER_ENTERING_WORLD` keeps its own per-entry latch in [`crate::ui_unit`] and still lands
+/// after this, since it waits on the self descriptor arriving over the wire.
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
     crate::ui_saved::load_saved_variables(script);
     script.fire_event("PLAYER_LOGIN", vec![]);
@@ -707,7 +791,7 @@ pub(crate) fn is_emote_token_line(line: &str) -> bool {
 /// no avatar in a server-less capture) and fire the initial events once — proving the full chain
 /// end-to-end on a screenshot: snapshot → `Unit*` bindings → Lua `OnEvent` → bars + text, for both
 /// unit frames (the target one included, so captures regression-test its show-on-target path).
-fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) {
+fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<bool>>) {
     /// The synthetic target's guid — a creature-family high part, so nothing mistakes it for a
     /// player. Only its *distinctness* matters.
     const DEMO_TARGET_GUID: u64 = 0xF130_0000_0000_0001;
@@ -715,6 +799,9 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) 
     let Some(mut script) = script else {
         return;
     };
+    // Session-keyed like every other seed (1290): the one-shot below is `PLAYER_ENTERING_WORLD`
+    // and the bar seeds, which a fresh VM needs again.
+    let fired = fired.get(&script);
     // TEMP DEBUG (WOW_CAPTURE_REHOVER=1): re-fire the world hover EVERY frame — the live
     // flapping-raycast simulation for the under-sized-plate investigation.
     if std::env::var("WOW_CAPTURE_REHOVER").as_deref() == Ok("1") {
@@ -1105,6 +1192,11 @@ mod shipped_xml_tests;
 
 #[cfg(test)]
 mod bagnon_render_tests;
+
+/// The UI's per-world-entry lifecycle: teardown at the character screen, a genuine second load at
+/// the next login (decision 1290).
+#[cfg(test)]
+mod world_entry_tests;
 
 #[cfg(test)]
 mod seam_scale_tests {

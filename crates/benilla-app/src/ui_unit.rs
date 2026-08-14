@@ -150,7 +150,10 @@ impl Plugin for UiUnitPlugin {
         )
         .add_systems(Update, drain_pvp_toggles.after(UiInput))
         .add_systems(Update, feed_default_language.in_set(UnitFeed))
-        .add_systems(PostStartup, (load_exhaustion_rows, load_default_languages));
+        // `load_exhaustion_rows` pushes into the VM, so it runs per VM in `Update` (1290);
+        // `load_default_languages` only builds a Bevy resource and stays a one-shot.
+        .add_systems(Update, load_exhaustion_rows)
+        .add_systems(PostStartup, load_default_languages);
     }
 }
 
@@ -194,11 +197,12 @@ fn feed_default_language(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     langs: Option<Res<DefaultLanguagesRes>>,
-    mut pushed: Local<Option<Option<String>>>,
+    mut pushed: Local<crate::ui_script::VmMemo<Option<Option<String>>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let pushed = pushed.get(&script);
     let name = self_q
         .iter()
         .next()
@@ -212,17 +216,25 @@ fn feed_default_language(
     }
 }
 
-/// Seed the VM's Exhaustion.dbc table once at startup — the rest bindings' data
+/// Seed the VM's Exhaustion.dbc table once per VM — the rest bindings' data
 /// ([`benilla_ui::script::UiScript::set_exhaustion_rows`]; the ui_macro icon-catalog shape).
 /// A failed load keeps the model's shipped-table fallback, so the rest surface still behaves
 /// like the shipped enUS client rather than going dark.
+///
+/// Per VM rather than per process (1290) for the reason every seed here is: a login builds a fresh
+/// VM, and this one degrades quietly — the fallback table is close enough that nobody would notice
+/// it had stopped being seeded.
 fn load_exhaustion_rows(
     script: Option<NonSendMut<UiScript>>,
     assets: Option<Res<benilla_assets::WorldAssets>>,
+    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let (Some(mut script), Some(assets)) = (script, assets) else {
         return;
     };
+    if !seeded.claim(&script) {
+        return;
+    }
     let loaded = {
         use benilla_assets::LockRecover;
         let mut chain = assets.chain.lock_recover();
@@ -909,9 +921,9 @@ fn feed_units(
     // is structural for every consumer.
     //
     // The absent arm is the world-EXIT edge (logout / char switch — the self entity despawns
-    // with the streamed world): the real client fires this event on *every* world entry (it
-    // tears the whole UI down between them; the once-per-process frame tree is our documented
-    // interim, `IngameUiLoaded`), so re-arm the fire and forget the player-global diff
+    // with the streamed world): the real client fires this event on *every* world entry, and
+    // since 1290 so do we — the frame tree is torn down and rebuilt across that edge, the way
+    // the reference does it. So re-arm the fire and forget the player-global diff
     // memories. Forgetting them makes every next-login first sighting re-seed SILENTLY — the
     // byte-verified fresh-CREATE notify silence (1098 §4), now holding per entry: without it a
     // 60→1 char switch latched the max-level rail shown over a level-1 body (1106's live

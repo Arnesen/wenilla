@@ -701,9 +701,10 @@ fn emit_minimap(
 fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     world: benilla_world::world_point::WorldPoint,
-    mut was_inside: Local<Option<bool>>,
+    mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
     let Some(mut script) = script else { return };
+    let was_inside = was_inside.get(&script);
     let inside = world.interior().is_some();
     script.set_minimap_inside(inside);
     if *was_inside != Some(inside) {
@@ -720,9 +721,10 @@ fn feed_minimap_inside(
 fn feed_game_time(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     time: Res<crate::net::ServerTime>,
-    mut last: Local<Option<u32>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<u32>>>,
 ) {
     let Some(script) = script else { return };
+    let last = last.get(&script);
     let Some(gt) = time.0 else { return };
     let minute = gt.minute_of_day();
     if *last == Some(minute) {

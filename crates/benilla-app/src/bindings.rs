@@ -83,7 +83,10 @@ struct BindingDispatch {
     /// order — re-snapshotted with the map, so the two can never disagree about what an index
     /// means. Empty in every session with no addon bindings, which is every session today.
     addons: Vec<AddonBindingBody>,
-    seen_generation: Option<u64>,
+    /// The engine table's generation this map was built from. **Session-keyed** (1290): a fresh VM
+    /// restarts its counter at 0, so a bare memo could hold a higher number than the live VM will
+    /// ever reach and gate the rebuild off for the whole session.
+    seen_generation: crate::ui_script::VmMemo<Option<u64>>,
 }
 
 impl BindingDispatch {
@@ -171,7 +174,8 @@ impl BindingsState {
 struct BindingFiles {
     account: Option<std::path::PathBuf>,
     character: Option<std::path::PathBuf>,
-    identity: Option<(String, String)>,
+    /// Whose set 2 is loaded — **in the VM that is live now**. See [`load_character_bindings`].
+    identity: crate::ui_script::VmMemo<Option<(String, String)>>,
 }
 
 /// Label for this module's systems inside [`crate::ui_script::UiInput`] — the UI key feed is
@@ -187,12 +191,15 @@ impl Plugin for BindingsPlugin {
         app.init_resource::<BindingDispatch>()
             .init_resource::<BindingsState>()
             .init_resource::<BindingFiles>()
-            // PostStartup like the macro catalog: needs the VM, which lands at the Startup
-            // schedule boundary.
-            .add_systems(PostStartup, seed_bindings)
             .add_systems(
                 Update,
                 (
+                    // Once per **VM**, not once per process (decision 1290): a login builds a
+                    // fresh one, and an unseeded VM has no command registry at all —
+                    // `sync_dispatch` would build an empty map and every keybind in the session
+                    // would be dead. Hence `Update` with a session-keyed claim rather than
+                    // `PostStartup`, ordered ahead of the pair that reads what it registers.
+                    seed_bindings.before(sync_dispatch),
                     (sync_dispatch, latch_and_dispatch)
                         .chain()
                         .in_set(crate::ui_script::UiInput)
@@ -221,10 +228,17 @@ pub(crate) fn registry_commands() -> Vec<KeybindCommand> {
         .collect()
 }
 
-/// Register the command registry with the engine table and seed the account set from disk —
-/// boot-time, before any window opens.
-fn seed_bindings(script: Option<NonSendMut<UiScript>>, mut files: ResMut<BindingFiles>) {
+/// Register the command registry with the engine table and seed the account set from disk — once
+/// per VM, before any window opens.
+fn seed_bindings(
+    script: Option<NonSendMut<UiScript>>,
+    mut files: ResMut<BindingFiles>,
+    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
+) {
     let Some(mut script) = script else { return };
+    if !seeded.claim(&script) {
+        return;
+    }
     script.register_bindings(&registry_commands());
     files.account = crate::local_state::bindings_account_path();
     if let Some(overrides) = read_diff(&files.account) {
@@ -260,11 +274,13 @@ fn load_character_bindings(
     let Some(id) = crate::ui_macro::identity(&roster) else {
         return;
     };
-    if files.identity.as_ref() == Some(&id) {
+    // Session-keyed (1290): re-entering the world as the SAME character still meets a fresh VM
+    // with no set 2 in it, so "same identity" is only a reason to skip within one VM.
+    if files.identity.get(&script).as_ref() == Some(&id) {
         return;
     }
     files.character = crate::local_state::bindings_character_path(&id.0, &id.1);
-    files.identity = Some(id);
+    *files.identity.get(&script) = Some(id);
     match read_diff(&files.character) {
         Some(overrides) => {
             script.seed_binding_set(2, Some(store::resolve(&overrides)));
@@ -314,10 +330,10 @@ fn save_bindings(script: Option<NonSendMut<UiScript>>, files: Res<BindingFiles>)
 fn sync_dispatch(script: Option<NonSendMut<UiScript>>, mut dispatch: ResMut<BindingDispatch>) {
     let Some(mut script) = script else { return };
     let generation = script.keybinds_generation();
-    if dispatch.seen_generation == Some(generation) {
+    if *dispatch.seen_generation.get(&script) == Some(generation) {
         return;
     }
-    dispatch.seen_generation = Some(generation);
+    *dispatch.seen_generation.get(&script) = Some(generation);
     dispatch.map.clear();
     // The addon table first: it is what the names the registry does not know resolve into. Before
     // 1188 phase 4 an unknown name hit the `continue` below and the binding silently never fired
@@ -622,7 +638,7 @@ impl BindingDispatch {
         Self {
             map,
             addons: Vec::new(),
-            seen_generation: None,
+            seen_generation: crate::ui_script::VmMemo::default(),
         }
     }
 }

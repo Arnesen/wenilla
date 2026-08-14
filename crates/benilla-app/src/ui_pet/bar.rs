@@ -268,11 +268,12 @@ pub(super) fn feed_pet_bar(
     clock: Res<crate::ui_script::UiClock>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
-    mut memory: Local<PetBarMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<PetBarMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let now = Instant::now();
     let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     let has_bar = bar.has_bar();

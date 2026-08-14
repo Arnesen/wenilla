@@ -422,12 +422,14 @@ fn feed_quest_log(
     commands: Res<NetCommands>,
     header_names: Option<Res<QuestHeaderNamesRes>>,
     states: Res<crate::world_state::WorldStates>,
-    mut last: Local<QuestLogState>,
-    mut prior_quest_ids: Local<Option<HashSet<u32>>>,
+    mut last: Local<crate::ui_script::VmMemo<QuestLogState>>,
+    mut prior_quest_ids: Local<crate::ui_script::VmMemo<Option<HashSet<u32>>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let prior_quest_ids = prior_quest_ids.get(&script);
     let Some((store, _)) = self_q.iter().next() else {
         // No self player streamed yet — nothing to show; `last` stays at its (empty) default, so
         // this is a no-op rather than a repeated empty push.
@@ -608,7 +610,7 @@ fn feed_quest_log(
     //    minutes when you achieve a quest objective") runs off this, a deliberate
     //    intent-over-letter divergence from the ref's broken chain (QuestLogFrame.xml's
     //    auto-watch comment; decision record with this fold-back).
-    let progressed = quests_with_progressed_objectives(&last, &fresh);
+    let progressed = quests_with_progressed_objectives(last, &fresh);
     script.set_quest_log(fresh.clone());
     script.fire_event("QUEST_LOG_UPDATE", vec![]);
     if !progressed.is_empty() {

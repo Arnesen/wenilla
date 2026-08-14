@@ -448,13 +448,14 @@ fn feed_loot_rolls(
     self_guid: Res<SelfGuid>,
     mut chat: ResMut<ChatLog>,
     time: Res<Time>,
-    mut last: Local<LootRollsState>,
+    mut last: Local<crate::ui_script::VmMemo<LootRollsState>>,
 ) {
     rolls.tick(time.delta().as_millis() as u32);
 
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     drain_lines(
         &mut rolls,
         self_guid.0,
@@ -469,7 +470,7 @@ fn feed_loot_rolls(
     // same `start()` call that queued `opened`, so pushing after would hand every fresh roll an
     // empty lookup. Same order as ui_loot's window feed, for the same reason.
     let fresh = snapshot(&rolls, &mut items, icons.as_deref(), &commands);
-    let changed = repainted(&last, &fresh);
+    let changed = repainted(last, &fresh);
     if fresh != *last {
         script.set_loot_rolls(fresh.clone());
         *last = fresh;

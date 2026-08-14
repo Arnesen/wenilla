@@ -144,8 +144,11 @@ pub(crate) struct CvarPersist {
     file: BTreeMap<String, String>,
     /// Lowercased names whose value came from an env var this session (never saved).
     env_overridden: HashSet<String>,
-    /// The engine table has been registered + seeded (once, when the VM first exists).
-    registered: bool,
+    /// The engine table has been registered + seeded — **once per VM**, not once per process
+    /// (decision 1290). A login builds a fresh VM, so the seed has to happen again: an
+    /// unregistered table answers every `GetCVar` with nil, and [`save_config`] composes
+    /// `config.toml` out of that same table.
+    registered: crate::ui_script::VmMemo<bool>,
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
     last_change: Option<Instant>,
@@ -343,7 +346,7 @@ fn sync_cvars(
     let Some(mut script) = script else {
         return;
     };
-    if !persist.registered {
+    if persist.registered.claim(&script) {
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
         let session: [(&str, String); 23] = [
@@ -377,7 +380,6 @@ fn sync_cvars(
         for (name, value) in session {
             script.set_cvar_host(name, &value);
         }
-        persist.registered = true;
     }
     // Take the changes BEFORE touching the knobs: constructing `Knobs` deref-muts every knob
     // resource, which trips Bevy change detection even when nothing is written — and the
@@ -462,6 +464,16 @@ fn save_config(
         return;
     };
     let snapshot = script.cvars_snapshot();
+    // **An empty table is not a player who cleared their settings.** The file is composed from the
+    // VM's live table, so a VM whose table was never registered would compose the player's
+    // `config.toml` back out *stripped* — a silent, irreversible loss of everything they had set.
+    // The seed above is what keeps that from happening; this is the floor under it, because the
+    // failure is one-way and the next regression in that seed must not be able to reach the disk.
+    if snapshot.is_empty() {
+        warn!("config: the VM has no registered cvars — refusing to compose the file from nothing");
+        persist.dirty = false; // nothing to save, and retrying every frame changes nothing
+        return;
+    }
     let cvars = compose_file(&persist.file, &persist.env_overridden, &snapshot);
     let body = toml::to_string(&LocalConfig {
         cvars: cvars.clone(),

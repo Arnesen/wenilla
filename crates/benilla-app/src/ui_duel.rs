@@ -228,11 +228,12 @@ fn feed_duel(
     mut duel: ResMut<DuelState>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut fed: Local<FedDuel>,
+    mut fed: Local<crate::ui_script::VmMemo<FedDuel>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let fed = fed.get(&script);
 
     // DUEL_REQUESTED(challengerName) — held until the name resolves (module doc, deviation 2).
     if let Some(guid) = duel.challenger {

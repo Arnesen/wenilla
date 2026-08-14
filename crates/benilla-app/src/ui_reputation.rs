@@ -109,6 +109,11 @@ pub(crate) fn reputation_row(
     })
 }
 
+/// The two cheap inputs [`feed_reputation`]'s gate watches by value — `(race, class, watched
+/// faction id)`; the other two are resources, watched with Bevy's own change detection. `None` =
+/// not yet read.
+type ReputationInputs = Option<(u8, u8, Option<u32>)>;
+
 /// Push the snapshot when one of its inputs moves, and fire `UPDATE_FACTION` when the result
 /// actually differs — the whole-snapshot-replace seam [`crate::ui_char::feed_skills`] established,
 /// with one addition.
@@ -129,12 +134,14 @@ fn feed_reputation(
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     reputations: Res<Reputations>,
     factions: Option<Res<Factions>>,
-    mut last: Local<Option<ReputationState>>,
-    mut last_inputs: Local<Option<(u8, u8, Option<u32>)>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<ReputationState>>>,
+    mut last_inputs: Local<crate::ui_script::VmMemo<ReputationInputs>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_inputs = last_inputs.get(&script);
     let (Ok(store), Some(factions_res)) = (self_store.single(), factions.as_ref()) else {
         return;
     };

@@ -586,7 +586,7 @@ fn feed_loot(
     commands: Res<NetCommands>,
     mut errors: ResMut<LootErrors>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
-    mut last: Local<Option<LootSnapshot>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<LootSnapshot>>>,
     cfg: Res<LootConfig>,
     keys: Res<ButtonInput<KeyCode>>,
     mut pickup: MessageWriter<crate::sound::LootPickupSound>,
@@ -594,6 +594,7 @@ fn feed_loot(
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     // Loot refusals + "You receive …" lines migrate to the chat window (decision 0084's chat arc):
     // refusals as informational SYSTEM-yellow lines, receive lines as LOOT-green. The ErrorsFrame
     // keeps only the cast/equip red toasts.

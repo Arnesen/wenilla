@@ -321,11 +321,12 @@ pub(super) fn feed_action_state(
     reputations: Res<crate::net::Reputations>,
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
-    mut memory: Local<StateMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<StateMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let now = Instant::now();
     // The frame's atomic clock pair — `ui_triple`'s conversion base: every cooldown is pushed as
     // its absolute start on the GetTime clock, derived through the ONE lawful pair

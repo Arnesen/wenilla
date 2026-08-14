@@ -436,13 +436,16 @@ fn feed_quest(
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut chat: ResMut<ChatLog>,
-    mut last: Local<Option<QuestState>>,
-    mut last_name: Local<Option<String>>,
-    mut last_npc: Local<Option<u64>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<QuestState>>>,
+    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_name = last_name.get(&script);
+    let last_npc = last_npc.get(&script);
     // The turn-in fanfare (QUESTCOMPLETED → iQuestComplete.wav): the client's C++ plays it on the
     // QUEST_COMPLETE packet itself — no Lua handler owns it, so the feed queues it directly.
     if giver.take_completed_fanfare() {

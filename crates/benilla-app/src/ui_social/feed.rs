@@ -46,11 +46,12 @@ pub(super) fn feed_social(
     areas: Option<Res<AreaTableRes>>,
     commands: Res<NetCommands>,
     mut chat_log: ResMut<ChatLog>,
-    mut fed: Local<FedSocial>,
+    mut fed: Local<crate::ui_script::VmMemo<FedSocial>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let fed = fed.get(&script);
     let areas = areas.as_deref().map(|a| &a.0);
 
     // The owed system lines first: a line about a friend who just went offline should land before

@@ -71,23 +71,24 @@ fn zone_rect(a: &WorldMapArea) -> ZoneRect {
 /// Build + push the static catalog once the patch chain, the VM, and the Map.dbc catalog all
 /// exist (Update-gated rather than Startup-ordered, like every feed that needs the script).
 fn load_world_map_ui(
-    mut done: Local<bool>,
+    mut done: Local<crate::ui_script::VmMemo<bool>>,
     script: Option<NonSendMut<UiScript>>,
     world_assets: Option<ResMut<WorldAssets>>,
     maps: Option<Res<MapCatalogRes>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     mut commands: Commands,
 ) {
-    if *done {
-        return;
-    }
     let (Some(mut script), Some(assets), Some(maps), Some(areas)) =
         (script, world_assets, maps, areas)
     else {
         return;
     };
+    // Once per **VM** (1290), not once per process: the catalog is static, the VM it is pushed
+    // into is not — a login builds a fresh one, and without this the map window has no continents.
+    if !done.claim(&script) {
+        return;
+    }
     let areas = &areas.0;
-    *done = true;
 
     let mut chain = assets.chain.lock_recover();
     let loaded = load_world_map_area_catalog(&mut chain).and_then(|wma| {
@@ -253,11 +254,12 @@ fn feed_world_map(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     areas: Option<Res<crate::area::AreaTableRes>>,
     death_net: Res<crate::death::DeathNet>,
-    mut last_explored: Local<Option<Vec<u32>>>,
+    mut last_explored: Local<crate::ui_script::VmMemo<Option<Vec<u32>>>>,
 ) {
     let (Some(mut script), Some(data), Some(map), Some(areas)) = (script, data, map, areas) else {
         return;
     };
+    let last_explored = last_explored.get(&script);
 
     // The discovery bitset (PLAYER_EXPLORED_ZONES, PRIVATE — only our own avatar carries it):
     // push on change (including the first stream-in); the engine setter queues the

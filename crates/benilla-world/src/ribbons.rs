@@ -33,6 +33,44 @@ use crate::view::WorldCamera;
 /// ring capacity is `ceil(rate·lifetime)+2`; shipped trails sit far below this).
 const MAX_EDGES: usize = 512;
 
+/// **What the ribbon lane did this frame** — live trails, and how many of them wrote a strip.
+///
+/// The parallel of [`crate::exterior_cull::ExteriorCullVerdict`], and here for the same reason: a
+/// trail carries no [`crate::model_render::ModelPart`] and no
+/// [`crate::particles::ParticleEmitter`], so it is invisible to the visibility census AND to the
+/// particle census. Ninety Caverns-of-Time energy trails burning across a Tanaris hillside read,
+/// on every instrument we had, as a scene with nothing in it.
+#[derive(Resource, Default)]
+pub struct RibbonVerdict {
+    /// Trails alive this frame (streaming or draining).
+    pub trails: usize,
+    /// …and how many committed a strip into the shared effect stream.
+    pub drawn: usize,
+}
+
+/// **May a trail draw, given the rooms it belongs to?** — the room half of the draw gate, pure and
+/// total so the rule is pinned by tests without an ECS (the [`crate::model_fade`] pattern that
+/// [`crate::particles::EmitterFade::in_draw_set`] already follows).
+///
+/// - No room ([`RibbonTrail::room`] `None`) — not a building's prop. Admitted; nothing claims it.
+/// - A room whose placement is resident — [`WmoGroupVis::drawn_by`], the same predicate the prop's
+///   own submeshes are culled by, so the trail and its mesh can never disagree.
+/// - A room whose placement is **gone** — refused. This is the one place the ribbon lane must NOT
+///   take the cull's usual fail-open arm: a trail outlives its building by the frame between the
+///   placement despawning and the owner cascade reaching the trail, and one frame of an additive
+///   strip hanging where a building used to be is a bright artefact, where one frame of a missing
+///   trail is nothing at all. `crate::wmo_sky`'s skybox resolve refuses on the same asymmetry.
+fn room_admits(
+    room: Option<&crate::wmo_portal::WmoGroupVis>,
+    instance: Option<&crate::wmo_portal::WmoPortalInstance>,
+) -> bool {
+    match (room, instance) {
+        (None, _) => true,
+        (Some(r), Some(inst)) => r.drawn_by(inst),
+        (Some(_), None) => false,
+    }
+}
+
 /// One committed trail edge: the vertex pair across the node, world (Bevy) space, and its birth
 /// time on the shared clock.
 struct Edge {
@@ -89,6 +127,23 @@ pub struct RibbonTrail {
     /// particle's, and inventing a ramp on top of a gate would be building past the evidence.
     /// `None` ⇒ always drawn (a placed prop, an effect instance).
     alpha_src: Option<Entity>,
+    /// The **rooms whose visibility this trail rides** — a WMO prop's own
+    /// [`crate::wmo_portal::WmoGroupVis`], carried by value because a trail entity must not hold
+    /// that component (it would enlist the trail in `apply_model_visibility`'s group query, a
+    /// second `Visibility` writer on an entity whose `Visibility` nobody reads — decision 0025).
+    ///
+    /// It exists because **a trail is one of its model's emitters, and the reference draws a
+    /// WMO's props out of each VISIBLE group's own MODR list** (`0x695aa0` from the visible-group
+    /// walk `0x698720`, decision 0689) — a prop in a culled room is never instantiated, so it
+    /// trails nothing. We culled the prop's *mesh* and left its ribbons streaming, which is the
+    /// same omission decision 0786 fixed one lane over for particle emitters, and the same shape
+    /// as 1283's shadow/nameplate/picker: a rider that never asked whether its owner was in the
+    /// scene. Standing in Tanaris, Caverns of Time's twelve energy-trail props kept ninety
+    /// additive trails burning up through 200 yd of rock (decision 1289).
+    ///
+    /// `None` = not a building's prop (an ADT map doodad, a creature, a missile, a held item):
+    /// nothing claims it, so nothing gates it here.
+    room: Option<crate::wmo_portal::WmoGroupVis>,
     /// Committed edges, newest at the back. The live head (the current node) is appended at
     /// render time only, so the trail always connects to the emitter between commits.
     edges: VecDeque<Edge>,
@@ -156,6 +211,7 @@ pub fn spawn_ribbon(
     owner_scale: f32,
     seq: RibbonSeq,
     alpha_src: Option<Entity>,
+    room: Option<crate::wmo_portal::WmoGroupVis>,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES also spawns no ribbons (one switch, whole family).
     if std::env::var_os("WOW_NO_PARTICLES").is_some() {
@@ -192,6 +248,7 @@ pub fn spawn_ribbon(
                     owner: Some(owner),
                     seq,
                     alpha_src,
+                    room,
                     edges: VecDeque::new(),
                     accumulator: 0.0,
                     age: 0.0,
@@ -229,6 +286,9 @@ pub(crate) fn simulate_ribbons(
     // The water-plane interleave inputs — a trail is one of the model's emitters and classifies
     // above/below water like the quad clouds ([`crate::particles::far_side_of_water`]).
     interleave: crate::particles::WaterInterleave,
+    // The per-frame portal PVS, for the room gate ([`RibbonTrail::room`]).
+    portal_instances: Query<&crate::wmo_portal::WmoPortalInstance>,
+    mut verdict: ResMut<RibbonVerdict>,
     mut trails: Query<(
         Entity,
         &mut RibbonTrail,
@@ -236,6 +296,7 @@ pub(crate) fn simulate_ribbons(
         &mut GlobalTransform,
     )>,
 ) {
+    *verdict = RibbonVerdict::default();
     let Ok(cam) = world_cam.single() else {
         return;
     };
@@ -248,6 +309,7 @@ pub(crate) fn simulate_ribbons(
             owner,
             seq,
             alpha_src,
+            room,
             edges,
             accumulator,
             age,
@@ -285,6 +347,7 @@ pub(crate) fn simulate_ribbons(
             commands.entity(entity).despawn();
             continue;
         }
+        verdict.trails += 1;
 
         // The `+0xc0` **enable** gate, sampled LIVE against the sequence the host is playing.
         // SETTLED at the bytes (wow-re `ribbon-emitter-spec.md` §7, closed — the dispatch this
@@ -406,6 +469,16 @@ pub(crate) fn simulate_ribbons(
         if alpha_src.is_some_and(|e| model_alphas.get(e) <= 1e-3) {
             continue;
         }
+        // …and the room gate, for the same reason one line up and with the same shape as `lit`:
+        // the sim above still ran, only the DRAW is skipped, so walking back into the room resumes
+        // mid-strip instead of from empty ([`RibbonTrail::room`]).
+        if !room_admits(
+            room.as_ref(),
+            room.as_ref()
+                .and_then(|r| portal_instances.get(r.instance).ok()),
+        ) {
+            continue;
+        }
         let n = edges.len() + usize::from(head.is_some());
         if n < 2 {
             continue;
@@ -449,6 +522,7 @@ pub(crate) fn simulate_ribbons(
                 ((now - e.born) / def.edge_lifetime).clamp(0.0, 1.0),
             ));
         }
+        verdict.drawn += 1;
         let start = quads.begin();
         for w in pairs.windows(2) {
             let ((t0, b0, a0), (t1, b1, a1)) = (w[0], w[1]);
@@ -520,7 +594,7 @@ impl Plugin for RibbonPlugin {
         // PostUpdate, after the billboard joint palette — same law and reason as the particle
         // sim: a trail node on a billboarded/animated bone must sample the frame the palette
         // just wrote (see `billboard_joint_palette`'s consumer note).
-        app.add_systems(
+        app.init_resource::<RibbonVerdict>().add_systems(
             PostUpdate,
             simulate_ribbons
                 .in_set(crate::billboard::BillboardPlace)
@@ -532,7 +606,52 @@ impl Plugin for RibbonPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::gravity_step;
+    use super::{gravity_step, room_admits};
+    use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
+    use bevy::math::Affine3A;
+    use bevy::prelude::*;
+
+    /// **A trail is one of its model's emitters, so it rides the rooms its model is drawn by.**
+    ///
+    /// The reference instantiates a WMO's props out of each VISIBLE group's own MODR list
+    /// (`0x695aa0` from the visible-group walk `0x698720`, decision 0689) — a prop in a culled
+    /// room is never created, so it trails nothing. Our prop's *mesh* was culled by exactly this
+    /// predicate and its ribbons were not, which is how Caverns of Time's twelve energy-trail
+    /// props kept ninety additive strips burning up through 200 yd of rock into Tanaris while
+    /// every one of their submeshes was correctly hidden (decision 1289).
+    #[test]
+    fn a_prop_in_a_culled_room_trails_nothing_and_an_orphan_trail_refuses() {
+        let inst = |visible: Vec<bool>| WmoPortalInstance {
+            handle: Handle::default(),
+            world_from_local: Affine3A::IDENTITY,
+            name_set: 0,
+            liquid_visited: vec![false; visible.len()],
+            flooded: vec![None; visible.len()],
+            visible,
+        };
+        let room = |groups: &[u16]| WmoGroupVis {
+            instance: Entity::PLACEHOLDER,
+            groups: groups.into(),
+        };
+        let cot = inst(vec![true, false, false]);
+
+        // Not a building's prop at all — an ADT map doodad, a creature, a held item's streak.
+        assert!(room_admits(None, None), "an unclaimed trail is never gated");
+        // The room the flood reached draws; the ones it did not, do not.
+        assert!(room_admits(Some(&room(&[0])), Some(&cot)));
+        assert!(!room_admits(Some(&room(&[1, 2])), Some(&cot)));
+        // A prop several rooms name draws while ANY of them is visible — the same
+        // `drawn_by` law the submeshes take, which is the point of sharing the predicate.
+        assert!(room_admits(Some(&room(&[1, 0])), Some(&cot)));
+
+        // …and the asymmetry that must NOT be the cull's usual fail-open: a trail whose
+        // placement has despawned refuses, rather than drawing one last frame through the hole
+        // where a building used to be.
+        assert!(
+            !room_admits(Some(&room(&[0])), None),
+            "an orphaned trail draws nothing"
+        );
+    }
 
     /// The per-frame gravity term telescopes to the closed form the bytes imply: stepping
     /// `gravity · ((2·age) + dt) · dt` and advancing `age` by `dt` leaves an edge exactly

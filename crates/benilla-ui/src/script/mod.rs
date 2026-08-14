@@ -421,7 +421,13 @@ pub struct UiScript {
     /// ([`UiScript::set_instruction_budget`]). `Arc` because the hook callback outlives this
     /// borrow; `Relaxed` because nothing orders against it — it is a bound, not a clock.
     instructions: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// **This VM's identity** — see [`UiScript::session`].
+    session: u64,
 }
+
+/// Hands out [`UiScript::session`] ids. Process-global and monotone, so an id is never reused and
+/// two of them can be compared without holding either VM.
+static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// How often the instruction hook fires — the resolution of an instruction budget.
 ///
@@ -524,6 +530,7 @@ impl UiScript {
         let s = UiScript {
             lua,
             instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            session: NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         Ok(s)
     }
@@ -533,6 +540,21 @@ impl UiScript {
     /// object model this crate installs.
     pub fn lua(&self) -> &Lua {
         &self.lua
+    }
+
+    /// **Which VM this is** — a fresh number for every [`UiScript::new`], never reused.
+    ///
+    /// The client destroys its Lua state at logout and builds another at the next world entry
+    /// (the reference's own `0x490bd0` ↔ `0x48fbf0` pair), so a host that remembers *what it last
+    /// pushed into the VM* is remembering something that may no longer exist. Anything the host
+    /// seeded — a registry, a catalog, a change-detection memo — is only valid for the session it
+    /// was seeded into, and this number is what says so.
+    ///
+    /// A host keying its memory on this cannot go stale by omission: a new VM simply does not
+    /// match, so the seed happens again. That is the property, and it is why this is a VM-side fact
+    /// rather than a host-side counter the host must remember to bump.
+    pub fn session(&self) -> u64 {
+        self.session
     }
 
     /// **Bound how long a chunk may run, so an infinite loop reports instead of hanging.**

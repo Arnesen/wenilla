@@ -185,13 +185,16 @@ fn feed_taxi(
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
     mut cache: ResMut<TaxiRouteCache>,
-    mut last: Local<Option<TaxiUiState>>,
-    mut last_name: Local<Option<String>>,
-    mut last_riding: Local<Option<bool>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<TaxiUiState>>>,
+    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut last_riding: Local<crate::ui_script::VmMemo<Option<bool>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_name = last_name.get(&script);
+    let last_riding = last_riding.get(&script);
 
     // The activate verdict (SMSG_ACTIVATETAXIREPLY), staged by the net bridge: a refusal surfaces
     // on the red error line (the trainer/merchant UI_ERROR_MESSAGE pattern); OK clears the map —

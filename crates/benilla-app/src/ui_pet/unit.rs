@@ -61,13 +61,14 @@ pub(super) fn feed_pet_unit(
     pet: PetUnit,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut memory: Local<PetUnitMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<PetUnitMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let pet_guid = bar.spells.pet_guid;
-    watch_name_timestamp(pet_guid, &mut script, &pet, &mut names, &mut memory);
+    watch_name_timestamp(pet_guid, &mut script, &pet, &mut names, memory);
     // A bar whose unit has not streamed yet (or has left) pushes nothing: `UnitExists("pet")` then
     // reads false and the frame hides, which is honest — we have the guid but none of the fields
     // the frame draws.

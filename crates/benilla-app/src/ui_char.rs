@@ -96,6 +96,11 @@ impl Plugin for UiCharPlugin {
     }
 }
 
+/// The skill block [`watch_skill_ups`] last announced: the self guid it was read off, and that
+/// character's `skillId → value` map — the diff base for both the chat lines and the event.
+/// `None` = nothing announced yet.
+type SkillBlock = Option<(u64, std::collections::HashMap<u16, u16>)>;
+
 /// The client-generated skill-up feedback (decision 0437, landed with phase 2): the server sends
 /// NO skill-up message at all — skills mutate only as `PLAYER_SKILL_INFO` descriptor deltas
 /// (verified at the vmangos source: no chat send anywhere in `UpdateSkill*`/`SetSkill`) — so the
@@ -112,11 +117,19 @@ fn watch_skill_ups(
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
-    mut prev: Local<Option<(u64, std::collections::HashMap<u16, u16>)>>,
+    mut prev: Local<crate::ui_script::VmMemo<SkillBlock>>,
 ) {
     let (Some(guid), Ok(store)) = (self_guid.0, self_store.single()) else {
         return;
     };
+    // The memo is about the VM — it gates `SKILL_LINES_CHANGED`, the pane's only repaint wire — so
+    // it re-seeds with the VM (decision 1290). With no VM there is nothing to announce to and
+    // nothing worth remembering: the diff would only queue chat lines for a VM that does not exist
+    // yet, which is a stale skill-up replayed at the next login. The next VM re-seeds silently.
+    let Some(mut script) = script else {
+        return;
+    };
+    let prev = prev.get(&script);
     let mut cur = std::collections::HashMap::new();
     for i in 0..PLAYER_SKILL_SLOTS {
         if let Some(s) = store.0.player_skill(i) {
@@ -131,16 +144,12 @@ fn watch_skill_ups(
             if cur.is_empty() {
                 return;
             }
-            if let Some(mut script) = script {
-                script.fire_event("SKILL_LINES_CHANGED", vec![]);
-            }
+            script.fire_event("SKILL_LINES_CHANGED", vec![]);
             *prev = Some((guid, cur));
         }
         Some((prev_guid, _)) if *prev_guid != guid => {
             // A different character logged in — re-seed, never diff across characters.
-            if let Some(mut script) = script {
-                script.fire_event("SKILL_LINES_CHANGED", vec![]);
-            }
+            script.fire_event("SKILL_LINES_CHANGED", vec![]);
             *prev = Some((guid, cur));
         }
         Some((_, prev_map)) => {
@@ -178,9 +187,7 @@ fn watch_skill_ups(
                     _ => {}
                 }
             }
-            if let Some(mut script) = script {
-                script.fire_event("SKILL_LINES_CHANGED", vec![]);
-            }
+            script.fire_event("SKILL_LINES_CHANGED", vec![]);
             *prev = Some((guid, cur));
         }
     }
@@ -203,11 +210,12 @@ fn feed_skills(
     script: Option<NonSendMut<UiScript>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
-    mut last: Local<Option<SkillsState>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<SkillsState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
         return;
     };

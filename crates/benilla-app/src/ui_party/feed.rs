@@ -58,11 +58,12 @@ pub(super) fn feed_party(
     // the instruments, and naming it from a game module would push it across the world-API wall
     // (`tests/world_api_wall.rs`, decision 1164) for a value this already answers.
     here: benilla_world::world_point::WorldPoint,
-    mut fed: Local<FedParty>,
+    mut fed: Local<crate::ui_script::VmMemo<FedParty>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let fed = fed.get(&script);
     let self_pair = self_q.iter().next();
     let self_guid = self_pair.map(|(g, _)| g.0);
     // The party's PvP faction group (decision 0646 §1): our own. A 1.12 party is always one

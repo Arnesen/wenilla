@@ -180,11 +180,18 @@ fn drive_displayed_cursor(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     // The base last applied by the UI-entry restore below — `None` while the pointer is over the
     // world, so re-entering the UI always restores once.
-    mut last: Local<Option<crate::target::WorldCursor>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<crate::target::WorldCursor>>>,
     mut displayed: ResMut<DisplayedCursor>,
 ) {
     use crate::target::{CursorKind, WorldCursor};
     use benilla_ui::script::UiCursorMode;
+
+    // A VM memo — the restore edge below is armed by `take_cursor_write`, a VM read — but unlike
+    // every other feed this system still drives the cursor with **no VM at all** (the character
+    // screen: the VM lives for one login, decision 1290). `get_for` is the shape for exactly that:
+    // no VM is a session in its own right, so the base restore re-arms once on each side of the
+    // glue phase instead of every frame inside it.
+    let last = last.get_for(script.as_deref());
 
     // **The BASE mode is not a constant** (`0xbe2c4c`, wow-re cursor-system.md §7: *"it is
     // independently mutable — e.g. a spell-cancel flow parks it at Cast(2)"*), and that is the
@@ -345,7 +352,10 @@ mod other {
         mut images: ResMut<Assets<Image>>,
         mut payload_cursors: ResMut<PayloadCursorImages>,
         window: Option<Single<Entity, With<PrimaryWindow>>>,
-        mut current: Local<Option<String>>,
+        // The key of the cursor we last handed the window — the macOS arm's `last_set` under the
+        // same name, because it is the same fact: OS state, not memory about the VM, so it is not a
+        // [`crate::ui_script::VmMemo`] and does not re-seat at a new login (decision 1290's sweep).
+        mut last_set: Local<Option<String>>,
         mut decode_failed: Local<HashSet<String>>,
     ) {
         let Some(window) = window else {
@@ -353,7 +363,7 @@ mod other {
         };
         let held_icon = script.as_ref().and_then(|s| payload_icon(s));
         if let Some(icon) = held_icon {
-            if current.as_deref() == Some(icon.as_str()) {
+            if last_set.as_deref() == Some(icon.as_str()) {
                 return; // already showing this icon
             }
             if !payload_cursors.0.contains_key(&icon) && !decode_failed.contains(&icon) {
@@ -373,7 +383,7 @@ mod other {
             }
             if let Some(handle) = payload_cursors.0.get(&icon) {
                 set_custom_cursor(&mut commands, *window, handle.clone());
-                *current = Some(icon);
+                *last_set = Some(icon);
                 return;
             }
             // Decode failed (or still pending catalogs): fall through to the mode cursor below.
@@ -383,7 +393,7 @@ mod other {
             return;
         };
         let stem = cursor.0.stem();
-        if current.as_deref() == Some(stem.as_str()) {
+        if last_set.as_deref() == Some(stem.as_str()) {
             return;
         }
         let handle = cursors
@@ -394,7 +404,7 @@ mod other {
         if let Some(handle) = handle {
             set_custom_cursor(&mut commands, *window, handle.clone());
         }
-        *current = Some(stem);
+        *last_set = Some(stem);
     }
 
     /// The shared `CustomCursor::Image` insert — hotspot `(0, 0)`: the vanilla mode cursors' active
@@ -484,6 +494,11 @@ mod macos {
         mode: Res<super::DisplayedCursor>,
         rig: Res<CameraControl>,
         mut focus: MessageReader<bevy::window::WindowFocused>,
+        // None of the `Local`s below is a [`crate::ui_script::VmMemo`], deliberately (decision
+        // 1290's sweep): every one of them remembers something about the **OS** — what we last told
+        // AppKit, which BLPs failed to decode, whether the pointer rects are off — and the OS keeps
+        // that state across the VM's death and rebirth, so re-seating them at a new login would
+        // re-assert a cursor nothing changed.
         mut was_looking: Local<bool>,
         mut rects_disabled: Local<bool>,
         mut decode_failed: Local<HashSet<String>>,

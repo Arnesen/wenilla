@@ -411,14 +411,18 @@ fn feed_merchant(
     tables: Option<Res<RepairTables>>,
     mut names: ResMut<NameCache>,
     mut errors: ResMut<MerchantErrors>,
-    mut last: Local<Option<MerchantState>>,
-    mut last_money: Local<Option<u64>>,
-    mut last_name: Local<Option<String>>,
-    mut last_vendor: Local<Option<u64>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<MerchantState>>>,
+    mut last_money: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut last_vendor: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_money = last_money.get(&script);
+    let last_name = last_name.get(&script);
+    let last_vendor = last_vendor.get(&script);
     // Refusals surface as the client's red error line (the equip/cast path's exact shape).
     for refusal in errors.0.drain(..) {
         let text = match refusal {

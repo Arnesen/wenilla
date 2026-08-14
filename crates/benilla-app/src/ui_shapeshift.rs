@@ -95,11 +95,12 @@ fn feed_shapeshift_bar(
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
     clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<StanceMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<StanceMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let Some(spells) = spells else {
         return;
     };

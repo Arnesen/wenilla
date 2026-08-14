@@ -36,8 +36,9 @@ pub(crate) struct MacroFiles {
     account: Option<std::path::PathBuf>,
     character: Option<std::path::PathBuf>,
     /// The `(realm, character)` the [`Self::character`] path was built for — the reload trigger
-    /// when a `/logout` brings a different character back into the world.
-    identity: Option<(String, String)>,
+    /// when a `/logout` brings a different character back into the world. Session-keyed (1290),
+    /// because the *same* character coming back still meets a fresh VM with an empty macro table.
+    identity: crate::ui_script::VmMemo<Option<(String, String)>>,
 }
 
 /// Macro index → the spell it casts — benilla's `[rec+0x564]` (wow-re
@@ -54,16 +55,16 @@ impl Plugin for UiMacroPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MacroFiles>()
             .init_resource::<MacroBoundSpells>()
-            // `PostStartup`, not `Startup.after(AssetSet::Open)` — the same reason
-            // `crate::ui_chat::commands::build_slash_commands` sits there: this needs BOTH the
-            // patch chain and the VM, and the VM is inserted by another `Startup` system whose
-            // `insert_non_send_resource` only lands at the schedule boundary. Ordered after
-            // `AssetSet::Open` alone, this ran before the VM existed and silently pushed no icon
-            // list at all (caught on a clean capture run: the boot line never appeared).
-            .add_systems(PostStartup, load_icon_catalog)
             .add_systems(
                 Update,
                 (
+                    // Once per **VM** (decision 1290), and in `Update` rather than `PostStartup`:
+                    // this needs BOTH the patch chain and the VM, and a login builds a fresh VM
+                    // whose icon chooser stays empty until it runs again. `PostStartup` was the
+                    // old answer to the ordering half alone — after `AssetSet::Open` this ran
+                    // before the VM existed and silently pushed no icon list at all — and a
+                    // session-keyed claim answers both halves at once.
+                    load_icon_catalog,
                     // Before the action feeds read it (they run in `UnitFeed`), so a macro edited
                     // this frame reports its new spell's cooldown the same frame.
                     rebind_macro_spells.before(crate::ui_unit::UnitFeed),
@@ -85,10 +86,17 @@ impl Plugin for UiMacroPlugin {
 /// two prefixes ([`benilla_formats::load_macro_icons`], where the byte citations live). A failed
 /// load leaves the list empty: the popup then shows no icons and `MacroPopupOkayButton_Update`
 /// keeps OKAY disabled, which is a visible, diagnosable failure rather than a silent one.
-fn load_icon_catalog(script: Option<NonSendMut<UiScript>>, assets: Option<Res<WorldAssets>>) {
+fn load_icon_catalog(
+    script: Option<NonSendMut<UiScript>>,
+    assets: Option<Res<WorldAssets>>,
+    mut seeded: Local<crate::ui_script::VmMemo<bool>>,
+) {
     let (Some(mut script), Some(assets)) = (script, assets) else {
         return;
     };
+    if !seeded.claim(&script) {
+        return;
+    }
     let loaded = {
         let mut chain = assets.chain.lock_recover();
         benilla_formats::load_macro_icons(&mut chain)
@@ -124,13 +132,13 @@ fn load_macros(
 ) {
     let Some(mut script) = script else { return };
     let Some(id) = identity(&roster) else { return };
-    if files.identity.as_ref() == Some(&id) {
-        return; // already loaded for this character
+    if files.identity.get(&script).as_ref() == Some(&id) {
+        return; // already loaded for this character, into the VM that is live now
     }
     let (realm, character) = (&id.0, &id.1);
     files.account = crate::local_state::macros_account_path();
     files.character = crate::local_state::macros_character_path(realm, character);
-    files.identity = Some(id.clone());
+    *files.identity.get(&script) = Some(id.clone());
 
     let read = |path: &Option<std::path::PathBuf>| -> Vec<benilla_ui::script::MacroView> {
         let Some(path) = path else { return Vec::new() };
@@ -194,11 +202,14 @@ fn rebind_macro_spells(
     actions: Res<crate::ui_action::PlayerActions>,
     table: Option<Res<crate::ui_chat::commands::SlashCommands>>,
     mut bound: ResMut<MacroBoundSpells>,
-    mut last_generation: Local<Option<u64>>,
+    mut last_generation: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
     let (Some(script), Some(table)) = (script, table) else {
         return;
     };
+    // Session-keyed (1290): a fresh VM restarts its macro generation at 0, so a bare memo could
+    // hold a *higher* number than the live VM will ever reach and gate this off for the session.
+    let last_generation = last_generation.get(&script);
     let generation = script.macros_generation();
     if *last_generation == Some(generation) && !actions.is_changed() {
         return;

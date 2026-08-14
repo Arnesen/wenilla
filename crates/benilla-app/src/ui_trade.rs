@@ -345,14 +345,18 @@ fn feed_trade(
     icons: Option<Res<ItemDisplays>>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut last: Local<Option<TradeState>>,
-    mut last_open: Local<bool>,
-    mut last_accept: Local<(bool, bool)>,
-    mut last_player_gold: Local<u32>,
+    mut last: Local<crate::ui_script::VmMemo<Option<TradeState>>>,
+    mut last_open: Local<crate::ui_script::VmMemo<bool>>,
+    mut last_accept: Local<crate::ui_script::VmMemo<(bool, bool)>>,
+    mut last_player_gold: Local<crate::ui_script::VmMemo<u32>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_open = last_open.get(&script);
+    let last_accept = last_accept.get(&script);
+    let last_player_gold = last_player_gold.get(&script);
 
     let fresh = snapshot(&trade, &mut items, icons.as_deref(), &mut names, &commands);
     let opened = !*last_open && trade.is_open();

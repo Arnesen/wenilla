@@ -246,10 +246,11 @@ pub(crate) fn cancel_targeting_on_right_press(
 /// a cancel-and-rearm in one frame still counts as a change.
 pub(crate) fn feed_targeting_to_vm(
     targeting: Res<SpellTargeting>,
-    mut last: Local<Option<u32>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<u32>>>,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
 ) {
     if let Some(mut script) = script {
+        let last = last.get(&script);
         script.set_spell_targeting(targeting.active());
         script.set_item_pick_armed(targeting.wants(TargetingWants::Item));
         // `SpellCanTargetUnit`'s answer (`0x6e6460`'s unit leg). Derived from the word rather than

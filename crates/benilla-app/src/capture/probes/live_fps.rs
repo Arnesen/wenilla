@@ -253,6 +253,20 @@ fn drive_live_fps(
                 (Some(room), Some(w)) => format!(" room={room} windows={w}"),
                 _ => String::new(),
             };
+            // Beside `room=`, because the two answer the same question from opposite ends:
+            // `room=none` says the camera claims no interior, `sky=` says whether some building's
+            // PVS is painting its own backdrop over the world anyway.
+            let sky = seen
+                .sky
+                .as_deref()
+                .map(|s| format!(" sky={s}"))
+                .unwrap_or_default();
+            // The effect stream's other half. `emitters=`/`particles=` above count quad clouds
+            // only, so a screen full of ribbon trails reads as an empty scene without this.
+            let ribbons = seen
+                .ribbons
+                .map(|(n, d)| format!(" ribbons={n} ribbons_drawn={d}"))
+                .unwrap_or_default();
             let culled = match seen.cull.as_ref() {
                 Some(v) => format!(
                     " cull_windows={} cull_frusta={} cull_tested={} cull_hidden={} \
@@ -275,7 +289,7 @@ fn drive_live_fps(
                 seen.mats, seen.meshes, seen.images, seen.uv_anims, seen.tint_anims,
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present} occluded_frames={}{at_pin}{gate}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present} occluded_frames={}{at_pin}{gate}{sky}{ribbons}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),

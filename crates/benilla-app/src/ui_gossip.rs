@@ -189,13 +189,16 @@ fn feed_gossip(
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
     states: Res<crate::world_state::WorldStates>,
-    mut last: Local<Option<GossipMenu>>,
-    mut last_name: Local<Option<String>>,
-    mut last_npc: Local<Option<u64>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<GossipMenu>>>,
+    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
+    mut last_npc: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_name = last_name.get(&script);
+    let last_npc = last_npc.get(&script);
     let mut fresh = snapshot(&state);
     // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
     if let Some(greeting) = fresh.as_mut().and_then(|m| m.greeting.as_mut()) {

@@ -52,6 +52,17 @@ pub(super) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionM
 pub(super) struct FeedMemory {
     pushed: HashMap<u32, ActionSlot>,
     bonus_offset: u8,
+    /// **Has the identity resolve run against the VM this memory is about?**
+    ///
+    /// Wrapping the memory in `VmMemo` (1290) makes a login's fresh VM reset `pushed` — but the
+    /// diff that reads `pushed` lives *inside* the gate below, and every other input to that gate
+    /// is host-side and survives the VM. `dirty` is false, and both `template_epoch` and
+    /// `macro_generation` can legitimately match the reset memory's zeros. The bar would then be
+    /// fed nothing at all, for the whole session.
+    ///
+    /// So the gate takes the memory's own freshness as an input. It is not a fourth *reason* to
+    /// re-resolve; it is the statement that a resolve is only valid for the VM it ran against.
+    resolved: bool,
     /// The [`Items::template_epoch`] the last identity resolve ran at — the feed's half of the
     /// landed-template redisplay (decision 0660). An advance re-resolves, exactly like a bar edit.
     template_epoch: u64,
@@ -74,11 +85,12 @@ pub(super) fn feed_actions(
     icons: Option<Res<ItemDisplays>>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     commands: Res<NetCommands>,
-    mut memory: Local<FeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
 
     // Rejected casts surface as the client's red error line (UI_ERROR_MESSAGE → the errors
     // frame), resolved through the byte-verified two-layer display ([`cast_fail`]) against the
@@ -246,11 +258,13 @@ pub(super) fn feed_actions(
     // The epoch is the second input, so a landed answer redisplays like the ref's DBCACHECALLBACK.
     let template_epoch = items.template_epoch();
     let macro_generation = script.macros_generation();
-    if actions.dirty
+    if !memory.resolved
+        || actions.dirty
         || template_epoch != memory.template_epoch
         || macro_generation != memory.macro_generation
     {
         actions.dirty = false;
+        memory.resolved = true;
         memory.template_epoch = template_epoch;
         memory.macro_generation = macro_generation;
         // Cloned once per re-resolve, never per frame: the gate above is a `u64` compare.

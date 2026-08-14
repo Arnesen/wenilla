@@ -393,9 +393,9 @@ fn feed_mail(
     commands: Res<NetCommands>,
     mut pending: ResMut<MailPending>,
     time: Res<Time>,
-    mut last: Local<Option<MailState>>,
-    mut last_mailbox: Local<Option<u64>>,
-    mut last_has_new_mail: Local<bool>,
+    mut last: Local<crate::ui_script::VmMemo<Option<MailState>>>,
+    mut last_mailbox: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut last_has_new_mail: Local<crate::ui_script::VmMemo<bool>>,
     // The `$`-macro subject for the letter body: the local player, as at every panel seam.
     self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
     states: Res<crate::world_state::WorldStates>,
@@ -403,6 +403,9 @@ fn feed_mail(
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_mailbox = last_mailbox.get(&script);
+    let last_has_new_mail = last_has_new_mail.get(&script);
 
     // Take/return/delete failures surface as the client's red error line (the equip/cast path shape).
     for text in std::mem::take(&mut mail.errors) {

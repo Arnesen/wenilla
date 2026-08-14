@@ -362,11 +362,12 @@ fn feed_trade_skill(
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
-    mut last: Local<Option<TradeSkillState>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<TradeSkillState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let fresh = (|| -> Option<TradeSkillState> {
         let line = open.line?;
         let spells = spells.as_deref()?;

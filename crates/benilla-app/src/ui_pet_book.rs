@@ -121,11 +121,12 @@ fn feed_pet_book(
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
     clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<FeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     // Nothing to resolve a name/icon/passive from yet — try again once Spell.dbc lands. Unlike the
     // bar (which can still draw its command tokens), a book with no catalog has no slots at all.
     let Some(spells) = spells.as_deref() else {

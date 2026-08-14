@@ -154,7 +154,7 @@ enum CursorGesture {
 #[allow(clippy::too_many_arguments)]
 fn play_item_gesture_sounds(
     script: Option<NonSend<UiScript>>,
-    mut prev: Local<Option<CursorPayload>>,
+    mut prev: Local<crate::ui_script::VmMemo<Option<CursorPayload>>>,
     mut items: ResMut<Items>,
     displays: Option<Res<ItemDisplays>>,
     sounds: Option<Res<ItemSounds>>,
@@ -165,6 +165,7 @@ fn play_item_gesture_sounds(
     net: Res<NetCommands>,
 ) {
     let Some(script) = script else { return };
+    let prev = prev.get(&script);
     let now = script.cursor_payload();
     if *prev == now {
         return;

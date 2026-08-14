@@ -319,13 +319,16 @@ fn feed_trainer(
     mut errors: ResMut<TrainerErrors>,
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
-    mut last: Local<Option<TrainerState>>,
-    mut last_trainer: Local<Option<u64>>,
-    mut last_name: Local<Option<String>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<TrainerState>>>,
+    mut last_trainer: Local<crate::ui_script::VmMemo<Option<u64>>>,
+    mut last_name: Local<crate::ui_script::VmMemo<Option<String>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_trainer = last_trainer.get(&script);
+    let last_name = last_name.get(&script);
     // Refusals surface as the client's red error line (the merchant/equip/cast path's exact shape).
     for code in errors.0.drain(..) {
         script.fire_event(

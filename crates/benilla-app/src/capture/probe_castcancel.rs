@@ -53,7 +53,7 @@ fn bar_timeline(
     time: ProbeClock,
     script: Option<NonSend<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<SelfPlayer>>,
-    mut last: Local<String>,
+    mut last: Local<crate::ui_script::VmMemo<String>>,
 ) {
     if self_player.is_empty() {
         return;
@@ -61,6 +61,10 @@ fn bar_timeline(
     let Some(script) = script else {
         return;
     };
+    // Session-keyed (1290) even though this is harness code: the phase string is read *out of* the
+    // VM, so a stale one would swallow the first transition of the next login — the exact event
+    // this probe exists to timestamp.
+    let last = last.get(&script);
     let Ok(state) = script.eval::<String>(BAR_PHASE_CHUNK) else {
         return;
     };

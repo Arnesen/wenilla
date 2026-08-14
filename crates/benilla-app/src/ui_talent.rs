@@ -97,11 +97,12 @@ fn feed_talents(
     spells: Option<Res<Spells>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut chat: ResMut<ChatLog>,
-    mut memory: Local<FeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let (Some(talents), Some(spells)) = (talents.as_deref(), spells.as_deref()) else {
         return;
     };

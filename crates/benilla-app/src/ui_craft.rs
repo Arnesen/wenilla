@@ -143,11 +143,12 @@ fn feed_craft(
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
-    mut last: Local<Option<CraftState>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<CraftState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let fresh = (|| -> Option<CraftState> {
         let line = open.line?;
         let craft_type = open.craft_type;

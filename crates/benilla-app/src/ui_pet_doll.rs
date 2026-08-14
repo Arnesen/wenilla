@@ -53,11 +53,12 @@ fn feed_pet_doll(
     bar: Res<PetBar>,
     pet: PetUnit,
     mut booth: ResMut<PetDollBooth>,
-    mut last: Local<Option<UnitCombatStats>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<UnitCombatStats>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     // The pane's rotate buttons own the yaw; the booth mirrors it (the inspect pane's arrangement,
     // decision 0631 §4). Written every frame, pet or no pet — a stale yaw would snap the model the
     // moment one is summoned.

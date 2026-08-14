@@ -50,6 +50,11 @@ pub struct WorldCensus<'w, 's> {
     claim: Option<Res<'w, CameraInteriorClaim>>,
     windows: Option<Res<'w, ExteriorWindows>>,
     verdict: Option<Res<'w, ExteriorCullVerdict>>,
+    /// Which backdrop is drawing — the gradient dome, or a building's own MOSB sky
+    /// ([`crate::wmo_sky`]). Optional for the same reason as the portal terms above.
+    skybox: Option<Res<'w, crate::wmo_sky::CameraWmoSkybox>>,
+    /// The ribbon lane's own verdict — the third effect population, counted nowhere else.
+    ribbons: Option<Res<'w, crate::ribbons::RibbonVerdict>>,
     mats: Res<'w, Assets<WowModelMaterial>>,
     meshes: Res<'w, Assets<Mesh>>,
     images: Res<'w, Assets<bevy::image::Image>>,
@@ -89,11 +94,24 @@ pub struct CensusReport {
     pub emitters: usize,
     pub active_emitters: usize,
     pub particles: usize,
+    /// Ribbon trails alive, and how many wrote a strip — `None` if the lane is not installed.
+    /// The `emitters`/`particles` pair above covers only the QUAD half of the effect stream;
+    /// trails are the other half and had no counter at all.
+    pub ribbons: Option<(usize, usize)>,
     /// The WMO group the camera claims — `"g07"`, or `"none"` over open world. `None` when the
     /// portal system is not installed at all, which is a different statement from "not indoors".
     pub room: Option<String>,
     /// `"unrestricted"`, or the number of window sub-frusta. `None` with [`CensusReport::room`].
     pub windows: Option<String>,
+    /// The backdrop actually drawing: `"dome"` for the `Light.dbc` gradient, else the WMO skybox
+    /// model a building's PVS asked for. `None` when the WMO-sky lane is not installed.
+    ///
+    /// Here because a skybox is the one draw that can repaint the whole frame while being
+    /// invisible to every other line in this report: its batches carry no [`ModelPart`], so they
+    /// are not in `submeshes`, not in `drawn`, not in `kinds`, and not in `labels`. Standing
+    /// outdoors in Tanaris with a purple sky and no purple *object* on any list is exactly the
+    /// state that has to be readable, and before this it was not.
+    pub sky: Option<String>,
     /// What the exterior cull did this frame, `None` if it did not run.
     pub cull: Option<CullTerms>,
     /// Resident asset counts — the leak meter. A tour probe reading the same counts as a fresh
@@ -225,6 +243,11 @@ impl WorldCensus<'_, '_> {
             None => (None, None),
         };
 
+        let sky = self.skybox.as_ref().map(|s| {
+            s.0.as_deref()
+                .map_or_else(|| "dome".to_string(), str::to_ascii_lowercase)
+        });
+
         CensusReport {
             submeshes,
             drawn,
@@ -240,6 +263,8 @@ impl WorldCensus<'_, '_> {
             particles,
             room,
             windows,
+            sky,
+            ribbons: self.ribbons.as_deref().map(|r| (r.trails, r.drawn)),
             cull: self.verdict.as_deref().map(|v| CullTerms {
                 windows: v
                     .windows

@@ -83,6 +83,13 @@ fn load_area_table(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 /// What the client's zone-text cache holds — the compare targets of `0x494780` (zone id + the
 /// two display strings), the minimap line's own cache (`0x494970`), and the indoor dedup pair
 /// (`[0x868608]` prev-indoor / `[0x86860c]` prev WMO-area row id).
+///
+/// Held as a [`crate::ui_script::VmMemo`], which is not a deviation from that BSS model but the
+/// completion of it: the cache's whole purpose is deduping what was last *pushed into the VM*, and
+/// the VM is built at world entry and destroyed at the character screen (decision 1290). A fresh VM
+/// is the client's own fresh BSS — the zeroed cache below is exactly the state the real client is in
+/// at that moment, so the first resolve of every login is a NEW_AREA with the globals written, which
+/// is what the zone splash and the minimap line need.
 #[derive(Default)]
 struct ZoneCache {
     /// `None` = never resolved (the zeroed BSS cache: the first resolve is a NEW_AREA).
@@ -134,11 +141,12 @@ fn feed_zone_events(
     areas: Option<Res<AreaTableRes>>,
     factions: Option<Res<Factions>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    mut cache: Local<ZoneCache>,
+    mut cache: Local<crate::ui_script::VmMemo<ZoneCache>>,
 ) {
     let (Some(mut script), Some(areas)) = (script, areas) else {
         return;
     };
+    let cache = cache.get(&script);
     let Some(leaf) = world.area() else { return };
     let Some(leaf_row) = areas.0.get(leaf) else {
         // An id the catalog doesn't know stays unpublished (keep the last real state, like the
@@ -228,7 +236,7 @@ fn feed_zone_events(
         signal.subzone_text.clone()
     };
 
-    let event = elect_event(&cache, &signal);
+    let event = elect_event(cache, &signal);
     let minimap_changed = cache.minimap_text != minimap_text;
     if event.is_none() && !minimap_changed {
         return;

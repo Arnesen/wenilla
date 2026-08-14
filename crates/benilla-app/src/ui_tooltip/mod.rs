@@ -354,11 +354,12 @@ fn feed_spell_tooltips(
     mut items: ResMut<Items>,
     sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     commands: Res<NetCommands>,
-    mut memory: Local<SpellFeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<SpellFeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     let Some(spells) = spells.as_deref() else {
         return;
     };
@@ -592,12 +593,14 @@ fn drive_mouseover_tooltip(
     player_actions: Res<crate::ui_action::PlayerActions>,
     // The cursor seat crosses the VM seam (0582/0584): the anchor below is UI units, not px.
     ui_scale: Res<crate::ui_script::UiScaleCvar>,
-    mut last: Local<LastHover>,
-    mut last_lines: Local<Option<UnitState>>,
+    mut last: Local<crate::ui_script::VmMemo<LastHover>>,
+    mut last_lines: Local<crate::ui_script::VmMemo<Option<UnitState>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_lines = last_lines.get(&script);
     let self_store = self_q.iter().next();
 
     // The hovered UNIT's snapshot (a hovered non-unit resolves no store here).

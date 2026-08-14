@@ -131,11 +131,12 @@ fn feed_spellbook(
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     clock: Res<crate::ui_script::UiClock>,
-    mut memory: Local<FeedMemory>,
+    mut memory: Local<crate::ui_script::VmMemo<FeedMemory>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let memory = memory.get(&script);
     // Nothing to resolve a name/icon/passive from yet — try again once Spell.dbc lands.
     let Some(spells) = spells.as_deref() else {
         return;

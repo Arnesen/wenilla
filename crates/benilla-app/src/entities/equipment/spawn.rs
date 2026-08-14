@@ -665,6 +665,7 @@ fn spawn_slot(
             // Its own model instance — chained to the wearer above — so an enchant streamer is
             // gone with the avatar in first person and absent until the body is shown (0827/0833).
             Some(root),
+            None, // a carried item belongs to no building's doodad set
         );
     }
     debug!(

@@ -383,11 +383,12 @@ pub(super) fn drive_blip_tooltip(
     hover: Res<MinimapBlipHover>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    mut last: Local<Option<(String, Vec2)>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<(String, Vec2)>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
     let show = match &*hover {
         MinimapBlipHover::None => None,
         MinimapBlipHover::Landmark(name, at) => Some((name.clone(), *at, false)),

@@ -133,12 +133,14 @@ fn feed_bank(
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
     mut errors: ResMut<BankErrors>,
-    mut last: Local<Option<BankState>>,
-    mut last_banker: Local<Option<u64>>,
+    mut last: Local<crate::ui_script::VmMemo<Option<BankState>>>,
+    mut last_banker: Local<crate::ui_script::VmMemo<Option<u64>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
+    let last = last.get(&script);
+    let last_banker = last_banker.get(&script);
     // Purchase refusals surface as the client's red error line.
     for result in errors.0.drain(..) {
         if let Some(text) = bank_slot_error_text(result) {
