@@ -579,6 +579,26 @@ impl MoveKind {
     }
 }
 
+/// The wire `ChatMsg` type byte an addon broadcast rides (decision 1235) — the client's own
+/// four-lane whitelist at `0x49fa3f`-`0x49fa4e`, VERIFIED in `WoW.exe` (5875), wow-re
+/// `system/ui/scratch/addon-chat-law.md` §5.
+///
+/// A **total** map from a closed enum, and a named function rather than an inline `match` in
+/// [`io`]'s dispatch so that it is assertable: this is the one place a distribution becomes a wire
+/// byte, and getting it wrong sends an addon's payload down a lane nobody is listening on. There
+/// is no fallback arm and none can be added — that is the whole reason the distribution crosses
+/// the crate boundary as an enum instead of a token string.
+pub(crate) fn addon_wire_chat_type(distribution: benilla_ui::script::AddonDistribution) -> u32 {
+    use benilla_protocol::messages as m;
+    use benilla_ui::script::AddonDistribution as D;
+    match distribution {
+        D::Party => m::CHAT_TYPE_PARTY,
+        D::Raid => m::CHAT_TYPE_RAID,
+        D::Guild => m::CHAT_TYPE_GUILD,
+        D::Battleground => m::CHAT_TYPE_BATTLEGROUND,
+    }
+}
+
 /// The wire `ChatMsg` type a chat-bar line sends as — the FULL sendable set (decision 0288 P5;
 /// vmangos `HandleChatMessageOpcode`'s switch). Each maps to its `WorldWriter` sender in [`io`]'s
 /// dispatch; `Whisper` carries its target and `Channel` its channel name through
@@ -676,6 +696,23 @@ pub(crate) enum ClientCommand {
     Chat {
         kind: ChatKind,
         target: Option<String>,
+        text: String,
+    },
+    /// **An addon broadcast** (`SendAddonMessage`, decision 1235) — a `CMSG_MESSAGECHAT` carrying
+    /// `LANG_ADDON` in the language field instead of the speaker's tongue, which is the entire
+    /// difference between addon data and speech (1.12.1 has no addon opcode).
+    ///
+    /// Deliberately **not** a flag on [`Self::Chat`]: that command's whole family speaks
+    /// `WorldWriter::chat_language`, and a language field bolted onto it would be a `None` that
+    /// fourteen arms have to remember to honour. This one carries no target (1.12's
+    /// `SendAddonMessage` has no fourth argument, so there is no whispered addon message) and no
+    /// language dial (there is exactly one legal value).
+    ///
+    /// `distribution` is the client's own four-value whitelist, already resolved and already
+    /// downgraded for the outside-a-raid case by the binding
+    /// ([`benilla_ui::script::AddonDistribution`]); `text` is the composed `prefix` TAB `message`.
+    AddonMessage {
+        distribution: benilla_ui::script::AddonDistribution,
         text: String,
     },
     /// Ask a player character's name (`CMSG_NAME_QUERY`); answered by a `PlayerName` event into the
@@ -1478,4 +1515,54 @@ pub(crate) enum EmoteKind {
 pub(crate) struct AiReactionMessage {
     pub(crate) unit: Entity,
     pub(crate) hostile: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The addon lane's four wire bytes** (decision 1235) — the client's own whitelist at
+    /// `0x49fa3f`-`0x49fa4e`, and the last link in the chain between an addon's Lua call and the
+    /// bytes `benilla-protocol`'s `addon_message_bodies_golden` pins. Wrong here and the payload
+    /// goes down a lane nobody listens on, which is silent at both ends.
+    ///
+    /// `RAID_LEADER`/`RAID_WARNING`/`OFFICER`/`BATTLEGROUND_LEADER`/`CHANNEL` are asserted absent
+    /// from the map's *image*: vmangos would accept `LANG_ADDON` on all five, and the client sends
+    /// on none of them, so a future widening has to fail a test rather than pass unnoticed.
+    #[test]
+    fn addon_distributions_map_to_the_clients_own_four_wire_types() {
+        use benilla_protocol::messages as m;
+        use benilla_ui::script::AddonDistribution as D;
+
+        assert_eq!(addon_wire_chat_type(D::Party), 0x01, "CHAT_MSG_PARTY");
+        assert_eq!(addon_wire_chat_type(D::Raid), 0x02, "CHAT_MSG_RAID");
+        assert_eq!(addon_wire_chat_type(D::Guild), 0x03, "CHAT_MSG_GUILD");
+        assert_eq!(
+            addon_wire_chat_type(D::Battleground),
+            0x5C,
+            "CHAT_MSG_BATTLEGROUND"
+        );
+
+        // The image is exactly those four — no distribution reaches a lane the reference refuses.
+        let image: Vec<u32> = [D::Party, D::Raid, D::Guild, D::Battleground]
+            .into_iter()
+            .map(addon_wire_chat_type)
+            .collect();
+        for refused in [
+            m::CHAT_TYPE_SAY,
+            m::CHAT_TYPE_YELL,
+            m::CHAT_TYPE_WHISPER,
+            m::CHAT_TYPE_EMOTE,
+            m::CHAT_TYPE_OFFICER,
+            m::CHAT_TYPE_CHANNEL,
+            m::CHAT_TYPE_RAID_LEADER,
+            m::CHAT_TYPE_RAID_WARNING,
+            m::CHAT_TYPE_BATTLEGROUND_LEADER,
+        ] {
+            assert!(
+                !image.contains(&refused),
+                "{refused:#04x} is a lane the client never sends addon data on"
+            );
+        }
+    }
 }

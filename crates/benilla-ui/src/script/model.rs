@@ -910,6 +910,11 @@ pub(crate) struct Model {
     /// (decision 1199). Deliberately a different queue from the chat box's input: the box's drain
     /// runs the slash grammar and this one must not.
     pub(crate) chat_sends: Vec<super::chat_send::ChatSend>,
+    /// Broadcasts an addon queued with `SendAddonMessage`, drained by the app into the wire
+    /// (decision 1235). Its own queue rather than [`Self::chat_sends`] because it is a different
+    /// wire: `LANG_ADDON` in the language field, a four-value distribution set, and a payload the
+    /// binding already composed as `prefix` TAB `message`.
+    pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
     pub(crate) realm_name: String,
     /// Frames per second, behind `GetFramerate()`. Pushed per tick by the app, which owns the
     /// clock this crate does not have.
@@ -1134,6 +1139,7 @@ impl Model {
             pending_events: Vec::new(),
             cursor_pos: (0.0, 0.0),
             chat_sends: Vec::new(),
+            addon_sends: Vec::new(),
             realm_name: String::new(),
             framerate: 0.0,
             modifiers: (false, false, false),

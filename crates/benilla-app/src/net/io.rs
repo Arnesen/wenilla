@@ -644,6 +644,12 @@ fn writer_loop(
                             w.send_channel(target.as_deref().unwrap_or_default(), &text)
                         }
                     },
+                    // The addon lane (decision 1235). The distribution arrived as an enum and the
+                    // map is TOTAL — no "unknown, guess SAY" arm exists, which is what the enum
+                    // seam is for — so the whole arm is one call.
+                    ClientCommand::AddonMessage { distribution, text } => {
+                        w.send_addon_message(super::addon_wire_chat_type(distribution), &text)
+                    }
                     ClientCommand::JoinChannel { name, password } => {
                         w.join_channel(&name, &password)
                     }

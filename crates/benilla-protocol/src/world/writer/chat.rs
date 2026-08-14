@@ -166,6 +166,33 @@ impl WorldWriter {
         )
     }
 
+    /// **Send an addon broadcast** (`SendAddonMessage`, decision 1235) — the one `CMSG_MESSAGECHAT`
+    /// in this module that does **not** speak [`Self::chat_language`].
+    ///
+    /// `chat_type` is one of the client's four addon lanes (`CHAT_TYPE_PARTY`/`RAID`/`GUILD`/
+    /// `BATTLEGROUND`); `text` is the already-composed `prefix` TAB `message` payload — this verb
+    /// does not compose it, because the Lua binding does and the tab's position is the only thing
+    /// the far client's splitter has to go on.
+    ///
+    /// The language field carries [`messages::LANGUAGE_ADDON`] (`0xFFFFFFFF`), and that sentinel
+    /// is the entire difference between addon data and speech: 1.12.1 has no addon opcode.
+    /// VERIFIED in `WoW.exe` (5875), wow-re `system/ui/scratch/addon-chat-law.md` §5 — the binding
+    /// `0x49f920` writes opcode `0x95` (`0x49facf`), the chat type (`0x49fad8`), then
+    /// `or ebx,-0x1` / `push ebx` (`0x49fab9`/`0x49fadd`) into the u32 language write at
+    /// `0x49fae1`, then the message CString at `0x49faf0`. Corroborated end-to-end against a live
+    /// vmangos by `examples/addon_chat_probe` (decision 1029): the sentinel and the tab both
+    /// survive the relay untouched.
+    ///
+    /// Server-side the line is exempt from the `KnowsLanguage` gate, from flood control and from
+    /// `SanitizeChatMessage`, and gated instead by the `AddonChannel` config — see
+    /// [`messages::LANGUAGE_ADDON`] for the whole treatment.
+    pub fn send_addon_message(&mut self, chat_type: u32, text: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_MESSAGECHAT,
+            &messages::messagechat(chat_type, messages::LANGUAGE_ADDON, text),
+        )
+    }
+
     /// Send a `/1`-style channel line (`CHAT_MSG_CHANNEL`) — `channel` is the channel **name**
     /// (`Handlers/ChatHandler.cpp:255-327`; body in [`messages::messagechat_channel`]). Requires
     /// membership; the server silently drops it if we're not on the channel.

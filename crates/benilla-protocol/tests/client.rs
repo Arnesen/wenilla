@@ -306,6 +306,107 @@ fn messagechat_sendable_types_golden() {
     );
 }
 
+/// **The addon broadcast body** (`SendAddonMessage`, decision 1235) — `CMSG_MESSAGECHAT` on one of
+/// four ordinary lanes with the `LANG_ADDON` sentinel in the language field. Bytes hand-computed
+/// from the layout, independent of the Rust builder.
+///
+/// VERIFIED in `WoW.exe` (5875) — wow-re `system/ui/scratch/addon-chat-law.md` §5, the binding
+/// `0x49f920`: opcode `0x95` (`0x49facf`), u32 chat type (`0x49fad8`), u32 language from
+/// `or ebx,-0x1` (`0x49fab9`) written at `0x49fae1`, then the message CString (`0x49faf0`). There
+/// is **no prefix field and no target field on the wire** — the prefix is glued to the message
+/// with a literal TAB (`_snprintf(dst, 0x800, "%s\t%s", …)` at `0x49f9b3`, format `0x844b5c`, raw
+/// `25 73 09 25 73 00`) and the pair rides as one C-string. The far client splits on the FIRST tab
+/// (`0x49a8d0`).
+///
+/// Corroborated end-to-end against a live vmangos by `examples/addon_chat_probe` (decision 1029):
+/// the sentinel comes back intact and the `0x09` survives (addon chat skips `SanitizeChatMessage`,
+/// `Handlers/ChatHandler.cpp:49`).
+#[test]
+fn addon_message_bodies_golden() {
+    // `LANG_ADDON` — the whole discriminator. Not a tongue, and never rewritten by the server.
+    assert_eq!(
+        messages::LANGUAGE_ADDON,
+        0xFFFF_FFFF,
+        "LANG_ADDON (vmangos SharedDefines.h:270)"
+    );
+
+    // oRA2 `Core.lua:563`, verbatim: SendAddonMessage("CTRA", msg, "RAID") — the corpus's one
+    // live caller of this verb.
+    //   02 00 00 00                          CHAT_MSG_RAID
+    //   ff ff ff ff                          LANG_ADDON
+    //   43 54 52 41                          "CTRA"
+    //   09                                   TAB — the prefix/message separator
+    //   73 74 61 74 75 73                    "status"
+    //   00                                   the message C-string's NUL
+    assert_eq!(
+        messages::messagechat(
+            messages::CHAT_TYPE_RAID,
+            messages::LANGUAGE_ADDON,
+            "CTRA\tstatus"
+        ),
+        hx("02000000ffffffff435452410973746174757300"),
+        "CMSG_MESSAGECHAT (addon, RAID) body"
+    );
+
+    // The other three lanes of the client's four-value whitelist (`0x49fa3f`-`0x49fa4e`). Only the
+    // type byte moves; the sentinel and the tab-composed payload are identical.
+    assert_eq!(
+        messages::messagechat(
+            messages::CHAT_TYPE_PARTY,
+            messages::LANGUAGE_ADDON,
+            "oRA\thello"
+        ),
+        hx("01000000ffffffff6f52410968656c6c6f00"),
+        "CMSG_MESSAGECHAT (addon, PARTY) body"
+    );
+    assert_eq!(
+        messages::messagechat(
+            messages::CHAT_TYPE_GUILD,
+            messages::LANGUAGE_ADDON,
+            "oRA\thello"
+        ),
+        hx("03000000ffffffff6f52410968656c6c6f00"),
+        "CMSG_MESSAGECHAT (addon, GUILD) body"
+    );
+    assert_eq!(
+        messages::messagechat(
+            messages::CHAT_TYPE_BATTLEGROUND,
+            messages::LANGUAGE_ADDON,
+            "oRA\thello"
+        ),
+        hx("5c000000ffffffff6f52410968656c6c6f00"),
+        "CMSG_MESSAGECHAT (addon, BATTLEGROUND) body"
+    );
+
+    // AceEvent-2.0.lua's own line — `SendAddonMessage("LOOT_OPENED", "", "RAID")`, the call
+    // replicated in 24 of the 218 corpus addons. **The empty message still carries its tab**: the
+    // composition is unconditional, so the payload is `"LOOT_OPENED\t"` and the body ends TAB, NUL.
+    // A builder that "helpfully" dropped a trailing separator would make the far client read
+    // prefix `"LOOT_OPENED"` with no message at all — which is the same thing, but only by
+    // accident of the receiver's no-tab rule; the bytes must still match the reference's.
+    assert_eq!(
+        messages::messagechat(
+            messages::CHAT_TYPE_RAID,
+            messages::LANGUAGE_ADDON,
+            "LOOT_OPENED\t"
+        ),
+        hx("02000000ffffffff4c4f4f545f4f50454e45440900"),
+        "CMSG_MESSAGECHAT (addon, empty message keeps its TAB) body"
+    );
+
+    // An addon line is byte-identical to ordinary speech on the same lane EXCEPT the language
+    // field — the property the receive-side gate rests on, pinned so a future refactor cannot
+    // quietly reintroduce a tongue here.
+    let addon = messages::messagechat(messages::CHAT_TYPE_PARTY, messages::LANGUAGE_ADDON, "x\ty");
+    let speech =
+        messages::messagechat(messages::CHAT_TYPE_PARTY, messages::LANGUAGE_COMMON, "x\ty");
+    assert_eq!(addon.len(), speech.len(), "same shape");
+    assert_eq!(addon[0..4], speech[0..4], "same chat type");
+    assert_eq!(addon[8..], speech[8..], "same payload");
+    assert_eq!(&addon[4..8], &[0xFF, 0xFF, 0xFF, 0xFF], "LANG_ADDON");
+    assert_eq!(&speech[4..8], &[0x07, 0x00, 0x00, 0x00], "LANG_COMMON");
+}
+
 /// The channel wire family's CMSG bodies (decision 0288 phase 1) — join/leave/list + the full
 /// moderation set, ALL verified vmangos `Server/Packets/Channel.cpp` (every `ReadFromWorldPacket`
 /// there is a channel-name cstring, optionally followed by a second cstring: a password or a target

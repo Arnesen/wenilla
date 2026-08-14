@@ -35,6 +35,17 @@ enum Pending {
         b_guid: u64,
         tries: u16,
     },
+    /// An inbound addon line awaiting its SENDER's name — `CHAT_MSG_ADDON` (event 227, fired at
+    /// `0x49a95f`). Parked here rather than fired at decode for the reason wow-re records: the
+    /// reference fires it *downstream* of the name resolve, from the `CMSG_NAME_QUERY` callback
+    /// (`0x49ccc0`), so `sender` is a NAME and never a guid.
+    Addon {
+        prefix: String,
+        message: String,
+        distribution: String,
+        guid: u64,
+        tries: u16,
+    },
     /// A `/random` broadcast awaiting the roller's name.
     Roll {
         min: u32,
@@ -56,6 +67,32 @@ enum Pending {
     Discovery { area: String, xp: u32 },
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
+}
+
+/// Fire `CHAT_MSG_ADDON` with the reference's four arguments, in the reference's order.
+///
+/// Split out of the drain so the shape that reaches Lua is testable without standing up
+/// `feed_chat`'s dozen resources — the scaffolding is not what can be wrong here; the argument
+/// ORDER is. wow-re carves it as `SignalEvent2(227, "%s%s%s%s", prefix, message, distribution,
+/// sender)` (`0x49a95f`), and `BigWigs` independently self-delivers
+/// `self:CHAT_MSG_ADDON("BigWigs", msg, "RAID", playerName)` — a 2006 addon author and the binary
+/// agreeing.
+///
+/// Fired DIRECTLY rather than through [`route`]: `CHAT_MSG_ADDON` is not a `ChatTypeInfo` key and
+/// carries four arguments against the chat family's ten, so the chat pipeline would mis-shape it
+/// and `every_fired_event_name_is_a_chat_type_info_key` would rightly reject it.
+pub(super) fn fire_addon_message(
+    script: &mut benilla_ui::script::UiScript,
+    prefix: String,
+    message: String,
+    distribution: String,
+    sender: String,
+) {
+    use benilla_ui::script::ScriptValue::Str;
+    script.fire_event(
+        "CHAT_MSG_ADDON",
+        vec![Str(prefix), Str(message), Str(distribution), Str(sender)],
+    );
 }
 
 /// The pending chat items the net/loot/quest feeds fill and [`feed_chat`] drains. Cleared on
@@ -110,6 +147,38 @@ impl ChatLog {
                 None,
             )));
         }
+    }
+
+    /// Queue an inbound addon line (`SMSG_MESSAGECHAT` carrying `LANG_ADDON`) for the sender-name
+    /// resolve, then `CHAT_MSG_ADDON`.
+    ///
+    /// **The split is the counter-intuitive part and it is the reference's** (`0x49a8d0`): the text
+    /// divides on its **FIRST** tab, and with **no tab at all the whole text is the PREFIX** and
+    /// the message is empty — not the other way round, which is what a reimplementation guesses.
+    ///
+    /// `distribution` is the remap at `0x49aff4`: only PARTY / RAID / GUILD / BATTLEGROUND have
+    /// names, and every other type byte reports `"UNKNOWN"` rather than being dropped — the
+    /// reference hands the addon a string it can branch on either way.
+    pub(crate) fn push_addon(&mut self, text: &str, chat_type: u8, guid: u64) {
+        let (prefix, message) = match text.find('\t') {
+            Some(i) => (text[..i].to_string(), text[i + 1..].to_string()),
+            None => (text.to_string(), String::new()),
+        };
+        let distribution = match chat_type {
+            0x01 => "PARTY",
+            0x03 => "RAID",
+            0x04 => "GUILD",
+            0x18 => "BATTLEGROUND",
+            _ => "UNKNOWN",
+        }
+        .to_string();
+        self.pending.push(Pending::Addon {
+            prefix,
+            message,
+            distribution,
+            guid,
+            tries: 0,
+        });
     }
 
     /// Queue a `/random` broadcast (`MSG_RANDOM_ROLL`) for the roller-name resolve.
@@ -171,11 +240,36 @@ impl ChatLog {
         self.pending.clear();
     }
 
-    /// How many items are queued — the gates upstream of this log ([`crate::net::apply`]'s addon
-    /// and ignore gates) are "the line never got here at all", so their tests read this.
+    /// The parked addon lines as `(prefix, message, distribution)` — test-only, so the split and
+    /// the remap can be asserted without standing up a name cache and a VM.
+    #[cfg(test)]
+    pub(crate) fn pending_addons(&self) -> Vec<(String, String, String)> {
+        self.pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Addon {
+                    prefix,
+                    message,
+                    distribution,
+                    ..
+                } => Some((prefix.clone(), message.clone(), distribution.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many parked items are headed for a CHAT WINDOW.
+    ///
+    /// Addon lines are excluded on purpose. They park in the same queue for the same ask-once name
+    /// resolve, but they are not speech and never render — so counting them here would make
+    /// `addon_chat_never_reaches_the_chat_window` fail the moment the receive half opened, which is
+    /// exactly what it did. "Pending" stopped meaning "will render" when `Pending::Addon` arrived.
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.pending
+            .iter()
+            .filter(|p| !matches!(p, Pending::Addon { .. }))
+            .count()
     }
 }
 
@@ -497,6 +591,32 @@ pub(super) fn feed_chat(
                     b,
                 );
                 route(&mut script, &mut windows, &event);
+            }
+            Pending::Addon {
+                prefix,
+                message,
+                distribution,
+                guid,
+                tries,
+            } => {
+                let name = names.resolve(guid, &commands).map(str::to_string);
+                if name.is_none() && tries < NAME_MAX_TRIES {
+                    still.push(Pending::Addon {
+                        prefix,
+                        message,
+                        distribution,
+                        guid,
+                        tries: tries + 1,
+                    });
+                    continue;
+                }
+                fire_addon_message(
+                    &mut script,
+                    prefix,
+                    message,
+                    distribution,
+                    name.unwrap_or_else(|| "Unknown".into()),
+                );
             }
             Pending::Roll {
                 min,

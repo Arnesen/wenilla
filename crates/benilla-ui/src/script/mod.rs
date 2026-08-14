@@ -37,6 +37,7 @@
 //! (an opaque identity in a lightuserdata) — only the *encoding* differs.
 
 mod action;
+mod addon_message;
 mod aura;
 mod backdrop;
 mod bank;
@@ -119,6 +120,7 @@ mod worldmap;
 
 pub use action::{ActionSlot, ActionState};
 pub use addon::AddOnInfo;
+pub use addon_message::{AddonDistribution, AddonSend};
 pub use aura::{AuraState, TrackingState};
 pub use backdrop::{pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
@@ -325,6 +327,7 @@ impl UiScript {
         lua.set_app_data(Model::new());
 
         addon::install(&lua)?;
+        addon_message::install(&lua)?;
         chat_send::install(&lua)?;
         channel::install(&lua)?;
         chat_window::install(&lua)?;

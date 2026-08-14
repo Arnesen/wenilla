@@ -890,3 +890,51 @@ pub(super) fn drain_addon_chat_sends(
         }
     }
 }
+
+/// Turn an addon's `SendAddonMessage` calls into sends (decision 1235) — the addon-to-addon lane,
+/// not speech.
+///
+/// Its own drain rather than a branch in [`drain_addon_chat_sends`] because the two queues carry
+/// different things: a `SendChatMessage` line still needs a chat-type token resolved and may be
+/// refused here, while a `SendAddonMessage` broadcast arrives **already validated** — the binding
+/// owns the four-value whitelist, the `prefix` TAB `message` composition and the outside-a-raid
+/// downgrade, exactly as the reference's `0x49f920` does, so nothing is left for this side to
+/// decide. That is why there is no "unknown distribution" arm here and no way to add one: the
+/// queue's own type is the enum.
+///
+/// **The lane is traced in both directions, under one tag.** An addon channel is invisible by
+/// construction — it never reaches a chat frame, which is the entire point of `LANG_ADDON` — so
+/// without a line here a broadcast that went out and one that never happened look identical from
+/// our own logs, which is exactly how a silently-discarded wire body survives (method.md's rule
+/// that new wire bodies are proved, not assumed). `net::apply::chat` already writes inbound addon
+/// traffic to the `addon` trace tag; this writes the outbound half to the same tag, so
+/// `WOW_MOVE_TRACE=<path> WOW_MOVE_TRACE_TAGS=addon` on a live run is the whole conversation in
+/// one file, in order.
+pub(super) fn drain_addon_message_sends(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    commands: Res<NetCommands>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for send in script.take_addon_sends() {
+        debug!(
+            "chat: addon broadcast on {} — {:?}",
+            send.distribution.token(),
+            send.text
+        );
+        if benilla_assets::trace::enabled() {
+            benilla_assets::trace::line(
+                "addon",
+                &format!("-> {} {:?}", send.distribution.token(), send.text),
+            );
+        }
+        let cmd = ClientCommand::AddonMessage {
+            distribution: send.distribution,
+            text: send.text,
+        };
+        if commands.0.send(cmd).is_err() {
+            warn!("chat: not connected; addon broadcast dropped");
+        }
+    }
+}

@@ -1117,3 +1117,147 @@ fn a_sticky_whose_group_is_gone_opens_as_say() {
     assert_eq!(sticky_on_open(SendType::Guild, &solo), SendType::Guild);
     assert_eq!(sticky_on_open(SendType::Say, &solo), SendType::Say);
 }
+
+/// **The inbound addon split, and the direction a reimplementation gets backwards.**
+///
+/// `CHAT_MSG_ADDON` (event 227) carries `(prefix, message, distribution, sender)`. The text divides
+/// on its **FIRST** tab (`0x49a8d0`) — and with **no tab at all the whole text is the PREFIX** with
+/// an empty message, not the reverse. wow-re records that direction explicitly because it is the
+/// counter-intuitive one; this test is where it is pinned.
+///
+/// `distribution` is the remap at `0x49aff4`: only the four lanes have names, and anything else
+/// reports `"UNKNOWN"` rather than being dropped — the reference hands the addon a string it can
+/// branch on either way.
+#[test]
+fn an_inbound_addon_line_splits_on_the_first_tab_only() {
+    const PARTY: u8 = 0x01;
+    const RAID: u8 = 0x03;
+    const GUILD: u8 = 0x04;
+    const BATTLEGROUND: u8 = 0x18;
+    const SAY: u8 = 0x00;
+
+    let mut log = super::feed::ChatLog::default();
+    // The ordinary shape.
+    log.push_addon("oRA\tSYNC:1", PARTY, 7);
+    // A message that itself contains tabs: only the FIRST one divides.
+    log.push_addon("CTRA\tA\tB\tC", RAID, 7);
+    // NO TAB — the whole text is the prefix, the message is empty.
+    log.push_addon("BareTag", GUILD, 7);
+    // An empty message after a trailing tab is still an empty message, not a missing one.
+    log.push_addon("Tag\t", BATTLEGROUND, 7);
+    // A lane with no name still arrives, labelled.
+    log.push_addon("X\ty", SAY, 7);
+
+    assert_eq!(
+        log.pending_addons(),
+        vec![
+            ("oRA".into(), "SYNC:1".into(), "PARTY".into()),
+            ("CTRA".into(), "A\tB\tC".into(), "RAID".into()),
+            ("BareTag".into(), String::new(), "GUILD".into()),
+            ("Tag".into(), String::new(), "BATTLEGROUND".into()),
+            ("X".into(), "y".into(), "UNKNOWN".into()),
+        ]
+    );
+}
+
+/// **`CHAT_MSG_ADDON` reaches Lua with the reference's four arguments, in the reference's order.**
+///
+/// The split test above covers the parse; this covers the FIRE, which is the half that can be
+/// silently wrong — an addon reading `arg3` as the sender instead of the distribution gets a string
+/// either way and misbehaves without erroring.
+///
+/// wow-re carves the shape as `SignalEvent2(227, "%s%s%s%s", prefix, message, distribution, sender)`
+/// (`0x49a95f`); `BigWigs` self-delivers the identical order by hand. The handler below records all
+/// four positionally, so a reordering fails on the values rather than on a count.
+#[test]
+fn the_addon_event_reaches_lua_with_four_arguments_in_order() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        seen = nil
+        f = CreateFrame("Frame", "AddonSink")
+        f:RegisterEvent("CHAT_MSG_ADDON")
+        f:SetScript("OnEvent", function()
+            seen = { arg1, arg2, arg3, arg4 }
+        end)
+        "#,
+    )
+    .unwrap();
+
+    super::feed::fire_addon_message(
+        &mut s,
+        "oRA".into(),
+        "SYNC:1".into(),
+        "PARTY".into(),
+        "Someone".into(),
+    );
+
+    assert!(
+        s.errors().is_empty(),
+        "the fire must not raise: {:?}",
+        s.errors()
+    );
+    assert_eq!(
+        s.eval::<String>("return seen[1]").unwrap(),
+        "oRA",
+        "arg1 is the PREFIX"
+    );
+    assert_eq!(
+        s.eval::<String>("return seen[2]").unwrap(),
+        "SYNC:1",
+        "arg2 is the MESSAGE"
+    );
+    assert_eq!(
+        s.eval::<String>("return seen[3]").unwrap(),
+        "PARTY",
+        "arg3 is the DISTRIBUTION, not the sender"
+    );
+    assert_eq!(
+        s.eval::<String>("return seen[4]").unwrap(),
+        "Someone",
+        "arg4 is the SENDER, and a name rather than a guid"
+    );
+}
+
+/// **The two halves of the addon lane, against each other.**
+///
+/// Send (1235/1236) and receive (7bd5567f) landed in different sessions, and the agent that built
+/// the send half flagged the gap honestly: they pass together but *"I have not independently
+/// exercised the two together."* A two-account live loopback is still the only thing that proves
+/// the round trip on the wire — this proves the halves agree with each OTHER, which is the part
+/// that can drift without either side looking wrong on its own.
+///
+/// The composition and the split are separate transcriptions of the same byte law (`0x49f9b3`
+/// composes on a tab, `0x49a8d0` splits on the first one), written by different sessions from the
+/// same note. If one had picked a different separator, or split last-tab instead of first, every
+/// test on both sides would still pass.
+///
+/// A message CONTAINING tabs is the case that discriminates: compose glues one tab, the split takes
+/// only the first, so the payload must come back with its own tabs intact.
+#[test]
+fn an_addon_message_survives_its_own_send_and_receive() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.run(r#"SendAddonMessage("oRA", "SYNC\t1\t2", "PARTY")"#)
+        .unwrap();
+    assert!(s.errors().is_empty(), "send raised: {:?}", s.errors());
+
+    let sends = s.take_addon_sends();
+    assert_eq!(sends.len(), 1, "one broadcast queued");
+    let sent = &sends[0];
+    assert_eq!(sent.distribution.token(), "PARTY");
+
+    // Now the wire turns around: the same text arrives as an ordinary PARTY line carrying
+    // LANG_ADDON, and the receive half parses it.
+    let mut log = super::feed::ChatLog::default();
+    log.push_addon(&sent.text, 0x01, 7);
+
+    assert_eq!(
+        log.pending_addons(),
+        vec![(
+            "oRA".to_string(),
+            "SYNC\t1\t2".to_string(),
+            "PARTY".to_string()
+        )],
+        "what one half composed, the other must recover — tabs in the payload included"
+    );
+}

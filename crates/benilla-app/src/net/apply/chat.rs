@@ -53,10 +53,29 @@ pub(super) fn chat(
     // **One divergence, named:** the reference suppresses *after* name resolution — an uncached
     // sender parks the line in `__AUPENDINGCHAT__` (`0x49d7ba`) behind `CMSG_NAME_QUERY`, and
     // `CHAT_MSG_ADDON` fires late from the callback `0x49ccc0`. We drop here instead, ahead of the
-    // name query [`ChatLog::push_wire`] would queue. Invisible today (nothing listens for
-    // `CHAT_MSG_ADDON` — benilla runs FrameXML, not third-party addons) and it saves a name query
-    // per addon sender; when an addon runtime lands, the *fire* must move downstream of the
-    // resolve so its `sender` arg is a name rather than a guid — the drop can stay here.
+    // name query [`ChatLog::push_wire`] would queue, which saves a name query per addon sender.
+    //
+    // **THE CHANNEL IS NOW HALF-OPEN, and that is the state of it — not a claim that it works.**
+    // Decision 1235 landed the SEND half: `SendAddonMessage` composes, validates against the
+    // client's four-lane whitelist and puts a real `CMSG_MESSAGECHAT`/`LANG_ADDON` on the wire.
+    // Nothing on THIS side changed, so an addon can broadcast and **cannot hear** — including its
+    // own echo (vmangos's `Group::BroadcastPacket` takes no ignore-guid, so the party lane returns
+    // a sender's own line, and an addon that sequences on that echo sees nothing).
+    //
+    // Opening the receive half is NOT deleting this `return`, which is why it is separate work:
+    //
+    //   - `CHAT_MSG_ADDON` (event 227, `0x49a95f push 0xe3`) is **not a `ChatTypeInfo` key** and
+    //     cannot ride [`crate::ui_chat::event`]'s pipeline — it has its own format string and its
+    //     own 4-argument shape `(prefix, message, distribution, sender)`, against the chat
+    //     family's ten. `every_fired_event_name_is_a_chat_type_info_key` would rightly fail it.
+    //   - `prefix`/`message` come from splitting the text on its **FIRST** tab (`0x49a8d0`); with
+    //     no tab the whole text is the *prefix* and the message is `""`, not the other way round.
+    //   - `distribution` is the remap table `0x49aff4` → jump table `0x49afe0`: only
+    //     PARTY/RAID/GUILD/BATTLEGROUND get names, every other type byte reports `"UNKNOWN"`.
+    //   - the *fire* must move downstream of the name resolve so `sender` is a name, not a guid.
+    //     The drop can stay here; the fire cannot.
+    //
+    // All four are recorded byte-exact in wow-re `system/ui/scratch/addon-chat-law.md` §3/§4/§6.
     //
     // The payload rides `debug!` and its own `addon` trace tag rather than vanishing, so
     // mixed-client traffic stays diagnosable: invisible in chat, never invisible to us.
@@ -67,12 +86,25 @@ pub(super) fn chat(
                 m.chat_type, m.sender_guid, m.text
             );
             if benilla_assets::trace::enabled() {
+                // `<-` inbound, matching the `->` the outbound drain writes to this same tag
+                // (`ui_chat::input::drain_addon_message_sends`): one tag, both directions, so a
+                // live run's trace reads as the conversation it is.
                 benilla_assets::trace::line(
                     "addon",
-                    &format!("[{:#04x}] {:?}", m.chat_type, m.text),
+                    &format!("<- [{:#04x}] {:?}", m.chat_type, m.text),
                 );
             }
+            // **The channel is whole now.** Parked for the sender-name resolve rather than fired
+            // here, because the reference fires `CHAT_MSG_ADDON` DOWNSTREAM of the name query
+            // (`0x49ccc0`) so `sender` is a name and never a guid — the one requirement of the
+            // four that is about WHERE rather than what. `push_addon` carries the other three: the
+            // first-tab split, the no-tab-means-all-prefix direction, and the four-lane
+            // distribution remap.
+            chat_log.push_addon(&m.text, m.chat_type, m.sender_guid);
         }
+        // The line still never reaches a chat window: an addon message is not speech, and the
+        // reference's addon arm jumps below the render path (`0x49a970`). An IGNORED sender fires
+        // nothing at all — ignore beats addon, which is why that check still wraps this.
         return;
     }
     if m.chat_type == 0x0A {
@@ -242,6 +274,48 @@ mod tests {
         )));
         // An empty addon payload likewise: nothing about the text can un-addon a line.
         assert!(!reaches_the_chat_window(a_party_line(LANGUAGE_ADDON, "")));
+    }
+
+    /// ...and since the receive half opened, "never reaches the chat window" must not be allowed to
+    /// mean "vanished". The same line is PARKED for `CHAT_MSG_ADDON`, which is the distinction that
+    /// stopped being free the moment `Pending::Addon` existed — `pending_len` excludes addon items
+    /// precisely so the test above keeps asserting what it says, and this one covers the other half.
+    #[test]
+    fn an_addon_line_is_parked_for_the_addon_event_not_discarded() {
+        let mut world = World::new();
+        world.init_resource::<Messages<ServerSaidMessage>>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        world.insert_resource(NetCommands(tx));
+        world.insert_resource(SocialState::default());
+        world.insert_resource(ChatLog::default());
+        let m = a_party_line(LANGUAGE_ADDON, "Quiver\tVERSION:3.1.4");
+        world
+            .run_system_once(
+                move |mut chat_log: ResMut<ChatLog>,
+                      social: Res<SocialState>,
+                      net_commands: Res<NetCommands>,
+                      mut server_said: MessageWriter<ServerSaidMessage>| {
+                    chat(
+                        m.clone(),
+                        &mut chat_log,
+                        &social,
+                        &net_commands,
+                        &mut server_said,
+                    );
+                },
+            )
+            .unwrap();
+        let log = world.resource::<ChatLog>();
+        assert_eq!(
+            log.pending_addons(),
+            vec![(
+                "Quiver".to_string(),
+                "VERSION:3.1.4".to_string(),
+                "PARTY".to_string()
+            )],
+            "the line must be queued for CHAT_MSG_ADDON, not dropped"
+        );
+        assert_eq!(log.pending_len(), 0, "and still never headed for a window");
     }
 
     /// The control the gate must not swallow: real speech on the same lane, in every tongue a

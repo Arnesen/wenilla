@@ -78,6 +78,10 @@ impl Plugin for UiChatPlugin {
                     // and in the same chain, so a `SendChatMessage` fired from a slash handler
                     // that the box's drain just ran goes out on the same frame.
                     input::drain_addon_chat_sends,
+                    // …and its addon-lane twin (decision 1235). Same position in the chain, for
+                    // the same reason: a `SendAddonMessage` fired from a handler that ran earlier
+                    // in this chain goes out on this frame rather than the next.
+                    input::drain_addon_message_sends,
                 )
                     .chain()
                     .after(UiInput)
