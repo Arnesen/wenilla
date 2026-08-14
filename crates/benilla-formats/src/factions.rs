@@ -12,11 +12,17 @@
 //! friendGroupMask@4, enemyGroupMask@5, enemies[4]@6..9, friends[4]@10..13 (both id lists
 //! 0-terminated).
 //!
-//! Also here: the **reputation identity** side of the decode — Faction.dbc's reputation slot +
-//! race/class-gated base values ([`FactionInfo`]) and the standing→rank thresholds
-//! ([`reputation_rank`]). The client checks `FactionHasReputation` *before* the comparator
-//! (`0x606530`): a reputation faction's NPCs colour by the player's rank, not by templates. The
-//! live standings are session state (`SMSG_INITIALIZE_FACTIONS`) and live with the net layer.
+//! Also here: the **reputation identity** side of the decode — Faction.dbc's reputation slot,
+//! parent pointer and race/class-gated base values ([`FactionInfo`]), the standing→rank thresholds
+//! ([`reputation_rank`]), and the names of the wire flag byte's bits ([`faction_flags`]). The client
+//! checks `FactionHasReputation` *before* the comparator (`0x606530`): a reputation faction's NPCs
+//! colour by the player's rank, not by templates. The live standings are session state
+//! (`SMSG_INITIALIZE_FACTIONS`) and live with the net layer.
+//!
+//! Two consumers share that identity now — the reaction decode above, and the **reputation pane**
+//! (decision 1258, whose display law is `benilla-ui`'s `script::reputation`). Where both need the
+//! same number they take it from the same function here, so a rank the pane draws and a colour the
+//! nameplate paints can never disagree.
 //!
 //! Deliberately **not** here: the rest of the real `UnitReaction 0x6061e0` orchestration —
 //! same-object/group/guild shortcuts, charm resolution, PvP-flag + sanctuary overrides. Those need
@@ -119,6 +125,16 @@ pub struct FactionInfo {
     /// `reputationIndex` — the slot into the `SMSG_INITIALIZE_FACTIONS` standings array; `-1` = this
     /// faction has no reputation (reaction falls through to the template comparator).
     pub rep_index: i32,
+    /// `Faction.dbc` field 18 — `team` in mangos, `m_parentFactionID` in the later builds' WDB
+    /// names. The **parent pointer**: Stormwind/Ironforge/Darnassus/Gnomeregan Exiles all carry 469
+    /// (Alliance), the four Steamwheedle towns carry 169, the six battleground factions carry
+    /// 891/892, and `0` means no parent. It is the only tree edge 1.12's `Faction.dbc` has.
+    ///
+    /// It is the reputation pane's **grouping key**, but *not* what makes a row a header — that is
+    /// the wire flag byte's [`faction_flags::HEADER`] bit. The distinction matters because the
+    /// client synthesizes a header for a group key that has no header row yet, and because two of
+    /// the pane's headers (`0` "Other" and `-1` "Inactive") name no faction at all.
+    pub team: u32,
     race_masks: [u32; 4],
     class_masks: [u32; 4],
     base: [i32; 4],
@@ -128,20 +144,55 @@ pub struct FactionInfo {
 }
 
 impl FactionInfo {
-    /// The base reputation for a player of `race`/`class` (1-based ids): the first of the four
-    /// race/class-gated slots that fits (a zero mask is a wildcard) — vmangos `GetIndexFitTo`,
-    /// mirroring the client's own base pick. `0` if none fits.
-    pub fn base_for(&self, race: u8, class: u8) -> i32 {
+    /// The race/class-gated slot the **client** picks for a player of `race`/`class` (1-based ids),
+    /// or `None` if no slot fits.
+    ///
+    /// `None` is not merely "no base value": it is the reputation pane's **membership gate** — the
+    /// client's list build calls its add inside this loop's accept block (`0x4d5555`), so a faction
+    /// no slot fits is not in the player's list at all.
+    ///
+    /// Byte-verified at `0x4d5500`–`0x4d5564` (wow-5875-re
+    /// `system/ui/scratch/reputation-panel-law.md`), and it differs from vmangos's `GetIndexFitTo`
+    /// in **two** ways that this project got wrong first time by reading the emulator instead:
+    ///
+    /// 1. A slot with **both** masks zero is a **reject**, not a double wildcard (`0x4d550b`). Only
+    ///    one of the two may be zero-as-wildcard.
+    /// 2. The loop has **no early exit** — the **last** matching slot wins, not the first.
+    ///
+    /// On the shipped 1.12 `Faction.dbc` the distinction is invisible: over all 190 rows × 72 valid
+    /// race/class pairs, zero of the 13,680 evaluations disagree with the first-match rule (no row
+    /// has a both-zero slot with a non-zero base, and none has two matching slots with different
+    /// bases). It is written the client's way regardless, because a rule that is right only for the
+    /// data we happen to ship is not a rule — a patched DBC would diverge silently.
+    pub fn slot_for(&self, race: u8, class: u8) -> Option<usize> {
         let race_mask = 1u32 << (race.max(1) - 1);
         let class_mask = 1u32 << (class.max(1) - 1);
-        for i in 0..4 {
-            if (self.race_masks[i] == 0 || self.race_masks[i] & race_mask != 0)
-                && (self.class_masks[i] == 0 || self.class_masks[i] & class_mask != 0)
-            {
-                return self.base[i];
-            }
-        }
-        0
+        (0..4).rfind(|&i| {
+            let (races, classes) = (self.race_masks[i], self.class_masks[i]);
+            (races != 0 || classes != 0)
+                && (races == 0 || races & race_mask != 0)
+                && (classes == 0 || classes & class_mask != 0)
+        })
+    }
+
+    /// The base reputation for a player of `race`/`class` — the [`Self::slot_for`] slot's value,
+    /// `0` if none fits. This is the term the wire standing EXCLUDES: the total a rank is taken
+    /// from is this plus the wire value (byte-verified at `0x4d6370`: `wire + base`, and each
+    /// addend has exactly one writer image-wide).
+    pub fn base_for(&self, race: u8, class: u8) -> i32 {
+        self.slot_for(race, class).map_or(0, |i| self.base[i])
+    }
+
+    /// The DBC's **default** reputation flag byte for a player of `race`/`class` — the same slot
+    /// pick as [`Self::base_for`], reading the `ReputationFlags` column instead of the base
+    /// (vmangos `ReputationMgr::GetDefaultStateFlags`). `0` if no slot fits.
+    ///
+    /// **The client never reads this column** (a byte-verified negative — the flag byte it displays
+    /// from is entirely the wire's). It is the *server's* seed for a fresh character's per-slot
+    /// state, and it is read here only to say what a faction is by default: notably that exactly
+    /// the pane's five header factions carry [`faction_flags::HEADER`].
+    pub fn default_flags_for(&self, race: u8, class: u8) -> u32 {
+        self.slot_for(race, class).map_or(0, |i| self.flags[i])
     }
 
     /// Whether the unit tooltip shows this faction's name to a player of `race`/`class` — the
@@ -186,6 +237,49 @@ pub fn reputation_rank(total_standing: i32) -> u8 {
     }
 }
 
+/// The per-slot reputation flag byte the server keeps for each of the player's factions and sends
+/// as the first field of every `SMSG_INITIALIZE_FACTIONS` entry.
+///
+/// **Named from the CLIENT's own reads, not from the emulators' enum** (wow-5875-re
+/// `system/ui/scratch/reputation-panel-law.md`, byte-verified: the thirteen accesses to the store at
+/// `0xb73294` are the complete image-wide population). That distinction is not pedantry — the two
+/// disagree on bit `0x08`, which every emulator calls `INVISIBLE_FORCED` and the client tests as
+/// **HEADER** (`entry.isHeader = (flags >> 3) & 1`, `0x4d5acb`). Believing the emulator's name gets
+/// the *right rows* on screen for the wrong reason (the five factions carrying it are exactly the
+/// pane's headers, so "hide these" and "these are headers" pick the same set) and then gets the
+/// header machinery wrong everywhere it matters.
+///
+/// The same bit layout appears in `Faction.dbc`'s four `ReputationFlags` columns, which is where the
+/// **server** seeds a slot's initial byte from (`ReputationMgr::GetDefaultStateFlags`). The client
+/// never reads that column — the byte it displays from is entirely the wire's.
+///
+/// Two of these the client also *writes*, optimistically, because neither send is acked: [`AT_WAR`]
+/// and [`INACTIVE`].
+pub mod faction_flags {
+    /// The faction is listed in the reputation pane at all. Off until the player first meets them;
+    /// the server lifts it and pushes `SMSG_SET_FACTION_VISIBLE`. The **only** flag gating list
+    /// membership.
+    pub const VISIBLE: u8 = 0x01;
+    /// The player has declared war on this faction.
+    pub const AT_WAR: u8 = 0x02;
+    /// Suppresses the auto-reveal on a standing change and the rank-change chat notification. It
+    /// does **not** hide the row: a faction with this bit and [`VISIBLE`] is listed normally.
+    pub const HIDDEN: u8 = 0x04;
+    /// **This row is a header.** Not "force-invisible" — see the module doc; the client's own test
+    /// is `(flags >> 3) & 1` at `0x4d5acb`. The five factions that carry it (Alliance, Horde,
+    /// Steamwheedle Cartel, and the two battleground blocs) are the pane's header rows.
+    pub const HEADER: u8 = 0x08;
+    /// Overrides [`AT_WAR`]: war can never be declared, so the pane's box is disabled. Your own
+    /// side's city factions carry it.
+    pub const PEACE_FORCED: u8 = 0x10;
+    /// The player moved this faction to the pane's inactive bucket — which re-parents the row under
+    /// the synthetic "Inactive" header, rather than hiding it.
+    pub const INACTIVE: u8 = 0x20;
+    /// The two competing factions of a rival pair. **The 1.12 client never tests this bit** — it is
+    /// here to name the byte completely, not because anything reads it.
+    pub const RIVAL: u8 = 0x40;
+}
+
 impl Reaction {
     /// A reputation rank (`0..=7`, [`reputation_rank`]) collapsed to the three-way scale, the way
     /// the **nameplate** palette thresholds it (`0x7cbaa0`: `<= 1` hostile, `>= 4` friendly, else
@@ -213,6 +307,9 @@ pub struct FactionCatalog {
     /// Faction id → the localized Name — what the item tooltip's "Requires <Faction> -
     /// <Standing>" line prints.
     names: HashMap<u32, String>,
+    /// Faction id → the localized Description — the paragraph the reputation pane's detail popup
+    /// prints under the faction name. Absent for most rows: only the pane's own factions carry one.
+    descriptions: HashMap<u32, String>,
 }
 
 impl FactionCatalog {
@@ -232,6 +329,12 @@ impl FactionCatalog {
     /// The localized name of a `Faction.dbc` id — the reputation-requirement line's faction.
     pub fn faction_name(&self, faction_id: u32) -> Option<&str> {
         self.names.get(&faction_id).map(String::as_str)
+    }
+
+    /// The localized description of a `Faction.dbc` id — the reputation pane's detail paragraph.
+    /// `None` where the DBC leaves it empty, which is most non-pane factions.
+    pub fn faction_description(&self, faction_id: u32) -> Option<&str> {
+        self.descriptions.get(&faction_id).map(String::as_str)
     }
 
     /// Every faction that has a reputation slot, with its identity — the app builds the
@@ -363,6 +466,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
     let rs = parse(&bytes, faction_schema(), "Faction")?;
     let mut factions = HashMap::with_capacity(rs.records().len());
     let mut names = HashMap::with_capacity(rs.records().len());
+    let mut descriptions = HashMap::new();
     for r in rs.records() {
         if let Some(id) = u32_at(r, 0) {
             let at = |i| u32_at(r, i).unwrap_or(0);
@@ -371,6 +475,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
                 id,
                 FactionInfo {
                     rep_index: iat(1),
+                    team: at(18),
                     race_masks: [at(2), at(3), at(4), at(5)],
                     class_masks: [at(6), at(7), at(8), at(9)],
                     base: [iat(10), iat(11), iat(12), iat(13)],
@@ -380,6 +485,11 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
             // Name0 (enUS) — column 19 after ID/RepIndex/4·race/4·class/4·base/4·flags/Team.
             if let Some(name) = crate::dbc::str_at(&rs, r, 19) {
                 names.insert(id, name);
+            }
+            // Desc0 (enUS) — column 28, past the 8 name columns and their flag word. Empty for
+            // most rows, so this map is far smaller than `names` and is left unsized.
+            if let Some(desc) = crate::dbc::str_at(&rs, r, 28) {
+                descriptions.insert(id, desc);
             }
         }
     }
@@ -401,6 +511,7 @@ pub fn load_faction_catalog(chain: &mut Chain) -> Result<FactionCatalog> {
         factions,
         group_names,
         names,
+        descriptions,
     })
 }
 
@@ -646,5 +757,71 @@ mod tests {
         assert_eq!(cat.faction_group_name(2), Some("Alliance"));
         assert_eq!(cat.faction_group_name(4), Some("Horde"));
         assert_eq!(cat.faction_group_name(0), None);
+    }
+
+    /// **`team` is the reputation pane's tree, on the real table.** 1.12's `Faction.dbc` has no
+    /// parent column — field 18 (`team`) is the only edge it carries — and every group the pane
+    /// draws a header for is a set of rows sharing one `team`. Asserted by value on the real DBC
+    /// because a one-column slip here would silently produce a flat list that still *renders*.
+    ///
+    /// The counts are the whole table's, so a future patch chain that changes them fails loudly
+    /// rather than quietly regrouping the pane. Skips without client data.
+    #[test]
+    fn real_reputation_factions_group_under_their_team() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_faction_catalog(&mut chain).expect("load factions");
+
+        // 54 of the table's 190 rows carry a reputation slot; the rest are reaction-only.
+        assert_eq!(cat.reputation_factions().count(), 54);
+
+        // The four Alliance cities sit under Alliance (469), the four Horde ones under Horde (67).
+        for id in [72 /* Stormwind */, 47, 69, 54] {
+            assert_eq!(
+                cat.reputation_faction(id).unwrap().team,
+                469,
+                "faction {id}"
+            );
+        }
+        for id in [76 /* Orgrimmar */, 81, 68, 530] {
+            assert_eq!(cat.reputation_faction(id).unwrap().team, 67, "faction {id}");
+        }
+        // The Steamwheedle towns sit under the cartel itself (169) — a header that is also a
+        // reputation faction in its own right (slot 10), which is why "is a header" cannot be
+        // "has no reputation slot".
+        for id in [21 /* Booty Bay */, 369, 470, 577] {
+            assert_eq!(
+                cat.reputation_faction(id).unwrap().team,
+                169,
+                "faction {id}"
+            );
+        }
+        assert_eq!(cat.reputation_faction(169).unwrap().rep_index, 10);
+        // …and the parents themselves have no parent: they are the top of the tree.
+        for id in [469, 67, 169] {
+            assert_eq!(cat.reputation_faction(id).unwrap().team, 0, "faction {id}");
+        }
+        // The pane's leftovers — Argent Dawn and the rest — carry no team at all.
+        assert_eq!(cat.reputation_faction(529).unwrap().team, 0);
+
+        // Exactly five factions are named as a parent by somebody, and every one of them is a
+        // header the pane draws: Alliance, Horde, Steamwheedle Cartel, and the two BG blocs.
+        let mut parents: Vec<u32> = cat
+            .reputation_factions()
+            .map(|(_, f)| f.team)
+            .filter(|&t| t != 0)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        parents.sort_unstable();
+        assert_eq!(parents, [67, 169, 469, 891, 892]);
+
+        // The detail popup's paragraph comes off the same row, past the eight name columns.
+        assert!(
+            cat.faction_description(529)
+                .is_some_and(|d| d.starts_with("An organization focused on protecting Azeroth")),
+            "Argent Dawn's description: {:?}",
+            cat.faction_description(529)
+        );
     }
 }

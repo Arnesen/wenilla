@@ -56,6 +56,13 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_PLAYER_AMMO_ID + 3, FIELD_PLAYER_BUYBACK_PRICE_1);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES, UNIT_END + 0x40A);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES + 1, FIELD_PLAYER_AMMO_ID);
+    // The watched reputation slot, anchored off the tested COINAGE the same way everything in the
+    // PLAYER block is: 0x431 − 0x3DC = 85 dwords above it.
+    assert_eq!(FIELD_PLAYER_WATCHED_FACTION_INDEX, UNIT_END + 0x431);
+    assert_eq!(
+        FIELD_PLAYER_WATCHED_FACTION_INDEX,
+        FIELD_PLAYER_FIELD_COINAGE + 85
+    );
     // The combo-target GUID is the two dwords immediately BEFORE the live-tested XP pair, so it
     // needs no anchor of its own. The binary agrees from the other side: `GetComboPoints 0x51a190`
     // reads it at `[player+0xe68]+0x838`, and 0x838/4 = 0x20E (decision 0875).

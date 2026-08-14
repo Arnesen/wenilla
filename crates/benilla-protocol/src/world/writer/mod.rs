@@ -71,6 +71,7 @@ mod pose;
 mod progression;
 mod pvp;
 mod quest;
+mod reputation;
 mod selection;
 mod self_movement;
 mod skills;

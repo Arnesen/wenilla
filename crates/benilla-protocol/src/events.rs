@@ -325,6 +325,10 @@ pub enum SessionEvent {
     /// Mid-session reputation deltas (`SMSG_SET_FACTION_STANDING`): `(reputationListId,
     /// standing)` per changed slot — same standing convention as [`Self::Reputations`].
     ReputationDelta { standings: Vec<(u32, i32)> },
+    /// One reputation-list slot just became visible in the pane (`SMSG_SET_FACTION_VISIBLE`) — the
+    /// server's "you have now met these people". Carries no standing; it only lifts the slot's
+    /// visible flag, which is what decides whether the pane lists the row at all.
+    ReputationVisible { list_id: u32 },
     /// A player character's identity (`SMSG_NAME_QUERY_RESPONSE`, answering our `CMSG_NAME_QUERY`).
     /// Unit names are **not** descriptor fields on the 1.12 wire — they arrive only through this
     /// query pair (players) and [`Self::CreatureName`] (creatures); the app caches them by guid/entry

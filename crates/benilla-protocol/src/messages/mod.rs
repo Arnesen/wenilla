@@ -43,6 +43,7 @@ mod pet;
 mod pose;
 mod progression;
 mod quest;
+mod reputation;
 mod roster;
 mod skills;
 mod social;
@@ -149,6 +150,9 @@ pub use quest::{
     QuestDetails, QuestGiverList, QuestListEntry, QuestObjective, QuestOfferReward,
     QuestRequestItems, QuestRequiredItem, QuestRewardItem, QuestTemplate, QUEST_EMOTE_COUNT,
     QUEST_OBJECTIVES_COUNT, QUEST_REWARDS_COUNT, QUEST_REWARD_CHOICES_COUNT,
+};
+pub use reputation::{
+    set_faction_at_war, set_faction_inactive, set_watched_faction, WATCHED_FACTION_NONE,
 };
 pub use roster::{
     CharCreateReq, CharEnumItem, Character, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK,

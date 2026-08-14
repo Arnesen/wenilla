@@ -34,8 +34,10 @@
         cursor-arc design). Tabs 2-5 (Pet/Reputation/Skills/Honor) were all OMITTED at 1b, the 0138
         merchant-tab precedent ("tabs arrive with their pages") — `BENILLA_CHARACTERFRAME_SUBFRAMES`
         only lists the pages that exist. Skills arrived with decision 0437 phase 4
-        (`SkillFrame.xml`) and **Pet with decision 1057** (`PetPaperDollFrame.xml`), which takes the
-        real client's own slot 2; Reputation and Honor are still out. Three things here are shared
+        (`SkillFrame.xml`), **Pet with decision 1057** (`PetPaperDollFrame.xml`), which takes the
+        real client's own slot 2, and **Reputation** (`ReputationFrame.xml`), which takes its own
+        slot 3 and puts Skills back on the reference's 4 — so the first four tabs are the
+        reference's, in its order, at its numbers, and only Honor (its tab 5) is still out. Three things here are shared
         WITH the pet page rather than owned by this one, and each is flagged at its definition: the
         `(unit, prefix)` stat setters (including `_SetDefense`, which exists for the pet row alone),
         the `BenillaPaperDollModel_*` pane quartet (driven through each pane's own `frame.setFacing`),
@@ -140,6 +142,7 @@
         CHARACTER = CHARACTER or "Character"                          -- :481
         SKILLS = SKILLS or "Skills"                                    -- :3477 (decision 0437 phase 4, the Skills tab label)
         PET = PET or "Pet"                                             -- :3010 (the Pet tab label, decision 1057)
+        REPUTATION = REPUTATION or "Reputation"                        -- :3328 (the Reputation tab label)
         PLAYER_LEVEL = PLAYER_LEVEL or "Level %d %s %s"                -- :3075
         ARMOR = ARMOR or "Armor"                                       -- :62
         ARMOR_COLON = ARMOR_COLON or "Armor:"                          -- :63
@@ -239,13 +242,14 @@
         BENILLA_MAGICRES_IDS = { 6, 2, 3, 4, 5 }
         -- The pages that exist so far (this file's header comment; the 0138 merchant-tab
         -- precedent — tabs arrive with their pages), named exactly as the reference names them
-        -- ("PaperDollFrame"/"SkillFrame"). 1:1 with the tab row below (index N is tab N's page) —
-        -- decision 0437 phase 4 added the Skills page, decision 1057 the Pet one, which takes the
-        -- real client's own slot 2 and pushes Skills to 3. Reputation/Honor (the real client's
-        -- tabs 3/5) are still OMITTED, which is the whole reason our Skills tab renders 3rd where
-        -- the reference's is 4th.
+        -- ("PaperDollFrame"/"ReputationFrame"/"SkillFrame"). 1:1 with the tab row below (index N is
+        -- tab N's page) — decision 0437 phase 4 added the Skills page, decision 1057 the Pet one,
+        -- and the Reputation page (ReputationFrame.xml) takes the real client's own slot 3, which
+        -- puts Skills at the real client's own 4. The FIRST FOUR SLOTS ARE NOW THE REFERENCE'S:
+        -- only Honor (its tab 5) is still OMITTED, and it sits past the end where its absence
+        -- shifts nothing.
         BENILLA_CHARACTERFRAME_SUBFRAMES = {
-            "PaperDollFrame", "PetPaperDollFrame", "SkillFrame",
+            "PaperDollFrame", "PetPaperDollFrame", "ReputationFrame", "SkillFrame",
         }
 
         -- ── The window: toggle / tab dispatch (ref CharacterFrame.lua:1-48) ─────────────────────
@@ -317,12 +321,13 @@
             local frame = this
             -- GetID()/SetID() DO exist (landed with slice 2's BagFrame, which relies on them for
             -- its own per-window bag id) — the STALE claim this comment used to make is corrected
-            -- here (0208 phase 1b touched this function anyway). 3 tabs ship as of decision 1057
-            -- (Character + Pet + Skills); the window opens on tab 1 by default, matching the real
-            -- client. Tab 2 raises and hides itself with the pet — PetTab_Update, which the
-            -- pet page runs at its own OnLoad and on every pet transition — so the COUNT here is
-            -- the full row, not the currently-visible one, exactly as the ref's SetNumTabs(5) is.
-            PanelTemplates_SetNumTabs(frame, 3)
+            -- here (0208 phase 1b touched this function anyway). 4 tabs ship with the Reputation
+            -- page (Character + Pet + Reputation + Skills — the reference's own first four); the
+            -- window opens on tab 1 by default, matching the real client. Tab 2 raises and hides
+            -- itself with the pet — PetTab_Update, which the pet page runs at its own OnLoad and on
+            -- every pet transition — so the COUNT here is the full row, not the currently-visible
+            -- one, exactly as the ref's SetNumTabs(5) is.
+            PanelTemplates_SetNumTabs(frame, 4)
             PanelTemplates_SetTab(frame, 1)
             -- The reference LABELS its numerals here (CharacterFrame_OnLoad l.55-57: "Health" on
             -- the player's health bar, "XP" on the XP bar, with the power bar's following the
@@ -342,7 +347,11 @@
         -- numerals landed (1143). Opening the character sheet reveals your own and your pet's
         -- numbers for as long as it is open, whatever Status Bar Text says, through the same
         -- lockShow refcount the hover uses — so a hover inside an open sheet still balances.
-        -- ShowWatchedReputationBarText stays OMITTED: no reputation watch bar exists.
+        -- ShowWatchedReputationBarText is LIVE too, since the Reputation tab landed and with it a
+        -- driven watch bar (ActionBar.xml owns both, its own placement note says why): opening the
+        -- sheet reveals the watched faction's numbers for as long as it is open, exactly like the
+        -- five bars above. Guarded on existence like its neighbours — the engine's per-window
+        -- harnesses load this file without ActionBar.xml.
         -- UnitPVPName -> plain UnitName (this file's header comment: PVP rank is a named deferral).
         function CharacterFrame_OnShow()
             if UpdateMicroButtons then UpdateMicroButtons() end
@@ -356,11 +365,14 @@
                 ShowTextStatusBarText(PetFrameHealthBar)
                 ShowTextStatusBarText(PetFrameManaBar)
             end
+            if ShowWatchedReputationBarText then
+                ShowWatchedReputationBarText()
+            end
         end
 
         -- ref CharacterFrame_OnHide (l.95-104): everything past the PlaySound is the OnShow list's
         -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text calls live too (1146),
-        -- the reputation one still omitted for the same reason as above. The subframe hide-loop is OUR OWN addition
+        -- and the reputation one live since the watch bar started being driven. The subframe hide-loop is OUR OWN addition
         -- (decision 0437 phase 4): PaperDollFrame is a true engine child of this frame (its
         -- own header comment) so it hides for free on the parent's Hide-cascade, but
         -- SkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
@@ -379,6 +391,9 @@
                 HideTextStatusBarText(MainMenuExpBar)
                 HideTextStatusBarText(PetFrameHealthBar)
                 HideTextStatusBarText(PetFrameManaBar)
+            end
+            if HideWatchedReputationBarText then
+                HideWatchedReputationBarText()
             end
             for _, name in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
                 local subFrame = getglobal(name)
@@ -1374,22 +1389,25 @@
                     <OnClick>HideUIPanel(getglobal("CharacterFrame"))</OnClick>
                 </Scripts>
             </Button>
-            <!-- The tab row (ref l.79-96 — CENTER of BOTTOMLEFT +60,+62 — each tab chained off the
-                 last, MerchantFrame.xml's own Merchant/Buyback LEFT-of-RIGHT -16 offset). The Pet
-                 tab takes the real client's own slot 2 (decision 1057); DEVIATION still flagged for
-                 the third: the real client's Skills tab is 4th of five
-                 (Character/Pet/Reputation/Skills/Honor, ref l.79-168) and ours is 3rd until
-                 Reputation/Honor land (the "tabs arrive with their pages" precedent, 0138/0208).
+            <!-- The tab row (ref l.79-168 — CENTER of BOTTOMLEFT +60,+62 — each tab chained off the
+                 last, MerchantFrame.xml's own Merchant/Buyback LEFT-of-RIGHT -16 offset). Four of
+                 the real client's five, in ITS OWN ORDER and at ITS OWN NUMBERS:
+                 Character/Pet/Reputation/Skills. The long-standing deviation flagged here — our
+                 Skills tab rendering 3rd where the reference's is 4th, because Reputation did not
+                 exist — is GONE with ReputationFrame.xml; only Honor (the reference's tab 5) is
+                 still out, and it sits past the end where its absence shifts nothing (the "tabs
+                 arrive with their pages" precedent, 0138/0208).
                  Tab 2 starts HIDDEN — it is raised only for a unit with a pet UI, by the pet page's
                  PetTab_Update, which also re-anchors tab 3 onto tab 2's LEFT while it is
-                 down so the row has no gap (ref PetPaperDollFrame.lua:189-198). Tab 3's XML anchor
-                 is the WITH-pet one; the update owns it from load onward.
+                 down so the row has no gap (ref PetPaperDollFrame.lua:189-198). That is now the
+                 reference's own function on the reference's own tab, Reputation and all. Tab 3's
+                 XML anchor is the WITH-pet one; the update owns it from load onward.
                  No hover tooltip (MicroButtonTooltipText/TOGGLECHARACTER0 have no engine surface,
                  and each tab's own visible label already says what it does — Merchant's own tab
                  pair carries no hover tooltip either). -->
-            <!-- The three labels are the ref's own GlobalStrings KEYS (l.79/97/…), not literals —
+            <!-- The four labels are the ref's own GlobalStrings KEYS (l.79/97/114/…), not literals —
                  the loader resolves a key-shaped `text=` through the shipped strings, so the row is
-                 localized like the reference's. (Tabs 1/3 carried the enUS literals from 0437;
+                 localized like the reference's. (Tabs 1/4 carried the enUS literals from 0437;
                  same words either way in enUS, and now the same mechanism.) -->
             <Button name="CharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="CHARACTER">
                 <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="60" y="62"/></Offset></Anchor></Anchors>
@@ -1399,9 +1417,13 @@
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(2)</OnClick></Scripts>
             </Button>
-            <Button name="CharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" text="SKILLS">
+            <Button name="CharacterFrameTab3" inherits="CharacterFrameTabButtonTemplate" text="REPUTATION">
                 <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab2" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(3)</OnClick></Scripts>
+            </Button>
+            <Button name="CharacterFrameTab4" inherits="CharacterFrameTabButtonTemplate" text="SKILLS">
+                <Anchors><Anchor point="LEFT" relativeTo="CharacterFrameTab3" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(4)</OnClick></Scripts>
             </Button>
 
             <!-- The paper-doll page (ref PaperDollFrame, ref-PaperDollFrame.xml:124-1059). Sized to

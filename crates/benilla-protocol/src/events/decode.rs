@@ -594,6 +594,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::SetFactionStanding { standings } => {
             vec![SessionEvent::ReputationDelta { standings }]
         }
+        ServerPacket::SetFactionVisible { list_id } => {
+            vec![SessionEvent::ReputationVisible { list_id }]
+        }
         ServerPacket::NameQueryResponse {
             guid,
             name,

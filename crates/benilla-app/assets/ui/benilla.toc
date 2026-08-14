@@ -215,12 +215,27 @@ CharacterFrame.xml
 # templates and the tab row it raises tab 2 of — all of which only exist once that file has
 # loaded, so this order is a requirement here, not just tidiness.
 PetPaperDollFrame.xml
+# The Reputation tab: the same separate-top-level-file shape as the two pages around it, seated
+# BETWEEN them because that is the real client's tab order (Character 1, Pet 2, Reputation 3,
+# Skills 4 — ref CharacterFrame.xml:79-168), and the page's `id=` is that slot. Its hard
+# dependencies are all far above: CharacterFrame.xml (the anchor target it is pinned to by name,
+# and the tab row it raises tab 3 of), ScrollTemplates.xml (the faux list + its trough template),
+# UIPanelTemplates.xml (`UIPanelCloseButton`, the detail popup's X — this page is that shared
+# template's first benilla consumer), OptionsFrameTemplates.xml (`OptionsCheckButtonTemplate`, two
+# of the three detail boxes), GameTooltip.xml (the column newbie tips) and Fonts.xml. One
+# dependency runs the other way and is worth naming: the WATCH BAR half of the reference's
+# ReputationFrame lives in ActionBar.xml (entry 94) beside the MainMenuBar frames it drives — that
+# file's own comment carries the justification — so `FACTION_BAR_COLORS` and
+# `ReputationWatchBar_Update` are already defined when this page paints a row or ticks the
+# "Show as Experience Bar" box.
+ReputationFrame.xml
 # The Skills tab (decision 0437 phase 4): a CharacterFrame child page, but a separate
 # top-level file (SkillFrame.xml's own header comment — this engine has no cross-file
 # `parent=` attachment, so it's positioned by name via `<Anchors relativeTo=
-# "CharacterFrame">` instead). Loaded immediately after CharacterFrame.xml so it
-# paints ON TOP of it (later file = higher z) and so `CharacterFrame` already exists
-# for that anchor to resolve against.
+# "CharacterFrame">` instead). Loaded after CharacterFrame.xml so it paints ON TOP of
+# it (later file = higher z) and so `CharacterFrame` already exists for that anchor to
+# resolve against — and last of the three sibling pages, because it is the last of the
+# three tabs (the real client's 4).
 SkillFrame.xml
 # The inspect window (decision 0631): another player's paper doll. Beside the character
 # window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus

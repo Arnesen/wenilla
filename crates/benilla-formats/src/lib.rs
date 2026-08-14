@@ -43,7 +43,8 @@ mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
 pub use factions::{
-    load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo, FactionTemplate, Reaction,
+    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo,
+    FactionTemplate, Reaction,
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};

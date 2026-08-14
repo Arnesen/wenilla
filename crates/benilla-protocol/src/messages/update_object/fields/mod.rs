@@ -341,6 +341,14 @@ const FIELD_PLAYER_FIELD_COINAGE: u16 = 1176;
 // UNIT_END + 0x210 / 0x211; its stale hex comments read 0x2C6/0x2C7, the same 6-low drift as COINAGE.)
 const FIELD_PLAYER_XP: u16 = 716;
 const FIELD_PLAYER_NEXT_LEVEL_XP: u16 = 717;
+// PLAYER_FIELD_WATCHED_FACTION_INDEX (INT, PRIVATE — self only): the reputation-list slot whose bar
+// rides the main menu bar, or -1 for none. SIGNED, and that matters — slot 0 is a real faction (the
+// Bloodsail Buccaneers), so -1 is the only "watch nothing" (vmangos writes it with `SetInt32Value`
+// in `HandleSetWatchedFactionOpcode`). Derived by the same server enum arithmetic as COINAGE above:
+// UNIT_END(0xBC = 188) + 0x431(1073) = 1261. Cross-checked against the tested COINAGE anchor:
+// 1176 + (0x431 − 0x3DC = 85) = 1261 ✓. (vmangos UpdateFields_1_12_1.h's stale hex comment reads
+// 0x4E7 = 1255, the usual 6-low drift.)
+const FIELD_PLAYER_WATCHED_FACTION_INDEX: u16 = 1261;
 // PLAYER_REST_STATE_EXPERIENCE (INT, PRIVATE — self only): the rested-XP pool, in BASE kill-XP
 // units — the server drains it 1:1 against a kill's base XP while granting +100%
 // (vmangos `Player::GetXPRestBonus`), and caps it at NEXT_LEVEL_XP × 1.5 / 2 (`SetRestBonus`), so

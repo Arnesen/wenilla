@@ -72,9 +72,16 @@ Early inspiration and file format guidance came from the
 
 benilla is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
 It ships **no Blizzard game data** — no art, models, sounds, maps or MPQ contents — and you provide
-your own legally obtained 1.12.1 client for all of it. Parts of the interface layer under
-`crates/benilla-app/assets/ui/` are **transcribed from the client's own FrameXML** (its Lua and XML),
-cited in place with the reference file and line range; that is Blizzard's authorship, not ours, and
-it is not covered by the licence below. World of Warcraft is a trademark of Blizzard Entertainment,
-Inc. Our own code is licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your
-option.
+your own legally obtained 1.12.1 client for all of it.
+
+**One known exception, which is being removed.** Some interface logic under
+`crates/benilla-app/assets/ui/` is transcribed from the client's own FrameXML rather than written
+from scratch. It is measured, not estimated — `scripts/reference-overlap.py` reports every run of
+code identical to the reference — and the work to eliminate it is by replacing those blocks with our
+own implementations, or by executing the player's own installed file at runtime instead of shipping
+a copy (the mechanism already used for `GlobalStrings.lua` and `ContainerFrame.lua`). Until that
+measurement reaches zero, treat those blocks as Blizzard's authorship rather than ours, and note
+that the public snapshot is gated on it.
+
+World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
+[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.

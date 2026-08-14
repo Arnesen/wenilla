@@ -24,10 +24,10 @@
 
         **The tab is conditional, and `PetTab_Update` is the whole mechanism** (ref
         `PetPaperDollFrame.lua:189-198`): no pet UI ⇒ tab 2 hides and tab 3 re-anchors onto tab 2's
-        LEFT, closing the gap; a pet ⇒ tab 2 shows and tab 3 goes back to the -16 chain. Ours is the
-        ref's arithmetic unchanged; only WHICH page tab 3 is differs (Skills here, Reputation there —
-        the "tabs arrive with their pages" precedent, 0138/0208/0437, and the reason our Skills tab
-        renders 3rd of three where the real client's is 4th of five).
+        LEFT, closing the gap; a pet ⇒ tab 2 shows and tab 3 goes back to the -16 chain. This used
+        to be the ref's arithmetic on a DIFFERENT page (tab 3 was Skills here, Reputation there);
+        `ReputationFrame.xml` took slot 3, so it is now the reference's function moving the
+        reference's tab, with nothing left to reconcile.
 
         Named deferrals / deviations (each re-cited at its own site below):
           - The model pane is a **booth-texture stand-in**, not a live `<PlayerModel>` widget — the
@@ -288,9 +288,11 @@
             bar:SetValue(currXP)
         end
 
-        -- ref PetTab_Update (l.189-198) — the conditional tab, whole. The re-anchor is what keeps
-        -- the row gapless: with tab 2 hidden, tab 3 sits at tab 2's own LEFT (i.e. exactly where
-        -- tab 2 would have started) instead of -16 past its RIGHT.
+        -- ref PetTab_Update (l.189-198) — the conditional tab, whole, and byte-for-byte the
+        -- reference's since the Reputation page took tab 3 (this file's header comment). The
+        -- re-anchor is what keeps the row gapless: with tab 2 hidden, tab 3 sits at tab 2's own LEFT
+        -- (i.e. exactly where tab 2 would have started) instead of -16 past its RIGHT. Only tab 3
+        -- is touched — tab 4 chains off tab 3, so the whole tail follows it.
         function PetTab_Update()
             local tab2 = getglobal("CharacterFrameTab2")
             local tab3 = getglobal("CharacterFrameTab3")

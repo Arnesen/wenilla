@@ -611,6 +611,9 @@ pub(super) fn apply_net_updates(
             SessionEvent::ReputationDelta { standings } => {
                 session::reputation_delta(standings, &mut reputations, &mut quest)
             }
+            SessionEvent::ReputationVisible { list_id } => {
+                session::reputation_visible(list_id, &mut reputations)
+            }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
             SessionEvent::Proficiency {
                 item_class,

@@ -125,6 +125,7 @@ mod ui_pet_doll;
 mod ui_pet_stats;
 mod ui_quest;
 mod ui_quest_log;
+mod ui_reputation;
 mod ui_saved;
 mod ui_script;
 mod ui_session;
@@ -509,6 +510,10 @@ pub fn run(build: BuildId) -> AppExit {
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.
     .add_plugins(UiCharPlugin)
+    // The reputation-pane feed: the player's wire faction slots resolved against Faction.dbc into
+    // the pane's snapshot, plus the pane's three outbound verbs. Beside the character feed because
+    // it is the same window's other tab.
+    .add_plugins(ui_reputation::UiReputationPlugin)
     // The inspect feed (decision 0631): another player's equipment off their PUBLIC visible-item
     // entries, plus the "inspect" booth's unit + yaw. Right after the character feed it mirrors.
     .add_plugins(ui_inspect::InspectUiPlugin)

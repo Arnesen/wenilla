@@ -5,10 +5,10 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, inspect,
-    item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log, session, skills,
-    slider, social, spellbook, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot,
-    AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest,
-    UnitState,
+    item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log, reputation,
+    session, skills, slider, social, spellbook, taxi, trade, tradeskill, trainer, weapon_enchant,
+    ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue,
+    SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -905,6 +905,24 @@ pub(crate) struct Model {
     /// server's skill-field update, vmangos `SkillHandler.cpp`'s `SetSkill(id, 0, 0)` round trip).
     pub(crate) skill_abandons: Vec<u32>,
 
+    /// The reputation-pane snapshot the app pushes ([`reputation::ReputationState`]) and the
+    /// synthesized display tree built from it ([`reputation::UiScript::set_reputation`]) — the
+    /// reputation seam ([`reputation`]).
+    pub(crate) reputation: reputation::ReputationState,
+    pub(crate) reputation_groups: Vec<reputation::FactionGroup>,
+    /// The header groups the player has folded, by HEADER KEY (a `Faction.dbc` id, or the
+    /// synthetic `0` "Other" / `-1` "Inactive") — an identity a re-push cannot move, unlike a row
+    /// index. Reset to all-expanded-but-Inactive on every push, exactly as
+    /// [`Model::skills_collapsed`] is: the client's own rebuild does the same.
+    pub(crate) reputation_collapsed: HashSet<i64>,
+    /// The engine-held selection, by REPUTATION-LIST SLOT (not visible index — see
+    /// [`reputation`]'s module doc).
+    pub(crate) reputation_selected: Option<u32>,
+    /// Reputation verbs the pane's bindings queued since the app's last
+    /// [`UiScript::take_reputation_sends`] drain — the outbound seam. Unlike the skills abandon
+    /// above, the engine DOES mutate locally first: none of the three sends is acked.
+    pub(crate) reputation_sends: Vec<reputation::ReputationSend>,
+
     /// Chat lines the input EditBox submitted (its `OnEnterPressed` → the `SubmitChatInput` Lua
     /// binding) since the app's last [`UiScript::take_chat_input`] drain — the outbound Lua→app seam
     /// for the chat input (the twin of `loot_picks`). The app routes each through its slash-command
@@ -1246,6 +1264,11 @@ impl Model {
             skills_collapsed: HashSet::new(),
             skills_selected: None,
             skill_abandons: Vec::new(),
+            reputation: reputation::ReputationState::default(),
+            reputation_groups: Vec::new(),
+            reputation_collapsed: HashSet::new(),
+            reputation_selected: None,
+            reputation_sends: Vec::new(),
         }
     }
 

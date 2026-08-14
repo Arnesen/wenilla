@@ -457,10 +457,15 @@ fn send_query_time(
     }
 }
 
-/// Our player's reputation store (`SMSG_INITIALIZE_FACTIONS`, once at login): `(flags, standing)`
-/// per reputation-list slot, indexed by `Faction.dbc`'s `reputationIndex`. The standing excludes the
-/// DBC race/class base. Read by the reaction decode (targeting): a reputation faction's NPCs colour
-/// by our rank with them, before any faction-template comparison. Empty until the packet lands.
+/// Our player's reputation store: `(flags, standing)` per reputation-list slot, indexed by
+/// `Faction.dbc`'s `reputationIndex`. The standing excludes the DBC race/class base — consumers add
+/// it before ranking. Empty until `SMSG_INITIALIZE_FACTIONS` lands at login; kept current after that
+/// by `SMSG_SET_FACTION_STANDING` (which also auto-reveals) and `SMSG_SET_FACTION_VISIBLE`.
+///
+/// Two consumers, and they read different halves. The **reaction decode** (targeting) reads the
+/// standing: a reputation faction's NPCs colour by our rank with them, before any faction-template
+/// comparison. The **reputation pane** ([`crate::ui_reputation`]) reads the flag byte as well — the
+/// visible bit decides which rows exist at all, and bit `0x08` marks the pane's headers.
 #[derive(Resource, Default)]
 pub(crate) struct Reputations(pub(crate) Vec<(u8, i32)>);
 
@@ -1001,6 +1006,18 @@ pub(crate) enum ClientCommand {
     /// server's `SetSkill(id, 0, 0)` returns as a `PLAYER_SKILL_INFO` field update, which the
     /// skills feed re-pushes (the engine never removes the line locally).
     UnlearnSkill { skill_id: u32 },
+    /// Declare or withdraw war on a faction (`CMSG_SET_FACTION_ATWAR`): the reputation pane's
+    /// crossed-swords box. Addressed by reputation-list slot. No ack — the engine already flipped
+    /// its own flag copy ([`crate::ui_reputation`]), and vmangos DROPS the request outright while
+    /// the player is in combat.
+    SetFactionAtWar { rep_list_id: u32, at_war: bool },
+    /// Move a faction into or out of the pane's inactive bucket (`CMSG_SET_FACTION_INACTIVE`).
+    /// Same slot addressing and same no-ack rule as [`Self::SetFactionAtWar`].
+    SetFactionInactive { rep_list_id: u32, inactive: bool },
+    /// Watch a faction's bar on the main menu bar (`CMSG_SET_WATCHED_FACTION`). **Signed**, and
+    /// `-1` — not `0` — is "watch nothing": slot 0 is the Bloodsail Buccaneers. The answer returns
+    /// as a `PLAYER_FIELD_WATCHED_FACTION_INDEX` descriptor update.
+    SetWatchedFaction { rep_list_id: i32 },
     /// Use a world GameObject (`CMSG_GAMEOBJ_USE`, decision 0236): a full guid naming the
     /// chest/door/quest-object/lever under the cursor. Sent by the right-click route
     /// ([`crate::target`]) when the nearest hovered CGObject is a usable GameObject. The server fans

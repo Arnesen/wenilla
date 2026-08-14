@@ -745,6 +745,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             }
             ServerPacket::SetFactionStanding { standings }
         }
+        opcode::SMSG_SET_FACTION_VISIBLE => ServerPacket::SetFactionVisible {
+            list_id: read_u32_le(&mut r)?,
+        },
         opcode::SMSG_NAME_QUERY_RESPONSE => {
             let guid = read_u64_le(&mut r)?;
             let name = read_cstring(&mut r)?;

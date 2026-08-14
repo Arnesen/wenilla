@@ -1053,6 +1053,9 @@ mod character_tests;
 mod skills_frame_tests;
 
 #[cfg(test)]
+mod reputation_frame_tests;
+
+#[cfg(test)]
 mod pet_paperdoll_tests;
 
 #[cfg(test)]

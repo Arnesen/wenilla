@@ -69,12 +69,15 @@
           row's xOffset 30 + baseY 0 + bottomLeft 45, and MultiBarBottomLeft's XML (0,17) is
           its row's baseY 17), so the pass now re-derives what the XML asserted. TutorialFrameParent
           and FramerateLabel still have no frame here and no-op through the ref's `if ( frame )`.
-        - MultiBarLeft/MultiBarRight (the vertical bars) and ReputationWatchBar don't exist yet:
-          nil-guarded (the ref reads them bare only because it always creates them). MainMenuExpBar
-          and MainMenuBarMaxLevelBar DO exist now, so the `reputation` and `maxLevel` flags are
-          real reads — `reputation` still cannot fire (it needs ReputationWatchBar too) and
-          `maxLevel` fires exactly when the level-60 rail replaces the XP bar, which is the ref's
-          own rule.
+        - Every frame these flags read now exists, so every flag is a real read — the nil guards
+          stay because the ref reads them bare only because it always creates them, and our
+          per-window test harnesses load file SUBSETS. `reputation` fires the moment a watched
+          faction raises ReputationWatchBar over a shown MainMenuExpBar (decision 1258; it could
+          not fire at all until that page landed, and `reputation_frame_tests` pins the 9px it
+          moves the bottom stack by). `maxLevel` fires exactly when the level-60 rail replaces the
+          XP bar — which is also why the two never fire together: at 60 the watch bar REPLACES
+          MainMenuExpBar rather than stacking above it, so `MainMenuExpBar:IsShown()` is false and
+          the stack stays put. Both are the ref's own arithmetic.
         - No IsUserPlaced/IsObjectType/SIMPLE_CHAT legs on the SetPoint: benilla has no
           user-placed frames and no simple-chat option, so the ref's guarded SetPoint
           collapses to the plain one.

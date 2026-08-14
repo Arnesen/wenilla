@@ -763,6 +763,17 @@ fn writer_loop(
                         w.learn_talent(talent_id, rank)
                     }
                     ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
+                    ClientCommand::SetFactionAtWar {
+                        rep_list_id,
+                        at_war,
+                    } => w.set_faction_at_war(rep_list_id, at_war),
+                    ClientCommand::SetFactionInactive {
+                        rep_list_id,
+                        inactive,
+                    } => w.set_faction_inactive(rep_list_id, inactive),
+                    ClientCommand::SetWatchedFaction { rep_list_id } => {
+                        w.set_watched_faction(rep_list_id)
+                    }
                     ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
                     ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
                     ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),

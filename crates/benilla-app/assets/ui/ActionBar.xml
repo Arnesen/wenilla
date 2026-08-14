@@ -924,54 +924,190 @@
             ExhaustionTick.timer = nil
         end
 
-        -- ── The max-level rail (ref-ReputationFrame.lua, the max-level slice) ─────────────────
-        -- ref l.14: the constant lives in ReputationFrame.lua, which isn't built yet — it moves
-        -- there with the reputation system.
-        MAX_PLAYER_LEVEL = 60
+        -- ══ The reputation WATCH BAR (ref-ReputationFrame.xml l.869-1036 + ref-ReputationFrame.lua
+        --    l.3-14 and l.161-270) ═══════════════════════════════════════════════════════════════
+        --
+        -- **THE PLACEMENT IS A DELIBERATE CALL, and this is its justification.** The reference
+        -- declares `ReputationWatchBar` and defines its update, its two text verbs, MAX_PLAYER_LEVEL
+        -- and FACTION_BAR_COLORS in `ReputationFrame.{xml,lua}`, because FrameXML loads MainMenuBar
+        -- and ReputationFrame in one breath and neither can exist without the other. benilla's
+        -- manifest is not one breath: this file is entry 94, `ReputationFrame.xml` is 213, and the
+        -- engine's per-window test harnesses deliberately load FILE SUBSETS — the XP bar's harness
+        -- loads no character window, the character window's loads no action bar.
+        --
+        -- Every frame `ReputationWatchBar_Update` touches except the watch bar itself is declared
+        -- in THIS file: MainMenuExpBar, MainMenuBarMaxLevelBar, ExhaustionTick, MainMenuBarArtFrame
+        -- and MainMenuBar. So does every frame that reads the bar back: `ExhaustionTick_Update`
+        -- below consults `ReputationWatchBar:IsShown()` twice, which is the reference's own pair of
+        -- guards. Splitting the bar's FRAME from the bar's UPDATE across a 120-entry manifest gap
+        -- would leave each subset holding half a mechanism and would put a nil-guard on every one
+        -- of those sites — the exact "special case to dodge a problem" shape the contract forbids.
+        -- The bar therefore stays whole, in the file that owns its collaborators, and
+        -- `ReputationFrame.xml` — which owns the PANE — reaches `ReputationWatchBar_Update()` by
+        -- name at click time, the direction that always resolves.
+        --
+        -- What DID move is the half-transcription. `BenillaMaxLevelBar_Update` was explicitly "the
+        -- no-watched-faction branch only" of the reference function, parked on the rail frame
+        -- because the watch bar was driven by nothing; it is gone, replaced in place by the whole
+        -- `ReputationWatchBar_Update(newLevel)`. `MainMenuBarMaxLevelBar` accordingly carries NO
+        -- scripts any more — the reference's rail carries none either, because this function is its
+        -- only driver — and the event fan that sat on it is now the watch bar's own OnLoad/OnEvent,
+        -- which is where the reference puts it.
+        MAX_PLAYER_LEVEL = 60 -- ref-ReputationFrame.lua l.14 (with the ref's own "Hard coded =(")
 
-        function BenillaMaxLevelBar_OnLoad(bar)
-            bar:RegisterEvent("PLAYER_ENTERING_WORLD")
-            bar:RegisterEvent("PLAYER_LEVEL_UP")
-        end
+        -- ref-ReputationFrame.lua l.3-12, verbatim. Indexed by the 1-based standingID both
+        -- `GetFactionInfo` and `GetWatchedFactionInfo` report (benilla-ui `script::reputation`), so
+        -- the pane's 15 bars and this one bar can never disagree about a colour. Declared HERE
+        -- rather than in ReputationFrame.xml (its reference home) for the placement reason above:
+        -- this file must be able to index it with no reputation file loaded, and ReputationFrame.xml
+        -- cannot be loaded without this one.
+        FACTION_BAR_COLORS = {
+            [1] = { r = 0.8, g = 0.3, b = 0.22 },
+            [2] = { r = 0.8, g = 0.3, b = 0.22 },
+            [3] = { r = 0.75, g = 0.27, b = 0 },
+            [4] = { r = 0.9, g = 0.7, b = 0 },
+            [5] = { r = 0, g = 0.6, b = 0.1 },
+            [6] = { r = 0, g = 0.6, b = 0.1 },
+            [7] = { r = 0, g = 0.6, b = 0.1 },
+            [8] = { r = 0, g = 0.6, b = 0.1 },
+        }
 
-        -- ref ReputationWatchBar_Update's else arm (ref-ReputationFrame.lua l.161-166 +
-        -- l.236-244), the no-watched-faction branch only — the reputation branches wait for the
-        -- reputation system: at MAX_PLAYER_LEVEL the XP strip gives way to the rail and the
-        -- tick goes with it. Login seam: the ref initializes off UPDATE_FACTION (its OnEvent's
-        -- else arm; the faction list lands at every login), an event benilla doesn't carry yet,
-        -- so the rail listens to PLAYER_ENTERING_WORLD instead — same moment, same values.
-        function BenillaMaxLevelBar_Update(newLevel)
+        -- ref-ReputationFrame.lua ReputationWatchBar_Update (l.161-250), whole. Three states, and
+        -- the level decides between the first two: a watched faction below max level STACKS the
+        -- reputation strip on top of the XP bar (8px tall, sitting 3 above MainMenuBar, wearing the
+        -- UI-ReputationWatchBar end art); a watched faction AT max level REPLACES the XP bar (13px
+        -- tall, seated on MainMenuBar's own TOP, wearing the dwarf XP-bar art instead so the swap is
+        -- invisible); no watched faction leaves the XP bar (or, at max level, the brass rail) alone.
+        --
+        -- `newLevel` is the reference's own parameter: PLAYER_LEVEL_UP carries the new level as
+        -- arg1 because the level FIELD may not have landed yet, and every other caller re-reads
+        -- UnitLevel.
+        --
+        -- ONE GUARD ADDED, at the tail: `updateContainerFrameAnchors` is defined by
+        -- ContainerFrameAdapters.xml (manifest 206, below this file), and a harness that shows this
+        -- bar without it would take a nil call on a line that only ever runs on a visibility flip.
+        -- The `if <global> then` shape is this codebase's own subset-load idiom (CharacterFrame.xml's
+        -- `if UpdateMicroButtons then`). `UIParent_ManageFramePositions` needs no such guard:
+        -- UIParent.xml is manifest 42, above every consumer.
+        function ReputationWatchBar_Update(newLevel)
+            local name, reaction, min, max, value = GetWatchedFactionInfo()
+            local visibilityChanged = nil
             if not newLevel then
                 newLevel = UnitLevel("player")
             end
-            if newLevel == MAX_PLAYER_LEVEL then
-                MainMenuExpBar:Hide()
-                MainMenuBarMaxLevelBar:Show()
-                ExhaustionTick:Hide()
+            if name then
+                -- See if it was already shown or not (ref l.168-171).
+                if not ReputationWatchBar:IsShown() then
+                    visibilityChanged = 1
+                end
+
+                -- Normalize values (ref l.173-176). The engine reports these ABSOLUTE for exactly
+                -- this reason (benilla-ui `script::reputation`'s module doc).
+                max = max - min
+                value = value - min
+                min = 0
+                ReputationWatchStatusBar:SetMinMaxValues(min, max)
+                ReputationWatchStatusBar:SetValue(value)
+                ReputationWatchStatusBarText:SetText(name .. " " .. value .. " / " .. max)
+                local color = FACTION_BAR_COLORS[reaction]
+                ReputationWatchStatusBar:SetStatusBarColor(color.r, color.g, color.b)
+                ReputationWatchBar:Show()
+
+                -- ref l.184-230: below max level the strip stacks on the XP bar; at max level it
+                -- replaces it.
+                ReputationWatchStatusBar:SetFrameLevel(MainMenuBarArtFrame:GetFrameLevel() - 1)
+                if newLevel < MAX_PLAYER_LEVEL then
+                    ReputationWatchStatusBar:SetHeight(8)
+                    ReputationWatchBar:ClearAllPoints()
+                    ReputationWatchBar:SetPoint("BOTTOM", MainMenuBar, "TOP", 0, -3)
+                    ReputationWatchStatusBarText:SetPoint("CENTER", ReputationWatchBarOverlayFrame, "CENTER", 0, 3)
+                    ReputationWatchBarTexture0:Show()
+                    ReputationWatchBarTexture1:Show()
+                    ReputationWatchBarTexture2:Show()
+                    ReputationWatchBarTexture3:Show()
+
+                    ReputationXPBarTexture0:Hide()
+                    ReputationXPBarTexture1:Hide()
+                    ReputationXPBarTexture2:Hide()
+                    ReputationXPBarTexture3:Hide()
+
+                    MainMenuExpBar:Show()
+                    MainMenuBarMaxLevelBar:Hide()
+                else
+                    ReputationWatchStatusBar:SetHeight(13)
+                    ReputationWatchBar:ClearAllPoints()
+                    ReputationWatchBar:SetPoint("TOP", MainMenuBar, "TOP", 0, 0)
+                    ReputationWatchStatusBarText:SetPoint("CENTER", ReputationWatchBarOverlayFrame, "CENTER", 0, 1)
+                    ReputationWatchBarTexture0:Hide()
+                    ReputationWatchBarTexture1:Hide()
+                    ReputationWatchBarTexture2:Hide()
+                    ReputationWatchBarTexture3:Hide()
+
+                    ReputationXPBarTexture0:Show()
+                    ReputationXPBarTexture1:Show()
+                    ReputationXPBarTexture2:Show()
+                    ReputationXPBarTexture3:Show()
+
+                    ExhaustionTick:Hide()
+
+                    MainMenuExpBar:Hide()
+                    MainMenuBarMaxLevelBar:Hide()
+                end
             else
-                MainMenuExpBar:Show()
-                MainMenuBarMaxLevelBar:Hide()
+                -- ref l.232-245: nothing watched. This is the arm decision 1094 shipped alone.
+                if ReputationWatchBar:IsShown() then
+                    visibilityChanged = 1
+                end
+                ReputationWatchBar:Hide()
+                if newLevel == MAX_PLAYER_LEVEL then
+                    MainMenuExpBar:Hide()
+                    MainMenuBarMaxLevelBar:Show()
+                    ExhaustionTick:Hide()
+                else
+                    MainMenuExpBar:Show()
+                    MainMenuBarMaxLevelBar:Hide()
+                end
+            end
+            if visibilityChanged then
+                UIParent_ManageFramePositions()
+                if updateContainerFrameAnchors then updateContainerFrameAnchors() end
             end
         end
 
-        -- The ref's event fan (ref-ReputationFrame.xml l.1002-1016): PLAYER_LEVEL_UP passes
-        -- arg1 (the new level — the level FIELD may not have landed yet), everything else
-        -- re-reads UnitLevel.
-        function BenillaMaxLevelBar_OnEvent()
-            if event == "PLAYER_LEVEL_UP" then
-                BenillaMaxLevelBar_Update(arg1)
+        -- ref-ReputationFrame.lua l.252-270, verbatim. The pair is a two-key lock: `cvarLocked`
+        -- records that the statusBarText cvar (not a hover) asked for the text, and `textLocked`
+        -- that the text is currently pinned on — which is what the bar's own OnLeave reads before
+        -- hiding it again. Note the reference only ever shows the text AT MAX LEVEL, where the
+        -- strip has replaced the XP bar and is tall enough to hold numerals; below that the Show
+        -- verb falls through to the Hide one.
+        function ShowWatchedReputationBarText(lock)
+            if lock then
+                ReputationWatchBar.cvarLocked = lock
+            end
+            if UnitLevel("player") == MAX_PLAYER_LEVEL and ReputationWatchBar:IsVisible() then
+                ReputationWatchStatusBarText:Show()
+                ReputationWatchBar.textLocked = 1
             else
-                BenillaMaxLevelBar_Update()
+                HideWatchedReputationBarText()
+            end
+        end
+
+        function HideWatchedReputationBarText(unlock)
+            if unlock or not ReputationWatchBar.cvarLocked then
+                ReputationWatchBar.cvarLocked = nil
+                ReputationWatchStatusBarText:Hide()
+                ReputationWatchBar.textLocked = nil
             end
         end
 
         -- ── The exhaustion tick (ref-MainMenuBar.lua ExhaustionTick_*) ────────────────────────
         -- The round marker riding the XP bar at the point where rested XP runs out, plus the
-        -- pale fill between the bar's value and that point. One transcription cut left, named:
-        -- the ref's two ReputationWatchBar guards (the max-level+rep tick hide, l.51-54, and
-        -- the rep-bar-replaced-the-xp-bar hide, l.69-71) reference the faction watch bar, not
-        -- built — its frame can't be shown, so the cut is an unreachable-code cut, not a
-        -- behavior cut. The MainMenuBarMaxLevelBar guard is live since 1094 (the rail below).
+        -- pale fill between the bar's value and that point. NO transcription cuts left: the two
+        -- ReputationWatchBar guards that used to be cut here (the max-level-plus-rep tick hide,
+        -- ref-MainMenuBar.lua l.51-54, and the rep-bar-replaced-the-xp-bar hide, l.69-71) were cut
+        -- as UNREACHABLE — the watch bar could never show — and the watch bar above shows now, so
+        -- both are transcribed into ExhaustionTick_Update below. The MainMenuBarMaxLevelBar guard
+        -- is live since 1094.
         function ExhaustionTick_OnLoad()
             local tick = this
             tick:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -1014,6 +1150,11 @@
                             "TOPLEFT", exhaustionTickSet, 0)
                     end
                 end
+                -- ref-MainMenuBar.lua l.51-54: at max level with a watched faction the strip the
+                -- tick rides is the REPUTATION bar, which has no rested pool — hide the tick.
+                if UnitLevel("player") == MAX_PLAYER_LEVEL and ReputationWatchBar:IsShown() then
+                    ExhaustionTick:Hide()
+                end
             end
             -- The rest-state paint (only these two events repaint it, the ref's own split):
             -- rested = light blue bar + pale blue fill-to-tick, normal = the purple default.
@@ -1028,6 +1169,13 @@
                     ExhaustionLevelFillBar:SetVertexColor(0.58, 0.0, 0.55, 0.15)
                     ExhaustionTickHighlight:SetVertexColor(0.58, 0.0, 0.55)
                 end
+            end
+            -- ref-MainMenuBar.lua l.69-71, the function's own last statement: the watch bar has
+            -- REPLACED the XP bar (max level), so there is no XP strip left for the tick to sit on
+            -- whatever the event was. Distinct from the guard above, which only runs on the four
+            -- position events; this one runs on every one.
+            if ReputationWatchBar:IsShown() and not MainMenuExpBar:IsShown() then
+                ExhaustionTick:Hide()
             end
         end
 
@@ -1406,8 +1554,12 @@
                 flat brass rail that replaces the XP strip at MAX_PLAYER_LEVEL — four 256×7
                 quarters of UI-MainMenuBar-MaxLevel, riding just above the frame's own 7 px rect
                 (each quarter's BOTTOM sits on the frame's TOP, the ref's own geometry).
-                Shown/hidden by BenillaMaxLevelBar_Update (decision 1094). The ref's OnShow/
-                OnHide call UIParent_ManageFramePositions, which benilla doesn't build
+                Shown and hidden by ReputationWatchBar_Update (above) and by nothing else — which
+                is the reference's own arrangement, and why this frame carries NO Scripts. It held
+                a benilla OnLoad/OnEvent pair while the watch bar was driven by nothing (decision
+                1094); those were a transcription of the WATCH BAR's own handlers parked here, and
+                they have gone back to it. The ref's OnShow/OnHide call
+                UIParent_ManageFramePositions, which benilla doesn't build
                 (DurabilityFrame.xml's note) — a named cut.
             -->
             <Frame name="MainMenuBarMaxLevelBar" enableMouse="true" hidden="true">
@@ -1447,10 +1599,6 @@
                         </Texture>
                     </Layer>
                 </Layers>
-                <Scripts>
-                    <OnLoad>BenillaMaxLevelBar_OnLoad(self)</OnLoad>
-                    <OnEvent>BenillaMaxLevelBar_OnEvent()</OnEvent>
-                </Scripts>
             </Frame>
 
             <!--
@@ -1726,21 +1874,21 @@
         </Frames>
     </Frame>
 
-    <!-- **The reputation watch bar, built and hidden** — the third time this posture has been the
-         answer (1219's vertical multibars, 1223's bonus bar, this). `ref-ReputationFrame.xml:869`
-         declares it `<Frame name="ReputationWatchBar" parent="MainMenuBar" hidden="true">`: real on
-         the client from load, shown only while a faction is being watched.
+    <!-- **The reputation watch bar** — `ref-ReputationFrame.xml:869-1036`, transcribed whole. It
+         shipped built-and-hidden with 1223 (three corpus addons index it by name — `FuBar_FuXPFu`,
+         `CT_BottomBar`, `zBarEx` — and FuXPFu dies at `FuBar_FuXPFu.lua:227` on the nil); it is
+         DRIVEN now, by `ReputationWatchBar_Update` in this file's script block, whose own comment
+         carries the reason the reputation watch-bar slice lives here rather than in
+         ReputationFrame.xml where the reference declares it.
 
-         benilla does not drive reputation watching, so it stays hidden — but three corpus addons
-         index it by name (`FuBar_FuXPFu`, `CT_BottomBar`, `zBarEx`), and FuXPFu dies at
-         `FuBar_FuXPFu.lua:227` on the nil. Its own `OnEnable` reaches for it the moment the addon
-         enables, so nothing before the populated-session fixture ever got that far.
-
-         Geometry quoted: a 1024x11 frame whose BOTTOM sits on MainMenuBar's TOP at (0,-3), holding
-         a 1024x8 `ReputationWatchStatusBar` at TOP. The reference's two art slices
-         (`ReputationWatchBarTexture0/1`, `UI-ReputationWatchBar`) are declared with it — an addon
-         that repositions the bar expects the named regions to exist, and they draw nothing while
-         the frame is hidden. -->
+         Geometry quoted from the reference: a 1024x11 frame whose BOTTOM sits on MainMenuBar's TOP
+         at (0,-3), holding a 1024x8 `ReputationWatchStatusBar` at TOP. TWO sets of end art ride the
+         status bar and the update swaps between them: the four `ReputationWatchBarTexture*` slices
+         of `UI-ReputationWatchBar` for the stacked-above-the-XP-bar posture, and the four
+         `ReputationXPBarTexture*` slices of the dwarf `UI-MainMenuBar-Dwarf` sheet for the
+         replaces-the-XP-bar posture at max level, where the strip has to look like the bar it took
+         over from. The numerals live on their own DIALOG-strata overlay child so they draw over
+         both. -->
     <Frame name="ReputationWatchBar" enableMouse="true" parent="MainMenuBar" hidden="true">
         <Size><AbsDimension x="1024" y="11"/></Size>
         <Anchors>
@@ -1752,17 +1900,138 @@
                 <Anchors><Anchor point="TOP"/></Anchors>
                 <Layers>
                     <Layer level="OVERLAY">
+                        <!-- ref l.890-929: four 256-wide quarters of the 1024 strip, each its own
+                             band of the sheet. The TexCoords were MISSING while the frame was a
+                             stub that could not show; without them every quarter draws the whole
+                             sheet. -->
                         <Texture name="ReputationWatchBarTexture0" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
                             <Size><AbsDimension x="256" y="11"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0" bottom="0.171875"/>
                         </Texture>
                         <Texture name="ReputationWatchBarTexture1" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
                             <Size><AbsDimension x="256" y="11"/></Size>
                             <Anchors><Anchor point="LEFT" relativeTo="ReputationWatchBarTexture0" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.171875" bottom="0.34375"/>
+                        </Texture>
+                        <Texture name="ReputationWatchBarTexture2" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
+                            <Size><AbsDimension x="256" y="11"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationWatchBarTexture1" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.34375" bottom="0.515625"/>
+                        </Texture>
+                        <Texture name="ReputationWatchBarTexture3" file="Interface\PaperDollInfoFrame\UI-ReputationWatchBar">
+                            <Size><AbsDimension x="256" y="11"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationWatchBarTexture2" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.515625" bottom="0.6875"/>
+                        </Texture>
+                        <!-- ref l.930-969: the max-level alternate, four bands of the SAME dwarf
+                             sheet the XP bar's own notch art comes from, so the replaced bar reads
+                             as the bar it replaced. Hidden until the max-level arm shows them. -->
+                        <Texture name="ReputationXPBarTexture0" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf" hidden="true">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.79296875" bottom="0.83203125"/>
+                        </Texture>
+                        <Texture name="ReputationXPBarTexture1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf" hidden="true">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationXPBarTexture0" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.54296875" bottom="0.58203125"/>
+                        </Texture>
+                        <Texture name="ReputationXPBarTexture2" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf" hidden="true">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationXPBarTexture1" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.29296875" bottom="0.33203125"/>
+                        </Texture>
+                        <Texture name="ReputationXPBarTexture3" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf" hidden="true">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="ReputationXPBarTexture2" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.04296875" bottom="0.08203125"/>
+                        </Texture>
+                    </Layer>
+                    <!-- ref l.971-975: the half-alpha black backing the fill rides over. -->
+                    <Layer level="BACKGROUND">
+                        <Texture name="ReputationWatchStatusBarBackground">
+                            <Color r="0.0" g="0.0" b="0.0" a="0.5"/>
                         </Texture>
                     </Layer>
                 </Layers>
+                <!-- ref l.977-978. The purple is only the load-time default: every painted state
+                     takes FACTION_BAR_COLORS[reaction] instead. -->
+                <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+                <BarColor r="0.58" g="0.0" b="0.55"/>
             </StatusBar>
+            <!-- ref l.980-994: the numerals sit on a DIALOG-strata child of their own so they clear
+                 both sets of end art. Hidden by default; the hover shows them, and at max level the
+                 statusBarText cvar can pin them (ShowWatchedReputationBarText). -->
+            <Frame name="ReputationWatchBarOverlayFrame" frameStrata="DIALOG" setAllPoints="true">
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString name="ReputationWatchStatusBarText" inherits="NumberFontNormal" hidden="true">
+                            <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
         </Frames>
+        <!-- ref l.996-1035, transcribed whole. The OnEvent fan is where the max-level rail's own
+             handler pair used to be (this file's script block, the placement note): UPDATE_FACTION
+             is the login seam the reference relies on and `crate::ui_reputation`'s feed now fires
+             on every accepted push including the first, PLAYER_LEVEL_UP carries the new level as
+             arg1, and anything else re-reads UnitLevel.
+
+             TWO NOTES on arms that read as odd and are the reference's own:
+               · the UPDATE_FACTION arm gates on `this:IsVisible()` and then calls
+                 ReputationFrame_Update() — the PANE's repaint, from the BAR's handler. The pane
+                 registers UPDATE_FACTION itself (ReputationFrame.xml), so this is the reference
+                 double-driving it; transcribed rather than "fixed", and harmless because the pane's
+                 own repaint is idempotent. Guarded on existence because this file loads without
+                 ReputationFrame.xml in the engine's subset harnesses.
+               · the `arg1 == "statusBarText"` arm is DEAD CODE in shipped 1.12 and stays: the
+                 CVAR_UPDATE token is the caller's third SetCVar argument, and 1.12's own options
+                 panels pass the uppercase display name ("STATUS_BAR_TEXT"), never the cvar's own
+                 name (benilla-ui `script::cvars`, decision 1140, which carves exactly this).
+             PLAYER_ENTERING_WORLD is benilla's ADDITION (decision 1094's own): our faction feed
+             only fires once the catalog and the player's race/class are up, which can be a tick or
+             two after world entry, and the max-level rail must be right from the first frame. The
+             arm it lands in is idempotent, so the extra registration only ever costs a no-op. -->
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("UPDATE_FACTION")
+                this:RegisterEvent("PLAYER_LEVEL_UP")
+                this:RegisterEvent("CVAR_UPDATE")
+                this:RegisterEvent("PLAYER_ENTERING_WORLD")
+            </OnLoad>
+            <OnEvent>
+                if ( event == "UPDATE_FACTION" and this:IsVisible() ) then
+                    if ( ReputationFrame_Update ) then
+                        ReputationFrame_Update()
+                    end
+                    ReputationWatchBar_Update()
+                elseif ( event == "PLAYER_LEVEL_UP" ) then
+                    ReputationWatchBar_Update(arg1)
+                elseif ( event == "CVAR_UPDATE" and arg1 == "statusBarText" ) then
+                    if ( arg2 == "1" ) then
+                        ShowWatchedReputationBarText("lock")
+                    else
+                        HideWatchedReputationBarText("unlock")
+                    end
+                else
+                    ReputationWatchBar_Update()
+                end
+            </OnEvent>
+            <OnShow>
+                if ( GetCVar("statusBarText") == "1" ) then
+                    ShowWatchedReputationBarText("lock")
+                end
+                UIParent_ManageFramePositions()
+            </OnShow>
+            <OnHide>UIParent_ManageFramePositions()</OnHide>
+            <OnEnter>ReputationWatchStatusBarText:Show()</OnEnter>
+            <OnLeave>
+                if ( not ReputationWatchBar.textLocked ) then
+                    ReputationWatchStatusBarText:Hide()
+                end
+            </OnLeave>
+        </Scripts>
     </Frame>
 </Ui>

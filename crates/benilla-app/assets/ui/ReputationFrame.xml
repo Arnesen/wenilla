@@ -1,0 +1,864 @@
+<Ui>
+    <!--
+        benilla's Reputation tab: the 1.12 `ReputationFrame`, transcribed from the reference
+        FrameXML `ReputationFrame.{xml,lua}` onto our own engine and feeds. Every geometry number,
+        art path and TexCoord below is QUOTED from the reference with its line cite inline (cites
+        read `ref l.N` into `ReputationFrame.xml`, `ref-lua l.N` into `ReputationFrame.lua`); the
+        Lua is transcribed logic turned onto benilla's Era API — the twelve reputation globals of
+        `crates/benilla-ui/src/script/reputation.rs`, whose module doc is the display law this file
+        paints, over `crates/benilla-app/src/ui_reputation.rs`'s feed.
+
+        A CHILD PAGE of `CharacterFrame` (ref l.211: `parent="CharacterFrame"`, `id="3"`), shown and
+        hidden by `CharacterFrame_ShowSubFrame` — but a SEPARATE top-level file, the SkillFrame.xml /
+        PetPaperDollFrame.xml shape: this engine reads no XML `parent=` attribute (only physical
+        `<Frames>` nesting creates a real parent), so the page is pinned to `CharacterFrame`'s own
+        TOPLEFT by NAME and loaded right after it so it paints on top (later file = higher z).
+        `CharacterFrame.xml`'s `CharacterFrame_OnHide` hide-loop over
+        `BENILLA_CHARACTERFRAME_SUBFRAMES` is what closes it with the window; joining that table as
+        entry 3 is all this page has to do to get that.
+
+        THE TAB IS THE REFERENCE'S OWN SLOT 3 AGAIN. Until this page, `SkillFrame` sat at id 3 with
+        a comment saying it was 3rd only because Reputation did not exist; Skills is id 4 now, which
+        is the real client's number, and `PetTab_Update` (PetPaperDollFrame.xml) re-anchors
+        `CharacterFrameTab3` exactly as the reference's does — same tab, same page, no divergence
+        left to carry.
+
+        NO OWN PORTRAIT: the "General" quadrant art below carries the same portrait-ring cutout
+        every PaperDollInfoFrame page shares, so `CharacterFrame`'s portrait/name/level (drawn
+        underneath) shows through — the reference's own compositing, and SkillFrame.xml's note.
+
+        DEVIATIONS (each re-cited at its own site below):
+          1. THE WATCH BAR IS NOT IN THIS FILE. The reference declares `ReputationWatchBar` here
+             (ref l.869-1036) and defines `ReputationWatchBar_Update` / `MAX_PLAYER_LEVEL` /
+             `FACTION_BAR_COLORS` / `Show`/`HideWatchedReputationBarText` in `ReputationFrame.lua`;
+             benilla keeps all of that in `ActionBar.xml`, where the frame already lived, and that
+             file's own comment at the block carries the full justification. The short of it: the
+             watch bar is a MainMenuBar fixture, and EVERY frame its update touches
+             (`MainMenuExpBar`, `MainMenuBarMaxLevelBar`, `ExhaustionTick`, `MainMenuBarArtFrame`,
+             `MainMenuBar` itself) is declared in `ActionBar.xml`, ~120 manifest entries above this
+             one. This page reaches `ReputationWatchBar_Update()` by name at click time, which is
+             the direction that always resolves.
+          2. `GetText("FACTION_STANDING_LABEL"..standingID, gender)` (ref-lua l.65) is the client's
+             C-side localization lookup, which benilla does not ship (UIParent.xml's `SecondsToTime`
+             records the same departure). Its one load-bearing rule — take the `_FEMALE` twin when
+             gender is 3 — is transcribed into `BenillaReputation_StandingLabel` below.
+          3. THE OPTIMISTIC VERBS FIRE NO EVENT, so this file repaints where the reference lets
+             `UPDATE_FACTION` do it. `CollapseFactionHeader`/`ExpandFactionHeader` and
+             `SetFactionInactive`/`SetFactionActive` change what the list shows the instant they are
+             called (the fold pair hide or reveal a group; the inactive pair RE-PARENT the row under
+             the "Inactive" header and rebuild the tree — reputation.rs's own note at
+             `0x4d69b0`), and none of them raises an event here the way the client's C bindings do.
+             Both call sites below therefore end in `ReputationFrame_Update()`, exactly as the
+             reference's own at-war box already does (ref l.765) — SkillFrame.xml's header click has
+             the identical addition for the identical reason.
+             `SetWatchedFactionIndex` gets NO such addition, and that is the interesting half:
+             it is **not** optimistic (`0x4d6b60` — the watched slot is a server field with no
+             client mirror), so there is nothing new for a repaint to paint, and forcing one would
+             un-tick the box the player just ticked before the round trip could answer. The
+             reference calls only `ReputationWatchBar_Update()` there, and so do we.
+          4. THE SCROLL FRAME IS THE HOUSE FAUX KIT (ScrollTemplates.xml, decisions 0247/0250/0251):
+             a plain `<Frame inherits="FauxScrollFrameTemplate">` rather than the reference's
+             `<ScrollFrame>`, so the reference's `<OnVerticalScroll>` body (ref l.567-571) has
+             nothing to fire and is dropped — our offset comes straight off the Slider. The two
+             loose trough textures the reference hangs beside the bar (ref l.572-600) are replaced
+             by the kit's shared `BenillaScrollTroughTemplate`; see the site for why the fit is
+             exact rather than approximate.
+          5. `enableMouse="true"` ADDED in three places (the bar template, the two label-hover
+             frames, the at-war indicator). In this engine only Button/CheckButton/EditBox/
+             ScrollingMessageFrame are mouse-enabled by construction (`widget/mod.rs`'s ctor
+             comment; UnitFrames.xml and CharacterFrame.xml both carry the same note), so a
+             StatusBar or a plain Frame with `<OnEnter>` needs the attribute or the handler silently
+             never fires. This REPRODUCES the reference's behaviour rather than departing from it.
+          6. TWO PIECES OF THE REFERENCE'S OWN DEAD WEIGHT DROPPED (the TradeSkillFrame.xml
+             precedent): `ReputationFrame_Update`'s `rightBarTexture` local (ref-lua l.36/71),
+             assigned and never read even in the reference, and the `text="Revered"` placeholder on
+             `$parentFactionStanding` (ref l.102), which only ever shows on a row that has not been
+             painted yet — and rows are hidden until they are.
+          7. A WHEEL HANDLER, where the reference has a bare `return;` (ref l.864-866). Its scroll
+             frame is a real `<ScrollFrame>` and takes the wheel itself; ours is a plain Frame, so
+             the page drives the faux kit. No wheel-catcher Button is needed (SkillFrame.xml ships
+             one): this page is mouse-enabled over its whole rect, so a spin in a gap between rows
+             lands on the page itself, and a spin on a row bubbles up the parent chain to it — and
+             a full-page catcher is precisely what ate SkillFrame's tab row in the 2026-07-17
+             report.
+          8. NO `LockHighlight` (SkillFrame.xml deviation 7): not needed here — the reference's own
+             selection glow is the pair of `$parentHighlight1`/`2` textures on the bar, shown and
+             hidden by hand, which is already the affordance this engine has.
+    -->
+    <Script><![CDATA[
+        -- ── Constants (ref-lua l.1-2) ───────────────────────────────────────────────────────────
+        -- Globals, as the reference declares them: NUM_FACTIONS_DISPLAYED is the row-slot count the
+        -- XML below instantiates, REPUTATIONFRAME_FACTIONHEIGHT the faux kit's pixel value step.
+        NUM_FACTIONS_DISPLAYED = 15
+        REPUTATIONFRAME_FACTIONHEIGHT = 26
+
+        -- ── GlobalStrings (ref-GlobalStrings.lua, cited per line) ───────────────────────────────
+        -- The `X = X or "..."` idiom is this codebase's convention: the app runs the real localized
+        -- GlobalStrings.lua off the patch chain BEFORE any window file, so the installed locale
+        -- wins and these copies only fill in for the test harnesses, which load no chain.
+        FACTION = FACTION or "Faction"                                     -- :1938
+        STANDING = STANDING or "Standing"                                  -- :4193
+        AT_WAR = AT_WAR or "At War"                                        -- :77
+        MOVE_TO_INACTIVE = MOVE_TO_INACTIVE or "Move to Inactive"          -- :2706
+        SHOW_FACTION_ON_MAINSCREEN = SHOW_FACTION_ON_MAINSCREEN or "Show as Experience Bar" -- :3438
+        REPUTATION_FACTION_DESCRIPTION = REPUTATION_FACTION_DESCRIPTION or
+            "These are the factions that you have interacted with."        -- :3330
+        REPUTATION_STANDING_DESCRIPTION = REPUTATION_STANDING_DESCRIPTION or
+            "The further to the right your standing bar is the closer you are to improving your reputation to the next tier with that faction. The Standing Levels in order are Hated, Hostile, Unfriendly, Neutral, Friendly, Honored, Revered and Exalted." -- :3331
+        REPUTATION_STATUS_AT_WAR = REPUTATION_STATUS_AT_WAR or
+            "You are currently at war with this group."                    -- :3333
+        REPUTATION_AT_WAR_DESCRIPTION = REPUTATION_AT_WAR_DESCRIPTION or
+            "This determines how you will interact with members of this faction. If you have at war checked then your default behavior will be to attack them. If you do not have it checked you will not be able to attack them. " -- :3329
+
+        -- The two SYNTHETIC header names. The engine reads these globals out of the VM itself
+        -- (reputation.rs `synthetic_header`), which is the only reason either string has a consumer
+        -- at all: GlobalStrings.lua defines both and no reference FrameXML file anywhere reads
+        -- them, because the real client builds the list C-side. `FACTION_OTHER` heads the
+        -- parentless bucket (key 0); `FACTION_INACTIVE` heads the bucket a faction moves to when
+        -- the popup's "Move to Inactive" box is ticked (key -1), which the engine folds by default
+        -- on every rebuild, exactly as the client does.
+        FACTION_OTHER = FACTION_OTHER or "Other"                           -- :1943
+        FACTION_INACTIVE = FACTION_INACTIVE or "Inactive"                  -- :1942
+
+        -- The eight standing names, and their `_FEMALE` twins (:1947-1962). enUS spells both the
+        -- same; a localized client's own GlobalStrings.lua overwrites the pair and the gender rule
+        -- in BenillaReputation_StandingLabel starts mattering.
+        FACTION_STANDING_LABEL1 = FACTION_STANDING_LABEL1 or "Hated"
+        FACTION_STANDING_LABEL2 = FACTION_STANDING_LABEL2 or "Hostile"
+        FACTION_STANDING_LABEL3 = FACTION_STANDING_LABEL3 or "Unfriendly"
+        FACTION_STANDING_LABEL4 = FACTION_STANDING_LABEL4 or "Neutral"
+        FACTION_STANDING_LABEL5 = FACTION_STANDING_LABEL5 or "Friendly"
+        FACTION_STANDING_LABEL6 = FACTION_STANDING_LABEL6 or "Honored"
+        FACTION_STANDING_LABEL7 = FACTION_STANDING_LABEL7 or "Revered"
+        FACTION_STANDING_LABEL8 = FACTION_STANDING_LABEL8 or "Exalted"
+        FACTION_STANDING_LABEL1_FEMALE = FACTION_STANDING_LABEL1_FEMALE or "Hated"
+        FACTION_STANDING_LABEL2_FEMALE = FACTION_STANDING_LABEL2_FEMALE or "Hostile"
+        FACTION_STANDING_LABEL3_FEMALE = FACTION_STANDING_LABEL3_FEMALE or "Unfriendly"
+        FACTION_STANDING_LABEL4_FEMALE = FACTION_STANDING_LABEL4_FEMALE or "Neutral"
+        FACTION_STANDING_LABEL5_FEMALE = FACTION_STANDING_LABEL5_FEMALE or "Friendly"
+        FACTION_STANDING_LABEL6_FEMALE = FACTION_STANDING_LABEL6_FEMALE or "Honored"
+        FACTION_STANDING_LABEL7_FEMALE = FACTION_STANDING_LABEL7_FEMALE or "Revered"
+        FACTION_STANDING_LABEL8_FEMALE = FACTION_STANDING_LABEL8_FEMALE or "Exalted"
+
+        -- `FACTION_BAR_COLORS` (ref-lua l.3-12) is NOT declared here: it lives in ActionBar.xml
+        -- beside `ReputationWatchBar_Update`, its other consumer, because that file must be able to
+        -- index it with no reputation file loaded and this one cannot be loaded without it (this
+        -- file's header comment, deviation 1). ActionBar.xml is manifest entry 94 against this
+        -- file's 213, so the table is always there by the time a row paints.
+
+        -- The standing name for `standingID` (1..8) at the player's gender — the reference's
+        -- `GetText("FACTION_STANDING_LABEL"..standingID, gender)` (ref-lua l.65) with its C-side
+        -- lookup collapsed (this file's header comment, deviation 2). `UnitSex` answers 2 for male
+        -- and 3 for female, which is the value the reference passes straight through.
+        function BenillaReputation_StandingLabel(standingID, gender)
+            if gender == 3 then
+                local female = getglobal("FACTION_STANDING_LABEL" .. standingID .. "_FEMALE")
+                if female then
+                    return female
+                end
+            end
+            return getglobal("FACTION_STANDING_LABEL" .. standingID) or ""
+        end
+
+        -- Fill the detail popup for the row at `factionIndex` — ref-lua l.106-133, split out of
+        -- the update loop only so that function stays readable; the body is the reference's,
+        -- branch for branch. Called only when the popup is up AND this row is the selected one.
+        function BenillaReputationDetail_Fill(factionIndex, name, description, atWarWith, canToggleAtWar, isWatched)
+            ReputationDetailFactionName:SetText(name)
+            ReputationDetailFactionDescription:SetText(description)
+            if atWarWith then
+                ReputationDetailAtWarCheckBox:SetChecked(1)
+            else
+                ReputationDetailAtWarCheckBox:SetChecked(nil)
+            end
+            if canToggleAtWar then
+                ReputationDetailAtWarCheckBox:Enable()
+                ReputationDetailAtWarCheckBoxText:SetTextColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
+            else
+                ReputationDetailAtWarCheckBox:Disable()
+                ReputationDetailAtWarCheckBoxText:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+            end
+            if IsFactionInactive(factionIndex) then
+                ReputationDetailInactiveCheckBox:SetChecked(1)
+            else
+                ReputationDetailInactiveCheckBox:SetChecked(nil)
+            end
+            if isWatched then
+                ReputationDetailMainScreenCheckBox:SetChecked(1)
+            else
+                ReputationDetailMainScreenCheckBox:SetChecked(nil)
+            end
+        end
+
+        -- The list page (ref-lua ReputationFrame_Update, l.32-149) — transcribed whole, onto the
+        -- house faux-scroll kit and with the reference's own unread `rightBarTexture` local dropped
+        -- (this file's header comment, deviation 6).
+        function ReputationFrame_Update()
+            local numFactions = GetNumFactions()
+            local scrollFrame = getglobal("ReputationListScrollFrame")
+
+            -- ref-lua l.39-41. The reset is a no-op in every reachable case — FauxScrollFrame_Update
+            -- has already clamped `frame.offset` to 0 when the list fits and seated the bar at
+            -- `offset * valueStep`, so this SetValue writes the value the Slider already holds and
+            -- its change-gate (decision 0250) drops it before it could re-enter this function.
+            -- Kept because it is the reference's line, not because it does anything.
+            if not FauxScrollFrame_Update(scrollFrame, numFactions, NUM_FACTIONS_DISPLAYED, REPUTATIONFRAME_FACTIONHEIGHT) then
+                getglobal("ReputationListScrollFrameScrollBar"):SetValue(0)
+            end
+            local factionOffset = FauxScrollFrame_GetOffset(scrollFrame)
+
+            local gender = UnitSex("player")
+            for i = 1, NUM_FACTIONS_DISPLAYED do
+                local factionIndex = factionOffset + i
+                local factionBar = getglobal("ReputationBar" .. i)
+                local factionHeader = getglobal("ReputationHeader" .. i)
+                local factionCheck = getglobal("ReputationBar" .. i .. "Check")
+                if factionIndex <= numFactions then
+                    local name, description, standingID, barMin, barMax, barValue, atWarWith,
+                        canToggleAtWar, isHeader, isCollapsed, isWatched = GetFactionInfo(factionIndex)
+                    if isHeader then
+                        -- ref-lua l.52-63.
+                        factionHeader:SetText(name)
+                        if isCollapsed then
+                            factionHeader:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                        else
+                            factionHeader:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                        end
+                        factionHeader.index = factionIndex
+                        factionHeader.isCollapsed = isCollapsed
+                        factionBar:Hide()
+                        factionHeader:Show()
+                        factionCheck:Hide()
+                    else
+                        -- ref-lua l.65-139.
+                        local factionStanding = BenillaReputation_StandingLabel(standingID, gender)
+                        local factionName = getglobal("ReputationBar" .. i .. "FactionName")
+                        factionName:SetText(name)
+                        getglobal("ReputationBar" .. i .. "FactionStanding"):SetText(factionStanding)
+
+                        local atWarIndicator = getglobal("ReputationBar" .. i .. "AtWarCheck")
+                        if atWarWith then
+                            atWarIndicator:Show()
+                        else
+                            atWarIndicator:Hide()
+                        end
+
+                        -- Normalize values (ref-lua l.79-82). The engine hands these over ABSOLUTE
+                        -- for exactly this reason: reputation.rs's module doc names the reference's
+                        -- own three lines as the contract the tuple is written against.
+                        barMax = barMax - barMin
+                        barValue = barValue - barMin
+                        barMin = 0
+
+                        factionBar.id = factionIndex
+                        factionBar.standingText = factionStanding
+                        factionBar.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. " " .. barValue .. " / " .. barMax .. FONT_COLOR_CODE_CLOSE
+                        factionBar:SetMinMaxValues(0, barMax)
+                        factionBar:SetValue(barValue)
+                        -- UNGUARDED, deliberately, exactly as the reference has it (ref-lua l.89).
+                        -- `GetFactionInfo` is eleven wide on EVERY path including a miss, and its
+                        -- miss puts the client's own `1` in the standingID slot for precisely this
+                        -- index (reputation.rs `unknown_faction`) — so the reference's own
+                        -- `factionIndex <= numFactions` gate above is belt, and that `1` is braces.
+                        -- Adding a nil-check here would be inventing a branch the client does not
+                        -- have and cannot reach.
+                        local color = FACTION_BAR_COLORS[standingID]
+                        factionBar:SetStatusBarColor(color.r, color.g, color.b)
+                        factionBar:SetID(factionIndex)
+                        factionBar:Show()
+                        factionHeader:Hide()
+
+                        -- The watched checkmark rides the END of the name string, so the name box
+                        -- narrows by 10 to make room (ref-lua l.95-103, verbatim).
+                        if isWatched then
+                            factionCheck:Show()
+                            factionName:SetWidth(100)
+                            factionCheck:SetPoint("LEFT", factionName, "LEFT", factionName:GetStringWidth(), 0)
+                        else
+                            factionCheck:Hide()
+                            factionName:SetWidth(110)
+                        end
+
+                        -- ref-lua l.105-139: the selected row wears the highlight pair, and fills
+                        -- the popup if it is open.
+                        if factionIndex == GetSelectedFaction() then
+                            if ReputationDetailFrame:IsShown() then
+                                BenillaReputationDetail_Fill(factionIndex, name, description,
+                                    atWarWith, canToggleAtWar, isWatched)
+                            end
+                            getglobal("ReputationBar" .. i .. "Highlight1"):Show()
+                            getglobal("ReputationBar" .. i .. "Highlight2"):Show()
+                        else
+                            getglobal("ReputationBar" .. i .. "Highlight1"):Hide()
+                            getglobal("ReputationBar" .. i .. "Highlight2"):Hide()
+                        end
+                    end
+                else
+                    factionHeader:Hide()
+                    factionBar:Hide()
+                end
+            end
+            -- ref-lua l.146-148: nothing selected means nothing to detail. `GetSelectedFaction`
+            -- answers 0 both for "never selected" and for "the selected faction is folded away
+            -- under a collapsed header" (reputation.rs), so a fold closes the popup too.
+            if GetSelectedFaction() == 0 then
+                ReputationDetailFrame:Hide()
+            end
+        end
+
+        -- A bar click toggles the popup for that faction (ref-lua ReputationBar_OnClick,
+        -- l.151-159). Parameterless and reading `this`, exactly as the reference writes it: our
+        -- dispatcher sets `this` before invoking a handler (script/event.rs `invoke_with_globals`)
+        -- and it stays set through the call, the same contract ScrollTemplates.xml's
+        -- `FauxScrollFrame_OnVerticalScroll` already relies on.
+        function ReputationBar_OnClick()
+            if ReputationDetailFrame:IsShown() and (GetSelectedFaction() == this.id) then
+                ReputationDetailFrame:Hide()
+            else
+                SetSelectedFaction(this.id)
+                ReputationDetailFrame:Show()
+                ReputationFrame_Update()
+            end
+        end
+
+        -- A header click folds or unfolds its group (ref l.9-15, the template's own OnClick).
+        -- THE ADDED LINE is the repaint: the reference's `Collapse`/`ExpandFactionHeader` are C
+        -- bindings that raise UPDATE_FACTION on their way out, ours are pure model writes (this
+        -- file's header comment, deviation 3) — SkillFrame.xml's `BenillaSkillTypeLabel_OnClick`
+        -- carries the identical addition for the identical reason.
+        --
+        -- `header.index` is the slot's own VISIBLE row index, stamped by the update loop that last
+        -- painted it, and it must stay that: an index that is not a header — `0`, a bar row, a stale
+        -- one past the end — folds or unfolds EVERY header instead (the client's own fall-through at
+        -- `0x4d6a50`/`0x4d6aa0`, which reputation.rs reproduces). Nothing here can reach that arm,
+        -- because a slot only ever shows its header twin while the loop has just written a header
+        -- index into it; the note is here so a future edit does not reach it by accident.
+        function BenillaReputationHeader_OnClick(header)
+            if header.isCollapsed then
+                ExpandFactionHeader(header.index)
+            else
+                CollapseFactionHeader(header.index)
+            end
+            ReputationFrame_Update()
+        end
+
+        -- The popup's three boxes (ref l.758-766, l.810-818, l.839-848). The at-war box is the
+        -- reference's own body unchanged — it already repaints. The inactive box gains the added
+        -- repaint (this file's header comment, deviation 3): its flip re-parents the row under the
+        -- "Inactive" header there and then, so the list on screen is stale the moment it returns.
+        -- The main-screen box gets NO addition — see the same note for why the round trip, not a
+        -- repaint, is what moves the watched checkmark.
+        function BenillaReputationAtWarBox_OnClick(box)
+            FactionToggleAtWar(GetSelectedFaction())
+            if box:GetChecked() then
+                PlaySound("igMainMenuOptionCheckBoxOn")
+            else
+                PlaySound("igMainMenuOptionCheckBoxOff")
+            end
+            ReputationFrame_Update()
+        end
+
+        function BenillaReputationInactiveBox_OnClick(box)
+            if box:GetChecked() then
+                PlaySound("igMainMenuOptionCheckBoxOn")
+                SetFactionInactive(GetSelectedFaction())
+            else
+                PlaySound("igMainMenuOptionCheckBoxOff")
+                SetFactionActive(GetSelectedFaction())
+            end
+            ReputationFrame_Update()
+        end
+
+        function BenillaReputationMainScreenBox_OnClick(box)
+            if box:GetChecked() then
+                PlaySound("igMainMenuOptionCheckBoxOn")
+                SetWatchedFactionIndex(GetSelectedFaction())
+            else
+                PlaySound("igMainMenuOptionCheckBoxOff")
+                SetWatchedFactionIndex(0)
+            end
+            ReputationWatchBar_Update()
+        end
+
+        -- The window's wheel handler (this file's header comment, deviation 7).
+        function BenillaReputationFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("ReputationListScrollFrame"), delta)
+        end
+
+        -- ── Lifecycle (ref-lua l.16-30) ─────────────────────────────────────────────────────────
+        function ReputationFrame_OnLoad()
+            local frame = this
+            frame:RegisterEvent("UPDATE_FACTION")
+            -- The faux kit's one wiring requirement: the owner names its own repaint so a drag of
+            -- the scroll bar re-binds the rows (ScrollTemplates.xml's `frame.updateFunc` contract).
+            getglobal("ReputationListScrollFrame").updateFunc = ReputationFrame_Update
+        end
+
+        function ReputationFrame_OnShow()
+            ReputationFrame_Update()
+        end
+
+        function ReputationFrame_OnEvent(event)
+            if event == "UPDATE_FACTION" then
+                if this:IsVisible() then
+                    ReputationFrame_Update()
+                end
+            end
+        end
+    ]]></Script>
+
+    <!--
+        The category header row (ref l.4-56): 302x13, the +/- fold icon at LEFT(3,0) and the group
+        name at LEFT(20,0). The handler is a chunk function, not the reference's inline body, so the
+        added repaint has a home with a comment on it (chunk-boundary rule, SkillFrame.xml l.96-100).
+    -->
+    <Button name="ReputationHeaderTemplate" virtual="true">
+        <Size><AbsDimension x="302" y="13"/></Size>
+        <Scripts>
+            <OnClick>BenillaReputationHeader_OnClick(self)</OnClick>
+        </Scripts>
+        <NormalTexture file="Interface\Buttons\UI-MinusButton-UP">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <ButtonText name="$parentNormalText">
+            <Size><AbsDimension x="275" y="12"/></Size>
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
+        <DisabledFont inherits="GameFontHighlight" justifyH="LEFT"/>
+    </Button>
+
+    <!--
+        The faction row (ref l.57-210): a 137x13 StatusBar carrying the whole row's furniture — the
+        two-piece frame art that reaches 126px LEFT of the bar itself, the name and standing
+        FontStrings, the hover/selection highlight pair, the watched checkmark, and the at-war
+        pennant hanging off the right end. The HitRectInsets stretch the row's MOUSE rect back over
+        the name (ref l.61-63: a NEGATIVE left inset widens), so clicking the faction's name selects
+        it just like clicking its bar.
+
+        `enableMouse="true"` is ADDED (this file's header comment, deviation 5) — a StatusBar is not
+        mouse-enabled by construction in this engine, and without it the OnEnter/OnLeave/OnMouseUp
+        below would never fire.
+    -->
+    <StatusBar name="ReputationBarTemplate" virtual="true" enableMouse="true" drawLayer="BACKGROUND" minValue="0" maxValue="1" defaultValue="1">
+        <Size><AbsDimension x="137" y="13"/></Size>
+        <HitRectInsets><AbsInset left="-126" right="3" top="-2" bottom="-2"/></HitRectInsets>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentReputationBarLeft" file="Interface\PaperDollInfoFrame\UI-Character-ReputationBar">
+                    <Size><AbsDimension x="256" y="22"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-126" y="4"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.34375"/>
+                </Texture>
+                <Texture name="$parentReputationBarRight" file="Interface\PaperDollInfoFrame\UI-Character-ReputationBar">
+                    <Size><AbsDimension x="16" y="24"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentReputationBarLeft" relativePoint="TOPRIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.0625" top="0.34375" bottom="0.71875"/>
+                </Texture>
+                <FontString name="$parentFactionName" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="100" y="10"/></Size>
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-119" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- The reference's `text="Revered"` placeholder is dropped (this file's header
+                     comment, deviation 6). -->
+                <FontString name="$parentFactionStanding" inherits="GameFontHighlightSmall">
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="$parentHighlight1" file="Interface\PaperDollInfoFrame\UI-Character-ReputationBar-Highlight" alphaMode="ADD" hidden="true">
+                    <Size><AbsDimension x="256" y="28"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentReputationBarLeft"><Offset><AbsDimension x="-2" y="3"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1" top="0" bottom="0.4375"/>
+                </Texture>
+                <Texture name="$parentHighlight2" file="Interface\PaperDollInfoFrame\UI-Character-ReputationBar-Highlight" alphaMode="ADD" hidden="true">
+                    <Size><AbsDimension x="17" y="28"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentHighlight1" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.06640625" top="0.4375" bottom="0.875"/>
+                </Texture>
+                <Texture name="$parentCheck" file="Interface\Buttons\UI-CheckBox-Check" hidden="true">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentFactionName" relativePoint="RIGHT"/></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The crossed-swords pennant at the row's right end, shown for a faction you are at
+                 war with (ref l.150-187). `enableMouse` added for its hover, same reason as the
+                 bar's. -->
+            <Frame name="$parentAtWarCheck" enableMouse="true" hidden="true">
+                <Size><AbsDimension x="24" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="$parentReputationBarRight" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="-2" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ReputationBar">
+                            <Size><AbsDimension x="24" y="22"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                            <TexCoords left="0.0625" right="0.15625" top="0.34375" bottom="0.71875"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(REPUTATION_STATUS_AT_WAR, nil, nil, nil, nil, 1)
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+        </Frames>
+        <!-- ref l.189-207, transcribed verbatim: hovering swaps the standing word for the raw
+             "value / max" and lights the glow; leaving puts the word back and drops the glow unless
+             this row is the selected one. -->
+        <Scripts>
+            <OnEnter>
+                if (this.tooltip) then
+                    getglobal(this:GetName() .. "FactionStanding"):SetText(this.tooltip)
+                end
+                getglobal(this:GetName() .. "Highlight1"):Show()
+                getglobal(this:GetName() .. "Highlight2"):Show()
+            </OnEnter>
+            <OnLeave>
+                getglobal(this:GetName() .. "FactionStanding"):SetText(this.standingText)
+                if (GetSelectedFaction() ~= this.id) then
+                    getglobal(this:GetName() .. "Highlight1"):Hide()
+                    getglobal(this:GetName() .. "Highlight2"):Hide()
+                end
+            </OnLeave>
+            <OnMouseUp>ReputationBar_OnClick()</OnMouseUp>
+        </Scripts>
+        <BarTexture file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+        <BarColor r=".25" g=".25" b=".75"/>
+    </StatusBar>
+
+    <!-- id=3, the reference's own (ref l.211): a page's id is the slot it occupies in the WINDOW'S
+         OWN tab row, and ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11).
+         `character_tests.rs` pins every page's id against its slot in
+         BENILLA_CHARACTERFRAME_SUBFRAMES. -->
+    <Frame name="ReputationFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="3">
+        <!-- The real 384x512 page. The reference's `setAllPoints="true"` needs the true parenting
+             this engine's cross-file `parent=` does not give (this file's header comment), so the
+             page is sized and pinned to CharacterFrame's TOPLEFT by name — SkillFrame.xml and
+             PetPaperDollFrame.xml both ship the identical substitute. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Anchors><Anchor point="TOPLEFT" relativeTo="CharacterFrame" relativePoint="TOPLEFT"/></Anchors>
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- The four quadrant slabs (ref l.216-264), at the reference's own four TOPLEFT
+                     offsets. The "General" pair is the variant every PaperDollInfoFrame page shares
+                     and carries the portrait-ring cutout (this file's header comment). -->
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="258" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-BottomLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="-257"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-BottomRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="258" y="-257"/></Offset></Anchor></Anchors>
+                </Texture>
+                <!-- The two column headings (ref l.265-282). `text=` carries the GlobalStrings KEY,
+                     which the loader resolves against the shipped strings (loader `resolve_text`),
+                     so the row is localized like the reference's. -->
+                <FontString name="ReputationFrameFactionLabel" inherits="GameFontHighlight" text="FACTION">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="70" y="-57"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="ReputationFrameStandingLabel" inherits="GameFontHighlight" text="STANDING">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="215" y="-59"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The 15 row slots (ref l.286-555): bar 1 at TOPLEFT(150,-86), each next chained
+                 BOTTOMLEFT to TOPLEFT by (0,-10) — a 23px pitch over a 13px bar. Every header sits
+                 at its own bar's TOPLEFT minus 125, so the two occupy the same row and only one of
+                 them is ever shown. Interleaved bar/header exactly as the reference declares them,
+                 which is also their z order. -->
+            <StatusBar name="ReputationBar1" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="150" y="-86"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader1" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar1"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar2" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader2" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar2"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar3" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader3" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar3"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar4" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader4" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar4"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar5" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader5" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar5"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar6" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader6" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar6"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar7" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader7" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar7"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar8" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader8" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar8"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar9" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader9" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar9"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar10" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader10" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar10"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar11" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader11" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar11"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar12" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader12" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar12"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar13" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar12" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader13" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar13"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar14" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader14" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar14"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <StatusBar name="ReputationBar15" inherits="ReputationBarTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <Button name="ReputationHeader15" inherits="ReputationHeaderTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="ReputationBar15"><Offset><AbsDimension x="-125" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+
+            <!-- The scroll bar's TROUGH — the shared kit's template, replacing the reference's own
+                 two loose textures (ref l.572-600; this file's header comment, deviation 4). It
+                 carries NO anchors: it seats itself on its bar the first time
+                 BenillaScrollBar_SetShown touches it, and the offsets that seat it were DERIVED
+                 from this very window — ScrollTemplates.xml's `BenillaScrollTrough_Seat` cites
+                 ref l.573-599 against ref-UIPanelTemplates.xml l.166-181 for its 21-above /
+                 20-below / 8-left hang. Checked against the numbers below rather than assumed: the
+                 kit's bar hangs at the scroll frame's TOPRIGHT+(6,-16) / BOTTOMRIGHT+(6,+16), so
+                 the seated trough lands at TOPRIGHT+(-2,+5) and BOTTOMRIGHT+(29,-4) — 31 wide,
+                 and the reference's own (-2,+5)/(-2,-4) for a 31-wide piece, to the pixel.
+                 Declared BEFORE the faux frame so it draws beneath the bar. -->
+            <Frame name="ReputationListScrollFrameScrollBarTrough" inherits="BenillaScrollTroughTemplate"/>
+
+            <!-- The faux scroll frame (ref l.556-602): 296x354 at the page's TOPRIGHT(-66,-76),
+                 which puts its left edge on the header column and its right edge 66 in from the
+                 page. updateFunc is set in ReputationFrame_OnLoad. -->
+            <Frame name="ReputationListScrollFrame" inherits="FauxScrollFrameTemplate">
+                <Size><AbsDimension x="296" y="354"/></Size>
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-66" y="-76"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The two newbie tips over the column headings (ref l.603-630): invisible frames
+                 exactly covering their FontString. `enableMouse` added, same engine rule as the bar
+                 template's. -->
+            <Frame name="FactionMouseOver" enableMouse="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="ReputationFrameFactionLabel"/>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="ReputationFrameFactionLabel"/>
+                </Anchors>
+                <Scripts>
+                    <OnEnter>GameTooltip_AddNewbieTip(FACTION, 1.0, 1.0, 1.0, REPUTATION_FACTION_DESCRIPTION, 1)</OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+            <Frame name="StandingMouseOver" enableMouse="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="ReputationFrameStandingLabel"/>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="ReputationFrameStandingLabel"/>
+                </Anchors>
+                <Scripts>
+                    <OnEnter>GameTooltip_AddNewbieTip(STANDING, 1.0, 1.0, 1.0, REPUTATION_STANDING_DESCRIPTION, 1)</OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Frame>
+
+            <!--
+                The detail popup (ref l.631-852): a 212x203 dialog hanging off the window's own
+                TOPRIGHT, opened by clicking a bar and carrying the faction's description plus the
+                three switches. Declared LAST so it draws over the list.
+            -->
+            <Frame name="ReputationDetailFrame" enableMouse="true" hidden="true">
+                <Size><AbsDimension x="212" y="203"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="ReputationFrame" relativePoint="TOPRIGHT">
+                        <Offset><AbsDimension x="-33" y="-28"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+                    <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+                    <TileSize><AbsValue val="32"/></TileSize>
+                    <EdgeSize><AbsValue val="32"/></EdgeSize>
+                </Backdrop>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString name="ReputationDetailFactionName" inherits="GameFontNormal" justifyH="LEFT">
+                            <Size><AbsDimension x="0" y="12"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="-21"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="ReputationDetailFactionDescription" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                            <Size><AbsDimension x="170" y="0"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="ReputationDetailFactionName" relativePoint="BOTTOMLEFT">
+                                    <Offset><AbsDimension x="0" y="-2"/></Offset>
+                                </Anchor>
+                            </Anchors>
+                        </FontString>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-Reputation-DetailBackground">
+                            <Size><AbsDimension x="256" y="128"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="11" y="-11"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <Texture name="ReputationDetailCorner" file="Interface\DialogFrame\UI-DialogBox-Corner">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-6" y="-7"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="ReputationDetailDivider" file="Interface\DialogFrame\UI-DialogBox-Divider">
+                            <Size><AbsDimension x="256" y="32"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="9" y="-131"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The reference's own `inherits="UIPanelCloseButton"` (ref l.720), and this is
+                         the FIRST benilla window to consume that shared template rather than
+                         carrying a private copy of the art — the posture UIPanelTemplates.xml's toc
+                         entry describes as the queue it is waiting in. Its OnClick is
+                         `HideUIPanel(this:GetParent())`, which for a frame that is not a registered
+                         UIPanel falls through UiPanels.xml's walk to a plain `frame:Hide()` — the
+                         reference's behaviour on this same button. -->
+                    <Button name="ReputationDetailCloseButton" inherits="UIPanelCloseButton">
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-3" y="-3"/></Offset></Anchor></Anchors>
+                    </Button>
+                    <!-- At War (ref l.729-791): the ONE box the reference builds from bare textures
+                         rather than a template, because its checked art is the crossed swords
+                         (UI-CheckBox-SwordCheck) at 32x32 rather than the 26x26 tick. -->
+                    <CheckButton name="ReputationDetailAtWarCheckBox">
+                        <Size><AbsDimension x="26" y="26"/></Size>
+                        <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="14" y="34"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString name="$parentText" inherits="GameFontNormalSmall">
+                                    <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>
+                                getglobal(this:GetName() .. "Text"):SetText(AT_WAR)
+                                getglobal(this:GetName() .. "Text"):SetVertexColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
+                            </OnLoad>
+                            <OnClick>BenillaReputationAtWarBox_OnClick(self)</OnClick>
+                            <OnEnter>
+                                GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                GameTooltip:SetText(REPUTATION_AT_WAR_DESCRIPTION, nil, nil, nil, nil, 1)
+                            </OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                        <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
+                        <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
+                        <HighlightTexture file="Interface\Buttons\UI-CheckBox-Highlight" alphaMode="ADD"/>
+                        <CheckedTexture file="Interface\Buttons\UI-CheckBox-SwordCheck">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="3" y="-5"/></Offset></Anchor></Anchors>
+                        </CheckedTexture>
+                        <DisabledCheckedTexture file="Interface\Buttons\UI-CheckBox-Check-Disabled"/>
+                    </CheckButton>
+                    <!-- Move to Inactive (ref l.792-820) and Show as Experience Bar (ref l.821-850),
+                         both on the reference's own `OptionsCheckButtonTemplate`
+                         (OptionsFrameTemplates.xml). The template also carries an OnClick that plays
+                         the on/off tick; the instance's own block below REPLACES it (the loader
+                         SetScripts each `<Scripts>` in order, the instance last — ScrollTemplates.xml's
+                         header states the rule), which is why the sound is not doubled. -->
+                    <CheckButton name="ReputationDetailInactiveCheckBox" inherits="OptionsCheckButtonTemplate">
+                        <Size><AbsDimension x="26" y="26"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="ReputationDetailAtWarCheckBoxText" relativePoint="RIGHT">
+                                <Offset><AbsDimension x="3" y="0"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                        <HitRectInsets><AbsInset left="0" right="0" top="0" bottom="0"/></HitRectInsets>
+                        <Scripts>
+                            <OnLoad>getglobal(this:GetName() .. "Text"):SetText(MOVE_TO_INACTIVE)</OnLoad>
+                            <OnClick>BenillaReputationInactiveBox_OnClick(self)</OnClick>
+                        </Scripts>
+                    </CheckButton>
+                    <CheckButton name="ReputationDetailMainScreenCheckBox" inherits="OptionsCheckButtonTemplate">
+                        <Size><AbsDimension x="26" y="26"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="ReputationDetailAtWarCheckBox" relativePoint="BOTTOMLEFT">
+                                <Offset><AbsDimension x="0" y="3"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                        <HitRectInsets><AbsInset left="0" right="0" top="0" bottom="0"/></HitRectInsets>
+                        <Scripts>
+                            <OnLoad>getglobal(this:GetName() .. "Text"):SetText(SHOW_FACTION_ON_MAINSCREEN)</OnLoad>
+                            <OnClick>BenillaReputationMainScreenBox_OnClick(self)</OnClick>
+                        </Scripts>
+                    </CheckButton>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>ReputationFrame_OnLoad()</OnLoad>
+            <OnShow>ReputationFrame_OnShow()</OnShow>
+            <OnEvent>ReputationFrame_OnEvent(event)</OnEvent>
+            <OnMouseWheel>BenillaReputationFrame_OnMouseWheel(arg1)</OnMouseWheel>
+        </Scripts>
+    </Frame>
+</Ui>

@@ -8,7 +8,8 @@
         `Expand`/`CollapseSkillHeader`/`SetSelectedSkill`/`GetSelectedSkill`, decision 0437's skills
         seam, `crates/benilla-ui/src/script/skills.rs`, built alongside this file).
 
-        A CHILD PAGE of `CharacterFrame` (ref: `parent="CharacterFrame"`, `id="4"`), shown/
+        A CHILD PAGE of `CharacterFrame` (ref: `parent="CharacterFrame"`, `id="4"` — ours too, since
+        the Reputation page landed and took slot 3 back), shown/
         hidden by `CharacterFrame_ShowSubFrame` exactly like `PaperDollFrame` — but NOT a
         physically nested `<Frame>` the way PaperDollFrame is: PaperDollFrame is declared INSIDE
         CharacterFrame.xml's own `<Frames>` tree (a real engine parent/child), while this page is a
@@ -467,12 +468,13 @@
         <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
     </Button>
 
-    <!-- id=3, NOT the ref's 4: a page's id is the slot it occupies in the WINDOW'S OWN tab row, and
-         ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11). Ours is 3rd because
-         Reputation (the ref's 3) is not built — the same deviation CharacterFrame.xml's tab row
-         already flags. `character_tests.rs` pins every page's id against its slot in
-         BENILLA_CHARACTERFRAME_SUBFRAMES, so the day Reputation lands this is loud, not silent. -->
-    <Frame name="SkillFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="3">
+    <!-- id=4, the ref's own: a page's id is the slot it occupies in the WINDOW'S OWN tab row, and
+         ToggleCharacter selects the tab from it (ref CharacterFrame.lua:11). This was 3 while
+         Reputation (the ref's 3) was not built; ReputationFrame.xml landed and took that slot, so
+         Skills is back on the reference's number. `character_tests.rs` pins every page's id against
+         its slot in BENILLA_CHARACTERFRAME_SUBFRAMES, which is what made the renumber loud rather
+         than silent — exactly as this comment predicted. -->
+    <Frame name="SkillFrame" enableMouse="true" parent="CharacterFrame" hidden="true" id="4">
         <!-- The real 384×512 page. No <Anchors relativeTo> substitute for true parenting exists
              (this file's header comment) — pinned to CharacterFrame's own TOPLEFT by name. -->
         <Size><AbsDimension x="384" y="512"/></Size>

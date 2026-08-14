@@ -226,6 +226,13 @@ pub enum ServerPacket {
     SetFactionStanding {
         standings: Vec<(u32, i32)>,
     },
+    /// `SMSG_SET_FACTION_VISIBLE` — one reputation-list slot just became visible in the pane
+    /// (vmangos `ReputationMgr::SendVisible`, pushed the first time the player meets the faction).
+    /// It carries **no standing**: the slot's existing standing is already correct, and this only
+    /// lifts `FACTION_FLAG_VISIBLE` on it.
+    SetFactionVisible {
+        list_id: u32,
+    },
     /// `SMSG_NAME_QUERY_RESPONSE` — a player character's identity, answering `CMSG_NAME_QUERY`:
     /// guid, name, realm (1.12.1 carries it, empty on a single realm), race/gender/class as `u32`s
     /// (VERIFIED vmangos `NameQueryResponse::AppendBodyTo`). An unknown guid answers with an empty
@@ -1125,6 +1132,7 @@ impl ServerPacket {
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
+            ServerPacket::SetFactionVisible { .. } => "SMSG_SET_FACTION_VISIBLE".into(),
             ServerPacket::NameQueryResponse { .. } => "SMSG_NAME_QUERY_RESPONSE".into(),
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),
             ServerPacket::PetNameQueryResponse { .. } => "SMSG_PET_NAME_QUERY_RESPONSE".into(),

@@ -939,17 +939,21 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     load_xml(&s, "UIParent.xml");
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "UIPanelTemplates.xml");
+    load_xml(&s, "OptionsFrameTemplates.xml");
     load_xml(&s, "CharacterFrame.xml");
     load_xml(&s, "PetPaperDollFrame.xml");
+    load_xml(&s, "ReputationFrame.xml");
     load_xml(&s, "SkillFrame.xml");
     s.set_unit("player", Some(player_unit()));
 
     // THE INVARIANT the fix rests on: a page's `id=` is its slot in this window's own tab row, and
-    // `BENILLA_CHARACTERFRAME_SUBFRAMES` is the same 1:1 mapping written the other way round. The
-    // reference's numbers are NOT ours — its Skills page is id 4 behind a Reputation tab we have
-    // not built — so this is the check that makes the divergence loud the day Reputation lands
-    // between them, instead of silently selecting the wrong tab.
-    for i in 1..=3 {
+    // `BENILLA_CHARACTERFRAME_SUBFRAMES` is the same 1:1 mapping written the other way round. It
+    // did its job: this loop is what made the Reputation page's arrival LOUD, since Skills had to
+    // move from 3 to 4 in the same breath. The four slots are the reference's own now
+    // (Character/Pet/Reputation/Skills, ref `CharacterFrame.xml:79-168`); only Honor, its tab 5, is
+    // still out, and it sits past the end where its absence shifts nothing.
+    for i in 1..=4 {
         let id: i64 = s
             .eval(&format!(
                 "return getglobal(BENILLA_CHARACTERFRAME_SUBFRAMES[{i}]):GetID()"
@@ -983,8 +987,8 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     assert_eq!(selected(&mut s), 1);
     s.run(r#"ToggleCharacter("SkillFrame")"#).unwrap();
     assert!(shown(&mut s, "SkillFrame"));
-    assert_eq!(selected(&mut s), 3, "the row follows a keybind to Skills");
-    assert!(wearing_active_art(&mut s, 3));
+    assert_eq!(selected(&mut s), 4, "the row follows a keybind to Skills");
+    assert!(wearing_active_art(&mut s, 4));
     assert!(!wearing_active_art(&mut s, 1));
 
     // THE REPORT: `C` from the Skills page. The page goes back to Character — and so must the row.
@@ -997,7 +1001,7 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
         "the tab row followed the keybind back to Character"
     );
     assert!(wearing_active_art(&mut s, 1));
-    assert!(!wearing_active_art(&mut s, 3));
+    assert!(!wearing_active_art(&mut s, 4));
 
     // …and the second half of the report — *"then if I click on char tab, it closes the whole
     // window"* — falls out of the same fix rather than needing its own. `PanelTemplates_SelectTab`

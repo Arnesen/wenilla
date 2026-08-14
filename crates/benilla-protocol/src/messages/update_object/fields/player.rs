@@ -193,6 +193,16 @@ impl ObjectFields {
     pub fn player_next_level_xp(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_NEXT_LEVEL_XP)
     }
+    /// `PLAYER_FIELD_WATCHED_FACTION_INDEX` — the reputation-list slot whose bar rides the main
+    /// menu bar (`GetWatchedFactionInfo`), or `-1` for none. Same PRIVATE/own-player caveat as
+    /// [`Self::player_xp`].
+    ///
+    /// **Signed, and `0` is not "none".** Slot 0 is the Bloodsail Buccaneers, so the only
+    /// no-faction value is `-1` — reading this field as unsigned would silently watch them.
+    pub fn player_watched_faction(&self) -> Option<i32> {
+        self.get_u32(FIELD_PLAYER_WATCHED_FACTION_INDEX)
+            .map(|v| v as i32)
+    }
     /// `PLAYER_CHARACTER_POINTS1` — unspent talent points (`UnitCharacterPoints("player")`'s
     /// first return; the talent frame's "N talent points" line, decision 0304). Same
     /// PRIVATE/own-player caveat as [`Self::player_xp`].

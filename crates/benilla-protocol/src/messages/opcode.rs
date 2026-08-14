@@ -56,7 +56,17 @@ pub const SMSG_TRIGGER_CINEMATIC: u16 = 0x00FA;
 pub const CMSG_COMPLETE_CINEMATIC: u16 = 0x00FC;
 pub const SMSG_MONSTER_MOVE: u16 = 0x00DD;
 pub const SMSG_INITIALIZE_FACTIONS: u16 = 0x0122;
+/// A faction became visible in the reputation pane (VERIFIED vmangos `Opcodes_1_12_1.h`: 291,
+/// sender `ReputationMgr::SendVisible`) — body one `u32` reputation-list slot. The server sets the
+/// slot's `FACTION_FLAG_VISIBLE` on first contact and pushes *only* this, never a fresh standing:
+/// a client that ignores it keeps a correct standing on a row the pane refuses to list.
+pub const SMSG_SET_FACTION_VISIBLE: u16 = 0x0123;
 pub const SMSG_SET_FACTION_STANDING: u16 = 0x0124;
+/// The reputation pane's three send verbs (VERIFIED vmangos `Opcodes.cpp`'s `DEFINE_HANDLER`
+/// registrations: 293, 791, 792). Bodies in [`super::reputation`]; none is acked.
+pub const CMSG_SET_FACTION_ATWAR: u16 = 0x0125; // 293
+pub const CMSG_SET_FACTION_INACTIVE: u16 = 0x0317; // 791
+pub const CMSG_SET_WATCHED_FACTION: u16 = 0x0318; // 792
 pub const SMSG_AUTH_CHALLENGE: u16 = 0x01EC;
 pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
 /// The Warden anticheat challenge. A server that sends this starts a response-timeout clock
