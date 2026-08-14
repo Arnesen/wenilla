@@ -440,8 +440,7 @@
         -- directly to count backpack repaints, e.g. delete_item_tests.rs's stuck-darkening
         -- regression check) — and BenillaBagWindow_Update generically for every other window. Every
         -- runtime repaint trigger (a slot click, an event, OpenAllBags' pre-show paint) goes
-        -- through this; BenillaBagBarSlot_OnClick calls BenillaBagWindow_Update directly (it only ever
-        -- targets bags 1..4).
+        -- through this (BenillaBagBarSlot_OnClick reaches it through the ToggleBag global too).
         function BenillaBagWindow_Repaint(frame)
             if frame:GetID() == 0 then
                 BenillaBagFrame_Update()
@@ -597,18 +596,31 @@
             if anyOpen then CloseAllBags() else OpenAllBags() end
         end
 
-        -- The backpack button (MainMenuBarBackpackButton) and the 'B' binding: if any bag window is open,
-        -- close them all; otherwise open every existing bag (ref ToggleBackpack — "if numOpen > 0
-        -- then CloseAllBags() else OpenAllBags()").
+        -- The backpack button (MainMenuBarBackpackButton): if any bag window is open, close them
+        -- all; otherwise open every existing bag (ref ToggleBackpack — "if numOpen > 0 then
+        -- CloseAllBags() else OpenAllBags()").
+        --
+        -- ONE STATED DIVERGENCE from ref BackpackButton_OnClick (MainMenuBarBagButtons.lua
+        -- l.55-69). The ref's tail re-derives the checked state from a scan of its NATIVE
+        -- ContainerFrames — and OnShow/OnHide dispatch is SYNCHRONOUS in the reference (wow-re
+        -- `onshow-onhide-dispatch-order.md`: Show binder 0x775750 → transition 0x76ae10 → notify
+        -- 0x76b260 → lua_pcall, every hop a direct call), so when an addon owns the bags its
+        -- OnShow's `SetChecked(1)` (Bagnon.lua l.33) lands FIRST and the ref tail stomps it: on
+        -- the real client the backpack button ends UNLIT after clicking it with Bagnon, and
+        -- lights only via the key binding (whose body is the bare `ToggleBackpack()`, no tail).
+        -- That click-path outcome contradicts the addon's evident intent and the director's call,
+        -- so ours swaps the scan for the auto-toggle UNDO below: checked belongs to the WINDOWS'
+        -- OnShow/OnHide writes — ours (BenillaBagFrame_OnShow/_OnHide) and any addon's alike —
+        -- and this handler only repairs what the CheckButton widget flipped before it ran. Every
+        -- stock outcome is identical to the ref's (the transition writes land inside
+        -- ToggleBackpack and are the last word); the addon case ends lit instead of stomped.
+        -- The widget-flip UNDO itself lives in the button's XML <OnClick> wrapper — the one seat
+        -- where the CheckButton auto-toggle has just happened — so every DIRECT caller of this
+        -- function (the tests, a macro) gets pure toggle semantics with no checked bookkeeping
+        -- to corrupt.
         function BenillaBagToggle_OnClick()
-            -- Through the GLOBAL, so an addon that replaced `ToggleBackpack` gets the click. This
-            -- one line is the whole Bagnon fix; the rest below is our own button's checked art,
-            -- which is ours to keep whatever the bag window turns out to be.
+            -- Through the GLOBAL, so an addon that replaced `ToggleBackpack` gets the click.
             ToggleBackpack()
-            -- The auto-toggle is provisional (ref BackpackButton_OnClick l.58-67): the button
-            -- lights for the BACKPACK window specifically, whatever the all-toggle just did.
-            local backpack = getglobal(BENILLA_BAG_WINDOWS[1])
-            getglobal("MainMenuBarBackpackButton"):SetChecked(backpack and backpack:IsShown())
         end
 
         -- The window's bar button (ref ContainerFrame_OnShow/OnHide: bag 0 →
@@ -778,23 +790,28 @@
             BenillaBagBarSlot_Update(button)
         end
 
+        -- ref BagSlotButton_OnClick (MainMenuBarBagButtons.lua l.3-21): the cursor arm first (the
+        -- ref's PutItemInBag; ours is the equip/swap PickupInventoryItem arm, decision 0208 1b),
+        -- otherwise the toggle goes THROUGH THE GLOBAL `ToggleBag` — the exact name
+        -- Bagnon_Core/Overrides.lua replaces — with the ref's own button sound on that arm only.
+        -- Toggling the window directly here (what this did before) made every bag addon's override
+        -- silently inert for the four slot buttons while the backpack button honoured it: the
+        -- 517-line rule above ("the reference's names are the real entry points") applied to only
+        -- one of the five buttons, and the director met the other four.
         function BenillaBagBarSlot_OnClick(button)
             if CursorHasItem() then
                 BenillaBagBarSlot_Place(button) -- drop/equip the carried bag onto this slot
             else
-                local frame = getglobal("BenillaBagFrame" .. button.bagId)
-                if frame then
-                    if frame:IsShown() then
-                        frame:Hide()
-                    else
-                        BenillaBagWindow_Update(frame)
-                        frame:Show()
-                    end
-                end
+                ToggleBag(button.bagId)
+                PlaySound("BAGMENUBUTTONPRESS")
             end
-            -- The click's own CheckButton auto-toggle is provisional — re-derive from the
-            -- window on every branch, the ref's exact tail (BagSlotButton_OnClick l.12-20:
-            -- SetChecked(isVisible) whether the click toggled, placed a bag, or did nothing).
+            -- The click's own CheckButton auto-toggle is provisional — re-derive from the NATIVE
+            -- window on every branch, the ref's exact tail (BagSlotButton_OnClick l.12-20 scans
+            -- ContainerFrame1..N: SetChecked(isVisible) whether the click toggled, placed a bag,
+            -- or did nothing). Reading the WINDOW rather than what ToggleBag did is load-bearing
+            -- both ways: stock, the flag is already set when the tail runs; with an addon holding
+            -- the bags, the native stays hidden and the slot button stays unlit — the reference's
+            -- own behaviour (its scan is equally blind to addon frames).
             local frame = getglobal("BenillaBagFrame" .. button.bagId)
             button:SetChecked(frame and frame:IsShown())
         end
@@ -1717,7 +1734,13 @@
                 self.icon = getglobal("MainMenuBarBackpackButtonIconTexture")
                 if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(self) end
             </OnLoad>
-            <OnClick>BenillaBagToggle_OnClick()</OnClick>
+            <!-- The undo repairs the CheckButton widget's own pre-handler flip; from there the
+                 checked state belongs to the windows' OnShow/OnHide writes (ours and any
+                 addon's) — the stated divergence at BenillaBagToggle_OnClick's comment. -->
+            <OnClick>
+                self:SetChecked(not self:GetChecked())
+                BenillaBagToggle_OnClick()
+            </OnClick>
             <OnEnter>BenillaBagToggle_OnEnter(self)</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
         </Scripts>

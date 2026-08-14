@@ -431,17 +431,19 @@ pub(crate) struct RegionData {
     /// WoW `ADD` blend (`SetBlendMode("ADD")` / XML `alphaMode` — the shared enum `0x811aa8`).
     /// Highlight state textures default to it (the client's `SetHighlightTexture` contract).
     pub(crate) additive: bool,
-    /// Explicit region size (`SetWidth`/`SetHeight`/XML `<Size>`); `None` = derive. When the region
-    /// carries [`RegionData::anchors`], size fills the axis the anchors don't pin (the client's "0 =
-    /// derive"); with **no** anchors, a sized region draws *centered* on its owner (the common
-    /// state-texture overhang, e.g. the 64×64 quickslot ring on a 36×36 button).
+    /// Explicit region size (`SetWidth`/`SetHeight`/XML `<Size>`); `None` = derive. Size fills the
+    /// axis the anchors don't pin (the client's "0 = derive") — so under a texture's implicit
+    /// SetAllPoints (two corners pin everything) an authored size is structurally unread, which is
+    /// how the reference stack-split plate authors 256×32 and renders 172×96 (decision 1310, B180).
     pub(crate) size: Option<(f32, f32)>,
     /// Region anchors (`SetPoint`/XML `<Anchors>` on a Texture/FontString). An anchor's
     /// `relative_to` defaults to the owner frame and may name a frame or a **sibling region**
     /// (resolved via [`Model::region_names`]; the fixpoint in [`UiScript::resolve`] orders the
-    /// sibling chain). Empty ⇒ the size/centered/fill fallback in [`UiScript::extract`];
-    /// non-empty ⇒ resolved in [`UiScript::resolve`], any edge the anchors leave unset inherited
-    /// from the owner frame's rect.
+    /// sibling chain). Every drawable region carries at least one — authored, or the
+    /// creation-path implicit anchor ([`super::region::implicit_creation_anchor`], decision
+    /// 1310); empty means a templateless Lua region nobody anchored, which never resolves and
+    /// never draws. Non-empty ⇒ resolved in [`UiScript::resolve`], any edge the anchors leave
+    /// unset inherited from the owner frame's rect.
     pub(crate) anchors: Vec<Anchor>,
     /// `Texture:SetDesaturated(flag)` — the shader desaturation state (`0x79c1e0`, verified in
     /// wow-re's ledger). **Stored; the renderer does not yet honour it**, which is exactly why the

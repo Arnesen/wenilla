@@ -14,7 +14,8 @@ use super::{
 
 /// Populate `m`'s layout methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
-    // Region explicit size (drawn centered on the owner; region anchors come later).
+    // Region explicit size — fills the axes the region's anchors don't pin (unread under an
+    // implicit SetAllPoints's two corners; decision 1310).
     m.set(
         "SetWidth",
         lua.create_function(|lua, (this, w): (Table, f32)| {
@@ -74,8 +75,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     )?;
 
     // GetLeft/GetRight/GetTop/GetBottom — the region's RESOLVED edges (y-up UI units; frame twin
-    // in object.rs). An anchored region reads its own resolved rect; an unanchored one has no
-    // rect of its own (it draws relative to its owner at extract) → nil, same as pre-resolve.
+    // in object.rs). Every drawable region carries anchors (authored or the creation-path
+    // implicit anchor, decision 1310) and reads its resolved rect; a templateless Lua region
+    // nobody anchored never resolves → nil, same as pre-resolve.
     for (name, pick) in [
         ("GetLeft", 0u8),
         ("GetRight", 1u8),

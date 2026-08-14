@@ -95,7 +95,12 @@ fn region_fontstring_unpinned_edge_collapses_until_measured() {
 }
 
 #[test]
-fn region_sized_no_anchor_centers_on_owner() {
+fn templateless_lua_region_without_anchors_never_draws() {
+    // Decision 1310 (wow-re `region-implicit-anchor.md`, VERIFIED): the creation-path implicit
+    // anchor fires from Lua CreateTexture only on a template-registry hit — a templateless region
+    // gets NOTHING, stays rect-less (the resolver has no zero-anchor fallback), and never renders,
+    // its explicit size notwithstanding. This replaced the old draws-centered-at-its-size
+    // fallback, which was refuted at the bytes (it was B180's squashed stack-split dialog).
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -105,16 +110,18 @@ fn region_sized_no_anchor_centers_on_owner() {
         f:SetSize(100, 50)
         local t = f:CreateTexture("Tex", "ARTWORK")
         t:SetTexture("Interface\\Ring")
-        t:SetSize(24, 24)                -- no anchors ⇒ centered on the owner
+        t:SetSize(24, 24)                -- no anchors, and no template ⇒ no rect, no draw
+        assert(t:GetLeft() == nil, "a rect-less region reads nil edges")
     "#,
     )
     .unwrap();
     s.resolve();
-    // center (50, 25), 24×24 → [bottom 13, left 38, top 37, right 62].
-    assert_eq!(
-        region_tex_rect(&s, "Interface\\Ring"),
-        Rect::new(13.0, 38.0, 37.0, 62.0)
-    );
+    let drawn = s.extract().iter().any(|q| {
+        matches!(&q.content,
+            QuadContent::Texture { path: Some(p), .. } if p.contains("Interface\\Ring"))
+            && q.rect.is_some()
+    });
+    assert!(!drawn, "a templateless anchor-less region must not draw");
 }
 
 #[test]

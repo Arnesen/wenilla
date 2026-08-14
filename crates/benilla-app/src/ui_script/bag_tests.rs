@@ -73,7 +73,8 @@ fn bag_bar_icons_draw_above_the_action_bar_art() {
 /// The backpack open/close kits (ContainerFrame.lua ContainerFrame_OnShow/OnHide, l.140 / l.120):
 /// showing the window queues igBackPackOpen, hiding it queues igBackPackClose — and nothing queues
 /// at load (the frame is authored hidden="true", so it never transitions on startup). Driven through
-/// `BenillaBagToggle_OnClick`, the exact path both the bag button and the 'B' binding use.
+/// `BenillaBagToggle_OnClick` — the toggle body the bag button's click wrapper calls (the 'B'
+/// binding runs the bare `ToggleBackpack()`, the same one hop deeper).
 #[test]
 fn backpack_toggle_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
@@ -1002,6 +1003,60 @@ fn shift_click_on_a_stack_opens_the_split_frame() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// B180 — the split dialog's parchment plate fills the whole 172×96 frame. The reference authors
+/// the plate 256×32 with NO anchors, a vestigial size the real client never renders (the TexCoords
+/// crop exactly 172×96 out of the 256×128 art — the frame's own size, a complete panel drawn 1:1
+/// over it). Our sized-anchor-less fallback draws CENTERED at the authored size instead, which
+/// squashed the dialog to a 32-tall bar: the count and arrows floated above it and Okay/Cancel
+/// straddled its bottom edge. The plate's authored size is dropped (StackSplit.xml says why); this
+/// pins the render so the vestigial size cannot come back.
+#[test]
+fn the_split_frame_plate_fills_the_dialog() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let (x, y) = open_backpack_with_a_five_stack(&mut s);
+
+    s.set_modifiers(true, false, false);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    s.set_modifiers(false, false, false);
+    s.resolve();
+
+    let (left, right, top, bottom) = s
+        .eval::<(f64, f64, f64, f64)>(
+            "return StackSplitFrame:GetLeft(), StackSplitFrame:GetRight(), \
+                    StackSplitFrame:GetTop(), StackSplitFrame:GetBottom()",
+        )
+        .unwrap();
+    assert!(
+        (right - left - 172.0).abs() < 0.5 && (top - bottom - 96.0).abs() < 0.5,
+        "the dialog frame is 172×96, got {}×{}",
+        right - left,
+        top - bottom
+    );
+    let plate = s
+        .extract()
+        .into_iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("UI-MoneyFrame"))
+        })
+        .expect("the plate is on screen");
+    let r = plate.rect.expect("the plate has a rect");
+    for (edge, got, want) in [
+        ("left", r.left, left as f32),
+        ("right", r.right, right as f32),
+        ("top", r.top, top as f32),
+        ("bottom", r.bottom, bottom as f32),
+    ] {
+        assert!(
+            (got - want).abs() < 0.5,
+            "plate {edge} = {got}, frame {edge} = {want} — the plate must fill the dialog"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Okay in the split spinner only picks the split carry up (ref/cursor.rs `SplitContainerItem` —
 /// a pickup, not a self-contained move); a SUBSEQUENT placement is what actually queues the
 /// `ContainerMove` with `count: Some(n)`, drained the same way any other container move is.
@@ -1833,4 +1888,74 @@ fn the_bag_slots_carry_the_references_names_and_icon_names() {
             .unwrap(),
         "Bagnon captures this OnClick to replace the bag behaviour"
     );
+}
+
+/// The backpack button's checked law after the stated divergence (BenillaBagToggle_OnClick's
+/// comment): checked belongs to the WINDOWS' OnShow/OnHide writes, and the button's XML click
+/// wrapper only undoes the CheckButton widget's pre-handler flip. The killer case is the click
+/// that never touches the backpack window — backpack shut, another bag's window open →
+/// ToggleBackpack sees an open window and CLOSES ALL; the backpack never transitions, nothing
+/// writes its button, and only the wrapper's undo keeps the widget flip from leaving it
+/// lit-while-shut (the job the ref's native-window scan tail used to do).
+#[test]
+fn a_close_others_click_leaves_the_backpack_button_dark() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "MerchantFrame.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "BagFrame.xml",
+    ] {
+        load_xml(&s, file);
+    }
+    s.set_money(0);
+    s.set_container(
+        1,
+        Some(benilla_ui::script::ContainerState {
+            name: Some("Pouch".into()),
+            num_slots: 6,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
+    let checked = |s: &mut UiScript| {
+        s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
+            .unwrap()
+    };
+    // Bag 1's window alone is open; the backpack window and its button are dark.
+    s.run("ToggleBag(1)").unwrap();
+    assert!(!s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(!checked(&mut s));
+
+    // A REAL click on the backpack button (the widget flip fires only on real input): close-all.
+    s.resolve();
+    let r: Vec<f32> = s
+        .eval(
+            "local f = MainMenuBarBackpackButton \
+             return { f:GetLeft() + f:GetWidth() / 2, f:GetBottom() + f:GetHeight() / 2 }",
+        )
+        .unwrap();
+    s.mouse_move(r[0], r[1]);
+    s.mouse_button(r[0], r[1], "LeftButton", true);
+    s.mouse_button(r[0], r[1], "LeftButton", false);
+    assert!(
+        !s.eval::<bool>("return BenillaBagFrame1:IsShown()").unwrap(),
+        "the click closes the other bag's window (ToggleBackpack's close-all arm)"
+    );
+    assert!(
+        !checked(&mut s),
+        "no backpack transition happened, so the button must stay dark — the widget flip undone"
+    );
+
+    // The second real click opens the backpack (plus the equipped bag): its OnShow writes the light.
+    s.mouse_button(r[0], r[1], "LeftButton", true);
+    s.mouse_button(r[0], r[1], "LeftButton", false);
+    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+    assert!(
+        checked(&mut s),
+        "open ⇒ lit, written by the window's OnShow"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

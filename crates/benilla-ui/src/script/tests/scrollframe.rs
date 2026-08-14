@@ -88,6 +88,7 @@ fn scroll_child_top_tracks_vertical_scroll_and_clamps_then_restores_on_clear() {
         child:SetSize(300, 600)
         local marker = child:CreateTexture(nil, "ARTWORK")
         marker:SetTexture("marker:child")
+        marker:SetAllPoints()  -- templateless Lua regions carry no implicit anchor (decision 1310)
 
         frame:SetScrollChild(child)
     "#,

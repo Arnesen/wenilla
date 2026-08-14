@@ -287,11 +287,16 @@ impl UiScript {
                     if let Some(c) = state_color {
                         data.vertex_color = Some(c);
                     }
-                    // Region-rect precedence (decision 0068 v1): anchored regions resolved in
-                    // [`resolve`] → their owner-relative rect; else an explicitly-sized region draws
-                    // *centered* on its owner (the state-texture overhang); else it fills the owner
-                    // (`rect` already = owner). The bar-fill region keeps its fraction geometry.
-                    // The fill CROPS its texture (wow-re `nameplate-vkey.md`, VERIFIED): every
+                    // A region draws at its RESOLVED rect, and nothing else (decision 1310,
+                    // superseding 0068 v1's centered/fill-the-owner fallbacks): every drawable
+                    // region carries real anchors — authored, or the creation-path implicit anchor
+                    // (`region::implicit_creation_anchor`) — and the real resolver has no
+                    // zero-anchor fallback (a failed resolve latches unresolvable, `0x768d55`). A
+                    // region with no rect here is a templateless Lua region nobody anchored, and
+                    // the reference draws it nowhere. The bar-fill/thumb regions keep their own
+                    // fraction geometry (computed off the owner rect above) — they never carry
+                    // anchors and skip the resolver entirely, like the reference's own bar path.
+                    // The bar-fill CROPS its texture (wow-re `nameplate-vkey.md`, VERIFIED): every
                     // `SetValue` rewrites the region's 4-corner UV block with `u1 = fraction` and
                     // recomputes the quad as `right = left + frac·width`. So the art is sliced, never
                     // squeezed — a bar texture with a horizontal ramp (`UI-StatusBar` brightens 124→166
@@ -300,17 +305,7 @@ impl UiScript {
                         data.tex_coords = Some(bar_fill_uv(data.tex_coords, sb));
                     }
                     if bar_fill.is_none() && !thumb_fill {
-                        if let Some(rr) = model.region_resolved.get(&rh) {
-                            rect = Some(*rr);
-                        } else if let (Some((w, h)), Some(r)) = (data.size, rect) {
-                            let (cx, cy) = ((r.left + r.right) * 0.5, (r.bottom + r.top) * 0.5);
-                            rect = Some(Rect::new(
-                                cy - h * 0.5,
-                                cx - w * 0.5,
-                                cy + h * 0.5,
-                                cx + w * 0.5,
-                            ));
-                        }
+                        rect = model.region_resolved.get(&rh).copied();
                     }
                     let is_text = matches!(
                         region.map(|r| r.kind),

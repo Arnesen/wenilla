@@ -173,6 +173,14 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
                 },
             );
             model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
+                                  // A freshly built slot region gets the creation-path implicit anchor (decision 1310):
+                                  // the reference's C++ string setters SetAllPoints a fresh state texture outright
+                                  // (`0x778f9d`/`0x7790db` — fresh means zero anchors, so the conditional form is
+                                  // equivalent), and ButtonText creation runs the FontString post-step (`0x778b96` →
+                                  // `0x771480`), which seats a fresh label CENTER. The XML loader re-derives after
+                                  // applying authored `<Anchors>` (see `loader/widgets.rs`); an EXISTING slot region is
+                                  // never touched here — the get half of get-or-create changes no geometry.
+            super::region::implicit_creation_anchor(&mut model, rh);
             if let Some(frame) = model.arena.frame_mut(h) {
                 if let KindState::Button(bs) = &mut frame.kind_state {
                     slot.set(bs, rh);

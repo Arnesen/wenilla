@@ -559,10 +559,16 @@ pub(crate) static SPECS: &[Spec] = &[
     // 1.12 splits TOGGLEBACKPACK (B, F12) from OPENALLBAGS (SHIFT-B); benilla's one bag knob is
     // the open-all toggle that already lived on B — so OPENALLBAGS ships with both defaults
     // (recorded divergence, 0997).
+    //
+    // The body is the bare GLOBAL, exactly the ref's own Bindings.xml (`ToggleBackpack();`) —
+    // NOT the backpack button's OnClick handler it used to run: the handler carries the button's
+    // checked bookkeeping, and routing the key through it dragged that onto a path the reference
+    // keeps clean (with a bag addon holding `ToggleBackpack`, the key press is the path that
+    // lights the backpack button on the real client — the addon's OnShow write is the last word).
     spec!(
         "OPENALLBAGS",
         INTERFACE,
-        Kind::Edge("BenillaBagToggle_OnClick()"),
+        Kind::Edge("ToggleBackpack()"),
         Some("B"),
         Some("SHIFT-B")
     ),

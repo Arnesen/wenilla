@@ -15,17 +15,22 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
         local parent = CreateFrame("Frame", "Root")
         parent:SetPoint("TOPLEFT", 0, 0)          -- anchored to the screen root
         parent:SetSize(400, 300)
+        -- SetAllPoints on each region: a templateless Lua region gets NO implicit anchor
+        -- (decision 1310 — rect-less, never drawn), so real addon code anchors it, and so do we.
         local pbg = parent:CreateTexture(nil, "BACKGROUND")
         pbg:SetTexture("Interface\\Parent.blp")
+        pbg:SetAllPoints()
 
         local child = CreateFrame("Frame", "Leaf", parent)
         child:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -10)
         child:SetSize(100, 50)
         local cbg = child:CreateTexture(nil, "ARTWORK")
         cbg:SetTexture("Interface\\Child.blp")
+        cbg:SetAllPoints()
         local ctext = child:CreateFontString(nil, "OVERLAY")
         ctext:SetText("Hello")
         ctext:SetVertexColor(1, 0, 0, 1)
+        ctext:SetAllPoints()
     "#,
     )
     .unwrap();
@@ -52,7 +57,7 @@ fn end_to_end_two_frame_tree_extracts_in_zkey_order() {
         ]
     );
 
-    // Region rects are their owner frame's resolved rect (v1). Parent → Rect(300,0,600,400);
+    // SetAllPoints resolves each region to its owner frame's rect. Parent → Rect(300,0,600,400);
     // child (TOPLEFT+10,-10 of parent, 100×50) → Rect(540,10,590,110).
     let child_text = quads
         .iter()

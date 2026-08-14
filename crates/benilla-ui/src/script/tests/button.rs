@@ -332,7 +332,7 @@ fn down_registration_fires_on_press_and_toggles_checked_once() {
 }
 
 #[test]
-fn highlight_is_additive_and_sized_regions_center() {
+fn highlight_is_additive_and_state_textures_fill_then_anchor() {
     let mut s = script();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -360,8 +360,34 @@ fn highlight_is_additive_and_sized_regions_center() {
         &find("Interface\\Hi.blp").content,
         QuadContent::Texture { additive: true, .. }
     ));
-    // The sized ring centers on the 36px button: 100..136 → 64px box at 86..150.
+    // A fresh state texture gets the creation-path implicit SetAllPoints (decision 1310 — the
+    // reference's string setters anchor a freshly built texture to the button outright), whose
+    // two corners pin all four edges: the later SetSize(64) is structurally unread and the ring
+    // FILLS the 36px button.
     let r = find("Interface\\Ring.blp").rect.unwrap();
+    assert_eq!(
+        (r.left, r.right, r.bottom, r.top),
+        (100.0, 136.0, 100.0, 136.0)
+    );
+    // The real quickslot-overhang idiom is an ANCHOR, not an anchorless size (ActionButton's
+    // 66×66 UI-Quickslot2 authors `<Anchor point="CENTER">`): one CENTER point replaces only its
+    // own slot, but clearing first leaves the single anchor + the 64px size → the centered
+    // overhang, 100..136 → 86..150.
+    s.run(
+        r#"
+        local n = AddBtn:GetNormalTexture()
+        n:ClearAllPoints()
+        n:SetPoint("CENTER", AddBtn, "CENTER", 0, 0)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let quads = s.extract();
+    let ring = quads
+        .iter()
+        .find(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == "Interface\\Ring.blp"))
+        .unwrap();
+    let r = ring.rect.unwrap();
     assert_eq!(
         (r.left, r.right, r.bottom, r.top),
         (86.0, 150.0, 86.0, 150.0)

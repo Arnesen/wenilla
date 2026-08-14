@@ -110,7 +110,20 @@ impl Loader<'_> {
                     if let Some(mode) = t.attr("alphaMode") {
                         this.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
                     }
+                    // The setter above MATERIALIZED the region with the runtime path's implicit
+                    // SetAllPoints (decision 1310) — but this is the XML path, where the real
+                    // engine routes state textures through the region adder (`0x778903`…: authored
+                    // `<Anchors>` first, the implicit step after). Reproduce that order: clear,
+                    // apply the authored layout, then re-run the conditional step — a same-point
+                    // SetPoint over a live implicit corner would otherwise leave the OTHER corner
+                    // standing (the slot law) and weld an anchored state texture to the button.
+                    this.call_region(&region, "ClearAllPoints", (), dbg);
                     this.apply_region_layout(t, &region, self_name, dbg);
+                    if let Err(e) = crate::script::implicit_creation_anchor_lua(this.lua, &region) {
+                        this.report
+                            .errors
+                            .push(format!("{dbg}: implicit anchor: {e}"));
+                    }
                     if let Some(tc) = tex_coords_of(t) {
                         this.call_region(&region, "SetTexCoord", tc, dbg);
                     }
@@ -155,7 +168,18 @@ impl Loader<'_> {
             };
             self.call(wrapper, "SetText", label, dbg);
             if let Ok(region) = wrapper.call_method::<Table>("GetFontString", ()) {
+                // Same clear→layout→implicit order as the state textures above (decision 1310):
+                // SetText materialized the label with the runtime path's implicit CENTER anchor;
+                // the XML path re-derives it AFTER the element's own `<Anchors>`/justify apply
+                // (so a `<ButtonText justifyH="LEFT">` with no anchors seats LEFT, as the real
+                // FontString post-step `0x771480` would).
+                self.call_region(&region, "ClearAllPoints", (), dbg);
                 self.apply_region_layout(bt, &region, self_name, dbg);
+                if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region) {
+                    self.report
+                        .errors
+                        .push(format!("{dbg}: implicit anchor: {e}"));
+                }
                 // Publish the label under its resolved name (`<ButtonText name="$parentText">`) —
                 // the ref kit addresses tab/button labels by exactly this global
                 // (PanelTemplates_TabResize's `getglobal(tabName.."Text")`).

@@ -532,6 +532,71 @@ pub(super) fn region_owner_id(model: &mut Model, rh: RegionHandle) -> u32 {
     }
 }
 
+/// The client's **creation-path implicit anchor** (wow-re `system/ui/scratch/`
+/// `region-implicit-anchor.md`, §5 VERIFIED; decision 1310): a per-region-type post-step the real
+/// engine runs immediately after a region's LoadXML returns (`0x7701c0` texture / `0x771480`
+/// fontstring — the same two fire from the Button state-texture and ButtonText paths, and from Lua
+/// `CreateTexture`/`CreateFontString` only on a template-registry hit). Condition: the region has a
+/// parent AND every one of its nine anchor slots is empty — any anchor from any source suppresses
+/// it. Then:
+///
+/// - a **Texture** gets `SetAllPoints(parent)` — two corner anchors, TOPLEFT→TOPLEFT and
+///   BOTTOMRIGHT→BOTTOMRIGHT at (0,0). Two opposing corners pin all four edges, so an authored
+///   `<Size>` is **structurally unread** (the resolver law) — which is why the reference's
+///   stack-split plate authors a vestigial 256×32 and renders 172×96 (B180).
+/// - a **FontString** gets ONE middle-row `SetPoint` chosen by its live justify word
+///   (`[this+0x120] & 7`: 1 → LEFT→LEFT, 4 → RIGHT→RIGHT, else CENTER→CENTER, offsets (0,0)) —
+///   and its `<Size>` stays live (single anchor + W/H sizes the opposite edges).
+///   [`RegionData::justify`] *is* that word — `SetJustifyH` writes it and a font-object link
+///   merges into it behind the explicit mask — so reading it here is reading `+0x120`.
+/// - a **Title region** gets nothing (verified negative), and a templateless Lua region is never
+///   routed here at all: it stays rect-less and does not render.
+///
+/// These are ordinary anchors once installed: a later same-point `SetPoint` replaces only its own
+/// slot and the other implicit corner survives (verified) — callers that re-apply authored anchors
+/// over a materialized region must `ClearAllPoints` first, exactly as the reference's XML path
+/// avoids the mix by running this step *after* `<Anchors>` load.
+pub(crate) fn implicit_creation_anchor(model: &mut Model, rh: RegionHandle) {
+    let Some((kind, owner)) = model.arena.region(rh).map(|r| (r.kind, r.owner)) else {
+        return;
+    };
+    let owner_id = model.frame_id(owner);
+    let data = model.region_data.entry(rh).or_default();
+    if !data.anchors.is_empty() {
+        return;
+    }
+    use crate::layout::Point;
+    match kind {
+        RegionKind::Texture => {
+            data.anchors = vec![
+                Anchor::new(Point::TopLeft, owner_id, Point::TopLeft, 0.0, 0.0),
+                Anchor::new(Point::BottomRight, owner_id, Point::BottomRight, 0.0, 0.0),
+            ];
+        }
+        RegionKind::FontString => {
+            // The exact byte compare chain: `& 7` then equality against LEFT (1) and RIGHT (4) —
+            // every other value, the CENTER bit and the cleared axis included, falls to CENTER.
+            let point = match data.justify.0 & crate::justify::H_MASK {
+                0x01 => Point::Left,
+                0x04 => Point::Right,
+                _ => Point::Center,
+            };
+            data.anchors = vec![Anchor::new(point, owner_id, point, 0.0, 0.0)];
+        }
+        RegionKind::Title => return,
+    }
+    model.touch_layout();
+}
+
+/// [`implicit_creation_anchor`] behind a wrapper table — the loader-facing form (the loader holds
+/// region wrappers, not handles), same seam as [`apply_font_parts`].
+pub(crate) fn implicit_creation_anchor_lua(lua: &Lua, wrapper: &Table) -> mlua::Result<()> {
+    let rh = region_handle_of(lua, wrapper)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    implicit_creation_anchor(&mut model, rh);
+    Ok(())
+}
+
 /// Resolve a `SetPoint`/`SetAllPoints` `relativeTo` argument (a frame/region wrapper table, a frame
 /// name, or nil) to a layout id, defaulting to `owner` when absent/unresolved.
 pub(super) fn resolve_target(model: &mut Model, target: &Value, owner: u32) -> u32 {

@@ -161,7 +161,14 @@
         </Anchors>
         <Layers>
             <Layer level="BACKGROUND">
-                <!-- ref l.9-15: the parchment plate, 256×32, TexCoords 0-0.671875 / 0-0.75. -->
+                <!-- ref l.9-15 verbatim: the plate, authored 256×32 with NO anchors. The size is
+                     VESTIGIAL and stays that way by the byte-verified law (decision 1310): an
+                     anchor-less region gets the creation-path implicit SetAllPoints(parent), whose
+                     two corners pin all four edges and leave the authored size unread — the
+                     TexCoords crop exactly 172×96 out of the 256×128 art, the frame's own size,
+                     drawn 1:1 filling the dialog. 1308 dropped this size to dodge the old centered
+                     fallback (B180's squashed bar); with the fallback corrected the ref's own text
+                     is back, and the bag test pins the render either way. -->
                 <Texture file="Interface\MoneyFrame\UI-MoneyFrame">
                     <Size><AbsDimension x="256" y="32"/></Size>
                     <TexCoords left="0" right="0.671875" top="0" bottom="0.75"/>

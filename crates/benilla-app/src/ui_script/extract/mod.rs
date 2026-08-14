@@ -826,6 +826,7 @@ mod clip_plumb_tests {
             frame:SetScrollChild(child)
             local marker = child:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)          -- pathless colored quad: no BLP asset needed
+            marker:SetAllPoints()               -- templateless Lua region: no implicit anchor (1310)
         "#,
             )
             .unwrap();
@@ -911,6 +912,7 @@ mod clip_plumb_tests {
             plain:SetSize(50, 50)
             local m = plain:CreateTexture(nil, "ARTWORK")
             m:SetTexture(0, 1, 0)
+            m:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
         "#,
             )
             .unwrap();
@@ -970,6 +972,7 @@ mod extract_gate_tests {
             plain:SetSize(50, 50)
             marker = plain:CreateTexture(nil, "ARTWORK")
             marker:SetTexture(1, 0, 0)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
         "#,
             )
             .unwrap();

@@ -583,6 +583,132 @@ mod loader_tests {
         );
     }
 
+    /// The creation-path implicit anchor, XML half (decision 1310; wow-re
+    /// `region-implicit-anchor.md`, §5 VERIFIED): a `<Texture>` with zero anchors gets
+    /// SetAllPoints(parent) right after its LoadXML — two corner anchors that pin all four
+    /// edges, so an authored `<Size>` is structurally unread. This is B180's engine shape: the
+    /// reference stack-split plate authors a vestigial 256×32 and renders 172×96, the frame.
+    #[test]
+    fn sized_anchorless_layer_texture_fills_its_frame() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Plate">
+                    <Size><AbsDimension x="172" y="96"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="10" y="10"/></Offset></Anchor>
+                    </Anchors>
+                    <Layers><Layer level="BACKGROUND">
+                        <Texture file="Interface\Panel">
+                            <Size><AbsDimension x="256" y="32"/></Size>
+                        </Texture>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+        let plate = s
+            .extract()
+            .into_iter()
+            .find(|q| {
+                matches!(&q.content,
+                    QuadContent::Texture { path: Some(p), .. } if p == "Interface\\Panel")
+            })
+            .expect("the plate draws");
+        let r = plate.rect.expect("the plate resolved");
+        assert_eq!(
+            (r.left, r.right, r.bottom, r.top),
+            (10.0, 182.0, 10.0, 106.0),
+            "implicit SetAllPoints fills the 172×96 frame; the 256×32 size is unread"
+        );
+    }
+
+    /// The FontString half of the same law: zero anchors ⇒ ONE middle-row SetPoint chosen by the
+    /// live justify word (`&7`: 1→LEFT, 4→RIGHT, else CENTER) — and the authored `<Size>` stays
+    /// LIVE (single anchor + W/H sizes the opposite edges), unlike the texture's.
+    #[test]
+    fn anchorless_fontstring_seats_at_its_justify_point() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Page">
+                    <Size><AbsDimension x="200" y="100"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <Layers><Layer level="ARTWORK">
+                        <FontString name="SeatLeft" justifyH="LEFT" text="body">
+                            <Size><AbsDimension x="80" y="20"/></Size>
+                        </FontString>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+        // LEFT→LEFT at (0,0): left edge at the page's left, vertically on the page's centerline
+        // (middle-row point), 80×20 from the size. Page [0,0]..[200,100] → [0,40]..[80,60].
+        let (l, r, t, b) = s
+            .eval::<(f64, f64, f64, f64)>(
+                "return SeatLeft:GetLeft(), SeatLeft:GetRight(), SeatLeft:GetTop(), SeatLeft:GetBottom()",
+            )
+            .unwrap();
+        assert_eq!(
+            (l, r, b, t),
+            (0.0, 80.0, 40.0, 60.0),
+            "justifyH=LEFT seats the implicit single anchor at the page's LEFT, size live"
+        );
+    }
+
+    /// The XML state-texture ordering (decision 1310's loader half): an authored `<Anchors>` on a
+    /// `<NormalTexture>` wins outright — the materializing setter's implicit SetAllPoints is
+    /// cleared before the authored layout applies, so no implicit corner survives to weld the
+    /// region to the button (the merchant row's icon-scoped highlight is the live consumer).
+    #[test]
+    fn anchored_state_texture_keeps_its_authored_anchors() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="ScopedBtn">
+                    <Size><AbsDimension x="36" y="36"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="100" y="100"/></Offset></Anchor>
+                    </Anchors>
+                    <NormalTexture file="Interface\Scoped">
+                        <Size><AbsDimension x="24" y="24"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="-2"/></Offset></Anchor>
+                        </Anchors>
+                    </NormalTexture>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+        let scoped = s
+            .extract()
+            .into_iter()
+            .find(|q| {
+                matches!(&q.content,
+                    QuadContent::Texture { path: Some(p), .. } if p == "Interface\\Scoped")
+            })
+            .expect("the state texture draws");
+        let r = scoped.rect.expect("resolved");
+        // Button [100,100]..[136,136]; TOPLEFT+2,-2 with 24×24 → [102,110]..[126,134].
+        assert_eq!(
+            (r.left, r.right, r.bottom, r.top),
+            (102.0, 126.0, 110.0, 134.0),
+            "authored anchors + size hold; no implicit corner welds it to the button"
+        );
+    }
+
     #[test]
     fn button_xml_extras_apply() {
         let mut s = UiScript::new().unwrap();

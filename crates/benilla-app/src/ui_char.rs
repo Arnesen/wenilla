@@ -121,16 +121,25 @@ impl Plugin for UiCharPlugin {
 /// `None` = nothing announced yet.
 type SkillBlock = Option<(u64, std::collections::HashMap<u16, u16>)>;
 
-/// The client-generated skill-up feedback (decision 0437, landed with phase 2): the server sends
-/// NO skill-up message at all — skills mutate only as `PLAYER_SKILL_INFO` descriptor deltas
-/// (verified at the vmangos source: no chat send anywhere in `UpdateSkill*`/`SetSkill`) — so the
-/// client diff-watches its own skill block, prints the byte-exact 1.12 line
-/// (`SKILL_RANK_UP`, GlobalStrings.lua:3485: "Your skill in %s has increased to %d.") on the
-/// Skill chat channel, and fires `SKILL_LINES_CHANGED` on ANY block change (the skills pane's
-/// repaint event). The login fill (empty → populated) and a character switch (self guid change)
-/// re-seed silently — the event fires, the lines don't. INTERIM (pinned to the in-flight wow-re
-/// §5, 0437 TU-E): no `SKILL_FLAG_NO_SKILLUP_MESSAGE` gate yet, and the exact chat channel of the
-/// real emitter is unconfirmed (Skill is the `ChatTypeInfo` family's own key for it).
+/// The client-generated skill-up feedback (decision 0437, landed with phase 2; gate corrected by
+/// 1309): the server sends NO skill-up message at all — skills mutate only as
+/// `PLAYER_SKILL_INFO` descriptor deltas (verified at the vmangos source: no chat send anywhere
+/// in `UpdateSkill*`/`SetSkill`) — so the client diff-watches its own skill block exactly as the
+/// real one does (the rank-field UpdateField watcher `0x5de180` → message facility `0x496720`,
+/// tokens `ERR_SKILL_UP_SI` / `ERR_SKILL_GAINED_S` — wow-re tradeskill TU-E, correcting 0437's
+/// "SKILL_RANK_UP" token guess), prints the GlobalStrings lines on the Skill chat channel, and
+/// fires `SKILL_LINES_CHANGED` on ANY block change (the skills pane's repaint event; TU-E: the
+/// real client fires it from a separate skill-manager TU on add/remove only — ours riding the
+/// same watcher is a benign coarsening, the pane just repaints). **The message gate** (B19/B245,
+/// decisions 1309/1314): both lines are skipped when the line's `SkillRaceClassInfo.flags`
+/// carries `0x402` (`SkillRaceClass::skill_up_silent`) — the class spec lines, racials,
+/// `GENERIC (DND)`, `Dual Wield` and the mount lines — **or when no row admits this race/class
+/// at all** (the resolve's own empty branch, `0x5de352`) — which is why a real 1.12 ding
+/// announces no skill at all (the level-up movers are all flagged) while weapon/profession
+/// skill-ups still print. The
+/// login fill (empty → populated) and a character switch (self guid change) re-seed silently —
+/// the event fires, the lines don't. Still open: the exact chat channel of the real emitter
+/// (TU-E left `0x496720`'s routing untraced; Skill is the `ChatTypeInfo` family's own key).
 fn watch_skill_ups(
     script: Option<NonSendMut<UiScript>>,
     self_guid: Res<crate::net::SelfGuid>,
@@ -176,21 +185,42 @@ fn watch_skill_ups(
             if *prev_map == cur {
                 return;
             }
+            // The 0x402 message gate resolves through the player's own race/class row, the same
+            // lookup the pane's display law makes ([`skills_row`]).
+            let (race, class) = (
+                store.0.unit_race().unwrap_or(0),
+                store.0.unit_class().unwrap_or(0),
+            );
             for (&id, &value) in &cur {
+                let line_id = u32::from(id);
                 let name = || {
                     skill_lines
                         .as_ref()
-                        .and_then(|s| s.catalog.line(u32::from(id)))
+                        .and_then(|s| s.catalog.line(line_id))
                         .map(|l| l.name.clone())
+                };
+                // The fn doc's message gate; `false` with no catalog (nothing to name it by
+                // either — the line stays silent, as before the catalog loads).
+                let announces = || {
+                    skill_lines
+                        .as_ref()
+                        .is_some_and(|s| s.catalog.announces_skill_ups(line_id, race, class))
                 };
                 match prev_map.get(&id) {
                     // A rank-up: the ERR_SKILL_UP_SI line (GlobalStrings.lua:1838).
                     Some(&old) if value > old => {
                         if let Some(name) = name() {
-                            chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                                crate::ui_chat::ChatEventKind::Skill,
-                                format!("Your skill in {name} has increased to {value}."),
-                            ));
+                            // Both verdicts are logged — the retest's instrument: a moved line
+                            // either announces or names the gate that held it.
+                            if announces() {
+                                debug!("chat: skill-up announced ({name} {old}→{value})");
+                                chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                                    crate::ui_chat::ChatEventKind::Skill,
+                                    format!("Your skill in {name} has increased to {value}."),
+                                ));
+                            } else {
+                                debug!("chat: skill-up silenced ({name} {old}→{value}, the 0x402 gate)");
+                            }
                         }
                     }
                     // A NEW line: the ERR_SKILL_GAINED_S line (GlobalStrings.lua:1837) — the
@@ -198,10 +228,17 @@ fn watch_skill_ups(
                     // both, first-gain vs rank-up).
                     None => {
                         if let Some(name) = name() {
-                            chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                                crate::ui_chat::ChatEventKind::Skill,
-                                format!("You have gained the {name} skill."),
-                            ));
+                            if announces() {
+                                debug!("chat: skill-gain announced ({name} at {value})");
+                                chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                                    crate::ui_chat::ChatEventKind::Skill,
+                                    format!("You have gained the {name} skill."),
+                                ));
+                            } else {
+                                debug!(
+                                    "chat: skill-gain silenced ({name} at {value}, the 0x402 gate)"
+                                );
+                            }
                         }
                     }
                     _ => {}

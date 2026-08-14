@@ -1391,3 +1391,158 @@ fn bagnon_forevers_records_survive_the_logout_boundary() {
     );
     assert_eq!(item, "4496", "the logout boundary must not erase the slot");
 }
+
+/// **Bug 6 — the director's "smaller bags open their own little bags".** Bagnon's whole
+/// interception model is the global override (`Bagnon_Core/core/Overrides.lua`: `ToggleBag = …`)
+/// plus a `SetScript("OnClick")` wrap on our bar buttons whose replacement calls the ORIGINAL
+/// handler back for a plain click. Both layers end at whatever the original OnClick does — and
+/// ours toggled `BenillaBagFrame<N>` directly instead of calling `ToggleBag`, so every slot-button
+/// click walked straight past both of Bagnon's hooks and opened the native window (the backpack
+/// button was fixed in an earlier pass; the four slots were not). The ref's own
+/// `BagSlotButton_OnClick` (MainMenuBarBagButtons.lua l.3-21) calls the GLOBAL `ToggleBag`, and
+/// its checked tail scans only the NATIVE ContainerFrames — so with Bagnon holding the bags a
+/// slot click toggles Bagnon's one window and the slot button stays unlit. Both halves pinned
+/// here with a real mouse click, an equipped bag in slot 2, and Bagnon fully hooked.
+#[test]
+fn a_bag_slot_click_toggles_bagnon_not_the_native_window() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon(&root);
+
+    // An equipped bag behind CharacterBag1Slot (bagId 2): the inventory surface (the bag ITEM in
+    // inv slot 21) and its container — both fed before any click, the schedule's own order.
+    let mut inv: benilla_ui::script::InventorySlots = Default::default();
+    inv[21] = Some(benilla_ui::script::InvSlotView {
+        item_id: 4497,
+        count: 1,
+        quality: 1,
+        name: Some("Small Green Pouch".into()),
+        link: Some("|cffffffff|Hitem:4497:0:0:0|h[Small Green Pouch]|h|r".into()),
+        icon: Some("Interface\\Icons\\INV_Misc_Bag_10_Green".into()),
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.set_container(
+        2,
+        Some(ContainerState {
+            name: Some("Small Green Pouch".into()),
+            num_slots: 6,
+            slots: Default::default(),
+        }),
+    );
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(2)]);
+    s.resolve();
+
+    // Bagnon is open (the fixture); a REAL click on the slot button must CLOSE Bagnon — the
+    // toggle routed through the override — and must never show the native window.
+    // Both interception layers must be live, and the click exercises both: the SetScript wrap
+    // (Bagnon.lua's Bagnon_AddBagHooks — its replacement calls our CAPTURED original back with
+    // no args, so `self` inside the XML wrapper must still resolve on the re-entrant call) and
+    // the global ToggleBag override the original then reaches.
+    assert!(
+        s.eval::<bool>("return CharacterBag1Slot:GetScript('OnClick') == BagnonBlizBag_OnClick")
+            .unwrap_or(false),
+        "Bagnon's SetScript OnClick wrap must be in place on the slot button"
+    );
+    let (x, y) = centre_of(&mut s, "CharacterBag1Slot");
+    s.mouse_move(x, y);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(
+        !s.eval::<bool>("return Bagnon:IsVisible() or false")
+            .unwrap(),
+        "the slot click must reach Bagnon's ToggleBag override and close its window"
+    );
+    assert!(
+        !s.eval::<bool>("return BenillaBagFrame2:IsVisible() or false")
+            .unwrap(),
+        "the native bag window must NOT open — the click belongs to the addon's override"
+    );
+
+    // Click again: Bagnon back open, native still shut, and the slot button unlit — the ref's
+    // checked tail reads only the native window (its ContainerFrame scan), which Bagnon never
+    // shows.
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    for _ in 0..2 {
+        s.tick(0.1);
+    }
+    assert!(
+        s.eval::<bool>("return Bagnon:IsVisible() or false")
+            .unwrap(),
+        "the second click re-opens Bagnon through the same override"
+    );
+    assert!(
+        !s.eval::<bool>("return BenillaBagFrame2:IsVisible() or false")
+            .unwrap(),
+        "the native window stays shut on the re-open too"
+    );
+    assert!(
+        !s.eval::<bool>("return CharacterBag1Slot:GetChecked() and true or false")
+            .unwrap(),
+        "the slot button stays unlit with an addon holding the bags (the ref scan is native-only)"
+    );
+    let raised = s.errors();
+    let unexplained: Vec<&String> = raised
+        .iter()
+        .filter(|e| !e.contains("PutItemIn") && !e.contains("PickupBagFromSlot"))
+        .collect();
+    assert!(
+        unexplained.is_empty(),
+        "the click round-trip raised: {unexplained:#?}"
+    );
+}
+
+/// **Bug 7 — the director's unlit backpack button.** Bagnon lights `MainMenuBarBackpackButton`
+/// from its window's OnShow/OnHide (`Bagnon.lua:33/39` — `SetChecked(1/0)`), and OnShow dispatch
+/// is synchronous (wow-re `onshow-onhide-dispatch-order.md`), so whoever writes checked AFTER the
+/// toggle wins. Two of our seats overwrote it: the button's old click tail re-derived checked
+/// from the NATIVE backpack window (the ref's own scan — which leaves the button unlit on the
+/// real client's click path too, a ref wart our stated divergence closes), and the `B` binding
+/// ran the BUTTON handler instead of the ref's bare `ToggleBackpack()` body, dragging that tail
+/// onto the one path the real client lights. Now: a real click on the button ends lit while
+/// Bagnon's window is open and unlit when it closes, and the bare-global path (the binding's
+/// body) does the same.
+#[test]
+fn the_backpack_button_lights_while_bagnon_holds_the_bags() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon(&root);
+
+    // The fixture opened Bagnon through the bare global (the binding's own body): OnShow's
+    // SetChecked(1) must be standing — nothing runs after it on that path.
+    assert!(
+        s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
+            .unwrap(),
+        "the bare ToggleBackpack() path (the B binding) must leave the button lit"
+    );
+
+    // A REAL click on the button: auto-toggle flips, the wrapper's undo repairs it, Bagnon's
+    // OnHide writes the truth — closed and unlit.
+    let (x, y) = centre_of(&mut s, "MainMenuBarBackpackButton");
+    s.mouse_move(x, y);
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(
+        !s.eval::<bool>("return Bagnon:IsVisible() or false")
+            .unwrap(),
+        "the click must toggle Bagnon closed through its override"
+    );
+    assert!(
+        !s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
+            .unwrap(),
+        "closed ⇒ unlit (Bagnon's OnHide write is the last word)"
+    );
+
+    // And the second click: open again, lit again — the director's report, closed.
+    s.mouse_button(x, y, "LeftButton", true);
+    s.mouse_button(x, y, "LeftButton", false);
+    assert!(
+        s.eval::<bool>("return Bagnon:IsVisible() or false")
+            .unwrap(),
+        "the second click re-opens Bagnon"
+    );
+    assert!(
+        s.eval::<bool>("return MainMenuBarBackpackButton:GetChecked() and true or false")
+            .unwrap(),
+        "open ⇒ lit (Bagnon's OnShow write is the last word)"
+    );
+}

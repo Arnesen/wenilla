@@ -397,7 +397,12 @@
             -- The description body hangs under the detail bar — anchored here, not in XML,
             -- because the bar is a child frame declared after the page's layers and anchors
             -- resolve at SetPoint time (an XML forward reference silently lands on the page;
-            -- the MailFrame error-text OnLoad precedent, ref MailFrame.xml l.1040).
+            -- the MailFrame error-text OnLoad precedent, ref MailFrame.xml l.1040). Cleared
+            -- first: the load-time implicit anchor (decision 1310) seated this justifyH="LEFT"
+            -- string at the page's LEFT, and SetPoint replaces only its own point -- without the
+            -- clear both anchors stand and the left/center edges resolve off the page, not the
+            -- bar. (The ref needs no clear on ITS file only because its XML anchors the string.)
+            SkillDetailDescriptionText:ClearAllPoints()
             SkillDetailDescriptionText:SetPoint("TOPLEFT", "SkillDetailBar", "BOTTOMLEFT", -2, -10)
         end
 
