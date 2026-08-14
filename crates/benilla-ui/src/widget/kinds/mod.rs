@@ -70,6 +70,14 @@ pub enum RegionKind {
     Texture,
     /// A `FontString` (text run).
     FontString,
+    /// A frame's **title region** — the drag handle `Frame:CreateTitleRegion()` makes.
+    ///
+    /// A third leaf rather than a texture that happens to draw nothing, because the difference is
+    /// OBSERVABLE: wow-re carves the object as a plain Region (`widget-api-batch-benilla.md` Q6,
+    /// `0x773910`) whose `GetObjectType()` answers `"Region"` and which exposes exactly the 19
+    /// Region methods — **no Show/Hide, no scripts, no textures**. A `Texture` in disguise would
+    /// answer `"Texture"` to any addon that asked, and would emit a quad.
+    Title,
 }
 
 /// Per-kind widget state — the "later layer" over the kind tag, for the kinds whose behavior is

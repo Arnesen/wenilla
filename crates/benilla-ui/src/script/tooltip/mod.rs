@@ -152,7 +152,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                             } else {
                                 "GameTooltipText"
                             };
-                            let fo = model.font_objects.get(font).cloned();
+                            let fo = model.font_object(font).cloned();
                             apply_font(d, font, fo.as_ref());
                         }
                     }

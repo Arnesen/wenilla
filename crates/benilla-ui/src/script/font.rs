@@ -229,7 +229,7 @@ pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
 /// Per-state **button** label fonts need no equivalent: they are stored as names and re-resolved at
 /// every `extract`, so a mutated font object reaches them on the next frame by construction.
 pub(crate) fn propagate(model: &mut Model, name: &str) {
-    let Some(fo) = model.font_objects.get(name).cloned() else {
+    let Some(fo) = model.font_object(name).cloned() else {
         return;
     };
     for d in model.region_data.values_mut() {
@@ -244,7 +244,10 @@ pub(crate) fn propagate(model: &mut Model, name: &str) {
 fn edit<R>(lua: &Lua, this: &Table, f: impl FnOnce(&mut FontObject) -> R) -> mlua::Result<R> {
     let name = name_of(this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model");
-    let out = f(model.font_objects.entry(name.clone()).or_default());
+    let out = f(model
+        .font_objects_by_lower
+        .entry(name.to_ascii_lowercase())
+        .or_default());
     propagate(&mut model, &name);
     Ok(out)
 }
@@ -253,7 +256,7 @@ fn edit<R>(lua: &Lua, this: &Table, f: impl FnOnce(&mut FontObject) -> R) -> mlu
 fn read(lua: &Lua, this: &Table) -> mlua::Result<FontObject> {
     let name = name_of(this)?;
     let model = lua.app_data_ref::<Model>().expect("model");
-    Ok(model.font_objects.get(&name).cloned().unwrap_or_default())
+    Ok(model.font_object(&name).cloned().unwrap_or_default())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -529,7 +532,7 @@ fn copy_from(lua: &Lua, this: &Table, other: &Value, verb: &str) -> mlua::Result
     let src = resolve_required(verb, other)?;
     let paint = {
         let model = lua.app_data_ref::<Model>().expect("model");
-        model.font_objects.get(&src).cloned().ok_or_else(|| {
+        model.font_object(&src).cloned().ok_or_else(|| {
             mlua::Error::runtime(format!(
                 "{verb}: no font object named '{src}' is registered"
             ))
@@ -558,7 +561,10 @@ fn create_font(lua: &Lua, name: Option<String>) -> mlua::Result<Table> {
     })?;
     {
         let mut model = lua.app_data_mut::<Model>().expect("model");
-        model.font_objects.entry(name.clone()).or_default();
+        model
+            .font_objects_by_lower
+            .entry(name.to_ascii_lowercase())
+            .or_default();
     }
     let t = wrapper(lua, &name)?;
     publish_global(lua, &name, &t)?;

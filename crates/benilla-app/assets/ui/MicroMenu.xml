@@ -56,6 +56,29 @@
         - The keyring button (ref KeyRingButton, `hidden="true"` by default) stays out with the
           keyring container itself.
     -->
+    <!-- ── MainMenuBarMicroButton (ref MainMenuBarMicroButtons.xml l.4-18, VERBATIM) ─────────────
+         The micro-button base template. Ours declares its buttons directly, so nothing here needed
+         it — but an ADDON that adds a micro button inherits this name, and an unresolved
+         `inherits=` is silent: no error, just a button with no size, no hit-rect inset and no
+         tooltip scripts.
+
+         Verbatim, and it costs nothing: `GameTooltip_AddNewbieTip` is already ours (GameTooltip.xml)
+         and the rest is geometry. The HitRectInsets top=18 is the reference's own — the micro
+         buttons overlap the bar art above them, and without it the top third of every addon micro
+         button would eat clicks meant for the bar. -->
+    <Button name="MainMenuBarMicroButton" virtual="true">
+        <Size><AbsDimension x="29" y="58"/></Size>
+        <HitRectInsets><AbsInset left="0" right="0" top="18" bottom="0"/></HitRectInsets>
+        <Scripts>
+            <OnEnter>
+                GameTooltip_AddNewbieTip(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText);
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide();
+            </OnLeave>
+        </Scripts>
+    </Button>
+
     <Script><![CDATA[
         -- ref GlobalStrings.lua — the eight labels (enUS), in the `X = X or` FALLBACK form: the
         -- app runs the real localized GlobalStrings.lua off the patch chain BEFORE this file

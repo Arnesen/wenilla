@@ -306,10 +306,10 @@
                 -- Fixed art, again because there is no bag item: the keyring's own portrait
                 -- (ref ContainerFrame.lua l.419) and its own background variant, snug-fitted to the
                 -- level-gated slot count exactly like an equipped bag.
-                local portrait = getglobal(frame:GetName() .. "Portrait")
-                if portrait then
-                    portrait:SetPortraitToTexture("Interface\\ContainerFrame\\KeyRing-Bag-Icon")
-                end
+                -- The GLOBAL form, which is the reference's own (ContainerFrame.lua l.419
+                -- writes exactly this call) — 1.12 has no such Texture method.
+                SetPortraitToTexture(frame:GetName() .. "Portrait",
+                    "Interface\\ContainerFrame\\KeyRing-Bag-Icon")
                 local size = GetContainerNumSlots(bagId)
                 if size > 0 then BenillaBagWindow_FitBackground(frame, size) end
             else
@@ -331,7 +331,7 @@
                         -- The circular crop (the real SetBagPortaitTexture is C-side and masks the
                         -- icon to the ring's inscribed circle): a raw square icon pokes its corners
                         -- past the round rim — the director's bank-bag popout artifact.
-                        portrait:SetPortraitToTexture(icon)
+                        SetPortraitToTexture(frame:GetName() .. "Portrait", icon)
                     else
                         -- The backpack fallback art is authored round — no crop to apply.
                         portrait:SetTexture("Interface\\Buttons\\Button-Backpack-Up")

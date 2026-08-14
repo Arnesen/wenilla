@@ -104,7 +104,17 @@ pub(crate) struct Model {
     /// The named virtual **Font object** registry (`<Font name=…>` → resolved paint), keyed by name.
     /// Populated by the loader as it walks top-level `<Font>` nodes; read by `SetFontObject` and by
     /// FontString `inherits=` resolution. Data only — no Lua handles (MAXCSTACK discipline).
-    pub(crate) font_objects: HashMap<String, FontObject>,
+    /// The named `<Font>` objects, **keyed by the ASCII-LOWERCASED name**.
+    ///
+    /// 1.12's font registry hashes the name and compares keys with `SStrCmpI` — case-INSENSITIVE
+    /// (`0x783870`/`0x7838c7`, wow-re `system/ui/scratch/font-object-lua-surface.md`: *"Font names
+    /// are matched case-insensitively"*), and a name string handed to `SetFontObject` folds the
+    /// same way. `Recap/RecapOptions.xml:32` inherits `GameFontHighLightSmall` — the shipped font
+    /// is `GameFontHighlightSmall`, one letter's case apart — and on the real client that resolves.
+    ///
+    /// Read it through [`Model::font_object`], never directly: that is where the fold lives, and
+    /// the name says so because nothing else guards the invariant (1247's shape).
+    pub(crate) font_objects_by_lower: HashMap<String, FontObject>,
     /// The last [`UiScript::resolve`] result for **anchored** regions (those with a non-empty
     /// [`RegionData::anchors`]): the region's own resolved rect, owner-relative (see [`extract`]).
     /// Regions with no anchors are absent here — they fall to the size-centered / fill-owner path.
@@ -959,6 +969,17 @@ impl Model {
     /// The uppercase scan is a fast path, not an optimisation for its own sake: every internal
     /// caller passes a lowercase literal (`"player"`, `"target"`), so the common case allocates
     /// nothing and only an addon's `"Player"` pays for a `String`.
+    /// A named font object, **case-folded the way the client folds it** — `SStrCmpI` over the font
+    /// registry's keys. ASCII only, and the uppercase scan is a fast path: every internal caller
+    /// passes an exact shipped name, so only an addon's odd spelling pays for a `String`.
+    pub(crate) fn font_object(&self, name: &str) -> Option<&FontObject> {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.font_objects_by_lower.get(&name.to_ascii_lowercase())
+        } else {
+            self.font_objects_by_lower.get(name)
+        }
+    }
+
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
@@ -988,7 +1009,7 @@ impl Model {
             chat_tab: false,
             region_data: HashMap::new(),
             backdrops: HashMap::new(),
-            font_objects: HashMap::new(),
+            font_objects_by_lower: HashMap::new(),
             region_resolved: HashMap::new(),
             next_id: 1,
             id_to_frame: HashMap::new(),

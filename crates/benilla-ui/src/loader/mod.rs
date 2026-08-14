@@ -614,7 +614,9 @@ impl Loader<'_> {
         // One model borrow, then the insert — `font_objects` and `framexml_fonts` are both on it.
         {
             let mut model = self.model();
-            model.font_objects.insert(name.clone(), font);
+            model
+                .font_objects_by_lower
+                .insert(name.to_ascii_lowercase(), font);
             // Store the merged (flattened) node so a chain rooted here reads resolved values.
             model
                 .framexml_fonts

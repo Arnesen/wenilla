@@ -259,26 +259,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetPortraitToTexture(path) — set the texture AND mark the region a portrait (drawn masked to
-    // its inscribed circle). The client's portraits are circular (model or icon fallback); the frame
-    // ring is a thin band whose transparent corners would otherwise show the square texture's edges.
-    // The live API's `SetPortraitToTexture(texture, path)` is a global crop helper; ours is the
-    // region-method face of the same intent. This is the *icon/path* portrait — distinct from the
-    // `SetPortraitTexture(region, unit)` live model bake, so it drops any live-unit binding.
-    // `SetTexture` on the same region clears the flag (a plain texture again).
-    m.set(
-        "SetPortraitToTexture",
-        lua.create_function(|lua, (this, path): (Table, String)| {
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let data = model.region_data.entry(rh).or_default();
-            data.texture = Some(path);
-            data.circular = true;
-            data.portrait_unit = None;
-            Ok(())
-        })?,
-    )?;
-
     // SetAlphaGradient(start, length) — the per-character write-on reveal (CSimpleFontString;
     // the quest-description machinery, ref QuestFrame.lua:548/558). Returns whether `start` is
     // still inside the text (chars) — the ref's OnUpdate loop advances until this goes false.

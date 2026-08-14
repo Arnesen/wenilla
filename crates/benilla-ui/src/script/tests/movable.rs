@@ -412,3 +412,179 @@ fn start_sizing_moves_the_gripped_edge_and_plants_the_other() {
         "StartSizing must refuse a frame that is not resizable"
     );
 }
+
+/// **`CreateTitleRegion` / `GetTitleRegion` — the object half** (wow-re
+/// `widget-api-batch-benilla.md` Q6, `0x773910` / `0x773820`).
+///
+/// Four details, each one a coin-flip a reimplementation loses, and each one asserted.
+#[test]
+fn a_title_region_is_a_plain_region_and_creating_it_twice_is_destructive() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        TFrame = CreateFrame("Frame", "TFrame")
+        TFrame:SetPoint("BOTTOMLEFT", 100, 100)
+        TFrame:SetSize(200, 80)
+        "#,
+    )
+    .unwrap();
+
+    // GetTitleRegion answers ONE value and it is nil — not zero values, which is the asymmetry
+    // Q6 flags against `GetBackdrop`.
+    assert_eq!(
+        s.eval::<i64>("return select('#', TFrame:GetTitleRegion())")
+            .unwrap(),
+        1
+    );
+    assert!(s
+        .eval::<Option<bool>>("return TFrame:GetTitleRegion() ~= nil and true or nil")
+        .unwrap()
+        .is_none());
+
+    // It is a plain REGION — not a Texture wearing a hat.
+    s.run("TR = TFrame:CreateTitleRegion()").unwrap();
+    assert_eq!(
+        s.eval::<String>("return TR:GetObjectType()").unwrap(),
+        "Region"
+    );
+    assert_eq!(
+        s.eval::<i64>("return TR:IsObjectType('Region')").unwrap(),
+        1
+    );
+    assert!(s
+        .eval::<Option<i64>>("return TR:IsObjectType('Texture')")
+        .unwrap()
+        .is_none());
+    assert!(s
+        .eval::<bool>("return TFrame:GetTitleRegion() == TR")
+        .unwrap());
+
+    // **It takes NO argument**: `CreateTitleRegion(frame)` is the no-arg call, which is exactly
+    // what `CustomNameplates/options.lua:73` writes.
+    assert!(s
+        .eval::<bool>("return TFrame:CreateTitleRegion(TFrame) == TR")
+        .unwrap());
+
+    // **Idempotent, and DESTRUCTIVELY so.** A second call returns the same object after clearing
+    // its anchors — so it silently wipes the points a caller already set.
+    s.run("TR:SetAllPoints(TFrame)").unwrap();
+    s.resolve();
+    assert_eq!(s.eval::<i64>("return TR:GetNumPoints()").unwrap(), 2);
+    assert!(s
+        .eval::<bool>("return TFrame:CreateTitleRegion() == TR")
+        .unwrap());
+    assert_eq!(
+        s.eval::<i64>("return TR:GetNumPoints()").unwrap(),
+        0,
+        "the second call ran ClearAllPoints on the region it returned"
+    );
+
+    // **It answers the 19 Region methods and NOTHING else** — 1250 §5's named divergence, closed.
+    // Q6: no Show/Hide, no scripts, no textures. Ours used to share one metatable with Texture and
+    // FontString, so a title region answered `SetTexture` where the reference raises.
+    for name in crate::script::REGION_MAP_METHODS {
+        assert_eq!(
+            s.eval::<String>(&format!("return type(TR.{name})"))
+                .unwrap(),
+            "function",
+            "a title region answers {name}"
+        );
+    }
+    for absent in [
+        "SetTexture",
+        "GetTexture",
+        "SetTexCoord",
+        "SetVertexColor",
+        "SetDrawLayer",
+        "Show",
+        "Hide",
+        "IsShown",
+        "IsVisible",
+        "SetText",
+        "GetText",
+        "SetAlpha",
+    ] {
+        assert_eq!(
+            s.eval::<String>(&format!("return type(TR.{absent})"))
+                .unwrap(),
+            "nil",
+            "a title region must NOT answer {absent} — the reference raises there"
+        );
+    }
+    // It never draws: a title region is a hit rectangle, not a visual.
+    s.run("TR:SetAllPoints(TFrame)").unwrap();
+    s.resolve();
+    let region_quads: Vec<_> = s
+        .extract()
+        .into_iter()
+        .filter(|q| matches!(q.target, crate::script::ZTarget::Region(_)))
+        .collect();
+    assert!(
+        region_quads.is_empty(),
+        "a title region emits no quad of its own (the frame's own quad is not one): {region_quads:?}"
+    );
+
+    // The full region kinds are untouched by the split — asserted LAST, because creating a real
+    // texture would otherwise put a legitimate quad into the check above.
+    s.run("TTex = TFrame:CreateTexture(nil, 'ARTWORK')")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return type(TTex.SetTexture)").unwrap(),
+        "function",
+        "a Texture still answers its own verbs"
+    );
+}
+
+/// **The drag half — and the three things that make it not just `StartMoving`.**
+///
+/// A mouse-down inside the title region starts a move that (1) SWALLOWS `OnMouseDown`, (2) ends on
+/// release where a scripted move persists, and (3) does not consult `SetMovable`.
+#[test]
+fn a_title_region_drag_swallows_the_press_and_ends_on_release() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        downs = 0
+        TP = CreateFrame("Frame", "TP")
+        TP:SetPoint("BOTTOMLEFT", 100, 100)
+        TP:SetSize(200, 80)
+        TP:EnableMouse(true)
+        TP:SetScript("OnMouseDown", function() downs = downs + 1 end)
+        TP:CreateTitleRegion():SetAllPoints(TP)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+    let corner = |s: &mut UiScript| {
+        s.resolve();
+        s.eval::<f64>("return TP:GetLeft()").unwrap()
+    };
+    assert_eq!(corner(&mut s), 100.0);
+
+    // Press inside the title region: the move starts and OnMouseDown never runs.
+    s.mouse_button(150.0, 150.0, "LeftButton", true);
+    assert_eq!(
+        s.eval::<i64>("return downs").unwrap(),
+        0,
+        "a title-region hit swallows OnMouseDown — a miss would fall through to it"
+    );
+    s.mouse_move(250.0, 150.0);
+    assert_eq!(corner(&mut s), 200.0, "the frame followed the cursor");
+
+    // **Release ends it** — mode 2 auto-cancels. Moving the cursor afterwards must not drag it.
+    s.mouse_button(250.0, 150.0, "LeftButton", false);
+    s.mouse_move(400.0, 150.0);
+    assert_eq!(
+        corner(&mut s),
+        200.0,
+        "the move ended at the release; a scripted StartMoving would still be running"
+    );
+
+    // **No `SetMovable` gate on this path** — TP was never made movable, and it dragged. Q6 marks
+    // the no-gate reading VERIFIED (the movable bit is simply not read on
+    // 0x7662c0->0x765320->0x7652b0->0x768430); a title region on a non-movable frame is the case
+    // that tells it apart from `StartMoving`, which raises "Frame %s is not movable".
+    assert!(!s.eval::<bool>("return TP:IsMovable()").unwrap());
+}

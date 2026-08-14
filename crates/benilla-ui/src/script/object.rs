@@ -28,7 +28,7 @@ use crate::widget::{FrameHandle, FrameKind};
 mod events_regions;
 mod frame_state;
 mod layout_methods;
-mod movable;
+pub(crate) mod movable;
 pub(crate) mod toplevel;
 pub(crate) use layout_methods::anchor_bits_eq;
 pub(crate) use movable::{advance_move, advance_size, FrameMove, FrameSizing};

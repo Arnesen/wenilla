@@ -7,7 +7,10 @@
 use mlua::{Lua, Table, Value};
 
 use super::object::{anchor_bits_eq, as_f32, decode_id, id_to_lud, point_from_str};
-use super::{Model, REG_REGION_META, REG_REGION_METHODS, REG_WRAPPERS, SCREEN};
+use super::{
+    Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
+    REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
+};
 use crate::layout::Anchor;
 use crate::widget::{RegionHandle, RegionKind};
 
@@ -70,7 +73,28 @@ pub(super) fn region_wrapper(lua: &Lua, id: u32) -> mlua::Result<Table> {
     }
     let t = lua.create_table()?;
     t.raw_set(0, Value::LightUserData(id_to_lud(id)))?;
-    let meta: Table = lua.named_registry_value(REG_REGION_META)?;
+    // **A title region gets a NARROWER metatable, chosen here rather than per lookup.** wow-re Q6
+    // carves the object as answering *exactly* the 19 Region methods — no Show/Hide, no textures,
+    // no text — and this cache is created once per region, so picking the table at construction
+    // costs nothing on the call path (dispatching inside `__index` would put a model borrow and a
+    // kind lookup in front of EVERY region method call in the UI).
+    let kind = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        model
+            .id_to_region
+            .get(&id)
+            .and_then(|rh| model.arena.region(*rh))
+            .map(|r| r.kind)
+    };
+    let meta: Table = lua.named_registry_value(match kind {
+        Some(RegionKind::Texture) => REG_TEXTURE_META,
+        Some(RegionKind::FontString) => REG_FONTSTRING_META,
+        Some(RegionKind::Title) => REG_TITLE_META,
+        // A wrapper for an id with no live region: the full table, which is what this cache did for
+        // every region before the leaves were split. Nothing can call through it — every method
+        // resolves the handle first and raises on a dead one.
+        None => REG_REGION_META,
+    })?;
     t.set_metatable(Some(meta))?;
     wrappers.set(id, t.clone())?;
     Ok(t)
@@ -98,6 +122,43 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             data.texture = None;
             data.fill = None;
             data.circular = true;
+            Ok(())
+        })?,
+    )?;
+
+    // SetPortraitToTexture(textureName, path) — the ENGINE GLOBAL, which is what 1.12 has.
+    //
+    // `reference/1.12-globals.tsv` marks it `engine`, and the reference's own two call sites both
+    // pass a texture NAME: `ContainerFrame.lua:419` writes
+    // `SetPortraitToTexture(frame:GetName().."Portrait", "…KeyRing-Bag-Icon")` and
+    // `MailFrame.lua:174` writes `SetPortraitToTexture("OpenMailFrameIcon", stationeryIcon)`.
+    // **That first one matters here: we SOURCE `ContainerFrame.lua` off the patch chain, so the
+    // client's own file calls this global inside our VM.**
+    //
+    // A NAME, not a region handle — strictly what the reference's callers are attested to pass.
+    // Whether the real binding also accepts a texture object is not carved, so it is not accepted
+    // here: inventing the wider signature is how a superset starts (1189), and nothing needs it —
+    // both of our own callers already hold the name.
+    //
+    // The behaviour is the crop it was always: set the texture AND mark the region a portrait, so
+    // it draws masked to its inscribed circle. The client's portraits are circular and the frame
+    // ring is a thin band whose transparent corners would otherwise show the square texture's
+    // edges. Distinct from `SetPortraitTexture(region, unit)`'s live model bake, so it drops any
+    // live-unit binding; a later `SetTexture` clears the flag again.
+    lua.globals().set(
+        "SetPortraitToTexture",
+        lua.create_function(|lua, (name, path): (String, String)| {
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let Some(id) = model.region_names.get(&name).copied() else {
+                return Ok(());
+            };
+            let Some(rh) = model.id_to_region.get(&id).copied() else {
+                return Ok(());
+            };
+            let data = model.region_data.entry(rh).or_default();
+            data.texture = Some(path);
+            data.circular = true;
+            data.portrait_unit = None;
             Ok(())
         })?,
     )?;
@@ -354,6 +415,81 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     text::install(lua, &m)?;
     layout::install(lua, &m)?;
 
+    // ── The title region's own, narrower table ──────────────────────────────────────────────────
+    //
+    // 1250 §5 recorded this as a named divergence: our region metatable was shared, so a title
+    // region answered `SetTexture`/`Show`/`Hide` where the reference raises `attempt to call
+    // method`. Inert — the kind never draws — but a **superset in PRESENCE**, and 1189 is the
+    // record of what a superset costs when an addon feature-detects.
+    //
+    // Closed by copying exactly the Region map (the 19 names 1244/1245 landed and assert as a set)
+    // out of the full table. It is a copy rather than a second install because the two must never
+    // disagree about what, say, `GetPoint` does — one implementation, two visibilities.
+    //
+    // **The Texture/FontString superset is NOT closed here, deliberately.** They still share one
+    // table, so a Texture answers `SetText` and a FontString answers `SetTexture`. Splitting those
+    // needs the per-table membership facts, and the naive partition is WRONG: `paint.rs` installs
+    // `SetDrawLayer`/`SetVertexColor`/`SetAlpha`/`SetAlphaGradient`, all of which the font carve
+    // says a FontString legitimately has. A wrong split REMOVES verbs addons use, which is worse
+    // than the superset it fixes — so that half waits for the membership read (1238's shape).
+    let title = lua.create_table()?;
+    for name in super::REGION_MAP_METHODS {
+        let f: Value = m.get(name)?;
+        title.set(name, f)?;
+    }
+    // ── The two LEAF tables (wow-re `texture-fontstring-method-split.md`) ───────────────────────
+    //
+    // Texture's map is `0x87c128` (22 entries, lookup `0x79c620`), FontString's is `0xcf5400` (32,
+    // lookup `0x79ee20`); both tail-call the Region map and stop there — no third table. Until now
+    // ours was ONE table for both, so a Texture answered `SetText` and a FontString answered
+    // `SetTexture`: a superset in both directions.
+    //
+    // **Partitioned, not pruned.** Every name we install keeps a home; what changes is which leaf
+    // can see it. Removing the five names that are in NEITHER client map (`SetPortraitToTexture`,
+    // `SetRotation`, `SetSize`, `SetFormattedText`, `GetStringHeight`) is a separate question per
+    // name — and getting a split wrong REMOVES verbs addons use, which is worse than the superset
+    // it fixes.
+    //
+    // Copied out of the full table rather than installed twice, so one implementation stands behind
+    // both visibilities — and note the carve's warning that the shared names use the IDENTICAL
+    // `const char*` in the client's two tables, so de-duplicating by name would drop one side.
+    for (key, extra) in [
+        (REG_TEXTURE_METHODS, &super::TEXTURE_ONLY_METHODS[..]),
+        (REG_FONTSTRING_METHODS, &super::FONTSTRING_ONLY_METHODS[..]),
+    ] {
+        let leaf = lua.create_table()?;
+        for name in super::REGION_MAP_METHODS
+            .iter()
+            .chain(super::REGION_LEAF_SHARED.iter())
+            .chain(extra.iter())
+        {
+            let f: Value = m.get(*name)?;
+            leaf.set(*name, f)?;
+        }
+        lua.set_named_registry_value(key, leaf)?;
+    }
+    for (meta_key, methods_key) in [
+        (REG_TEXTURE_META, REG_TEXTURE_METHODS),
+        (REG_FONTSTRING_META, REG_FONTSTRING_METHODS),
+    ] {
+        let meta = lua.create_table()?;
+        let index = lua.create_function(move |lua, (_this, key): (Table, Value)| {
+            let methods: Table = lua.named_registry_value(methods_key)?;
+            methods.get::<Value>(key)
+        })?;
+        meta.set("__index", index)?;
+        lua.set_named_registry_value(meta_key, meta)?;
+    }
+
+    let title_meta = lua.create_table()?;
+    let title_index = lua.create_function(|lua, (_this, key): (Table, Value)| {
+        let methods: Table = lua.named_registry_value(REG_TITLE_METHODS)?;
+        methods.get::<Value>(key)
+    })?;
+    title_meta.set("__index", title_index)?;
+    lua.set_named_registry_value(REG_TITLE_METHODS, title)?;
+    lua.set_named_registry_value(REG_TITLE_META, title_meta)?;
+
     lua.set_named_registry_value(REG_REGION_METHODS, m)?;
     Ok(())
 }
@@ -383,6 +519,8 @@ pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str 
     match model.arena.region(rh).map(|r| r.kind) {
         Some(RegionKind::Texture) => "Texture",
         Some(RegionKind::FontString) => "FontString",
+        // The title region's own type name — it is a Region and nothing more (Q6).
+        Some(RegionKind::Title) => "Region",
         None => "Region",
     }
 }

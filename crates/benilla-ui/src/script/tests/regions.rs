@@ -662,3 +662,130 @@ fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
         "SetGradient's stops are opaque, so the midpoint alpha is 1"
     );
 }
+
+/// **The split itself: a Texture answers texture verbs and NOT text ones, and vice versa.**
+///
+/// Until this landed, one shared table meant a Texture answered `SetText` and a FontString answered
+/// `SetTexture` — a superset in both directions (wow-re
+/// `system/ui/scratch/texture-fontstring-method-split.md`: Texture's map `0x87c128` is 22 entries,
+/// FontString's `0xcf5400` is 32, both tail-calling the Region map and stopping there).
+#[test]
+fn the_two_region_leaves_answer_their_own_maps() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        LeafOwner = CreateFrame("Frame", "LeafOwner")
+        Tex = LeafOwner:CreateTexture("Tex", "ARTWORK")
+        Str = LeafOwner:CreateFontString("Str", "ARTWORK")
+        "#,
+    )
+    .unwrap();
+    let has = |s: &crate::script::UiScript, obj: &str, m: &str| {
+        s.eval::<String>(&format!("return type({obj}.{m})"))
+            .unwrap()
+            == "function"
+    };
+
+    // Texture-only, and the asymmetry the carve calls out: `SetVertexColor` is on BOTH leaves while
+    // `GetVertexColor` is Texture-only. No reasonable partition invents that.
+    for m in [
+        "SetTexture",
+        "GetTexture",
+        "SetTexCoord",
+        "SetBlendMode",
+        "GetVertexColor",
+    ] {
+        assert!(has(&s, "Tex", m), "a Texture answers {m}");
+        assert!(!has(&s, "Str", m), "a FontString must NOT answer {m}");
+    }
+    // FontString-only.
+    for m in [
+        "SetText",
+        "GetText",
+        "GetStringWidth",
+        "SetJustifyH",
+        "SetAlphaGradient",
+    ] {
+        assert!(has(&s, "Str", m), "a FontString answers {m}");
+        assert!(!has(&s, "Tex", m), "a Texture must NOT answer {m}");
+    }
+    // On BOTH — and each leaf registers its own copy in the client, so these are NOT on the Region
+    // map and must not be hoisted into it.
+    for m in [
+        "SetVertexColor",
+        "SetAlpha",
+        "Show",
+        "Hide",
+        "IsShown",
+        "SetDrawLayer",
+    ] {
+        assert!(
+            has(&s, "Tex", m) && has(&s, "Str", m),
+            "{m} is on both leaves"
+        );
+    }
+    // The Region map reaches both, through each leaf's own fallback.
+    for m in crate::script::REGION_MAP_METHODS {
+        assert!(
+            has(&s, "Tex", m) && has(&s, "Str", m),
+            "{m} is the Region map"
+        );
+    }
+    // **`GetStringHeight` is GONE and must stay gone.** 1.12 has no such method on any table (0
+    // hits in every encoding; the control `GetStringWidth` has 1), Blizzard's own FrameXML calls it
+    // 0 times, and ours was a byte-identical duplicate of `GetHeight` — which is the method the
+    // reference itself uses for this, falling through to the same cached measurement
+    // `GetStringWidth` reads. Keeping the width and dropping the height is not an oversight: the
+    // client really is asymmetric here.
+    assert!(
+        !has(&s, "Str", "GetStringHeight"),
+        "1.12 has no GetStringHeight"
+    );
+    assert!(
+        has(&s, "Str", "GetStringWidth"),
+        "…but it does have GetStringWidth"
+    );
+    assert!(
+        has(&s, "Str", "GetHeight"),
+        "GetHeight is the replacement, via the Region map"
+    );
+
+    // The near-miss pair: Texture has SetGradientAlpha, FontString has SetAlphaGradient.
+    assert!(has(&s, "Tex", "SetGradientAlpha") && !has(&s, "Str", "SetGradientAlpha"));
+    assert!(has(&s, "Str", "SetAlphaGradient") && !has(&s, "Tex", "SetAlphaGradient"));
+}
+
+/// **`SetPortraitToTexture` is a GLOBAL in 1.12, not a Texture method.**
+///
+/// `reference/1.12-globals.tsv` marks it `engine`, and both of the reference's own call sites pass a
+/// texture NAME: `ContainerFrame.lua:419` and `MailFrame.lua:174`. The first is the one that binds
+/// us — we SOURCE `ContainerFrame.lua` off the patch chain, so the client's own file calls this
+/// global inside our VM.
+#[test]
+fn set_portrait_to_texture_is_a_global_taking_a_name() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.run(
+        r#"
+        PortHost = CreateFrame("Frame", "PortHost")
+        Port = PortHost:CreateTexture("PortHostPortrait", "ARTWORK")
+        SetPortraitToTexture("PortHostPortrait", "Interface\\ContainerFrame\\KeyRing-Bag-Icon")
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return Port:GetTexture()").unwrap(),
+        "Interface\\ContainerFrame\\KeyRing-Bag-Icon"
+    );
+    // The Texture METHOD is gone — 1.12's Texture map has no such entry.
+    assert_eq!(
+        s.eval::<String>("return type(Port.SetPortraitToTexture)")
+            .unwrap(),
+        "nil",
+        "1.12 has no Texture:SetPortraitToTexture — it is a global"
+    );
+    // An unknown name is not an error: the reference's callers compose names that may not exist
+    // yet, and nothing here may raise on the sourced file's behalf.
+    s.run(r#"SetPortraitToTexture("NoSuchPortrait", "Interface\\X")"#)
+        .unwrap();
+    assert!(s.errors().is_empty());
+}

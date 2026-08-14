@@ -93,6 +93,35 @@
         server slot order, not insertion order, exactly like the reference. The target-of-target
         branches take the not-shown leg (wrap 6, buffs under Debuff7) until a ToT frame exists.
     -->
+    <!-- ── TargetBuffButtonTemplate (ref TargetFrame.xml l.9-27, VERBATIM) ──────────────────────
+         A reference template addons INHERIT and we did not declare. `CT_UnitFrames` builds its own
+         `CT_UnitFrames_BuffButtonTemplate` on top of it (CT_TargetFrame.xml:4), and an unresolved
+         `inherits=` is SILENT — no load error, no session error, nothing in any column. The addon
+         simply gets a button with no size, no icon region and no tooltip scripts, and nothing
+         anywhere says so. That invisibility is why this row only ever appeared in the report's
+         missing-TEMPLATES ranking.
+
+         Transcribed verbatim because every piece of it already resolves here: `GameTooltip:SetOwner`
+         and `GameTooltip:SetUnitBuff` are both ours, and the icon is a plain `setAllPoints` texture.
+         The `$parentIcon` name matters — that is what a consumer getglobals to set the texture. -->
+    <Button name="TargetBuffButtonTemplate" virtual="true">
+        <Size><AbsDimension x="21" y="21"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentIcon" setAllPoints="true"/>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>
+                GameTooltip:SetOwner(this, "ANCHOR_BOTTOMRIGHT", 15, -25);
+                GameTooltip:SetUnitBuff("target", this.id);
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide();
+            </OnLeave>
+        </Scripts>
+    </Button>
+
     <Script><![CDATA[
         -- The right-click-menu explanations the detailed-tooltip fork shows in place of the unit
         -- lines (BenillaUnitFrame_OnEnter below) — ref GlobalStrings.lua l.2993/3081/2754/2755

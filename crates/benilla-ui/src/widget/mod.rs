@@ -208,6 +208,13 @@ pub struct Frame {
     /// `SetParent(nil)` stays in this list so [`WidgetArena::destroy`] still frees it — see
     /// [`Region::detached`], which is what actually takes it out of the draw.
     pub regions: Vec<RegionHandle>,
+    /// This frame's **title region** — the drag handle at `CSimpleFrame+0xA8`, or `None`.
+    ///
+    /// **One per frame**, which is what makes `CreateTitleRegion` idempotent: a second call returns
+    /// the SAME object after clearing its anchors, so calling it on an XML-declared title region
+    /// silently wipes them (wow-re `widget-api-batch-benilla.md` Q6). It is also in
+    /// [`Frame::regions`], so the arena still frees it.
+    pub title_region: Option<RegionHandle>,
     /// The draw stratum (`frameStrata +0xc0`, default MEDIUM).
     pub strata: Strata,
     /// The level within the stratum (`frameLevel +0xc4`, default 0).
@@ -496,6 +503,7 @@ impl WidgetArena {
             parent,
             children: Vec::new(),
             regions: Vec::new(),
+            title_region: None,
             strata: Strata::default(),
             level: 0,
             alpha,

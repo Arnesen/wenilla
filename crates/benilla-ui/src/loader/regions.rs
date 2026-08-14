@@ -257,6 +257,15 @@ impl Loader<'_> {
     /// exist. Depth is bounded: a template registry can contain a cycle, and a loader that hangs on
     /// a malformed addon is worse than one that gives up on it.
     fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
+        // **The probes here stay case-EXACT, and the outcome is still folded.** Font names match
+        // case-insensitively in 1.12 (`0x783870`, `SStrCmpI`), and that fold lives in
+        // `Model::font_object` — so a miss here falls through to the caller's
+        // `unwrap_or_else(|| name.to_string())` and `SetFontObject` resolves it anyway.
+        //
+        // Not folded HERE because the `framexml_fonts` element registry's other reader hands its
+        // keys to `framexml::expand`, which is the SAME expansion templates go through — and
+        // whether the client matches TEMPLATE names case-insensitively is not carved. Folding this
+        // registry would quietly extend a verified font fact to unverified template behaviour.
         const MAX_HOPS: usize = 8;
         let model = self.model();
         let fonts = model.framexml_fonts.borrow();

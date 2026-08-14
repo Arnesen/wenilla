@@ -715,6 +715,36 @@
             end
         end
 
+        -- ── The inspect-cursor pair (ref UIParent.lua l.1805-1817, VERBATIM) ──────────────────
+        -- `CursorUpdate` is the ctrl-hover "can I inspect this?" cursor swap, and `CursorOnUpdate`
+        -- is the OnUpdate wrapper that only re-runs it while the tooltip is still ours. Both are
+        -- **FrameXML, not engine** (`reference/1.12-globals.tsv` marks them `framexml`, while
+        -- `ResetCursor` and `ShowInspectCursor` beside them are `engine`) — so they are ours to
+        -- transcribe, and every piece they reach for already resolves here: `IsControlKeyDown`,
+        -- `ShowInspectCursor`, `ResetCursor` and `GameTooltip:IsOwned` are all present.
+        --
+        -- Two corpus addons call `CursorUpdate` (AdvancedTradeSkillWindow, WhoHas) and one calls
+        -- `CursorOnUpdate`. It is also a blocker — one of several — for two reference templates
+        -- addons inherit (`GroupLootFrameTemplate`, `ContainerFrameItemButtonTemplate`), and it is
+        -- called by the SOURCED `ContainerFrame.lua`'s keyring fork.
+        --
+        -- `this.hasItem` is read, not required: the reference tests it as a plain truthy field the
+        -- hovering frame sets for itself, so a frame that never sets it simply takes the
+        -- `ResetCursor` arm — which is why this is safe to ship before anything sets it.
+        function CursorUpdate()
+            if ( IsControlKeyDown() and this.hasItem ) then
+                ShowInspectCursor()
+            else
+                ResetCursor()
+            end
+        end
+
+        function CursorOnUpdate()
+            if ( GameTooltip:IsOwned(this) ) then
+                CursorUpdate()
+            end
+        end
+
         -- SetDesaturation(texture, desaturation) — ref UIParent.lua l.1499-1510, verbatim. The
         -- reference itself has a no-shader fallback, and OURS IS ALWAYS THAT PATH: this engine has
         -- no SetDesaturated, so `shaderSupported` is false exactly as on a 1.12 card without the

@@ -252,7 +252,7 @@
         -- the SetText (the measure round-trip), hence the guard + the OnUpdate settle above.
         function BenillaQuestTitleButton_Resize(button)
             local text = button:GetFontString()
-            local h = text and text:GetStringHeight() or 0
+            local h = text and text:GetHeight() or 0
             if h <= 0 or button.benillaFitHeight == h then return end
             button.benillaFitHeight = h
             button:SetHeight(h + 2)

@@ -1327,6 +1327,46 @@ mod region_template_tests {
         );
     }
 
+    /// **A font-object name resolves case-INSENSITIVELY**, because the client's font registry
+    /// compares its keys with `SStrCmpI` (`0x783870`/`0x7838c7`, wow-re
+    /// `font-object-lua-surface.md`: *"Font names are matched case-insensitively"*).
+    ///
+    /// `Recap/RecapOptions.xml:32` inherits `GameFontHighLightSmall`; the shipped font is
+    /// `GameFontHighlightSmall`, one letter's case apart. On the real client that resolves, and it
+    /// used to be a warn-once gap here — a NARROWING fix, like the unit-token fold (1247).
+    #[test]
+    fn a_font_object_inherits_resolves_whatever_its_case() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Font name="GameFontHighlightSmall" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="10"/></FontHeight>
+                </Font>
+                <Frame name="CaseHost">
+                    <Size><AbsDimension x="100" y="30"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                    <Layers><Layer level="ARTWORK">
+                        <FontString name="CaseLabel" inherits="GameFontHighLightSmall" text="hi"/>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        )
+        .unwrap();
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert!(
+            report.warnings.is_empty(),
+            "a differently-cased font name must resolve, not warn: {:?}",
+            report.warnings
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>("local f, h = CaseLabel:GetFont() return f, h")
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 10.0),
+            "the mis-cased inherit found the shipped font"
+        );
+    }
+
     /// **EQL3's actual shape: FontString -> virtual FontString TEMPLATE -> Font object.** One hop
     /// works (above); this is the two-hop chain every "define a line template once, stamp it N
     /// times" addon writes, and `EQL3_Tracker.xml:6/32` is the corpus instance —

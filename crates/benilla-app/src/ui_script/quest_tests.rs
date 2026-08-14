@@ -627,7 +627,7 @@ fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
     let row = |i: u32| -> (f32, f32, f32) {
         s.eval::<(f32, f32, f32)>(&format!(
             "local b = getglobal('QuestTitleButton{i}')\n\
-             return b:GetTop(), b:GetBottom(), b:GetFontString():GetStringHeight()"
+             return b:GetTop(), b:GetBottom(), b:GetFontString():GetHeight()"
         ))
         .unwrap()
     };

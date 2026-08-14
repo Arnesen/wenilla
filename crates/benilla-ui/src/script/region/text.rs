@@ -21,7 +21,7 @@ use crate::justify;
 use crate::script::Model;
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
-use super::{measured_wh, region_handle_of};
+use super::region_handle_of;
 
 /// Populate `m`'s text methods (see the module doc).
 pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
@@ -72,7 +72,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetStringWidth/GetStringHeight (FontString): the host-measured text extent from the measure
+    // GetStringWidth (FontString): the host-measured text extent from the measure
+    //
+    // **There is no `GetStringHeight` beside it, and that asymmetry is the client's.** 1.12 has no
+    // such method on any table — byte-verified absent in every encoding, with `GetStringWidth`
+    // itself as the positive control — and Blizzard's own FrameXML calls it zero times. Ours was a
+    // byte-identical duplicate of `GetHeight`, which is what the reference uses for this
+    // (`0x7a2030` falls through to the same cached measurement), so it was pruned rather than
+    // reimplemented (1251).
     // round-trip ([`super::UiScript::set_measured_text`]) — the client asks its font engine for the
     // laid-out string's metrics exactly here (`fontstring.md`), and the tooltip's auto-size sums
     // these to fit its lines. `0` until the string has been measured (a frame's latency; converges).
@@ -111,11 +118,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "GetStringWidth",
         lua.create_function(|lua, this: Table| natural_w(lua, &this))?,
-    )?;
-
-    m.set(
-        "GetStringHeight",
-        lua.create_function(|lua, this: Table| Ok(measured_wh(lua, &this)?.1))?,
     )?;
 
     // SetJustifyH("LEFT"|"CENTER"|"RIGHT") — a FontString's horizontal justification (XML

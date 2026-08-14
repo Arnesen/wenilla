@@ -115,7 +115,7 @@ fn link_label_to_font_object(lua: &Lua, text: Option<RegionHandle>, name: Option
     };
     // An unregistered name is not an error here: `SetTextFontObject` already accepted it, and the
     // loader's own log-and-continue rule (0068) owns the reporting.
-    let Some(fo) = model.font_objects.get(name).cloned() else {
+    let Some(fo) = model.font_object(name).cloned() else {
         return;
     };
     let d = model.region_data.entry(rh).or_default();
@@ -311,7 +311,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // so this answers the harmless number rather than raising on a guess.
     for (name, region_getter) in [
         ("GetTextWidth", "GetStringWidth"),
-        ("GetTextHeight", "GetStringHeight"),
+        // `GetHeight`, not a `GetStringHeight` — 1.12 has no such method (byte-verified absent
+        // in every encoding), and the reference's own `Button:GetTextHeight 0x782390` is this
+        // same call on the embedded FontString rather than a separate API.
+        ("GetTextHeight", "GetHeight"),
     ] {
         m.set(
             name,
@@ -435,7 +438,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(f) => (Some(f.path), Some(f.height), f.flags),
                 None => {
                     let model = lua.app_data_ref::<Model>().expect("model app_data");
-                    let fo = inherits.and_then(|n| model.font_objects.get(&n));
+                    let fo = inherits.and_then(|n| model.font_object(&n));
                     (
                         fo.and_then(|f| f.font.clone()),
                         fo.and_then(|f| f.height),

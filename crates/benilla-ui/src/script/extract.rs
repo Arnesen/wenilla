@@ -199,7 +199,7 @@ impl UiScript {
                             } else {
                                 bs.normal_font.as_ref()
                             };
-                            state_font = name.and_then(|n| model.font_objects.get(n));
+                            state_font = name.and_then(|n| model.font_object(n));
                             button_font = bs.font.as_ref();
                             // The per-state color override (Button:Set*TextColor) — hover falls
                             // back to the normal color, mirroring the font fallback above.
@@ -211,6 +211,15 @@ impl UiScript {
                                 bs.normal_color
                             };
                         }
+                    }
+                    // A TITLE REGION NEVER DRAWS. It is a hit rectangle, not a visual: wow-re
+                    // carves it as a plain Region with no textures at all
+                    // (`widget-api-batch-benilla.md` Q6). Falling through here would emit the
+                    // texture quad the `else` branch below builds — invisible on screen, but the
+                    // render report counts quads, so every addon that makes one would read as
+                    // "drew something" (1246's lesson about what an instrument is told).
+                    if region.map(|r| r.kind) == Some(crate::widget::RegionKind::Title) {
+                        continue;
                     }
                     let mut data = model.region_data.get(&rh).cloned().unwrap_or_default();
                     // Region-level Hide (the VisibleRegion bit): no quad at all.

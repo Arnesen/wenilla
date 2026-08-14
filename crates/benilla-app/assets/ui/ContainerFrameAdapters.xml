@@ -24,7 +24,8 @@
     slots, so it has to detour out of the container API to describe one. benilla's keyring is an
     ordinary container (id -2, decision 0765): its slots come through `GetContainerItemInfo` and
     `GameTooltip:SetBagItem` like every other bag's. So the detour is not merely unavailable here
-    (neither `KeyRingButtonIDToInvSlotID` nor `CursorUpdate` is a binding) — it is *wrong* here,
+    (`KeyRingButtonIDToInvSlotID` is not a binding here; `CursorUpdate` now is, transcribed from
+    UIParent.lua into UiPanels.xml, so only half the detour is missing) — it is *wrong* here,
     and supplying the two verbs would buy an empty tooltip, because our keyring items were never
     fed into the inventory-slot space it reads.
 

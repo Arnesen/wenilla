@@ -1145,27 +1145,9 @@ fn every_region_map_method_is_callable_on_a_texture_and_a_fontstring() {
     /// All 19. `GetObjectType`/`IsObjectType` were held out of this list when 1244 landed the other
     /// four — dispatched rather than guessed — and joined it when wow-re answered
     /// (`system/ui/scratch/widget-type-identity.md`). The list is the whole map again.
-    const REGION_MAP: &[&str] = &[
-        "GetObjectType",
-        "IsObjectType",
-        "GetName",
-        "GetParent",
-        "SetParent",
-        "GetCenter",
-        "GetLeft",
-        "GetRight",
-        "GetTop",
-        "GetBottom",
-        "GetWidth",
-        "SetWidth",
-        "GetHeight",
-        "SetHeight",
-        "GetNumPoints",
-        "GetPoint",
-        "SetPoint",
-        "SetAllPoints",
-        "ClearAllPoints",
-    ];
+    // The one list, shared with the title region's narrower table (`script::REGION_MAP_METHODS`)
+    // so the two can never disagree about what "the Region map" is.
+    const REGION_MAP: [&str; 19] = crate::script::REGION_MAP_METHODS;
     let mut s = crate::script::UiScript::new().unwrap();
     s.set_screen_size(800.0, 600.0);
     s.run(
@@ -1512,5 +1494,46 @@ fn a_frames_type_chain_matches_the_roster() {
     assert!(
         err.contains(r#"Usage: TCNamed:IsObjectType("TYPE")"#),
         "the frame's Usage text names the frame: {err}"
+    );
+}
+
+/// **Every region method belongs to a leaf — no name may be installed and invisible to both.**
+///
+/// The split (`script::region`) copies names out of the full table into a Texture leaf and a
+/// FontString leaf. A name in neither list is still installed, still costs a closure, and is
+/// reachable from NOTHING — the silent half of a wrong partition.
+///
+/// This is not hypothetical: the partition was first built from a grep, and that grep missed
+/// `SetGradient`/`SetGradientAlpha` because they are installed from a LOOP rather than a literal
+/// `m.set("…")`. One test caught one of them; this gate catches the whole class, and it reads the
+/// table the VM actually holds rather than the source that builds it.
+#[test]
+fn every_installed_region_method_lands_in_a_leaf() {
+    use crate::script::{
+        FONTSTRING_ONLY_METHODS, REGION_LEAF_SHARED, REGION_MAP_METHODS, TEXTURE_ONLY_METHODS,
+    };
+    let s = crate::script::UiScript::new().unwrap();
+    let full: mlua::Table = s
+        .lua()
+        .named_registry_value(crate::script::REG_REGION_METHODS_FOR_TEST)
+        .expect("the full region method table");
+
+    let mut known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    known.extend(REGION_MAP_METHODS);
+    known.extend(REGION_LEAF_SHARED);
+    known.extend(TEXTURE_ONLY_METHODS);
+    known.extend(FONTSTRING_ONLY_METHODS);
+
+    let mut orphans: Vec<String> = Vec::new();
+    for pair in full.pairs::<String, mlua::Value>() {
+        let (name, _) = pair.expect("region method entry");
+        if !known.contains(name.as_str()) {
+            orphans.push(name);
+        }
+    }
+    orphans.sort();
+    assert!(
+        orphans.is_empty(),
+        "installed on the region table but in NO leaf list, so no region can call them: {orphans:?}"
     );
 }

@@ -192,6 +192,117 @@ const REG_FRAME_META: &str = "__benilla_frame_meta";
 const REG_REGION_META: &str = "__benilla_region_meta";
 const REG_FRAME_METHODS: &str = "__benilla_frame_methods";
 const REG_REGION_METHODS: &str = "__benilla_region_methods";
+/// The full table's registry key, exposed for the exhaustiveness gate in `tests::reference_surface`
+/// — the split's correctness is a property of what the VM HOLDS, not of the source that builds it.
+#[cfg(test)]
+pub(crate) const REG_REGION_METHODS_FOR_TEST: &str = REG_REGION_METHODS;
+/// The **title region's** method table + metatable — the 19 Region methods and nothing else.
+const REG_TITLE_METHODS: &str = "__benilla_title_methods";
+const REG_TITLE_META: &str = "__benilla_title_meta";
+/// The two region LEAF tables + metatables — Texture and FontString each answer their own map.
+const REG_TEXTURE_METHODS: &str = "__benilla_texture_methods";
+const REG_TEXTURE_META: &str = "__benilla_texture_meta";
+const REG_FONTSTRING_METHODS: &str = "__benilla_fontstring_methods";
+const REG_FONTSTRING_META: &str = "__benilla_fontstring_meta";
+
+/// The **Region method map** (`0xcf54b4`) — the 19 names every region leaf reaches through its own
+/// lookup's fallback, carved in wow-re `system/ui/scratch/font-object-lua-surface.md` and asserted
+/// as a SET by `tests::reference_surface`. Named here because two things need the same list: that
+/// test, and the title region's narrower method table (1250 §5).
+/// Names on **both** region leaves — and each leaf registers its own copy, so these are NOT on the
+/// Region map and must not be hoisted into it (wow-re
+/// `system/ui/scratch/texture-fontstring-method-split.md`, stated there as a trap in as many words).
+/// `GetDrawLayer` is in the client's pair and absent here; absent is absent.
+pub(crate) const REGION_LEAF_SHARED: [&str; 8] = [
+    "SetDrawLayer",
+    "SetVertexColor",
+    "SetAlpha",
+    "GetAlpha",
+    "Show",
+    "Hide",
+    "IsVisible",
+    "IsShown",
+];
+
+/// **Texture-only.** Note `GetVertexColor` sits here while `SetVertexColor` is shared — an asymmetry
+/// no reasonable partition invents, and the carve calls it out. Also note the client's Texture map
+/// has `SetGradientAlpha` where FontString has `SetAlphaGradient`: a near-miss pair, and we install
+/// only the FontString one.
+///
+/// The tail three are OURS, not 1.12's, and are parked here rather than pruned: `SetPortraitToTexture`
+/// and `SetRotation` are texture verbs the carve's 22 does not list, and `SetSize` is an Era
+/// geometry verb absent from the Region map. Removing a superset is a separate question per name —
+/// this landing partitions, it does not prune.
+pub(crate) const TEXTURE_ONLY_METHODS: [&str; 11] = [
+    "SetGradient",
+    "SetGradientAlpha",
+    "GetTexture",
+    "SetTexture",
+    "GetTexCoord",
+    "SetTexCoord",
+    "SetBlendMode",
+    "SetDesaturated",
+    "GetVertexColor",
+    "SetRotation",
+    "SetSize",
+];
+
+/// **FontString-only** — the font/text/justify/shadow block plus the string metrics.
+///
+/// The tail two are OURS: `SetFormattedText` is not in the client's 32, and `SetSize` is the same
+/// Era geometry verb the Texture list carries. Parked, not pruned, pending their own checks.
+///
+/// `GetStringHeight` was here and is GONE (1251's first prune): byte-verified absent from 1.12 in
+/// every encoding, ours was a byte-identical duplicate of `GetHeight`, and every call site — two of
+/// our own XML files, two tests, and `Button:GetTextHeight`'s delegate — now goes through the
+/// Region method the reference itself uses.
+pub(crate) const FONTSTRING_ONLY_METHODS: [&str; 23] = [
+    "SetFont",
+    "GetFont",
+    "SetFontObject",
+    "GetFontObject",
+    "SetTextColor",
+    "GetTextColor",
+    "SetShadowColor",
+    "GetShadowColor",
+    "SetShadowOffset",
+    "GetShadowOffset",
+    "SetJustifyH",
+    "GetJustifyH",
+    "SetJustifyV",
+    "GetJustifyV",
+    "SetText",
+    "GetText",
+    "SetTextHeight",
+    "GetStringWidth",
+    "SetNonSpaceWrap",
+    "CanNonSpaceWrap",
+    "SetAlphaGradient",
+    "SetFormattedText",
+    "SetSize",
+];
+
+pub(crate) const REGION_MAP_METHODS: [&str; 19] = [
+    "GetObjectType",
+    "IsObjectType",
+    "GetName",
+    "GetParent",
+    "SetParent",
+    "GetCenter",
+    "GetLeft",
+    "GetRight",
+    "GetTop",
+    "GetBottom",
+    "GetWidth",
+    "SetWidth",
+    "GetHeight",
+    "SetHeight",
+    "GetNumPoints",
+    "GetPoint",
+    "SetPoint",
+    "SetAllPoints",
+    "ClearAllPoints",
+];
 const REG_WRAPPERS: &str = "__benilla_wrappers";
 const REG_SCRIPTS: &str = "__benilla_scripts";
 
@@ -893,7 +1004,7 @@ impl UiScript {
     /// where that fork lives). A census that asks only the template registry reports every font in
     /// the corpus as a missing template.
     pub fn has_font_object(&self, name: &str) -> bool {
-        self.model_ref().font_objects.contains_key(name)
+        self.model_ref().font_object(name).is_some()
     }
 
     /// The **widget kind of a published name** — `"MessageFrame"`, `"Button"`, `"Texture"`, … — or
@@ -944,6 +1055,9 @@ impl UiScript {
         model.arena.region(h).map(|r| match r.kind {
             crate::widget::RegionKind::Texture => "Texture",
             crate::widget::RegionKind::FontString => "FontString",
+            // A title region is a plain Region and says so (Q6) — and it is unreachable by name
+            // anyway: `CreateTitleRegion` takes no name argument at all.
+            crate::widget::RegionKind::Title => "Region",
         })
     }
 
@@ -974,7 +1088,9 @@ impl UiScript {
     /// like one declared in XML (`fs:SetFontObject(Name)`, `Name:GetFont()`). One registration act,
     /// one outcome: the two paths cannot drift.
     pub fn register_font_object(&self, name: &str, font: FontObject) {
-        self.model_mut().font_objects.insert(name.to_string(), font);
+        self.model_mut()
+            .font_objects_by_lower
+            .insert(name.to_ascii_lowercase(), font);
         // Publishing cannot fail for a fresh table + a string key; a registry hiccup is not worth
         // an unwrap in a host-facing setter, and the record is already in place either way.
         let _ = font::publish(&self.lua, name);
@@ -983,7 +1099,7 @@ impl UiScript {
     /// Look up a registered [`FontObject`] by name (the resolved paint), if any. Used by tests and by
     /// the `SetFontObject` binding.
     pub fn font_object(&self, name: &str) -> Option<FontObject> {
-        self.model_ref().font_objects.get(name).cloned()
+        self.model_ref().font_object(name).cloned()
     }
 
     /// Every registered [`FontObject`] (the resolved paints of all loaded `<Font>` nodes) — the
@@ -991,7 +1107,11 @@ impl UiScript {
     /// off this to know which outlined cell variants the shipped UI can actually request
     /// (the outlined-glyph bake, the fade-composite fold-back record).
     pub fn font_objects(&self) -> Vec<FontObject> {
-        self.model_ref().font_objects.values().cloned().collect()
+        self.model_ref()
+            .font_objects_by_lower
+            .values()
+            .cloned()
+            .collect()
     }
 
     // ── internals ────────────────────────────────────────────────────────────────────────────

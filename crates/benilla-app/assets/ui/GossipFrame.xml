@@ -115,7 +115,7 @@
         -- has measured THIS text. A zero keeps the current height (never collapses the row) and
         -- the frame's OnUpdate below re-runs the fit until it settles.
         function BenillaGossipRow_Resize(button)
-            local h = button.label:GetStringHeight()
+            local h = button.label:GetHeight()
             if h <= 0 or button.benillaFitHeight == h then return end
             button.benillaFitHeight = h
             button:SetHeight(h + 2)

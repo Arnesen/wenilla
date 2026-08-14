@@ -188,7 +188,7 @@ pub(super) fn install(
                 model.region_data.entry(rh).or_default().font_object = None;
                 return Ok(());
             };
-            let Some(fo) = model.font_objects.get(&name).cloned() else {
+            let Some(fo) = model.font_object(&name).cloned() else {
                 return Err(mlua::Error::runtime(format!(
                     "SetFontObject: no font object named '{name}' is registered"
                 )));
@@ -215,7 +215,7 @@ pub(super) fn install(
                     .region_data
                     .get(&rh)
                     .and_then(|d| d.font_object.clone())
-                    .filter(|n| model.font_objects.contains_key(n))
+                    .filter(|n| model.font_object(n).is_some())
             };
             match name {
                 Some(n) => Ok(Value::Table(super::font::wrapper(lua, &n)?)),

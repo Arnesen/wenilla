@@ -142,6 +142,86 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             },
         )?,
     )?;
+    // ── The title region: Frame:CreateTitleRegion() / GetTitleRegion() ──────────────────────────
+    //
+    // wow-re `system/ui/scratch/widget-api-batch-benilla.md` Q6 (`0x773910` / `0x773820`). Four
+    // details, each one a coin-flip a reimplementation loses:
+    //
+    //  · **It reads NO argument at all** — nothing in `0x773910`-`0x773a1f` touches Lua index 2. So
+    //    `CustomNameplates/options.lua:73`'s `CreateTitleRegion(optionsFrame)` is harmless and
+    //    identical to the no-arg call, rather than an error or a differently-parented region.
+    //  · **It is IDEMPOTENT, destructively.** One region per frame (`CSimpleFrame+0xA8`): a second
+    //    call runs ClearAllPoints on the existing one and returns THE SAME OBJECT — so calling it
+    //    on an XML-declared `<TitleRegion>` silently wipes that region's anchors. Returning a
+    //    fresh region instead would leave the first one hit-testing forever.
+    //  · **A fresh one has NO anchors** and does nothing until `SetPoint`/`SetAllPoints`. Both
+    //    corpus consumers immediately call `SetAllPoints`, which is the whole-window drag idiom.
+    //  · **`GetTitleRegion` answers 1 value (nil)** when there is none — note the asymmetry with
+    //    `GetBackdrop`, which answers 0 values. Q6 flags it explicitly; both converged
+    //    independently there, so both are reproduced here.
+    // **ONE NAMED DIVERGENCE, because it is a superset and 1189 is what a superset costs.** Q6 says
+    // the object answers *exactly* the 19 Region methods — no Show/Hide, no scripts, no textures.
+    // Ours answers the whole shared region table, because Texture/FontString/Title use one
+    // metatable here, so `titleRegion:SetTexture(…)` is accepted where the reference would raise
+    // `attempt to call method`. It is inert rather than wrong — a title region never draws (the
+    // extract skips its kind outright), so a texture or a Hide set on one changes nothing — but an
+    // addon that FEATURE-DETECTS would see a method the real client does not have. Splitting the
+    // metatable is the fix; it is not free, and nothing in the corpus asks, so this is recorded
+    // rather than hidden.
+    m.set(
+        "CreateTitleRegion",
+        lua.create_function(|lua, this: Table| {
+            let owner = frame_handle_of(lua, &this)?;
+            let existing = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                model.arena.frame(owner).and_then(|f| f.title_region)
+            };
+            if let Some(rh) = existing {
+                let id = {
+                    let mut model = lua.app_data_mut::<Model>().expect("model");
+                    let d = model.region_data.entry(rh).or_default();
+                    let changed = !d.anchors.is_empty();
+                    d.anchors.clear();
+                    if changed {
+                        model.touch_layout();
+                    }
+                    model.region_id(rh)
+                };
+                return region_wrapper(lua, id);
+            }
+            let wrapper = create_region(lua, &this, RegionKind::Title, None, None)?;
+            let id = decode_id(&wrapper)?;
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let rh = *model
+                .id_to_region
+                .get(&id)
+                .expect("the region we just created is registered");
+            if let Some(f) = model.arena.frame_mut(owner) {
+                f.title_region = Some(rh);
+            }
+            Ok(wrapper)
+        })?,
+    )?;
+    m.set(
+        "GetTitleRegion",
+        lua.create_function(|lua, this: Table| {
+            let owner = frame_handle_of(lua, &this)?;
+            let found = {
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                model
+                    .arena
+                    .frame(owner)
+                    .and_then(|f| f.title_region)
+                    .map(|rh| model.region_id(rh))
+            };
+            match found {
+                Some(id) => Ok(Value::Table(region_wrapper(lua, id)?)),
+                // ONE value, and it is nil — not zero values. See the `GetBackdrop` asymmetry above.
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     m.set(
         "CreateFontString",
         lua.create_function(

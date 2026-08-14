@@ -267,6 +267,22 @@ impl UiScript {
         new_id
     }
 
+    /// Is `(x, y)` inside this frame's title region?
+    ///
+    /// **False whenever the region has no resolved rect**, which is the common case and the correct
+    /// one: a freshly created title region has NO anchors at all and does nothing until
+    /// `SetPoint`/`SetAllPoints` (Q6). Both corpus consumers call `SetAllPoints` immediately, so
+    /// theirs covers the whole window — the whole-window-as-drag-handle idiom.
+    fn title_region_hit(&self, h: crate::widget::FrameHandle, x: f32, y: f32) -> bool {
+        let model = self.model_ref();
+        model
+            .arena
+            .frame(h)
+            .and_then(|f| f.title_region)
+            .and_then(|rh| model.region_resolved.get(&rh))
+            .is_some_and(|r| point_in_rect(*r, x, y))
+    }
+
     /// A mouse button transition at `(x, y)`: `button` is the WoW name (`"LeftButton"`,
     /// `"RightButton"`, …), `down` is press vs release. Fires `OnMouseDown(self, button)` on press or
     /// `OnMouseUp(self, button)` on release, on the captured frame.
@@ -301,6 +317,41 @@ impl UiScript {
     /// statement-position calls (`script.mouse_button(...);`) are unaffected.
     pub fn mouse_button(&mut self, x: f32, y: f32, button: &str, down: bool) -> bool {
         let hit_id = self.hit_test(x, y);
+        // ── The title region, and it SWALLOWS the press ─────────────────────────────────────────
+        //
+        // A mouse-down inside `frame:GetTitleRegion()` starts a mode-2 move and never reaches the
+        // ordinary path: the reference's `0x7662c0` tests `titleRegion+0x24` point-in-rect FIRST
+        // and only a MISS falls through to `0x7663e6`, which sets the captured frame and dispatches
+        // `vtable[0x68]` — the OnMouseDown script. So a hit takes `OnMouseDown`/`OnMouseUp` and
+        // `RegisterForDrag`'s `OnDragStart` with it (wow-re `widget-api-batch-benilla.md` Q6).
+        //
+        // Returning early is what implements that swallow: no OnMouseDown, no drag arm, no OnClick,
+        // no double-click bookkeeping. It reports the event CONSUMED, because it was.
+        if down {
+            if let Some(h) = self.hit_test_frame(x, y) {
+                if self.title_region_hit(h, x, y) {
+                    self.model_mut().cursor_pos = (x, y);
+                    crate::script::object::movable::start_title_move(&mut self.model_mut(), h);
+                    return true;
+                }
+            }
+        }
+        // ── …and the release ends it, where a scripted move would survive ───────────────────────
+        //
+        // `0x766420` auto-cancels modes 1 (modifier-drag) and 2 (title region) and leaves mode 3
+        // (`StartMoving`) alone — so a window grabbed by its title bar stops when the button comes
+        // up, while `OnDragStart → StartMoving` keeps moving until the addon's
+        // `StopMovingOrSizing`. Reduced to [`FrameMove::auto_stop`], because that one bit is all
+        // of the mode that is observable from Lua.
+        if !down
+            && self
+                .model_ref()
+                .moving
+                .as_ref()
+                .is_some_and(|m| m.auto_stop)
+        {
+            self.model_mut().moving = None;
+        }
         // The session clock, read before the borrow below — the double-click detector's only input
         // beyond the hit ([`Model::last_click`]). Same `GetTime()` seconds every script sees.
         let now = self.now();

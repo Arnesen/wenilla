@@ -101,6 +101,15 @@ pub(crate) struct FrameMove {
     frame: FrameHandle,
     /// The cursor position at the last pump (`root+0xd08`/`+0xd0c`), UI px, y-up.
     sample: (f32, f32),
+    /// Whether releasing the mouse ends this move on its own.
+    ///
+    /// **The reference's drag MODE, reduced to the one bit that is observable from Lua.** The
+    /// mouse-up handler `0x766420` auto-cancels modes 1 (modifier-drag) and 2 (title region) and
+    /// leaves mode 3 (`StartMoving`) running until `StopMovingOrSizing`
+    /// (wow-re `widget-api-batch-benilla.md` Q6). So a title drag ends on release while a scripted
+    /// one outlives the button — which is exactly the distinction this module's own doc already
+    /// records for the drag/move split.
+    pub(crate) auto_stop: bool,
 }
 
 /// An in-flight `StartSizing` drag: which frame, which grip, and the cursor at the last pump.
@@ -337,8 +346,39 @@ fn start_moving(model: &mut Model, h: FrameHandle) -> mlua::Result<()> {
     model.moving = Some(FrameMove {
         frame: h,
         sample: model.cursor_pos,
+        // Lua `StartMoving` is mode 3: it survives the button and ends only at
+        // `StopMovingOrSizing`.
+        auto_stop: false,
     });
     Ok(())
+}
+
+/// Begin a **title-region** move — mode 2, the drag a mouse-down inside `frame:GetTitleRegion()`
+/// starts (wow-re Q6, `0x7662c0` → `0x765320(frame, mode=2, …)` → `0x7652b0`).
+///
+/// [`start_moving`]'s body **minus the movable gate**, and that omission is the carved part rather
+/// than a shortcut: the movable bit is `frame+0xb4 & 0x100`, tested by `StartMoving` (`0x77678b`,
+/// else `"Frame %s is not movable"`) and by the modifier-drag path — and **not read anywhere** on
+/// `0x7662c0`→`0x765320`→`0x7652b0`→`0x768430`. Q6 marks the no-gate reading VERIFIED and the
+/// observable claim INFERRED, because both FrameXML users happen to be `movable="true"`; a title
+/// region on a non-movable frame is the case that would tell them apart, and it drags here.
+///
+/// Returns whether a move actually started — `false` when one was already in flight, which is
+/// `0x7767e8`'s `root+0xcfc != 0` guard and the same refusal [`start_moving`] makes.
+pub(crate) fn start_title_move(model: &mut Model, h: FrameHandle) -> bool {
+    if model.moving.is_some() {
+        return false;
+    }
+    super::toplevel::raise(model, h);
+    if let Some(f) = model.arena.frame_mut(h) {
+        f.user_placed = true;
+    }
+    model.moving = Some(FrameMove {
+        frame: h,
+        sample: model.cursor_pos,
+        auto_stop: true,
+    });
+    true
 }
 
 /// Pump an in-flight move to the cursor at `pos` — the engine half of `0x7655b0`, run from

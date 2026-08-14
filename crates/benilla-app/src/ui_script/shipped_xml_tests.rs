@@ -503,3 +503,106 @@ fn every_shipped_font_object_is_published_as_a_lua_global() {
         assert!(height > 0.0, "{name}: height {height}");
     }
 }
+
+/// **Two reference templates addons INHERIT, and the silence that hid them.**
+///
+/// `TargetBuffButtonTemplate` (ref `TargetFrame.xml`) and `MainMenuBarMicroButton` (ref
+/// `MainMenuBarMicroButtons.xml`) are declared by the reference and were not by us. An unresolved
+/// `inherits=` is **silent** — no load error, no session error, nothing in any harness column — so
+/// a consumer just gets a button with no size, no hit-rect and no scripts, and nothing anywhere
+/// says so. They surfaced only in the report's missing-TEMPLATES ranking.
+///
+/// Asserted through what a consumer actually gets: inherit the template, then read back the
+/// geometry and the script the reference confers.
+#[test]
+fn the_inheritable_reference_templates_confer_their_shape() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    assert!(super::load_default_ui(&s).is_empty());
+
+    // `CT_UnitFrames/CT_TargetFrame.xml:4` builds its own virtual template on top of this one, so
+    // the inherit has to work through a second hop as well as directly.
+    s.run(
+        r#"
+        BuffProbe = CreateFrame("Button", "BuffProbe", UIParent, "TargetBuffButtonTemplate")
+        MicroProbe = CreateFrame("Button", "MicroProbe", UIParent, "MainMenuBarMicroButton")
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<(f64, f64)>("return BuffProbe:GetWidth(), BuffProbe:GetHeight()")
+            .unwrap(),
+        (21.0, 21.0),
+        "the buff button carries the reference's 21x21"
+    );
+    assert!(
+        s.eval::<bool>("return BuffProbeIcon ~= nil").unwrap(),
+        "$parentIcon is the region a consumer getglobals to set the texture"
+    );
+    assert!(
+        s.eval::<bool>(r#"return BuffProbe:GetScript("OnEnter") ~= nil"#)
+            .unwrap(),
+        "the tooltip script comes with the template"
+    );
+
+    assert_eq!(
+        s.eval::<(f64, f64)>("return MicroProbe:GetWidth(), MicroProbe:GetHeight()")
+            .unwrap(),
+        (29.0, 58.0)
+    );
+    assert!(s
+        .eval::<bool>(r#"return MicroProbe:GetScript("OnEnter") ~= nil"#)
+        .unwrap());
+    assert!(s.errors().is_empty(), "no script errors: {:?}", s.errors());
+}
+
+/// **`CursorUpdate` / `CursorOnUpdate` — the inspect-cursor pair, transcribed from FrameXML.**
+///
+/// Both are `framexml` origin in `reference/1.12-globals.tsv` (while `ResetCursor` and
+/// `ShowInspectCursor` beside them are `engine`), so they are ours to write rather than to bind.
+/// Two corpus addons call `CursorUpdate` and one calls `CursorOnUpdate`; it is also one of the
+/// blockers on two reference templates addons inherit, and the sourced `ContainerFrame.lua` calls
+/// it from its keyring fork.
+#[test]
+fn the_inspect_cursor_pair_takes_both_arms() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    assert!(super::load_default_ui(&s).is_empty());
+
+    // Both exist as functions — the shape a caller checks before hooking.
+    assert_eq!(
+        s.eval::<(String, String)>("return type(CursorUpdate), type(CursorOnUpdate)")
+            .unwrap(),
+        ("function".into(), "function".into())
+    );
+
+    // **The no-ctrl arm, which is the one that runs in practice.** `this.hasItem` is read as a
+    // plain truthy field, so a frame that never sets it simply takes `ResetCursor` — this is why
+    // the pair is safe to ship before anything sets that field.
+    s.run(
+        r#"
+        CursorProbe = CreateFrame("Frame", "CursorProbe", UIParent)
+        this = CursorProbe
+        CursorUpdate()
+        this = nil
+        "#,
+    )
+    .unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "the ResetCursor arm runs clean: {:?}",
+        s.errors()
+    );
+
+    // `CursorOnUpdate` gates on tooltip ownership, so with the tooltip unowned it must do nothing
+    // at all rather than reach through to the cursor.
+    s.run("this = CursorProbe CursorOnUpdate() this = nil")
+        .unwrap();
+    assert!(
+        s.errors().is_empty(),
+        "the unowned-tooltip gate short-circuits: {:?}",
+        s.errors()
+    );
+}
