@@ -968,3 +968,57 @@ fn set_desaturated_reports_no_shader_support_and_does_not_raise() {
     s.run("DsTex:SetDesaturated(nil) DsTex:SetDesaturated(false)")
         .unwrap();
 }
+
+/// `UnitCreatureType(unit)` — `0x51a280`'s three-stage resolver, of which we model stages 2 and 3.
+///
+/// The load-bearing assertion is the **player** one. `0x605570` falls through the (never populated)
+/// creature record to a `ChrRaces.dbc` col-9 lookup that is **7 for all nine shipped races**, and
+/// `CreatureType[7]` is `"Humanoid"` — so a player answers a word, not nil. Reading only the
+/// creature record, which is what our data alone suggested, would have been wrong for every
+/// `UnitCreatureType("player")` call in the corpus.
+#[test]
+fn unit_creature_type_answers_the_record_then_falls_back_to_humanoid() {
+    let mut s = script();
+    s.set_unit(
+        "target",
+        Some(crate::script::UnitState {
+            exists: true,
+            creature_type_name: Some("Beast".into()),
+            ..Default::default()
+        }),
+    );
+    s.set_unit(
+        "player",
+        Some(crate::script::UnitState {
+            exists: true,
+            is_player: true,
+            ..Default::default()
+        }),
+    );
+
+    // Stage 2: a creature's cached record wins.
+    assert_eq!(
+        s.eval::<String>(r#"return UnitCreatureType("target")"#)
+            .unwrap(),
+        "Beast"
+    );
+    // Stage 3: a player has no record and falls through to race -> Humanoid.
+    assert_eq!(
+        s.eval::<String>(r#"return UnitCreatureType("player")"#)
+            .unwrap(),
+        "Humanoid"
+    );
+    // An unresolved TOKEN is nil — not a raise.
+    assert!(s
+        .eval::<bool>(r#"return UnitCreatureType("party4") == nil"#)
+        .unwrap());
+    // A non-string ARGUMENT is a raise, which is a different failure from the nil above:
+    // `lua_isstring` gates it and `luaL_error` longjmps, so a missing arg abandons the statement.
+    let err = s
+        .run("UnitCreatureType()")
+        .expect_err("a missing arg must raise");
+    assert!(
+        format!("{err}").contains("Usage: UnitCreatureType"),
+        "got {err}"
+    );
+}

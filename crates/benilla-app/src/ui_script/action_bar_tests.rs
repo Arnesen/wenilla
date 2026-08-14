@@ -1068,10 +1068,18 @@ fn the_reference_action_bar_constants_are_defined() {
         "zBar.lua:40's numeric for must have a limit"
     );
 
-    assert!(
-        s.eval::<bool>("return CURRENT_ACTIONBAR_PAGE == nil").unwrap(),
-        "CURRENT_ACTIONBAR_PAGE is mutable page state we do not keep — nil fails loudly, a frozen 1 lies"
+    // `CURRENT_ACTIONBAR_PAGE` was asserted ABSENT here, on the grounds that a frozen 1 lies where
+    // nil fails loudly. That objection is discharged, not overruled: the bar pages now, so the
+    // global is live state the paged-id formula reads rather than a frozen number. It is therefore
+    // asserted as state — present, and MOVING — instead of as one of the constants above.
+    assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 1);
+    s.run("ActionBar_PageUp()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(),
+        2,
+        "a frozen 1 would still be a lie — this one has to move"
     );
+    s.run("ActionBar_PageDown()").unwrap();
 }
 
 /// **The reference's two-level action-button split, both halves inheritable by name.**
@@ -1153,5 +1161,104 @@ fn both_reference_action_button_templates_are_inheritable() {
         s.eval::<bool>("return ActionButton1NormalTexture ~= nil and ActionButton1:GetScript(\"OnClick\") ~= nil")
             .unwrap(),
         "BenillaActionButtonTemplate's 48 inherits= sites must be untouched by the split"
+    );
+}
+
+/// Main-bar paging — `CURRENT_ACTIONBAR_PAGE` and the three verbs around it.
+///
+/// The data was always there (the app owns all 120 action slots); only the selector was missing,
+/// and its absence was visible on screen as page arrows with no `OnClick`. `Bartender2.lua:686`
+/// died on the nil `ChangeActionBarPage` at session start.
+///
+/// Two things are asserted that a reconstruction would get wrong. **A bonus page outranks the
+/// paged one** — the reference's own `ActionButton_GetPagedID` takes the bonus branch first, so
+/// paging must be the `else` arm and not an addition. And **page-up wraps to the literal page 1**
+/// while page-down rescans for the last viewable page: that asymmetry is the reference's, and it
+/// is observable the moment a page is blanked from `VIEWABLE_ACTION_BAR_PAGES`.
+#[test]
+fn the_main_bar_pages_and_a_bonus_page_still_outranks_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in ["Cooldown.xml", "ActionBar.xml"] {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/ui")
+                .join(file),
+        )
+        .unwrap();
+        let doc = benilla_ui::framexml::parse(&text).unwrap();
+        let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+        assert!(report.errors.is_empty(), "{file}: {:?}", report.errors);
+    }
+
+    assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        1,
+        "page 1 button 1 is action 1"
+    );
+
+    // Page up walks to 2, so button 1 shows action 13.
+    s.run("ActionBar_PageUp()").unwrap();
+    assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 2);
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        13
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton12)")
+            .unwrap(),
+        24
+    );
+
+    // Down again, and below page 1 it rescans to the LAST viewable page.
+    s.run("ActionBar_PageDown()").unwrap();
+    assert_eq!(s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(), 1);
+    s.run("ActionBar_PageDown()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(),
+        4,
+        "page-down off the bottom rescans for the last VIEWABLE page — 4, not 6, because the \
+         always-on bottom multibars own pages 5 and 6"
+    );
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        37
+    );
+    // The pages the bottom bars already display are unreachable from the main bar, which is what
+    // MultiActionBar_Update does on the reference the moment those bars are shown. Without this,
+    // paging up lands on a duplicate of the twelve actions already on screen below.
+    assert!(s
+        .eval::<bool>(
+            "return VIEWABLE_ACTION_BAR_PAGES[5] == nil and VIEWABLE_ACTION_BAR_PAGES[6] == nil"
+        )
+        .unwrap());
+    s.run("CURRENT_ACTIONBAR_PAGE = 4 ActionBar_PageUp()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<i64>("return CURRENT_ACTIONBAR_PAGE").unwrap(),
+        1,
+        "walking up from the last viewable page skips 5 and 6 and wraps to the LITERAL 1 — the \
+         reference's own asymmetry with page-down, which rescans instead"
+    );
+
+    // A bonus page outranks the paged one entirely: with an offset up, the page is ignored.
+    s.run("CURRENT_ACTIONBAR_PAGE = 3").unwrap();
+    s.set_bonus_bar_offset(1);
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        73,
+        "bonus offset 1 is action 73, whatever page the main bar is on"
+    );
+    s.set_bonus_bar_offset(0);
+    assert_eq!(
+        s.eval::<i64>("return ActionButton_GetPagedID(ActionButton1)")
+            .unwrap(),
+        25,
+        "and the page comes back when the form drops"
     );
 }

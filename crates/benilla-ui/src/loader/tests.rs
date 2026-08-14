@@ -247,6 +247,86 @@ mod loader_tests {
         assert_eq!(s.eval::<f32>("return PinChild:GetHeight()").unwrap(), 200.0);
     }
 
+    /// **`<Include file="X.lua">` RUNS the file** — the client's `<Include>` is a recursion into
+    /// its load-one-file routine `0x6ede10`, whose first act is a case-insensitive `.lua` suffix
+    /// test on the resolved path. It never sniffs content; it never parses a `.lua` as XML.
+    ///
+    /// We parsed every target as FrameXML, so a `.lua` target died `unknown token at 1:1` and took
+    /// the whole library set with it. Three corpus addons load nothing but these lines —
+    /// FonzAppraiser, AckisRecipeList, FonzSummon — and `embeds.xml` is the whole of their Ace
+    /// dependency chain.
+    ///
+    /// The mixed document is the point: one `<Include>` of each kind, in one file, both landing.
+    #[test]
+    fn include_runs_a_lua_target_and_still_parses_an_xml_one() {
+        let s = UiScript::new().unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            match path {
+                "libs/Lib.lua" => Some(b"IncludedLua = 41 + 1".to_vec()),
+                // Case-insensitive, exactly as `0x64a4c0` compares it.
+                "libs/Shouty.LUA" => Some(b"ShoutyLua = true".to_vec()),
+                "Sub.xml" => Some(br#"<Ui><Frame name="FromXmlInclude"/></Ui>"#.to_vec()),
+                _ => None,
+            }
+        };
+        let doc = parse(
+            r#"<Ui>
+                <Include file="libs\Lib.lua"/>
+                <Include file="libs\Shouty.LUA"/>
+                <Include file="Sub.xml"/>
+                <Frame name="FromMain"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &provider);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            s.eval::<i64>("return IncludedLua").unwrap(),
+            42,
+            "a .lua Include must be executed as a chunk, not parsed as a document"
+        );
+        assert!(
+            s.eval::<bool>("return ShoutyLua").unwrap(),
+            "case-insensitive suffix"
+        );
+        // ...and the XML arm is untouched: both frames still exist.
+        assert_eq!(report.frames, 2);
+        assert!(s
+            .eval::<bool>("return FromXmlInclude ~= nil and FromMain ~= nil")
+            .unwrap());
+    }
+
+    /// A raise inside an `.lua` Include is reported and the enclosing document CONTINUES — the
+    /// reference logs at severity 2 and falls through (`0x6ee00d` -> `0x6ee012` is unconditional,
+    /// `eax` never read), so one bad library must not cost the frames declared after it.
+    #[test]
+    fn a_raising_lua_include_does_not_take_the_rest_of_the_document() {
+        let s = UiScript::new().unwrap();
+        let provider = |path: &str| -> Option<Vec<u8>> {
+            match path {
+                "Bad.lua" => Some(b"error('library exploded')".to_vec()),
+                _ => None,
+            }
+        };
+        let doc = parse(
+            r#"<Ui>
+                <Include file="Bad.lua"/>
+                <Frame name="AfterTheBadInclude"/>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &provider);
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "the raise is reported: {:?}",
+            report.errors
+        );
+        assert!(report.errors[0].contains("Bad.lua"));
+        assert!(
+            s.eval::<bool>("return AfterTheBadInclude ~= nil").unwrap(),
+            "the element after a failed Include must still be built"
+        );
+    }
+
     /// `<Include>` resolved through an in-memory provider closure.
     #[test]
     fn include_resolves_through_provider() {

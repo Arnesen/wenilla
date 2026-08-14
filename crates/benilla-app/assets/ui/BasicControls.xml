@@ -70,6 +70,39 @@
         function TEXT(text)
             return text
         end
+
+        -- ── UIParentLoadAddOn (ref UIParent.lua l.638-647) ────────────────────────────────────
+        -- The on-demand loader every "open the auction house / tradeskill / talent panel" path
+        -- goes through, and the one 5 corpus addons name — FuBar_MCPFu, Fubar_RareTrackerFu, MCP,
+        -- MikScrollingBattleText, SpecialTalent: five separate addons, not one library replicated
+        -- (1207/1240).
+        --
+        -- Every piece was already here and only the join was missing: `LoadAddOn` answers the
+        -- reference's own `(1, nil)` / `(nil, reason)` pair, `message` and `TEXT` are directly
+        -- above, and the `ADDON_*` reason words come from the real `GlobalStrings.lua` we RUN off
+        -- the patch chain rather than copy (1234).
+        --
+        -- **`FailedAddOnLoad` is the reference's own latch, and it is not decoration.** Without it
+        -- an addon that retries the load from a handler raises a modal on every attempt; with it
+        -- the failure shows once per addon name per session. It is exactly the detail this would
+        -- have lacked had it been reconstructed from the name instead of read.
+        --
+        -- Every reason our `LoadAddOn` can answer resolves to a string: MISSING, DISABLED,
+        -- NOT_DEMAND_LOADED, DEP_MISSING and DEP_DISABLED all have an `ADDON_..reason` word
+        -- (GlobalStrings l.16-31), the same reason set wow-re's `ui.md` l.2396 carves off
+        -- `0x51e780`. So the `getglobal` below cannot hand `format` a nil.
+        FailedAddOnLoad = {};
+
+        function UIParentLoadAddOn(name)
+            local loaded, reason = LoadAddOn(name)
+            if not loaded then
+                if not FailedAddOnLoad[name] then
+                    message(format(TEXT(ADDON_LOAD_FAILED), name, TEXT(getglobal("ADDON_" .. reason))))
+                    FailedAddOnLoad[name] = true
+                end
+            end
+            return loaded
+        end
     ]]></Script>
 
     <!-- The dialog button faces (ref l.28-37). Same three-piece art as UIPanelButtonTemplate's,

@@ -99,9 +99,16 @@
         hides the one that owns it (`crates/benilla/src/ui_loot_roll.rs` fires both).
     -->
     <Script><![CDATA[
-        -- LootFrame.lua l.2's NUM_GROUP_LOOT_FRAMES, renamed to the house BENILLA_ prefix (the same
-        -- treatment LootFrame.xml gave LOOTFRAME_NUMBUTTONS -> BENILLA_LOOT_NUMBUTTONS).
-        BENILLA_NUM_GROUP_LOOT_FRAMES = 4
+        -- LootFrame.lua l.2's NUM_GROUP_LOOT_FRAMES, under the REFERENCE's own name.
+        --
+        -- It carried the house `BENILLA_` prefix until an addon died on the bare one:
+        -- `Bongos_RollBar/bar.lua:85` is `for i=1, NUM_GROUP_LOOT_FRAMES do` and got a nil limit.
+        -- That is 1222's shadowed-global class again — the fifth instance — and the rule it
+        -- settled applies to a CONSTANT an addon reads exactly as it does to a frame: our name for
+        -- a global is as load-bearing as our name for a function. The prefix is right only where
+        -- the reference has no counterpart; here it has one, with the same value (4) counting the
+        -- same four frames, which already carry the reference's bare names two paragraphs down.
+        NUM_GROUP_LOOT_FRAMES = 4
 
         -- The bind-on-pickup confirm (ref StaticPopup.lua l.1371-1382, verbatim bar the TEXT()
         -- indirection this house dialect drops). Need/Greed on a BoP roll never reaches the wire
@@ -138,7 +145,7 @@
         -- Timer StatusBar's max before showing it (fields set BEFORE Show(), so OnShow below can
         -- already read frame.rollID).
         function GroupLootFrame_OpenNewFrame(rollId, rollTime)
-            for i = 1, BENILLA_NUM_GROUP_LOOT_FRAMES do
+            for i = 1, NUM_GROUP_LOOT_FRAMES do
                 local frame = getglobal("GroupLootFrame" .. i)
                 if frame and not frame:IsVisible() then
                     frame.rollID = rollId

@@ -477,6 +477,65 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitCreatureType(unit) → **1 string, or nil** (`0x51a280`), the sibling of
+    // `UnitCreatureFamily 0x51a310`. Adjacent addresses and the same shape — but a DIFFERENT
+    // column: this reads `CreatureType.dbc` col `1 + locale`, the family reads col `8 + locale`.
+    // "Adjacent so probably identical" was right about the shape and wrong about the map.
+    //
+    // **A three-stage resolver** (`0x605570`), with no class or typemask gate anywhere — its only
+    // three tests are bounds checks:
+    //   1. **shapeshift override** — `SpellShapeshiftForm.dbc` col 12, keyed by field 138
+    //      `UNIT_FIELD_BYTES_1` byte 2, taken only if signed `> 0` (`0x60559a jg`), so `0` **and
+    //      the `-1` sentinel** fall through;
+    //   2. **the cached creature record** `[unit+0xb30]+0x18`, returned **unvalidated** — this is
+    //      what [`UnitState::creature_type_name`] carries;
+    //   3. **race fallback** — `ChrRaces.dbc` col 9, keyed by field 36 `UNIT_FIELD_BYTES_0` byte 0.
+    //
+    // Stage 3 is why **a PLAYER answers `"Humanoid"`, not nil**: `ChrRaces` col 9 is **7 for all
+    // nine shipped race rows** and `CreatureType[7]` is `"Humanoid"`, while `[player+0xb30]` is
+    // never populated (§5-verified by a 4-hit writer census — the ctor zeroes it, two writers
+    // early-out on `key==0`, and the third is hard-gated on `OBJECT_FIELD_TYPE == 0x9`, an
+    // equality a player's `0x19` fails structurally). A creature-record-only reading answers nil
+    // there, which would have been wrong for every `UnitCreatureType("player")` and every
+    // `("target")` aimed at a player.
+    //
+    // **Stage 1 is NOT modelled, and it is the one divergence to know about.** A druid in Cat,
+    // Bear, Dire Bear, Travel or Aquatic form — and a shaman in Ghost Wolf — answers `"Beast"` on
+    // the reference and `"Humanoid"` here. Tree Form, Moonkin, Battle Stance, Shadowform and
+    // Spirit of Redemption carry col 12 = `-1` and fall through to race anyway, so those already
+    // agree. We hold the active form's spell id and name ([`super::super::ShapeshiftFormView`])
+    // but **not the form INDEX the DBC is keyed by**, and matching on a localised form name would
+    // be inventing a mechanism the client does not use.
+    //
+    // The argument gate is real, and differs from the two boolean siblings: arg1 goes through
+    // `lua_isstring` (`0x6f3510`) and a miss calls `luaL_error 0x6f4940`, which **longjmps** — so a
+    // non-string, including a MISSING argument, abandons the caller's statement. An unresolved
+    // *token* is a different thing entirely and answers nil (`0x51a2b8`).
+    //
+    // Demand: 6 distinct corpus addons over 11 files.
+    g.set(
+        "UnitCreatureType",
+        lua.create_function(|lua, token: Value| {
+            let token = match &token {
+                Value::String(s) => Some(s.to_str()?.to_string()),
+                // `lua_isstring` coerces a number, so a numeric token is accepted and simply
+                // resolves to nothing.
+                Value::Number(_) | Value::Integer(_) => Some(String::new()),
+                _ => return Err(mlua::Error::runtime("Usage: UnitCreatureType(\"unit\")")),
+            };
+            let word = with_unit(lua, &token, None, |u| {
+                u.creature_type_name
+                    .clone()
+                    // Stage 3, collapsed: every player race maps to CreatureType 7.
+                    .or_else(|| u.is_player.then(|| "Humanoid".to_string()))
+            });
+            match word {
+                Some(w) => Ok(Value::String(lua.create_string(&w)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // UnitClassification(unit) → "normal" | "elite" | "rareelite" | "worldboss" | "rare" (decision
     // 0782, byte-verified `0x516d90`): a plain table index by the gated rank, and it answers a
     // STRING for every input — never nil. An absent snapshot deliberately reports "normal" rather

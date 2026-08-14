@@ -59,7 +59,7 @@
           AUTOCAST_* .
     -->
     <Script><![CDATA[
-        BENILLA_NUM_PET_ACTION_SLOTS = 10
+        NUM_PET_ACTION_SLOTS = 10
 
         -- The token textures, quoted verbatim from ref PetActionBarFrame.lua:6-12. They are
         -- GLOBALS on purpose: `GetPetActionInfo` returns the NAME of one for a token slot, and the
@@ -325,7 +325,7 @@
         -- the filled UI-Quickslot2 to the empty UI-Quickslot.
         function PetActionBar_Update()
             local usable = GetPetActionsUsable()
-            for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
+            for i = 1, NUM_PET_ACTION_SLOTS do
                 local button = getglobal("PetActionButton" .. i)
                 local name, subtext, texture, isToken, isActive, autoCastAllowed, autoCastEnabled = GetPetActionInfo(i)
                 button.isToken = isToken
@@ -411,7 +411,7 @@
             if frame.clock > BENILLA_PET_AUTOCAST_PERIOD then
                 frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
             end
-            for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
+            for i = 1, NUM_PET_ACTION_SLOTS do
                 BenillaPetAutocast_Update(getglobal("PetActionButton" .. i), frame.clock)
             end
         end

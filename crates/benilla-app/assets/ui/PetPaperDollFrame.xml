@@ -81,7 +81,7 @@
         UNIT_LEVEL_TEMPLATE = UNIT_LEVEL_TEMPLATE or "Level %d"        -- :4436
         PET_DIET_TEMPLATE = PET_DIET_TEMPLATE or "Diet: %s"            -- :3037
 
-        BENILLA_NUM_PET_STATS = 5             -- NUM_PET_STATS (ref l.2)
+        NUM_PET_STATS = 5             -- (ref l.2)
         BENILLA_NUM_PET_RESISTANCE_TYPES = 5  -- NUM_PET_RESISTANCE_TYPES (ref l.1)
 
         -- ── The page ────────────────────────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@
         -- duplication; unifying them would mean inventing a prefix the reference's own
         -- `PetStatFrame`/`CharacterStatFrame` naming doesn't share).
         function PetPaperDollFrame_SetStats()
-            for i = 1, BENILLA_NUM_PET_STATS do
+            for i = 1, NUM_PET_STATS do
                 local label = getglobal("PetStatFrame" .. i .. "Label")
                 local text = getglobal("PetStatFrame" .. i .. "StatText")
                 local frame = getglobal("PetStatFrame" .. i)

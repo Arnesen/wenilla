@@ -233,7 +233,7 @@
         -- ── This window's own constants (ref-PaperDollFrame.lua:1-4, Benilla-prefixed) ────────────
         BENILLA_NUM_STATS = 5              -- NUM_STATS
         BENILLA_NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
-        BENILLA_ATTACK_POWER_MAGIC_NUMBER = 14 -- ATTACK_POWER_MAGIC_NUMBER
+        ATTACK_POWER_MAGIC_NUMBER = 14 -- ATTACK_POWER_MAGIC_NUMBER
         -- MagicResFrame1..5's ref `id=` attrs (ref-PaperDollFrame.xml:654-759) — arcane/fire/nature/
         -- frost/shadow; Holy(1) never rides the paper doll (only 5 of the 6 schools show here).
         BENILLA_MAGICRES_IDS = { 6, 2, 3, 4, 5 }
@@ -689,7 +689,7 @@
             local text = getglobal(prefix .. "AttackPowerFrameStatText")
             PaperDollFormatStat(MELEE_ATTACK_POWER, base, posBuff, negBuff, frame, text)
             frame.tooltipSubtext = format(MELEE_ATTACK_POWER_TOOLTIP,
-                math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
+                math.max(base + posBuff + negBuff, 0) / ATTACK_POWER_MAGIC_NUMBER)
         end
 
         -- ref PaperDollFrame_SetAttackBothHands (l.391-417) — the weapon-skill line (decision 0208's
@@ -837,7 +837,7 @@
             local base, posBuff, negBuff = UnitRangedAttackPower(unit)
             PaperDollFormatStat(RANGED_ATTACK_POWER, base, posBuff, negBuff, frame, text)
             frame.tooltipSubtext = format(RANGED_ATTACK_POWER_TOOLTIP,
-                math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
+                math.max(base + posBuff + negBuff, 0) / ATTACK_POWER_MAGIC_NUMBER)
         end
 
         -- ref PaperDollFormatStat (l.804-833).

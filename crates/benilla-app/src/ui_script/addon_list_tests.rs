@@ -415,3 +415,66 @@ fn the_list_reports_an_out_of_date_interface_like_the_char_select_twin() {
         "no `## Interface` at all is silent, not out of date"
     );
 }
+
+/// `UIParentLoadAddOn(name)` — the on-demand loader 5 corpus addons name (FuBar_MCPFu,
+/// Fubar_RareTrackerFu, MCP, MikScrollingBattleText, SpecialTalent), and which raised as a nil
+/// global until every piece it needs was joined up in `BasicControls.xml`.
+///
+/// Two things are asserted, and the second is the one a reconstruction from the name would miss:
+/// it answers `LoadAddOn`'s own falsey result so a caller can branch, and `FailedAddOnLoad` shows
+/// the failure **once per addon name**, not once per attempt (ref `UIParent.lua` l.641-643).
+#[test]
+fn ui_parent_load_addon_reports_once_and_returns_the_load_result() {
+    let s = UiScript::new().unwrap();
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui/BasicControls.xml"),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(&s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "loader errors: {:?}",
+        report.errors
+    );
+
+    // The two GlobalStrings this leans on. The real client has them from FrameXML's first file and
+    // the corpus survey runs the real `GlobalStrings.lua`; a bare VM does not, so they are seated
+    // here rather than left to make `format` raise on a nil.
+    s.run(
+        r#"
+        ADDON_LOAD_FAILED = "Couldn't load %s: %s"
+        ADDON_MISSING = "Missing"
+        shown = {}
+        message = function(t) table.insert(shown, t) end
+    "#,
+    )
+    .unwrap();
+
+    // A name no registry has: LoadAddOn answers (nil, "MISSING"), so this answers falsey.
+    assert!(
+        s.eval::<bool>(r#"return UIParentLoadAddOn("NoSuchAddonAnywhere") == nil"#)
+            .unwrap(),
+        "must hand back LoadAddOn's own falsey result for a caller to branch on"
+    );
+    assert_eq!(
+        s.eval::<String>("return shown[1]").unwrap(),
+        "Couldn't load NoSuchAddonAnywhere: Missing",
+        "the reason word resolves through ADDON_..reason"
+    );
+
+    // The latch: a retrying addon gets one modal, not one per attempt.
+    for _ in 0..3 {
+        s.run(r#"UIParentLoadAddOn("NoSuchAddonAnywhere")"#)
+            .unwrap();
+    }
+    assert_eq!(
+        s.eval::<i64>("return table.getn(shown)").unwrap(),
+        1,
+        "FailedAddOnLoad must suppress every repeat for the same name"
+    );
+
+    // A DIFFERENT name is a different latch entry, so it still reports.
+    s.run(r#"UIParentLoadAddOn("AlsoNotThere")"#).unwrap();
+    assert_eq!(s.eval::<i64>("return table.getn(shown)").unwrap(), 2);
+}

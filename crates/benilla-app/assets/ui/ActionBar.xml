@@ -67,12 +67,12 @@
         --
         -- Found by the use-probe, which is the only column that touches anything.
         --
-        -- `CURRENT_ACTIONBAR_PAGE` is deliberately NOT among them. It is the reference's mutable
-        -- page cursor (ActionButton.lua:64/74 walk it), and benilla does not page the main bar that
-        -- way — the bonus offset re-pages it instead. Defining it as a frozen 1 would hand every
-        -- addon a number that is silently wrong forever; absent, a reader fails loudly and we find
-        -- out. That is this arc's own rule (1203/1205/1230: a silent wrong answer costs more than
-        -- a missing one), applied to ourselves.
+        -- `CURRENT_ACTIONBAR_PAGE` used to be withheld from this list on the grounds that it is the
+        -- reference's MUTABLE page cursor and we did not page the main bar — "defining it as a
+        -- frozen 1 would hand every addon a number that is silently wrong forever". That reasoning
+        -- was right and is now discharged rather than overruled: the bar pages, the global is live
+        -- state the paged-id formula reads, and it is declared with the paging verbs below rather
+        -- than here among the true constants. A frozen 1 would still be a lie; this one moves.
         NUM_ACTIONBAR_PAGES = 6
         NUM_ACTIONBAR_BUTTONS = 12
         BOTTOMLEFT_ACTIONBAR_PAGE = 6
@@ -133,6 +133,80 @@
         -- at OnLoad). The fan-out roster for the bar-level events below: the ref registers the
         -- feedback events per-button; our bar-level fan needs the full set in one place.
         BENILLA_ACTION_BUTTONS = {}
+
+        -- ── Main-bar paging (ref ActionButton.lua l.1-12 and l.63-101) ───────────────────────
+        -- The main bar has six pages, and we already hold every slot they address: the app owns
+        -- the authoritative 1..120 action table, so the DATA for pages 2-6 was always there and
+        -- only the page SELECTOR was missing. Its absence was on screen, not just in the API —
+        -- the page arrows below shipped as art with no OnClick, which this file's own comment
+        -- admitted ("ART ONLY - we have no bar paging, so the clicks are no-ops").
+        --
+        -- `Bartender2.lua:686` is the corpus tell: three bare `ChangeActionBarPage()` calls, and
+        -- the addon died on the nil global at session start.
+        CURRENT_ACTIONBAR_PAGE = 1
+        -- "Table of actionbar pages and whether they're viewable or not" (the reference's own
+        -- comment). The page walk below honours it rather than counting, which is what makes the
+        -- next two lines work at all.
+        --
+        -- **Pages 5 and 6 are deliberately NOT viewable, and that is the reference's own rule
+        -- applied to our configuration rather than a deviation from it.**
+        -- `MultiActionBar_Update` (ref MultiActionBars.lua l.49-60) blanks
+        -- `VIEWABLE_ACTION_BAR_PAGES[BOTTOMLEFT_ACTIONBAR_PAGE]` whenever MultiBarBottomLeft is
+        -- SHOWN — a page a multibar already displays must not also be reachable on the main bar,
+        -- or paging up shows you the twelve actions already on screen below. benilla's two bottom
+        -- bars are always-on with no `SHOW_MULTI_ACTIONBAR_*` state (0270, the director's call),
+        -- and they own pages 6 and 5 (MultiBars.xml: BottomLeft = actions 61..72, BottomRight =
+        -- 49..60), so the two rows are blanked at declaration instead of by a toggle.
+        --
+        -- MultiBarLeft/Right (pages 4 and 3) stay viewable because ours ship HIDDEN (1219), which
+        -- is the same state the reference is in with SHOW_MULTI_ACTIONBAR_3/4 unset.
+        VIEWABLE_ACTION_BAR_PAGES = {1, 1, 1, 1}
+        VIEWABLE_ACTION_BAR_PAGES[BOTTOMRIGHT_ACTIONBAR_PAGE] = nil
+        VIEWABLE_ACTION_BAR_PAGES[BOTTOMLEFT_ACTIONBAR_PAGE] = nil
+
+        -- `ChangeActionBarPage()` takes NO arguments — every reference caller sets
+        -- CURRENT_ACTIONBAR_PAGE first and then calls this to apply it (l.79, l.100), and
+        -- Bartender2 calls it bare.
+        --
+        -- Upstream it is a client binding; here it is FrameXML, deliberately. Our paged action id
+        -- is computed in Lua by `BenillaActionBar_ActionFor`, so the page IS this global and the
+        -- only work left for the verb is the repaint the reference gets by firing
+        -- ACTIONBAR_PAGE_CHANGED. Addons CALL this, they never replace it, so the divergence is
+        -- unobservable from Lua — unlike a name we shadow, which is 1222's class.
+        function ChangeActionBarPage()
+            for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                BenillaActionButton_Update(BENILLA_ACTION_BUTTONS[i])
+            end
+        end
+
+        function ActionBar_PageUp()
+            local page = CURRENT_ACTIONBAR_PAGE + 1
+            local nextPage
+            for i = page, NUM_ACTIONBAR_PAGES do
+                if VIEWABLE_ACTION_BAR_PAGES[i] then nextPage = i break end
+            end
+            -- Past the last viewable page, wrap to 1 — the reference wraps to the LITERAL 1 here
+            -- rather than to the first viewable page, which is its own asymmetry with PageDown
+            -- (which rescans). Kept, because it is observable: with page 1 blanked, paging up off
+            -- the end lands on a page the down-walk would have skipped.
+            CURRENT_ACTIONBAR_PAGE = nextPage or 1
+            ChangeActionBarPage()
+        end
+
+        function ActionBar_PageDown()
+            local page = CURRENT_ACTIONBAR_PAGE - 1
+            local prevPage
+            for i = page, 1, -1 do
+                if VIEWABLE_ACTION_BAR_PAGES[i] then prevPage = i break end
+            end
+            if not prevPage then
+                for i = NUM_ACTIONBAR_PAGES, 1, -1 do
+                    if VIEWABLE_ACTION_BAR_PAGES[i] then prevPage = i break end
+                end
+            end
+            CURRENT_ACTIONBAR_PAGE = prevPage
+            ChangeActionBarPage()
+        end
 
         -- Seat a TOP-LEVEL frame that anchors INTO the bar art (the bag bar + backpack toggle,
         -- BagFrame.xml; the micro-button row, MicroMenu.xml) one frame level above the art, so its
@@ -224,6 +298,11 @@
             local base = 0
             if offset > 0 then
                 base = (6 + offset - 1) * 12
+            else
+                -- The paged main bar. A bonus page (stance/form/stealth) OUTRANKS it, which is
+                -- why this is the else arm and not an addition: the reference's own
+                -- `ActionButton_GetPagedID` takes the bonus branch first.
+                base = (CURRENT_ACTIONBAR_PAGE - 1) * 12
             end
             return base + index
         end
@@ -1485,8 +1564,8 @@
                     </CheckButton>
 
                     <!-- Page up/down: 32x32 at CENTER of the art frame's TOPLEFT +(522,-22)/(522,-42)
-                         (ref-ActionBarFrame.xml l.159-217). ART ONLY — we have no bar paging, so the
-                         clicks are no-ops (no OnClick handler). -->
+                         (ref-ActionBarFrame.xml l.159-217). Live now that the bar pages — they were
+                         art with no OnClick for as long as `CURRENT_ACTIONBAR_PAGE` did not exist. -->
                     <Button name="ActionBarUpButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
                         <Anchors>
@@ -1495,6 +1574,7 @@
                         <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Up"/>
                         <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Down"/>
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Highlight" alphaMode="ADD"/>
+                        <Scripts><OnClick>ActionBar_PageUp()</OnClick></Scripts>
                     </Button>
                     <Button name="ActionBarDownButton">
                         <Size><AbsDimension x="32" y="32"/></Size>
@@ -1504,6 +1584,7 @@
                         <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Up"/>
                         <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Down"/>
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Highlight" alphaMode="ADD"/>
+                        <Scripts><OnClick>ActionBar_PageDown()</OnClick></Scripts>
                     </Button>
                 </Frames>
             </Frame>

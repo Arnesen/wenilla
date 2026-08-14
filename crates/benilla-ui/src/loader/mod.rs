@@ -288,6 +288,17 @@ pub fn join_ref(base: &str, path: &str) -> String {
     out.join("/")
 }
 
+/// The `.lua` test `0x6ede10` opens with: `strrchr(path, '.')` on the **whole resolved path**,
+/// then a **case-insensitive** compare against `".lua"` (`0x8710c8`, through `0x64a4c0`).
+///
+/// Deliberately the last dot anywhere in the path rather than the basename's, because that is what
+/// `strrchr` does — a directory carrying a dot and a file carrying none would take the same branch
+/// in the client as it does here.
+fn has_lua_suffix(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("lua"))
+}
+
 /// The directory part of a provider path — `""` for a bare name.
 fn dir_of(path: &str) -> &str {
     match path.rfind('/') {
@@ -414,6 +425,29 @@ impl Loader<'_> {
         for item in &doc.items {
             match item {
                 TopLevel::Include(path) => self.do_include(path),
+                // **A DELIBERATE DIVERGENCE, and a strict superset of the reference.**
+                //
+                // `<Script file=X>` does NOT share `<Include>`'s path law. `0x6ee070`-`0x6ee079`
+                // tests X itself for a separator and, when it has one, uses X **verbatim** — no
+                // `dirname(referrer)` prefix, and no `..` collapse either, since that arm never
+                // enters `0x6ede10`. Only a *bare* name gets `dirname(referrer) + name`.
+                //
+                // A verbatim value cannot open on 1.12. Resolution runs through `0x647e60` against
+                // a hash index whose key is each file's path **relative to the scan root**, and the
+                // root is the process CWD (Storm's base-path global `0xc52418` has no writer
+                // image-wide, so `0x646ebc` substitutes `"."`). The basename retry at `0x647ed3` is
+                // real code but off — it needs a flag bit that `0x648be0(0)` clears at startup. So
+                // `Libs\Ace\Ace.lua` misses every leg: full-string, base-prefixed and the MPQ
+                // chain. There is no per-addon or per-document current directory anywhere in the
+                // client. (wow-re `scratch/include-lua-dispatch.md` §4.1.)
+                //
+                // We resolve it against the including document's directory anyway. That converts a
+                // guaranteed failure into a success and **cannot break anything that worked on the
+                // reference**, because under 1.12 there is no install-root `Libs\` for the verbatim
+                // value to have found. The corpus addons carrying the form are TBC-era anyway —
+                // all three report `iface=20400` and ship LibStub/CallbackHandler-1.0, none of
+                // which existed in 1.12 — so reproducing the failure would buy nothing and cost
+                // `FuBar_AtlasFu`, which works today.
                 TopLevel::Script(ScriptRef::File(path)) => {
                     let joined = join_ref(self.base(), path);
                     match (self.files)(&joined) {
@@ -470,6 +504,33 @@ impl Loader<'_> {
             ));
             return;
         };
+        // **`<Include>` dispatches on the EXTENSION, and a `.lua` target is RUN, not parsed.**
+        //
+        // `0x6ede10` is not "the XML loader" — it is *load one file by path*, and its first act
+        // after the `..` collapse is a case-insensitive `.lua` suffix test on the **resolved** path
+        // (`0x6edee6`-`0x6edf0f`: `strrchr(path,'.')`, then a case-insensitive compare against
+        // `".lua"` @`0x8710c8`). Extension, never a content sniff — no byte of the file has been
+        // read at that point. A match runs the chunk (`0x6edf0f call 0x704bc0`, chunk name
+        // `"@<resolved path>"` via `0x8716e0`); anything else is opened and parsed as XML.
+        //
+        // `<Include file=X>` is a **recursion into that same routine** (`0x6ee00d`), so it inherits
+        // the dispatch for free: there is no `<Include>`-specific Lua code in the client at all,
+        // and it is the same mechanism that makes a `.lua` line in a `.toc` work. Which is also the
+        // internal evidence that this was ours and not the corpus's — our own `.toc` loader has
+        // always split on extension (`ui_script::addons`, 1185), and only this arm never did.
+        //
+        // Three addons ship the form — FonzAppraiser (67 sites), AckisRecipeList (24), FonzSummon
+        // (22): an authoring habit rather than a convention, but each lost its ENTIRE library set
+        // here, because `embeds.xml` is nothing but these lines. (wow-re
+        // `scratch/include-lua-dispatch.md`, §5-verified.)
+        if has_lua_suffix(&joined) {
+            if let Err(e) = self.run(crate::source::chunk(&bytes), &joined) {
+                self.report
+                    .errors
+                    .push(format!("<Include file=\"{path}\">: {e}"));
+            }
+            return;
+        }
         // An included document is the one place text is forced: roxmltree parses `&str` (1193).
         match framexml::parse(&crate::source::decode(&bytes)) {
             Ok(sub) => {

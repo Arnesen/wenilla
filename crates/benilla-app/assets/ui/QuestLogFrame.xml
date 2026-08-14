@@ -67,9 +67,9 @@
             to be the real widget method rather than a benilla global.
     -->
     <Script><![CDATA[
-        BENILLA_QUESTLOG_ROWS = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
-        BENILLA_QUESTLOG_MAX_DISPLAY = 20     -- MAX_QUESTLOG_QUESTS (pin §2, :6) — display cap only
-        BENILLA_QUESTLOG_MAX_OBJECTIVES = 10  -- MAX_OBJECTIVES (pin §3, QuestLogFrame.lua:3)
+        QUESTS_DISPLAYED = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
+        MAX_QUESTLOG_QUESTS = 20     -- MAX_QUESTLOG_QUESTS (pin §2, :6) — display cap only
+        MAX_OBJECTIVES = 10  -- MAX_OBJECTIVES (pin §3, QuestLogFrame.lua:3)
         -- Reward/choice row cap: the SAME v1 cap `QuestFrame.xml`'s BENILLA_QUEST_MAX_ITEMS uses (the
         -- ref's own MAX_NUM_ITEMS is 10, QuestFrame.lua:2 — we halve it there too).
         BENILLA_QUESTLOG_MAX_ITEMS = 6
@@ -270,7 +270,7 @@
             -- pill's middle piece then shrinks to the text (ref sizes it every update). The >10
             -- guard skips the first-ever paint, where the host hasn't measured the string yet
             -- (GetWidth 0 would collapse the pill; the next update — and every one after — sizes it).
-            getglobal("QuestLogCount"):SetText(string.format("Quests: |cffffffff%d/%d|r", numQuests, BENILLA_QUESTLOG_MAX_DISPLAY))
+            getglobal("QuestLogCount"):SetText(string.format("Quests: |cffffffff%d/%d|r", numQuests, MAX_QUESTLOG_QUESTS))
             local countWidth = getglobal("QuestLogCount"):GetWidth()
             if countWidth and countWidth > 10 then
                 getglobal("QuestLogCountMiddle"):SetWidth(countWidth)
@@ -293,14 +293,14 @@
             end
 
             -- Clamp the faux-scroll offset (pin §2's FauxScrollFrame_Update clamp).
-            local maxOffset = numEntries - BENILLA_QUESTLOG_ROWS
+            local maxOffset = numEntries - QUESTS_DISPLAYED
             if maxOffset < 0 then maxOffset = 0 end
             if questLogOffset > maxOffset then questLogOffset = maxOffset end
             if questLogOffset < 0 then questLogOffset = 0 end
 
             local selection = GetQuestLogSelection()
 
-            for i = 1, BENILLA_QUESTLOG_ROWS do
+            for i = 1, QUESTS_DISPLAYED do
                 local button = getglobal("QuestLogTitle" .. i)
                 local index = i + questLogOffset
                 if index <= numEntries then
@@ -362,7 +362,7 @@
             -- vertex-colored to the row's own difficulty color (that green bar in the ref shot IS
             -- this vertex color on the white ADD gradient).
             local hl = getglobal("QuestLogSelectHighlight")
-            if selection > questLogOffset and selection <= questLogOffset + BENILLA_QUESTLOG_ROWS
+            if selection > questLogOffset and selection <= questLogOffset + QUESTS_DISPLAYED
                 and selection <= numEntries then
                 local selButton = getglobal("QuestLogTitle" .. (selection - questLogOffset))
                 local _, selLevel, _, selIsHeader = GetQuestLogTitle(selection)
@@ -563,7 +563,7 @@
             getglobal("QuestLogTimerText"):SetText("")
             getglobal("QuestLogDescriptionTitle"):SetText("")
             getglobal("QuestLogDescription"):SetText("")
-            for i = 1, BENILLA_QUESTLOG_MAX_OBJECTIVES do
+            for i = 1, MAX_OBJECTIVES do
                 getglobal("QuestLogObjective" .. i):SetText("")
             end
             getglobal("QuestLogRewardTitleText"):SetText("")
@@ -819,7 +819,7 @@
             getglobal("QuestLogDescriptionTitle"):SetText("Description")
 
             local numObjectives = GetNumQuestLeaderBoards()
-            for i = 1, BENILLA_QUESTLOG_MAX_OBJECTIVES do
+            for i = 1, MAX_OBJECTIVES do
                 local line = getglobal("QuestLogObjective" .. i)
                 if i <= numObjectives then
                     local text, kind, finished = GetQuestLogLeaderBoard(i)
@@ -847,7 +847,7 @@
             -- widget backs GetQuestLogRequiredMoney yet) — that ref branch collapses into the rest.
             -- The objective-less TIMED branch (ref :432-437) is transcribed: a timed quest with no
             -- leaderboard lines hangs the header off the countdown row, not off ObjectivesText.
-            local objAnchorIndex = math.min(numObjectives, BENILLA_QUESTLOG_MAX_OBJECTIVES)
+            local objAnchorIndex = math.min(numObjectives, MAX_OBJECTIVES)
             local descTitle = getglobal("QuestLogDescriptionTitle")
             if objAnchorIndex > 0 then
                 descTitle:SetPoint("TOPLEFT", getglobal("QuestLogObjective" .. objAnchorIndex), "BOTTOMLEFT", 0, -10)

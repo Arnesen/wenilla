@@ -56,8 +56,8 @@
         established cross-window reuse `TrainerFrame.xml`/`BagFrame.xml` already lean on).
     -->
     <Script><![CDATA[
-        BENILLA_BANK_ITEM_SLOTS = 24  -- NUM_BANKGENERIC_SLOTS (ref BankFrame.lua:3)
-        BENILLA_BANK_BAG_SLOTS = 6    -- NUM_BANKBAGSLOTS (ref BankFrame.lua:4)
+        NUM_BANKGENERIC_SLOTS = 24  -- (ref BankFrame.lua:3)
+        NUM_BANKBAGSLOTS = 6    -- (ref BankFrame.lua:4)
 
         function BankFrame_OnLoad()
             local frame = this
@@ -95,7 +95,7 @@
         -- Repaint every one of the 24 generic slots (PLAYERBANKSLOTS_CHANGED names ONE slot; the
         -- spec allows repainting all 24 — cheap, and spares tracking a slot->button map).
         function BenillaBankFrame_RepaintItems()
-            for i = 1, BENILLA_BANK_ITEM_SLOTS do
+            for i = 1, NUM_BANKGENERIC_SLOTS do
                 local button = getglobal("BankItem" .. i)
                 if button then BenillaBagSlot_Update(button) end
             end
@@ -107,7 +107,7 @@
         -- afford color; the whole row hidden once GetNumBankSlots() reports `full`.
         function BenillaBankFrame_UpdateBagRow()
             local numSlots, full = GetNumBankSlots()
-            for i = 1, BENILLA_BANK_BAG_SLOTS do
+            for i = 1, NUM_BANKBAGSLOTS do
                 local button = getglobal("BankBagButton" .. i)
                 if button then
                     local texture = BenillaGetBankBagTexture(i)
@@ -188,7 +188,7 @@
 
         -- CloseBankBagFrames (ref BankFrame.lua:119-123), over our popout naming.
         function CloseBankBagFrames()
-            for j = 1, BENILLA_BANK_BAG_SLOTS do
+            for j = 1, NUM_BANKBAGSLOTS do
                 local frame = getglobal("BenillaBankBagFrame" .. j)
                 if frame and frame:IsShown() then frame:Hide() end
                 local button = getglobal("BankBagButton" .. j)

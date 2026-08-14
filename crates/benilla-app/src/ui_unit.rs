@@ -664,7 +664,15 @@ fn creature_type_word(t: u32) -> Option<&'static str> {
         7 => "Humanoid",
         8 => "Critter",
         9 => "Mechanical",
-        _ => return None, // 10 "Not specified" shows nothing
+        // The shipped `CreatureType.dbc` is **1..11 dense**, not 1..9 — this table stopped two
+        // rows early. 11 is reachable and wow-re's own nameplate filter tests for it
+        // (`0x605570 == 0xb`).
+        11 => "Totem",
+        // 10 is "Not specified" in the DBC. Deliberately still None: this word is the tooltip's
+        // level-line class slot and a literal "Not specified" there is noise. The cost is named
+        // rather than hidden — `UnitCreatureType` shares this field, so it answers nil for a
+        // type-10 unit where the reference answers the DBC word.
+        _ => return None,
     })
 }
 
