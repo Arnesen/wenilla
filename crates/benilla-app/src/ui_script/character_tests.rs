@@ -1013,3 +1013,68 @@ fn a_keybind_page_switch_moves_the_tab_row_with_it() {
     assert!(shown(&mut s, "PaperDollFrame"), "…or change the page");
     assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
 }
+
+/// **The tab kit's XML-facing entry point, driven the way an addon drives it.**
+///
+/// Four corpus addons (Enchantrix, Outfitter, SimpleActionSets, TheoryCraft) put
+/// `PanelTemplates_Tab_OnClick(<frame>)` straight into a tab's `<OnClick>` and let the kit do the
+/// rest; this client had every other member of the kit and not that one, because our own windows
+/// wire their tabs to their own handlers and never reached for the generic entry point.
+///
+/// **It is built on a row of this test's own, and that is the finding, not a convenience.** The
+/// reference's tab buttons carry `id="1".."4"` (ref `CharacterFrame.xml:79-133`) and ours carry
+/// none: our row is id-based through `BenillaCharacterFrameTab_OnClick(id)`, which closes over the
+/// number instead of reading it off the widget. So `CharacterFrameTab2:GetID()` is **0** here, and
+/// driving OUR row through the generic entry point would select tab 0 — correct code meeting a
+/// window that does not obey the contract it reads. An addon's own tabs do carry ids, which is why
+/// the four callers above work; this builds a row that obeys the reference's contract and drives
+/// that.
+///
+/// The `this`/frame split is the whole reason the function exists: `this` is the clicked TAB and
+/// the owning FRAME is a separate argument, which is the shape `SimpleActionSets.xml:342` relies on
+/// when it passes `this:GetParent()`.
+#[test]
+fn an_addons_tab_click_selects_through_the_generic_entry_point() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "UIParent.xml");
+
+    // A conforming row: tabs named `<frame>Tab1..N` (what `PanelTemplates_UpdateTabs` getglobals)
+    // and each carrying its own id, exactly as an addon's XML declares them.
+    s.run(
+        r#"
+        TabKitFrame = CreateFrame("Frame", "TabKitFrame", UIParent)
+        PanelTemplates_SetNumTabs(TabKitFrame, 2)
+        for i = 1, 2 do
+            local t = CreateFrame("Button", "TabKitFrameTab" .. i, TabKitFrame,
+                                  "CharacterFrameTabButtonTemplate")
+            t:SetID(i)
+        end
+        PanelTemplates_SetTab(TabKitFrame, 1)
+        "#,
+    )
+    .unwrap();
+    let selected = |s: &mut UiScript| {
+        s.eval::<i64>("return PanelTemplates_GetSelectedTab(TabKitFrame)")
+            .unwrap()
+    };
+    assert_eq!(selected(&mut s), 1);
+
+    // The addon idiom, verbatim: `this` is the tab, the frame is the argument.
+    s.run("this = TabKitFrameTab2; PanelTemplates_Tab_OnClick(TabKitFrame); this = nil")
+        .unwrap();
+    assert_eq!(
+        selected(&mut s),
+        2,
+        "the kit takes the tab's OWN id from `this`, not from the frame it was handed"
+    );
+    // The row repainted, not just the number — the same visible half the keybind test asserts.
+    assert!(
+        s.eval::<bool>("return TabKitFrameTab2MiddleDisabled:IsVisible()")
+            .unwrap(),
+        "the newly selected tab wears the Active art"
+    );
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}

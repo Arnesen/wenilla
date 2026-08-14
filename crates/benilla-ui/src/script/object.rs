@@ -123,7 +123,10 @@ pub(super) fn point_from_str(s: &str) -> Option<Point> {
 }
 
 /// The inverse of [`point_from_str`] (the client's point-id table `0x811a38`, names back out).
-fn point_name(p: Point) -> &'static str {
+///
+/// `pub(super)` because the REGION cluster reports the same names from the same table — one
+/// spelling of the point set, not two (`region/layout.rs`'s `GetPoint`).
+pub(super) fn point_name(p: Point) -> &'static str {
     match p {
         Point::TopLeft => "TOPLEFT",
         Point::Top => "TOP",

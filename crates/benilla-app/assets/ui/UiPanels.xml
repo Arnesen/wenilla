@@ -1277,6 +1277,30 @@
         -- isDisabled/SetDisabledTabState arm (no window has a disabled tab yet) and the SelectTab
         -- tab-tooltip hide (our tabs set no tooltip). First consumer: the merchant's
         -- Merchant/Buyback pair.
+        -- The kit's XML-facing entry point (ref l.2-4), and the one member of it this client never
+        -- had. Not an omission anyone decided: our own windows wire each tab's OnClick to their own
+        -- handler (the merchant's Merchant/Buyback pair, CharacterFrame's pages), so nothing here
+        -- ever reached for the generic one. An ADDON does the opposite — it puts the reference's
+        -- name straight in its <OnClick> and lets the kit do the work:
+        --
+        --     Enchantrix        EnchantrixBarker.xml:61    (Enchantrix_BarkerOptions_Frame)
+        --     Outfitter         Outfitter.xml:7            (OutfitterFrame)
+        --     SimpleActionSets  SimpleActionSets.xml:342   (this:GetParent())
+        --     TheoryCraft       TheoryCraft.xml:163        (TheoryCraft)
+        --
+        -- Four addons, four separate files, so 1207's one-library caveat does not apply. A raw grep
+        -- says FIVE: QuestItemTemplates.xml:17 has the call commented out. Reading the line is what
+        -- tells those apart, and the survey's own count of 4 was the right one.
+        --
+        -- Missing, every one of them raises on each click of the tab, so the addon's options window
+        -- stays on whatever page it opened with and cannot be navigated at all. `this` is the
+        -- clicked tab button, whose id is its slot in the row; the frame is passed in separately
+        -- because the tab's parent is not always the frame owning the row — SimpleActionSets is the
+        -- case that proves it, passing `this:GetParent()` explicitly.
+        function PanelTemplates_Tab_OnClick(frame)
+            PanelTemplates_SetTab(frame, this:GetID())
+        end
+
         function PanelTemplates_SetNumTabs(frame, numTabs)
             frame.numTabs = numTabs
         end

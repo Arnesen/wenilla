@@ -1702,3 +1702,44 @@ fn the_unit_frame_hover_hooks_carry_the_references_names() {
         s.errors()
     );
 }
+
+/// **`SetRaidTargetIconTexture` lands each mark on its own cell of the 4×4 sheet.**
+///
+/// The helper an addon uses to draw a raid mark it got from `GetRaidTargetIndex` — three corpus
+/// addons in two codebases (CustomNameplates; Optional/oRA2's shared `MainTank.lua:1216` and
+/// `PlayerTarget.lua:1472`). It owns no frame and reads no unit: the texture is the caller's.
+///
+/// The coordinates are the point, so all eight are checked rather than one. Star is the top-left
+/// cell and skull the bottom-right of the first two rows — which is also what pins the reference's
+/// own `/ ROWS` row derivation as harmless here: with 4 rows and 4 columns the wrap lands where the
+/// sheet's mark order says it should.
+#[test]
+fn the_raid_mark_helper_maps_each_index_to_its_cell() {
+    let s = UiScript::new().unwrap();
+    load_unit_frames(&s);
+    s.run(r#"RTMark = UIParent:CreateTexture("RTMark", "OVERLAY")"#)
+        .unwrap();
+
+    // (index, left, right, top, bottom) — 0.25 per cell, four across then down a row.
+    let cells = [
+        (1, 0.00, 0.25, 0.00, 0.25), // star
+        (2, 0.25, 0.50, 0.00, 0.25), // circle
+        (3, 0.50, 0.75, 0.00, 0.25), // diamond
+        (4, 0.75, 1.00, 0.00, 0.25), // triangle
+        (5, 0.00, 0.25, 0.25, 0.50), // moon — the wrap onto row 2
+        (6, 0.25, 0.50, 0.25, 0.50), // square
+        (7, 0.50, 0.75, 0.25, 0.50), // cross
+        (8, 0.75, 1.00, 0.25, 0.50), // skull
+    ];
+    for (i, l, r, t, b) in cells {
+        s.run(&format!("SetRaidTargetIconTexture(RTMark, {i})"))
+            .unwrap();
+        let got: (f64, f64, f64, f64) = s.eval("return RTMark:GetTexCoord()").unwrap();
+        assert_eq!(
+            got,
+            (l, r, t, b),
+            "mark {i} must sample the cell at ({l}, {r}, {t}, {b})"
+        );
+    }
+    assert!(s.errors().is_empty(), "no errors: {:?}", s.errors());
+}

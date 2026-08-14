@@ -1,7 +1,7 @@
 //! `addon_harness` — load a folder of addons, one per VM, and print what happened.
 //!
 //! ```text
-//! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>] [--status <file>] [--diff <file>]
+//! cargo run -q -p benilla-app --example addon_harness -- <folder> [--verbose] [--why <substr>] [--deep [n]] [--status <file>] [--diff <file>]
 //! ```
 //!
 //! The instrument decision 1188 phase 6 asks for: *"which addons work" is a number that can be
@@ -16,6 +16,42 @@ use benilla_app::addon_harness;
 /// frame, which was enough to RANK a row and never enough to FIND one: chasing a `SetTexture`
 /// failure to its call site needed the frames below it, and the addon/file/line only appear there.
 const WHY_TRACEBACK_LINES: usize = 8;
+
+/// Print a ranked demand table — and **say what was dropped**.
+///
+/// Every one of these lists is a queue, and each was printed as a silent top-N. A silent cut reads
+/// as "that is the whole list", and this arc has one expensive instance of exactly that: the
+/// "a reference frame we do not build" class was swept, found clean, and recorded CLOSED — while
+/// `ShapeshiftBarLeft` sat below the cut with two addons behind it, and stayed there until an
+/// addon's first error named it (1219's class, first regions). The sweep was honest; the list it
+/// swept was not complete and did not say so.
+///
+/// So the tail is now stated: how many rows, and how many addon-mentions, were not shown. The
+/// caller keeps its own `take` — this only refuses to hide the remainder.
+///
+/// `--deep [n]` overrides every caller's `take` (see [`DEEP`]). 1242 made the cut VISIBLE and
+/// rejected raising it — an unreadable report helps nobody. But "visible" only tells a sweep that
+/// rows exist; it still cannot read them, and `--why` opens one name at a time, which is no way to
+/// walk 1930 of them. So the cut stays where it is for the report, and a sweep asks for the rest.
+fn ranked(rows: Vec<(String, usize)>, take: usize) {
+    let take = DEEP.get().copied().flatten().unwrap_or(take);
+    let total = rows.len();
+    for (name, count) in rows.iter().take(take) {
+        println!("    {count:>4}  {name}");
+    }
+    if total > take {
+        let tail: usize = rows[take..].iter().map(|(_, c)| c).sum();
+        println!(
+            "    …{} more rows below the cut ({tail} addon-mentions) — TRUNCATED, not exhausted; \
+             `--why <name>` opens any row.",
+            total - take
+        );
+    }
+}
+
+/// The `--deep` override, set once in `main`. `Some(n)` shows `n` rows of EVERY ranked list;
+/// `--deep` with no number means all of them. Absent, each list keeps the `take` its caller chose.
+static DEEP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -65,6 +101,13 @@ fn main() {
         .position(|a| a == "--diff")
         .and_then(|i| rest.get(i + 1))
         .cloned();
+    // `--deep [n]`: open the tails. A bare `--deep` (or one followed by the next flag) means all.
+    let deep = rest.iter().position(|a| a == "--deep").map(|i| {
+        rest.get(i + 1)
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(usize::MAX)
+    });
+    let _ = DEEP.set(deep);
     let root = std::path::PathBuf::from(root);
 
     let reports = addon_harness::survey(&root);
@@ -322,9 +365,7 @@ fn main() {
     let templates = addon_harness::template_demand(&reports);
     if !templates.is_empty() {
         println!("\n  most-wanted missing TEMPLATES (addons naming each in CreateFrame):");
-        for (name, count) in templates.into_iter().take(12) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(templates, 12);
     }
 
     // The same question over the OTHER axis, and the one that actually moves the headline: a
@@ -336,9 +377,7 @@ fn main() {
     let inherits = addon_harness::inherits_demand(&reports);
     if !inherits.is_empty() {
         println!("\n  most-wanted missing TEMPLATES (addons naming each in an XML inherits=):");
-        for (name, count) in inherits.into_iter().take(12) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(inherits, 12);
     }
 
     // Frames and tables, ranked separately: a missing function is a Rust verb to write, a missing
@@ -347,9 +386,7 @@ fn main() {
     let tables = addon_harness::table_demand(&reports);
     if !tables.is_empty() {
         println!("\n  most-wanted missing FRAMES/TABLES (addons indexing each):");
-        for (name, count) in tables.into_iter().take(16) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(tables, 16);
     }
 
     // **Widget METHODS** — the third queue, and the one this report was blind to while the arc
@@ -379,9 +416,7 @@ fn main() {
             "    · a third-party library's own method on its own object is not ours to write."
         );
         println!("  Open the call site before ranking it (decision 1240).");
-        for (name, count) in methods.into_iter().take(16) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(methods, 16);
     }
 
     // **Per KIND** — the question the table above structurally cannot ask. It resolves a name
@@ -397,9 +432,7 @@ fn main() {
             "\n  most-wanted missing METHODS BY KIND (receiver typed from the call site; \"on X\" \
              = the sibling that does answer it):"
         );
-        for (name, count) in by_kind.into_iter().take(16) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(by_kind, 16);
     }
 
     // ...and the residue: a receiver nothing could type, on a name whose answer DEPENDS on the
@@ -415,9 +448,7 @@ fn main() {
              is the AddMessage shape and one every kind but the two regions answers is not):",
             ambiguous.len()
         );
-        for (name, count) in ambiguous.into_iter().take(12) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(ambiguous, 12);
     }
 
     // The other half of the same scan, and never merged into it: methods addons call **behind a
@@ -428,15 +459,11 @@ fn main() {
     let optional = addon_harness::optional_method_demand(&reports);
     if !optional.is_empty() {
         println!("\n  ...and methods they FEATURE-TEST and work around (not blockers):");
-        for (name, count) in optional.into_iter().take(8) {
-            println!("    {count:>4}  {name}");
-        }
+        ranked(optional, 8);
     }
 
     println!("\n  most-wanted missing globals (addons wanting each):");
-    for (name, count) in addon_harness::demand(&reports).into_iter().take(30) {
-        println!("    {count:>4}  {name}");
-    }
+    ranked(addon_harness::demand(&reports), 30);
 
     if let Some(pattern) = &why {
         let hits = addon_harness::blocked_by(&reports, pattern);

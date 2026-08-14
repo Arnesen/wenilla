@@ -4,8 +4,8 @@
 use mlua::{Lua, Table, Value};
 
 use crate::layout::{Anchor, Point};
-use crate::script::object::anchor_bits_eq;
-use crate::script::Model;
+use crate::script::object::{anchor_bits_eq, frame_wrapper, point_name};
+use crate::script::{Model, SCREEN};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
 use super::{
@@ -149,6 +149,112 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 model.touch_layout();
             }
             Ok(())
+        })?,
+    )?;
+
+    // ── The rest of the Region map `0xcf54b4` (wow-re `font-object-lua-surface.md`) ──────────────
+    //
+    // These four landed together because the MAP is the unit, not the name. `SetParent` shipped
+    // alone when one addon line named it, and its own getter stayed missing for months — which is
+    // how `TheoryCraft\TheoryCraftUI.lua:720` (`buttontext:GetParent()`, a FontString) died every
+    // session, and how the per-kind census came to read `115 GetParent (missing on Texture,
+    // FontString)`. The set is closed and byte-verified, so it is asserted as a set in
+    // `tests/reference_surface.rs` rather than grown a name at a time.
+
+    // GetParent() → the OWNER frame's wrapper. A region always has one (`region_owner_id` falls
+    // back to the owner for every unresolved case), so unlike the frame twin this never answers nil.
+    m.set(
+        "GetParent",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let owner = {
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                region_owner_id(&mut model, rh)
+            };
+            frame_wrapper(lua, owner)
+        })?,
+    )?;
+
+    // GetCenter() → the resolved rect's midpoint, or a nil PAIR before the first resolve — the same
+    // contract, and the same source, as the GetLeft/GetRight/GetTop/GetBottom readers above.
+    //
+    // **Deliberately unscaled, where the frame twin divides by GetEffectiveScale.** The region edge
+    // readers report raw resolved units; scaling only the centre would make `GetCenter()` disagree
+    // with `(GetLeft() + GetRight()) / 2` on any scaled subtree — a contradiction inside one method
+    // table is worse than a missing division, and regions have no scale of their own to divide by.
+    m.set(
+        "GetCenter",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(match model.region_resolved.get(&rh) {
+                Some(r) => (
+                    Value::Number(f64::from((r.left + r.right) * 0.5)),
+                    Value::Number(f64::from((r.bottom + r.top) * 0.5)),
+                ),
+                None => (Value::Nil, Value::Nil),
+            })
+        })?,
+    )?;
+
+    // GetNumPoints() → how many anchors this region carries. Absent on our FRAMES too, which is the
+    // same drift one table up; this side is what the corpus named.
+    m.set(
+        "GetNumPoints",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model
+                .region_data
+                .get(&rh)
+                .map_or(0, |d| d.anchors.len() as i64))
+        })?,
+    )?;
+
+    // GetPoint([n]) → point, relativeTo, relativePoint, xOfs, yOfs — the n-th (1-based, default
+    // first) anchor, mirroring the frame twin including its out-of-range answer (five nils).
+    //
+    // **The relativeTo dispatch is the part a frame-shaped copy gets wrong.** Region anchors live in
+    // ONE id space with frames and may target a sibling REGION — the real XML does it everywhere
+    // (`region.rs`'s `resolve_target`: frames first, then the region-name registry). So the id is
+    // matched against both tables and answered with the matching wrapper kind; handing back a frame
+    // wrapper for a region id would be a working-looking handle onto the wrong object.
+    m.set(
+        "GetPoint",
+        lua.create_function(|lua, (this, n): (Table, Option<i64>)| {
+            let rh = region_handle_of(lua, &this)?;
+            let anchor = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                let idx = (n.unwrap_or(1).max(1) - 1) as usize;
+                model
+                    .region_data
+                    .get(&rh)
+                    .and_then(|d| d.anchors.get(idx))
+                    .cloned()
+            };
+            let Some(a) = anchor else {
+                return Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil, Value::Nil));
+            };
+            let rel = {
+                let is_frame = {
+                    let model = lua.app_data_ref::<Model>().expect("model");
+                    model.id_to_frame.contains_key(&a.relative_to)
+                };
+                if a.relative_to == SCREEN {
+                    Value::Nil
+                } else if is_frame {
+                    Value::Table(frame_wrapper(lua, a.relative_to)?)
+                } else {
+                    Value::Table(super::region_wrapper(lua, a.relative_to)?)
+                }
+            };
+            Ok((
+                Value::String(lua.create_string(point_name(a.point))?),
+                rel,
+                Value::String(lua.create_string(point_name(a.relative_point))?),
+                Value::Number(f64::from(a.x_off)),
+                Value::Number(f64::from(a.y_off)),
+            ))
         })?,
     )?;
     Ok(())

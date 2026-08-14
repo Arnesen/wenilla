@@ -112,6 +112,41 @@
             HAPPINESS = { r = 0.0, g = 1.0, b = 1.0 },
         }
 
+        -- ── The raid-target mark atlas (ref TargetFrame.lua l.460-463 + l.475-484) ──────────────
+        -- `Interface\TargetingFrame\UI-RaidTargetingIcons` is one 256x256 sheet of 4x4 64px cells,
+        -- in mark order: star, circle, diamond, triangle, moon, square, cross, skull. The helper
+        -- turns a 1..8 mark index into that cell's texcoords on a CALLER-SUPPLIED texture — it owns
+        -- no frame and reads no unit, which is why an addon can hand it a texture of its own.
+        --
+        -- Three corpus addons do, in two codebases (`Optional` and `oRA2` ship the same two files):
+        --     CustomNameplates  options.lua:363    (its options preview)
+        --     Optional / oRA2   MainTank.lua:1216, PlayerTarget.lua:1472
+        -- We answer `GetRaidTargetIndex(unit)` already (0434 §6); this is the other half — what an
+        -- addon DRAWS with that number — and without it those lines raise while redrawing a mark.
+        --
+        -- TRANSCRIBED VERBATIM, INCLUDING THE REFERENCE'S OWN SLIP: the row is derived with
+        -- `/ RAID_TARGET_TEXTURE_ROWS` while the column uses `mod(.., RAID_TARGET_TEXTURE_COLUMNS)`.
+        -- Rows and columns are both 4, so the two agree for every index this sheet holds and the
+        -- output is right; "fixing" it to divide by COLUMNS computes the same coords today and would
+        -- quietly diverge from the client the day a caller changes a constant. These are globals in
+        -- the reference for exactly that reason — addons read them, and two of ours are addons that
+        -- draw their own marks.
+        RAID_TARGET_ICON_DIMENSION = 64
+        RAID_TARGET_TEXTURE_DIMENSION = 256
+        RAID_TARGET_TEXTURE_COLUMNS = 4
+        RAID_TARGET_TEXTURE_ROWS = 4
+
+        function SetRaidTargetIconTexture(texture, raidTargetIconIndex)
+            raidTargetIconIndex = raidTargetIconIndex - 1
+            local left, right, top, bottom
+            local coordIncrement = RAID_TARGET_ICON_DIMENSION / RAID_TARGET_TEXTURE_DIMENSION
+            left = mod(raidTargetIconIndex, RAID_TARGET_TEXTURE_COLUMNS) * coordIncrement
+            right = left + coordIncrement
+            top = floor(raidTargetIconIndex / RAID_TARGET_TEXTURE_ROWS) * coordIncrement
+            bottom = top + coordIncrement
+            texture:SetTexCoord(left, right, top, bottom)
+        end
+
         -- The client's UnitReactionColor table (ref-TargetFrame.lua l.6-14), indexed by
         -- UnitReaction 1..8 (hated..exalted): 1-2 red, 3 orange, 4 neutral yellow, 5-7 green. The
         -- name-plate reaction tint (TargetFrame_CheckFaction) reads it — this is what makes a neutral
@@ -1056,7 +1091,29 @@
                              of its own layer — the ref hides the number while resting by putting
                              it in a LOWER layer than the badge. Shipped in OVERLAY by 1082, the
                              number rode ON the badge (director report, 2026-08-07); decision 1093. -->
-                        <!-- Name 100×10 CENTER (50,19) (ref l.58-69). -->
+                        <!-- Name 100×10 CENTER (50,19) (ref l.58-69).
+
+                             A DIVERGENCE, measured and deliberately kept. The reference names the
+                             three unit-frame name FontStrings LITERALLY — `PlayerName`
+                             (PlayerFrame.xml:58), `TargetName` (TargetFrame.xml:152), `PetName`
+                             (PetFrame.xml:69) — where ours derive from `$parent`. That is 1222's
+                             shadowed-global class on a region, and it was tried: the rename is
+                             NOT free and it buys nothing.
+                               · Not free — `UnitFrame_OnLoad` binds the region by COMPOSING the
+                                 name (`getglobal(tf .. "NameText")`, l.174), so a text search for
+                                 the derived global finds zero hits and the rename still breaks
+                                 every unit frame. It broke 40 tests. A name built inside
+                                 `getglobal` is invisible to a grep — the same trap that once left
+                                 CleanMinimap in the tail for three rounds.
+                               · Buys nothing — the survey's "why" read-back matches ZERO
+                                 error rows for `TargetName` across
+                                 the 218-addon corpus. The one syntactic caller,
+                                 `CT_UnitFrames/CT_TargetFrame.xml:181`'s
+                                 `<Anchor relativeTo="TargetName">`, is not what stops that addon:
+                                 it dies at its own `CT_PlayerFrame.lua:206`.
+                             So: 1222's rejected clause applies (a shadowed name with no observable
+                             caller is building against a guess), and the cost lands on the frames
+                             the director looks at every session. Revisit if a row ever names it. -->
                         <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
                             <Size><AbsDimension x="100" y="10"/></Size>
                             <Anchors>

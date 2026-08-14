@@ -426,22 +426,53 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetSpellName(id, bookType) -> name, rank (the Era tuple, `subSpellName` in the ref); pet or
-    // out-of-range -> a single nil.
+    // GetSpellName(id, bookType) -> name, rank. **Always TWO values, never one, and the rank of a
+    // rankless spell is the EMPTY STRING, never nil** (wow-re
+    // `scratch/getspellname-return-contract.md`, §5-derived from the bytes alone).
+    //
+    // Both returns go through the same push helper with **no rank-specific branch anywhere in the
+    // binding** — a ranked and a rankless spell run byte-identical code: `0x4b4063 call 0x6f3890`
+    // pushes `SpellRec.Name[locale]`, `0x4b4076` pushes `NameSubtext[locale]`, and the single
+    // DBC-resolved exit is `mov eax,0x2` at `0x4b407c`. `0x6f3890` decides on **pointer nullity
+    // alone** (`test edx,edx`), and the DBC pointer is never NULL: `SpellRec::Read 0x583750` fixes
+    // up every string column with an unconditional `add offset, stringBlockBase`, so an on-disk
+    // offset of 0 materializes as a pointer to the string block's own byte 0 — a NUL. `0x6f3840`
+    // then writes tag 4 (`LUA_TSTRING`) unconditionally; `len == 0` is not a special case. So the
+    // rankless rank is a real, interned, zero-length Lua string.
+    //
+    // This is not an edge case: **14,403 of the shipped Spell.dbc's 22,357 rows carry NameSubtext
+    // offset 0** — 64%, `Attack` (6603) among them. Our `Option<String>::None` pushed nil there,
+    // and two 1.12 corpus addons walking the whole book die on it in two different idioms:
+    // `Roid-Macros/Generic.lua:35` uses the rank as a TABLE KEY (nil is illegal), and
+    // `CT_MasterMod/CT_Master.lua:16` passes it straight to `string.find` (nil raises). Both were
+    // invisible until the survey seated a spellbook.
+    //
+    // The `Option` is still the right shape for the MODEL — it records "this spell has no
+    // NameSubtext", which is a fact about the DBC row. What was wrong was rendering that absence
+    // as nil at the Lua boundary; the reference renders it as the empty string the pointer targets.
     g.set(
         "GetSpellName",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
+            // An out-of-range index RAISES rather than answering nil. `0x4b3ec0` gates the index to
+            // `[0, 0x400)` (`0x4b3f0a`/`0x4b3f11`) before the binding proper runs, and the miss arm
+            // is `luaL_error("Invalid spell slot in GetSpellName")`, which longjmps and abandons
+            // the caller's statement (`super::binding_abi`). The in-binding bound check at
+            // `0x4b4018` is unreachable-as-taken. This file previously assumed the bound was
+            // "enforced by our slot lists being shorter than that anyway" — a short list answers
+            // nil, which is a different thing entirely.
+            if id >= 0x400 {
+                return Err(mlua::Error::runtime("Invalid spell slot in GetSpellName"));
+            }
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let Some(slot) = book_slot(&model, id, &book_type) else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
-            };
-            let rank = match &slot.rank {
-                Some(r) => Value::String(lua.create_string(r)?),
-                None => Value::Nil,
+                // An unfilled slot inside the range answers **two** nils (`0x4b4086` → `mov eax,0x2`
+                // at `0x4b4095`), not one — which `select('#', …)` and a two-name assignment can
+                // both tell apart.
+                return Ok(MultiValue::from_vec(vec![Value::Nil, Value::Nil]));
             };
             Ok(MultiValue::from_vec(vec![
                 Value::String(lua.create_string(&slot.name)?),
-                rank,
+                Value::String(lua.create_string(slot.rank.as_deref().unwrap_or(""))?),
             ]))
         })?,
     )?;
@@ -1277,6 +1308,89 @@ mod tests {
             s.eval::<(f64, f64, i32)>(r#"return GetSpellCooldown(1, BOOKTYPE_PET)"#)
                 .unwrap(),
             (0.0, 0.0, 1)
+        );
+    }
+
+    /// **A rankless spell's rank is the empty string, not nil** — and the arity is always two.
+    ///
+    /// Both returns go through one push helper with no rank-specific branch (`0x4b4063`/`0x4b4076`,
+    /// single exit `mov eax,0x2` at `0x4b407c`), and the DBC pointer is never NULL, so an on-disk
+    /// NameSubtext offset of 0 becomes a pointer to the string block's byte 0 — a real zero-length
+    /// Lua string. 64% of the shipped Spell.dbc's rows are in that state, `Attack` among them.
+    ///
+    /// The two corpus idioms this was breaking are both asserted here, because "falsey either way"
+    /// is exactly the reasoning that made nil look acceptable: a nil is an ILLEGAL TABLE KEY
+    /// (Roid-Macros) and an ILLEGAL `string.find` argument (CT_MasterMod), while `""` is neither.
+    #[test]
+    fn a_rankless_spell_answers_an_empty_rank_and_still_two_values() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(SpellBookState {
+            tabs: Vec::new(),
+            slots: vec![
+                SpellSlotView {
+                    spell_id: 6603,
+                    name: "Attack".into(),
+                    rank: None,
+                    ..Default::default()
+                },
+                SpellSlotView {
+                    spell_id: 78,
+                    name: "Heroic Strike".into(),
+                    rank: Some("Rank 1".into()),
+                    ..Default::default()
+                },
+            ],
+        });
+
+        assert_eq!(
+            s.eval::<i64>(r#"return select('#', GetSpellName(1, "spell"))"#)
+                .unwrap(),
+            2
+        );
+        let (name, rank) = s
+            .eval::<(String, String)>(r#"return GetSpellName(1, "spell")"#)
+            .unwrap();
+        assert_eq!((name.as_str(), rank.as_str()), ("Attack", ""));
+        assert!(
+            s.eval::<bool>(r#"local _, r = GetSpellName(1, "spell") return r ~= nil"#)
+                .unwrap(),
+            "the rankless rank must be a STRING, not nil"
+        );
+        // Roid-Macros/Generic.lua:35 and CT_MasterMod/CT_Master.lua:16, in miniature.
+        s.run(r#"local _, r = GetSpellName(1, "spell") local t = {} t[r] = 1"#)
+            .expect("a rankless rank must be a legal table key");
+        s.run(r#"local _, r = GetSpellName(1, "spell") string.find(r, "(%d+)")"#)
+            .expect("a rankless rank must be a legal string.find argument");
+        // A ranked spell is unchanged.
+        assert_eq!(
+            s.eval::<(String, String)>(r#"return GetSpellName(2, "spell")"#)
+                .unwrap(),
+            ("Heroic Strike".to_string(), "Rank 1".to_string())
+        );
+
+        // An unfilled slot INSIDE the range is two nils, not one — distinguishable by select('#').
+        assert_eq!(
+            s.eval::<i64>(r#"return select('#', GetSpellName(9, "spell"))"#)
+                .unwrap(),
+            2
+        );
+        assert!(s
+            .eval::<bool>(r#"local a, b = GetSpellName(9, "spell") return a == nil and b == nil"#)
+            .unwrap());
+
+        // Past the reference's [0, 0x400) gate it RAISES rather than answering nil.
+        let err = s
+            .run(r#"GetSpellName(1024, "spell")"#)
+            .expect_err("an out-of-range slot must raise");
+        assert!(
+            format!("{err}").contains("Invalid spell slot in GetSpellName"),
+            "got {err}"
+        );
+        // ...and 1023 is inside it, so it answers rather than raising.
+        assert_eq!(
+            s.eval::<i64>(r#"return select('#', GetSpellName(1023, "spell"))"#)
+                .unwrap(),
+            2
         );
     }
 }

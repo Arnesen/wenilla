@@ -166,7 +166,18 @@ fn an_error_toast_draws_over_an_open_panel_window() {
     let above: Vec<&ExtractedQuad> = quads
         .iter()
         .filter(|q| q.z > toast)
-        .filter(|q| s.quad_owner_name(q.target).as_deref() != Some("UIErrorsFrame"))
+        // `RaidWarningFrame` is excluded on exactly the same grounds, and it is the reference's
+        // own arrangement rather than ours: it is HIGH + toplevel too (ref RaidWarning.xml:4), so
+        // it raises above the toast in z — but it sits BELOW UIErrorsFrame on screen (anchored to
+        // its BOTTOM at -10) and its declared `<FontString>` carries no text, so nothing of it is
+        // ever painted over the toast. Excluding it keeps this test about a PANEL WINDOW drawing
+        // over the toast, which is what it is named for.
+        .filter(|q| {
+            !matches!(
+                s.quad_owner_name(q.target).as_deref(),
+                Some("UIErrorsFrame") | Some("RaidWarningFrame")
+            )
+        })
         .collect();
     assert!(
         above.is_empty(),

@@ -1119,3 +1119,154 @@ fn get_inventory_slot_info_folds_case_and_flags_only_the_ranged_slot() {
         "the reference does not interpolate the offending name: {err}"
     );
 }
+
+/// **The whole Region method map, on both leaves that chain to it.**
+///
+/// `SetParent` above landed as one name because one addon line named it. That is how this table has
+/// always grown, and it is why `GetParent` — its own getter — was still absent while `SetParent`
+/// worked. wow-re carves the map as a SET, not as names: FontString's lookup `0x79ee20` chains its
+/// own map `0xcf5400` to the Region map `0xcf54b4`, whose 19 entries are
+///
+/// ```text
+/// GetObjectType IsObjectType GetName GetParent SetParent GetCenter GetLeft GetRight GetTop
+/// GetBottom GetWidth SetWidth GetHeight SetHeight GetNumPoints GetPoint SetPoint SetAllPoints
+/// ClearAllPoints
+/// ```
+///
+/// (`system/ui/scratch/font-object-lua-surface.md` — the same note whose point is that a `<Font>`
+/// object does NOT chain and so has none of these. Texture reaches the identical map through its
+/// own leaf lookup, which is why both are asserted here.)
+///
+/// So this asserts membership rather than behaviour: each name is *present and callable* on a
+/// Texture and on a FontString. Behaviour belongs in the focused tests around it — what is pinned
+/// here is that the set cannot quietly lose a member again, which is the failure `GetParent` was.
+#[test]
+fn every_region_map_method_is_callable_on_a_texture_and_a_fontstring() {
+    /// The map minus `GetObjectType`/`IsObjectType`, which are **dispatched, not forgotten**: both
+    /// are in `0xcf54b4`, but a faithful `IsObjectType` needs facts a reimplementation cannot
+    /// guess — whether it matches the leaf name only or walks a class chain, the exact strings in
+    /// that chain, whether it answers `1`/`nil` or `true`/`false`, and whether a bad argument
+    /// raises. Shipping a guess is how 1203/1205/1211 happened. They join this list with the
+    /// verified answer; until then their absence is a raise, which is loud and correct.
+    const REGION_MAP: &[&str] = &[
+        "GetName",
+        "GetParent",
+        "SetParent",
+        "GetCenter",
+        "GetLeft",
+        "GetRight",
+        "GetTop",
+        "GetBottom",
+        "GetWidth",
+        "SetWidth",
+        "GetHeight",
+        "SetHeight",
+        "GetNumPoints",
+        "GetPoint",
+        "SetPoint",
+        "SetAllPoints",
+        "ClearAllPoints",
+    ];
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        RMOwner = CreateFrame("Frame", "RMOwner")
+        RMOwner:SetPoint("BOTTOMLEFT", 0, 0)  RMOwner:SetSize(100, 50)
+        RMTex = RMOwner:CreateTexture("RMTex", "ARTWORK")
+        RMStr = RMOwner:CreateFontString("RMStr", "ARTWORK")
+        "#,
+    )
+    .unwrap();
+
+    let mut absent: Vec<String> = Vec::new();
+    for kind in ["RMTex", "RMStr"] {
+        for name in REGION_MAP {
+            if !s
+                .eval::<bool>(&format!("return type({kind}.{name}) == 'function'"))
+                .unwrap_or(false)
+            {
+                absent.push(format!("{kind}:{name}"));
+            }
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "the Region map 0xcf54b4 is missing from our regions: {absent:?}"
+    );
+}
+
+/// **The four Region-map readers, on the cases a frame-shaped copy gets wrong.**
+///
+/// `TheoryCraftUI.lua:720` is the line that found them: `buttontext:GetParent():GetID()`, where
+/// `buttontext` is a FontString — a working line on the real client, and `attempt to call method
+/// 'GetParent' (a nil value)` here, every session.
+#[test]
+fn the_region_map_readers_answer_the_way_the_edges_do() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        RRFrame = CreateFrame("Frame", "RRFrame")
+        RRFrame:SetPoint("BOTTOMLEFT", 100, 200)  RRFrame:SetSize(200, 100)
+        RRPlate = RRFrame:CreateTexture("RRPlate", "ARTWORK")
+        RRPlate:SetPoint("TOPLEFT", 10, -10)  RRPlate:SetSize(50, 20)
+        -- the sibling-region anchor the real XML uses everywhere
+        RRLabel = RRFrame:CreateFontString("RRLabel", "OVERLAY")
+        RRLabel:SetPoint("LEFT", RRPlate, "RIGHT", 4, 0)
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // GetParent is the OWNER frame — the identity TheoryCraft then calls :GetID() on.
+    assert!(
+        s.eval::<bool>("return RRPlate:GetParent() == RRFrame")
+            .unwrap(),
+        "a region's parent is the frame that created it"
+    );
+    assert!(
+        s.eval::<bool>("return RRLabel:GetParent():GetName() == 'RRFrame'")
+            .unwrap(),
+        "…and it is a real frame handle, not a bare id"
+    );
+
+    // GetCenter agrees with the edge readers BY CONSTRUCTION — the invariant that forbids scaling
+    // one and not the others.
+    let (cx, cy): (f64, f64) = s.eval("return RRPlate:GetCenter()").unwrap();
+    let (l, r, t, b): (f64, f64, f64, f64) = s
+        .eval("return RRPlate:GetLeft(), RRPlate:GetRight(), RRPlate:GetTop(), RRPlate:GetBottom()")
+        .unwrap();
+    assert_eq!((cx, cy), ((l + r) * 0.5, (t + b) * 0.5));
+
+    // GetNumPoints counts what SetPoint wrote, and ClearAllPoints takes it back to 0.
+    assert_eq!(s.eval::<i64>("return RRPlate:GetNumPoints()").unwrap(), 1);
+    assert_eq!(
+        s.eval::<i64>("return RRLabel:GetNumPoints()").unwrap(),
+        1,
+        "the sibling-anchored label carries its one point"
+    );
+
+    // GetPoint's relativeTo must come back as the SIBLING REGION, not a frame wrapper onto the same
+    // id — the one place regions genuinely differ from frames, since both share an id space.
+    let (p, rp, x, y): (String, String, f64, f64) = s
+        .eval("local p, _, rp, x, y = RRLabel:GetPoint(1) return p, rp, x, y")
+        .unwrap();
+    assert_eq!((p.as_str(), rp.as_str(), x, y), ("LEFT", "RIGHT", 4.0, 0.0));
+    assert!(
+        s.eval::<bool>("local _, rel = RRLabel:GetPoint(1) return rel == RRPlate")
+            .unwrap(),
+        "relativeTo is the sibling REGION handle itself"
+    );
+    // Out of range is five nils, like the frame twin.
+    assert_eq!(
+        s.eval::<i64>("return select('#', RRPlate:GetPoint(7))")
+            .unwrap(),
+        5,
+        "an out-of-range index still answers five values, all nil"
+    );
+    assert!(
+        s.eval::<bool>("return RRPlate:GetPoint(7) == nil").unwrap(),
+        "…and the first of them is nil"
+    );
+}

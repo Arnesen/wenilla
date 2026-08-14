@@ -65,4 +65,39 @@
              Fonts.xml:258), which is the face the hand-rolled version used too. -->
         <FontString inherits="ErrorFont" justifyH="CENTER"/>
     </MessageFrame>
+
+    <!-- RaidWarningFrame (ref RaidWarning.xml:4-24), declared here beside the frame it anchors to.
+
+         Two corpus addons push into it directly — `Participant/RaidWarn.lua:133` and
+         `oRA2/RaidWarn.lua:133` are the same code in two distributions, plus their MainTank.lua's
+         "Tank %s has died!" — and both call
+         `RaidWarningFrame:AddMessage(text, r, g, b, 1.0, UIERRORS_HOLD_TIME)`. That is the plain
+         MessageFrame arity we already ship: the 6th argument is read and DROPPED, because the
+         reference's own `0x795590` reads five and stops (messageframe/plain.rs's first law).
+         Absent, that line is `attempt to index global` and takes the handler with it.
+         (`BigWigs` also names it — in a LOCALISATION STRING, "Suppressing RaidWarningFrame". Not a
+         use; 1207.)
+
+         Geometry quoted: 512x40, insertMode TOP, HIGH + toplevel, TOP anchored to UIErrorsFrame's
+         BOTTOM at (0,-10), and the direct-child FontString the class draws its lines through —
+         GameFontNormalHuge, CENTER, exactly as the sibling above takes ErrorFont.
+
+         **No <Scripts>, deliberately.** The reference's OnLoad/OnEvent call into RaidWarning.lua to
+         register CHAT_MSG_RAID_WARNING and route it here. We already deliver that chat type through
+         `ui_chat::feed`, so wiring a second consumer would print every raid warning TWICE; and
+         declaring handlers whose functions we do not ship would raise at load. The frame exists and
+         accepts messages, which is what the corpus asks of it — the automatic routing is the
+         ChatFrame_OnEvent architecture question, not this frame's.
+
+         RaidBossEmoteFrame, its sibling in the same file, is NOT declared: zero corpus addons name
+         it, and a shadowed name with no caller is building against a guess (1222's rejected clause). -->
+    <MessageFrame name="RaidWarningFrame" insertMode="TOP" frameStrata="HIGH" toplevel="true">
+        <Size><AbsDimension x="512" y="40"/></Size>
+        <Anchors>
+            <Anchor point="TOP" relativeTo="UIErrorsFrame" relativePoint="BOTTOM">
+                <Offset><AbsDimension x="0" y="-10"/></Offset>
+            </Anchor>
+        </Anchors>
+        <FontString inherits="GameFontNormalHuge" justifyH="CENTER"/>
+    </MessageFrame>
 </Ui>

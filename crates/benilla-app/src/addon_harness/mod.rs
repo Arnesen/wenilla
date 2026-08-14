@@ -1323,6 +1323,43 @@ fn seat_a_session(script: &mut UiScript) {
     // resembling a session anyone has, and every row it lights up is one nobody can attribute. Two
     // tabs and four spells is a Tuesday. `Attack` is slot 1 because it is on every warrior's, and
     // three corpus addons look for exactly that name.
+    // EQUIPPED GEAR. Every `GetInventoryItem*("player", slot)` answered the empty shape, and a
+    // level-60 with no equipment at all is a state no character reaches — the same argument the
+    // spellbook and the backpack landed on.
+    //
+    // Three slots, not nineteen: head, chest and main hand. A fully-geared doll would be a state a
+    // real session presents, but it would also light up every path at once, and 1209's rule is
+    // that a row nobody can attribute is worth less than one nobody lit. Three is enough for an
+    // addon that WALKS the slots to reach real items, empty ones, and the ammo slot's absence.
+    {
+        let mut slots: benilla_ui::script::InventorySlots = Default::default();
+        slots[1] = Some(equip_slot(12640, "Lionheart Helm"));
+        slots[5] = Some(equip_slot(11726, "Bloodmail Hauberk"));
+        slots[16] = Some(equip_slot(871, "Flurry Axe"));
+        script.set_inventory_slots(slots);
+    }
+    // THE BACKPACK. `GetContainerNumSlots(0)` answered 0 — and a character with no backpack has
+    // never existed: bag 0 is 16 slots from level 1, before a single bag is bought. Same argument
+    // as the spellbook above and the nil `UnitFactionGroup` below it, and the same expectation:
+    // seating a state every character is in should LOSE rows, because a path nothing walked is a
+    // path nothing tested.
+    //
+    // Backpack only, and deliberately: bags 1..4 are equipped bags, which a fresh character does
+    // NOT have, so seating them would manufacture a state rather than expose one. Two items in
+    // sixteen slots — the rest empty, which is itself a shape bag addons must handle.
+    {
+        let mut slots = std::collections::HashMap::new();
+        slots.insert(1, bag_slot(6948, "Hearthstone", 1));
+        slots.insert(5, bag_slot(2589, "Linen Cloth", 12));
+        script.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                name: Some("Backpack".into()),
+                num_slots: 16,
+                slots,
+            }),
+        );
+    }
     script.set_spellbook(benilla_ui::script::SpellBookState {
         tabs: vec![
             benilla_ui::script::SpellTabView {
@@ -1345,6 +1382,36 @@ fn seat_a_session(script: &mut UiScript) {
             spell_slot(772, "Rend", Some("Rank 1")),
         ],
     });
+}
+
+/// One seated equipment slot — full durability, so no alert region lights up.
+fn equip_slot(item_id: u32, name: &str) -> benilla_ui::script::InvSlotView {
+    benilla_ui::script::InvSlotView {
+        item_id,
+        icon: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
+        count: 1,
+        quality: 2,
+        name: Some(name.to_string()),
+        // FULL durability on purpose. The setter recomputes the eleven alert statuses and fires
+        // UPDATE_INVENTORY_ALERTS, so a worn item would light DurabilityFrame's regions — a
+        // VISIBLE change, and this fixture's job is to present a plausible session, not to drive
+        // the alert law. Undamaged gear is the ordinary case anyway.
+        durability: Some((100, 100)),
+        link: Some(format!("|cff1eff00|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
+        ..Default::default()
+    }
+}
+
+/// One seated backpack slot.
+fn bag_slot(item_id: u32, name: &str, count: u32) -> benilla_ui::script::ContainerSlot {
+    benilla_ui::script::ContainerSlot {
+        texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
+        count,
+        quality: Some(1),
+        item_id,
+        link: Some(format!("|cffffffff|Hitem:{item_id}:0:0:0|h[{name}]|h|r")),
+        ..Default::default()
+    }
 }
 
 /// One seated spellbook slot — the fields a book reader actually reads, defaulted otherwise.
@@ -3536,6 +3603,79 @@ mod dependency_tests {
         seat_a_session(&mut script);
         let _ = crate::ui_script::load_default_ui(&script);
         script
+    }
+
+    /// **The session fixture is LIVE**, asserted through the same Lua surface an addon sees.
+    ///
+    /// A fixture that silently fails to seat reads EXACTLY like a fixture that exposed nothing —
+    /// both are "net +0" — and this arc has already been fooled once by a measurement that
+    /// returned an empty answer for a tooling reason (1242's note on `grep`). The backpack seat
+    /// produced no corpus delta at all; this is what makes that a finding rather than a
+    /// possibility.
+    ///
+    /// It is also a guard: delete a seat and this fails, instead of the columns quietly shifting
+    /// and the next A/B attributing the move to whatever landed beside it.
+    #[test]
+    fn the_seated_session_is_visible_from_lua() {
+        let s = seated_vm();
+
+        // The backpack — 16 slots from level 1, two of them filled. Exposed nothing, verifiably.
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
+        assert_eq!(
+            s.eval::<String>("return GetBagName(0)").unwrap(),
+            "Backpack"
+        );
+        assert_eq!(
+            s.eval::<i64>("local _, c = GetContainerItemInfo(0, 5) return c")
+                .unwrap(),
+            12,
+            "the Linen Cloth stack"
+        );
+        // Bags 1..4 are deliberately NOT seated: a fresh character has no equipped bags, and
+        // seating them would manufacture a state rather than expose one.
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(1)").unwrap(), 0);
+
+        // Equipped gear — head, chest, main hand, with the rest empty. Also exposed nothing.
+        assert_eq!(
+            s.eval::<String>(r#"return GetInventoryItemTexture("player", 16)"#)
+                .unwrap(),
+            "Interface\\Icons\\INV_Misc_QuestionMark"
+        );
+        assert!(
+            s.eval::<String>(r#"return GetInventoryItemLink("player", 5)"#)
+                .unwrap()
+                .contains("Bloodmail Hauberk"),
+            "the chest slot's link"
+        );
+        assert_eq!(
+            s.eval::<i64>(r#"return GetInventoryItemQuality("player", 1)"#)
+                .unwrap(),
+            2
+        );
+        // An EMPTY slot still answers the absent shape — the case an addon walking 1..19 hits most.
+        assert!(s
+            .eval::<bool>(r#"return GetInventoryItemLink("player", 10) == nil"#)
+            .unwrap());
+        // The slot ids come from the same table `GetInventorySlotInfo` serves, so a walk that
+        // resolves names to ids lands on the seated items rather than past them.
+        assert_eq!(
+            s.eval::<i64>(r#"return GetInventorySlotInfo("MainHandSlot")"#)
+                .unwrap(),
+            16
+        );
+
+        // The spellbook, as the positive control — this seat DID move the columns (+2).
+        assert_eq!(
+            s.eval::<String>(r#"return GetSpellName(1, "spell")"#)
+                .unwrap(),
+            "Attack"
+        );
+        assert_eq!(
+            s.eval::<String>(r#"local _, r = GetSpellName(1, "spell") return r"#)
+                .unwrap(),
+            "",
+            "and its rank is the empty string, not nil"
+        );
     }
 
     fn wanted(names: &[&str]) -> BTreeSet<String> {
