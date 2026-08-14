@@ -25,7 +25,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::Face;
 
 use crate::clutter::{scatter_tile_clutter, ClutterConfig, GroundClutter};
-use crate::collision::{GroundDecalSurface, PickOccluder};
+use crate::collision::{walk_layers, GroundDecalSurface, PickOccluder};
 use crate::interior::WmoResidency;
 use crate::lighting::SharedLightBuffer;
 use crate::liquid::{spawn_liquids, LiquidAssets};
@@ -43,7 +43,7 @@ mod furnish;
 mod queries;
 mod spawn;
 
-use collider::{finish_colliders, terrain_collider_data};
+use collider::{finish_colliders, impassable_wall_data, terrain_collider_data};
 use furnish::furnish_tile_cells;
 use spawn::prop_light::WmoDoodadInst;
 use spawn::spawn_loaded_placements;
@@ -132,6 +132,10 @@ struct TileState {
     placements: Vec<u32>,
     /// The tile's water-surface entities (tile-exclusive, like the terrain mesh — despawned on unload).
     liquid: Vec<Entity>,
+    /// The tile's impassable-chunk wall collider, if it authors any (decision 1266). Its own static
+    /// body rather than a child of the root, matching the per-WMO walk/camera bakes: two colliders
+    /// with different audiences are two bodies, not a nested one.
+    wall: Option<Entity>,
     /// The tile's per-chunk `ClutterChunk` entities (tile-exclusive; their lazily-built clutter meshes
     /// are children, so despawning these cascades to them).
     clutter: Vec<Entity>,
@@ -706,6 +710,7 @@ fn stream_terrain(
                     furnished: false,
                     placements: Vec::new(),
                     liquid: Vec::new(),
+                    wall: None,
                     clutter: Vec::new(),
                 },
             );
@@ -740,6 +745,12 @@ fn stream_terrain(
         // (attached by `finish_colliders`) so a tile streaming in never hitches the frame. It rides the
         // tile root's lifecycle — gone when the tile despawns, no separate bookkeeping.
         let collider_data = terrain_collider_data(&adt.chunks);
+        // …and, separately, the tile's impassable-chunk fences (decision 1266, report B129). A
+        // SECOND collider because the audience is the point: the reference's fence is emitted only
+        // into the movement box gather, and its segment/ray path never reads the flag at all. So —
+        // the walk layer, where the body sees it and the camera boom does not, and unmarked, so it
+        // neither takes the selection ring nor clamps the mouse pick. An authored wall is not scenery.
+        let wall_data = impassable_wall_data(&adt.chunks);
         // The tile ROOT draws nothing: it carries the collider and the surface roles, and its MCNK
         // cells hang off it as children — one drawn object per 33.333 yd chunk. That is the unit the
         // exterior-scene cull needs (decision 0780; a 533 yd slab the camera stands on intersects
@@ -762,6 +773,15 @@ fn stream_terrain(
             ));
         }
         tile.entity = Some(tile_ent.id());
+        tile.wall = wall_data.map(|(verts, tris)| {
+            commands
+                .spawn(PendingCollider::new(
+                    build_collider_task(verts, tris),
+                    Some(walk_layers()),
+                    true,
+                ))
+                .id()
+        });
         tile.material = Some(material);
         activity.tiles_spawned += 1;
 
@@ -1023,7 +1043,7 @@ fn release_world(
 }
 
 fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
-    if let Some(e) = t.entity {
+    for e in t.entity.into_iter().chain(t.wall) {
         commands.entity(e).try_despawn();
     }
     for &e in t.liquid.iter().chain(&t.clutter) {

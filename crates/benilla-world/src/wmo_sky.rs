@@ -95,6 +95,29 @@ pub struct CameraWmoSkybox(pub Option<String>);
 #[derive(Component)]
 struct WmoSkyboxPart(String);
 
+/// This batch **spins**: every one of its vertices is wholly weighted to one parentless
+/// rotation-only bone, so the authored motion is a rigid transform about that bone's pivot and needs
+/// no skinning palette at all ([`benilla_formats::BoneSpin`]).
+///
+/// That is the whole reason the belts can turn here rather than on the `M2Model` asset lane, which
+/// is what decision 1264 assumed this would cost. A rig would want joint entities under the anchor,
+/// and the anchor is written *post-propagation* ([`follow_camera`], decision 0504's same-frame
+/// camera pose) — so its children's globals would be a frame stale, and fixing that means either
+/// giving up the same-frame pose or hand-writing joint globals. A rigid batch sidesteps the whole
+/// question: there are no children.
+///
+/// **Population, measured** (`benilla-extract m2batch`/`m2bones`): `CavernsOfTimeSky.m2`'s four
+/// asteroid-belt batches, `[1@1.00]×38`, `[2@1.00]×38`, `[3@1.00]×38` and `[3@1.00]×28`, on three
+/// parentless bones keying rotation alone over one 66.667 s loop. The other 17 batches ride bone 0,
+/// which has no track, and `StratholmeSkybox.m2` has no animation at all — so this is the entire
+/// animated content of every skybox the chain ships.
+#[derive(Component)]
+struct SkyboxSpin {
+    /// The bone's pivot, in the same (Bevy) space the batch's vertices were baked into.
+    pivot: Vec3,
+    spin: benilla_formats::BoneSpin,
+}
+
 /// Which skybox paths have been built already — a build is a chain read + BLP decodes, so it happens
 /// once per path per session and the entities are then just shown/hidden. A path that FAILED to load
 /// is recorded here too: the retry would fail identically every frame, and the gradient dome is the
@@ -156,8 +179,11 @@ fn resolve_camera_skybox(
     mut want: ResMut<CameraWmoSkybox>,
 ) {
     // `min()` rather than "first match": `Query` iteration order is not stable across frames, and a
-    // tie would otherwise alternate two backdrops frame to frame. Only one 1.12 root can qualify
-    // (Stratholme_B — the four Caverns of Time shells are unreleased), so this never actually picks.
+    // tie would otherwise alternate two backdrops frame to frame. Five roots qualify — Stratholme_B
+    // and the four Caverns of Time shells — and the tie-break is live code, not a formality: the
+    // note that used to sit here read "unreleased" as "unreachable" and concluded this can never
+    // pick twice. `CavernsofTime.wmo` is placed in the live world (decision 1264, and the module
+    // header above); two of its shells overlapping the camera is exactly the case `min()` settles.
     let resolved = instances
         .iter()
         .filter_map(|inst| {
@@ -211,6 +237,15 @@ fn build_skybox(
     let Some(mut world_assets) = world_assets else {
         return; // assetless dev run — the gradient dome stays the backdrop
     };
+    // The model's rigid spins, keyed by bone — empty for `StratholmeSkybox` and for a capture
+    // (`deterministic_run`), which keeps every animated lane on its bind pose so world baselines stay
+    // comparable across runs and branches, exactly as the doodad host's own arm does.
+    let spins = if crate::dev_state::deterministic_run() {
+        Default::default()
+    } else {
+        benilla_formats::load_m2_bone_spins(&mut world_assets.chain.lock_recover(), path)
+            .unwrap_or_default()
+    };
     let subs = benilla_formats::load_m2_mesh(&mut world_assets.chain.lock_recover(), path);
     let subs = match subs {
         Ok(subs) if !subs.is_empty() => subs,
@@ -260,15 +295,44 @@ fn build_skybox(
         let Some(material) = mats.skybox(sub, texture, u16::try_from(i + 1).unwrap_or(0)) else {
             return; // light buffer vanished mid-build; `built` is unlatched, so we retry
         };
-        commands.spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(material),
-            Transform::default(),
-            Visibility::Hidden, // `apply_skybox_visibility` turns on exactly the wanted one
-            WmoSkyboxPart(path.to_string()),
-        ));
+        let part = commands
+            .spawn((
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(material),
+                Transform::default(),
+                Visibility::Hidden, // `apply_skybox_visibility` turns on exactly the wanted one
+                WmoSkyboxPart(path.to_string()),
+            ))
+            .id();
+        if let Some(spin) = sole_bone(sub).and_then(|b| spins.get(&b)) {
+            commands.entity(part).insert(SkyboxSpin {
+                pivot: wow_to_bevy(spin.pivot),
+                spin: spin.clone(),
+            });
+        }
     }
     built.0.insert(path.to_string());
+}
+
+/// The bone this batch is **wholly** weighted to, if any — the caller's half of
+/// [`benilla_formats::BoneSpin`]'s rigid-body condition, and the one half the bone table cannot
+/// answer: a vertex split between this bone and another is half a rigid body's worth of motion,
+/// which no single transform can produce.
+///
+/// `None` for a batch with no skin binding at all (every WMO batch, and any loader that didn't fill
+/// it) — the conservative answer, since an unweighted batch has nothing to spin about.
+fn sole_bone(sub: &benilla_formats::RenderSubmesh) -> Option<u16> {
+    let bone = sub.joints.first()?[0];
+    (sub.weights.len() == sub.joints.len()
+        && sub
+            .joints
+            .iter()
+            .zip(&sub.weights)
+            // `> 0.999` rather than `== 1.0`: the weights are the file's 0..255 bytes normalised by
+            // their sum, so a wholly-bound vertex is exactly 1.0 today — but an equality test on a
+            // divided float is the kind of thing that silently stops matching.
+            .all(|(j, w)| j[0] == bone && w[0] > 0.999))
+    .then_some(bone)
 }
 
 /// Show the wanted skybox's batches and hide every other built one. This is the sole `Visibility`
@@ -312,22 +376,88 @@ fn apply_skybox_visibility(
 /// not incidental — the near-black ±Z pair covers only a **34.7°** cone about the zenith rather than
 /// a symmetric 45°, and the side pairs' painted horizon lands three-quarters down their gradient
 /// (v ≈ 0.72). Re-centring the box on the eye would be a visible change and a wrong one.
+/// A spinning batch ([`SkyboxSpin`]) composes its bone's rotation about the bone's own pivot INSIDE
+/// the anchor: `T(eye) · T(pivot) · R(t) · T(−pivot)`, which closes to the rotation itself plus the
+/// translation below. The pivot conjugation is not decoration — Caverns of Time's belt bones pivot
+/// ~3 yd off the model origin, and the eye sits AT that origin ~20 yd from the belt, so dropping it
+/// swings the whole ring through several degrees instead of turning it in place.
+///
+/// The clock is the scene's own elapsed time, wrapped by the sequence. **The phase origin is not
+/// byte-pinned** — the reference arms the model at load and samples a shared clock, so its phase is
+/// whatever the room's load moment was — and for a 66.7 s loop of an asteroid ring with no start
+/// event, phase is unobservable. Captures never reach here at all (the spin component is not
+/// attached under a deterministic run), so no golden frame depends on it.
 #[allow(clippy::type_complexity)]
 fn follow_camera(
+    time: Res<Time>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     mut parts: Query<
-        (&mut Transform, &mut GlobalTransform),
+        (&mut Transform, &mut GlobalTransform, Option<&SkyboxSpin>),
         (With<WmoSkyboxPart>, Without<WorldCamera>),
     >,
 ) {
     let Some(cam_gt) = cam.iter().next() else {
         return;
     };
-    for (mut tf, mut gt) in &mut parts {
-        tf.translation = cam_gt.translation();
-        tf.rotation = Quat::IDENTITY;
+    let now = time.elapsed_secs();
+    for (mut tf, mut gt, spin) in &mut parts {
+        let (rot, pivot) = match spin {
+            Some(s) => (
+                benilla_assets::coords::wow_rotation_to_bevy(s.spin.sample(now)),
+                s.pivot,
+            ),
+            None => (Quat::IDENTITY, Vec3::ZERO),
+        };
+        tf.translation = cam_gt.translation() + pivot - rot * pivot;
+        tf.rotation = rot;
         tf.scale = Vec3::ONE;
         // Propagation already ran this frame — the direct global write is what renders.
         *gt = GlobalTransform::from(*tf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The renderer's half of the rigid-spin predicate, on the real art: exactly the four
+    /// asteroid-belt batches resolve to a bone the collector spins, and the other seventeen resolve
+    /// to bone 0 — which is *weighted* wholly, and simply has no track.
+    ///
+    /// The distinction matters and is why this asserts both columns. `sole_bone` returning `Some(0)`
+    /// for the painted cube is correct and harmless; it is the SPIN lookup that must come back empty
+    /// for it. A test that only checked "four parts spin" would pass just as well if the predicate
+    /// were selecting the wrong four.
+    #[test]
+    fn only_the_belt_batches_of_the_caverns_sky_resolve_to_a_spinning_bone() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::Chain::open(&data).expect("open vanilla patch chain");
+        const SKY: &str = "Environments\\Stars\\CavernsOfTimeSky.m2";
+        let subs = benilla_formats::load_m2_mesh(&mut chain, SKY).expect("load the sky");
+        let spins = benilla_formats::load_m2_bone_spins(&mut chain, SKY).expect("its spins");
+
+        let bones: Vec<Option<u16>> = subs.iter().map(sole_bone).collect();
+        assert_eq!(bones.len(), 21, "21 authored batches");
+        // Batches 5..=8 are the belts (`m2batch`: `[1@1.00]×38`, `[2@1.00]×38`, `[3@1.00]×38`,
+        // `[3@1.00]×28`); every other batch rides bone 0.
+        assert_eq!(
+            &bones[5..=8],
+            &[Some(1), Some(2), Some(3), Some(3)],
+            "the belt batches and the bones they ride"
+        );
+        assert!(
+            bones
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !(5..=8).contains(i))
+                .all(|(_, b)| *b == Some(0)),
+            "every non-belt batch is wholly on bone 0: {bones:?}"
+        );
+
+        let spinning = bones
+            .iter()
+            .filter(|b| b.and_then(|b| spins.get(&b)).is_some())
+            .count();
+        assert_eq!(spinning, 4, "exactly the four belt batches turn");
     }
 }

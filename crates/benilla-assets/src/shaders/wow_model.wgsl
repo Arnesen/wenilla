@@ -231,6 +231,29 @@ struct WowVsOut {
 // (the FFP never enables GL_LIGHT_MODEL_TWO_SIDE — no per-face flip). A selected light reaches every
 // vertex of its unit with no distance cutoff, exactly like a committed GL light — selection pops at
 // unit granularity (the authored vanilla behaviour), never mid-surface. Mirrored in terrain.wgsl.
+// **Zero-normal-safe normalize — the M2 corpus authors `(0,0,0)` vertex normals and the reference
+// draws them lit** (decision 1268). `Creature\QuirajProphet` (the AQ40 Qiraji Brainwasher)
+// authors them on 28 of its sleeve batch's 40 vertices; `Creature\TitanFemale` (Uldaman's Ironaya)
+// on 82. A plain `normalize()` turns that legal, shipped datum into NaN, and NaN poisons the whole
+// lighting chain: every SH dot is NaN, `clamp(NaN, 0, 1)` floors to 0, and the batch renders PURE
+// BLACK over its correct texture — the reported symptom, which only "came back" while the unit was
+// targeted because the highlight's `+64/255` emissive rides OUTSIDE the poisoned factor.
+//
+// The reference lands on the zero vector instead: its `Model2.bls` lit permutations normalize with
+// the era's `RSQ`/`MUL` pair (wow-re `models/scratch/model2-bls-vertex-sh.md` §2), where the
+// `0 × INF` product resolves to 0, so the order-2 SH quadratic form is evaluated at `N = 0` and
+// collapses to its **DC term** — the flat, direction-independent ambient the reference's own
+// screenshots show on exactly these surfaces. Passing the zero vector through reproduces that
+// through every lane here: the SH lobe keeps `c10.w + sun_dc`, `lit_nl` keeps its ambient, and
+// `point_light_sum`'s `max(N·L, 0)` is 0.
+// Guarded around the SAME `normalize` rather than an open-coded `v · inverseSqrt(l2)`: every
+// non-degenerate normal — i.e. the whole corpus outside these few batches — keeps its existing bits,
+// so the visual baselines cannot drift by a rounding step on account of this fix.
+fn wow_normalize(v: vec3<f32>) -> vec3<f32> {
+    let l2 = dot(v, v);
+    return select(vec3<f32>(0.0), normalize(v), l2 > 1e-12);
+}
+
 fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     let count = u32(wow_light.point_count.x);
     var sel = array<u32, 3>(0u, 0u, 0u);
@@ -363,7 +386,7 @@ fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
 // (Translation-free by construction — so the rig-relative frame of decision 0974 feeds it
 // unchanged: a normal never cared where the rig stands.)
 fn wow_skin_normals(frame_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
-    return normalize(
+    return wow_normalize(
         inverse_transpose_3x3m(mat3x3<f32>(
             frame_from_local[0].xyz,
             frame_from_local[1].xyz,
@@ -682,7 +705,9 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // normal, WMO by its own (both genuinely fixed-function reference programs).
     let is_clutter = m.clutter_fade.w > 0.5;
     let L = -normalize(wow_light.light_sun.xyz);
-    let n_m2 = normalize(pbr_input.world_normal);
+    // `wow_normalize`, not `normalize`: the unskinned lane carries an authored `(0,0,0)` normal
+    // through to here unchanged, and a NaN out of this line blacks the whole batch (see the helper).
+    let n_m2 = wow_normalize(pbr_input.world_normal);
     // Bevy negates `world_normal` on the back faces of any DOUBLE-SIDED material — two-sided foliage
     // cross-quads (grass tufts, leaf cards) AND every WMO group face (our WMO loader marks all WMO
     // submeshes two-sided, models.rs). The reference has NO such per-face negation: WoW sets the GL

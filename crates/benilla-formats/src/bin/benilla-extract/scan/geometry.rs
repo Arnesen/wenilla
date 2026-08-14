@@ -2,8 +2,9 @@
 //! how they are textured or shaded.
 //!
 //! Billboard cards and which way they face (`bbscan`, `bbfacescan`), geosets and the untextured /
-//! single-triangle strays (`geosetscan`), and flat ground-plane quads (`groundscan`). What
-//! MATERIAL a batch carries is [`super::material`]'s question.
+//! single-triangle strays (`geosetscan`), flat ground-plane quads (`groundscan`), and degenerate
+//! authored vertex normals (`normalscan`). What MATERIAL a batch carries is [`super::material`]'s
+//! question.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -611,6 +612,71 @@ pub fn animboundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             "{slack:9.2}  {short:8.2}  {half_diag:9.2}  {:>4}  {name}",
             "yes"
         );
+    }
+    Ok(())
+}
+
+/// `normalscan` — census the batches carrying **degenerate authored vertex normals** (`(0,0,0)`).
+///
+/// The shipped corpus authors them, and the reference draws those surfaces lit: its `Model2.bls`
+/// vertex program consumes the normal as the zero vector, so the order-2 SH quadratic form
+/// collapses to its DC term (wow-re `models/scratch/model2-bls-vertex-sh.md` §2). A renderer that
+/// `normalize()`s the same datum gets NaN, `clamp(NaN, 0, 1)` floors the lighting factor to 0, and
+/// the batch renders **pure black over its correct texture** — bug B134's Qiraji Brainwasher
+/// sleeves and Ironaya skirt, and the reason the shader's normalize is guarded (decision 1268).
+///
+/// This is the population instrument for that class: how many models are on it, how much of each
+/// batch is degenerate, and which models are worst hit. `ALL` marks a batch with no usable normal
+/// at all — the one that renders as a solid black shape rather than a shaded gradient.
+pub fn normalscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    // (degenerate verts, total verts, batches touched, all-degenerate batches, model)
+    let mut rows: Vec<(usize, usize, usize, usize, String)> = Vec::new();
+    let mut scanned = 0u32;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        let (mut bad, mut total, mut touched, mut all_bad) = (0usize, 0usize, 0usize, 0usize);
+        for s in &subs {
+            let n = s
+                .normals
+                .iter()
+                .filter(|v| v[0] * v[0] + v[1] * v[1] + v[2] * v[2] <= 1e-8)
+                .count();
+            total += s.normals.len();
+            if n > 0 {
+                bad += n;
+                touched += 1;
+                all_bad += usize::from(n == s.normals.len());
+            }
+        }
+        if bad > 0 {
+            rows.push((bad, total, touched, all_bad, name));
+        }
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let batches: usize = rows.iter().map(|r| r.2).sum();
+    let all_batches: usize = rows.iter().map(|r| r.3).sum();
+    let verts: usize = rows.iter().map(|r| r.0).sum();
+    println!("normalscan — degenerate (0,0,0) authored vertex normals");
+    println!("  models scanned:                  {scanned}");
+    println!("  models with any:                 {}", rows.len());
+    println!("  batches touched:                 {batches}");
+    println!("  batches with NO usable normal:   {all_batches}");
+    println!("  degenerate vertices:             {verts}");
+    println!();
+    println!(
+        "{:>7}  {:>7}  {:>7}  {:>4}  MODEL",
+        "BAD", "OF", "BATCHES", "ALL"
+    );
+    for (bad, total, touched, all_bad, name) in rows.iter().take(60) {
+        println!("{bad:7}  {total:7}  {touched:7}  {all_bad:4}  {name}");
     }
     Ok(())
 }

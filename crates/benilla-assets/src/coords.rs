@@ -73,19 +73,25 @@ pub fn placement_rotation(rotation_deg: [f32; 3]) -> Quat {
 /// rotation by the WoW→Bevy basis (the meshes are baked there), and keep the uniform scale (a uniform
 /// scale is basis-invariant). This mirrors the conjugation in [`placement_rotation`].
 pub fn wmo_doodad_local(position: [f32; 3], orientation: [f32; 4], scale: f32) -> Transform {
-    let q_wow = Quat::from_xyzw(
-        orientation[0],
-        orientation[1],
-        orientation[2],
-        orientation[3],
-    );
-    let to_bevy = wow_to_bevy_quat();
     Transform {
         translation: wow_to_bevy(position),
-        // q and −q are the same rotation; normalize guards a denormalized stored quat.
-        rotation: (to_bevy * q_wow * to_bevy.inverse()).normalize(),
+        rotation: wow_rotation_to_bevy(orientation),
         scale: Vec3::splat(scale),
     }
+}
+
+/// A rotation authored in **WoW model space** `(x, y, z, w)` → the equivalent rotation of a mesh
+/// already baked into Bevy space: the basis conjugation `B · q · B⁻¹`.
+///
+/// The conjugation (rather than a component shuffle) is the whole point — [`wow_to_bevy`] is a
+/// change of basis, and a rotation changes basis by similarity, not by permuting its parts. Every
+/// caller that has a stored WoW quaternion wants this: an MODD doodad's orientation
+/// ([`wmo_doodad_local`]) and an M2 bone track's rotation key alike.
+pub fn wow_rotation_to_bevy(q: [f32; 4]) -> Quat {
+    let q_wow = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+    let to_bevy = wow_to_bevy_quat();
+    // q and −q are the same rotation; normalize guards a denormalized stored quat.
+    (to_bevy * q_wow * to_bevy.inverse()).normalize()
 }
 
 #[cfg(test)]

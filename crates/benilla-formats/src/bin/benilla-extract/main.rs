@@ -212,6 +212,18 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the batches carrying
+    /// **degenerate authored vertex normals** — `(0,0,0)`, which the shipped corpus really does
+    /// author (the AQ40 Qiraji Brainwasher's sleeves, Uldaman Ironaya's skirt). The reference
+    /// consumes such a normal as the zero vector and its order-2 SH collapses to the flat DC term,
+    /// so the surface draws lit; a renderer that `normalize()`s it gets NaN, `clamp(NaN)` floors
+    /// the whole lighting factor to 0, and the batch renders PURE BLACK over its correct texture.
+    /// The population instrument for that class (decision 1268, bug B134) — `ALL` marks a batch
+    /// where every vertex is degenerate, and the tail names the worst-hit models.
+    Normalscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and measure how far its authored header
     /// bounding box — the model's **all-animation** vertex extent, and the box the reference
     /// derives its doodad cull sphere from (`rec+0x5c`/`rec+0x68`) — reaches past its **bind-pose**
@@ -671,6 +683,7 @@ fn main() -> Result<()> {
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
         Command::Bbfacescan { prefix } => scan::bbfacescan(&mut chain, prefix.as_deref())?,
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
+        Command::Normalscan { prefix } => scan::normalscan(&mut chain, prefix.as_deref())?,
         Command::Animboundscan { prefix } => scan::animboundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,

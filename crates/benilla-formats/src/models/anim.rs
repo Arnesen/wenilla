@@ -2,12 +2,14 @@
 //! every sequence's per-bone keyframe tracks, which the skinned-entity path turns into Bevy clips.
 //! Split out of the model parser as its own concern.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 
 use anyhow::Result;
 use benilla_m2::parse_m2;
 
 use super::{le_f32, le_u16, le_u32};
+use crate::BoneSpin;
 
 /// One bone of a model's rest skeleton (decision 0019): its parent bone index (`-1` = root) and pivot
 /// point in **raw WoW model space** (the render boundary maps it to Bevy space). Vanilla M2 has no
@@ -279,6 +281,60 @@ pub fn parse_m2_animation_lookup(bytes: &[u8]) -> Result<Vec<u16>> {
     let format =
         parse_m2(&mut Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("parsing M2: {e}"))?;
     Ok(format.model().animation_lookup.clone())
+}
+
+/// Every bone of `bytes` that **spins rigidly** in the sequence a loader arm plays — see
+/// [`BoneSpin`] for what that means and why each clause of the predicate is there. Keyed by M2 bone
+/// index, so a caller can look up the sole bone its batch is weighted to; empty for a model with no
+/// such bone, which is almost every model.
+///
+/// **The sequence is `anim_id == 0`** — the idle the reference arms by default (VERIFIED
+/// wow-5875-re, and the doodad host's load arm: bone 0, animation id 0, wow-re
+/// `doodad-anim-host.md` §4a). Selection is by id, never by record index ([`ModelAnimation`]'s own
+/// rule). Whether a *WMO skybox* is armed by that same path is NOT byte-pinned — both shipped
+/// skyboxes author exactly one sequence, so there is nothing else it could be playing, but a model
+/// with several would need the arming verified before this picked among them.
+pub fn m2_bone_spins(bytes: &[u8]) -> HashMap<u16, BoneSpin> {
+    let mut out = HashMap::new();
+    let Ok(skeleton) = parse_m2_skeleton(bytes) else {
+        return out;
+    };
+    let anims = parse_m2_animations(bytes);
+    let Some(seq) = anims.iter().find(|a| a.anim_id == 0) else {
+        return out;
+    };
+    let (bone_count, bone_ofs) = (le_u32(bytes, 0x34) as usize, le_u32(bytes, 0x38) as usize);
+    for keys in &seq.bones {
+        let idx = keys.bone as usize;
+        // Rotation only, and enough keys to move: a translation or scale track on the same bone is
+        // still rigid but is not a spin about the pivot, and one key is a pose, not an animation.
+        if keys.rotation.len() < 2 || !keys.translation.is_empty() || !keys.scale.is_empty() {
+            continue;
+        }
+        // Parentless: nothing above it can compose another motion in (see [`BoneSpin`]).
+        let Some(bone) = skeleton.bones.get(idx).filter(|b| b.parent < 0) else {
+            continue;
+        };
+        // The rotation track's own `interp_type` word — bone record stride `0x6c`, rotation
+        // `M2Track` at `+0x28`, `interp_type` at its `+0x00` (the same offsets `parse_m2_animations`
+        // reads the track through, where `read_channel_track`'s `step` is `interp_type == 0`).
+        // Bounds-checked rather than leaning on `parse_m2_animations` having already validated the
+        // record: `le_u16` panics past the end, and the two readers' guards must not be coupled.
+        let interp = idx < bone_count
+            && bone_ofs
+                .checked_add(idx * 0x6c + 0x28)
+                .is_some_and(|t| t + 2 <= bytes.len() && le_u16(bytes, t) != 0);
+        out.insert(
+            keys.bone,
+            BoneSpin {
+                pivot: bone.pivot,
+                duration: seq.duration,
+                interp,
+                keys: keys.rotation.clone(),
+            },
+        );
+    }
+    out
 }
 
 /// One bone's keyframe tracks for an animation sequence (decision 0019), in **raw WoW model space**:

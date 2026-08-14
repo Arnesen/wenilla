@@ -182,10 +182,10 @@ mod models;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
     accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
-    load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned, load_object_model,
-    load_wmo, load_wmo_collision_tris, m2_owner_reach, m2_ribbon_emitter_count,
-    m2_texture_transform_count, non_separable_billboard_bones, owner_last_rung,
-    owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
+    load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
+    load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_owner_reach,
+    m2_ribbon_emitter_count, m2_texture_transform_count, non_separable_billboard_bones,
+    owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
     parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
     parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
@@ -194,7 +194,7 @@ pub use models::{
     wmo_group_doodad_refs, wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header,
     wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
     wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
-    CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
+    BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
     GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light,
     M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
     RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim,
@@ -203,9 +203,10 @@ pub use models::{
 };
 mod terrain;
 pub use terrain::{
-    adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, load_tile_mesh,
+    adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, impassable_at, load_tile_mesh,
     load_tiles_around, mcsh_shadowed_at, terrain_height_at, triangle_z_at, ChunkMesh, Doodad,
-    MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY, TILE_SIZE,
+    MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, CHUNK_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY,
+    TILE_SIZE,
 };
 mod wdl;
 /// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles

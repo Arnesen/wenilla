@@ -30,8 +30,9 @@ pub const SHADOW_MAP_SIZE: u32 = 64;
 
 /// Yards per ADT tile (1/64 of a map edge).
 pub const TILE_SIZE: f32 = 533.333_3;
-/// Yards per MCNK chunk (16×16 chunks per tile).
-const CHUNK_SIZE: f32 = TILE_SIZE / 16.0;
+/// Yards per MCNK chunk (16×16 chunks per tile) — also the grid the impassable-chunk wall runs on
+/// (decision 1266), which is why it is public.
+pub const CHUNK_SIZE: f32 = TILE_SIZE / 16.0;
 /// Yards between adjacent outer-grid vertices (9×9 grid spans one chunk).
 /// `pub(crate)` so the liquid mesher shares the exact same lattice spacing.
 pub(crate) const UNIT_SIZE: f32 = CHUNK_SIZE / 8.0;
@@ -100,6 +101,11 @@ pub struct ChunkMesh {
     /// `AreaTable.dbc` id of this chunk (MCNK +0x34) — the zone/subzone under the player's feet;
     /// drives zone music/ambience/reverb selection (decision 0070).
     pub area_id: u32,
+    /// MCNK header flag bit 1 ([`benilla_adt::MCNK_IMPASSABLE`]): this chunk is authored
+    /// **impassable** — the ADT-level invisible wall the reference stops a mover at (report B129,
+    /// decision 1266). A header bit, so it covers the whole 33.333 yd chunk: the wall runs the
+    /// chunk grid, not the terrain relief.
+    pub impassable: bool,
     /// The chunk's MCLQ liquid surfaces — flat meshes built alongside the terrain (see
     /// [`crate::liquid`]). Empty on a dry chunk; **more than one** where the MCNK carries more than
     /// one liquid block, as the 28 shipped river-mouth chunks do (a stream over the sea).
@@ -162,6 +168,17 @@ impl ChunkMesh {
         }
     }
 
+    /// Is the **raw WoW-space** position inside this chunk's footprint, and is the chunk flagged
+    /// [`benilla_adt::MCNK_IMPASSABLE`]? `None` = outside (caller tries the next chunk). Same
+    /// containment math as [`Self::area_at`] — and the same reason it is a *footprint* test and not
+    /// a height test: the flag has no z extent, so the answer is the same at every altitude.
+    pub fn impassable_at(&self, wow: [f32; 3]) -> Option<bool> {
+        let nw = *self.positions.first()?;
+        let south = (nw[0] - wow[0]) / TILE_SIZE * 16.0;
+        let east = (nw[1] - wow[1]) / TILE_SIZE * 16.0;
+        ((0.0..=1.0).contains(&south) && (0.0..=1.0).contains(&east)).then_some(self.impassable)
+    }
+
     /// The terrain surface height (WoW `z`) under a **raw WoW-space** column, by exact interpolation
     /// of the covering center-fan triangle. `None` when the column lies outside this chunk's footprint
     /// (caller tries the next chunk) **or falls in an MCNK hole**.
@@ -215,6 +232,14 @@ pub fn triangle_z_at(tri: &[[f32; 3]; 3], x: f32, y: f32) -> Option<f32> {
 /// [`mcsh_shadowed_at`]). The zone/subzone driving music/ambience/reverb (decision 0070).
 pub fn area_id_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<u32> {
     chunks.iter().find_map(|c| c.area_at(wow))
+}
+
+/// Is a raw WoW-space position over an **impassable** MCNK, given **one tile's** chunks? `None`
+/// when the position lies outside every chunk (a different tile — the same containment contract as
+/// [`area_id_at`]), which a caller must read as "unknown", never as "passable": the chunk on the
+/// far side of a tile seam is exactly where B129's wall is authored.
+pub fn impassable_at(chunks: &[ChunkMesh], wow: [f32; 3]) -> Option<bool> {
+    chunks.iter().find_map(|c| c.impassable_at(wow))
 }
 
 /// The `GroundEffectTexture` id under a raw WoW-space position, given **one tile's** chunks;
@@ -504,6 +529,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
             index_x: h.index_x,
             index_y: h.index_y,
             area_id: h.area_id,
+            impassable: h.impassable(),
             liquids,
         });
     }
@@ -730,6 +756,7 @@ mod tests {
             index_x: 0,
             index_y: 0,
             area_id: 0,
+            impassable: false,
             liquids: Vec::new(),
         }
     }
@@ -815,5 +842,53 @@ mod tests {
             dm.global_wmo().expect("WMO-only").rotation,
             [0.0, 180.0, 0.0]
         );
+    }
+
+    /// B129's pin, from the shipped bytes: the reference stops you 1.46 yd east of
+    /// `.go xyz -6601.98 -531.87 335.60 0`, and this is the wall — the MCNK immediately east is
+    /// flagged [`benilla_adt::MCNK_IMPASSABLE`] while the one under the pin is not.
+    ///
+    /// The numbers are the point. A regression that dropped the flag, or read the neighbouring bit,
+    /// would leave the pin's own chunk reading the same and only the *other* side of the seam wrong
+    /// — so the test pins both sides, the seam they straddle, and the band's size. Skips without
+    /// client data.
+    #[test]
+    fn the_b129_pin_stands_one_chunk_west_of_an_impassable_band() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+
+        // The pin, and a step east across the chunk boundary at y = -533.333 (one tile seam too:
+        // the flagged chunk is column 0 of Azeroth_33_44, which is why a single-tile view misses it).
+        let pin = [-6601.98, -531.87, 335.60];
+        let east = [-6601.98, -535.0, 335.60];
+        assert_eq!(crate::world_to_tile(pin[0], pin[1]), (32, 44));
+        assert_eq!(crate::world_to_tile(east[0], east[1]), (33, 44));
+
+        let here = load_tile_mesh(&mut chain, "Azeroth", 32, 44).expect("Azeroth_32_44.adt");
+        let next = load_tile_mesh(&mut chain, "Azeroth", 33, 44).expect("Azeroth_33_44.adt");
+
+        assert_eq!(
+            impassable_at(&here.chunks, pin),
+            Some(false),
+            "the pin's own chunk is walkable — the reporter was standing on it"
+        );
+        assert_eq!(
+            impassable_at(&next.chunks, east),
+            Some(true),
+            "the chunk 1.46 yd east is the wall"
+        );
+        // The containment contract: a tile answers only for its own footprint. A caller that read
+        // `None` as "passable" would walk straight through every wall authored across a seam.
+        assert_eq!(impassable_at(&here.chunks, east), None);
+        assert_eq!(impassable_at(&next.chunks, pin), None);
+
+        // Not one stray chunk but an authored ribbon: Searing Gorge's rim (area 51) crosses this
+        // tile, and the far side of the map's tiles carry none of it.
+        assert_eq!(
+            next.chunks.iter().filter(|c| c.impassable).count(),
+            48,
+            "Azeroth_33_44 authors 48 impassable chunks"
+        );
+        assert_eq!(here.chunks.iter().filter(|c| c.impassable).count(), 0);
     }
 }

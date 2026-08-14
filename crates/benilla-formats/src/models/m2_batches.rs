@@ -228,6 +228,20 @@ pub fn load_m2_mesh_skinned(
     parse_m2_render_submeshes(&bytes, &dir, skins).with_context(|| format!("parsing M2 {path}"))
 }
 
+/// [`crate::m2_bone_spins`] for a model in the patch chain — the shape [`load_m2_mesh`]'s callers
+/// already use, so a lane wanting both reads the file through the same normalisation rather than
+/// threading bytes across the boundary.
+pub fn load_m2_bone_spins(
+    chain: &mut Chain,
+    raw_path: &str,
+) -> Result<std::collections::HashMap<u16, crate::BoneSpin>> {
+    let path = model_path(raw_path);
+    let bytes = chain
+        .read_file(&path)
+        .with_context(|| format!("reading M2 {path}"))?;
+    Ok(crate::m2_bone_spins(&bytes))
+}
+
 /// The model's billboard bones that are **not** rigidly separable — the population the card split
 /// declines to claim, read through the renderer's own predicate so the census can't drift from it
 /// (`benilla-extract bbscan`'s `SEAM` column). Empty for a model with no billboard bones, and for

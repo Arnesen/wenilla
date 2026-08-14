@@ -162,6 +162,14 @@ pub struct MclqChunk {
     pub tile_flags: [u8; 64],
 }
 
+/// MCNK header flag **bit 1** — the chunk a mover may not enter (the "impassable" band that walls
+/// Searing Gorge and the other mountain rims off from their neighbours).
+///
+/// The *producer* is VERIFIED per-instruction in wow-re (`system/terrain/scratch/adt-format.md`,
+/// the MCNK header walk: `hdr+0x00` bit1 → `chunk+0xc |= 0x40`); the *name* is wow-re's INFERRED
+/// label for that bit. Consuming it is decision 1266 / report B129.
+pub const MCNK_IMPASSABLE: u32 = 0x2;
+
 /// The fields of the 128-byte MCNK header the renderer reads. `pred_tex`/`no_effect_doodad`/
 /// `unknown_8bytes` mirror wow-adt's (mis)split of the predominant-texture + noEffectDoodad region,
 /// which the consumer reconstructs — kept identical on purpose.
@@ -178,6 +186,15 @@ pub struct McnkHeader {
     pub no_effect_doodad: [u8; 8],
     pub unknown_8bytes: [u8; 8],
     pub position: [f32; 3],
+}
+
+impl McnkHeader {
+    /// Is this chunk flagged [`MCNK_IMPASSABLE`]? The flag is a header bit, so its granularity is
+    /// the whole 33.333 yd chunk; in the shipped data the set chunks form contiguous ribbons along
+    /// zone rims (Searing Gorge's is 48 chunks of `Azeroth_33_44` alone).
+    pub fn impassable(&self) -> bool {
+        self.flags & MCNK_IMPASSABLE != 0
+    }
 }
 
 /// One MCNK terrain chunk.

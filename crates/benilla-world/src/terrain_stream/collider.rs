@@ -202,6 +202,83 @@ pub(super) fn terrain_collider_data(
     (!tris.is_empty()).then_some((verts, tris))
 }
 
+/// How far an impassable chunk's fence rises above the chunk's own floor — the reference's literal
+/// `u = (0, 0, 32000.0)` (immediate `0x46fa0000` at `0x6ab599`), VERIFIED by wow-re's §5 on
+/// `0x6ab530` (`system/terrain/scratch/impassable-chunk-walls.md`).
+///
+/// It is a *reach*, not a height: the quad is based at `chunk+0x4c`, the chunk AABB's **min z**, so
+/// the fence stands on the chunk's lowest ground and rises 32 km. Nothing extends below — a mover
+/// under the chunk floor (a mine, a tunnel, the sea bed) passes beneath the wall, and that is the
+/// law, not an omission.
+const FENCE_REACH: f32 = 32000.0;
+
+/// The `(vertices, triangles)` for a tile's **impassable-chunk fences** — the ADT-level invisible
+/// wall of report B129, in the same world space as the terrain collider.
+///
+/// The mechanism is the reference's, VERIFIED (wow-re §5 on the emitter `0x6ab530`, reached from
+/// the movement box gather `0x6721b0 → 0x6aa8b0 → 0x6aadc0`; the flag is `CMapChunk+0xc & 0x40`,
+/// written word-wide at `0x6af5f0` from MCNK header bit 1, and `0x6aae2a` is its only reader in the
+/// image):
+///
+/// - **Additive, never subtractive.** The terrain under a flagged chunk stays exactly as walkable as
+///   any other; what the flag adds is a fence. Nothing is removed from the walkable set, which is
+///   why a flagged chunk holds you up rather than dropping you through.
+/// - **All four sides of every flagged chunk**, with no look at the neighbours. Two chunks side by
+///   side each keep their own shared-side fence, so a mover already inside the band cannot cross
+///   *within* it either — and the tile seam stops being a question, since nothing is ever asked
+///   about a chunk in another tile.
+/// - **Outward normals, so the fence is one-way.** Composed with the universal facing gate
+///   (`n·dir ≤ −1e-5`, decision 0970), entry is blocked and the same face is discarded on the way
+///   out: you cannot walk in, and if you start inside you can always walk out.
+/// - **Whole chunk.** The flag is tested once, before the reference's 8×8 cell loop opens — unlike
+///   holes and the no-doodad bits, which are per cell.
+/// - `n.z == 0` on all four, so a fence is never a floor and never something to step up onto.
+///
+/// The audience is the other half of the law and lives at the call site: the segment/ray path never
+/// reads the flag, so camera pull-in, mouse-pick and LOS are wall-blind, and terrain *height* is not
+/// gated at all.
+pub(super) fn impassable_wall_data(
+    chunks: &[benilla_formats::ChunkMesh],
+) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for chunk in chunks.iter().filter(|c| c.impassable) {
+        // `chunk+0x4c`: the min corner of the AABB the reference folds over the chunk's 145 world
+        // vertices (`0x6b0e50`) — the chunk's lowest ground, wherever in the chunk it happens to be.
+        let Some(floor) = chunk.positions.iter().map(|p| p[2]).reduce(f32::min) else {
+            continue; // a chunk with no vertices has no AABB to stand a fence on
+        };
+        // The four footprint sides, from the corners of the 9×9 outer grid (stride 17: row `r`
+        // starts at `r·17`), each walked so that `(b−a)×(c−a)` points AWAY from the chunk. With +X
+        // north, +Y west and +Z up, a side whose outward normal is `n` must be walked along
+        // `t = ẑ × n`: south down the west side, north up the east side, west along the north side,
+        // east along the south side.
+        const SIDES: [[usize; 2]; 4] = [
+            [8, 0],     // north (row 0), walked east → west
+            [136, 144], // south (row 8), walked west → east
+            [0, 136],   // west (col 0), walked north → south
+            [144, 8],   // east (col 8), walked south → north
+        ];
+        for [from, to] in SIDES {
+            let (Some(a), Some(b)) = (chunk.positions.get(from), chunk.positions.get(to)) else {
+                continue; // a chunk without its outer grid has no side to stand a fence on
+            };
+            let base = verts.len() as u32;
+            for (p, z) in [
+                (a, floor),
+                (b, floor),
+                (b, floor + FENCE_REACH),
+                (a, floor + FENCE_REACH),
+            ] {
+                verts.push(wow_to_bevy([p[0], p[1], z]));
+            }
+            tris.push([base, base + 1, base + 2]);
+            tris.push([base, base + 2, base + 3]);
+        }
+    }
+    (!tris.is_empty()).then_some((verts, tris))
+}
+
 /// Build a static-trimesh [`Collider`] on the **async compute pool** (parry's QBVH construction is the
 /// hundreds-of-ms cost that hitched the frame on big-WMO / terrain stream-in). [`finish_colliders`]
 /// attaches the result. A few-frame delay in collision for just-streamed *static* geometry is
@@ -216,6 +293,255 @@ mod tests {
     use avian3d::prelude::PhysicsPlugins;
     use bevy::app::TaskPoolPlugin;
     use bevy::ecs::system::RunSystemOnce;
+
+    use benilla_formats::{ChunkMesh, CHUNK_SIZE};
+
+    /// One MCNK at tile-grid `(index_x, index_y)`, flat at z = 0, carrying only what the wall
+    /// builder reads: the 9×9 outer grid in its stride-17 slots, the indices, and the flag. The
+    /// tile's NW corner sits at the WoW origin, so chunk `(ix, iy)` runs from `(−iy·C, −ix·C)`
+    /// south and east — rows step −x, columns step −y, exactly as `adt_to_tile_mesh` lays them out.
+    fn chunk(ix: u32, iy: u32, impassable: bool) -> ChunkMesh {
+        let (nw_x, nw_y) = (-(iy as f32) * CHUNK_SIZE, -(ix as f32) * CHUNK_SIZE);
+        let mut positions = vec![[0.0_f32; 3]; 145];
+        for r in 0..9usize {
+            for c in 0..9usize {
+                positions[r * 17 + c] = [
+                    nw_x - r as f32 * CHUNK_SIZE / 8.0,
+                    nw_y - c as f32 * CHUNK_SIZE / 8.0,
+                    0.0,
+                ];
+            }
+        }
+        ChunkMesh {
+            positions,
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            holes: 0,
+            base_texture: None,
+            layer_textures: Vec::new(),
+            layer_effect_ids: Vec::new(),
+            alpha_map: None,
+            shadow: None,
+            pred_tex: [0; 64],
+            no_effect_doodad: [false; 64],
+            index_x: ix,
+            index_y: iy,
+            area_id: 0,
+            impassable,
+            liquids: Vec::new(),
+        }
+    }
+
+    /// The centre of chunk `(ix, iy)`'s footprint in Bevy space, at z = 0.
+    fn chunk_centre(ix: u32, iy: u32) -> Vec3 {
+        wow_to_bevy([
+            -(iy as f32 + 0.5) * CHUNK_SIZE,
+            -(ix as f32 + 0.5) * CHUNK_SIZE,
+            0.0,
+        ])
+    }
+
+    /// A flagged chunk is boxed in, and every face is wound OUTWARD — which is the whole mechanism:
+    /// composed with the one-sided movement law (0970), the fence blocks a mover walking in and is
+    /// discarded from behind, so the band cannot be entered and never traps what starts inside it.
+    #[test]
+    fn a_flagged_chunk_is_boxed_in_by_outward_facing_walls() {
+        let chunks: Vec<ChunkMesh> = [(1, 1, true), (0, 1, false), (1, 0, false)]
+            .into_iter()
+            .map(|(ix, iy, f)| chunk(ix, iy, f))
+            .collect();
+        let (verts, tris) = impassable_wall_data(&chunks).expect("one flagged chunk, four walls");
+        assert_eq!(tris.len(), 8, "four sides, two triangles each");
+
+        let centre = chunk_centre(1, 1);
+        for t in &tris {
+            let (a, b, c) = (
+                verts[t[0] as usize],
+                verts[t[1] as usize],
+                verts[t[2] as usize],
+            );
+            let n = (b - a).cross(c - a).normalize();
+            assert!(n.y.abs() < 1e-5, "a wall face is vertical: {n:?}");
+            let face = (a + b + c) / 3.0;
+            assert!(
+                n.dot(face - centre) > 0.0,
+                "face at {face:?} is wound back INTO the chunk (normal {n:?})"
+            );
+        }
+    }
+
+    /// Every flagged chunk keeps its **own** four sides, neighbours unread — so two side by side
+    /// carry a doubled fence on the boundary they share, wound apart. That is not redundancy: it is
+    /// what stops a mover already inside the band from crossing *within* it, since each chunk's
+    /// fence blocks entry to that chunk from any direction. It also makes the tile seam a non-issue,
+    /// because nothing is ever asked about a chunk in another tile — the case B129 is (the flagged
+    /// chunk is column 0 of `Azeroth_33_44`, the pin is column 15 of `Azeroth_32_44`).
+    #[test]
+    fn every_flagged_chunk_fences_all_four_of_its_own_sides() {
+        let chunks: Vec<ChunkMesh> = [(1, 1, true), (2, 1, true), (0, 1, false), (3, 1, false)]
+            .into_iter()
+            .map(|(ix, iy, f)| chunk(ix, iy, f))
+            .collect();
+        let (verts, tris) = impassable_wall_data(&chunks).expect("two flagged chunks");
+        assert_eq!(tris.len(), 16, "four sides each, two triangles a side");
+
+        // The shared plane is WoW y = −2·CHUNK_SIZE ⇒ Bevy x = +2·CHUNK_SIZE. Both chunks put a
+        // face IN it, and the two must face opposite ways — each blocking entry to its own chunk.
+        let shared = 2.0 * CHUNK_SIZE;
+        let normals: Vec<Vec3> = tris
+            .iter()
+            .filter(|t| {
+                t.iter()
+                    .all(|&i| (verts[i as usize].x - shared).abs() < 1e-3)
+            })
+            .map(|t| {
+                let (a, b, c) = (
+                    verts[t[0] as usize],
+                    verts[t[1] as usize],
+                    verts[t[2] as usize],
+                );
+                (b - a).cross(c - a).normalize()
+            })
+            .collect();
+        assert_eq!(normals.len(), 4, "two coplanar quads on the shared side");
+        assert!(
+            normals.iter().any(|n| n.x > 0.9) && normals.iter().any(|n| n.x < -0.9),
+            "the shared side is fenced from both directions: {normals:?}"
+        );
+    }
+
+    /// A fence stands on the chunk's own floor and only ever rises — the reference bases the quad
+    /// at the chunk AABB's min z and adds `(0, 0, 32000)`. Nothing below: a mover under the chunk
+    /// floor (a mine, a tunnel, the sea bed) passes beneath the wall, and that is the law.
+    #[test]
+    fn a_fence_stands_on_the_chunk_floor_and_only_rises() {
+        // A chunk dished 12 yd below its corners, so "the floor" is a real minimum and not just the
+        // corner height the sides are built from.
+        let mut c = chunk(1, 1, true);
+        c.positions[4 * 17 + 4][2] = -12.0;
+        let (verts, _) = impassable_wall_data(&[c]).expect("walls");
+        let (lo, hi) = verts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+            (lo.min(v.y), hi.max(v.y))
+        });
+        assert!(
+            (lo - -12.0).abs() < 1e-3,
+            "based at the chunk floor, got {lo}"
+        );
+        assert!(
+            (hi - (-12.0 + FENCE_REACH)).abs() < 1e-3,
+            "rises {FENCE_REACH} from the floor, got {hi}"
+        );
+    }
+
+    /// The overwhelmingly common tile: no flag, no collider, nothing attached.
+    #[test]
+    fn a_tile_with_no_flagged_chunk_builds_no_wall() {
+        let chunks = vec![chunk(0, 0, false), chunk(1, 0, false)];
+        assert!(impassable_wall_data(&chunks).is_none());
+    }
+
+    /// B129 end to end, on the shipped bytes and through the real cast: a body walking east from
+    /// Goudy's pin (`.go xyz -6601.98 -531.87 335.60 0`) is stopped where 1.12.1 stops it, at the
+    /// chunk boundary 1.46 yd away — and the SAME world built without the walls carries it straight
+    /// through, which is the report. Both halves matter: the second is the symptom reproduced, the
+    /// first is it gone, and a wall built at the wrong offset would satisfy neither. Skips without
+    /// client data.
+    #[test]
+    fn a_body_walking_east_from_the_b129_pin_is_stopped_at_the_wall() {
+        /// Goudy's pin, and the MCNK boundary the flagged chunk starts at (WoW y; east is −y).
+        const PIN: [f32; 3] = [-6601.98, -531.87, 335.60];
+        const WALL_Y: f32 = 32.0 * benilla_formats::TILE_SIZE - 528.0 * CHUNK_SIZE;
+        const R: f32 = 0.5;
+        const SKIN: f32 = 0.01;
+
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        // Both sides of the seam: the pin's tile and the one that authors the wall.
+        let tiles: Vec<benilla_formats::TileMesh> = [(32, 44), (33, 44)]
+            .into_iter()
+            .map(|(tx, ty)| {
+                benilla_formats::load_tile_mesh(&mut chain, "Azeroth", tx, ty)
+                    .expect("Azeroth tile")
+            })
+            .collect();
+        let ground = tiles
+            .iter()
+            .find_map(|t| benilla_formats::terrain_height_at(&t.chunks, PIN))
+            .expect("terrain under the pin");
+
+        // How far the body gets walking east from a given height, in a world with the walls and in
+        // one without.
+        let run_east = |walls: bool, z: f32| -> Option<f32> {
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                bevy::transform::TransformPlugin,
+                bevy::asset::AssetPlugin::default(),
+                bevy::scene::ScenePlugin,
+                avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
+            ));
+            app.init_asset::<Mesh>();
+            for t in &tiles {
+                if let Some((v, i)) = terrain_collider_data(&t.chunks) {
+                    app.world_mut().spawn((
+                        RigidBody::Static,
+                        Collider::trimesh(v, i),
+                        Transform::default(),
+                    ));
+                }
+                if let Some((v, i)) = walls.then(|| impassable_wall_data(&t.chunks)).flatten() {
+                    app.world_mut().spawn((
+                        RigidBody::Static,
+                        Collider::trimesh(v, i),
+                        crate::collision::walk_layers(),
+                        Transform::default(),
+                    ));
+                }
+            }
+            app.update(); // builds Position/Rotation and the spatial-query trees
+            app.world_mut()
+                .run_system_once(move |world: crate::collision::WorldCollision| {
+                    let capsule = Collider::capsule(R, 1.0);
+                    // East is −y in WoW, +x in Bevy.
+                    let from = wow_to_bevy([PIN[0], PIN[1], z]);
+                    world
+                        .cast_body(&capsule, from, Vec3::X * 5.0, SKIN)
+                        .map(|h| h.distance)
+                })
+                .unwrap()
+        };
+
+        // Feet on the ground at the pin.
+        let walking = ground + 1.0 + R;
+        // The report: nothing at all stops the body inside the 5 yd it walks.
+        assert!(
+            run_east(false, walking).is_none(),
+            "B129 itself — the terrain here does not stop a body, which is why the flag has to"
+        );
+        // The fix: stopped, with the capsule's leading surface against the chunk boundary.
+        let d = run_east(true, walking).expect("the impassable chunk's fence stops the body");
+        let leading_edge = -(wow_to_bevy([PIN[0], PIN[1], 0.0]).x + d) - R;
+        assert!(
+            (leading_edge - (WALL_Y + SKIN)).abs() < 0.05,
+            "stopped at y={leading_edge}, wall is at y={WALL_Y} (travelled {d} yd)"
+        );
+
+        // …and the other half of the same law: the fence is based at the flagged chunk's own floor
+        // and only rises, so a body BELOW that floor — a tunnel, a mine, the sea bed — crosses
+        // freely. Under the ground and out of the terrain's way, the only thing that could stop
+        // this cast is a fence reaching down, and the reference's does not.
+        let floor = tiles
+            .iter()
+            .flat_map(|t| t.chunks.iter())
+            .filter(|c| c.impassable)
+            .filter_map(|c| c.positions.iter().map(|p| p[2]).reduce(f32::min))
+            .fold(f32::MAX, f32::min);
+        assert!(
+            run_east(true, floor - 20.0).is_none(),
+            "the fence reached below the chunk floor (floor {floor})"
+        );
+    }
 
     /// A tile-sized grid: 256 quads -> 512 triangles per chunk, `chunks` chunks.
     fn grid(chunks: usize) -> (Vec<Vec3>, Vec<[u32; 3]>) {
