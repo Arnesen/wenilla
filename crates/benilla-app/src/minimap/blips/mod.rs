@@ -66,7 +66,7 @@ use benilla_ui::script::UiScript;
 
 use crate::go_templates::GameObjectTemplates;
 use crate::names::NameCache;
-use crate::net::{Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::net::{ActiveMover, Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 
 /// The landmark rank radius in yards (`0x8116cc` = 694.444, VERIFIED).
@@ -154,7 +154,7 @@ pub(super) type TrackedCandidates<'w, 's> = Query<
         &'static GlobalTransform,
         Option<&'static ObjectStore>,
     ),
-    Without<SelfPlayer>,
+    Without<ActiveMover>,
 >;
 
 /// The shared frame geometry the blip emitters draw in: the widget centre/side, the active

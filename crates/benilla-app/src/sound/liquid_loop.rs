@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_formats::WaterSoundCatalog;
 
-use crate::net::SelfPlayer;
+use crate::net::ActiveMover;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::schedule::WorldStage;
 
@@ -94,8 +94,8 @@ fn drive_liquid_loops(
     mut state: ResMut<LiquidLoopState>,
     water_sounds: Option<Res<WaterSounds>>,
     world: benilla_world::world_point::WorldPoint,
-    player: Query<&Transform, With<SelfPlayer>>,
-    mut emitters: Query<&mut Transform, Without<SelfPlayer>>,
+    player: Query<&Transform, With<ActiveMover>>,
+    mut emitters: Query<&mut Transform, Without<ActiveMover>>,
     time: Res<Time>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,

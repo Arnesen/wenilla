@@ -10,7 +10,7 @@ use bevy::time::Real;
 use crate::creature_anim::move_flags;
 use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
-use super::super::{SelfPlayer, UnitSpeeds};
+use super::super::{ActiveMover, UnitSpeeds};
 use super::relay::{PendingMove, RelayChain, RelayMove};
 use super::{yaw_of, Spline};
 
@@ -361,7 +361,7 @@ pub(in crate::net) fn drain_pending_moves(
     time: Res<Time<Real>>,
     mut commands: Commands,
     mut landings: MessageWriter<crate::creature_anim::HardLanding>,
-    mut q: Query<(Entity, &mut RemoteMotion), (Without<Spline>, Without<SelfPlayer>)>,
+    mut q: Query<(Entity, &mut RemoteMotion), (Without<Spline>, Without<ActiveMover>)>,
 ) {
     let now_ms = time.elapsed_secs_f64() * 1000.0;
     for (e, mut rm) in &mut q {
@@ -376,7 +376,7 @@ pub(in crate::net) fn drain_pending_moves(
 /// *smoothly* between the sparse relay packets instead of snapping at the ~2 Hz heartbeat rate. The
 /// horizontal velocity is derived from the live `moveFlags` in the mover's facing frame at its run /
 /// run-back / swim speed; the `TURN_*` flags rotate the facing at `turn_rate`. A creature [`Spline`]
-/// (server-authored path) and our own avatar ([`SelfPlayer`]) are excluded — they have their own
+/// (server-authored path) and the body we drive ([`ActiveMover`]) are excluded — they have their own
 /// motion source.
 ///
 /// **The step is then resolved against the world** ([`crate::player::mover::grounded_step`], decision
@@ -428,7 +428,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             Has<super::FacingStep>,
             Has<crate::transport::TransportRider>,
         ),
-        (Without<Spline>, Without<SelfPlayer>),
+        (Without<Spline>, Without<ActiveMover>),
     >,
 ) {
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};

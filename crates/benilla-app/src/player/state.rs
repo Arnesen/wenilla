@@ -19,10 +19,20 @@ use bevy::prelude::*;
 /// ~36% shorter — no separate constant.
 pub(super) const RUN_BACK_RATIO: f32 = 4.5 / 7.0;
 
-/// Character turn rate (rad/s) — how fast A/D rotate the avatar's facing when not mouse-looking (the
-/// vanilla turn-vs-strafe model, VERIFIED wow-5875-re `0x7c4f30` heading integrate). It is the unit's
-/// 6th movement speed (`CMovement+0x9c`, the server-seeded `TURN_RATE`; vanilla default ≈π rad/s),
-/// reduced to 0.75× while also translating (the `flags & 0x200f` case). Decision 0050.
+/// Turn rate (rad/s) **fallback** — how fast A/D rotate the facing when not mouse-looking, used
+/// only until the mover's own sixth movement speed arrives.
+///
+/// The live rate is per-unit and server-authoritative: `CMovement+0x9c`, last of six consecutive
+/// speed floats on the **mover's own** `CMovement`, set by `0x7c6ff0` (which acks with
+/// `CMSG_FORCE_TURN_RATE_CHANGE_ACK`, `0x2df`) and read for held turns by `GetYawRate 0x7c5c50`.
+/// The base ctor `0x7c4850` *zeroes* all six, so the client keeps no default of its own — π is the
+/// vanilla server's value, and this constant stands in only for frames before a create block lands.
+/// VERIFIED wow-5875-re (`0x7c4f30` heading integrate; the speed block, decision 1278).
+///
+/// Because it lives on the mover, a possessed creature turns at **its** rate, not ours. Reduced to
+/// [`TURN_RATE_MOVING`] while translating **or falling** (`flags & 0x200f`), and the same cell is
+/// the held-*pitch* rate — that integrator's keys are default-unbound, so we never bind it.
+/// Decision 0050.
 pub(super) const TURN_RATE: f32 = std::f32::consts::PI;
 
 /// The mouselook swim-pitch clamp (radians) — **VERIFIED** ±89.0° = 1.5533431 (`0x8089d8` =
@@ -468,9 +478,19 @@ pub(crate) struct Player {
     pub(super) follow_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
-    /// **The server has taken the reins off us** — `SMSG_CLIENT_CONTROL_UPDATE` naming our own guid
-    /// with `allowMove = 0`. Set while somebody is mind-controlling us; cleared when control comes
-    /// back (B211).
+    /// **The body in our hands may not be moved** — `SMSG_CLIENT_CONTROL_UPDATE` with
+    /// `allowMove = 0` about whatever we are currently driving.
+    ///
+    /// Two cases, one meaning (decision 1279). The packet names **us** while somebody is
+    /// mind-controlling us (B211); it names **the creature we are possessing** when that creature
+    /// becomes feared or confused, which vmangos sends from the fear/flee movement generators
+    /// without ending the possession at all. Both say the same thing — the reins are still where
+    /// they were, and nothing may move — and the reference collapses them the same way, by zeroing
+    /// the mover global for whichever unit the packet names when it is the one already being
+    /// driven.
+    ///
+    /// So this is **not** "someone is controlling me"; reading it that way is what made the second
+    /// case clear [`Player::foreign_mover`] and walk our own body around under a creature's mover.
     ///
     /// This is the *whole* of what stops a mind-controlled player walking away, and that is a
     /// verified property of the server rather than an assumption: vmangos never roots the victim,
@@ -483,11 +503,6 @@ pub(crate) struct Player {
     /// (decision 0866), each with its own SMSG/ack pair and its own movement-flag bit; this owes no
     /// ack, carries no flag, and suppresses turning too — which root explicitly does not.
     pub(crate) control_lost: bool,
-    /// A mover the server just took back from us, still owed its `CMSG_MOVE_NOT_ACTIVE_MOVER`.
-    ///
-    /// Parked here rather than sent at the wire drain because the release carries a *pose*, and the
-    /// controller is the only thing that owns one. Cleared the frame it goes out.
-    pub(crate) release_mover: Option<u64>,
     /// **We hold somebody else's reins** — a unit the server handed us and we claimed as our mover
     /// (mind-controlling a creature, Eye of Kilrogg). `None` whenever the mover is our own body.
     ///
@@ -497,10 +512,30 @@ pub(crate) struct Player {
     /// mover would teleport that creature onto us. Suppressing our body is also simply what
     /// possession looks like: your own character stands still while you drive the other thing.
     ///
-    /// Driving the held unit is the named residual (decision 1269): its capsule, speeds and
-    /// take-control edge are all still the avatar's alone, so for now the possessed unit stays put
-    /// rather than moving wrongly.
+    /// While this holds, [`crate::net::ActiveMover`] sits on that unit's entity — or on nothing at
+    /// all until it streams — and the controller drives *it*. Our own body then simulates nothing,
+    /// animates from nothing, and sends nothing, which is both the fix and what possession looks
+    /// like from the outside (decision 1277).
     pub(crate) foreign_mover: Option<u64>,
+    /// **The reins are between hands** — the body we drive has changed, and we drive *nothing*
+    /// until we have adopted its pose.
+    ///
+    /// Set when the mover guid changes (the control handshake in [`super::wire_in`], and
+    /// [`super::embody::maintain_active_mover`] when the marker follows it); cleared at the same
+    /// take-control edge that seizes our own body on login, once a streamed pose is actually there
+    /// to seize. Both halves matter:
+    ///
+    /// - **Adopt before driving** — the resource's `pos`/facing still describe the body we were
+    ///   driving a moment ago, so the first streamed frame would otherwise report the creature
+    ///   standing wherever we left our character.
+    /// - **Drive nothing while pending** — the handshake runs *inside* the controller, a frame
+    ///   ahead of the marker that follows it, and the claimed unit may not have streamed in at all.
+    ///   Either way there is a window where what we intend to drive and what carries the marker
+    ///   disagree, and driving during it means writing one body's pose onto another.
+    ///
+    /// A flag rather than a direct write because the pose lives on the entity and the seize needs
+    /// the camera too — both of which the controller already holds and the marker's owner does not.
+    pub(crate) reseat: bool,
     /// Feet position in **Bevy** coords (converted to raw WoW only when sending to the server).
     pub(crate) pos: Vec3,
     /// Vertical velocity (yd/s, Bevy +Y up) for gravity/jump/fall. Integrated each frame; zeroed while

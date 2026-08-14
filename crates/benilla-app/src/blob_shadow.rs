@@ -50,7 +50,7 @@ use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
 use crate::creature_anim::AnimData;
-use crate::net::{NetEntity, SelfPlayer};
+use crate::net::{ActiveMover, NetEntity};
 use crate::player::CameraControl;
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::model_fade::{fade_alpha, RenderFade};
@@ -184,7 +184,7 @@ fn update_shadows(
         (
             &Transform,
             &ModelAnimations,
-            Has<SelfPlayer>,
+            Has<ActiveMover>,
             Option<&crate::entities::mount::MountChild>,
         ),
         Without<BlobShadow>,

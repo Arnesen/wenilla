@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
-use crate::net::{ClientCommand, NetCommands, SelfPlayer, TeleportMessage, WorldportMessage};
+use crate::net::{ActiveMover, ClientCommand, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
 use crate::ui_script::PointerOverUi;
 use benilla_assets::AssetSet;
@@ -36,6 +36,8 @@ mod world_focus;
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
 mod drunk;
+// Which single unit the client embodies (decision 1277) — the `ActiveMover` marker's owner.
+mod embody;
 mod follow;
 
 mod gait;
@@ -248,14 +250,24 @@ impl Plugin for PlayerPlugin {
                 Update,
                 wire_in::release_on_session_end.in_set(WorldStage::Input),
             )
-            // Mirror our body's collision height onto `Player` for the swim arm (decision 0645).
-            // A *continuous* sync rather than a one-shot at take-control, for the reason the
-            // take-control branch itself records: a cross-map worldport re-streams the `SelfPlayer`
-            // entity, so anything latched on that edge is lost on transfer. Before `control`, which
-            // is where the swim depth lines are evaluated.
+            // Which body the client drives at all (decision 1277). Strictly before everything that
+            // reads the marker — the controller, and the collision-height mirror below.
             .add_systems(
                 Update,
-                mirror_self_collision_height
+                embody::maintain_active_mover
+                    .in_set(WorldStage::Input)
+                    .before(control)
+                    .before(mirror_mover_collision_height),
+            )
+            // Mirror the driven body's collision height onto `Player` for the swim arm (decision
+            // 0645). A *continuous* sync rather than a one-shot at take-control, for the reason the
+            // take-control branch itself records: a cross-map worldport re-streams the entity, so
+            // anything latched on that edge is lost on transfer — and a possession swaps it for a
+            // body of an entirely different size. Before `control`, which is where the swim depth
+            // lines are evaluated.
+            .add_systems(
+                Update,
+                mirror_mover_collision_height
                     .in_set(WorldStage::Input)
                     .before(control),
             )
@@ -290,15 +302,16 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-/// Mirror the streamed `SelfPlayer`'s [`crate::entities::CollisionHeight`] onto [`Player`] — the
-/// avatar's swim depth lines are fractions of it (decision 0645), and the swim arm runs off the
-/// resource, not the entity. One entity, one copy: no work until our body streams in, and it
-/// re-syncs itself after a worldport re-streams that entity under a new one.
-fn mirror_self_collision_height(
+/// Mirror the driven body's [`crate::entities::CollisionHeight`] onto [`Player`] — its swim depth
+/// lines are fractions of it (decision 0645), and the swim arm runs off the resource, not the
+/// entity. One entity, one copy: no work until a body streams in, and it re-syncs itself after a
+/// worldport re-streams that entity under a new one — or after a possession puts a different-sized
+/// body in our hands.
+fn mirror_mover_collision_height(
     mut player: ResMut<Player>,
-    self_player: Query<&crate::entities::CollisionHeight, With<SelfPlayer>>,
+    mover: Query<&crate::entities::CollisionHeight, With<ActiveMover>>,
 ) {
-    if let Ok(&h) = self_player.single() {
+    if let Ok(&h) = mover.single() {
         if player.collision_height != h {
             player.collision_height = h;
         }
@@ -386,10 +399,13 @@ fn control(
     // Avian's kinematic move-and-slide: sweeps the capsule against the streamed colliders (decision 0009).
     collide: benilla_world::collision::WorldCollision,
     mut cameras: Query<(&mut Transform, &mut FlyCam, &Camera)>,
-    // The streamed self entity: we read its server pose to take control, then drive its transform
-    // (feet position + facing) and feed its movement to the animation selector via `MovementState`. Its
-    // body model is attached by the entity renderer through the same path as any other player (0041).
-    mut self_player: Query<
+    // **The body in our hands** — normally our own streamed avatar, and a possessed creature while
+    // we hold its reins (decision 1277). We read its server pose to take control, then drive its
+    // transform (feet position + facing) and feed its movement to the animation selector via
+    // `MovementState`. Its model is attached by the entity renderer through the same path as any
+    // other unit (0041), which is exactly why a creature needs nothing special here: everything
+    // below reads the body's own pivot, speeds, scale and descriptor off the entity.
+    mut body: Query<
         (
             Entity,
             &mut Transform,
@@ -404,7 +420,7 @@ fn control(
             // (the ref's three `GetWeapon(0/1/2)` calls before the state walk, below).
             Option<&crate::creature_anim::Wielded>,
         ),
-        (With<SelfPlayer>, Without<FlyCam>),
+        (With<ActiveMover>, Without<FlyCam>),
     >,
     window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     // Clicks go out here — left for the target picker, right for the context action (attack) — and
@@ -432,7 +448,7 @@ fn control(
             (&Transform, &crate::net::Guid),
             (
                 With<crate::transport::Transport>,
-                Without<SelfPlayer>,
+                Without<ActiveMover>,
                 Without<FlyCam>,
             ),
         >,
@@ -496,7 +512,7 @@ fn control(
     // movement flag and NOT an aura: the reference's `0x5145b0` computes `!STUNNED` straight off
     // `[[unit+0x110]+0xa0]` (`not eax; shr eax,0x12; and eax,1`) and `0x514755` consumes it to skip
     // the turn and pitch emitters outright.
-    let stunned = self_player
+    let stunned = body
         .single()
         .ok()
         .and_then(|(.., store, _, _, _, _)| {
@@ -508,7 +524,7 @@ fn control(
     // fraction), and zero while stunned — the reference's wobble sits behind the same
     // input-allowed chain as the turn emitters (`0x60aa47` → `0x5145b0`).
     let drunk_wobble = {
-        let f = self_player
+        let f = body
             .single()
             .ok()
             .and_then(|(.., store, _, _, _, _)| store.and_then(|s| s.0.player_drunk_byte()))
@@ -550,9 +566,13 @@ fn control(
     // zeroed, `0x514640` skips the whole tick at `51466c` — input is still *sampled*, the body turn
     // is skipped at `514474` — while the camera rotate at `514444` happens BEFORE the mover lookup
     // and so keeps working. A mind-controlled player can still look around; they just cannot turn
-    // or move their body. Same restore, for the same reason, and it covers holding somebody else's
-    // reins too: the turn belongs to whatever we are driving, which is not this body.
-    if stunned || player.control_lost || player.foreign_mover.is_some() {
+    // or move their body. Same restore, for the same reason — and `reseat` is the same condition
+    // once more, the frames where the mover global would not resolve at all.
+    //
+    // Holding *somebody else's* reins is emphatically not in this set: the turn belongs to whatever
+    // we are driving, and once the marker has caught up that is the creature, whose `Transform` is
+    // the one this `face_yaw` writes.
+    if stunned || player.control_lost || player.reseat {
         player.face_yaw = yaw_before_look;
     }
     let mouse_turned = player.face_yaw != yaw_before_look;
@@ -600,25 +620,10 @@ fn control(
         &mut net.11,
         self_guid,
         transports,
-        self_player
-            .single()
+        body.single()
             .ok()
             .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
     );
-
-    // A mover the server took back owes it a parting pose (`CMSG_MOVE_NOT_ACTIVE_MOVER`), and this
-    // is the first point in the frame that has one. Without it the server never clears its
-    // confirmed-mover state and never re-broadcasts the stop, so observers keep the unit sliding on
-    // its last relayed pose.
-    if let Some(guid) = player.release_mover.take() {
-        let _ = net.0 .0.send(crate::net::ClientCommand::NotActiveMover {
-            guid,
-            flags: 0,
-            pos: benilla_assets::coords::bevy_to_wow(player.pos),
-            orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
-            fall_time: 0,
-        });
-    }
 
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
 
@@ -684,13 +689,18 @@ fn control(
         // The park below flushes one `MSG_MOVE_STOP`, which matters — we may have been mid-run at
         // the moment control was taken, and the server would otherwise keep extrapolating that run
         // for every observer.
-        // The same gate serves both ways of not driving our own body: the reins taken from us
-        // (mind-controlled), or the reins of something else in our hands. The second is the
-        // sharper one — outbound moves carry no guid, so with a foreign mover claimed, streaming
-        // our body's pose would land on the possessed unit and teleport it onto us. Standing our
-        // own character still is also what possession looks like from the outside.
-        if player.control_lost || player.foreign_mover.is_some() {
-            let pivot_h = self_player
+        //
+        // The same gate serves the other way of holding no reins: [`Player::reseat`], the window
+        // between mover guids where what we intend to drive and what carries `ActiveMover` have
+        // not yet met — the frame a grant lands, and every frame after it while the claimed unit
+        // has not streamed in. Driving during that window writes one body's pose onto another,
+        // because outbound moves carry no guid of their own. `apply_server_moves` above closes the
+        // window the moment a pose is there to adopt, so this is normally a single frame.
+        //
+        // Note this branch is deliberately NOT "we are possessing": once the marker has caught up,
+        // possession runs the *ordinary* controlled path below, on the creature (decision 1277).
+        if player.control_lost || player.reseat {
+            let pivot_h = body
                 .single()
                 .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
                 .unwrap_or(CAM_PIVOT_FALLBACK);
@@ -715,7 +725,7 @@ fn control(
             return;
         }
         if player.server_riding {
-            let pivot_h = self_player
+            let pivot_h = body
                 .single()
                 .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
                 .unwrap_or(CAM_PIVOT_FALLBACK);
@@ -848,6 +858,18 @@ fn control(
         // The net translate state — the reference's `flags & 0xf` (its four move bits), read off
         // the *net* axes, not the keys: W+S streams no direction bit and doesn't translate.
         let translating = fwd_axis != 0 || side_axis != 0;
+        // **The mover's own** six speeds, read once here for the whole frame — the turn below and
+        // the run/backpedal selection further down. All six live on the driven unit's `CMovement`
+        // and nothing in the reference's applied-input path ever reads *our* speeds when the mover
+        // is a different object (VERIFIED, decision 1278), so a possessed creature moves and turns
+        // at its own numbers for free: the component was on its entity all along.
+        let mover_speeds = body.single().ok().and_then(|q| q.7).map(|s| s.0);
+        // The 6th speed. Zero is the ctor state, not a rate — the client keeps no default of its
+        // own, so a unit whose create block has not landed falls back rather than freezing solid.
+        let turn_rate = mover_speeds
+            .map(|s| s.turn_rate)
+            .filter(|r| *r > 0.0)
+            .unwrap_or(TURN_RATE);
         // This frame's keyboard-turn rotation — `seat_camera` carries the camera by it rigidly
         // (char and camera turn as one on the reference; director's call, closing 0050's open
         // "camera follow on turn" feel item).
@@ -860,8 +882,10 @@ fn control(
             if turn_right {
                 turn -= 1.0;
             }
-            // 0.75× while also translating — the verified `flags & 0x200f` case.
-            let rate = TURN_RATE * if translating { TURN_RATE_MOVING } else { 1.0 };
+            // 0.75× while translating **or falling** — the verified `flags & 0x200f` case, whose
+            // `0x2000` is FALLING (`0x7c5c73`). A jump mid-turn keeps the reduced rate.
+            let slowed = translating || player.airborne_since.is_some();
+            let rate = turn_rate * if slowed { TURN_RATE_MOVING } else { 1.0 };
             turn_delta = turn * rate * dt;
             player.face_yaw += turn_delta;
         }
@@ -915,7 +939,7 @@ fn control(
         // observer's. `stand_pending` is the local commit (the client's `SetStandState`
         // applies immediately and sends, one setter — `0x6127b0`), overlaid on the echoed
         // byte until it lands so the pose never waits on the round-trip.
-        let stand_byte = self_player
+        let stand_byte = body
             .single()
             .ok()
             .and_then(|(.., store, _, _, _, _)| store.map(|s| s.0.unit_stand_state()))
@@ -957,7 +981,7 @@ fn control(
             // wow-re `sheath-policy.md` §4): entering any stand-state ∉ {0 STAND, 2 SIT_CHAIR}
             // force-stows drawn weapons, through the anim layer's one setter.
             if s != 0 && s != 2 {
-                if let Ok((e, _, _, _, drv, _, _, _, _, _)) = self_player.single() {
+                if let Ok((e, _, _, _, drv, _, _, _, _, _)) = body.single() {
                     if drv.and_then(|d| d.sheath_state()).unwrap_or(0) != 0 {
                         net.3.write(crate::creature_anim::SheathRequest {
                             entity: e,
@@ -978,8 +1002,7 @@ fn control(
         // `sheath-policy.md`). No body model yet (no driver) drops the toggle, the client's own
         // refusal.
         if binds.fired(crate::bindings::cmd::TOGGLE_SHEATH) {
-            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded)) = self_player.single()
-            {
+            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded)) = body.single() {
                 // The manual toggle's guard chain (decision 0080d) — the guards of the client's
                 // 12-deep silent-refusal chain (`ToggleSheath` `0x5eb480`) whose states exist
                 // today: dead · engaged in combat · not standing (`GetStandState() != 0` —
@@ -1031,8 +1054,7 @@ fn control(
         // move us at the server's number). `$WOW_MOVE_SPEED` stays the absolute dev override
         // (backpedal keeps the vanilla 4.5/7.0 ratio under it); pre-create frames fall back the
         // same way.
-        let server_speeds = self_player.single().ok().and_then(|q| q.7).map(|s| s.0);
-        let (run_speed, run_back_speed) = match server_speeds {
+        let (run_speed, run_back_speed) = match mover_speeds {
             Some(s) if !move_speed.env_override => (s.run, s.run_back),
             _ => (move_speed.value, move_speed.value * RUN_BACK_RATIO),
         };
@@ -1111,7 +1133,7 @@ fn control(
         // (TU-F: Space is the Jump command; it is NOT a pitch or ascend input) — and never
         // reaches this walk-side gate.
         if want_jump && !moving && !swimming && player.airborne_since.is_none() {
-            if let Ok((e, .., store, _, _, _, _)) = self_player.single() {
+            if let Ok((e, .., store, _, _, _, _)) = body.single() {
                 if store.is_some_and(|s| s.0.unit_mount_display_id() != 0) {
                     want_jump = false;
                     if !turning {
@@ -1196,7 +1218,7 @@ fn control(
             // forward or strafe-only → swim; the backward bit `0x2` → `min(swimBack, swim)` —
             // byte-identical in template to the run arm's `min(runBack, run)`. Vanilla defaults
             // 4.722/2.5 (vmangos `baseMoveSpeed`).
-            let (swim_speed, swim_back_speed) = match server_speeds {
+            let (swim_speed, swim_back_speed) = match mover_speeds {
                 Some(s) if !move_speed.env_override => (s.swim, s.swim_back),
                 _ => (swim::SWIM_SPEED, swim::SWIM_BACK_SPEED),
             };
@@ -1531,6 +1553,7 @@ fn control(
             moving,
             airborne,
             turning || mouselook,
+            turn_rate,
         );
 
         // Drive the streamed self entity: its transform is the avatar's pose (feet position + body
@@ -1542,7 +1565,7 @@ fn control(
         // `CAM_PIVOT_FLOOR`). Read the avatar's model-local pivot + its live scale here (where we hold the
         // self entity); until the body attaches (no `CameraPivot` yet) fall back to a human neck height.
         let mut cam_pivot_height = CAM_PIVOT_FALLBACK;
-        if let Ok((entity, mut t, motion, pivot, .., twist, _)) = self_player.single_mut() {
+        if let Ok((entity, mut t, motion, pivot, .., twist, _)) = body.single_mut() {
             t.translation = player.pos;
             // The swim body pitch (TU-A, `0x60a110`→`0x710620`): while swimming AND moving fwd/back
             // the model root renders `Rz(yaw)·Ry(−pitch)` — in Bevy axes, the yaw then a nose-up

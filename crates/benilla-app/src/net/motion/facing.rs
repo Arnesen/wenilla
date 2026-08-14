@@ -6,7 +6,7 @@ use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::{EntityKind, MonsterMoveFacing};
 use bevy::prelude::*;
 
-use super::super::{GuidIndex, NetEntity, ObjectStore, SelfPlayer};
+use super::super::{ActiveMover, GuidIndex, NetEntity, ObjectStore};
 use super::{yaw_of, RemoteMotion, Spline};
 
 /// Radians/second an idle creature turns to face its target — a smooth turn, not a snap. Tunable
@@ -75,7 +75,7 @@ pub(in crate::net) fn resolve_facing(
 /// stationary meleeing mob squares up on its victim even though the server sends **no** facing for it
 /// (vmangos `SetInFront` is server-only; verified by a live sniff — no `MONSTER_MOVE` arrives when you
 /// attack a standing mob). A moving unit (a [`Spline`]) faces its travel direction instead; a remote
-/// player ([`RemoteMotion`]) and our own avatar ([`SelfPlayer`]) own their facing — all excluded. The
+/// player ([`RemoteMotion`]) and the body we drive ([`ActiveMover`]) own their facing — all excluded. The
 /// turn is capped per frame at [`FACE_TARGET_TURN_RATE`], toward the horizontal bearing to the target.
 #[allow(clippy::type_complexity)]
 pub(in crate::net) fn face_target(
@@ -84,7 +84,7 @@ pub(in crate::net) fn face_target(
     index: Res<GuidIndex>,
     candidates: Query<
         (Entity, &NetEntity, &ObjectStore),
-        (Without<Spline>, Without<RemoteMotion>, Without<SelfPlayer>),
+        (Without<Spline>, Without<RemoteMotion>, Without<ActiveMover>),
     >,
     mut transforms: Query<&mut Transform>,
     // A remote player's latch belongs to the facing interp in [`super::remote`] — the cleanup

@@ -21,8 +21,8 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
 use crate::net::{
-    ClientCommand, ClientControlMessage, Guid, MoveKind, MoveModeMessage, NetCommands,
-    SelfMoveMessage, SelfPlayer, SpeedChangeMessage, TeleportMessage, WorldportMessage,
+    ActiveMover, ClientCommand, ClientControlMessage, Guid, MoveKind, MoveModeMessage, NetCommands,
+    SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
 use benilla_world::world_map::CurrentMap;
@@ -47,6 +47,32 @@ enum ControlVerdict {
     Granted(u64),
     /// A unit we were driving was taken back, and owes a parting pose.
     Released(u64),
+}
+
+/// Give our own body back to the server: the stop, then the parting pose.
+///
+/// `CMSG_MOVE_NOT_ACTIVE_MOVER` (`0x2D1`) is **only ever about our own character**. The reference
+/// sends it from `SetActiveMover 0x6006e0` for the outgoing mover *when that mover was the local
+/// player* (`0x5fa6d0`), and vmangos agrees from the other side: `HandleMoveNotActiveMover` rejects
+/// any guid that is not the session's currently-confirmed mover, and rejects again if the guid names
+/// something other than the player while the player's mover still is it. There is no such packet for
+/// a creature we are handing back.
+///
+/// Skipped while a server-authored spline owns the body: the reference returns early on that edge
+/// (`0x619d50`), and vmangos would discard it anyway (`HasPendingSplineDone`).
+fn yield_own_body(net_cmds: &NetCommands, player: &mut Player, self_guid: Option<u64>) {
+    movement_net::park_mover(&net_cmds.0, player);
+    let Some(me) = self_guid else { return };
+    if player.server_riding {
+        return;
+    }
+    let _ = net_cmds.0.send(ClientCommand::NotActiveMover {
+        guid: me,
+        flags: 0,
+        pos: bevy_to_wow(player.pos),
+        orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
+        fall_time: 0,
+    });
 }
 
 /// Classify a control update. `self_guid` is `None` only before login has named us, where nothing
@@ -83,7 +109,7 @@ pub(super) fn apply_server_moves(
     self_guid: Option<u64>,
     transports: &Query<
         (&Transform, &Guid),
-        (With<Transport>, Without<SelfPlayer>, Without<FlyCam>),
+        (With<Transport>, Without<ActiveMover>, Without<FlyCam>),
     >,
     self_pose: Option<(Vec3, f32)>,
 ) -> Vec<SpeedChangeMessage> {
@@ -97,11 +123,27 @@ pub(super) fn apply_server_moves(
     // frozen server-side while our client cheerfully walks it around locally.
     for c in control_msgs.read() {
         match control_verdict(c.mover, c.allow_move, self_guid) {
-            ControlVerdict::Revoked => player.control_lost = true,
+            // Somebody is driving our body. Yielding it is not just bookkeeping: the parting
+            // `CMSG_MOVE_NOT_ACTIVE_MOVER` clears the server's `m_clientMoverGuid`, after which
+            // `GetConfirmedMover` answers null and vmangos **discards every movement packet we
+            // send**. That is a second, server-side belt on the immobility our own gate provides.
+            ControlVerdict::Revoked => {
+                player.control_lost = true;
+                yield_own_body(net_cmds, player, self_guid);
+            }
             ControlVerdict::Restored => {
                 player.control_lost = false;
                 player.foreign_mover = None;
+                player.reseat = true;
                 // Re-claim ourselves as the mover — the same claim login makes.
+                //
+                // And send **nothing else**. A parting stop for the creature we were driving looks
+                // right and is a teleport: by the time this packet is written the server has
+                // already pointed `m_mover` back at us while `m_clientMoverGuid` still names the
+                // creature, so `GetConfirmedMover` falls through its mismatch branch to *us* — and
+                // a stop carrying the creature's pose would relocate our own character to wherever
+                // the creature was standing. The creature's own stop is the server's to send; it
+                // owns that unit again.
                 let _ = net_cmds
                     .0
                     .send(ClientCommand::SetActiveMover { guid: c.mover });
@@ -110,16 +152,35 @@ pub(super) fn apply_server_moves(
             // claim is what stops the controller streaming OUR body's pose under their guid —
             // outbound moves carry none of their own, so that would teleport them onto us.
             ControlVerdict::Granted(guid) => {
+                // Hand our own body over FIRST, while it is still the mover the server attributes
+                // to. One command channel, so this is genuinely ordered ahead of the claim — and
+                // it has to be, in both directions: vmangos rejects a
+                // `CMSG_MOVE_NOT_ACTIVE_MOVER` whose guid is not the mover it currently has
+                // confirmed, and a `MSG_MOVE_STOP` sent after the claim would carry our pose under
+                // the creature's guid.
+                yield_own_body(net_cmds, player, self_guid);
+                player.control_lost = false;
                 player.foreign_mover = Some(guid);
+                player.reseat = true;
                 let _ = net_cmds.0.send(ClientCommand::SetActiveMover { guid });
             }
-            // The matching `CMSG_MOVE_NOT_ACTIVE_MOVER` rides the controller's own park, which
-            // owns the pose that has to go in it.
+            // "That unit may not move" — about a unit that is not us. Genuinely ambiguous on the
+            // wire, because vmangos sends it from two places: the unpossess path (right after the
+            // `Restored` that already took us home) and, while a possession is still very much in
+            // force, whenever the possessed unit becomes feared or confused.
+            //
+            // The reference resolves both with one rule, and so do we: *is this the unit I am
+            // driving?* If it is, we are still holding it and merely forbidden to move it — the
+            // mover global goes to nobody, exactly as `0x5fa600` zeroes it when the named unit is
+            // the current one. If it is not, `Restored` already ran and there is nothing to do.
+            //
+            // Clearing `foreign_mover` here — the obvious reading — would send us back to driving
+            // our own body while the server still has `m_mover` pointed at the creature, so every
+            // step we took would be applied to the creature instead.
             ControlVerdict::Released(guid) => {
                 if player.foreign_mover == Some(guid) {
-                    player.foreign_mover = None;
+                    player.control_lost = true;
                 }
-                player.release_mover = Some(guid);
             }
         }
     }
@@ -287,22 +348,54 @@ pub(super) fn apply_server_moves(
         );
     }
 
-    // Take control once the server first reports our position (the streamed `SelfPlayer` entity,
-    // whose transform is already in Bevy space). From here the controller drives that entity
-    // directly; the entity renderer attaches its body model (0041) the same way it does for any
-    // other player.
-    if !player.active {
+    // Take control once the server first reports our position (the streamed mover entity, whose
+    // transform is already in Bevy space). From here the controller drives that entity directly;
+    // the entity renderer attaches its body model (0041) the same way it does for any other player.
+    //
+    // The same edge serves a *mover change* — a possessed creature arriving in our hands, or our
+    // own body coming back (decision 1277). It is one path deliberately: seizing a body means the
+    // same thing either way, and the resource's pose describes whatever we were driving a moment
+    // ago. What differs is only the login-once half below (`first`), which owns the settle, the
+    // stale-world flag and the initial camera seat.
+    let seizing = !player.active || player.reseat;
+    if seizing {
         if let Some((pos, yaw)) = self_pose {
+            let first = !player.active;
+            player.reseat = false;
+            // Momentum, movement bits and the platform under our feet all belonged to the body we
+            // just let go of. The reference's `SetActiveMover 0x6006e0` tears exactly this down on
+            // the outgoing mover — resetting movement flags and cancelling click-to-move — and
+            // carrying any of it across would have the new body sprinting, falling or standing on a
+            // boat it is nowhere near.
+            if !first {
+                player.vel_y = 0.0;
+                player.horiz_vel = Vec3::ZERO;
+                player.move_flags = 0;
+                player.autorun = false;
+                player.airborne_since = None;
+                player.fall_far = false;
+                player.fall_start_y = pos.y;
+                player.ride = None;
+                // The granted modes (root, water-walk, feather-fall, hover) were granted to the
+                // *previous* mover; the new one's arrive on its own `SMSG_FORCE_*`/mode packets.
+                player.modes = Default::default();
+            }
             player.pos = pos;
             player.active = true;
-            player.settling = true; // settle onto the initial ground once it loads (don't fall through)
-            player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
-            player.world_stale = true; // nothing is streamed yet at all — see [`Player::world_stale`]
-                                       // The streamed spawn pose carries the server's facing (the character's logout
-                                       // orientation on a fresh login) — adopt it whole, camera seated behind, like the
-                                       // reference. Zeroing here is what made every login face due north regardless.
-            cam.yaw = yaw;
-            cam.pitch = -0.45;
+            if first {
+                player.settling = true; // settle onto the initial ground once it loads (don't fall through)
+                player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+                player.world_stale = true; // nothing is streamed yet — see [`Player::world_stale`]
+                                           // The streamed spawn pose carries the server's facing (the character's logout
+                                           // orientation on a fresh login) — adopt it whole, camera seated behind, like
+                                           // the reference. Zeroing here made every login face due north regardless.
+                cam.yaw = yaw;
+                cam.pitch = -0.45;
+            }
+            // The camera is deliberately NOT re-seated on a mover change: it is already on the new
+            // body (Mind Control sets `PLAYER_FARSIGHT` to the victim alongside the handoff, so
+            // far sight moved it there before the reins arrived), and snapping its yaw would spin
+            // the view for a change the player made happen on purpose.
             player.face_yaw = yaw;
             player.model_yaw = yaw;
             // Seed the facing-change detector with the adopted facing — the server gave it to us,
@@ -314,7 +407,11 @@ pub(super) fn apply_server_moves(
             // cross-map worldport despawns and re-streams this entity while `player.active` stays
             // true — per-entity state attached only on this one-shot edge would be lost on transfer.
             info!(
-                "took control of player @ {:?} facing {:.3}{}",
+                "took control of {} @ {:?} facing {:.3}{}",
+                match player.foreign_mover {
+                    Some(guid) => format!("possessed unit {guid:#x}"),
+                    None => "player".to_string(),
+                },
                 player.pos,
                 yaw.rem_euclid(std::f32::consts::TAU),
                 crate::run_mode::free_fly_hint()
@@ -392,7 +489,7 @@ fn apply_self_move(
     time: &Time,
     transports: &Query<
         (&Transform, &Guid),
-        (With<Transport>, Without<SelfPlayer>, Without<FlyCam>),
+        (With<Transport>, Without<ActiveMover>, Without<FlyCam>),
     >,
 ) {
     let was_falling = player.move_flags & move_flags::FALLING != 0;

@@ -5,7 +5,7 @@
 
 use crate::creature_anim::{ease_strafe_yaw, move_flags, strafe_body_offset, wrap_pi};
 
-use super::{Player, STATIONARY_CHASE_RATE, TURN_RATE};
+use super::{Player, STATIONARY_CHASE_RATE};
 
 /// Advance `model_yaw` (the rendered body heading) one frame and return the **animation's** view of
 /// the move flags (the wire keeps the real key flags — observers integrate the facing from them):
@@ -41,6 +41,9 @@ pub(super) fn drive_body_heading(
     moving: bool,
     airborne: bool,
     steering: bool,
+    // The mover's own turn rate (rad/s) — the release sweep is a multiple of it, so a possessed
+    // creature's body settles onto its aim at the creature's pace (decision 1278).
+    turn_rate: f32,
 ) -> u32 {
     let strafe_offset = if swimming {
         0.0
@@ -58,7 +61,7 @@ pub(super) fn drive_body_heading(
         let delta = wrap_pi(player.face_yaw - player.model_yaw);
         let mut step = (delta.abs() - std::f32::consts::FRAC_PI_2).max(0.0); // the ceiling
         if !steering {
-            step += dt * TURN_RATE * STATIONARY_CHASE_RATE; // the release sweep
+            step += dt * turn_rate * STATIONARY_CHASE_RATE; // the release sweep
         }
         body_turn_step = step.min(delta.abs()).copysign(delta);
         player.model_yaw = wrap_pi(player.model_yaw + body_turn_step);
@@ -74,4 +77,54 @@ pub(super) fn drive_body_heading(
         }
     }
     anim_flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The release sweep is a multiple of the **mover's** turn rate, not of a constant. It is the
+    /// one place the rate reaches the *rendered* body rather than the aim, so a possessed creature
+    /// with a slow turn rate would otherwise snap its body around at a human's pace while its
+    /// facing crawled — the head and the body disagreeing about what they are attached to.
+    #[test]
+    fn the_standing_body_sweeps_back_at_the_movers_own_rate() {
+        let sweep = |turn_rate: f32| {
+            let mut player = Player {
+                face_yaw: 1.0,
+                model_yaw: 0.0,
+                ..Default::default()
+            };
+            drive_body_heading(&mut player, 0, 0.01, false, false, false, false, turn_rate);
+            player.model_yaw
+        };
+        // Below the 90° ceiling, the whole step is the sweep — so it scales linearly with the rate.
+        let slow = sweep(std::f32::consts::PI / 4.0);
+        let fast = sweep(std::f32::consts::PI);
+        assert!(slow > 0.0 && fast > slow);
+        assert!(
+            (fast / slow - 4.0).abs() < 1e-3,
+            "a 4× turn rate sweeps 4× as far in a frame: {slow} vs {fast}"
+        );
+        // Steering freezes the chase whatever the rate — the byte rule, not a slow sweep.
+        let mut player = Player {
+            face_yaw: 1.0,
+            model_yaw: 0.0,
+            ..Default::default()
+        };
+        drive_body_heading(
+            &mut player,
+            0,
+            0.01,
+            false,
+            false,
+            false,
+            true,
+            std::f32::consts::PI,
+        );
+        assert_eq!(
+            player.model_yaw, 0.0,
+            "under the 90° ceiling a steering frame moves the body not at all"
+        );
+    }
 }

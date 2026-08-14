@@ -182,10 +182,31 @@ pub(crate) struct UnitSpeeds(pub(crate) MoveSpeeds);
 #[derive(Component, Clone, Default)]
 pub(crate) struct ObjectStore(pub(crate) ObjectFields);
 
-/// Marks our own player's streamed entity (guid == [`SelfGuid`]). The renderer skips it — the player
-/// controller owns our avatar — but the controller reads its [`Transform`] to take control on login.
+/// Marks our own player's streamed entity (guid == [`SelfGuid`]). This is **identity** — "my
+/// character", the thing whose bags, auras, quest log and paper doll are mine. It is deliberately
+/// *not* "the thing I steer": that is [`ActiveMover`], which normally sits on the same entity and
+/// leaves it while you drive something else.
 #[derive(Component)]
 pub(crate) struct SelfPlayer;
+
+/// **The one unit this client simulates locally and streams to the server** — the reference's
+/// active-mover global (`ds:0xc4da98`/`0xc4da9c`, written only by `SetActiveMover 0x6006e0`), as a
+/// marker on the entity that global names.
+///
+/// Normally our own body, so it rides alongside [`SelfPlayer`]. While we hold somebody else's reins
+/// — mind-controlling a creature, an Eye of Kilrogg — it moves to *that* entity and our own body
+/// keeps none of it. The two are separate stores in the reference and separate markers here, for
+/// the reason decision 0092 separates the camera eye from the active-player character: possession
+/// moves what you *drive* without moving who you *are*.
+///
+/// Exactly one entity carries it, and possibly none — a claimed mover whose object has not streamed
+/// in yet is nobody, never a silent fallback to our own body. That distinction is load-bearing:
+/// outbound `MSG_MOVE_*` carry no guid, so driving our body under a claimed creature's mover writes
+/// our pose onto the creature. [`crate::player`] owns the marker's placement; everything that
+/// simulates, animates from input, or streams a body reads `With<ActiveMover>`, and everything that
+/// replays *server* motion reads `Without<ActiveMover>`.
+#[derive(Component)]
+pub(crate) struct ActiveMover;
 
 // ── ECS state: resources ─────────────────────────────────────────────────────────────────────────
 

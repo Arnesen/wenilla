@@ -30,10 +30,12 @@ pub(super) fn publish_viewer(
     player: Option<Res<Player>>,
     rig: Option<Res<super::CameraControl>>,
     screen: Option<Res<crate::loading_screen::LoadingScreen>>,
-    store: Query<&crate::net::ObjectStore, With<benilla_world::world_unit::ViewerUnit>>,
+    store: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 ) {
-    // The viewer's *condition*, off its own descriptor block: both are whole-screen effects keyed
-    // on the eye's owner, which is why they ride here rather than on any body in the scene.
+    // The viewer's *condition*, off **our own character's** descriptor block: both are whole-screen
+    // effects, which is why they ride here rather than on any body in the scene — and why they read
+    // `SelfPlayer` rather than the body we drive. Being drunk is a fact about you; possessing a boar
+    // does not sober you up, and a boar has no drunk byte to read (decision 1277).
     let (drunk, ghost) = match store.single() {
         Ok(s) => (
             s.0.player_drunk_byte()

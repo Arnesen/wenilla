@@ -25,7 +25,7 @@ use benilla_assets::coords::bevy_to_wow;
 use bevy::prelude::*;
 
 use crate::creature_anim::{move_flags, BodyTwist, MovementState};
-use crate::net::{ClientCommand, NetCommands, SelfPlayer, Spline};
+use crate::net::{ActiveMover, ClientCommand, NetCommands, Spline};
 
 use super::Player;
 
@@ -54,7 +54,7 @@ pub(super) fn drive_self_ride(
             Option<&mut MovementState>,
             Option<&mut BodyTwist>,
         ),
-        With<SelfPlayer>,
+        With<ActiveMover>,
     >,
 ) {
     // Only while we hold control (post-login). A free-fly detach (`F`) abandons any ride rather than
@@ -186,7 +186,7 @@ mod tests {
                     grounded: true,
                 },
                 twist,
-                SelfPlayer,
+                ActiveMover,
             ))
             .id();
         (app, entity, rx)
