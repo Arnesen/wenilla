@@ -67,7 +67,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitLevel",
         lua.create_function(|lua, token: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let Some(u) = token.as_ref().and_then(|t| model.units.get(t)) else {
+            let Some(u) = token.as_ref().and_then(|t| model.unit(t)) else {
                 return Ok(0i64);
             };
             Ok(if u.level == 0 {
@@ -224,7 +224,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let (Some(a), Some(b)) = (a, b) else {
                 return Ok(Value::Nil);
             };
-            let (Some(ua), Some(ub)) = (model.units.get(&a), model.units.get(&b)) else {
+            let (Some(ua), Some(ub)) = (model.unit(&a), model.unit(&b)) else {
                 return Ok(Value::Nil);
             };
             if !ua.exists || !ub.exists {
@@ -286,7 +286,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let hit = token
                 .as_ref()
-                .and_then(|t| model.units.get(t))
+                .and_then(|t| model.unit(t))
                 .filter(|u| u.exists && u.guid != 0)
                 .is_some_and(|u| {
                     model
@@ -308,7 +308,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(t) = token else {
                 return Ok(Value::Nil);
             };
-            let Some(u) = model.units.get(&t) else {
+            let Some(u) = model.unit(&t) else {
                 return Ok(Value::Nil);
             };
             let grouped = !model.party.members.is_empty();
@@ -316,9 +316,9 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(Value::Nil);
             }
             let hit = (t.starts_with("party") && !t.starts_with("partypet"))
-                || t == "player"
+                || t.eq_ignore_ascii_case("player")
                 || (u.guid != 0
-                    && (model.units.get("player").is_some_and(|p| p.guid == u.guid)
+                    && (model.unit("player").is_some_and(|p| p.guid == u.guid)
                         || model
                             .party
                             .members
@@ -611,6 +611,32 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // UnitIsCharmed(unit) → 1 while somebody is charming this unit, else nil (`0x516cf0`).
+    //
+    // Three details, all byte-verified, none of them what a reimplementation reaches for:
+    //  · the predicate is `UNIT_FIELD_CHARMEDBY != 0` — a plain 64-bit non-zero test on fields
+    //    10/11 — **not** a `UNIT_FIELD_FLAGS` bit, which is the obvious guess for a boolean-shaped
+    //    unit question;
+    //  · a hit is the NUMBER 1 (`lua_pushnumber`, tag 3) and a miss is `nil` (tag 0) — never
+    //    `true`/`false`, and never `0`. Exactly one value on both arms;
+    //  · it is ASYMMETRIC. The field is "who charms me", so the CHARMER reads nil and the charmed
+    //    unit reads 1. `UnitIsPossessed` does not exist in 5875 at all — this is the only
+    //    charm verb in the API.
+    //
+    // KLHThreatMeter is the corpus addon blocked on it (`KTM_My.lua:533`); seven others name it.
+    g.set(
+        "UnitIsCharmed",
+        lua.create_function(|lua, token: Option<String>| {
+            Ok(with_unit(lua, &token, Value::Nil, |u| {
+                if u.charmed {
+                    Value::Number(1.0)
+                } else {
+                    Value::Nil
+                }
+            }))
+        })?,
+    )?;
+
     // GetMoney() → the player's purse in copper (a player-level global, not a unit token). The coin
     // display + the merchant window's money line read it; `0` until the app's coinage feed lands.
     g.set(
@@ -652,7 +678,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             if class != CLASS_ROGUE && class != CLASS_DRUID {
                 return Ok(0_i64);
             }
-            let target = model.units.get("target").map_or(0, |u| u.guid);
+            let target = model.unit("target").map_or(0, |u| u.guid);
             if model.combo_target != target {
                 return Ok(0_i64);
             }
@@ -839,7 +865,7 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "ClearTarget",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.units.get("target").is_some_and(|u| u.exists) {
+            if model.unit("target").is_some_and(|u| u.exists) {
                 model.target_clear = true;
                 Ok(Value::Integer(1))
             } else {

@@ -9,7 +9,7 @@ use mlua::{Lua, Table, Value};
 use super::object::{anchor_bits_eq, as_f32, decode_id, id_to_lud, point_from_str};
 use super::{Model, REG_REGION_META, REG_REGION_METHODS, REG_WRAPPERS, SCREEN};
 use crate::layout::Anchor;
-use crate::widget::RegionHandle;
+use crate::widget::{RegionHandle, RegionKind};
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
 pub(super) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHandle> {
@@ -145,24 +145,80 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     // to a fade `finishedFunc` and `getglobal`s it back ("hack since a frame can't have a
     // reference to itself in it" — its own comment).
     //
-    // Resolved by scanning the region-name registry rather than storing the name a second time on
-    // the region: that registry is the single authority for region names (the widget arena
-    // deliberately holds none), and a mirrored copy is one more thing to drift. The scan is linear
-    // in NAMED regions, and this is a human-rate call.
+    // Resolution is [`region_name_of`], shared with `IsObjectType`'s `Usage:` text so the two can
+    // never disagree about what this region is called.
     m.set(
         "GetName",
         lua.create_function(|lua, this: Table| {
             let id = decode_id(&this)?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            let name = model
-                .region_names
-                .iter()
-                .find(|&(_, &v)| v == id)
-                .map(|(k, _)| k.clone());
-            match name {
+            match region_name_of(&model, id) {
                 Some(n) => Ok(Value::String(lua.create_string(&n)?)),
                 None => Ok(Value::Nil),
             }
+        })?,
+    )?;
+
+    // ── GetObjectType / IsObjectType: the last two of the Region map (1244 §4 closed) ───────────
+    //
+    // 1244 shipped four of the six missing Region-map members and deliberately left these two
+    // DISPATCHED rather than guessed, because every interesting detail is one a plausible
+    // implementation gets wrong. wow-re answered (§5 trio + byte cross-check,
+    // `system/ui/scratch/widget-type-identity.md`), and every one of those details is below.
+    //
+    // `GetObjectType` is a per-class `.data` `const char*` read through `vtable[+0x1c]` — Texture
+    // `0x773480` → `"Texture"`, FontString `0x7735d0` → `"FontString"` — pushed with
+    // `lua_pushstring`, exactly one value, extra arguments ignored with no arity check.
+    m.set(
+        "GetObjectType",
+        lua.create_function(|lua, this: Table| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(region_type_name(&model, rh))
+        })?,
+    )?;
+
+    // `IsObjectType(name)` — binding `0x7a1290`. Four traps, all verified, all here:
+    //
+    //  · **Case-INSENSITIVE, whole-string.** `vtable[+0x18]` → `SStrCmpI 0x64a4c0` → `_strnicmp`,
+    //    which folds both operands before comparing and breaks at the first NUL on either side —
+    //    so no prefix or substring match either. (The *method-name* lookup `0x702000` uses the
+    //    case-SENSITIVE sibling; the two are easy to conflate and behave differently.)
+    //  · **A short, hardcoded chain — and there is no root type.** Texture answers `"Texture"` and
+    //    `"Region"`; FontString answers `"FontString"` and `"Region"`. **1.12.1 has no
+    //    `"LayoutFrame"`, `"ScriptObject"` or `"Object"` type at all** — those strings exist only
+    //    inside `__FILE__` paths and allocator tags — so `tex:IsObjectType("LayoutFrame")` is nil.
+    //    That is the single most likely thing to invent from knowing later clients.
+    //  · **A hit is the NUMBER 1 and a miss is nil — never a boolean**, read off the pushed tags
+    //    (`lua_pushnumber` tag 3 vs `lua_pushnil` tag 0; tag 1 is never written), and exactly one
+    //    value on both paths.
+    //  · **A bad argument RAISES.** The gate is `lua_isstring`, which accepts strings and NUMBERS
+    //    only; anything else (missing, nil, boolean, table, function, userdata) hits
+    //    `luaL_error(L, "Usage: %s:IsObjectType(\"TYPE\")")` with `%s` the region's name or
+    //    `<unnamed>`, and that longjmps rather than returning. A number is ACCEPTED and stringified
+    //    in place, so `tex:IsObjectType(5)` compares against `"5"` and quietly answers nil — we
+    //    format it and compare for real rather than short-circuiting, though no type name is
+    //    numeric so the answer is nil either way.
+    m.set(
+        "IsObjectType",
+        lua.create_function(|lua, (this, want): (Table, Value)| {
+            let rh = region_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let want = match &want {
+                Value::String(s) => s.to_str()?.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Integer(i) => i.to_string(),
+                _ => {
+                    let who = region_name_of(&model, decode_id(&this)?)
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    return Err(mlua::Error::runtime(format!(
+                        "Usage: {who}:IsObjectType(\"TYPE\")"
+                    )));
+                }
+            };
+            let leaf = region_type_name(&model, rh);
+            let hit = want.eq_ignore_ascii_case(leaf) || want.eq_ignore_ascii_case("Region");
+            Ok(if hit { Value::Number(1.0) } else { Value::Nil })
         })?,
     )?;
 
@@ -304,6 +360,33 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
 
 /// The layout [`super::layout::Handle`] a region anchors to by default: its **owner frame**'s id
 /// (minted if needed), or [`SCREEN`] if the region has somehow lost its owner.
+/// This region's global name, or `None` when it was declared anonymously.
+///
+/// Scans the region-name registry rather than mirroring the name onto the region: that registry is
+/// the single authority (the widget arena deliberately holds none), and a second copy is one more
+/// thing to drift. Linear in NAMED regions, and every caller is human-rate.
+pub(super) fn region_name_of(model: &Model, id: u32) -> Option<String> {
+    model
+        .region_names
+        .iter()
+        .find(|&(_, &v)| v == id)
+        .map(|(k, _)| k.clone())
+}
+
+/// The string `GetObjectType()` answers for this region, and the leaf `IsObjectType` matches.
+///
+/// The reference reads a per-class `.data` `const char*` through `vtable[+0x1c]`; ours reads the
+/// arena's [`RegionKind`], which is the same fact stored once. A handle whose region has been
+/// destroyed answers `"Region"` — the base every leaf also matches, so an identity question about
+/// a dead handle degrades to the truthful half rather than naming a leaf it no longer is.
+pub(super) fn region_type_name(model: &Model, rh: RegionHandle) -> &'static str {
+    match model.arena.region(rh).map(|r| r.kind) {
+        Some(RegionKind::Texture) => "Texture",
+        Some(RegionKind::FontString) => "FontString",
+        None => "Region",
+    }
+}
+
 pub(super) fn region_owner_id(model: &mut Model, rh: RegionHandle) -> u32 {
     match model.arena.region(rh).map(|r| r.owner) {
         Some(owner) => model.frame_id(owner),

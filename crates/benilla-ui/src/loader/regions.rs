@@ -244,6 +244,43 @@ impl Loader<'_> {
         }
     }
 
+    /// Follow a FontString's `inherits=` to the **font object** at the end of it, through any
+    /// virtual FontString templates in between.
+    ///
+    /// Returns the name unchanged when it already names a font object (the one-hop case), the
+    /// template chain's font object when it does not, and `None` when the chain ends without one —
+    /// which is the case the caller still warns about, because an `inherits=` naming nothing at all
+    /// is a real gap and not something to swallow.
+    ///
+    /// `inherits=` is comma-separated in general; the first entry that resolves wins, which matches
+    /// the single-font reality (a region cannot wear two faces) without pretending the list cannot
+    /// exist. Depth is bounded: a template registry can contain a cycle, and a loader that hangs on
+    /// a malformed addon is worse than one that gives up on it.
+    fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
+        const MAX_HOPS: usize = 8;
+        let model = self.model();
+        let fonts = model.framexml_fonts.borrow();
+        let templates = model.framexml_templates.borrow();
+        for entry in inherits.split(',').map(str::trim) {
+            let mut name = entry.to_string();
+            for _ in 0..MAX_HOPS {
+                if fonts.contains_key(&name) {
+                    return Some(name);
+                }
+                let Some(next) = templates
+                    .get(&name)
+                    .and_then(|t| t.attr("inherits"))
+                    .and_then(|i| i.split(',').map(str::trim).next())
+                    .map(str::to_string)
+                else {
+                    break;
+                };
+                name = next;
+            }
+        }
+        None
+    }
+
     /// A `<FontString>`'s font resolution: `inherits="GameFontNormal"` → `SetFontObject` (the named
     /// virtual Font object's face/height/color/outline become this string's defaults), then the
     /// FontString's own `font=`/`<FontHeight>`/`outline=` → `SetFont` overrides. Called before the
@@ -251,7 +288,29 @@ impl Loader<'_> {
     /// unregistered `inherits=` target is a warn-once gap, not a dropped region.
     pub(super) fn apply_fontstring_font(&mut self, region: &Element, wrapper: &Table, dbg: &str) {
         if let Some(name) = region.attr("inherits") {
-            if let Err(e) = wrapper.call_method::<()>("SetFontObject", name.to_string()) {
+            // **Resolved through the TEMPLATE chain, not taken literally.** A FontString's
+            // `inherits=` may name a font object *or* a virtual FontString template, and a template
+            // may itself inherit the font object — which is how every "declare the line once, stamp
+            // it N times" addon is written. `expand_region` splices the template's attributes in,
+            // but the merged element keeps the INSTANCE's own `inherits=` (the template's name), so
+            // the font object at the far end of the chain was simply lost: one hop worked and two
+            // did not.
+            //
+            // `EQL3_Tracker.xml` is the corpus instance — `EQL3_QuestWatch_FontTemplate` inherits
+            // `GameFontHighlight` and each `EQL3_QuestWatchLine<i>` inherits the template — and it
+            // is not a cosmetic loss. `EQL3_Options.lua:1086` reads the line's font back with
+            // `GetFont()` and feeds it straight to `SetFont(t1, height, t2)`, so the dropped face
+            // came back as OUR OWN faithful `Usage: <FontString>:SetFont(...)` raise, firing on our
+            // own nil, and took the addon's session with it.
+            // An UNRESOLVED chain passes the name through UNCHANGED rather than something
+            // emptier. Handing `SetFontObject("")` an empty string is not the same request as
+            // handing it a bad name — it reads as "clear the font object", which is a silent state
+            // change where the old code produced a loud warn, and it cost EQL3 a NEW load-time
+            // failure the first time this landed.
+            let resolved = self
+                .font_object_through_templates(name)
+                .unwrap_or_else(|| name.to_string());
+            if let Err(e) = wrapper.call_method::<()>("SetFontObject", resolved) {
                 self.warn_once(
                     &format!("fontobj:{name}"),
                     format!("{dbg}: <FontString inherits=\"{name}\">: {e}"),

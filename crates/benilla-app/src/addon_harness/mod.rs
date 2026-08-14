@@ -73,7 +73,7 @@ use benilla_ui::toc::Toc;
 /// The render column — the one question every column here was blind to: *did this addon put
 /// anything on screen?* Its own module because it is its own concern (and this file is well over
 /// the size budget); its header is the design and the honest bounds.
-mod render;
+pub mod render;
 #[cfg(test)]
 mod render_tests;
 /// The use column — *does the thing it drew survive being **touched**?* Its own module for the
@@ -1323,6 +1323,74 @@ fn seat_a_session(script: &mut UiScript) {
     // resembling a session anyone has, and every row it lights up is one nobody can attribute. Two
     // tabs and four spells is a Tuesday. `Attack` is slot 1 because it is on every warrior's, and
     // three corpus addons look for exactly that name.
+    // THE QUEST LOG. `GetNumQuestLogEntries()` answered `0, 0`, so every quest addon's walk ran
+    // zero times — the same shape as the 0-copper purse below and the empty spellbook: not a bug
+    // anywhere, just a path nothing ever entered. Five corpus addons walk this API (AtlasQuest,
+    // EQL3, FuBar_QuestsFu, QuestHistory, QuestItem).
+    //
+    // A HEADER AND TWO QUESTS, and each piece is here to be a shape the API distinguishes rather
+    // than to be plausible scenery:
+    //  · a zone HEADER row, because `GetQuestLogTitle`'s `isHeader` is a different row kind and an
+    //    addon that indexes rows without checking it walks straight into one;
+    //  · an IN-PROGRESS quest with two objectives, one finished and one not — so a leaderboard walk
+    //    sees both states, and `%d/%d` progress is mid-way rather than 0 or complete;
+    //  · a COMPLETE quest (`complete = 1`), the other end of `isComplete`'s 1/-1/nil.
+    // Not seated: a FAILED quest (-1) and a TIMED one. Both are real states, and both are states a
+    // character is only briefly in — 1209's rule that a row nobody can attribute is worth less than
+    // one nobody lit applies to fixtures too.
+    {
+        use benilla_ui::script::{QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
+        let objective = |text: &str, cur: u32, req: u32| QuestLogObjectiveView {
+            text: text.into(),
+            kind: "monster".into(),
+            finished: cur >= req,
+            cur,
+            req,
+        };
+        let header = QuestLogEntryView {
+            quest_id: 0,
+            title: "Elwynn Forest".into(),
+            is_header: true,
+            ..Default::default()
+        };
+        let in_progress = QuestLogEntryView {
+            quest_id: 62,
+            title: "The Fargodeep Mine".into(),
+            level: 10,
+            objectives: vec![
+                objective("Kobold Miner slain: 8/12", 8, 12),
+                objective("Kobold Vermin slain: 6/6", 6, 6),
+            ],
+            ..Default::default()
+        };
+        let done = QuestLogEntryView {
+            quest_id: 176,
+            title: "Kobold Candles".into(),
+            level: 8,
+            complete: 1,
+            ..Default::default()
+        };
+        script.set_quest_log(QuestLogState {
+            entries: vec![header, in_progress, done],
+            num_quests: 2,
+            detail: None,
+        });
+    }
+
+    // THE PURSE. `GetMoney()` answered **0 copper** for every addon in every VM — and a level-60
+    // with literally no money is not a state a character is in; it is the same "state the real
+    // client cannot be in" the nil `UnitFactionGroup` below is seated for. Money addons are a whole
+    // genre in this corpus (Accountant, the CT_* expense trackers, every auction and vendor addon),
+    // and they all compute with this number.
+    //
+    // **12_345_678 copper — 1234g 56s 78c — and the digits are the point.** A round figure is what
+    // a fixture reaches for and it is exactly the value that hides bugs: any of `gold`, `silver`
+    // and `copper` being zero lets a broken coin-format or a `mod`/`floor` slip read as correct.
+    // All three non-zero means a formatter that drops a field, or divides in the wrong order, has
+    // nowhere to hide. Non-zero also matters on its own: an addon that guards `if GetMoney() > 0`
+    // never ran its body here.
+    script.set_money(12_345_678);
+
     // EQUIPPED GEAR. Every `GetInventoryItem*("player", slot)` answered the empty shape, and a
     // level-60 with no equipment at all is a state no character reaches — the same argument the
     // spellbook and the backpack landed on.
@@ -3634,6 +3702,64 @@ mod dependency_tests {
         // Bags 1..4 are deliberately NOT seated: a fresh character has no equipped bags, and
         // seating them would manufacture a state rather than expose one.
         assert_eq!(s.eval::<i64>("return GetContainerNumSlots(1)").unwrap(), 0);
+
+        // The quest log — asserted through the API an addon actually walks, not the state struct.
+        // `GetNumQuestLogEntries` returns (rows, quests): THREE rows but TWO quests, because the
+        // header is a row and not a quest. An addon that conflates the two indexes off the end.
+        assert_eq!(
+            s.eval::<(i64, i64)>("return GetNumQuestLogEntries()")
+                .unwrap(),
+            (3, 2),
+            "three rows, two quests — the header is a row"
+        );
+        assert_eq!(
+            s.eval::<String>("local t = GetQuestLogTitle(1) return t")
+                .unwrap(),
+            "Elwynn Forest"
+        );
+        assert!(
+            s.eval::<bool>("local _,_,_,h = GetQuestLogTitle(1) return h and true or false")
+                .unwrap(),
+            "row 1 is the header"
+        );
+        // Both ends of isComplete: nil for in-progress, 1 for complete.
+        assert!(s
+            .eval::<Option<i64>>("local _,_,_,_,_,c = GetQuestLogTitle(2) return c")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            s.eval::<i64>("local _,_,_,_,_,c = GetQuestLogTitle(3) return c")
+                .unwrap(),
+            1
+        );
+        // A leaderboard walk sees a finished objective AND an unfinished one — the pair a
+        // one-objective fixture cannot show.
+        s.run("SelectQuestLogEntry(2)").unwrap();
+        assert_eq!(
+            s.eval::<i64>("return GetNumQuestLeaderBoards()").unwrap(),
+            2
+        );
+        assert_eq!(
+            s.eval::<(bool, bool)>(
+                "local _,_,f1 = GetQuestLogLeaderBoard(1)                  local _,_,f2 = GetQuestLogLeaderBoard(2) return f1, f2"
+            )
+            .unwrap(),
+            (false, true),
+            "one objective outstanding, one done"
+        );
+
+        // The purse — and asserted as its three coin fields, not as one number, because that is the
+        // whole reason the value is 1234g 56s 78c rather than something round. A seat that reads
+        // back as 12345678 but breaks down wrong is the bug this shape exists to catch.
+        assert_eq!(s.eval::<i64>("return GetMoney()").unwrap(), 12_345_678);
+        assert_eq!(
+            s.eval::<(i64, i64, i64)>(
+                "local m = GetMoney()                  return floor(m / 10000), mod(floor(m / 100), 100), mod(m, 100)"
+            )
+            .unwrap(),
+            (1234, 56, 78),
+            "gold/silver/copper are each non-zero, so no field can be dropped unnoticed"
+        );
 
         // Equipped gear — head, chest, main hand, with the rest empty. Also exposed nothing.
         assert_eq!(

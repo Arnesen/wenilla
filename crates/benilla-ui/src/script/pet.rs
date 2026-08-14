@@ -503,7 +503,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(move |lua, token: Option<String>| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let family = token
-                .filter(|t| t == "pet")
+                .filter(|t| t.eq_ignore_ascii_case("pet"))
                 .and_then(|_| model.pet_bar.stats.family.as_deref());
             Ok(match family {
                 Some(name) => Value::String(lua.create_string(name)?),

@@ -246,7 +246,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UnitOnTaxi",
         lua.create_function(|lua, unit: String| {
             let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(unit == "player" && model.taxi_riding)
+            Ok(unit.eq_ignore_ascii_case("player") && model.taxi_riding)
         })?,
     )?;
 

@@ -1314,6 +1314,53 @@ mod region_template_tests {
             report.warnings
         );
         assert_eq!(s.eval::<String>("return Label:GetText()").unwrap(), "hello");
+        // …and the font it inherited is READABLE BACK, which is the half this test did not ask.
+        // `EQL3_Options.lua:1086` is the corpus line that needs it: it reads the tracker line's
+        // font with `t1, _, t2 = EQL3_QuestWatchLine1:GetFont()` and feeds `t1` straight into
+        // `temp:SetFont(t1, height, t2)` — so a nil path there is not a cosmetic gap, it is our own
+        // faithful `Usage: <FontString>:SetFont(...)` raise firing on our own nil.
+        assert_eq!(
+            s.eval::<(String, f32)>("local f, h = Label:GetFont() return f, h")
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 12.0),
+            "a FontString that inherits a Font object reports that object's font"
+        );
+    }
+
+    /// **EQL3's actual shape: FontString -> virtual FontString TEMPLATE -> Font object.** One hop
+    /// works (above); this is the two-hop chain every "define a line template once, stamp it N
+    /// times" addon writes, and `EQL3_Tracker.xml:6/32` is the corpus instance —
+    /// `EQL3_QuestWatch_FontTemplate` inherits `GameFontHighlight`, and each
+    /// `EQL3_QuestWatchLine<i>` inherits the template.
+    #[test]
+    fn a_fontstring_template_carries_the_font_object_it_inherits() {
+        let s = UiScript::new().unwrap();
+        let doc = parse(
+            r#"<Ui>
+                <Font name="GameFontHighlight" font="Fonts\FRIZQT__.TTF" virtual="true">
+                    <FontHeight><AbsValue val="12"/></FontHeight>
+                </Font>
+                <FontString name="LineTemplate" inherits="GameFontHighlight" virtual="true"
+                            justifyH="LEFT"/>
+                <Frame name="Host3">
+                    <Size><AbsDimension x="100" y="30"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                    <Layers><Layer level="ARTWORK">
+                        <FontString name="Line1" inherits="LineTemplate" text="one"/>
+                    </Layer></Layers>
+                </Frame>
+            </Ui>"#,
+        )
+        .unwrap();
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(s.eval::<String>("return Line1:GetText()").unwrap(), "one");
+        assert_eq!(
+            s.eval::<(String, f32)>("local f, h = Line1:GetFont() return f, h")
+                .unwrap(),
+            ("Fonts\\FRIZQT__.TTF".to_string(), 12.0),
+            "the font survives BOTH hops — template inheritance must not drop it"
+        );
     }
 }
 

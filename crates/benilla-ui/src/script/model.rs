@@ -183,7 +183,19 @@ pub(crate) struct Model {
     /// …), read by the `Unit*` Lua bindings ([`unit`]). Plain data — the engine never touches the
     /// ECS/net; the app's feed writes here via [`UiScript::set_unit`] (decision 0068 §3). A token
     /// absent from the map is a non-existent unit (`UnitExists` false, numbers `0`/nil).
-    pub(crate) units: HashMap<String, UnitState>,
+    ///
+    /// **Keyed by the ASCII-LOWERCASED token, and the name says so because the invariant has no
+    /// other guard.** 1.12's shared token resolver `0x515970` compares every literal with
+    /// `SStrCmpI` → `_strnicmp`, which folds `'A'..'Z'` by `+0x20`; not one of its ten compares
+    /// reaches the case-sensitive sibling. So `"Player"`, `"PLAYER"` and `"player"` are the same
+    /// unit on the real client, and ~10 corpus addons rely on it — `Accountant.lua:107`'s
+    /// `UnitFactionGroup("Player")` is the one that cost an addon its session.
+    ///
+    /// Read it through [`Model::unit`], never directly: that is where the fold lives. The field was
+    /// called `units` until the fold landed, and it was renamed precisely so that every existing
+    /// reader had to come through here rather than be trusted to remember (wow-re
+    /// `system/ui/scratch/unit-token-grammar.md`).
+    pub(crate) units_by_lower: HashMap<String, UnitState>,
     /// Per-unit-token aura list, **in display order**, pushed by the app's aura feed each frame and
     /// read by the `UnitAura` family ([`super::aura`]). The order is the app's decision, not the
     /// engine's: the local player's is a maintained insertion-order cache, every other unit's is
@@ -926,6 +938,24 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// A unit token's snapshot, **case-folded the way the client folds it**.
+    ///
+    /// 1.12's resolver `0x515970` compares each of its literals with `SStrCmpI` → `_strnicmp`,
+    /// whose fold is `'A'..'Z' += 0x20` and nothing else: the `jb`/`ja` bounds are unsigned, so a
+    /// byte ≥ 0x80 is never folded. `to_ascii_lowercase` is exactly that rule, and the reason this
+    /// does not use `to_lowercase()` — a locale-aware fold would map bytes the client leaves alone.
+    ///
+    /// The uppercase scan is a fast path, not an optimisation for its own sake: every internal
+    /// caller passes a lowercase literal (`"player"`, `"target"`), so the common case allocates
+    /// nothing and only an addon's `"Player"` pays for a `String`.
+    pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
+        if token.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.units_by_lower.get(&token.to_ascii_lowercase())
+        } else {
+            self.units_by_lower.get(token)
+        }
+    }
+
     pub(crate) fn new() -> Model {
         Model {
             addons: Vec::new(),
@@ -968,7 +998,7 @@ impl Model {
             // Classic Era's UIParent virtual space is 1024×768-ish; a sensible default the host can
             // override with `set_screen_size`. y-up: [bottom, left, top, right].
             screen: Rect::new(0.0, 0.0, 768.0, 1024.0),
-            units: HashMap::new(),
+            units_by_lower: HashMap::new(),
             auras: HashMap::new(),
             cancel_aura_requests: Vec::new(),
             tracking: None,

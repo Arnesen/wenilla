@@ -51,6 +51,16 @@ pub struct UnitState {
     /// predicate — its wire health is 1 (decision 0308 §1); the trio is dead / [`Self::ghost`] /
     /// dead-or-ghost, the real client's three tests.
     pub dead: bool,
+    /// Whether somebody is charming this unit (`UnitIsCharmed`).
+    ///
+    /// **`UNIT_FIELD_CHARMEDBY != 0`, and the asymmetry is the fact worth keeping.** The binding
+    /// `0x516cf0` reads fields 10/11 as one 64-bit value and tests it non-zero — not a
+    /// `UNIT_FIELD_FLAGS` bit, and not a comparison against the player (its body contains no `cmp`
+    /// at all). The field means *"who charms me"*; its mirror `UNIT_FIELD_CHARM` (*"whom I charm"*)
+    /// is never read here. So a **charmer** answers nil, a **charmed** pet answers 1, and an
+    /// ordinary **summoned** pet answers nil — `"pet"` is itself charm-else-summon in the resolver.
+    /// (wow-re `system/ui/scratch/unit-verbs-controlled-charmed-creaturetype.md`.)
+    pub charmed: bool,
     /// Whether the unit is a released ghost (`UnitIsGhost` — `PLAYER_FLAGS` bit 0x10, decision
     /// 0308 §1). Only meaningful for player tokens; creatures stay `false`.
     pub ghost: bool,
@@ -258,11 +268,14 @@ impl super::UiScript {
         {
             let mut model = self.model_mut();
             match state {
+                // Folded on the way IN as well as on the way out — the map's key type is the
+                // canonical lowercase token, so a feed that ever pushed `"Target"` could not create
+                // a second, shadowing entry.
                 Some(s) => {
-                    model.units.insert(token.to_string(), s);
+                    model.units_by_lower.insert(token.to_ascii_lowercase(), s);
                 }
                 None => {
-                    model.units.remove(token);
+                    model.units_by_lower.remove(&token.to_ascii_lowercase());
                 }
             }
         }
@@ -356,9 +369,15 @@ impl super::UiScript {
 /// Pick the interesting token from a directional two-unit call (`UnitIsEnemy(a, b)`): whichever
 /// arg isn't `"player"` — our snapshot stores the relationship on the non-player unit (target),
 /// and the ref calls both argument orders.
+///
+/// **The `"player"` test folds case**, like every other token comparison here and like the client's
+/// own resolver. It is the kind of site the map's fold does not cover on its own: an addon passing
+/// `UnitIsEnemy("Player", "target")` would otherwise be read as naming a non-player first arg, and
+/// this would answer about the wrong unit — a wrong ANSWER rather than a missing one, which is the
+/// worse failure of the two.
 fn pick_unit_token(a: &Option<String>, b: &Option<String>) -> Option<String> {
     match (a, b) {
-        (Some(x), _) if x != "player" => Some(x.clone()),
+        (Some(x), _) if !x.eq_ignore_ascii_case("player") => Some(x.clone()),
         (_, Some(y)) => Some(y.clone()),
         (x, _) => x.clone(),
     }
@@ -373,7 +392,7 @@ fn with_unit<T>(
     f: impl FnOnce(&UnitState) -> T,
 ) -> T {
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    match token.as_ref().and_then(|t| model.units.get(t)) {
+    match token.as_ref().and_then(|t| model.unit(t)) {
         Some(u) => f(u),
         None => default,
     }

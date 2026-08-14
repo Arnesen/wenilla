@@ -446,7 +446,7 @@ fn with_unit_stats<T>(
 /// `ui/scratch/pet-paperdoll-stat-api.md`). Nothing here is skill data — a creature has no skill
 /// block at all, which is exactly why the client substitutes a formula.
 fn cgunit_skill(model: &Model, token: &str) -> i64 {
-    model.units.get(token).map_or(0, |u| i64::from(u.level)) * 5
+    model.unit(token).map_or(0, |u| i64::from(u.level)) * 5
 }
 
 /// Read inventory slot `slot` under a short borrow, cloned out so the caller holds no borrow.

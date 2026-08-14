@@ -694,3 +694,150 @@ fn target_by_name_queues_the_name_and_the_exact_flag() {
         "got {err}"
     );
 }
+
+/// **`UnitIsCharmed` — the number `1`, the nil, and the asymmetry.**
+///
+/// `KLHThreatMeter\Code\KTM_My.lua:533` is the corpus line blocked on it; seven other addons name
+/// it. The binding (`0x516cf0`) reads `UNIT_FIELD_CHARMEDBY != 0` — a 64-bit non-zero test on
+/// fields 10/11, **not** a `UNIT_FIELD_FLAGS` bit, which is what a boolean-shaped unit question
+/// invites you to assume.
+#[test]
+fn unit_is_charmed_answers_one_or_nil_and_only_for_the_charmed_side() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    let mut mc = player();
+    mc.charmed = true;
+    s.set_unit("target", Some(mc));
+
+    // A hit is the NUMBER 1 — `lua_pushnumber` writes tag 3; tag 1 (boolean) is never written on
+    // either arm, so `== true` in an addon must NOT match.
+    assert_eq!(
+        s.eval::<i64>(r#"return UnitIsCharmed("target")"#).unwrap(),
+        1
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return type(UnitIsCharmed("target"))"#)
+            .unwrap(),
+        "number",
+        "the reference pushes a number, not a boolean"
+    );
+    assert_eq!(
+        s.eval::<i64>(r#"return select('#', UnitIsCharmed("target"))"#)
+            .unwrap(),
+        1,
+        "exactly one value on the hit path"
+    );
+
+    // An uncharmed unit and an absent one both answer nil — and nil, not `false` and not `0`.
+    for token in ["player", "party1"] {
+        assert!(
+            s.eval::<Option<i64>>(&format!(r#"return UnitIsCharmed("{token}")"#))
+                .unwrap()
+                .is_none(),
+            "{token} is not charmed, so the answer is nil"
+        );
+        assert_eq!(
+            s.eval::<String>(&format!(r#"return type(UnitIsCharmed("{token}"))"#))
+                .unwrap(),
+            "nil",
+            "…nil rather than false or 0"
+        );
+    }
+
+    // **The asymmetry.** The field is "who charms me", never "whom I charm", so the charmer reads
+    // nil while its victim reads 1 — here the player is doing the charming and is not charmed.
+    assert!(
+        s.eval::<Option<i64>>(r#"return UnitIsCharmed("player")"#)
+            .unwrap()
+            .is_none(),
+        "a charmER is not charmed; UNIT_FIELD_CHARM is never read by this binding"
+    );
+}
+
+/// **Unit tokens fold case, because the client's resolver does.**
+///
+/// `0x515970` compares every one of its literals with `SStrCmpI` → `_strnicmp`, whose fold is
+/// `'A'..'Z' += 0x20`; not one of its ten compares reaches the case-sensitive sibling (wow-re
+/// `system/ui/scratch/unit-token-grammar.md`, §5 trio). So this is a NARROWING fix — the real
+/// client resolves these and we did not — rather than the superset 1189 had to take back out.
+///
+/// `Accountant.lua:107` is the corpus line that paid for it: `UnitFactionGroup("Player")`, capital
+/// P, whose nil made `Accountant_SaveData[realm][faction]` a nil table index at l.192 and ended the
+/// addon's session. Roughly ten addons pass `Player`, `PLAYER`, `Target`, `Pet`, `PARTY`, `NPC`,
+/// `Mouseover` or `"Raid"..i`.
+#[test]
+fn a_unit_token_resolves_whatever_its_case() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+    let mut tgt = player();
+    tgt.name = Some("Hogger".into());
+    s.set_unit("target", Some(tgt));
+
+    // Every spelling names the same unit — the getter, the number and the predicate alike.
+    for spelling in ["player", "Player", "PLAYER", "PlAyEr"] {
+        assert_eq!(
+            s.eval::<String>(&format!(r#"return UnitName("{spelling}")"#))
+                .unwrap(),
+            "Benilla",
+            "UnitName(\"{spelling}\") must resolve"
+        );
+        assert_eq!(
+            s.eval::<i64>(&format!(r#"return UnitLevel("{spelling}")"#))
+                .unwrap(),
+            12
+        );
+        assert!(s
+            .eval::<bool>(&format!(r#"return UnitExists("{spelling}")"#))
+            .unwrap());
+    }
+    for spelling in ["target", "Target", "TARGET"] {
+        assert_eq!(
+            s.eval::<String>(&format!(r#"return UnitName("{spelling}")"#))
+                .unwrap(),
+            "Hogger"
+        );
+    }
+
+    // **The two-unit call, which the map's fold does not cover on its own.**
+    // `pick_unit_token` chooses "whichever arg is not the player"; with a case-sensitive test,
+    // `("Player", "target")` reads as a non-player FIRST arg and the call answers about the wrong
+    // unit — a wrong answer rather than a missing one.
+    assert!(
+        s.eval::<bool>(
+            r#"return UnitIsEnemy("Player", "target") == UnitIsEnemy("player", "target")"#
+        )
+        .unwrap(),
+        "the directional pick folds case too"
+    );
+
+    // An unseated token is still absent whatever its case — folding must not invent units.
+    for spelling in ["bogus", "BOGUS", "Party1"] {
+        assert!(
+            !s.eval::<bool>(&format!(r#"return UnitExists("{spelling}")"#))
+                .unwrap(),
+            "{spelling} was never seated"
+        );
+    }
+}
+
+/// The fold is on the way **IN** as well as out: a feed that pushes `"Target"` must not create a
+/// second entry shadowing `"target"`, which is what a lookup-only fold would allow.
+#[test]
+fn seating_a_token_folds_its_key_too() {
+    let mut s = UiScript::new().unwrap();
+    let mut a = player();
+    a.name = Some("First".into());
+    s.set_unit("Target", Some(a));
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("target")"#).unwrap(),
+        "First",
+        "a token seated as \"Target\" is readable as \"target\""
+    );
+
+    // …and clearing it through the other spelling really clears it, rather than leaving a shadow.
+    s.set_unit("TARGET", None);
+    assert!(
+        !s.eval::<bool>(r#"return UnitExists("target")"#).unwrap(),
+        "removal folds too — no shadowed entry survives"
+    );
+}

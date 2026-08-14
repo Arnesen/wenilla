@@ -131,6 +131,10 @@ pub struct RenderReport {
     pub own_quads: usize,
     /// Painting quads from widgets the addon hung off a frame that already existed.
     pub overlay_quads: usize,
+    /// **Every** distinct named frame, not a sample — [`MAX_NAMED_FRAMES`] bounds only what is
+    /// PRINTED, because a caller that asks "did it draw an item slot?" cannot answer that from a
+    /// truncated list, and one of ours silently could not.
+    ///
     /// The distinct named frames those quads were charged to, nearest-named-ancestor per quad, so
     /// a `nothing`/`own` row can be read back to a place in the addon's own code. Capped, sorted.
     pub frames: Vec<String>,
@@ -146,8 +150,25 @@ impl RenderReport {
     }
 }
 
-/// How many named frames a row carries. Enough to name the window; not enough to be a dump.
-const MAX_NAMED_FRAMES: usize = 6;
+/// How many named frames a row PRINTS. Enough to name the window; not enough to be a dump.
+///
+/// **This bounds the display, not the collection, and that distinction is the whole of 1242.** It
+/// used to stop the `named` set filling at 6 — so a row kept the first six names *encountered* and
+/// then rendered them through a `BTreeSet`, i.e. sorted. The output therefore read as an
+/// alphabetical list of what an addon drew while actually being an arbitrary six of N, and nothing
+/// said so.
+///
+/// That is not hypothetical damage. `render_tests`'
+/// `the_directors_two_verified_addons_come_out_on_opposite_sides` asserts Bagnon draws frames named
+/// `BagnonItem*` — the director's original complaint. It passed only because `BagnonItem1` happened
+/// to be among the first six quads attributed. Seating the player's PURSE in the session fixture
+/// added `BagnonMoneyFrameSilverButton` to the same window, which took the sixth slot, evicted
+/// `BagnonItem1`, and made the test assert — correctly, against the data it was given — that Bagnon
+/// draws no item slots at all. The addon had not changed.
+///
+/// So the set now collects everything and the cap applies where the constraint actually is: the
+/// printed line. 1242's rule, in the second instrument to break it.
+pub const MAX_NAMED_FRAMES: usize = 6;
 
 /// Drive the entry points that make a UI **visible**, then attribute every painting quad.
 ///
@@ -285,10 +306,8 @@ pub(super) fn measure_render(
             owner,
             point: centre(rect),
         });
-        if named.len() < MAX_NAMED_FRAMES {
-            if let Some(name) = script.target_owner_name(quad.target) {
-                named.insert(name);
-            }
+        if let Some(name) = script.target_owner_name(quad.target) {
+            named.insert(name);
         }
     }
     report.frames = named.into_iter().collect();

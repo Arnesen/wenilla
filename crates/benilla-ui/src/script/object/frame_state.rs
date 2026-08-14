@@ -8,6 +8,7 @@ use mlua::{Lua, Table, Value};
 
 use crate::order::Strata;
 use crate::script::{event, Backdrop, Insets, Model};
+use crate::widget::FrameKind;
 
 use super::{decode_id, frame_handle_of, frame_wrapper, strata_from_str};
 
@@ -87,6 +88,98 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // ── GetObjectType / IsObjectType, frame side (wow-re `widget-type-identity.md` §6) ──────────
+    //
+    // The region side landed first because a FontString found it; `_Nameplates` is why this half
+    // exists too — `_Nameplates.lua:164` tests `Nameplate:GetObjectType() ~= "Button"` and `:191`
+    // tests `== "StatusBar"`, on FRAMES, in the same file whose `Region:GetObjectType()` calls the
+    // region verbs answer.
+    //
+    // The chains are a hardcoded straight-line list per class in the binary, not a runtime parent
+    // walk, so they are a table here too. Three of them are things a reasonable person invents
+    // wrongly:
+    //
+    //  · **`ScrollingMessageFrame` derives from `Frame`, NOT from `MessageFrame`.** The name says
+    //    otherwise and the roster is explicit (`0x787940`).
+    //  · **`SimpleHTML` is spelled with a capitalised HTML.** Our enum variant is `SimpleHtml`, so
+    //    anything derived from the variant name — `format!("{:?}")` and friends — would hand
+    //    addons `"SimpleHtml"`, and `GetObjectType` is compared with `==` (`IsObjectType`'s
+    //    case-folding would hide it; the getter's would not).
+    //  · **`Cooldown` answers `"Model"`.** 1.12.1 has no `Cooldown` type — the census finds 23
+    //    type-name globals and none is that. The reference builds its cooldown as a `Model` playing
+    //    `UI-Cooldown-Indicator.mdx` (`CooldownFrameTemplate`), and OUR `FrameKind::Cooldown` is a
+    //    deliberate Era-shaped divergence that models the mechanism first-class (0137 phase 4). So
+    //    the faithful answer is what the reference's own cooldown widget IS. Answering `"Cooldown"`
+    //    would announce an Era type to a Lua ecosystem that branches on presence — precisely the
+    //    superset 1189 had to take back out.
+    fn type_chain(kind: FrameKind) -> &'static [&'static str] {
+        match kind {
+            FrameKind::Frame => &["Frame", "Region"],
+            FrameKind::Button => &["Button", "Frame", "Region"],
+            FrameKind::CheckButton => &["CheckButton", "Button", "Frame", "Region"],
+            FrameKind::EditBox => &["EditBox", "Frame", "Region"],
+            FrameKind::StatusBar => &["StatusBar", "Frame", "Region"],
+            FrameKind::Slider => &["Slider", "Frame", "Region"],
+            FrameKind::ScrollFrame => &["ScrollFrame", "Frame", "Region"],
+            FrameKind::Model => &["Model", "Frame", "Region"],
+            FrameKind::MessageFrame => &["MessageFrame", "Frame", "Region"],
+            FrameKind::ScrollingMessageFrame => &["ScrollingMessageFrame", "Frame", "Region"],
+            FrameKind::ColorSelect => &["ColorSelect", "Frame", "Region"],
+            FrameKind::SimpleHtml => &["SimpleHTML", "Frame", "Region"],
+            FrameKind::MovieFrame => &["MovieFrame", "Frame", "Region"],
+            FrameKind::GameTooltip => &["GameTooltip", "Frame", "Region"],
+            FrameKind::Minimap => &["Minimap", "Frame", "Region"],
+            FrameKind::Cooldown => &["Model", "Frame", "Region"],
+        }
+    }
+    fn chain_of(lua: &Lua, this: &Table) -> mlua::Result<&'static [&'static str]> {
+        let h = frame_handle_of(lua, this)?;
+        let model = lua.app_data_ref::<Model>().expect("model");
+        Ok(model
+            .arena
+            .frame(h)
+            .map_or(&["Frame", "Region"][..], |f| type_chain(f.kind)))
+    }
+
+    m.set(
+        "GetObjectType",
+        lua.create_function(|lua, this: Table| {
+            Ok(Value::String(lua.create_string(chain_of(lua, &this)?[0])?))
+        })?,
+    )?;
+
+    // Same four traps as the region twin (see `script::region`): case-insensitive whole-string,
+    // number 1 on a hit and nil on a miss, exactly one value either way, and a non-string
+    // non-number argument raises the reference's own `Usage:` text.
+    m.set(
+        "IsObjectType",
+        lua.create_function(|lua, (this, want): (Table, Value)| {
+            let chain = chain_of(lua, &this)?;
+            let want = match &want {
+                Value::String(s) => s.to_str()?.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Integer(i) => i.to_string(),
+                _ => {
+                    let h = frame_handle_of(lua, &this)?;
+                    let model = lua.app_data_ref::<Model>().expect("model");
+                    let who = model
+                        .arena
+                        .frame(h)
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    return Err(mlua::Error::runtime(format!(
+                        "Usage: {who}:IsObjectType(\"TYPE\")"
+                    )));
+                }
+            };
+            Ok(if chain.iter().any(|t| want.eq_ignore_ascii_case(t)) {
+                Value::Number(1.0)
+            } else {
+                Value::Nil
+            })
+        })?,
+    )?;
+
     m.set(
         "GetParent",
         lua.create_function(|lua, this: Table| {

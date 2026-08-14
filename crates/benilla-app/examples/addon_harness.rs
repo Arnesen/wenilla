@@ -53,6 +53,21 @@ fn ranked(rows: Vec<(String, usize)>, take: usize) {
 /// `--deep` with no number means all of them. Absent, each list keeps the `take` its caller chose.
 static DEEP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
 
+/// The row's frame names, bounded for the line and **saying so when it bounds**.
+///
+/// `RenderReport::frames` carries every named frame now; the cap that used to live in the
+/// collection (and silently evicted the very names a test asserted on) lives here instead.
+fn render_frames(frames: &[String]) -> String {
+    use benilla_app::addon_harness::render::MAX_NAMED_FRAMES;
+    // `--deep` opens THIS bound too. It was added for the ranked tables, but the principle is one
+    // principle: a bounded view is fine, a bounded view you cannot open is not.
+    let cap = DEEP.get().copied().flatten().unwrap_or(MAX_NAMED_FRAMES);
+    if frames.len() <= cap {
+        return frames.join(",");
+    }
+    format!("{},+{} more", frames[..cap].join(","), frames.len() - cap)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(root) = args.next() else {
@@ -584,7 +599,7 @@ fn main() {
                 if r.loaded { "loaded" } else { "ERRORS" },
                 r.missing_globals.len(),
                 session,
-                r.render.frames.join(","),
+                render_frames(&r.render.frames),
                 r.errors.first().map(String::as_str).unwrap_or("")
             );
         }

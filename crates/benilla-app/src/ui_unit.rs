@@ -479,6 +479,9 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // The released-ghost predicate (decision 0308 §1): PLAYER_FLAGS bit 0x10 — a ghost's
         // health is 1, so `dead` above is false for it. Zero/absent on creatures.
         ghost: store.0.player_is_ghost(),
+        // `UnitIsCharmed 0x516cf0` — `UNIT_FIELD_CHARMEDBY != 0`, the same field `ui_aura`'s
+        // charmed-unit buff leg already reads, so the two cannot disagree about who is charmed.
+        charmed: store.0.unit_charmed_by().is_some(),
         reaction,
         race: race.map(|(n, _)| n.to_string()),
         race_file: race.map(|(_, f)| f.to_string()),

@@ -123,7 +123,7 @@ fn render_unit(lua: &Lua, this: &Table, token: &str) -> mlua::Result<bool> {
     let (unit, player_level) = {
         let model = lua.app_data_mut::<Model>().expect("model app_data");
         (
-            model.units.get(token).cloned().filter(|u| u.exists),
+            model.unit(token).cloned().filter(|u| u.exists),
             model.player_req.level,
         )
     };
@@ -281,7 +281,7 @@ pub(super) fn on_unit_push(lua: &Lua, token: &str) {
     for h in hits {
         let unit = {
             let model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.units.get(token).cloned().filter(|u| u.exists)
+            model.unit(token).cloned().filter(|u| u.exists)
         };
         update_bar(lua, h, unit.as_ref());
     }

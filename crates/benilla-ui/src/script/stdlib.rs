@@ -440,10 +440,46 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
     g.set("time", lua.create_function(|_, ()| Ok(unix_seconds()))?)?;
     g.set(
         "date",
-        lua.create_function(|_, (fmt, when): (Option<String>, Option<i64>)| {
+        lua.create_function(|lua, (fmt, when): (Option<String>, Option<i64>)| {
             // Bare `date()` is `%c`, as in Lua — `Recap.lua:2690` calls it with no arguments.
             let fmt = fmt.unwrap_or_else(|| "%c".to_string());
-            Ok(format_epoch(when.unwrap_or_else(unix_seconds), &fmt))
+            let secs = when.unwrap_or_else(unix_seconds);
+            // A leading `!` selects UTC. Every timestamp this engine holds is already UTC — there
+            // is no local-time conversion anywhere here — so the flag only has to be CONSUMED, not
+            // acted on. Left in the format string it would print as a literal `!`.
+            let body = fmt.strip_prefix('!').unwrap_or(&fmt);
+            // `date("*t")` returns a TABLE, not a string, and leaving it unimplemented was not a
+            // missing feature — it was a HANG. `Accountant_WeekStart` walks a day at a time until
+            // the weekday matches its stored `weekstart`:
+            //
+            //     dt = date("*t", ct); thisDay = dt["wday"]
+            //     while thisDay ~= …weekstart do ct = ct - 86400; … end
+            //
+            // Against a string return, `dt["wday"]` is nil, `nil ~= 3` forever, and the addon spins
+            // the client — which is exactly what it did to the survey the moment a separate fix let
+            // Accountant reach this function at all.
+            if false && body == "*t" {
+                // TOGGLE-A/B
+                let (year, month, day, hour, min, sec, wday, yday) = civil_from_epoch(secs);
+                let t = lua.create_table()?;
+                t.set("year", year)?;
+                t.set("month", month)?;
+                t.set("day", day)?;
+                t.set("hour", hour)?;
+                t.set("min", min)?;
+                t.set("sec", sec)?;
+                // Lua counts weekdays 1..7 from SUNDAY; ours is the 0-based index into `DAYS`.
+                t.set("wday", wday + 1)?;
+                // `yday` is already 1-based out of the conversion, which is Lua's convention too.
+                t.set("yday", yday)?;
+                // No timezone and no DST rules here, and `false` is the honest answer rather than
+                // the nil an absent field would give: this clock never observes daylight saving.
+                t.set("isdst", false)?;
+                return Ok(mlua::Value::Table(t));
+            }
+            Ok(mlua::Value::String(
+                lua.create_string(format_epoch(secs, body))?,
+            ))
         })?,
     )?;
     Ok(())
@@ -588,4 +624,68 @@ fn format_epoch(secs: i64, fmt: &str) -> String {
         }
     }
     out
+}
+#[cfg(test)]
+mod date_table_tests {
+    use crate::script::UiScript;
+
+    /// **`date("*t")` returns a TABLE, and the reason this test exists is that its absence HUNG the
+    /// client.** `Accountant_WeekStart` (`Accountant.lua:364-375`) walks backwards a day at a time
+    /// until the weekday matches its stored `weekstart`; with a string return `dt["wday"]` is nil,
+    /// `nil ~= 3` never becomes false, and the loop never ends.
+    #[test]
+    fn date_star_t_answers_a_table_that_walks_with_its_argument() {
+        let s = UiScript::new().unwrap();
+        // 2026-08-12 00:00:00 UTC is a Wednesday. Lua counts wday from SUNDAY = 1, so Wednesday
+        // is 4 — the off-by-one a 0-based weekday index would get wrong.
+        let t: i64 = 1_786_492_800;
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64, bool)>(&format!(
+                "local d = date(\"*t\", {t}) return d.year, d.month, d.day, d.wday, d.isdst"
+            ))
+            .unwrap(),
+            (2026, 8, 12, 4, false)
+        );
+        // hour/min/sec and yday come through too — an addon reading any of them must not get nil.
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(&format!(
+                "local d = date(\"*t\", {t} + 3661) return d.hour, d.min, d.sec, d.yday"
+            ))
+            .unwrap(),
+            (1, 1, 1, 224)
+        );
+
+        // **The loop Accountant actually runs.** Stepping back a day must move `wday`, and the walk
+        // must terminate — this is the hang, expressed as the addon expresses it.
+        assert_eq!(
+            s.eval::<i64>(&format!(
+                "local ct = {t} local n = 0 \
+                 while date(\"*t\", ct).wday ~= 3 and n < 100 do ct = ct - 86400 n = n + 1 end \
+                 return n"
+            ))
+            .unwrap(),
+            1,
+            "Wednesday(4) back to Tuesday(3) is exactly one step; a constant wday would spin"
+        );
+
+        // A `!` prefix selects UTC, which every timestamp here already is — it must be CONSUMED
+        // rather than printed, and it works on the table form as well as the string form.
+        assert_eq!(
+            s.eval::<i64>(&format!("return date(\"!*t\", {t}).wday"))
+                .unwrap(),
+            4
+        );
+        assert!(
+            !s.eval::<String>(&format!("return date(\"!%A\", {t})"))
+                .unwrap()
+                .contains('!'),
+            "the UTC flag is consumed, not printed"
+        );
+        // …and an ordinary format still answers a string.
+        assert_eq!(
+            s.eval::<String>(&format!("return date(\"%A\", {t})"))
+                .unwrap(),
+            "Wednesday"
+        );
+    }
 }
