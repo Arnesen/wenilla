@@ -13,7 +13,9 @@ pub mod messages;
 pub mod wire;
 pub mod world;
 pub use auth::AuthReject;
-pub use events::{decode, CharAction, EntityKind, LoginStage, MoveSpeeds, Poll, SessionEvent};
+pub use events::{
+    decode, CharAction, EntityKind, LoginStage, MoveSpeeds, Poll, SessionEnd, SessionEvent,
+};
 pub use messages::{
     CharCreateReq, CharEnumItem, Character, CreateSpline, ItemInfo, JumpInfo, MonsterMoveFacing,
     MoveMode, ObjectFields, OwnerFallback, ServerPacket, SpeedKind, TransportPose,

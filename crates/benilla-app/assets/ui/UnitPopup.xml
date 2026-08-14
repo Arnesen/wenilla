@@ -1,13 +1,21 @@
 <!--
-    The unit right-click popups (decision 0434 phase 5) — transcribed from the 1.12 FrameXML
-    UnitPopup.lua (the whole file: the button/menu tables, ShowMenu, HideButtons, the OnUpdate
-    enable pass, OnClick) + the UIParent.xml OnUpdate hook (a driver frame here — the DeathFrame
-    driver pattern; benilla's UIParent carries no OnUpdate).
+    The unit right-click popups (decision 0434 phase 5) — benilla's own implementation of the
+    engine the 1.12 FrameXML `UnitPopup.lua` SPECIFIES. That file is the specification this one
+    matches, not the source of this text. What is faithful is everything observable: the row
+    catalogue and every row's facts (label, interact-distance class, colours, atlas cells), the
+    membership and ORDER of every menu, which rows a menu hides and when, which rows grey out and
+    when, and what each row does when it is clicked. How that is written is ours — a row
+    catalogue walked by a builder, and three keyed tables (hide / grey / click) where the
+    reference runs one long `elseif value == "…"` ladder each. The globals the reference
+    publishes (`UnitPopupButtons`, `UnitPopupMenus`, `UnitPopupShown`, `UnitPopup_ShowMenu`, …)
+    keep their names and shapes exactly, because addons index, call and replace them by name.
 
     The menus ride the dropdown kit's MENU displayMode + level-2 submenus (UIDropDownMenu.xml).
     The owner frames (TargetFrameDropDown, PlayerFrameDropDown, PartyMemberFrameNDropDown) live
     with their frames in UnitFrames.xml / PartyFrame.xml — this file is the shared engine, like
-    the ref's load split.
+    the ref's load split. The OnUpdate driver frame at the bottom stands in for the ref's
+    UIParent.xml OnUpdate hook (the DeathFrame hidden-driver pattern; benilla's UIParent carries
+    no OnUpdate).
 
     DEVIATIONS, deliberate (each waits for its arc):
     - NO ADDED ROWS. A "PVP" row briefly sat at the head of SELF (decision 0646 §3); decision 0652
@@ -16,7 +24,7 @@
       exactly zero times — so the row was a deviation that made this menu read wrong against the
       reference. `/pvp` is the toggle the client has.
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
-      BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: TARGET (the friends
+      BENILLA_UNITPOPUP_DEFERRED set below) rather than shown-dead: TARGET (the friends
       list), GUILD_PROMOTE/GUILD_LEAVE (the guild arc), RESET_INSTANCES (instances). TRADE came out
       with decision 0592 P1, DUEL with 0633, INSPECT with 0631, FOLLOW with 0890's follow-up — and
       that last entry's stated reason ("its CMSG family is its own slice") was simply WRONG: 0890
@@ -27,105 +35,183 @@
       the two dialogs behind Abandon and Rename are registered in PetActionBar.xml (with the pet
       arc, like every other dialog in this codebase — this file must stay loadable without the
       popup engine). The RAID_* rank rows stay in the tables but are unreachable (no raid roster) —
-      their OnClick branches are trimmed with the rest.
-    - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub → the
-      TEXT stub below keeps the table lines verbatim (the ref's TEXT() is the localization
-      identity).
+      they carry a hide-always predicate, and no click handler at all.
+    - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub is
+      string.sub. `TEXT` is kept because the reference publishes it as the localization hook every
+      displayed string passes through (it is the identity, and BasicControls.xml defines the real
+      one) — row labels are declared through it here for the same reason.
     - The newbie tooltips on rows are OUT with the kit's (default-off cvar look).
     - CheckInteractDistance now really gates (decision 0631): the binding landed with the inspect
       row, off wow-re's §5-VERIFIED `check_interact_dist2` table {10², 11.1111², 10², 30²}. So every
       SHOWN row with a non-zero `dist` grays out of range now — INSPECT (dist 1, 10 yd), TRADE
       (dist 2, 11.11 yd) and DUEL (dist 3, 10 yd) — where TRADE and DUEL shipped ungated only
-      because the binding was nil when they landed. The nil-guard in the OnUpdate pass below is
+      because the binding was nil when they landed. The nil-guard in the enable pass below is
       kept as-is.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
-        -- The ref's localization identity (UIParent.lua) — keeps the table lines verbatim.
+        -- The localization identity every displayed string passes through (BasicControls.xml
+        -- defines the real one; this stands in when it is not loaded).
         if ( not TEXT ) then
             TEXT = function(s) return s end
         end
 
         UNITPOPUP_TIMEOUT = 5;
 
+        -- ── The row catalogue ──────────────────────────────────────────────────────────────
+        -- `UnitPopupButtons` is the flat key → row map the reference publishes: addons index it,
+        -- and overwrite entries in it, by name. Each row is declared once, from its key, the
+        -- label to draw, and its interact-distance class — 0 for no range check at all, 1..4 for
+        -- the client's own CheckInteractDistance classes, which the enable pass consults. Extra
+        -- presentation attributes (a leading spacer, a submenu arrow, a check box, a colour, an
+        -- icon and its atlas cell) ride in the fourth field and are copied through untouched.
         UnitPopupButtons = { };
-        UnitPopupButtons["CANCEL"] = { text = TEXT(CANCEL), dist = 0, space = 1 };
-        UnitPopupButtons["TRADE"] = { text = TEXT(TRADE), dist = 2 };
-        UnitPopupButtons["INSPECT"] = { text = TEXT(INSPECT), dist = 1 };
-        UnitPopupButtons["TARGET"] = { text = TEXT(TARGET), dist = 0 };
-        UnitPopupButtons["DUEL"] = { text = TEXT(DUEL), dist = 3, space = 1 };
-        UnitPopupButtons["WHISPER"] = { text = TEXT(WHISPER), dist = 0 };
-        UnitPopupButtons["INVITE"] = { text = TEXT(PARTY_INVITE), dist = 0 };
-        UnitPopupButtons["UNINVITE"] = { text = TEXT(PARTY_UNINVITE), dist = 0 };
-        UnitPopupButtons["PROMOTE"] = { text = TEXT(PARTY_PROMOTE), dist = 0 };
-        UnitPopupButtons["GUILD_PROMOTE"] = { text = TEXT(GUILD_PROMOTE), dist = 0 };
-        UnitPopupButtons["GUILD_LEAVE"] = { text = TEXT(GUILD_LEAVE), dist = 0 };
-        UnitPopupButtons["LEAVE"] = { text = TEXT(PARTY_LEAVE), dist = 0 };
-        UnitPopupButtons["FOLLOW"] = { text = TEXT(FOLLOW), dist = 4 };
-        UnitPopupButtons["PET_PASSIVE"] = { text = TEXT(PET_PASSIVE), dist = 0 };
-        UnitPopupButtons["PET_DEFENSIVE"] = { text = TEXT(PET_DEFENSIVE), dist = 0 };
-        UnitPopupButtons["PET_AGGRESSIVE"] = { text = TEXT(PET_AGGRESSIVE), dist = 0 };
-        UnitPopupButtons["PET_WAIT"] = { text = TEXT(PET_WAIT), dist = 0 };
-        UnitPopupButtons["PET_FOLLOW"] = { text = TEXT(PET_FOLLOW), dist = 0 };
-        UnitPopupButtons["PET_ATTACK"] = { text = TEXT(PET_ATTACK), dist = 0 };
-        UnitPopupButtons["PET_DISMISS"] = { text = TEXT(PET_DISMISS), dist = 0 };
-        UnitPopupButtons["PET_ABANDON"] = { text = TEXT(PET_ABANDON), dist = 0 };
-        UnitPopupButtons["PET_PAPERDOLL"] = { text = TEXT(PET_PAPERDOLL), dist = 0 };
-        UnitPopupButtons["PET_RENAME"] = { text = TEXT(PET_RENAME), dist = 0 };
 
-        UnitPopupButtons["LOOT_METHOD"] = { text = TEXT(LOOT_METHOD), dist = 0, nested = 1 };
-        UnitPopupButtons["FREE_FOR_ALL"] = { text = TEXT(LOOT_FREE_FOR_ALL), dist = 0 };
-        UnitPopupButtons["ROUND_ROBIN"] = { text = TEXT(LOOT_ROUND_ROBIN), dist = 0 };
-        UnitPopupButtons["MASTER_LOOTER"] = { text = TEXT(LOOT_MASTER_LOOTER), dist = 0 };
-        UnitPopupButtons["GROUP_LOOT"] = { text = TEXT(LOOT_GROUP_LOOT), dist = 0 };
-        UnitPopupButtons["NEED_BEFORE_GREED"] = { text = TEXT(LOOT_NEED_BEFORE_GREED), dist = 0 };
-        UnitPopupButtons["RESET_INSTANCES"] = { text = TEXT(RESET_INSTANCES), dist = 0 };
+        local function declareRow(key, label, dist, attributes)
+            local row = attributes or { };
+            row.text = TEXT(label);
+            row.dist = dist or 0;
+            UnitPopupButtons[key] = row;
+        end
 
-        UnitPopupButtons["LOOT_THRESHOLD"] = { text = TEXT(LOOT_THRESHOLD), dist = 0, nested = 1 };
-        UnitPopupButtons["LOOT_PROMOTE"] = { text = TEXT(LOOT_PROMOTE), dist = 0 };
-        UnitPopupButtons["ITEM_QUALITY2_DESC"] = { text = TEXT(ITEM_QUALITY2_DESC), dist = 0, color = ITEM_QUALITY_COLORS[2] };
-        UnitPopupButtons["ITEM_QUALITY3_DESC"] = { text = TEXT(ITEM_QUALITY3_DESC), dist = 0, color = ITEM_QUALITY_COLORS[3] };
-        UnitPopupButtons["ITEM_QUALITY4_DESC"] = { text = TEXT(ITEM_QUALITY4_DESC), dist = 0, color = ITEM_QUALITY_COLORS[4] };
+        -- { key, label, interact-distance class, extra attributes }
+        local ROWS = {
+            { "CANCEL", CANCEL, 0, { space = 1 } },
+            { "TRADE", TRADE, 2 },
+            { "INSPECT", INSPECT, 1 },
+            { "TARGET", TARGET },
+            { "DUEL", DUEL, 3, { space = 1 } },
+            { "WHISPER", WHISPER },
+            { "INVITE", PARTY_INVITE },
+            { "UNINVITE", PARTY_UNINVITE },
+            { "PROMOTE", PARTY_PROMOTE },
+            { "GUILD_PROMOTE", GUILD_PROMOTE },
+            { "GUILD_LEAVE", GUILD_LEAVE },
+            { "LEAVE", PARTY_LEAVE },
+            { "FOLLOW", FOLLOW, 4 },
 
-        UnitPopupButtons["RAID_LEADER"] = { text = TEXT(NEW_LEADER), dist = 0 };
-        UnitPopupButtons["RAID_PROMOTE"] = { text = TEXT(PROMOTE), dist = 0 };
-        UnitPopupButtons["RAID_DEMOTE"] = { text = TEXT(DEMOTE), dist = 0 };
-        UnitPopupButtons["RAID_REMOVE"] = { text = TEXT(REMOVE), dist = 0 };
+            -- The pet verbs. Only the last four are reachable — no 1.12 menu holds the six
+            -- stance/command rows above them (the reference declares them and builds no menu
+            -- from them either), so nothing here can click them. They stay declared because the
+            -- catalogue is what addons index.
+            { "PET_PASSIVE", PET_PASSIVE },
+            { "PET_DEFENSIVE", PET_DEFENSIVE },
+            { "PET_AGGRESSIVE", PET_AGGRESSIVE },
+            { "PET_WAIT", PET_WAIT },
+            { "PET_FOLLOW", PET_FOLLOW },
+            { "PET_ATTACK", PET_ATTACK },
+            { "PET_DISMISS", PET_DISMISS },
+            { "PET_ABANDON", PET_ABANDON },
+            { "PET_PAPERDOLL", PET_PAPERDOLL },
+            { "PET_RENAME", PET_RENAME },
 
-        UnitPopupButtons["RAID_TARGET_ICON"] = { text = TEXT(RAID_TARGET_ICON), dist = 0, nested = 1 };
-        UnitPopupButtons["RAID_TARGET_1"] = { text = TEXT(RAID_TARGET_1), dist = 0, checkable = 1, color = {r = 1.0, g = 0.92, b = 0}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0, tCoordRight = 0.25, tCoordTop = 0, tCoordBottom = 0.25 };
-        UnitPopupButtons["RAID_TARGET_2"] = { text = TEXT(RAID_TARGET_2), dist = 0, checkable = 1, color = {r = 0.98, g = 0.57, b = 0}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.25, tCoordRight = 0.5, tCoordTop = 0, tCoordBottom = 0.25 };
-        UnitPopupButtons["RAID_TARGET_3"] = { text = TEXT(RAID_TARGET_3), dist = 0, checkable = 1, color = {r = 0.83, g = 0.22, b = 0.9}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.5, tCoordRight = 0.75, tCoordTop = 0, tCoordBottom = 0.25 };
-        UnitPopupButtons["RAID_TARGET_4"] = { text = TEXT(RAID_TARGET_4), dist = 0, checkable = 1, color = {r = 0.04, g = 0.95, b = 0}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.75, tCoordRight = 1, tCoordTop = 0, tCoordBottom = 0.25 };
-        UnitPopupButtons["RAID_TARGET_5"] = { text = TEXT(RAID_TARGET_5), dist = 0, checkable = 1, color = {r = 0.7, g = 0.82, b = 0.875}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0, tCoordRight = 0.25, tCoordTop = 0.25, tCoordBottom = 0.5 };
-        UnitPopupButtons["RAID_TARGET_6"] = { text = TEXT(RAID_TARGET_6), dist = 0, checkable = 1, color = {r = 0, g = 0.71, b = 1}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.25, tCoordRight = 0.5, tCoordTop = 0.25, tCoordBottom = 0.5 };
-        UnitPopupButtons["RAID_TARGET_7"] = { text = TEXT(RAID_TARGET_7), dist = 0, checkable = 1, color = {r = 1.0, g = 0.24, b = 0.168}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.5, tCoordRight = 0.75, tCoordTop = 0.25, tCoordBottom = 0.5 };
-        UnitPopupButtons["RAID_TARGET_8"] = { text = TEXT(RAID_TARGET_8), dist = 0, checkable = 1, color = {r = 0.98, g = 0.98, b = 0.98}, icon = "Interface\\TargetingFrame\\UI-RaidTargetingIcons", tCoordLeft = 0.75, tCoordRight = 1, tCoordTop = 0.25, tCoordBottom = 0.5 };
-        UnitPopupButtons["RAID_TARGET_NONE"] = { text = TEXT(NONE), dist = 0, checkable = 1, };
+            -- Loot: the parent row opens a submenu, the five below it are that submenu.
+            { "LOOT_METHOD", LOOT_METHOD, 0, { nested = 1 } },
+            { "FREE_FOR_ALL", LOOT_FREE_FOR_ALL },
+            { "ROUND_ROBIN", LOOT_ROUND_ROBIN },
+            { "MASTER_LOOTER", LOOT_MASTER_LOOTER },
+            { "GROUP_LOOT", LOOT_GROUP_LOOT },
+            { "NEED_BEFORE_GREED", LOOT_NEED_BEFORE_GREED },
+            { "RESET_INSTANCES", RESET_INSTANCES },
 
-        -- First level menus
-        UnitPopupMenus = { };
-        UnitPopupMenus["SELF"] = { "LOOT_METHOD", "LOOT_THRESHOLD", "LOOT_PROMOTE", "LEAVE", "RESET_INSTANCES", "RAID_TARGET_ICON", "CANCEL" };
-        UnitPopupMenus["PET"] = { "PET_PAPERDOLL", "PET_RENAME", "PET_ABANDON", "PET_DISMISS", "CANCEL" };
-        UnitPopupMenus["PARTY"] = { "WHISPER", "PROMOTE", "LOOT_PROMOTE", "UNINVITE", "INSPECT", "TRADE", "FOLLOW", "DUEL", "RAID_TARGET_ICON", "CANCEL" };
-        UnitPopupMenus["PLAYER"] = { "WHISPER", "INSPECT", "INVITE", "TRADE", "FOLLOW", "DUEL", "RAID_TARGET_ICON", "CANCEL" };
-        UnitPopupMenus["RAID"] = { "RAID_LEADER", "RAID_PROMOTE", "RAID_DEMOTE", "RAID_REMOVE", "CANCEL" };
-        UnitPopupMenus["FRIEND"] = { "WHISPER", "INVITE", "TARGET", "GUILD_PROMOTE", "GUILD_LEAVE", "CANCEL" };
-        UnitPopupMenus["RAID_TARGET_ICON"] = { "RAID_TARGET_1", "RAID_TARGET_2", "RAID_TARGET_3", "RAID_TARGET_4", "RAID_TARGET_5", "RAID_TARGET_6", "RAID_TARGET_7", "RAID_TARGET_8", "RAID_TARGET_NONE" };
+            -- The quality floor, likewise — and each threshold row wears its own quality colour.
+            { "LOOT_THRESHOLD", LOOT_THRESHOLD, 0, { nested = 1 } },
+            { "LOOT_PROMOTE", LOOT_PROMOTE },
+            { "ITEM_QUALITY2_DESC", ITEM_QUALITY2_DESC, 0, { color = ITEM_QUALITY_COLORS[2] } },
+            { "ITEM_QUALITY3_DESC", ITEM_QUALITY3_DESC, 0, { color = ITEM_QUALITY_COLORS[3] } },
+            { "ITEM_QUALITY4_DESC", ITEM_QUALITY4_DESC, 0, { color = ITEM_QUALITY_COLORS[4] } },
 
-        -- Second level menus
-        UnitPopupMenus["LOOT_METHOD"] = { "FREE_FOR_ALL", "ROUND_ROBIN", "MASTER_LOOTER", "GROUP_LOOT", "NEED_BEFORE_GREED", "CANCEL" };
-        UnitPopupMenus["LOOT_THRESHOLD"] = { "ITEM_QUALITY2_DESC", "ITEM_QUALITY3_DESC", "ITEM_QUALITY4_DESC", "CANCEL" };
+            -- The raid rank rows. Their labels are the plain verbs, not RAID_-prefixed strings.
+            { "RAID_LEADER", NEW_LEADER },
+            { "RAID_PROMOTE", PROMOTE },
+            { "RAID_DEMOTE", DEMOTE },
+            { "RAID_REMOVE", REMOVE },
 
+            -- The marks' parent row; the eight marks themselves are declared below, and clearing
+            -- the mark is a row of its own.
+            { "RAID_TARGET_ICON", RAID_TARGET_ICON, 0, { nested = 1 } },
+            { "RAID_TARGET_NONE", NONE, 0, { checkable = 1 } },
+        };
+
+        for _, spec in ipairs(ROWS) do
+            declareRow(spec[1], spec[2], spec[3], spec[4]);
+        end
+
+        -- The eight marks ride ONE atlas: four quarter-cells across, two down, filled left to
+        -- right and top to bottom in mark order. So a mark's cell follows from its number, and
+        -- the only facts worth writing per mark are its name and its colour.
+        local RAID_MARK_TEXTURE = "Interface\\TargetingFrame\\UI-RaidTargetingIcons";
+        local RAID_MARK_CELL = 0.25;
+        local RAID_MARKS = {
+            { RAID_TARGET_1, 1.0, 0.92, 0 },
+            { RAID_TARGET_2, 0.98, 0.57, 0 },
+            { RAID_TARGET_3, 0.83, 0.22, 0.9 },
+            { RAID_TARGET_4, 0.04, 0.95, 0 },
+            { RAID_TARGET_5, 0.7, 0.82, 0.875 },
+            { RAID_TARGET_6, 0, 0.71, 1 },
+            { RAID_TARGET_7, 1.0, 0.24, 0.168 },
+            { RAID_TARGET_8, 0.98, 0.98, 0.98 },
+        };
+
+        for mark, spec in ipairs(RAID_MARKS) do
+            local cell = mark - 1;
+            local atlasRow = math.floor(cell / 4);
+            local atlasColumn = cell - atlasRow * 4;
+            declareRow("RAID_TARGET_" .. mark, spec[1], 0, {
+                checkable = 1,
+                color = { r = spec[2], g = spec[3], b = spec[4] },
+                icon = RAID_MARK_TEXTURE,
+                tCoordLeft = atlasColumn * RAID_MARK_CELL,
+                tCoordRight = (atlasColumn + 1) * RAID_MARK_CELL,
+                tCoordTop = atlasRow * RAID_MARK_CELL,
+                tCoordBottom = (atlasRow + 1) * RAID_MARK_CELL,
+            });
+        end
+
+        -- ── The menus ──────────────────────────────────────────────────────────────────────
+        -- Which rows a menu holds, and in what order. This IS the menu's observable shape, so
+        -- both the membership and the order are the reference's exactly. The last two are the
+        -- level-2 submenus, keyed by the row that opens them.
+        UnitPopupMenus = {
+            SELF = { "LOOT_METHOD", "LOOT_THRESHOLD", "LOOT_PROMOTE", "LEAVE", "RESET_INSTANCES", "RAID_TARGET_ICON", "CANCEL" },
+            PET = { "PET_PAPERDOLL", "PET_RENAME", "PET_ABANDON", "PET_DISMISS", "CANCEL" },
+            PARTY = { "WHISPER", "PROMOTE", "LOOT_PROMOTE", "UNINVITE", "INSPECT", "TRADE", "FOLLOW", "DUEL", "RAID_TARGET_ICON", "CANCEL" },
+            PLAYER = { "WHISPER", "INSPECT", "INVITE", "TRADE", "FOLLOW", "DUEL", "RAID_TARGET_ICON", "CANCEL" },
+            RAID = { "RAID_LEADER", "RAID_PROMOTE", "RAID_DEMOTE", "RAID_REMOVE", "CANCEL" },
+            FRIEND = { "WHISPER", "INVITE", "TARGET", "GUILD_PROMOTE", "GUILD_LEAVE", "CANCEL" },
+
+            RAID_TARGET_ICON = { "RAID_TARGET_1", "RAID_TARGET_2", "RAID_TARGET_3", "RAID_TARGET_4", "RAID_TARGET_5", "RAID_TARGET_6", "RAID_TARGET_7", "RAID_TARGET_8", "RAID_TARGET_NONE" },
+            LOOT_METHOD = { "FREE_FOR_ALL", "ROUND_ROBIN", "MASTER_LOOTER", "GROUP_LOOT", "NEED_BEFORE_GREED", "CANCEL" },
+            LOOT_THRESHOLD = { "ITEM_QUALITY2_DESC", "ITEM_QUALITY3_DESC", "ITEM_QUALITY4_DESC", "CANCEL" },
+        };
+
+        -- Row N of the menu being opened is shown (1) or hidden (0). This is only a seed — the
+        -- hide pass rewrites every entry it walks, and grows the table for a menu longer than
+        -- the reference's nine (PARTY's ten rows do exactly that).
         UnitPopupShown = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 
-        UnitLootMethod = {};
-        UnitLootMethod["freeforall"] = { text = LOOT_FREE_FOR_ALL };
-        UnitLootMethod["roundrobin"] = { text = LOOT_ROUND_ROBIN };
-        UnitLootMethod["master"] = { text = LOOT_MASTER_LOOTER };
-        UnitLootMethod["group"] = { text = LOOT_GROUP_LOOT };
-        UnitLootMethod["needbeforegreed"] = { text = LOOT_NEED_BEFORE_GREED };
+        -- The row that PICKS each loot method → the token the API speaks. Used twice: to gate the
+        -- five submenu rows, and to send the choice.
+        local LOOT_METHOD_TOKENS = {
+            FREE_FOR_ALL = "freeforall",
+            ROUND_ROBIN = "roundrobin",
+            MASTER_LOOTER = "master",
+            GROUP_LOOT = "group",
+            NEED_BEFORE_GREED = "needbeforegreed",
+        };
 
+        -- The label the parent Loot Method row wears, keyed by the token GetLootMethod() answers
+        -- with. (The reference's newbie tooltips are out with the kit's.)
+        UnitLootMethod = {
+            freeforall = { text = LOOT_FREE_FOR_ALL },
+            roundrobin = { text = LOOT_ROUND_ROBIN },
+            master = { text = LOOT_MASTER_LOOTER },
+            group = { text = LOOT_GROUP_LOOT },
+            needbeforegreed = { text = LOOT_NEED_BEFORE_GREED },
+        };
+
+        -- The dropdowns whose open menu this engine owns — the enable pass ignores anybody
+        -- else's. (FriendsDropDown is ItemRef.xml's stand-in and drives its menu directly.)
         UnitPopupFrames = {
             "PlayerFrameDropDown",
             "TargetFrameDropDown",
@@ -142,22 +228,212 @@
             GUILD_PROMOTE = 1, GUILD_LEAVE = 1, RESET_INSTANCES = 1,
         };
 
+        -- ── Shared helpers ─────────────────────────────────────────────────────────────────
+
+        -- The marks and the row that opens them share one key prefix, and three passes ask the
+        -- same question, so it gets a name. RAID_TARGET_ICON answers YES on purpose: the parent
+        -- row is leader business exactly like the marks under it.
+        local function isRaidMarkRow(key)
+            return string.sub(key, 1, 12) == "RAID_TARGET_";
+        end
+
+        -- The party facts the hide and enable passes both ask about, read once per pass instead
+        -- of once per row. `canCoop` needs the menu's unit, so it is only meaningful when one is
+        -- passed (the enable pass never asks).
+        local function partyState(menu)
+            local party = {
+                inParty = 0,
+                isLeader = 0,
+                isAssistant = 0,
+                canCoop = 0,
+            };
+            if ( (GetNumPartyMembers() > 0) or (GetNumRaidMembers() > 0) ) then
+                party.inParty = 1;
+            end
+            if ( party.inParty == 1 and IsPartyLeader() ) then
+                party.isLeader = 1;
+            end
+            if ( IsRaidOfficer() ) then
+                party.isAssistant = 1;
+            end
+            if ( menu and menu.unit and UnitCanCooperate("player", menu.unit) ) then
+                party.canCoop = 1;
+            end
+            return party;
+        end
+
+        -- Record which menu a level is showing, so the enable pass can find it again.
+        local function rememberOpenMenu(level, menu)
+            OPEN_DROPDOWNMENUS[level] = { which = menu.which, unit = menu.unit };
+        end
+
+        -- The dropdown kit wants a text colour as three separate fields, and a row that has no
+        -- colour must leave all three alone.
+        local function applyTextColor(info, color)
+            if ( color ) then
+                info.textR, info.textG, info.textB = color.r, color.g, color.b;
+            end
+        end
+
+        -- One catalogue row → one dropdown info table. Both menu levels want the same
+        -- presentation off a row, so it is read in one place; each caller adds what only its own
+        -- level decides (the owner, the checked state, the submenu arrow). Returns the row
+        -- alongside, since callers go on to ask it questions.
+        local function rowInfo(key)
+            local row = UnitPopupButtons[key];
+            local info = {
+                text = row.text,
+                value = key,
+                func = UnitPopup_OnClick,
+                icon = row.icon,
+                tCoordLeft = row.tCoordLeft,
+                tCoordRight = row.tCoordRight,
+                tCoordTop = row.tCoordTop,
+                tCoordBottom = row.tCoordBottom,
+            };
+            applyTextColor(info, row.color);
+            return info, row;
+        end
+
+        -- ── Which rows a menu shows at all ─────────────────────────────────────────────────
+        -- Every row that can be hidden owns one predicate answering "hide this?" from the menu
+        -- being opened plus the party facts. A row with no predicate is always shown. The
+        -- conditions are the reference's, row for row; only the ladder is gone.
+        local HIDE_ROW = { };
+
+        -- You cannot trade with, duel, inspect or follow someone you cannot cooperate with — an
+        -- enemy-faction player is already attackable, so none of the four has anything to offer.
+        -- (Ref UnitPopup.lua l.285/304-307/311-319. INSPECT and FOLLOW were MISSING until
+        -- decision 1033: without them both stayed shown for *every* unit — including one that
+        -- does not exist — so PARTY's shown-count never fell to zero, ShowMenu's "nothing but
+        -- CANCEL, don't show the menu" early-out never fired at load, and each party dropdown's
+        -- OnLoad-time initialize ran on to its closing PlaySound.)
+        local function hideWithoutCooperation(menu, party)
+            return party.canCoop == 0;
+        end
+        HIDE_ROW["TRADE"] = hideWithoutCooperation;
+        HIDE_ROW["DUEL"] = hideWithoutCooperation;
+        HIDE_ROW["INSPECT"] = hideWithoutCooperation;
+        HIDE_ROW["FOLLOW"] = hideWithoutCooperation;
+
+        -- Nothing to say to yourself, or to someone you cannot cooperate with.
+        HIDE_ROW["WHISPER"] = function(menu, party)
+            return (menu.unit and party.canCoop == 0) or menu.name == UnitName("player");
+        end
+
+        -- The units an invite would be pointless against: the party we already have, and us.
+        local INVITE_POINTLESS_AGAINST = { "party1", "party2", "party3", "party4", "player" };
+
+        HIDE_ROW["INVITE"] = function(menu, party)
+            if ( menu.unit ) then
+                return party.canCoop == 0;
+            end
+            -- Addressed by NAME (a chat name, a /who row): no unit to test, so compare names.
+            for _, unit in ipairs(INVITE_POINTLESS_AGAINST) do
+                if ( menu.name == UnitName(unit) ) then
+                    return true;
+                end
+            end
+        end
+
+        -- Party bookkeeping rows: some need a party at all, some need to be leading it.
+        local function hideOutsideAParty(menu, party)
+            return party.inParty == 0;
+        end
+        HIDE_ROW["LEAVE"] = hideOutsideAParty;
+        HIDE_ROW["LOOT_METHOD"] = hideOutsideAParty;
+        HIDE_ROW["LOOT_THRESHOLD"] = hideOutsideAParty;
+
+        local function hideUnlessLeading(menu, party)
+            return party.inParty == 0 or party.isLeader == 0;
+        end
+        HIDE_ROW["PROMOTE"] = hideUnlessLeading;
+        HIDE_ROW["UNINVITE"] = hideUnlessLeading;
+
+        -- The five loot-method rows: in a party always, and either we set the method or this row
+        -- IS the method already in force — so a member still gets to SEE which one is on.
+        for rowKey, method in pairs(LOOT_METHOD_TOKENS) do
+            HIDE_ROW[rowKey] = function(menu, party)
+                return party.inParty == 0 or (party.isLeader == 0 and GetLootMethod() ~= method);
+            end
+        end
+
+        -- Handing master loot over: only a leader under master loot, and never to whoever
+        -- already holds it (party member or, at index 0, us).
+        HIDE_ROW["LOOT_PROMOTE"] = function(menu, party)
+            local lootMethod, lootMaster = GetLootMethod();
+            return party.inParty == 0 or party.isLeader == 0 or lootMethod ~= "master"
+                or (lootMaster and menu.unit == "party" .. lootMaster)
+                or (menu.unit == "player" and lootMaster and lootMaster == 0);
+        end
+
+        -- The pet menu forks on ONE predicate, and Dismiss reads it INVERTED (decision 1066,
+        -- ref UnitPopup.lua l.402-417): a hunter's pet can be abandoned, so it offers
+        -- paperdoll/rename/abandon and hides dismiss; a warlock's demon cannot, so it offers only
+        -- dismiss. Rename wants both bits, because its own is one-shot — the server clears it
+        -- after the first rename.
+        local function hideUnlessAbandonable()
+            return not PetCanBeAbandoned();
+        end
+        HIDE_ROW["PET_PAPERDOLL"] = hideUnlessAbandonable;
+        HIDE_ROW["PET_ABANDON"] = hideUnlessAbandonable;
+        HIDE_ROW["PET_RENAME"] = function()
+            return not PetCanBeAbandoned() or not PetCanBeRenamed();
+        end
+        HIDE_ROW["PET_DISMISS"] = function()
+            return PetCanBeAbandoned();
+        end
+
+        -- The raid roster (GetRaidRosterInfo) is a later arc — no raid menu opens yet, so the
+        -- four rank rows stay declared and never show.
+        local function hideAlways()
+            return true;
+        end
+        HIDE_ROW["RAID_LEADER"] = hideAlways;
+        HIDE_ROW["RAID_PROMOTE"] = hideAlways;
+        HIDE_ROW["RAID_DEMOTE"] = hideAlways;
+        HIDE_ROW["RAID_REMOVE"] = hideAlways;
+
+        -- Marking is leader/assistant business, and a mark on an enemy-faction player nobody in
+        -- the group can cooperate with is pointless — except on our OWN menu, which marks us.
+        local function hideRaidMarkRow(menu, party)
+            if ( party.inParty == 0 or (party.isLeader == 0 and party.isAssistant == 0) ) then
+                return true;
+            end
+            if ( menu.which ~= "SELF" and UnitExists("target") and not UnitInParty("target") ) then
+                return UnitIsPlayer("target")
+                    and not UnitCanCooperate("player", "target")
+                    and not UnitIsUnit("target", "player");
+            end
+        end
+
+        -- A row's own predicate, or the shared one every raid-mark row uses (the reference keys
+        -- those by PREFIX, so an addon's own mark row is covered too).
+        local function hidePredicate(key)
+            local hide = HIDE_ROW[key];
+            if ( hide ) then
+                return hide;
+            end
+            if ( isRaidMarkRow(key) ) then
+                return hideRaidMarkRow;
+            end
+        end
+
         function UnitPopup_ShowMenu(dropdownMenu, which, unit, name, userData)
-            -- Init variables
             dropdownMenu.which = which;
             dropdownMenu.unit = unit;
-            local server = nil;
             if ( unit and not name ) then
                 name = UnitName(unit);
             end
             dropdownMenu.name = name;
             dropdownMenu.userData = userData;
-            dropdownMenu.server = server;
+            -- No realm half: benilla has no cross-realm names yet (the reference reads one out of
+            -- UnitName's second return and appends it to whispers and targets).
+            dropdownMenu.server = nil;
 
-            -- Determine which buttons should be shown or hidden
             UnitPopup_HideButtons();
 
-            -- If only one menu item (the cancel button) then don't show the menu
+            -- Nothing but Cancel left? Then there is no menu worth opening.
             local count = 0;
             for index, value in ipairs(UnitPopupMenus[which]) do
                 if ( UnitPopupShown[index] == 1 and value ~= "CANCEL" ) then
@@ -168,117 +444,68 @@
                 return;
             end
 
-            -- Reflect the live loot method/threshold into the nested rows' labels (ref).
+            -- The two nested rows wear the live setting as their own label, and open only for
+            -- whoever can change it — a member still gets to read them.
             local lootMethod = GetLootMethod();
             dropdownMenu.selectedLootMethod = UnitLootMethod[lootMethod].text;
-            UnitPopupButtons["LOOT_METHOD"].text = dropdownMenu.selectedLootMethod;
-            dropdownMenu.selectedLootThreshold = getglobal("ITEM_QUALITY"..GetLootThreshold().."_DESC");
-            UnitPopupButtons["LOOT_THRESHOLD"].text = dropdownMenu.selectedLootThreshold;
-            -- A non-leader can VIEW the loot settings but not open the submenus (ref).
-            if ( ((GetNumPartyMembers() > 0) or (GetNumRaidMembers() > 0)) and IsPartyLeader() ) then
-                UnitPopupButtons["LOOT_METHOD"].nested = 1;
-                UnitPopupButtons["LOOT_THRESHOLD"].nested = 1;
-            else
-                UnitPopupButtons["LOOT_METHOD"].nested = nil;
-                UnitPopupButtons["LOOT_THRESHOLD"].nested = nil;
-            end
+            dropdownMenu.selectedLootThreshold = getglobal("ITEM_QUALITY" .. GetLootThreshold() .. "_DESC");
+            local methodRow, thresholdRow = UnitPopupButtons["LOOT_METHOD"], UnitPopupButtons["LOOT_THRESHOLD"];
+            methodRow.text = dropdownMenu.selectedLootMethod;
+            thresholdRow.text = dropdownMenu.selectedLootThreshold;
+            local leads = ((GetNumPartyMembers() > 0) or (GetNumRaidMembers() > 0)) and IsPartyLeader();
+            methodRow.nested = leads and 1 or nil;
+            thresholdRow.nested = leads and 1 or nil;
 
-            -- If level 2 dropdown
-            local info;
-            local color;
+            -- A level-2 open is a submenu of the row that owns it: the value the kit hands back
+            -- names both the menu and the owner. Every row in it is shown — the hide pass ran
+            -- against the parent menu.
             if ( UIDROPDOWNMENU_MENU_LEVEL == 2 ) then
-                dropdownMenu.which = UIDROPDOWNMENU_MENU_VALUE;
-                OPEN_DROPDOWNMENUS[UIDROPDOWNMENU_MENU_LEVEL] = {which = dropdownMenu.which, unit = dropdownMenu.unit};
-                for index, value in ipairs(UnitPopupMenus[UIDROPDOWNMENU_MENU_VALUE]) do
-                    info = {};
-                    info.text = UnitPopupButtons[value].text;
-                    info.owner = UIDROPDOWNMENU_MENU_VALUE;
-                    color = UnitPopupButtons[value].color;
-                    if ( color ) then
-                        info.textR = color.r;
-                        info.textG = color.g;
-                        info.textB = color.b;
-                    end
-                    info.icon = UnitPopupButtons[value].icon;
-                    info.tCoordLeft = UnitPopupButtons[value].tCoordLeft;
-                    info.tCoordRight = UnitPopupButtons[value].tCoordRight;
-                    info.tCoordTop = UnitPopupButtons[value].tCoordTop;
-                    info.tCoordBottom = UnitPopupButtons[value].tCoordBottom;
-                    -- Checked conditions
-                    if ( info.text == dropdownMenu.selectedLootMethod ) then
+                local submenu = UIDROPDOWNMENU_MENU_VALUE;
+                dropdownMenu.which = submenu;
+                rememberOpenMenu(UIDROPDOWNMENU_MENU_LEVEL, dropdownMenu);
+                for index, value in ipairs(UnitPopupMenus[submenu]) do
+                    local info = rowInfo(value);
+                    info.owner = submenu;
+                    -- The live loot method and threshold tick themselves; a mark row ticks when
+                    -- the unit already wears it — a mark's POSITION in the icon menu is its
+                    -- number, which is why the row index is what gets compared.
+                    if ( info.text == dropdownMenu.selectedLootMethod
+                         or info.text == dropdownMenu.selectedLootThreshold ) then
                         info.checked = 1;
-                    elseif ( info.text == dropdownMenu.selectedLootThreshold ) then
+                    elseif ( isRaidMarkRow(value) and GetRaidTargetIndex(unit) == index ) then
                         info.checked = 1;
-                    elseif ( string.sub(value, 1, 12) == "RAID_TARGET_" ) then
-                        local raidTargetIndex = GetRaidTargetIndex(unit);
-                        if ( raidTargetIndex == index ) then
-                            info.checked = 1;
-                        end
                     end
-                    info.value = value;
-                    info.func = UnitPopup_OnClick;
                     UIDropDownMenu_AddButton(info, UIDROPDOWNMENU_MENU_LEVEL);
                 end
                 return;
             end
 
-            -- Add dropdown title
+            -- The unit's name titles the menu.
             if ( unit or name ) then
-                info = {};
-                if ( name ) then
-                    info.text = name;
-                else
-                    info.text = TEXT(UNKNOWN);
-                end
-                info.isTitle = 1;
-                info.notCheckable = 1;
-                UIDropDownMenu_AddButton(info);
+                UIDropDownMenu_AddButton({
+                    text = name or TEXT(UNKNOWN),
+                    isTitle = 1,
+                    notCheckable = 1,
+                });
             end
 
-            -- Set which menu is being opened
-            OPEN_DROPDOWNMENUS[UIDROPDOWNMENU_MENU_LEVEL] = {which = dropdownMenu.which, unit = dropdownMenu.unit};
-            -- Show the buttons which are used by this menu
+            rememberOpenMenu(UIDROPDOWNMENU_MENU_LEVEL, dropdownMenu);
             for index, value in ipairs(UnitPopupMenus[which]) do
                 if ( UnitPopupShown[index] == 1 ) then
-                    info = {};
-                    info.text = UnitPopupButtons[value].text;
-                    info.value = value;
+                    local info, row = rowInfo(value);
                     info.owner = which;
-                    info.func = UnitPopup_OnClick;
-                    if ( not UnitPopupButtons[value].checkable ) then
+                    if ( not row.checkable ) then
                         info.notCheckable = 1;
                     end
-                    -- Text color
-                    if ( value == "LOOT_THRESHOLD" ) then
-                        color = ITEM_QUALITY_COLORS[GetLootThreshold()];
-                        if ( color ) then
-                            info.textR = color.r;
-                            info.textG = color.g;
-                            info.textB = color.b;
-                        end
-                    else
-                        color = UnitPopupButtons[value].color;
-                        if ( color ) then
-                            info.textR = color.r;
-                            info.textG = color.g;
-                            info.textB = color.b;
-                        end
-                    end
-                    -- Icons
-                    info.icon = UnitPopupButtons[value].icon;
-                    info.tCoordLeft = UnitPopupButtons[value].tCoordLeft;
-                    info.tCoordRight = UnitPopupButtons[value].tCoordRight;
-                    info.tCoordTop = UnitPopupButtons[value].tCoordTop;
-                    info.tCoordBottom = UnitPopupButtons[value].tCoordBottom;
-                    -- Checked conditions
-                    if ( string.sub(value, 1, 12) == "RAID_TARGET_" ) then
-                        local raidTargetIndex = GetRaidTargetIndex("target");
-                        if ( raidTargetIndex == index ) then
-                            info.checked = 1;
-                        end
-                    end
-                    if ( UnitPopupButtons[value].nested ) then
+                    if ( row.nested ) then
                         info.hasArrow = 1;
+                    end
+                    -- The threshold row wears the live threshold's own quality colour.
+                    if ( value == "LOOT_THRESHOLD" ) then
+                        applyTextColor(info, ITEM_QUALITY_COLORS[GetLootThreshold()]);
+                    end
+                    if ( isRaidMarkRow(value) and GetRaidTargetIndex("target") == index ) then
+                        info.checked = 1;
                     end
                     UIDropDownMenu_AddButton(info);
                 end
@@ -287,156 +514,111 @@
         end
 
         function UnitPopup_HideButtons()
-            local dropdownMenu = getglobal(UIDROPDOWNMENU_INIT_MENU);
-            local inParty = 0;
-            if ( (GetNumPartyMembers() > 0) or (GetNumRaidMembers() > 0) ) then
-                inParty = 1;
-            end
-
-            local isLeader = 0;
-            if ( inParty == 1 and IsPartyLeader() ) then
-                isLeader = 1;
-            end
-
-            local isAssistant = 0;
-            if ( IsRaidOfficer() ) then
-                isAssistant = 1;
-            end
-
-            local canCoop = 0;
-            if ( dropdownMenu.unit and UnitCanCooperate("player", dropdownMenu.unit) ) then
-                canCoop = 1;
-            end
-            for index, value in ipairs(UnitPopupMenus[dropdownMenu.which]) do
-                UnitPopupShown[index] = 1;
-
-                if ( BENILLA_UNITPOPUP_DEFERRED[value] ) then
-                    -- Hidden until its arc lands (header) — checked FIRST so the ref chain
-                    -- below never resurrects one.
+            local menu = getglobal(UIDROPDOWNMENU_INIT_MENU);
+            local party = partyState(menu);
+            for index, value in ipairs(UnitPopupMenus[menu.which]) do
+                local hide = hidePredicate(value);
+                -- The DEFERRED set is asked first, so nothing can resurrect one of its rows.
+                if ( BENILLA_UNITPOPUP_DEFERRED[value] or (hide and hide(menu, party)) ) then
                     UnitPopupShown[index] = 0;
-                elseif ( value == "DUEL" ) then
-                    -- Ref UnitPopup.lua l.311: shown only for a unit we can cooperate with — an
-                    -- enemy-faction player is already attackable, so there is nothing to arrange.
-                    if ( canCoop == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "TRADE" ) then
-                    -- Only shown for a unit we can cooperate with (ref UnitPopup.lua l.285) — you
-                    -- cannot trade an enemy-faction player, so the row is hidden, not just doomed.
-                    if ( canCoop == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "FOLLOW" ) then
-                    -- Ref UnitPopup.lua l.304-307, verbatim: you cannot follow a unit you cannot
-                    -- cooperate with.
-                    if ( canCoop == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "INSPECT" ) then
-                    -- Ref UnitPopup.lua l.316-319, verbatim. These two arms were MISSING
-                    -- (decision 1033): without them FOLLOW and INSPECT stayed shown for *every*
-                    -- unit — including one that does not exist — so PARTY's count never fell to
-                    -- zero, `UnitPopup_ShowMenu`'s "nothing but CANCEL, don't show the menu"
-                    -- early-out never fired at load, and each party dropdown's OnLoad-time
-                    -- initialize ran on to its closing `PlaySound("igMainMenuOpen")`.
-                    if ( canCoop == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "INVITE" ) then
-                    if ( dropdownMenu.unit ) then
-                        if ( canCoop == 0 ) then
-                            UnitPopupShown[index] = 0;
-                        end
-                    else
-                        if ( dropdownMenu.name == UnitName("party1") or
-                             dropdownMenu.name == UnitName("party2") or
-                             dropdownMenu.name == UnitName("party3") or
-                             dropdownMenu.name == UnitName("party4") or
-                             dropdownMenu.name == UnitName("player")) then
-                            UnitPopupShown[index] = 0;
-                        end
-                    end
-                elseif ( value == "WHISPER" ) then
-                    if ( (dropdownMenu.unit and canCoop == 0) or (dropdownMenu.name == UnitName("player")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "PROMOTE" ) then
-                    if ( (inParty == 0) or (isLeader == 0) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "UNINVITE" ) then
-                    if ( (inParty == 0) or (isLeader == 0) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "LEAVE" ) then
-                    if ( inParty == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "FREE_FOR_ALL" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (GetLootMethod() ~= "freeforall")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "ROUND_ROBIN" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (GetLootMethod() ~= "roundrobin")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "MASTER_LOOTER" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (GetLootMethod() ~= "master")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "GROUP_LOOT" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (GetLootMethod() ~= "group")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "NEED_BEFORE_GREED" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (GetLootMethod() ~= "needbeforegreed")) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "LOOT_THRESHOLD" ) then
-                    if ( inParty == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "LOOT_PROMOTE" ) then
-                    local lootMethod, lootMaster = GetLootMethod();
-                    if ( (inParty == 0) or (isLeader == 0) or (lootMethod ~= "master") or (lootMaster and (dropdownMenu.unit == "party"..lootMaster)) or ((dropdownMenu.unit == "player") and lootMaster and (lootMaster == 0)) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "LOOT_METHOD" ) then
-                    if ( inParty == 0 ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "RAID_LEADER" or value == "RAID_PROMOTE" or value == "RAID_DEMOTE" or value == "RAID_REMOVE" ) then
-                    -- The raid roster (GetRaidRosterInfo) is a later arc — no raid menus open yet.
-                    UnitPopupShown[index] = 0;
-                -- The four PET rows, ref UnitPopup.lua l.402-417 verbatim (decision 1066). ONE
-                -- predicate decides all four, and Dismiss reads it INVERTED: a hunter's pet is
-                -- abandonable, so it offers paperdoll/rename/abandon and hides dismiss; a
-                -- warlock's demon is not, so it offers only dismiss. Rename wants both bits,
-                -- because its own is one-shot — the server clears it after the first rename.
-                elseif ( value == "PET_PAPERDOLL" ) then
-                    if ( not PetCanBeAbandoned() ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "PET_RENAME" ) then
-                    if ( not PetCanBeAbandoned() or not PetCanBeRenamed() ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "PET_ABANDON" ) then
-                    if ( not PetCanBeAbandoned() ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( value == "PET_DISMISS" ) then
-                    if ( PetCanBeAbandoned() ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                elseif ( string.sub(value, 1, 12) == "RAID_TARGET_" ) then
-                    if ( (inParty == 0) or ((isLeader == 0) and (isAssistant == 0)) ) then
-                        UnitPopupShown[index] = 0;
-                    end
-                    if ( not (dropdownMenu.which == "SELF") ) then
-                        if ( UnitExists("target") and not UnitInParty("target") ) then
-                            if ( UnitIsPlayer("target") and (not UnitCanCooperate("player", "target") and not UnitIsUnit("target", "player")) ) then
-                                UnitPopupShown[index] = 0;
+                else
+                    UnitPopupShown[index] = 1;
+                end
+            end
+        end
+
+        -- ── Which shown rows are clickable right now ───────────────────────────────────────
+        -- The enable pass runs every frame over the open menus, so a row that can go grey owns a
+        -- predicate too: "grey this out?". Range is handled for every row at once, off the row's
+        -- own interact-distance class.
+        local GREY_ROW = { };
+
+        GREY_ROW["LEAVE"] = function(menu, party)
+            return party.inParty == 0;
+        end
+
+        -- In a group, only the leader or an assistant may bring someone else in.
+        GREY_ROW["INVITE"] = function(menu, party)
+            return party.inParty == 1 and party.isLeader == 0 and party.isAssistant == 0;
+        end
+
+        local function greyUnlessLeading(menu, party)
+            return party.inParty == 0 or party.isLeader == 0;
+        end
+        GREY_ROW["UNINVITE"] = greyUnlessLeading;
+        GREY_ROW["PROMOTE"] = greyUnlessLeading;
+
+        GREY_ROW["WHISPER"] = function(menu)
+            return menu.unit and not UnitIsConnected(menu.unit);
+        end
+
+        -- Ref UnitPopup.lua l.502-505: greyed while either party is dead or a ghost, or while we
+        -- lack full control (feared/charmed) — `HasFullControl` is nil-guarded like
+        -- CheckInteractDistance is below, because benilla models no loss of control yet, so the
+        -- clause is inert rather than an error. The row also carries dist = 3, so the shared
+        -- range leg gates it too.
+        GREY_ROW["DUEL"] = function(menu)
+            return UnitIsDeadOrGhost("player")
+                or (HasFullControl and not HasFullControl())
+                or UnitIsDeadOrGhost(menu.unit);
+        end
+
+        -- Only a leader under master loot can hand the job on, and never to its current holder.
+        GREY_ROW["LOOT_PROMOTE"] = function(menu, party)
+            local lootMethod, lootMaster = GetLootMethod();
+            if ( party.inParty == 0 or party.isLeader == 0 or lootMethod ~= "master" ) then
+                return true;
+            end
+            local master = "player";
+            if ( lootMaster and lootMaster ~= 0 ) then
+                master = "party" .. lootMaster;
+            end
+            return menu.unit and UnitIsUnit(menu.unit, master);
+        end
+
+        -- Out of interact range first (dist 0 means the row has no range at all), then whatever
+        -- the row itself says.
+        local function rowEnabled(menu, key, party)
+            local row = UnitPopupButtons[key];
+            if ( row.dist > 0 and CheckInteractDistance ) then
+                if ( not CheckInteractDistance(menu.unit, row.dist) ) then
+                    return false;
+                end
+            end
+            local grey = GREY_ROW[key];
+            return not (grey and grey(menu, party));
+        end
+
+        -- Somebody else's dropdown is not ours to enable and disable.
+        local function ownsOpenMenu()
+            for _, frame in ipairs(UnitPopupFrames) do
+                if ( UIDROPDOWNMENU_OPEN_MENU == frame ) then
+                    return true;
+                end
+            end
+        end
+
+        -- The per-frame enable/disable pass over every open unit-popup menu (driven by the
+        -- BenillaUnitPopupDriver below — the ref hooks it off UIParent's OnUpdate).
+        function UnitPopup_OnUpdate(elapsed)
+            if ( not DropDownList1:IsVisible() or not ownsOpenMenu() ) then
+                return;
+            end
+
+            local party = partyState();
+            for level, menu in pairs(OPEN_DROPDOWNMENUS) do
+                if ( menu ) then
+                    -- The kit numbers buttons by SHOWN position, so only shown rows advance the
+                    -- count; the +1 steps over the title the level-1 menu puts at button 1. (The
+                    -- reference offsets every level alike, level 2's title-less lists included.)
+                    local count = 0;
+                    for index, value in ipairs(UnitPopupMenus[menu.which]) do
+                        if ( UnitPopupShown[index] == 1 ) then
+                            count = count + 1;
+                            if ( rowEnabled(menu, value, party) ) then
+                                UIDropDownMenu_EnableButton(level, count + 1);
+                            else
+                                UIDropDownMenu_DisableButton(level, count + 1);
                             end
                         end
                     end
@@ -444,192 +626,133 @@
             end
         end
 
-        -- The per-frame enable/disable pass over every open unit-popup menu (ref; driven by the
-        -- BenillaUnitPopupDriver below — the ref hooks it off UIParent's OnUpdate).
-        function UnitPopup_OnUpdate(elapsed)
-            if ( not DropDownList1:IsVisible() ) then
-                return;
+        -- ── What a row does when it is clicked ─────────────────────────────────────────────
+        -- One handler per row, keyed by the row's own name. A row with no handler does nothing —
+        -- which is how Cancel, the nested parent rows, and every DEFERRED row are expressed
+        -- (header: TARGET, GUILD_*, RESET_INSTANCES, RAID_LEADER/PROMOTE/DEMOTE/REMOVE).
+        local CLICK_ROW = { };
+
+        CLICK_ROW["WHISPER"] = function(menu)
+            ChatFrame_SendTell(menu.name);
+        end
+
+        -- A targeted invite goes by token; a chat name or /who row has only the name.
+        CLICK_ROW["INVITE"] = function(menu)
+            if ( menu.unit ) then
+                InviteToParty(menu.unit);
             else
-                -- If none of the unitpopup frames own the open menu then return
-                local found = nil;
-                for index, value in ipairs(UnitPopupFrames) do
-                    if ( UIDROPDOWNMENU_OPEN_MENU == value ) then
-                        found = 1;
-                        break;
-                    end
-                end
-                if ( not found ) then
-                    return;
-                end
+                InviteByName(menu.name);
             end
+        end
 
-            local inParty = 0;
-            if ( (GetNumPartyMembers() > 0) or (GetNumRaidMembers() > 0) ) then
-                inParty = 1;
-            end
+        CLICK_ROW["UNINVITE"] = function(menu)
+            UninviteFromParty(menu.unit);
+        end
 
-            local isLeader = 0;
-            if ( inParty == 1 and IsPartyLeader() ) then
-                isLeader = 1;
-            end
-            local isAssistant = 0;
-            if ( IsRaidOfficer() ) then
-                isAssistant = 1;
-            end
-            -- Loop through all menus and enable/disable their buttons appropriately
-            local count;
-            for level, dropdownFrame in pairs(OPEN_DROPDOWNMENUS) do
-                if ( dropdownFrame ) then
-                    count = 0;
-                    for index, value in ipairs(UnitPopupMenus[dropdownFrame.which]) do
-                        if ( UnitPopupShown[index] == 1 ) then
-                            count = count + 1;
-                            local enable = 1;
-                            if ( UnitPopupButtons[value].dist > 0 and CheckInteractDistance ) then
-                                if ( not CheckInteractDistance(dropdownFrame.unit, UnitPopupButtons[value].dist) ) then
-                                    enable = 0;
-                                end
-                            end
-                            if ( value == "LEAVE" ) then
-                                if ( inParty == 0 ) then
-                                    enable = 0;
-                                end
-                            elseif ( value == "INVITE" ) then
-                                if ( inParty == 1 and (isLeader == 0 and isAssistant == 0) ) then
-                                    enable = 0;
-                                end
-                            elseif ( value == "UNINVITE" or value == "PROMOTE" ) then
-                                if ( inParty == 0 or isLeader == 0 ) then
-                                    enable = 0;
-                                end
-                            elseif ( value == "DUEL" ) then
-                                -- Ref UnitPopup.lua l.502-505, verbatim: greyed while either
-                                -- party is dead or a ghost, or while we lack full control
-                                -- (feared/charmed) — `HasFullControl` is nil-guarded like
-                                -- CheckInteractDistance above: benilla models no loss of control
-                                -- yet, so the clause is inert rather than an error. The row also
-                                -- carries dist = 3, so the shared range leg gates it too.
-                                if ( UnitIsDeadOrGhost("player") or (HasFullControl and not HasFullControl()) or UnitIsDeadOrGhost(dropdownFrame.unit) ) then
-                                    enable = 0;
-                                end
-                            elseif ( value == "WHISPER" ) then
-                                if ( dropdownFrame.unit and not UnitIsConnected(dropdownFrame.unit) ) then
-                                    enable = 0;
-                                end
-                            elseif ( value == "LOOT_PROMOTE" ) then
-                                local lootMethod, lootMaster = GetLootMethod();
-                                if ( (inParty == 0) or (isLeader == 0) or (lootMethod ~= "master") ) then
-                                    enable = 0;
-                                else
-                                    local masterName = 0;
-                                    if ( not lootMaster or (lootMaster == 0) ) then
-                                        masterName = "player";
-                                    else
-                                        masterName = "party"..lootMaster;
-                                    end
-                                    if ( dropdownFrame.unit and UnitIsUnit(dropdownFrame.unit, masterName) ) then
-                                        enable = 0;
-                                    end
-                                end
-                            end
+        CLICK_ROW["PROMOTE"] = function(menu)
+            PromoteToPartyLeader(menu.unit);
+        end
 
-                            if ( enable == 1 ) then
-                                UIDropDownMenu_EnableButton(level, count+1);
-                            else
-                                UIDropDownMenu_DisableButton(level, count+1);
-                            end
-                        end
-                    end
+        CLICK_ROW["LEAVE"] = function()
+            LeaveParty();
+        end
+
+        -- Picking a loot method sets it and writes the choice back onto the parent row — list 1,
+        -- button 2, the fixed place LOOT_METHOD sits in the SELF menu. Master loot is the one
+        -- method that also names who holds it.
+        for rowKey, method in pairs(LOOT_METHOD_TOKENS) do
+            CLICK_ROW[rowKey] = function(menu)
+                if ( method == "master" ) then
+                    SetLootMethod(method, menu.name);
+                else
+                    SetLootMethod(method);
                 end
+                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[rowKey].text);
+                UIDropDownMenu_Refresh(menu, nil, 1);
             end
+        end
+
+        CLICK_ROW["LOOT_PROMOTE"] = function(menu)
+            SetLootMethod("master", menu.name);
+        end
+
+        -- The threshold rows start at uncommon, so the clicked row's own id is one below the
+        -- quality it sets; the parent row (list 1, button 3) takes that quality's colour.
+        local function chooseLootThreshold(menu, key, clicked)
+            local quality = clicked:GetID() + 1;
+            SetLootThreshold(quality);
+            local color = ITEM_QUALITY_COLORS[quality];
+            UIDropDownMenu_SetButtonText(1, 3, UnitPopupButtons[key].text, color.r, color.g, color.b);
+        end
+        CLICK_ROW["ITEM_QUALITY2_DESC"] = chooseLootThreshold;
+        CLICK_ROW["ITEM_QUALITY3_DESC"] = chooseLootThreshold;
+        CLICK_ROW["ITEM_QUALITY4_DESC"] = chooseLootThreshold;
+
+        -- Every row of the icon submenu marks the unit; None clears it (mark 0). Registering
+        -- against that menu's own membership is also what keeps the parent RAID_TARGET_ICON row
+        -- out of it — it opens the submenu, it does not mark.
+        local function setRaidMark(menu, key)
+            local mark = string.sub(key, 13);
+            if ( mark == "NONE" ) then
+                mark = 0;
+            end
+            SetRaidTargetIcon(menu.unit, tonumber(mark));
+        end
+        for _, key in ipairs(UnitPopupMenus["RAID_TARGET_ICON"]) do
+            CLICK_ROW[key] = setRaidMark;
+        end
+
+        -- Challenge to a duel (decision 0633): the app resolves the unit token → player guid →
+        -- a cast of the duel spell (ref UnitPopup_OnClick l.559, StartDuelUnit).
+        CLICK_ROW["DUEL"] = function(menu)
+            StartDuelUnit(menu.unit);
+        end
+
+        -- Offer to trade (decision 0592 P1): the app resolves the unit token → player guid →
+        -- CMSG_INITIATE_TRADE.
+        CLICK_ROW["TRADE"] = function(menu)
+            InitiateTrade(menu.unit);
+        end
+
+        -- Open the inspect window (decision 0631) — InspectUnit gates on CanInspect and sends
+        -- CMSG_INSPECT.
+        CLICK_ROW["INSPECT"] = function(menu)
+            InspectUnit(menu.unit);
+        end
+
+        -- Begin auto-following, by NAME and EXACT. That `1` is the resolver's exact-only flag,
+        -- and it matters: this menu already knows the unit's name to the letter, so unlike
+        -- `/follow rag` it must not prefix-match its way onto a bystander. Client-side movement
+        -- only, no wire.
+        CLICK_ROW["FOLLOW"] = function(menu)
+            FollowByName(menu.name, 1);
+        end
+
+        -- The four PET rows (decision 1066). The asymmetry is the reference's and it is the right
+        -- one: DISMISS runs immediately, ABANDON goes behind a confirm. Sending a summon away
+        -- costs nothing; giving up a tamed pet is permanent, and the server deletes it
+        -- (`PET_SAVE_AS_DELETED`).
+        CLICK_ROW["PET_DISMISS"] = function()
+            PetDismiss();
+        end
+        CLICK_ROW["PET_ABANDON"] = function()
+            StaticPopup_Show("ABANDON_PET");
+        end
+        CLICK_ROW["PET_PAPERDOLL"] = function()
+            ToggleCharacter("PetPaperDollFrame");
+        end
+        CLICK_ROW["PET_RENAME"] = function()
+            StaticPopup_Show("RENAME_PET");
         end
 
         function UnitPopup_OnClick()
-            local dropdownFrame = getglobal(UIDROPDOWNMENU_INIT_MENU);
-            local button = this.value;
-            local unit = dropdownFrame.unit;
-            local name = dropdownFrame.name;
-
-            if ( button == "WHISPER" ) then
-                ChatFrame_SendTell(name);
-            elseif ( button == "INVITE" ) then
-                if ( unit ) then
-                    InviteToParty(unit);
-                else
-                    InviteByName(name);
-                end
-            elseif ( button == "UNINVITE" ) then
-                UninviteFromParty(unit);
-            elseif ( button == "PROMOTE" ) then
-                PromoteToPartyLeader(unit);
-            elseif ( button == "LEAVE" ) then
-                LeaveParty();
-            elseif ( button == "FREE_FOR_ALL" ) then
-                SetLootMethod("freeforall");
-                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[button].text);
-                UIDropDownMenu_Refresh(dropdownFrame, nil, 1);
-            elseif ( button == "ROUND_ROBIN" ) then
-                SetLootMethod("roundrobin");
-                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[button].text);
-                UIDropDownMenu_Refresh(dropdownFrame, nil, 1);
-            elseif ( button == "MASTER_LOOTER" ) then
-                SetLootMethod("master", name);
-                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[button].text);
-                UIDropDownMenu_Refresh(dropdownFrame, nil, 1);
-            elseif ( button == "GROUP_LOOT" ) then
-                SetLootMethod("group");
-                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[button].text);
-                UIDropDownMenu_Refresh(dropdownFrame, nil, 1);
-            elseif ( button == "NEED_BEFORE_GREED" ) then
-                SetLootMethod("needbeforegreed");
-                UIDropDownMenu_SetButtonText(1, 2, UnitPopupButtons[button].text);
-                UIDropDownMenu_Refresh(dropdownFrame, nil, 1);
-            elseif ( button == "LOOT_PROMOTE" ) then
-                SetLootMethod("master", name);
-            elseif ( button == "ITEM_QUALITY2_DESC" or button == "ITEM_QUALITY3_DESC" or button == "ITEM_QUALITY4_DESC" ) then
-                SetLootThreshold(this:GetID()+1);
-                local color = ITEM_QUALITY_COLORS[this:GetID()+1];
-                UIDropDownMenu_SetButtonText(1, 3, UnitPopupButtons[button].text, color.r, color.g, color.b);
-            elseif ( string.sub(button, 1, 12) == "RAID_TARGET_" and button ~= "RAID_TARGET_ICON" ) then
-                local raidTargetIndex = string.sub(button, 13);
-                if ( raidTargetIndex == "NONE" ) then
-                    raidTargetIndex = 0;
-                end
-                SetRaidTargetIcon(unit, tonumber(raidTargetIndex));
-            elseif ( button == "DUEL" ) then
-                -- Challenge to a duel (decision 0633): the app resolves the unit token → player
-                -- guid → a cast of the duel spell (ref UnitPopup_OnClick l.559, StartDuelUnit).
-                StartDuelUnit(unit);
-            elseif ( button == "TRADE" ) then
-                -- Offer to trade (decision 0592 P1): the app resolves the unit token → player guid
-                -- → CMSG_INITIATE_TRADE (ref UnitPopup_OnClick's TRADE arm, InitiateTrade(unit)).
-                InitiateTrade(unit);
-            elseif ( button == "INSPECT" ) then
-                -- Open the inspect window (decision 0631) — the ref UnitPopup_OnClick's INSPECT arm
-                -- verbatim: InspectUnit(unit), which gates on CanInspect and sends CMSG_INSPECT.
-                InspectUnit(unit);
-            elseif ( button == "FOLLOW" ) then
-                -- Begin auto-following — the ref UnitPopup_OnClick's FOLLOW arm verbatim, by NAME
-                -- and EXACT. That `1` is the resolver's exact-only flag, and it matters: this menu
-                -- already knows the unit's name to the letter, so unlike `/follow rag` it must not
-                -- prefix-match its way onto a bystander. Client-side movement only, no wire.
-                FollowByName(name, 1);
-
-            -- The four PET arms, ref UnitPopup_OnClick l.590-597 verbatim (decision 1066). The
-            -- asymmetry is the reference's and it is the right one: DISMISS runs immediately,
-            -- ABANDON goes behind a confirm. Sending a summon away costs nothing; giving up a
-            -- tamed pet is permanent, and the server deletes it (`PET_SAVE_AS_DELETED`).
-            elseif ( button == "PET_DISMISS" ) then
-                PetDismiss();
-            elseif ( button == "PET_ABANDON" ) then
-                StaticPopup_Show("ABANDON_PET");
-            elseif ( button == "PET_PAPERDOLL" ) then
-                ToggleCharacter("PetPaperDollFrame");
-            elseif ( button == "PET_RENAME" ) then
-                StaticPopup_Show("RENAME_PET");
+            local clicked = this;
+            local key = clicked.value;
+            local menu = getglobal(UIDROPDOWNMENU_INIT_MENU);
+            local click = CLICK_ROW[key];
+            if ( click ) then
+                click(menu, key, clicked);
             end
-            -- DEFERRED branches trimmed with their rows (header): TARGET,
-            -- GUILD_*, RESET_INSTANCES, RAID_LEADER/PROMOTE/DEMOTE/REMOVE.
             PlaySound("UChatScrollButton");
         end
 

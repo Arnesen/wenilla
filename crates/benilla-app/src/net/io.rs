@@ -10,10 +10,11 @@
 //! pacing, the env fast path, auto-relogin on reconnect, the director's click) is app-side
 //! ([`crate::login`], [`crate::char_select`]); this thread is a pure sequencer — it never sleeps.
 //!
-//! On a stream failure it emits a [`SessionEvent::Disconnected`] and returns to the login park;
-//! the app's pending-credentials policy re-establishes the session (decision 0065's seamless
-//! reconnect, paced app-side). A clean in-game logout ([`SessionEvent::LoggedOut`]) does the same
-//! with no failure. A single long-lived sibling write thread drains
+//! On a stream failure it emits a [`SessionEvent::Disconnected`] carrying
+//! [`SessionEnd::Lost`] and returns to the login park; a clean in-game logout
+//! ([`SessionEvent::LoggedOut`]) does the same with [`SessionEnd::LoggedOut`]. What happens next is
+//! the app's, and the two answers differ (decision 1262): the logout relists, while a loss ends the
+//! session at the account screen unless nobody is there to type. A single long-lived sibling write thread drains
 //! [`ClientCommand`](super::ClientCommand)s down to the server; each successful connection hands it
 //! the fresh [`WorldWriter`] over a swap channel, so "exactly one writer" is structural, not
 //! signalled. The ECS half (draining the events into components each frame, and tearing the
@@ -27,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use benilla_protocol::{
-    host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEvent, WardenRequired,
-    WorldSession, WorldWriter, WORLD_PORT,
+    host_port, messages, AuthReject, CharAction, LoginStage, Poll, SessionEnd, SessionEvent,
+    WardenRequired, WorldSession, WorldWriter, WORLD_PORT,
 };
 use crossbeam_channel::{Receiver, Sender};
 
@@ -190,6 +191,7 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                             if events_tx
                                 .send(SessionEvent::Disconnected {
                                     reason: "logged out".into(),
+                                    end: SessionEnd::LoggedOut,
                                 })
                                 .is_err()
                             {
@@ -197,11 +199,14 @@ pub(super) fn spawn_net(cfg: NetConfig, connect: bool) -> NetHandles {
                             }
                         }
                         Err(e) => {
-                            // A live-stream failure. No sleep — the app paces resubmits (0539 §3).
+                            // A live-stream failure — including a displacement kick, which reaches
+                            // us as a bare EOF and nothing else (decision 1262). No sleep: what
+                            // happens next is the app's policy, not this thread's (0539 §3).
                             bevy::log::error!("net: {e:#}");
                             if events_tx
                                 .send(SessionEvent::Disconnected {
                                     reason: format!("disconnected: {e:#}"),
+                                    end: SessionEnd::Lost,
                                 })
                                 .is_err()
                             {

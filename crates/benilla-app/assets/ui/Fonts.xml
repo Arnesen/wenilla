@@ -1,7 +1,7 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!--
         Benilla's named virtual Font objects: the COMPLETE set from the real 1.12.1 FrameXML
-        `Fonts.xml`, transcribed verbatim — names, TTF paths, heights, colors, outlines, and
+        `Fonts.xml`, quoted verbatim — names, TTF paths, heights, colors, outlines, and
         (critically) which families carry a `<Shadow>` and which don't. The reference copy is
         re-extractable from the client at any time with the `mpqx` bin (crates/benilla-mpq,
         virtual path `Interface\FrameXML\Fonts.xml`); this is our own authored file (MIT/Apache),
@@ -84,7 +84,8 @@
             ITEM_QUALITY_COLORS[i].hex = GetItemQualityColor(i)
         end
 
-        -- ── RAID_CLASS_COLORS (ref Fonts.xml l.43-53), transcribed verbatim ───────────────────
+        -- ── RAID_CLASS_COLORS (spec: ref Fonts.xml l.43-53 — same name, same nine keys, same
+        -- channel values; our own way of writing them down) ───────────────────────────────────
         --
         -- The per-class colour every raid/party addon paints names with. **22 corpus addons** reach
         -- it — nine of them through `Babble-Class-2.0`, but seven more by hand (KLHThreatMeter,
@@ -93,22 +94,35 @@
         -- file scope. That was the whole of the harness's remaining `table expected` row: three
         -- addons, one missing table, found by asking the blocker table which addons were behind it.
         --
-        -- TWO THINGS THAT LOOK WRONG AND ARE THE REFERENCE'S: `SHAMAN` carries the same pink as
-        -- `PALADIN` (shamans were Horde-only and paladins Alliance-only in 1.12, so the two never
-        -- shared a raid frame and Blizzard never gave shamans their own), and there is no `ROGUE`
-        -- yellow anywhere else in the client to reconcile it with. Transcribed as found; a later
-        -- client's palette is not this one's.
-        RAID_CLASS_COLORS = {
-            ["HUNTER"]  = { r = 0.67, g = 0.83, b = 0.45 },
-            ["WARLOCK"] = { r = 0.58, g = 0.51, b = 0.79 },
-            ["PRIEST"]  = { r = 1.0,  g = 1.0,  b = 1.0  },
-            ["PALADIN"] = { r = 0.96, g = 0.55, b = 0.73 },
-            ["MAGE"]    = { r = 0.41, g = 0.8,  b = 0.94 },
-            ["ROGUE"]   = { r = 1.0,  g = 0.96, b = 0.41 },
-            ["DRUID"]   = { r = 1.0,  g = 0.49, b = 0.04 },
-            ["SHAMAN"]  = { r = 0.96, g = 0.55, b = 0.73 },
-            ["WARRIOR"] = { r = 0.78, g = 0.61, b = 0.43 },
+        -- Written as the eight distinct triples plus a loop that lifts them into the `{r=,g=,b=}`
+        -- records addons index (`RAID_CLASS_COLORS["HUNTER"].r`), the same spec-plus-builder shape
+        -- ITEM_QUALITY_COLORS above takes. The only thing worth SAYING about a palette is which
+        -- colours are in it, and a bare triple says that with no ceremony; the record shape is the
+        -- addon-facing contract and belongs in the one line that builds it.
+        --
+        -- EIGHT triples for nine classes, and that is the 1.12 client's own doing: shamans have no
+        -- colour of their own. They were Horde-only and paladins Alliance-only, so the two never
+        -- shared a raid frame and the client hands SHAMAN the paladin pink. We ASSIGN it, which
+        -- states the fact instead of re-typing three numbers and asking the next reader to believe
+        -- a comment. (`ROGUE`'s yellow likewise reconciles with nothing else in the client. A later
+        -- client's palette is not this one's; these are 1.12's.) Each class still gets its OWN
+        -- record below, so an addon that writes to `.PALADIN.r` does not move SHAMAN — the
+        -- reference's two equal-but-separate tables, preserved.
+        local classRGB = {
+            WARRIOR = { 0.78, 0.61, 0.43 },
+            PALADIN = { 0.96, 0.55, 0.73 },
+            HUNTER  = { 0.67, 0.83, 0.45 },
+            ROGUE   = { 1.0,  0.96, 0.41 },
+            PRIEST  = { 1.0,  1.0,  1.0  },
+            MAGE    = { 0.41, 0.8,  0.94 },
+            WARLOCK = { 0.58, 0.51, 0.79 },
+            DRUID   = { 1.0,  0.49, 0.04 },
         }
+        classRGB.SHAMAN = classRGB.PALADIN
+        RAID_CLASS_COLORS = {}
+        for token, rgb in pairs(classRGB) do
+            RAID_CLASS_COLORS[token] = { r = rgb[1], g = rgb[2], b = rgb[3] }
+        end
         -- The three OTHER tables the reference's Fonts.xml `<Script>` block carries —
         -- CHAT_FONT_HEIGHTS, MATERIAL_TEXT_COLOR_TABLE, MATERIAL_TITLETEXT_COLOR_TABLE — are
         -- deliberately not here: **zero corpus addons name any of them**, and nothing benilla ships

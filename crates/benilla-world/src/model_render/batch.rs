@@ -101,6 +101,72 @@ impl M2BatchMaterials<'_> {
         ))
     }
 
+    /// One material for a batch of a **WMO skybox** — the painted sky a building owns
+    /// ([`crate::wmo_sky`]), which is an ordinary M2 and is drawn as one (decision 1264).
+    ///
+    /// Everything that makes it a *skybox* rather than a doodad is here, and it is only three
+    /// things. Blend mode, sidedness, the UNLIT and UNFOGGED bits, the alpha-key reference, the
+    /// multiply factors and the additive gamma premultiply all come off the authored batch, like
+    /// any other model's — which is the whole point: the lane this replaced read positions, UVs and
+    /// one texture and drew every batch opaque, so `CavernsOfTimeSky`'s six ADDITIVE star sheets
+    /// (near-white RGB whose stars live in the ALPHA channel) painted a flat white sheet over the
+    /// painted sky, and its planets and asteroid belts drew as dark opaque cards.
+    ///
+    /// - **The far depth** (`sky_depth`): the sky's whole occlusion law is that it writes the
+    ///   reverse-Z far value and lets the world paint over it ([`crate::sky_order`], "The depth
+    ///   law").
+    /// - **Depth-write OFF, always**, whatever the batch authored — a sky element leaves the
+    ///   z-buffer at its clear value so the forced-far glare quads stay occluded by world geometry
+    ///   alone (the rule [`crate::sky`] gives the gradient dome).
+    /// - **Depth-test ON, always**, and this one *overrides* the batch. Every `CavernsOfTimeSky`
+    ///   batch sets M2 flag `0x08` (no depth test), which on this lane becomes
+    ///   `CompareFunction::Always` and would paint the sky straight over the room around you. The
+    ///   flag is how the reference orders the sky pass *within* its own squashed depth slice
+    ///   (`[0.975, 0.98]`, painter's order, depth-write off); our port of that ordering is the sort
+    ///   rung ([`super::skybox_sort_bias`]), so honouring the flag here would be reading it twice.
+    ///
+    /// No variant set: a skybox never feathers, never primes depth, and is never indoors or
+    /// outdoors — it *is* the outdoors.
+    pub fn skybox(
+        &mut self,
+        sub: &benilla_formats::RenderSubmesh,
+        texture: Option<Handle<Image>>,
+        order: u16,
+    ) -> Option<Handle<WowModelMaterial>> {
+        let light = self.light.as_ref()?.0.clone();
+        Some(model_material(
+            &mut self.cache.0,
+            &mut self.materials,
+            texture,
+            sub.blend,
+            sub.two_sided,
+            false, // an M2, whichever building names it
+            false,
+            sub.emissive,
+            sub.additive,
+            false, // never feathers
+            true,  // …never writes depth
+            false, // …and never skips the test — see above
+            sub.fog_policy,
+            sub.env_map,
+            ShadeSel::Lit, // unread: every skybox batch the chain ships authors UNLIT (0x01)
+            order,
+            // No texture-transform or M2Color loop is wired on this lane, and neither shipped
+            // skybox authors one (`CavernsOfTimeSky` has 0 texture transforms and 0 animated colour
+            // tracks; `StratholmeSkybox` is fully static). Wiring them means loading the skybox
+            // through the `M2Model` asset lane — which holds these as the `Arc`s the material key
+            // identifies them by, and is also what the asteroid belts' BONE animation needs. One
+            // move, when that lands; a locally-minted `Arc` here would be a dedup key with no owner.
+            None,
+            None,
+            None, // M2: no MOBA class, no SIDN, no WINDOW
+            None,
+            false,
+            true, // the sky lane
+            &light,
+        ))
+    }
+
     /// One steady material for a batch drawn **off-world**, against a render target's own light
     /// buffer instead of the world's: a portrait booth's frozen studio rig, the model pane's, the
     /// char-select stage's. The buffer is a key axis ([`super::MatKey::light`]), so these share
@@ -251,6 +317,7 @@ impl M2BatchMaterials<'_> {
                 None,  // worn/held part: light selection anchors at the instance origin
                 None,  // M2 carries no MOMT SIDN colour
                 false, // …nor the WINDOW flag
+                false, // a character composite is never a skybox
                 &light,
             )
         };
@@ -356,6 +423,9 @@ impl M2BatchMaterials<'_> {
             sub.wmo_batch,
             sub.sidn,
             sub.window,
+            // The sky lane is [`Self::skybox`]'s alone: it overrides depth state the authored batch
+            // asks for, so it cannot be one more variant built from `sub` here.
+            false,
             light,
         )
     }

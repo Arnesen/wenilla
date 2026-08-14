@@ -6,7 +6,9 @@
 //! ([`CharListMessage`]); the **pick policy** here decides what answers it — the pending pick
 //! (seamless reconnect, decision 0065), the `WOW_CHAR` env fast path, or the director's choice on
 //! the screen. The pick travels the [`CharPick`] channel; `Connected` flips us `InWorld`;
-//! a `/logout` round-trip ([`LoggedOutMessage`]) flips back with the pending pick cleared.
+//! a `/logout` round-trip ([`LoggedOutMessage`]) flips back to select with the pending pick
+//! cleared, and a **lost** session flips all the way back to the login screen (decision 1262 —
+//! the reference's `DISCONNECTED_FROM_SERVER`).
 //!
 //! The screen is the reference's own arrangement (`CharacterSelect.xml/.lua`, extracted off the
 //! patch chain — decision 0465): the fullscreen `UI_<Race>` glue scene with the **selected
@@ -103,7 +105,15 @@ impl Plugin for CharSelectPlugin {
                 (
                     // The policy + transitions run in BOTH states: the roster auto-answer (reconnect
                     // relogin) happens while `InWorld`, and the logout edge arrives there too.
-                    (apply_roster_policy, enter_on_connected, back_on_logout).chain(),
+                    // `back_on_disconnect` LAST: a session that died during entry queues both
+                    // edges into one frame, and the dead one has to win (decision 1262).
+                    (
+                        apply_roster_policy,
+                        enter_on_connected,
+                        back_on_logout,
+                        back_on_disconnect,
+                    )
+                        .chain(),
                     (
                         screen::materialize_screen,
                         input::select_input,
@@ -279,7 +289,15 @@ fn apply_roster_policy(
                 }
                 None
             }
-            None => std::env::var("WOW_CHAR").ok(),
+            // `WOW_CHAR`, or the login smoke's optional third field (decision 1262): the smoke's
+            // seat exists because `WOW_CHAR` is also an *unattended* marker
+            // ([`crate::run_mode::unattended_login`]), so using it to reach the world would switch
+            // the very branch a session test is trying to exercise. Same fast path, no marker.
+            None => std::env::var("WOW_CHAR").ok().or_else(|| {
+                std::env::var("WOW_LOGIN_SMOKE")
+                    .ok()
+                    .and_then(|s| crate::login::smoke_character(&s))
+            }),
         };
     }
     for msg in msgs.read() {
@@ -352,6 +370,35 @@ fn enter_on_connected(
     if msgs.read().next().is_some() {
         next.set(ClientState::InWorld);
     }
+}
+
+/// **The session died** → all the way back to the login screen (decision 1262), which is where the
+/// reference's `GlueParent.lua` puts it: `SetGlueScreen("login")` on `DISCONNECTED_FROM_SERVER`,
+/// with [`crate::login`] raising the "Disconnected from server" dialog over it.
+///
+/// Chained **after** [`enter_on_connected`] on purpose. Both edges can land in the same frame — the
+/// IO thread emits `Connected` before its read loop starts, so a stream that dies during entry
+/// queues `Connected` and `Disconnected` back to back and the app drains both at once. That is the
+/// race the report caught: the entry half won, and the client walked into a world whose session had
+/// already been torn down — a camera with no avatar, `SelfGuid` set, an entry awaiting a snap that
+/// could never arrive. Ordering it last makes the dead session the last word by construction.
+fn back_on_disconnect(
+    mut msgs: MessageReader<crate::net::DisconnectedMessage>,
+    mut roster: ResMut<Roster>,
+    mut next: ResMut<NextState<ClientState>>,
+    mut ui_hover: ResMut<crate::ui_script::PlayerUiHover>,
+    mut ui_keys: ResMut<crate::ui_script::UiKeyboardCapture>,
+) {
+    if !msgs.read().any(|m| m.session_over) {
+        return;
+    }
+    // The pending pick is the reconnect's memory (0065). With no reconnect coming it would only
+    // auto-answer the *next* roster — sending the player straight back into the world they were
+    // just thrown out of, without ever seeing the screen.
+    roster.pending_pick = None;
+    ui_hover.0 = None;
+    ui_keys.0 = false;
+    next.set(ClientState::Login);
 }
 
 /// A confirmed `/logout` → back to the glue layer, pick cleared (the follow-up roster must be
@@ -637,6 +684,88 @@ mod tests {
             flags: 0,
             equipment: [benilla_protocol::CharEnumItem::default(); 19],
         }
+    }
+
+    /// **A session that dies during world entry does not leave the client in the world**
+    /// (decision 1262).
+    ///
+    /// The IO thread emits `Connected` *before* its read loop starts, so a socket that dies mid-
+    /// entry — which is exactly what a displacement kick looks like, a bare EOF and nothing else —
+    /// queues `Connected` and `Disconnected` back to back, and the drain (`try_iter`) hands the app
+    /// both in one frame. Both edges then fire in the same `Update`. Whichever writes `NextState`
+    /// last wins, and before this the entry did: the client flipped `InWorld` against a world the
+    /// same frame's teardown had already emptied, and stood there in a camera with no avatar.
+    ///
+    /// The guard is the *ordering*, which nothing else can catch: each system is correct alone, the
+    /// build is green either way, and the failure needs two logins racing on one account to
+    /// reproduce by hand.
+    #[test]
+    fn a_session_lost_during_entry_beats_the_entry() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::CharSelect)
+            .init_resource::<Roster>()
+            .init_resource::<crate::ui_script::PlayerUiHover>()
+            .init_resource::<crate::ui_script::UiKeyboardCapture>()
+            .add_message::<EnteredWorldMessage>()
+            .add_message::<crate::net::DisconnectedMessage>()
+            .add_systems(Update, (enter_on_connected, back_on_disconnect).chain());
+        app.world_mut().resource_mut::<Roster>().pending_pick = Some(7);
+
+        // One frame carrying both halves of the race, in the order the drain produces them.
+        app.world_mut().write_message(EnteredWorldMessage);
+        app.world_mut()
+            .write_message(crate::net::DisconnectedMessage {
+                reason: "disconnected: world stream closed: failed to fill whole buffer".into(),
+                end: benilla_protocol::SessionEnd::Lost,
+                session_over: true,
+            });
+        app.update();
+        app.update(); // `StateTransition` applies the pending state at the next frame
+
+        assert_eq!(
+            *app.world().resource::<State<ClientState>>().get(),
+            ClientState::Login,
+            "the dead session must be the last word — the reference's DISCONNECTED_FROM_SERVER \
+             puts the client back on the account screen, not into a world with no session",
+        );
+        assert_eq!(
+            app.world().resource::<Roster>().pending_pick,
+            None,
+            "and the reconnect's pending pick goes with it, or the next roster walks straight \
+             back into the world the player was just thrown out of",
+        );
+    }
+
+    /// The same frame with the session *not* over (a clean logout's teardown, or an unattended run
+    /// keeping 0065's seamless reconnect) still enters the world — the guard above must not have
+    /// turned every disconnect into a bounce to the login screen.
+    #[test]
+    fn a_teardown_that_is_not_the_end_leaves_the_entry_alone() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::CharSelect)
+            .init_resource::<Roster>()
+            .init_resource::<crate::ui_script::PlayerUiHover>()
+            .init_resource::<crate::ui_script::UiKeyboardCapture>()
+            .add_message::<EnteredWorldMessage>()
+            .add_message::<crate::net::DisconnectedMessage>()
+            .add_systems(Update, (enter_on_connected, back_on_disconnect).chain());
+
+        app.world_mut().write_message(EnteredWorldMessage);
+        app.world_mut()
+            .write_message(crate::net::DisconnectedMessage {
+                reason: "logged out".into(),
+                end: benilla_protocol::SessionEnd::LoggedOut,
+                session_over: false,
+            });
+        app.update();
+        app.update();
+
+        assert_eq!(
+            *app.world().resource::<State<ClientState>>().get(),
+            ClientState::InWorld,
+        );
     }
 
     /// B119 — a created character is selected against the roster **already in hand**. `net::io`

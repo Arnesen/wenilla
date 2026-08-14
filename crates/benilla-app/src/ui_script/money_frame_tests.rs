@@ -1,6 +1,6 @@
 //! The shipped `assets/ui/MoneyFrame.xml` — the reference's `MoneyFrameTemplate` /
-//! `SmallMoneyFrameTemplate` kit and the `MoneyTypeInfo` table behind it (decision 1190: a name
-//! the shipped 1.12 UI defines is FrameXML's to transcribe).
+//! `SmallMoneyFrameTemplate` kit and the `MoneyTypeInfo` table behind it (decision 1190: a name the
+//! shipped 1.12 UI defines is a name we publish too — under our own implementation of it, 1260).
 //!
 //! Nothing benilla ships consumes this file yet — our own eight coin displays run on
 //! MerchantFrame.xml's `BenillaMoney_*` slot kit, and MoneyFrame.xml's header is where the two are

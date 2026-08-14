@@ -73,11 +73,26 @@
 
 /// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them, so
 /// theirs is the ladder's LOWEST rung (see the sign law above).
-///
-/// The WMO skybox ([`crate::wmo_sky`]) takes no rung: like the gradient dome it replaces, it is an
-/// **opaque** backdrop, so it draws in the opaque pass and needs no transparent-sort bias — its
-/// forced far depth (the depth law below) is the whole of its ordering, and the two never coexist.
 pub(crate) const STARS_BIAS: f32 = -1.0e6;
+/// **The WMO skybox** ([`crate::wmo_sky`]) — the building-owned painted sky, which replaces this
+/// whole ladder while it draws, so its rung never competes with one above. It needs a rung at all
+/// because a skybox is **an ordinary M2 and not an opaque backdrop**, which is what this module
+/// asserted until decision 1264: `CavernsOfTimeSky.m2` is 21 batches across four blend modes — a
+/// painted cube, six additive star sheets on the cube's own faces, five alpha-blended planet cards
+/// and three alpha-tested asteroid belts on rotating bones. Drawn opaque (the old lane read
+/// positions, UVs and one texture and nothing else) the additive star sheet — near-white RGB whose
+/// stars live in its ALPHA — paints a flat white sheet over the painted sky. That is the director's
+/// "the whole ceiling is white" in Caverns of Time.
+///
+/// The blended half of a skybox therefore lands in the transparent pass, camera-anchored, so its
+/// view-z is a few tens of yards and it would sort *after* the world. This rung sinks it under
+/// every world transparent: the deepest of those is [`FAR_SIDE_BIAS`] plus a far-plane view-z,
+/// ≈ −4.3e4, and the shell's own view-z rides on top of the rung — all four properties of the band
+/// are machine-checked in `model_render`'s
+/// `the_skybox_band_orders_its_batches_on_one_pipeline_key`. Kept as small as that job allows (the
+/// magnitude rationale above), because the rung is also what the batch-order epsilon has to
+/// survive: see `model_render::SKYBOX_ORDER_EPS`.
+pub(crate) const WMO_SKYBOX_BIAS: f32 = -6.0e4;
 /// The sun disc — second (`0x7e5b90` via `0x6d4a47`).
 pub(crate) const SUN_DISC_BIAS: f32 = -8.2e5;
 /// The white moon — third; where the discs cross, the moon paints over the sun.
@@ -198,7 +213,9 @@ fn every_sky_shader_forces_the_far_depth() {
         ("star.wgsl", include_str!("shaders/star.wgsl")),
         ("cloud.wgsl", include_str!("shaders/cloud.wgsl")),
         ("celestial.wgsl", include_str!("shaders/celestial.wgsl")),
-        ("wmo_skybox.wgsl", include_str!("shaders/wmo_skybox.wgsl")),
+        // The WMO skybox is no longer a shader of its own: it draws on the shared model lane, whose
+        // `WOW_SKY_DEPTH` branch obeys the same law and is asserted beside it
+        // (`benilla_assets::materials`, `the_sky_lane_forces_the_far_depth`).
     ] {
         assert!(
             src.contains("const SKY_FAR_DEPTH: f32 = 0.0;"),

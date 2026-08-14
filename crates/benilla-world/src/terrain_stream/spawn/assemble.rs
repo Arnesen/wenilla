@@ -202,6 +202,7 @@ pub fn spawn_model_entities(
             sub.wmo_batch,
             sub.sidn,
             sub.window,
+            false, // the world streamer never spawns a skybox
             light,
         );
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
@@ -243,6 +244,7 @@ pub fn spawn_model_entities(
                 sub.wmo_batch,
                 sub.sidn,
                 sub.window,
+                false, // the world streamer never spawns a skybox
                 light,
             )
         };

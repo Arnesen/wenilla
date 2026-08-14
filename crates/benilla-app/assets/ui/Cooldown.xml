@@ -14,7 +14,7 @@
         lines while each of those children came out as a bare, attribute-less frame.
     -->
     <Script><![CDATA[
-        -- Ref Cooldown.lua's CooldownFrame_SetTimer, transcribed: show-and-arm only when all three
+        -- Ref Cooldown.lua's CooldownFrame_SetTimer, re-expressed: show-and-arm only when all three
         -- are positive, else hide.
         --
         -- THE ONE FORK, and why it is two faithful branches rather than a guard. The reference's
@@ -44,7 +44,7 @@
     ]]></Script>
 
     <!--
-        ref Cooldown.xml l.4-14, transcribed. The reference's own attributes are kept verbatim
+        ref Cooldown.xml l.4-14. The reference's own attributes are kept verbatim
         (its .mdx file, its 0.75 scale, setAllPoints, hidden) even where this engine has no use for
         the model file: the template's JOB here is to exist under the reference's name so an
         addon's `inherits=` resolves and its cooldown child inherits the geometry the addon is

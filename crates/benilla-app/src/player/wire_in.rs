@@ -397,14 +397,23 @@ fn apply_self_move(
     player.wedge_still = 0;
 }
 
-/// A confirmed `/logout` (decision 0193): drop control so the next login re-takes it from its own
-/// streamed `SelfPlayer` — possibly a different character on a different map (the boot path). The
-/// avatar entity itself is despawned by the net drain the same frame this message is written.
-pub(super) fn release_on_logout(
-    mut msgs: MessageReader<crate::net::LoggedOutMessage>,
+/// **The avatar went away with the session** — drop control, so the next login re-takes it from
+/// its own streamed `SelfPlayer` (possibly a different character on a different map — the boot
+/// path). The entity itself is despawned by the net drain the same frame these messages are
+/// written.
+///
+/// Two edges, one answer (decision 1262): a confirmed `/logout` (decision 0193), and a **lost**
+/// session, which since 1262 takes the avatar too — there is no reconnect left for it to be the
+/// puppet of. Missing the second edge would leave `Player.active` true over a despawned entity: a
+/// controller driving nothing, which is the shape of the free camera this arc is about.
+pub(super) fn release_on_session_end(
+    mut logouts: MessageReader<crate::net::LoggedOutMessage>,
+    mut lost: MessageReader<crate::net::DisconnectedMessage>,
     mut player: ResMut<Player>,
 ) {
-    if msgs.read().next().is_some() {
+    // Both readers drain unconditionally — `|`, not `||`: a short-circuit would leave the other
+    // message unread, and its cursor would carry it into the next frame.
+    if logouts.read().next().is_some() | lost.read().any(|m| m.session_over) {
         player.active = false;
         player.move_flags = 0;
         player.airborne_since = None;

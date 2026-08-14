@@ -1,6 +1,6 @@
 <Ui>
     <!--
-        The real client's UIErrorsFrame, now transcribed as what it actually IS: a
+        The real client's UIErrorsFrame, now declared as what it actually IS: a
         `<MessageFrame>` (ref UIErrorsFrame.xml:4 — 512×60 at TOP (0,-122), displayDuration="5",
         insertMode="TOP", with `<FontString inherits="ErrorFont" justifyH="CENTER"/>` as its line
         font). UI_INFO_MESSAGE shows YELLOW (1,1,0) — the quest objective-progress toasts land

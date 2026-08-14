@@ -1,7 +1,10 @@
 <Ui>
     <!--
-        The reference's SHARED widget kit — Interface\FrameXML\UIPanelTemplates.xml, transcribed
-        from the extracted 1.12.1 file (line numbers below are that file's).
+        The reference's SHARED widget kit, in our own terms. Interface\FrameXML\UIPanelTemplates.xml
+        is the SPECIFICATION — the template names, the child names, the art, every offset and every
+        handler's observable effect are read off the extracted 1.12.1 file, and the line numbers
+        cited below are that file's. Nothing here is required to be *spelled* the way it spells it,
+        and the two Lua handlers are not.
 
         WHY THIS FILE EXISTS AT ALL. Every window benilla has built so far declared its own private
         copy of these — `AddonListPanelButtonTemplate`, `BenillaTrainerPanelButtonTemplate`,
@@ -32,8 +35,8 @@
           own name in ScrollTemplates.xml, built as a plain `<Frame>` over `BenillaScrollBarTemplate`
           (decisions 0247/0250/0251). Two declarations of one name would race; re-pointing ours at
           the reference's `<ScrollFrame>` shape is its own job with its own risk, not this pass's.
-        · `TabButtonTemplate` (ref l.303-402) — already transcribed verbatim in UiPanels.xml, with
-          its fit/highlight deviations recorded there (decision 1004).
+        · `TabButtonTemplate` (ref l.303-402) — already declared in UiPanels.xml, with its
+          fit/highlight deviations recorded there (decision 1004).
         (`GameMenuButtonTemplate`, ref l.403-410, was on this list as "already in GameMenuFrame.xml"
         until the colour picker needed it from above that file's LAST-in-the-toc seat. It is below
         now, in the reference's own file for it, and GameMenuFrame.xml's private copy is gone.)
@@ -48,77 +51,85 @@
     -->
 
     <Script><![CDATA[
-        -- The two scroll-frame handlers `UIPanelScrollFrameTemplate` below calls by name (ref
-        -- UIPanelTemplates.lua l.150-157 and l.254-305). `ScrollFrame_OnLoad` and the whole
-        -- `FauxScrollFrame_*` family already live in ScrollTemplates.xml, which loads immediately
-        -- before this file; these two are the remainder of that kit.
+        -- The two scroll-frame handlers `UIPanelScrollFrameTemplate` below calls by name. Their
+        -- contract — the names, the arguments, and every branch's observable effect — is the
+        -- reference's (UIPanelTemplates.lua l.150-157 and l.254-305); the code is ours.
+        -- `ScrollFrame_OnLoad` and the whole `FauxScrollFrame_*` family already live in
+        -- ScrollTemplates.xml, which loads immediately before this file; these two are the
+        -- remainder of that kit.
 
-        -- ref l.150-157, verbatim.
+        -- One wheel notch pans by half a bar-height, up or down. The wheel is SOUNDLESS, unlike the
+        -- arrow buttons — the reference's own split, and the director's (trainer_tests.rs).
         function ScrollFrameTemplate_OnMouseWheel(value)
             local scrollBar = getglobal(this:GetName() .. "ScrollBar")
-            if (value > 0) then
-                scrollBar:SetValue(scrollBar:GetValue() - (scrollBar:GetHeight() / 2))
-            else
-                scrollBar:SetValue(scrollBar:GetValue() + (scrollBar:GetHeight() / 2))
+            local step = scrollBar:GetHeight() / 2
+            if value > 0 then
+                step = -step
             end
+            scrollBar:SetValue(scrollBar:GetValue() + step)
         end
 
-        -- ref l.254-305, verbatim — including `getglobal(scrollbar:GetName().."ThumbTexture")`,
-        -- which is what `<ThumbTexture name="$parentThumbTexture">` publishes. (That publication
-        -- did not exist when this file was first written: `apply_slider` applied a named thumb's
-        -- layout and never set the global, the one asymmetry with a Button's state textures. It
-        -- was the reference's own line that found the gap, and the gap is fixed rather than
-        -- routed around.)
+        -- Reconcile a ScrollFrame's bar, arrows and thumb to a range the engine has just
+        -- recomputed. `scrollrange` is the engine's own second argument when this runs as the
+        -- handler; a caller who omits it gets the frame's current range instead.
+        --
+        -- All four children hang off the OWNER's name two `$parent` levels down
+        -- (`MyScrollScrollBarScrollUpButton`), so they are resolved ONCE here — the reference walks
+        -- back to getglobal at each of the ten points it touches one. `$parentThumbTexture` is what
+        -- publishes the last of them; that publication did not exist when this file was first
+        -- written (`apply_slider` applied a named thumb's layout and never set the global, the one
+        -- asymmetry with a Button's state textures), and the gap was fixed rather than routed
+        -- around.
         function ScrollFrame_OnScrollRangeChanged(scrollrange)
-            local scrollbar = getglobal(this:GetName() .. "ScrollBar")
-            if (not scrollrange) then
-                scrollrange = this:GetVerticalScrollRange()
-            end
-            local value = scrollbar:GetValue()
-            if (value > scrollrange) then
-                value = scrollrange
-            end
+            local frame = this
+            local scrollbar = getglobal(frame:GetName() .. "ScrollBar")
+            local up = getglobal(scrollbar:GetName() .. "ScrollUpButton")
+            local down = getglobal(scrollbar:GetName() .. "ScrollDownButton")
+            local thumb = getglobal(scrollbar:GetName() .. "ThumbTexture")
+
+            scrollrange = scrollrange or frame:GetVerticalScrollRange()
+            local value = min(scrollbar:GetValue(), scrollrange)
             scrollbar:SetMinMaxValues(0, scrollrange)
             scrollbar:SetValue(value)
-            if (floor(scrollrange) == 0) then
-                if (this.scrollBarHideable) then
-                    scrollbar:Hide()
-                    getglobal(scrollbar:GetName() .. "ScrollDownButton"):Hide()
-                    getglobal(scrollbar:GetName() .. "ScrollUpButton"):Hide()
-                else
-                    getglobal(scrollbar:GetName() .. "ScrollDownButton"):Disable()
-                    getglobal(scrollbar:GetName() .. "ScrollUpButton"):Disable()
-                    getglobal(scrollbar:GetName() .. "ScrollDownButton"):Show()
-                    getglobal(scrollbar:GetName() .. "ScrollUpButton"):Show()
-                end
-                getglobal(scrollbar:GetName() .. "ThumbTexture"):Hide()
-            else
-                getglobal(scrollbar:GetName() .. "ScrollDownButton"):Show()
-                getglobal(scrollbar:GetName() .. "ScrollUpButton"):Show()
-                scrollbar:Show()
-                getglobal(scrollbar:GetName() .. "ScrollDownButton"):Enable()
-                getglobal(scrollbar:GetName() .. "ThumbTexture"):Show()
-            end
 
-            -- Hide/show scrollframe borders (ref l.285-304). Named regions an OWNER declares, so
-            -- all three are optional.
-            local top = getglobal(this:GetName() .. "Top")
-            local bottom = getglobal(this:GetName() .. "Bottom")
-            local middle = getglobal(this:GetName() .. "Middle")
-            if (top and bottom and this.scrollBarHideable) then
-                if (this:GetVerticalScrollRange() == 0) then
-                    top:Hide()
-                    bottom:Hide()
-                else
-                    top:Show()
-                    bottom:Show()
-                end
+            -- Nothing to scroll, and two ways of saying so — which one is the OWNER's call:
+            -- a hideable bar leaves altogether, a fixed one stays in place and greys out. On the
+            -- way back only the DOWN arrow wakes, because the offset is still zero and there is
+            -- nowhere up to go; the frame's own vertical-scroll handler below wakes the up arrow
+            -- the moment that stops being true.
+            local empty = floor(scrollrange) == 0
+            if not empty then
+                down:Show()
+                up:Show()
+                scrollbar:Show()
+                down:Enable()
+            elseif frame.scrollBarHideable then
+                scrollbar:Hide()
+                down:Hide()
+                up:Hide()
+            else
+                down:Disable()
+                up:Disable()
+                down:Show()
+                up:Show()
             end
-            if (middle and this.scrollBarHideable) then
-                if (this:GetVerticalScrollRange() == 0) then
-                    middle:Hide()
-                else
-                    middle:Show()
+            if empty then thumb:Hide() else thumb:Show() end
+
+            -- The frame's own border (ref l.285-304), if it declares one: all three regions are the
+            -- OWNER's to name, so all three are optional, and the pair is decided together because
+            -- a half-declared border is no border. Note this leg asks the FRAME for its range
+            -- rather than trusting the argument, and wants an exact zero where the bar above floors
+            -- first — two different questions, and the reference keeps them apart.
+            if frame.scrollBarHideable then
+                local bordered = frame:GetVerticalScrollRange() ~= 0
+                local top = getglobal(frame:GetName() .. "Top")
+                local bottom = getglobal(frame:GetName() .. "Bottom")
+                local middle = getglobal(frame:GetName() .. "Middle")
+                if top and bottom then
+                    if bordered then top:Show() bottom:Show() else top:Hide() bottom:Hide() end
+                end
+                if middle then
+                    if bordered then middle:Show() else middle:Hide() end
                 end
             end
         end
@@ -278,12 +289,14 @@
     <Slider name="UIPanelScrollBarTemplate" virtual="true">
         <Size><AbsDimension x="16" y="0"/></Size>
         <Frames>
+            <!-- Both arrows step by half a bar-height and differ only in sign; unlike the wheel,
+                 both click. -->
             <Button name="$parentScrollUpButton" inherits="UIPanelScrollUpButtonTemplate">
                 <Anchors><Anchor point="BOTTOM" relativePoint="TOP"/></Anchors>
                 <Scripts>
                     <OnClick>
-                        local parent = this:GetParent()
-                        parent:SetValue(parent:GetValue() - (parent:GetHeight() / 2))
+                        local bar = this:GetParent()
+                        bar:SetValue(bar:GetValue() - bar:GetHeight() / 2)
                         PlaySound("UChatScrollButton")
                     </OnClick>
                 </Scripts>
@@ -292,8 +305,8 @@
                 <Anchors><Anchor point="TOP" relativePoint="BOTTOM"/></Anchors>
                 <Scripts>
                     <OnClick>
-                        local parent = this:GetParent()
-                        parent:SetValue(parent:GetValue() + (parent:GetHeight() / 2))
+                        local bar = this:GetParent()
+                        bar:SetValue(bar:GetValue() + bar:GetHeight() / 2)
                         PlaySound("UChatScrollButton")
                     </OnClick>
                 </Scripts>
@@ -312,10 +325,10 @@
          scroll child, with the bar above pinned down its right edge (inset 16 top and bottom so
          the arrow buttons sit inside the track span). 6 call sites across 2 corpus addons.
 
-         `ScrollFrame_OnLoad` is ScrollTemplates.xml's (the reference's own function, already
-         transcribed there); the other two handlers are this file's script block. An instance
-         supplies its own `<ScrollChild>` — without one the frame has no scroll range at all, which
-         the loader now says out loud. -->
+         `ScrollFrame_OnLoad` — the reference's own name for it — is declared in ScrollTemplates.xml;
+         the other two handlers are this file's script block. An instance supplies its own
+         `<ScrollChild>` — without one the frame has no scroll range at all, which the loader now
+         says out loud. -->
     <ScrollFrame name="UIPanelScrollFrameTemplate" virtual="true">
         <Frames>
             <Slider name="$parentScrollBar" inherits="UIPanelScrollBarTemplate">
@@ -328,24 +341,20 @@
         <Scripts>
             <OnLoad>ScrollFrame_OnLoad()</OnLoad>
             <OnScrollRangeChanged>ScrollFrame_OnScrollRangeChanged(arg2)</OnScrollRangeChanged>
-            <!-- The reference's own comment here reads "The code to disable the ScrollDownButton is
-                 pretty hacked, but it works". Transcribed as it stands. -->
+            <!-- Each arrow is live only while there is somewhere its way to go: up dies at offset
+                 zero, down dies once the bar has been seated at the top of its range. The bar's
+                 own value is re-read for the down test rather than arg1 being reused, because
+                 SetValue above may have clamped it. (The reference's comment on this pair reads
+                 "The code to disable the ScrollDownButton is pretty hacked, but it works" — it
+                 asks the same question as `(value - max) == 0`.) -->
             <OnVerticalScroll>
                 local scrollbar = getglobal(this:GetName() .. "ScrollBar")
                 scrollbar:SetValue(arg1)
-                local min
-                local max
-                min, max = scrollbar:GetMinMaxValues()
-                if (arg1 == 0) then
-                    getglobal(scrollbar:GetName() .. "ScrollUpButton"):Disable()
-                else
-                    getglobal(scrollbar:GetName() .. "ScrollUpButton"):Enable()
-                end
-                if ((scrollbar:GetValue() - max) == 0) then
-                    getglobal(scrollbar:GetName() .. "ScrollDownButton"):Disable()
-                else
-                    getglobal(scrollbar:GetName() .. "ScrollDownButton"):Enable()
-                end
+                local up = getglobal(scrollbar:GetName() .. "ScrollUpButton")
+                local down = getglobal(scrollbar:GetName() .. "ScrollDownButton")
+                local _, maxScroll = scrollbar:GetMinMaxValues()
+                if arg1 == 0 then up:Disable() else up:Enable() end
+                if scrollbar:GetValue() == maxScroll then down:Disable() else down:Enable() end
             </OnVerticalScroll>
             <OnMouseWheel>ScrollFrameTemplate_OnMouseWheel(arg1)</OnMouseWheel>
         </Scripts>

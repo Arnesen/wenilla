@@ -167,22 +167,42 @@
             end
         end
 
-        UIPARENT_MANAGED_FRAME_POSITIONS = {}
-        -- Frames
-        UIPARENT_MANAGED_FRAME_POSITIONS["MultiBarBottomLeft"] = {baseY = 17, reputation = 9, maxLevel = -5, anchorTo = "ActionButton1", point = "BOTTOMLEFT", rpoint = "TOPLEFT"}
-        UIPARENT_MANAGED_FRAME_POSITIONS["GroupLootFrame1"] = {baseY = 60, bottomEither = 42, pet = 42, reputation = 9}
-        UIPARENT_MANAGED_FRAME_POSITIONS["TutorialFrameParent"] = {baseY = 55, bottomEither = 47, pet = 42, reputation = 9}
-        UIPARENT_MANAGED_FRAME_POSITIONS["FramerateLabel"] = {baseY = 64, bottomEither = 42, pet = 42, reputation = 9}
-        UIPARENT_MANAGED_FRAME_POSITIONS["CastingBarFrame"] = {baseY = 60, bottomEither = 40, pet = 40, reputation = 9}
-        UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame1"] = {baseY = 85, bottomLeft = 17, pet = 17, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMLEFT", rpoint = "BOTTOMLEFT", xOffset = 32}
-        UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame2"] = {baseY = 85, bottomRight = 17, rightLeft = -88, rightRight = -43, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMRIGHT", rpoint = "BOTTOMRIGHT", xOffset = -32}
-        UIPARENT_MANAGED_FRAME_POSITIONS["ShapeshiftBarFrame"] = {baseY = 0, bottomLeft = 45, reputation = 9, maxLevel = -5, anchorTo = "MainMenuBar", point = "BOTTOMLEFT", rpoint = "TOPLEFT", xOffset = 30}
+        -- ── Everything that has to move when the bottom of the screen fills up ──────────────────
+        --
+        -- One row per thing whose seat depends on which bars are raised. A row reads:
+        --
+        --   baseY           where it sits on the y axis with nothing in the way
+        --   baseX / xOffset the same for the x axis, under two names: the rows that write a var
+        --                   spell it `baseX`, the rows that seat a frame spell it `xOffset`, and
+        --                   baseX wins if a row ever names both
+        --   bottomLeft, bottomRight, bottomEither, pet, reputation, maxLevel   (y axis)
+        --   rightLeft, rightRight                                              (x axis)
+        --                   what this row owes each raised bar, ADDED for every flag standing
+        --   anchorTo / point / rpoint   who to hang off; defaulted to UIParent BOTTOM-to-BOTTOM
+        --   isVar           the row is not a frame at all: it names a GLOBAL, and the pass writes
+        --                   the computed offset into it for other files to read
+        --
+        -- The KEY is the global name — a frame to seat, or the var to write — and other windows'
+        -- OnShow/OnHide drive the pass by it, so both the keys and the fields are a published
+        -- shape. Written as one constructor rather than a dozen index assignments: it is a
+        -- constant, and a constant reads better as a table than as a program that builds one.
+        UIPARENT_MANAGED_FRAME_POSITIONS = {
+            -- Frames to seat
+            MultiBarBottomLeft = {baseY = 17, reputation = 9, maxLevel = -5, anchorTo = "ActionButton1", point = "BOTTOMLEFT", rpoint = "TOPLEFT"},
+            GroupLootFrame1 = {baseY = 60, bottomEither = 42, pet = 42, reputation = 9},
+            TutorialFrameParent = {baseY = 55, bottomEither = 47, pet = 42, reputation = 9},
+            FramerateLabel = {baseY = 64, bottomEither = 42, pet = 42, reputation = 9},
+            CastingBarFrame = {baseY = 60, bottomEither = 40, pet = 40, reputation = 9},
+            ChatFrame1 = {baseY = 85, bottomLeft = 17, pet = 17, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMLEFT", rpoint = "BOTTOMLEFT", xOffset = 32},
+            ChatFrame2 = {baseY = 85, bottomRight = 17, rightLeft = -88, rightRight = -43, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMRIGHT", rpoint = "BOTTOMRIGHT", xOffset = -32},
+            ShapeshiftBarFrame = {baseY = 0, bottomLeft = 45, reputation = 9, maxLevel = -5, anchorTo = "MainMenuBar", point = "BOTTOMLEFT", rpoint = "TOPLEFT", xOffset = 30},
 
-        -- Vars
-        UIPARENT_MANAGED_FRAME_POSITIONS["CONTAINER_OFFSET_X"] = {baseX = 0, rightLeft = 90, rightRight = 45, isVar = "xAxis"}
-        UIPARENT_MANAGED_FRAME_POSITIONS["CONTAINER_OFFSET_Y"] = {baseY = 70, bottomEither = 27, bottomRight = 0, reputation = 9, isVar = "yAxis", pet = 23}
-        UIPARENT_MANAGED_FRAME_POSITIONS["BATTLEFIELD_TAB_OFFSET_Y"] = {baseY = 210, bottomRight = 40, reputation = 9, isVar = "yAxis"}
-        UIPARENT_MANAGED_FRAME_POSITIONS["PETACTIONBAR_YPOS"] = {baseY = 97, bottomLeft = 43, reputation = 9, maxLevel = -5, isVar = "yAxis"}
+            -- Globals to write
+            CONTAINER_OFFSET_X = {baseX = 0, rightLeft = 90, rightRight = 45, isVar = "xAxis"},
+            CONTAINER_OFFSET_Y = {baseY = 70, bottomEither = 27, bottomRight = 0, reputation = 9, isVar = "yAxis", pet = 23},
+            BATTLEFIELD_TAB_OFFSET_Y = {baseY = 210, bottomRight = 40, reputation = 9, isVar = "yAxis"},
+            PETACTIONBAR_YPOS = {baseY = 97, bottomLeft = 43, reputation = 9, maxLevel = -5, isVar = "yAxis"},
+        }
 
         function UIParent_ManageFramePositions()
             -- Frames that affect offsets in y axis
@@ -220,72 +240,48 @@
                 table.insert(yOffsetFrames, "maxLevel")
             end
 
-            -- Iterate through frames and set anchors according to the flags set
-            local frame, xOffset, yOffset, anchorTo, point, rpoint
-            for index, value in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
-                frame = getglobal(index)
+            -- Walk the rows and settle each one against the flags now standing. Rows are
+            -- independent — nothing here reads a var another row writes — so the arbitrary order
+            -- `pairs` hands back is not a hazard.
+            for index, row in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
+                local frame = getglobal(index)
                 if ( frame ) then
-                    -- Always start with base as the base offset or default to zero if no "none" specified
-                    xOffset = 0
-                    if ( value["baseX"] ) then
-                        xOffset = value["baseX"]
-                    elseif ( value["xOffset"] ) then
-                        xOffset = value["xOffset"]
-                    end
-                    yOffset = 0
-                    if ( value["baseY"] ) then
-                        yOffset = value["baseY"]
-                    end
+                    -- Start from where the row sits with nothing in its way. A zero base is a real
+                    -- base, not an absent one, which is why `or` chains do the right thing here.
+                    local xOffset = row.baseX or row.xOffset or 0
+                    local yOffset = row.baseY or 0
 
-                    -- Iterate through frames that affect y offsets
-                    local hasBottomLeft, hasPetBar, hasBottomRight
-                    for flag, flagValue in pairs(yOffsetFrames) do
-                        if ( value[flagValue] ) then
-                            if ( flagValue == "bottomLeft" ) then
-                                hasBottomLeft = 1
-                            elseif ( flagValue == "pet" ) then
-                                hasPetBar = 1
-                            elseif ( flagValue == "bottomRight" ) then
-                                hasBottomRight = 1
-                            end
-                            yOffset = yOffset + value[flagValue]
+                    -- Then add what the row owes each raised bar, keeping note of which ones it
+                    -- actually paid — two of them interact below.
+                    local paid = {}
+                    for _, flag in pairs(yOffsetFrames) do
+                        if ( row[flag] ) then
+                            yOffset = yOffset + row[flag]
+                            paid[flag] = true
+                        end
+                    end
+                    for _, flag in pairs(xOffsetFrames) do
+                        if ( row[flag] ) then
+                            xOffset = xOffset + row[flag]
                         end
                     end
 
-                    if ( hasBottomLeft and hasPetBar ) then
+                    -- The bottom-left bar and the pet/stance row do not simply stack: clearing both
+                    -- costs 23px more than the two figures added together. The reference carries the
+                    -- same correction (l.1657-1658) with no derivation, and it is a fact about the
+                    -- bars' art rather than arithmetic we can recompute.
+                    if ( paid.bottomLeft and paid.pet ) then
                         yOffset = yOffset + 23
                     end
 
-                    -- Iterate through frames that affect x offsets
-                    for flag, flagValue in pairs(xOffsetFrames) do
-                        if ( value[flagValue] ) then
-                            xOffset = xOffset + value[flagValue]
-                        end
-                    end
-
-                    -- Set up anchoring info
-                    anchorTo = value["anchorTo"]
-                    point = value["point"]
-                    rpoint = value["rpoint"]
-                    if ( not anchorTo ) then
-                        anchorTo = "UIParent"
-                    end
-                    if ( not point ) then
-                        point = "BOTTOM"
-                    end
-                    if ( not rpoint ) then
-                        rpoint = "BOTTOM"
-                    end
-
-                    -- Anchor frame
-                    if ( value["isVar"] ) then
-                        if ( value["isVar"] == "xAxis" ) then
-                            _G[index] = xOffset
-                        else
-                            _G[index] = yOffset
-                        end
+                    -- A row either NAMES A GLOBAL to leave the number in, or is a frame to seat.
+                    if ( row.isVar == "xAxis" ) then
+                        _G[index] = xOffset
+                    elseif ( row.isVar ) then
+                        _G[index] = yOffset
                     else
-                        frame:SetPoint(point, anchorTo, rpoint, xOffset, yOffset)
+                        frame:SetPoint(row.point or "BOTTOM", row.anchorTo or "UIParent",
+                            row.rpoint or "BOTTOM", xOffset, yOffset)
                     end
                 end
             end
@@ -377,71 +373,77 @@
             end
         end
 
-        -- ref UIParent.lua:1819-1878, transcribed 1:1 (decision 1008 — closes 0997's
-        -- "abbreviates through KEY_ABBR" residue with the REAL mechanism: it never was a
-        -- KEY_ABBR set; the whole abbreviation is this Lua). The action bar's HotKey corners
-        -- call it with returnAbbr=1: ONE modifier abbreviates (CTRL→c, SHIFT→s, ALT→a — so
-        -- SHIFT-2 reads "s-2", the director's ask), TWO OR MORE collapse the whole label to
-        -- "·" — the ref's own multi-modifier dot. The full form (tooltips, the Keybindings
-        -- page) keeps the canonical prefixes and reads the base key's KEY_* global.
-        -- Transcription notes: the ref's dead `gsub(tempName, "CAPSLOCK", "Caps")` line
-        -- (result discarded — gsub doesn't mutate) is dropped; its GetLocale() deDE
-        -- CTRL→STRG swap and IsMacClient() KEY_*_MAC lookup ride behind existence guards
-        -- (this VM defines neither yet, and the getglobal fallback covers the gap).
+        -- The published binding-label API — benilla's implementation of the behaviour ref
+        -- UIParent.lua:1819-1878 specifies (decision 1008, which closed 0997's "abbreviates
+        -- through KEY_ABBR" residue with the REAL mechanism: there never was a KEY_ABBR set, the
+        -- whole abbreviation is this one function). Addons call it by name, so the contract is:
+        --
+        --   * a nil name reads as the empty string;
+        --   * "CTRL-SHIFT-2" splits at its LAST dash — up to and including that dash is the
+        --     modifier run ("CTRL-SHIFT-"), what follows is the key ("2"). A name with no dash is
+        --     all key;
+        --   * the key renders through the `prefix..key` global (the KEY_* family), preferring a
+        --     `_MAC` twin on a Mac client, and falls back to the raw key name;
+        --   * returnAbbr — what the action bar's HotKey corners pass — shrinks ONE modifier to
+        --     its initial, so SHIFT-2 reads "s-2" (the director's ask), and collapses TWO OR MORE
+        --     to "·". The full form (tooltips, the Keybindings page) keeps the whole prefix.
+        --
+        -- Two knowing departures from the reference, both about its code rather than its
+        -- behaviour: its `gsub(tempName, "CAPSLOCK", "Caps")` line is dead — gsub returns a new
+        -- string and that result is discarded, so nothing can observe it — and has no counterpart
+        -- here; and its GetLocale()/IsMacClient() calls ride behind existence guards because this
+        -- VM defines neither yet, with the getglobal fallback covering the gap.
+
+        -- What a single modifier shrinks to on a button corner. German calls Control "STRG" (the
+        -- deDE swap below runs first), which is the one that needs two letters to stay legible.
+        -- The order is fixed so the pass is deterministic, but it does not matter: no abbreviation
+        -- occurs inside another modifier's name, so no substitution can feed the next.
+        local MODIFIER_ABBREVIATIONS = {
+            { "CTRL", "c" },
+            { "SHIFT", "s" },
+            { "ALT", "a" },
+            { "STRG", "st" },
+        }
+
         function GetBindingText(name, prefix, returnAbbr)
-            if ( not name ) then
-                return "";
-            end
-            local tempName = name;
-            local i = strfind(name, "-");
-            local dashIndex = nil;
-            local count = 0;
-            while ( i ) do
-                if ( not dashIndex ) then
-                    dashIndex = i;
-                else
-                    dashIndex = dashIndex + i;
-                end
-                count = count + 1;
-                tempName = strsub(tempName, i + 1);
-                i = strfind(tempName, "-");
+            if not name then
+                return ""
             end
 
-            local modKeys = '';
-            if ( not dashIndex ) then
-                dashIndex = 0;
-            else
-                modKeys = strsub(name, 1, dashIndex);
-                if ( GetLocale and GetLocale() == "deDE" ) then
-                    modKeys = gsub(modKeys, "CTRL", "STRG");
+            local modifiers, key = "", name
+            local modifierCount = 0
+            -- The greedy `.*` walks to the LAST dash, which is the one that divides the modifier
+            -- run from the key; gsub's second return then counts the dashes, one per modifier —
+            -- plus one more when the key ITSELF is a dash ("CTRL--"), which is why that binding
+            -- abbreviates as if it had two. The reference's dash-walking loop reaches both of the
+            -- same answers, and both are pinned by keybindings_tests.
+            local _, lastDash = strfind(name, "^.*%-")
+            if lastDash then
+                modifiers = strsub(name, 1, lastDash)
+                key = strsub(name, lastDash + 1)
+                _, modifierCount = gsub(modifiers, "%-", "-")
+                if GetLocale and GetLocale() == "deDE" then
+                    modifiers = gsub(modifiers, "CTRL", "STRG")
                 end
             end
 
-            if ( returnAbbr ) then
-                if ( count > 1 ) then
-                    return "·";
-                else
-                    modKeys = gsub(modKeys, "CTRL", "c");
-                    modKeys = gsub(modKeys, "SHIFT", "s");
-                    modKeys = gsub(modKeys, "ALT", "a");
-                    modKeys = gsub(modKeys, "STRG", "st");
+            if returnAbbr then
+                if modifierCount > 1 then
+                    -- Two modifiers never fit a corner: the whole label becomes the dot.
+                    return "·"
+                end
+                for _, abbreviation in ipairs(MODIFIER_ABBREVIATIONS) do
+                    modifiers = gsub(modifiers, abbreviation[1], abbreviation[2])
                 end
             end
 
-            if ( not prefix ) then
-                prefix = "";
+            prefix = prefix or ""
+            local label
+            if IsMacClient and IsMacClient() then
+                label = getglobal(prefix .. key .. "_MAC")
             end
-            local localizedName = nil;
-            if ( IsMacClient and IsMacClient() ) then
-                localizedName = getglobal(prefix..tempName.."_MAC");
-            end
-            if ( not localizedName ) then
-                localizedName = getglobal(prefix..tempName);
-            end
-            if ( not localizedName ) then
-                localizedName = tempName;
-            end
-            return modKeys..localizedName;
+            label = label or getglobal(prefix .. key) or key
+            return modifiers .. label
         end
 
         -- ref UIParent.lua:1051-1057, transcribed 1:1 (decision 1062). The reference's own
@@ -520,24 +522,26 @@
             frame:SetFrameLevel(frame:GetFrameLevel() + 1)
         end
 
-        -- ── MouseIsOver (ref UIParent.lua l.1388-1417), verbatim ──────────────────────────────
+        -- ── MouseIsOver: is the cursor inside this frame, with optional per-edge padding ─────────
         --
-        -- "is the cursor inside this frame, optionally with per-edge padding" — the idiom every
-        -- hover-driven addon writes, and **9 corpus addons call it**. Missing, each is
-        -- `attempt to call global 'MouseIsOver'`.
+        -- The idiom every hover-driven addon writes, and **9 corpus addons call it** by name.
+        -- Missing, each is `attempt to call global 'MouseIsOver'`. So the CONTRACT is 1.12's, quirks
+        -- and all (ref UIParent.lua l.1388-1417) — three of which look like bugs and are not:
         --
-        -- Transcribed rather than approximated, including the two things that look like bugs and
-        -- are not:
-        --   · the offsets are ADDED to every edge, so a positive `bottomOffset` shrinks the box
-        --     from below while a positive `topOffset` grows it upward. The reference's own caller
-        --     proves the intent — `MouseIsOver(chatFrame, 45, -10, -5, 5)` means 45 up into the
-        --     tab strip, 10 in from the bottom, 5 out each side.
-        --   · a nil `topOffset` zeroes ALL FOUR, so `MouseIsOver(f, nil, 5)` silently ignores the 5.
-        --     That is the reference's `if ( not topOffset ) then` block exactly; an addon written
-        --     against 1.12 may depend on it.
-        -- The reference's `-- Hack to fix a symptom not the real issue` guard on an unresolved rect
-        -- is kept with its comment, because a frame that has never been laid out really does answer
-        -- nil here and returning nil is what callers expect.
+        --   · each offset is ADDED to its own edge, in that axis's positive direction. A positive
+        --     `topOffset` raises the ceiling (growing the box upward) while a positive
+        --     `bottomOffset` raises the floor (shrinking it from below). The reference's own caller
+        --     proves the intent: `MouseIsOver(chatFrame, 45, -10, -5, 5)` is 45 up into the tab
+        --     strip, 10 in from the bottom, 5 out each side.
+        --   · the padding is ALL OR NOTHING on `topOffset`: pass none and the other three are
+        --     dropped with it, so `MouseIsOver(f, nil, 5)` silently ignores the 5. Pass a topOffset
+        --     and omit any of the rest and it is an arithmetic error, not a zero — 1.12 raises
+        --     there too, and an addon written against it may lean on either half.
+        --   · the bounds are strict, so a cursor exactly on an edge is outside.
+        --
+        -- A frame that has never been laid out answers nil for its rect; nil is the right answer to
+        -- hand back for it, and the reference's own comment on that guard ("a symptom not the real
+        -- issue") is about where the unresolved frame came from, not about the guard.
         --
         -- ONE DIVERGENCE, and it is a no-op: the reference divides the cursor by
         -- `frame:GetEffectiveScale()` because 1.12 hands Lua screen pixels. benilla's UI space is
@@ -546,29 +550,23 @@
         -- forever. If a real UI scale ever lands, this is one of the sites that needs it back.
         function MouseIsOver(frame, topOffset, bottomOffset, leftOffset, rightOffset)
             local x, y = GetCursorPosition()
-            local left = frame:GetLeft()
-            local right = frame:GetRight()
-            local top = frame:GetTop()
-            local bottom = frame:GetBottom()
-            if not topOffset then
-                topOffset = 0
-                bottomOffset = 0
-                leftOffset = 0
-                rightOffset = 0
-            end
-            -- Hack to fix a symptom not the real issue
+            local left, right = frame:GetLeft(), frame:GetRight()
+            local top, bottom = frame:GetTop(), frame:GetBottom()
             if not left then
                 return
             end
-            left = left + leftOffset
-            right = right + rightOffset
-            top = top + topOffset
-            bottom = bottom + bottomOffset
-            if (x > left and x < right) and (y > bottom and y < top) then
-                return 1
-            else
-                return nil
+            if not topOffset then
+                topOffset, bottomOffset, leftOffset, rightOffset = 0, 0, 0, 0
             end
+            -- All four edges are padded before any of them is tested, and deliberately so: folding
+            -- the additions into the comparison would let a short circuit swallow the arithmetic
+            -- error that a half-supplied offset set is supposed to raise.
+            left, right = left + leftOffset, right + rightOffset
+            top, bottom = top + topOffset, bottom + bottomOffset
+            if x > left and x < right and y > bottom and y < top then
+                return 1
+            end
+            return nil
         end
     ]]></Script>
 </Ui>

@@ -67,7 +67,7 @@
           the app's single write (ui_unit.rs enrich_unit), not per reader. And UNIT_CLASSIFICATION_
           CHANGED is the repaint wire, edge-fired on that rank — without it the border would only be
           right on re-target, since Update is otherwise the sole caller.
-        - The level slot runs the full CheckLevel law (ref-TargetFrame.lua l.119-142, transcribed in
+        - The level slot runs the full CheckLevel law (ref-TargetFrame.lua l.119-142, re-expressed in
           Update below): corpse or "can't tell" (UnitLevel ≤ 0) → the HighLevelTexture skull;
           otherwise the number, GetDifficultyColor-tinted when attackable, gold when not.
         - The PVP icon landed with decision 0646 (the three-branch law in BenillaUnitFrame_UpdatePvP).
@@ -153,7 +153,7 @@
         -- We answer `GetRaidTargetIndex(unit)` already (0434 §6); this is the other half — what an
         -- addon DRAWS with that number — and without it those lines raise while redrawing a mark.
         --
-        -- TRANSCRIBED VERBATIM, INCLUDING THE REFERENCE'S OWN SLIP: the row is derived with
+        -- KEPT WHOLE, INCLUDING THE REFERENCE'S OWN SLIP: the row is derived with
         -- `/ RAID_TARGET_TEXTURE_ROWS` while the column uses `mod(.., RAID_TARGET_TEXTURE_COLUMNS)`.
         -- Rows and columns are both 4, so the two agree for every index this sheet holds and the
         -- output is right; "fixing" it to divide by COLUMNS computes the same coords today and would
@@ -503,12 +503,12 @@
         end
 
         -- ── Combat feedback: the portrait hit indicator (decision 0576) ──────────────────────
-        -- Ref CombatFeedback.lua, transcribed onto frame-param style (the ref reads `this`).
-        -- Timings/colors/size factors verbatim. The words come from the GLOBALS, exactly as the ref
-        -- builds this table (CombatFeedback.lua l.6-17: CombatFeedbackText["MISS"] = TEXT(MISS)),
-        -- so a localized install shows its own — the app runs the real GlobalStrings.lua off the
-        -- patch chain before this file (ui_script/mod.rs). The enUS literals are the fallback for
-        -- the test harnesses, which load no patch chain.
+        -- Our implementation of what ref CombatFeedback.lua specifies, on frame-param style (the
+        -- ref reads `this`). Timings, colors and size factors are its MEASURED values. The words
+        -- come from the GLOBALS, exactly as the ref builds this table (CombatFeedback.lua l.6-17:
+        -- CombatFeedbackText["MISS"] = TEXT(MISS)), so a localized install shows its own — the app
+        -- runs the real GlobalStrings.lua off the patch chain before this file (ui_script/mod.rs).
+        -- The enUS literals are the fallback for the test harnesses, which load no patch chain.
         COMBATFEEDBACK_FADEINTIME = 0.2
         COMBATFEEDBACK_HOLDTIME = 0.7
         COMBATFEEDBACK_FADEOUTTIME = 0.3
@@ -527,62 +527,91 @@
             REFLECT = REFLECT or "Reflect",
         }
 
+        -- The indicator says one of two things: a NUMBER, when something moved a bar, or a WORD,
+        -- when nothing did. Everything below is that split. `scale` is a multiple of the frame's
+        -- own indicator height — 1 is "as authored" — and the multiples themselves are the
+        -- reference's measurements: half again for a big hit, three quarters for one that was
+        -- stopped, half for one that could never land.
+
+        -- The two events that move a bar the friendly way, and the colour each prints in. (A
+        -- WOUND prints a number too, but its colour depends on the school, so it is settled in
+        -- place below.)
+        local COMBAT_FEEDBACK_GAIN = {
+            HEAL     = { r = 0.0, g = 1.0, b = 0.0 },
+            ENERGIZE = { r = 0.41, g = 0.8, b = 0.94 },
+        }
+
+        -- The words that do not print at the indicator's authored height. Everything else does.
+        local COMBAT_FEEDBACK_WORD_SCALE = {
+            IMMUNE = 0.5,
+            BLOCK  = 0.75,
+        }
+
+        -- A wound that did no damage was stopped by one of three things, and in each case the
+        -- flag naming it is also the key of the word for it. Anything else was a plain miss.
+        local COMBAT_FEEDBACK_SOAKED = { ABSORB = 1, BLOCK = 1, RESIST = 1 }
+
+        -- What a zero-damage wound reads as: the word, and the size it prints at. Being stopped
+        -- reads small; missing outright reads full size, because a miss is the ordinary case.
+        local function CombatFeedback_Stopped(flags)
+            if COMBAT_FEEDBACK_SOAKED[flags] then
+                return CombatFeedbackText[flags], 0.75
+            end
+            return CombatFeedbackText["MISS"], 1.0
+        end
+
+        -- The size a landed blow reads at. A crushing blow is as loud as a critical; a glancing
+        -- one is as quiet as a soak.
+        local function CombatFeedback_HitScale(flags)
+            if flags == "CRITICAL" or flags == "CRUSHING" then
+                return 1.5
+            elseif flags == "GLANCING" then
+                return 0.75
+            end
+            return 1.0
+        end
+
         function CombatFeedback_OnCombatEvent(frame, event, flags, amount, type)
             local feedbackText = frame.feedbackText
             if not feedbackText then return end
-            local fontHeight = frame.feedbackFontHeight
-            local text = ""
+
+            -- The default reading, which most events take unchanged: this event's own word, at the
+            -- authored height, in white. An event with no word at all prints nothing, which is the
+            -- honest thing to do with a feedback kind we do not have a string for.
+            local text = CombatFeedbackText[event]
+            local scale = 1.0
             local r, g, b = 1.0, 1.0, 1.0
 
-            if event == "IMMUNE" then
-                fontHeight = fontHeight * 0.5
-                text = CombatFeedbackText[event]
-            elseif event == "WOUND" then
-                if amount ~= 0 then
-                    if flags == "CRITICAL" or flags == "CRUSHING" then
-                        fontHeight = fontHeight * 1.5
-                    elseif flags == "GLANCING" then
-                        fontHeight = fontHeight * 0.75
-                    end
-                    -- type > 0 = a spell school: the number reads yellow, physical white.
+            if event == "WOUND" then
+                if amount == 0 then
+                    text, scale = CombatFeedback_Stopped(flags)
+                else
+                    text = amount
+                    scale = CombatFeedback_HitScale(flags)
+                    -- A non-zero school means a spell landed it: spell damage prints yellow where
+                    -- a physical hit prints white.
                     if type > 0 then
                         r, g, b = 1.0, 1.0, 0.0
                     end
-                    text = amount
-                elseif flags == "ABSORB" then
-                    fontHeight = fontHeight * 0.75
-                    text = CombatFeedbackText["ABSORB"]
-                elseif flags == "BLOCK" then
-                    fontHeight = fontHeight * 0.75
-                    text = CombatFeedbackText["BLOCK"]
-                elseif flags == "RESIST" then
-                    fontHeight = fontHeight * 0.75
-                    text = CombatFeedbackText["RESIST"]
-                else
-                    text = CombatFeedbackText["MISS"]
-                end
-            elseif event == "BLOCK" then
-                fontHeight = fontHeight * 0.75
-                text = CombatFeedbackText[event]
-            elseif event == "HEAL" then
-                text = amount
-                r, g, b = 0.0, 1.0, 0.0
-                if flags == "CRITICAL" then
-                    fontHeight = fontHeight * 1.5
-                end
-            elseif event == "ENERGIZE" then
-                text = amount
-                r, g, b = 0.41, 0.8, 0.94
-                if flags == "CRITICAL" then
-                    fontHeight = fontHeight * 1.5
                 end
             else
-                text = CombatFeedbackText[event]
+                local gain = COMBAT_FEEDBACK_GAIN[event]
+                if gain then
+                    text = amount
+                    r, g, b = gain.r, gain.g, gain.b
+                    -- A critical heal or power gain reads big. Note this is the ONLY flag that
+                    -- resizes one — a wound's crushing/glancing legs do not apply here.
+                    if flags == "CRITICAL" then
+                        scale = 1.5
+                    end
+                else
+                    scale = COMBAT_FEEDBACK_WORD_SCALE[event] or 1.0
+                end
             end
 
             frame.feedbackStartTime = GetTime()
 
-            feedbackText:SetTextHeight(fontHeight)
+            feedbackText:SetTextHeight(frame.feedbackFontHeight * scale)
             feedbackText:SetText(text)
             feedbackText:SetTextColor(r, g, b)
             feedbackText:SetAlpha(0.0)
@@ -615,7 +644,7 @@
 
         -- Pull the unit's current state and repaint. A non-existent unit hides the whole frame.
         -- The classification border art (TargetFrame_CheckClassification, ref-TargetFrame.lua
-        -- l.205-218) — transcribed branch for branch, and the shape is the surprise: 1.12 has FIVE
+        -- l.205-218) — re-expressed branch for branch, and the shape is the surprise: 1.12 has FIVE
         -- classifications but only THREE border textures, because elite, rareelite and worldboss all
         -- take the same Elite art. There is no rare-elite border in this build and no rare-elite
         -- tooltip word either (the level line's rank table is {"", ELITE, ELITE, BOSS, ""}), so
@@ -774,7 +803,7 @@
         MAX_TARGET_DEBUFFS = 16
         MAX_TARGET_BUFFS = 5
 
-        -- TargetDebuffButton_Update (ref-TargetFrame.lua l.263-387), transcribed onto the Era API
+        -- TargetDebuffButton_Update (ref-TargetFrame.lua l.263-387), re-expressed onto the Era API
         -- (decision 0255: UnitBuff returns name,icon,count,debuffType,… — the 1.12 original returned
         -- the texture first). Only called with a live target (UnitFrame_Update guards).
         -- DebuffTypeColor is defined by BuffFrame.xml, which loads AFTER this file — safe, because
@@ -883,7 +912,7 @@
             end
         end
 
-        -- The status flash's paint (ref PlayerFrame_UpdateStatus, transcribed onto frame-param
+        -- The status flash's paint (ref PlayerFrame_UpdateStatus, re-expressed onto frame-param
         -- style; decision 1082). Priority is the ref's: RESTING wins over combat — sitting in an
         -- inn mid-auto-attack shows the zzz — then the auto-attack state (gold ring/zzz vs red
         -- ring/swords/red disc), then bare swords for on-someone's-aggro-list, then nothing.
@@ -976,26 +1005,34 @@
             UIDropDownMenu_Initialize(this, TargetFrameDropDown_Initialize, "MENU")
         end
 
-        function TargetFrameDropDown_Initialize()
-            local menu
-            local name
+        -- Which menu the CURRENT target gets, and the heading that menu needs (only the bare mark
+        -- list carries one — the unit menus title themselves from the unit). Most specific first:
+        --   yourself                     → SELF
+        --   your own pet                 → PET. Selecting your pet and right-clicking the TARGET
+        --                                  frame is still the pet's menu; the ref's own second
+        --                                  branch (TargetFrame.lua l.440-441), which sat as a
+        --                                  comment here until the "pet" token (0990) and then the
+        --                                  menu itself (1066).
+        --   anything that is not a player → an NPC, which gets only the raid-mark list
+        --   a player, in your party or not → PARTY / PLAYER
+        local function TargetFrameMenu()
             if UnitIsUnit("target", "player") then
-                menu = "SELF"
-            elseif UnitIsUnit("target", "pet") then
-                -- Selecting your own pet and right-clicking the TARGET frame gives you the pet
-                -- menu — the ref's own second branch (TargetFrame.lua l.440-441), which sat as a
-                -- comment here until the "pet" token (0990) and then the menu itself (1066).
-                menu = "PET"
-            elseif UnitIsPlayer("target") then
-                if UnitInParty("target") then
-                    menu = "PARTY"
-                else
-                    menu = "PLAYER"
-                end
-            else
-                menu = "RAID_TARGET_ICON"
-                name = RAID_TARGET_ICON
+                return "SELF"
             end
+            if UnitIsUnit("target", "pet") then
+                return "PET"
+            end
+            if not UnitIsPlayer("target") then
+                return "RAID_TARGET_ICON", RAID_TARGET_ICON
+            end
+            if UnitInParty("target") then
+                return "PARTY"
+            end
+            return "PLAYER"
+        end
+
+        function TargetFrameDropDown_Initialize()
+            local menu, name = TargetFrameMenu()
             if menu then
                 UnitPopup_ShowMenu(TargetFrameDropDown, menu, "target", name)
             end
@@ -1594,7 +1631,8 @@
     </Frame>
 
     <!--
-        THE PET FRAME (decision 0990; ref PetFrame.xml + PetFrame.lua, quoted). 128×53 parented to
+        THE PET FRAME (decision 0990). Geometry and art are MEASURED off ref PetFrame.xml +
+        PetFrame.lua and the behaviour is theirs; the code is our own. 128×53 parented to
         the player frame at TOPLEFT (80,-60) — a static anchor, deliberately: the reference does not
         list PetFrame in UIPARENT_MANAGED_FRAME_POSITIONS at all, because it rides its parent.
 
@@ -1611,8 +1649,8 @@
 
         The PET RIGHT-CLICK MENU is no longer deferred either — decision 1066 built the last of
         the five things it was waiting on (the pet paper doll, the fifth, landed as 1057). The
-        frame's else arm opens PetFrameDropDown below; the rows, their fork and their dialogs are
-        UnitPopup.xml's.
+        frame's non-left-click arm opens PetFrameDropDown below; the rows, their fork and their
+        dialogs are UnitPopup.xml's.
 
         STILL DEFERRED, with its reason:
         - PartyMemberBuffTooltip on hover (the ref's OnEnter panel): it belongs to the party
@@ -1719,32 +1757,44 @@
             PetFrame_SetHappiness()
         end
 
-        -- ref PetFrame_SetHappiness (PetFrame.lua l.132-156), quoted (decision 1005).
+        -- ── The happiness face (decision 1005; ref PetFrame_SetHappiness, PetFrame.lua l.132-156)
         --
+        -- `Interface\PetPaperDollFrame\UI-PetHappiness` is one row of three faces, and each cut is
+        -- a MEASURED value off that file. The buckets run RIGHT to left across the strip — bucket
+        -- 1 (unhappy) takes the rightmost cut and bucket 3 (happy) sits at x=0 — which is why the
+        -- left edges below descend as the index climbs. A bucket outside 1..3 selects no cell at
+        -- all and the icon keeps whatever face it was already wearing, deliberately: see the note
+        -- on bucket 0 below.
+        local PET_HAPPINESS_CELL = {
+            { 0.375, 0.5625, 0, 0.359375 },
+            { 0.1875, 0.375, 0, 0.359375 },
+            { 0, 0.1875, 0, 0.359375 },
+        }
+
         -- `GetPetHappiness` hands back a PRE-BUCKETED 1/2/3 — the client does the thresholding
         -- against PetPersonality.dbc, not this function — plus the two numbers that bucket
         -- selects. Three things here are load-bearing and each is the reference's own:
-        --   * the hide test is `not happiness or not isHunterPet`, so a bucket of **0** (truthy in
-        --     Lua) leaves the icon SHOWING with whatever texcoords it had. Testing `happiness == 0`
-        --     or coercing 0 to nil would hide a frame the reference shows.
-        --   * the three texcoord cuts run 3/2/1 left-to-right across the strip — happy is at x=0.
+        --   * the hide test is on the bucket being ABSENT, not on it being zero, so a bucket of
+        --     **0** (truthy in Lua) leaves the icon SHOWING with whatever texcoords it had.
+        --     Testing `happiness == 0` or coercing 0 to nil would hide a frame the reference shows.
+        --   * only a HUNTER's pet has a face at all — `HasPetUI`'s second return is the whole gate,
+        --     and its first return is nothing to do with this frame.
         --   * the loyalty line is chosen by the SIGN of loyaltyRate, which is why that return is
-        --     unscaled and allowed to be negative.
+        --     unscaled and allowed to be negative. Exactly zero means "steady", and says nothing.
         function PetFrame_SetHappiness()
             local happiness, damagePercentage, loyaltyRate = GetPetHappiness()
-            local hasPetUI, isHunterPet = HasPetUI()
-            if not happiness or not isHunterPet then
+            local _, isHunterPet = HasPetUI()
+            if not (happiness and isHunterPet) then
                 PetFrameHappiness:Hide()
                 return
             end
             PetFrameHappiness:Show()
-            if happiness == 1 then
-                PetFrameHappinessTexture:SetTexCoord(0.375, 0.5625, 0, 0.359375)
-            elseif happiness == 2 then
-                PetFrameHappinessTexture:SetTexCoord(0.1875, 0.375, 0, 0.359375)
-            elseif happiness == 3 then
-                PetFrameHappinessTexture:SetTexCoord(0, 0.1875, 0, 0.359375)
+
+            local cell = PET_HAPPINESS_CELL[happiness]
+            if cell then
+                PetFrameHappinessTexture:SetTexCoord(cell[1], cell[2], cell[3], cell[4])
             end
+
             PetFrameHappiness.tooltip = getglobal("PET_HAPPINESS" .. happiness)
             PetFrameHappiness.tooltipDamage = format(PET_DAMAGE_PERCENTAGE, damagePercentage)
             if loyaltyRate < 0 then
@@ -1754,6 +1804,27 @@
             else
                 PetFrameHappiness.tooltipLoyalty = nil
             end
+        end
+
+        -- The happiness face's hover. Both extra lines are drawn the same way — plain white,
+        -- nothing in the right-hand column — and either can be absent, so the stanza is written
+        -- once. The whole tooltip waits on the headline: until SetHappiness has run there is
+        -- nothing to say, and an empty plate is worse than none.
+        local function AddHappinessTooltipLine(text)
+            if text then
+                GameTooltip:AddLine(text, "", 1, 1, 1)
+            end
+        end
+
+        function BenillaPetHappiness_OnEnter(frame)
+            if not frame.tooltip then
+                return
+            end
+            GameTooltip:SetOwner(frame, "ANCHOR_RIGHT")
+            GameTooltip:SetText(frame.tooltip)
+            AddHappinessTooltipLine(frame.tooltipDamage)
+            AddHappinessTooltipLine(frame.tooltipLoyalty)
+            GameTooltip:Show()
         end
 
         -- The four debuff buttons (ref PetFrame.xml's $parentDebuff1..4 over RefreshBuffs). The pet
@@ -1801,26 +1872,30 @@
             PetFrameAttackMode:SetVertexColor(1.0, 1.0, 1.0, alpha)
         end
 
-        -- ref PetFrame_OnClick, now whole (decision 1066 built the right branch). Its FIRST leg is
-        -- the one that is easy to drop: with a spell armed, a RIGHT click disarms rather than
-        -- opening the menu, and it precedes both branches.
+        -- Clicking the pet frame (decision 1066 built the right-hand half). The LEFT button hands
+        -- the pet whatever the cursor is carrying; every other button opens its menu — except for
+        -- the one case that is easy to drop, a RIGHT click with a spell already armed, which puts
+        -- the spell away instead. That exception is the right button's alone: a middle click while
+        -- casting still opens the menu.
         function PetFrame_OnClick(button)
-            if SpellIsTargeting() and button == "RightButton" then
-                SpellStopTargeting()
+            if button ~= "LeftButton" then
+                if button == "RightButton" and SpellIsTargeting() then
+                    SpellStopTargeting()
+                else
+                    -- No anchor arguments, unlike the player and target frames: this menu opens at
+                    -- the CURSOR (ref PetFrame.lua l.128).
+                    ToggleDropDownMenu(1, nil, PetFrameDropDown)
+                end
                 return
             end
-            if button == "LeftButton" then
-                if SpellIsTargeting() then
-                    SpellTargetUnit("pet")
-                elseif CursorHasItem() then
-                    DropItemOnUnit("pet")
-                else
-                    TargetUnit("pet")
-                end
+            -- Most specific first: an armed spell binds to the pet, then a held item drops on it
+            -- (this is how you feed one), and with an empty cursor the click simply selects it.
+            if SpellIsTargeting() then
+                SpellTargetUnit("pet")
+            elseif CursorHasItem() then
+                DropItemOnUnit("pet")
             else
-                -- No anchor arguments, unlike the player and target frames: the ref opens this one
-                -- at the CURSOR (PetFrame.lua l.128).
-                ToggleDropDownMenu(1, nil, PetFrameDropDown)
+                TargetUnit("pet")
             end
         end
 
@@ -2006,17 +2081,7 @@
                 </Layers>
                 <Scripts>
                     <OnEnter>
-                        if this.tooltip then
-                            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-                            GameTooltip:SetText(this.tooltip)
-                            if this.tooltipDamage then
-                                GameTooltip:AddLine(this.tooltipDamage, "", 1, 1, 1)
-                            end
-                            if this.tooltipLoyalty then
-                                GameTooltip:AddLine(this.tooltipLoyalty, "", 1, 1, 1)
-                            end
-                            GameTooltip:Show()
-                        end
+                        BenillaPetHappiness_OnEnter(this)
                     </OnEnter>
                     <OnLeave>
                         GameTooltip:Hide()

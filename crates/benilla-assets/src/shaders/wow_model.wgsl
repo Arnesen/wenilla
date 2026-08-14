@@ -46,9 +46,27 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     pbr_bindings,
-    forward_io::{VertexOutput, FragmentOutput},
+    forward_io::VertexOutput,
     mesh_view_bindings::view,
     mesh_functions,
+}
+
+// Our own fragment output, so the SKY lane can force the far depth. Bevy's `forward_io::FragmentOutput`
+// is `@location(0) color` and nothing else (bevy_pbr 0.18.1 `forward_io.wgsl`), so this is that struct
+// plus one optional builtin — not a divergence from it.
+//
+// **`WOW_SKY_DEPTH` is a pipeline-key branch, never an unconditional field.** Declaring
+// `@builtin(frag_depth)` disables early-Z for the whole pipeline, and the model lane draws every
+// doodad, creature and WMO wall in the frame. The def is pushed only for the WMO-skybox lane
+// (`clutter_fade.z` bit 13, `model_render::SKY_DEPTH_MARKER`), which is one camera-anchored model.
+struct WowFragOut {
+    @location(0) color: vec4<f32>,
+#ifdef WOW_SKY_DEPTH
+    // Reverse-Z "infinitely far", under bevy's `GreaterEqual` test — the sky depth law
+    // (`benilla_world::sky_order`, "The depth law"): the world paints over the sky whatever the
+    // shell's radius, and the sky can never land in front of world geometry.
+    @builtin(frag_depth) depth: f32,
+#endif
 }
 
 // Per-material model uniforms packed at binding 100 (see `WowModelExt` in terrain.rs). Light + fog + the
@@ -492,7 +510,7 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 }
 
 @fragment
-fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // HARD FAR-CLIP WALL (faithful `farclip` ~777 yd) — see terrain.wgsl. Per-pixel discard beyond the
     // projection far plane (planar eye-Z), so distant buildings/trees reveal closest-part-first and the
     // sky/WDL shows behind. `wow_light.fog_params.w` = farclip (0 ⇒ disabled). Clutter (≤70 yd) never hits it.
@@ -986,7 +1004,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     }
 
 
-    var out: FragmentOutput;
+    var out: WowFragOut;
+#ifdef WOW_SKY_DEPTH
+    out.depth = 0.0;
+#endif
     // Raw gamma out (GAMMA LANE, 0161 — the frame's one decode is the FFXGlow combine). Alpha = the
     // faded cutout alpha (tex × fade) for the blend twin; ignored (blend off) on steady/opaque draws.
     // OPAQUE-INTENT alpha pin (clutter_fade.z bit 3, set in model_render for steady opaque/alpha-key

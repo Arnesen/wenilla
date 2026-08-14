@@ -1,7 +1,10 @@
 <!--
-    The reference's `ItemButtonTemplate.lua` helper family (transcribed whole, like
-    TextStatusBar.xml) — the eight `SetItemButton*` globals every 1.12 window uses to paint an item
-    slot: its icon, its stack count, its merchant stock line, and the four vertex-colour verbs.
+    Our implementation of the eight `SetItemButton*` globals every 1.12 window uses to paint an item
+    slot: its icon, its stack count, its merchant stock line, and the four vertex-colour verbs. The
+    specification is the reference's `ItemButtonTemplate.lua` — the names, the argument order and the
+    behaviour of every branch are its contract; the code below is ours, and it is factored the way
+    eight near-identical verbs want to be factored (one region lookup, one tint verb) rather than the
+    way eight separately-written ones came out.
 
     **Why this file exists, and what it cost to be without it.** The director installed Bagnon, hit
     B, and got a frame with a title and a gold line and NO BAG SLOTS. `Bagnon_Core/core/Item.lua`
@@ -17,8 +20,8 @@
     reproduction.
 
     These are FrameXML, not engine (decision 1190's split): the real client ships them as Lua in
-    `Interface\FrameXML\ItemButtonTemplate.lua`, so they belong here beside our other
-    transcriptions rather than in a Rust binding. Read off the install's own copy with the
+    `Interface\FrameXML\ItemButtonTemplate.lua`, so ours belong here in our own interface rather
+    than in a Rust binding. The specification was read off the install's own copy with the
     `mpqcat` example over `WoW/Data/interface.MPQ` — not from memory.
     (An XML comment may not contain a double hyphen, which is why no command line is spelled out
     here; `benilla-mpq/examples/mpqcat.rs`'s own header carries the invocation.)
@@ -37,8 +40,8 @@
 
     Six addons in all — Bagnon_Core, CT_MailMod, CT_MasterMod, AdvancedTradeSkillWindow,
     QuestHistory, SpecialTalentUI. The last two rows have **zero** corpus callers and are here
-    anyway because this is one reference file transcribed whole and they are two lines each; that
-    is stated rather than dressed up as demand (1210).
+    anyway because the family is one contract and, once the tint verb below is shared, they are one
+    line each; that is stated rather than dressed up as demand (1210).
 
     **The virtual `ItemButtonTemplate` Button is deliberately NOT here.** The harness's template
     demand ranks it at zero on both axes — no corpus addon names it in a `CreateFrame` fourth
@@ -55,29 +58,47 @@
         -- `$parent…` template shape, and it is why these are free functions taking a button rather
         -- than widget methods: any button that follows the naming works, whoever built it.
         --
-        -- Nil guards are the REFERENCE's, not ours — one on `button` per verb, and one on the icon
-        -- region in SetItemButtonDesaturated. A missing region anywhere else raises, and that is
-        -- the right loudness: "this is not an item button" is a real mistake, and 1203's lesson is
-        -- that the silent version of a failure is the expensive one.
+        -- TWO DIFFERENT NILS, and the difference is the whole error policy of this file.
+        -- A nil BUTTON is a no-op everywhere: callers hand us whatever their loop is holding, and
+        -- the reference tolerates that in all eight verbs, so we do too. A button that is missing
+        -- the REGION is not tolerated — the lookup yields nil and the very next `:` raises. That
+        -- loudness is deliberate: "this is not an item button" is a real mistake by the caller, and
+        -- 1203's lesson is that the silent version of a failure is the expensive one.
+
+        -- One named region off a button, which is the only address these verbs ever compute. Nil in,
+        -- nil out, so the button guard reads as one expression instead of eight copied early
+        -- returns.
+        local function region(button, suffix)
+            return button and getglobal(button:GetName() .. suffix)
+        end
+
+        -- Four of the eight differ in nothing but which region they tint, so they share the verb
+        -- and name the region. The guard is on the BUTTON and deliberately not on the region it
+        -- resolved: a nil button is the tolerated case, a button carrying no such region is the
+        -- loud one. `texture` is a local rather than an inline call only so that the raise names
+        -- which lookup came back empty.
+        local function tint(button, suffix, r, g, b)
+            local texture = region(button, suffix)
+            if button then
+                texture:SetVertexColor(r, g, b)
+            end
+        end
 
         function SetItemButtonCount(button, count)
             if not button then
                 return
             end
-            if not count then
-                count = 0
-            end
+            count = count or 0
             button.count = count
+            local label = region(button, "Count")
             -- `isBag` is the reference's own flag for a bag button, where even a single item
-            -- counts as a number worth showing.
+            -- counts as a number worth showing. Above 999 the slot shows a bare `*` — the stack
+            -- is "more than the label can say" — while `button.count` keeps the real number.
             if count > 1 or (button.isBag and count > 0) then
-                if count > 999 then
-                    count = "*"
-                end
-                getglobal(button:GetName() .. "Count"):SetText(count)
-                getglobal(button:GetName() .. "Count"):Show()
+                label:SetText(count > 999 and "*" or count)
+                label:Show()
             else
-                getglobal(button:GetName() .. "Count"):Hide()
+                label:Hide()
             end
         end
 
@@ -89,15 +110,14 @@
             -- string/number comparison Lua refuses — a raise on the only path the default can
             -- reach. Ours defaults to 0, which is what the branch below actually means. Not aping
             -- a quirk (method step 3); the behaviour on every reachable path is identical.
-            if not numInStock then
-                numInStock = 0
-            end
+            numInStock = numInStock or 0
             button.numInStock = numInStock
+            local label = region(button, "Stock")
             if numInStock > 0 then
-                getglobal(button:GetName() .. "Stock"):SetText(format(MERCHANT_STOCK, numInStock))
-                getglobal(button:GetName() .. "Stock"):Show()
+                label:SetText(format(MERCHANT_STOCK, numInStock))
+                label:Show()
             else
-                getglobal(button:GetName() .. "Stock"):Hide()
+                label:Hide()
             end
         end
 
@@ -105,28 +125,39 @@
             if not button then
                 return
             end
-            -- Show/Hide FIRST, then SetTexture — the reference's order, and it matters: a nil
-            -- texture hides the region rather than leaving an empty quad behind.
+            local icon = region(button, "IconTexture")
+            -- Visibility tracks the ARGUMENT, not the region's contents, and it is settled before
+            -- the texture is assigned: clearing a slot with a nil texture must leave the region
+            -- hidden, never an empty quad standing where the icon was.
             if texture then
-                getglobal(button:GetName() .. "IconTexture"):Show()
+                icon:Show()
             else
-                getglobal(button:GetName() .. "IconTexture"):Hide()
+                icon:Hide()
             end
-            getglobal(button:GetName() .. "IconTexture"):SetTexture(texture)
+            icon:SetTexture(texture)
         end
 
         function SetItemButtonTextureVertexColor(button, r, g, b)
-            if not button then
-                return
-            end
-            getglobal(button:GetName() .. "IconTexture"):SetVertexColor(r, g, b)
+            tint(button, "IconTexture", r, g, b)
+        end
+
+        function SetItemButtonNormalTextureVertexColor(button, r, g, b)
+            tint(button, "NormalTexture", r, g, b)
+        end
+
+        function SetItemButtonNameFrameVertexColor(button, r, g, b)
+            tint(button, "NameFrame", r, g, b)
+        end
+
+        function SetItemButtonSlotVertexColor(button, r, g, b)
+            tint(button, "SlotTexture", r, g, b)
         end
 
         function SetItemButtonDesaturated(button, desaturated, r, g, b)
-            if not button then
-                return
-            end
-            local icon = getglobal(button:GetName() .. "IconTexture")
+            -- The one verb whose own nil guard is on the ICON rather than the button: the
+            -- reference checks both, and `region()` collapses them into this single test without
+            -- changing which calls no-op and which raise.
+            local icon = region(button, "IconTexture")
             if not icon then
                 return
             end
@@ -138,37 +169,14 @@
             -- is on the METHOD's existence and the no-shader branch is the one we take. When the
             -- real verb lands this line starts using it with nothing else to change.
             local shaderSupported = icon.SetDesaturated and icon:SetDesaturated(desaturated)
+            -- Undesaturated is full colour whatever the caller passed; desaturated is the caller's
+            -- own tint when they named one AND the shader took it, and the flat grey otherwise.
             if not desaturated then
-                r = 1.0
-                g = 1.0
-                b = 1.0
+                r, g, b = 1.0, 1.0, 1.0
             elseif not r or not shaderSupported then
-                r = 0.5
-                g = 0.5
-                b = 0.5
+                r, g, b = 0.5, 0.5, 0.5
             end
             icon:SetVertexColor(r, g, b)
-        end
-
-        function SetItemButtonNormalTextureVertexColor(button, r, g, b)
-            if not button then
-                return
-            end
-            getglobal(button:GetName() .. "NormalTexture"):SetVertexColor(r, g, b)
-        end
-
-        function SetItemButtonNameFrameVertexColor(button, r, g, b)
-            if not button then
-                return
-            end
-            getglobal(button:GetName() .. "NameFrame"):SetVertexColor(r, g, b)
-        end
-
-        function SetItemButtonSlotVertexColor(button, r, g, b)
-            if not button then
-                return
-            end
-            getglobal(button:GetName() .. "SlotTexture"):SetVertexColor(r, g, b)
         end
     ]]></Script>
 </Ui>

@@ -107,6 +107,7 @@ pub(super) fn update_model_particles(
                         None,
                         None,
                         false,
+                        false, // an effect model is never a skybox
                         &light.0,
                     );
                     // The owner-last draw-order rung, stamped on after the fact: a 3-D model

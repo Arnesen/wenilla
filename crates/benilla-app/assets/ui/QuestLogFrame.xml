@@ -40,10 +40,10 @@
             — a quest with many objectives/a long description/many rewards scrolls and clips at the
             pane's own edge instead of running past the window's bottom (pin §3's doNotScroll
             asymmetry is implemented — see `BenillaQuestLogDetail_Update`'s own comment).
-          - Difficulty coloring is the ref's own `QuestDifficultyColor` table + `GetDifficultyColor`
-            (QUOTED, l.14-20 + l.584-599) over the real `GetQuestGreenRange()` binding — see the
-            function's own comment. (The old `BenillaQuestDifficultyColor` INTERIM and its
-            approximated thresholds are retired.)
+          - Difficulty coloring wears the reference's names and bands (`QuestDifficultyColor` +
+            `GetDifficultyColor`, specified at l.14-20 + l.584-599) over the real
+            `GetQuestGreenRange()` binding — see the function's own comment. (The old
+            `BenillaQuestDifficultyColor` INTERIM and its approximated thresholds are retired.)
           - No headers ship (`benilla-ui`'s `quest_log.rs`: flat entries only, headers need the
             QuestSort/AreaTable DBC join) — the header branch below is dead code today, kept for when
             that join lands rather than re-derived then.
@@ -124,37 +124,41 @@
         local detailLastAppliedHeight = nil
 
         -- ── Difficulty coloring ──────────────────────────────────────────────────────────────────
-        -- QUOTED from ref-QuestLogFrame.lua: the table (l.14-20) and GetDifficultyColor (l.584-599,
-        -- "Used for quests and enemy coloration" — the ref's own comment; the TARGET FRAME's level
-        -- number colors through this exact function too, TargetFrame_CheckLevel l.130). The
-        -- green→grey boundary is the real GetQuestGreenRange() binding (benilla-ui unit.rs — the
-        -- byte-verified grey band the plate/tooltip share; the binding's own byte read is under
-        -- the 2026-07-17 wow-re §5). This retires the BenillaQuestDifficultyColor INTERIM and its
-        -- approximated -2/-10 thresholds. One deviation: the ref assigns its scratch `color` as a
-        -- GLOBAL (vanilla Lua sloppiness); ours is local.
-        QuestDifficultyColor = { }
-        QuestDifficultyColor["impossible"]    = { r = 1.00, g = 0.10, b = 0.10 }
-        QuestDifficultyColor["verydifficult"] = { r = 1.00, g = 0.50, b = 0.25 }
-        QuestDifficultyColor["difficult"]     = { r = 1.00, g = 1.00, b = 0.00 }
-        QuestDifficultyColor["standard"]      = { r = 0.25, g = 0.75, b = 0.25 }
-        QuestDifficultyColor["trivial"]       = { r = 0.50, g = 0.50, b = 0.50 }
-        QuestDifficultyColor["header"]        = { r = 0.7,  g = 0.7,  b = 0.7  }
+        -- The six bands and their exact colors are the reference's contract, not a palette of ours:
+        -- ref-QuestLogFrame.lua's table (l.14-20) and GetDifficultyColor (l.584-599, "Used for
+        -- quests and enemy coloration" — the ref's own comment; the TARGET FRAME's level number
+        -- colors through this same function, TargetFrame_CheckLevel l.130), and `QuestDifficultyColor`
+        -- is a name addons read, so both the global and its six keys are fixed. The green→grey
+        -- boundary is the real GetQuestGreenRange() binding (benilla-ui unit.rs — the byte-verified
+        -- grey band the plate/tooltip share; the binding's own byte read is under the 2026-07-17
+        -- wow-re §5). This retires the BenillaQuestDifficultyColor INTERIM and its approximated
+        -- -2/-10 thresholds.
+        QuestDifficultyColor = {
+            impossible    = { r = 1.00, g = 0.10, b = 0.10 },
+            verydifficult = { r = 1.00, g = 0.50, b = 0.25 },
+            difficult     = { r = 1.00, g = 1.00, b = 0.00 },
+            standard      = { r = 0.25, g = 0.75, b = 0.25 },
+            trivial       = { r = 0.50, g = 0.50, b = 0.50 },
+            header        = { r = 0.70, g = 0.70, b = 0.70 },
+        }
 
+        -- How far ABOVE the player the quest sits picks the band. Note the shape of the last two
+        -- tests: the three hard bands are fixed offsets, but the green/grey boundary is not a
+        -- constant at all — GetQuestGreenRange() widens as the player levels — which is why it is
+        -- asked rather than compared against a number, and why "trivial" is what is left over
+        -- rather than a band with an edge of its own.
         function GetDifficultyColor(level)
-            local color
             local levelDiff = level - UnitLevel("player")
-            if ( levelDiff >= 5 ) then
-                color = QuestDifficultyColor["impossible"]
-            elseif ( levelDiff >= 3 ) then
-                color = QuestDifficultyColor["verydifficult"]
-            elseif ( levelDiff >= -2 ) then
-                color = QuestDifficultyColor["difficult"]
-            elseif ( -levelDiff <= GetQuestGreenRange() ) then
-                color = QuestDifficultyColor["standard"]
-            else
-                color = QuestDifficultyColor["trivial"]
+            if levelDiff >= 5 then
+                return QuestDifficultyColor.impossible
+            elseif levelDiff >= 3 then
+                return QuestDifficultyColor.verydifficult
+            elseif levelDiff >= -2 then
+                return QuestDifficultyColor.difficult
+            elseif -levelDiff <= GetQuestGreenRange() then
+                return QuestDifficultyColor.standard
             end
-            return color
+            return QuestDifficultyColor.trivial
         end
 
         -- ── The list page ────────────────────────────────────────────────────────────────────────
@@ -495,7 +499,7 @@
             BenillaQuestLogDetail_ResizeChild(detailObjAnchorIndex, detailRewardHeight)
         end
 
-        -- ref QuestLog_OnUpdate (QuestLogFrame.lua:96-105), transcribed 1:1 including its
+        -- ref QuestLog_OnUpdate (QuestLogFrame.lua:96-105), re-expressed here including its
         -- UPDATE_DELAY throttle: the countdown is repainted ten times a second, not every frame —
         -- SecondsToTime's output only changes once a second, so anything faster is a re-measure of
         -- an identical string. The flag/accumulator pair is the ref's own (its two fields on
@@ -616,7 +620,7 @@
         --
         -- Guard-for-guard with the ref: ctrl is gated on `this.rewardType ~= "spell"` (l.544), and
         -- so is shift — but on the ELSEIF line itself (l.547), where the giver window's twin puts it
-        -- inside (QuestFrame.lua:121). Same outcome, and transcribed where the ref puts it. Ours
+        -- inside (QuestFrame.lua:121). Same outcome, and kept where the ref puts it. Ours
         -- adds `ChatFrameEditBox and` (ChatFrame.xml is a separate file a window test need not
         -- load — BenillaPaperDollSlot_OnClick's precedent) and a nil-link guard: `link` is nil until
         -- the ask-once item template lands, a state the reference's synchronous item cache never
@@ -634,7 +638,7 @@
             end
         end
 
-        -- The reward-panel layout, ported verbatim from the ref's shared `QuestFrameItems_Update`
+        -- The reward-panel layout, ported from the ref's shared `QuestFrameItems_Update`
         -- (QuestFrame.lua:311-522, the same routine the live QuestFrame reward panel uses) — this
         -- window's v1 subset of it: no spell-reward row (GetQuestLogRewardSpell has no v1 caller,
         -- QuestLogFrame.xml's header comment), capped at BENILLA_QUESTLOG_MAX_ITEMS (6, half the ref's
@@ -792,7 +796,7 @@
             local description, objectivesText = GetQuestLogQuestText()
             getglobal("QuestLogObjectivesText"):SetText(objectivesText or "")
 
-            -- pin §3, QuestLog_UpdateQuestDetails (QuestLogFrame.lua:364-374) verbatim, minus the
+            -- pin §3, QuestLog_UpdateQuestDetails (QuestLogFrame.lua:364-374) followed, minus the
             -- Show/Hide our region model has no verb for: a timed quest gets the "Time Remaining:"
             -- row and pushes Objective1 below it; an untimed one blanks the row (our stand-in for
             -- the ref's :Hide()) and anchors Objective1 straight onto ObjectivesText, so the row
@@ -845,7 +849,7 @@
             -- down by however much dead space the unused tail slots add (this window's own comment
             -- on the FontString). No RequiredMoney branch here (this file's documented v1 gap: no
             -- widget backs GetQuestLogRequiredMoney yet) — that ref branch collapses into the rest.
-            -- The objective-less TIMED branch (ref :432-437) is transcribed: a timed quest with no
+            -- The objective-less TIMED branch (ref :432-437) is kept: a timed quest with no
             -- leaderboard lines hangs the header off the countdown row, not off ObjectivesText.
             local objAnchorIndex = math.min(numObjectives, MAX_OBJECTIVES)
             local descTitle = getglobal("QuestLogDescriptionTitle")
@@ -865,7 +869,7 @@
         end
 
         -- ── The always-visible quest-watch tracker (QuestWatchFrame) ─────────────────────────
-        -- Ref QuestWatch_Update (QuestLogFrame.lua:602-663), transcribed onto the flat 30-line pool
+        -- Ref QuestWatch_Update (QuestLogFrame.lua:602-663), re-expressed onto the flat 30-line pool
         -- (the frame's own XML comment): every paint re-anchors each used line — a quest TITLE drops
         -- -5 below the previous line (ref -4 under its 13px boxes; ours are measured 12s, same
         -- pitch), an OBJECTIVE drops -1 (ref 0) — writes " - "-prefixed objective rows colored by
@@ -1114,11 +1118,13 @@
             HideUIPanel(getglobal("QuestLogFrame"))
         end
 
-        -- ── The abandon two-step (mark on click → confirm on Yes) — the ref's ABANDON_QUEST
-        -- entry on the shared StaticPopup engine (UiPanels.xml, decision 0308 §3), verbatim from
-        -- StaticPopup.lua:749-761: ABANDON_QUEST_CONFIRM 'Abandon "%s"?' (GlobalStrings.lua:5),
-        -- OnAccept = AbandonQuest() + the igQuestLogAbandonQuest kit. exclusive is v1-inert
-        -- (engine header note). ──────────────────────────────────────────────────────────────────
+        -- ── The abandon two-step (mark on click → confirm on Yes) — our `ABANDON_QUEST` entry on
+        -- the shared StaticPopup engine (UiPanels.xml, decision 0308 §3). Every field below is
+        -- StaticPopup's own vocabulary and every value is specified by StaticPopup.lua:749-761:
+        -- the ABANDON_QUEST_CONFIRM wording 'Abandon "%s"?' (GlobalStrings.lua:5), abandoning on
+        -- accept, and the igQuestLogAbandonQuest kit. There is no expression left to choose here,
+        -- which is why this reads the way the specification does. exclusive is v1-inert (engine
+        -- header note). ─────────────────────────────────────────────────────────────────────────
         StaticPopupDialogs["ABANDON_QUEST"] = {
             text = "Abandon \"%s\"?", -- ABANDON_QUEST_CONFIRM
             button1 = "Yes",          -- YES
@@ -1317,7 +1323,7 @@
                 <FontString name="QuestLogTitleText" inherits="GameFontHighlight" justifyH="CENTER" text="Quest Log">
                     <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
                 </FontString>
-                <!-- pin §1, transcribed byte-for-byte (ref QuestLogFrame.xml:204-243): the quest-count
+                <!-- pin §1, geometry/art byte-for-byte (ref QuestLogFrame.xml:204-243): the quest-count
                      pill is the Common-Input-Border 3-texture trio + a FontString RIGHT of the right
                      piece — REPLACING this window's old bare text at (-30,-16), which sat inside the
                      close X's hit area and visually collided with it. -->
@@ -1485,7 +1491,7 @@
                 </Layer></Layers>
             </Frame>
 
-            <!-- pin §2, transcribed byte-for-byte (ref QuestLogFrame.xml:535-588): 6 title rows,
+            <!-- pin §2, geometry byte-for-byte (ref QuestLogFrame.xml:535-588): 6 title rows,
                  300×16, row1 TOPLEFT of the frame at (19,-75); rows 2-6 chain TOPLEFT→prior BOTTOMLEFT
                  at (0,+1) — a TIGHT 1px OVERLAP, not a gap (the ref's own offset is positive). -->
             <Button name="QuestLogTitle1" inherits="BenillaQuestLogTitleTemplate">
@@ -1539,7 +1545,7 @@
                                      QuestLogFrame.xml:648-659, at its own anchor and offset. Untimed quests are the
                                      overwhelming majority, so the row must cost them NOTHING: the ref hides it and
                                      re-SetPoints Objective1 straight onto ObjectivesText (QuestLogFrame.lua:370/374),
-                                     and `BenillaQuestLogDetail_Update` transcribes exactly that pair of branches. Our
+                                     and `BenillaQuestLogDetail_Update` keeps exactly that pair of branches. Our
                                      region model has no Show/Hide for a bare FontString (the recurring comment
                                      below), so the untimed case leaves this string EMPTY — it draws nothing, and
                                      nothing anchors through it, so its 12px sits harmlessly behind Objective1's row
@@ -1762,7 +1768,7 @@
                 </Scripts>
             </ScrollFrame>
 
-            <!-- pin §4, transcribed byte-for-byte (ref QuestLogFrame.xml:451-498): Abandon 125×21 at
+            <!-- pin §4, geometry byte-for-byte (ref QuestLogFrame.xml:451-498): Abandon 125×21 at
                  (17,54), Exit 77×21 at (-43,54). numEntries==0 disables Abandon. -->
             <Button name="QuestLogAbandonButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Abandon Quest">
                 <Size><AbsDimension x="125" y="21"/></Size>
@@ -1843,7 +1849,7 @@
         up front and `QuestWatch_Update` only ever SetTexts/colors them, never creates one.
     -->
     <!-- The always-on quest-watch tracker HUD (ref QuestWatchFrame, QuestLogFrame.xml:963-1146
-         + QuestWatch_Update, QuestLogFrame.lua:602-663), transcribed: TOPRIGHT hangs off the
+         + QuestWatch_Update, QuestLogFrame.lua:602-663), re-expressed: TOPRIGHT hangs off the
          MinimapCluster's BOTTOMRIGHT (+10 up — the cluster art overhangs), an empty 13px
          GameFontNormal spacer (the ref's never-written QuestWatchQuestName) seats the first line,
          and ONE FLAT POOL of 30 lines (MAX_QUESTWATCH_LINES) carries titles and objectives alike —

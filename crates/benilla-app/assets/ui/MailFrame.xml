@@ -7,6 +7,11 @@
         (`benilla-ui/src/script/mail.rs`) + `crate::ui_mail`'s feed/drain. The house dressing
         convention (decisions 0084/0112/0120).
 
+        THE LUA IS OURS. The reference's `MailFrame.lua` is the SPECIFICATION — the function names an
+        addon can call, the event vocabulary, and every branch's observable effect are read off it,
+        and the line cites in the script block are that file's. How any of it is spelled is this
+        file's own business, and several pieces are deliberately not spelled its way.
+
         Where the reference inherits a shared template benilla does NOT ship (UIPanelButtonTemplate,
         UIPanelCloseButton, ItemButtonTemplate, SmallMoneyFrameTemplate, MoneyInputFrameTemplate,
         UIRadioButtonTemplate, FriendsFrameTabTemplate, UIPanelScrollFrameTemplate — grep-verified
@@ -14,7 +19,8 @@
         ANCHORS/sizes kept exactly; the tab pair inherits benilla's CharacterFrameTabButtonTemplate at
         the reference tab anchors. `MailTextFontNormal`/`GameFontRedSmall` DO ship and are used verbatim.
 
-        RENDER APPROXIMATIONS (the only geometry-affecting deviations, all else is verbatim):
+        RENDER APPROXIMATIONS (the only geometry-affecting deviations; every other measurement in the
+        markup below is the reference's own):
           · Unread/read row **desaturation**: the engine has no `SetDesaturation`, so the read icon +
             slot ring grey via vertex color (0.5) — ref MailFrame.lua l.130-141's SetVertexColor legs
             are exact, only the icon's desaturation is the vertex-grey stand-in.
@@ -93,26 +99,53 @@
             end
         end
 
-        -- The tab pair + the four corner-texture swaps (ref MailFrameTab_OnClick l.64-93).
+        -- THE TWO SKINS the window wears (ref MailFrameTab_OnClick l.64-93). The inbox is dressed in
+        -- the item-text parchment, the compose form in the class-trainer panel; four corner slabs
+        -- and the top-left slab's own offset are the whole of the difference between them, so they
+        -- are a table here rather than two copies of the same five calls. `$parentTopLeft` and its
+        -- siblings publish as MailFrameTopLeft…, which is what the corner keys compose.
+        local mailSkin = {
+            inbox = {
+                TopLeft  = "Interface\\ItemTextFrame\\UI-ItemText-TopLeft",
+                TopRight = "Interface\\Spellbook\\UI-SpellbookPanel-TopRight",
+                BotLeft  = "Interface\\ItemTextFrame\\UI-ItemText-BotLeft",
+                BotRight = "Interface\\Spellbook\\UI-SpellbookPanel-BotRight",
+                x = 0, y = 0,
+            },
+            compose = {
+                TopLeft  = "Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft",
+                TopRight = "Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight",
+                BotLeft  = "Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotLeft",
+                BotRight = "Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotRight",
+                -- The trainer art does not sit flush the way the parchment does; the ref's own
+                -- one-pixel nudge is what lines the two skins' outer edges up.
+                x = 2, y = -1,
+            },
+        }
+        local mailCorners = { "TopLeft", "TopRight", "BotLeft", "BotRight" }
+
+        -- Tab 1 is the inbox; anything else is the compose form.
         function MailFrameTab_OnClick(tab)
             if not tab then tab = this:GetID() end
             PanelTemplates_SetTab(MailFrame, tab)
-            if tab == 1 then
+
+            local reading = (tab == 1)
+            if reading then
                 InboxFrame:Show()
                 SendMailFrame:Hide()
-                MailFrameTopLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-TopLeft")
-                MailFrameTopRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-TopRight")
-                MailFrameBotLeft:SetTexture("Interface\\ItemTextFrame\\UI-ItemText-BotLeft")
-                MailFrameBotRight:SetTexture("Interface\\Spellbook\\UI-SpellbookPanel-BotRight")
-                MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", 0, 0)
             else
                 InboxFrame:Hide()
                 SendMailFrame:Show()
-                MailFrameTopLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopLeft")
-                MailFrameTopRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-TopRight")
-                MailFrameBotLeft:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotLeft")
-                MailFrameBotRight:SetTexture("Interface\\ClassTrainerFrame\\UI-ClassTrainer-BotRight")
-                MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", 2, -1)
+            end
+
+            local skin = reading and mailSkin.inbox or mailSkin.compose
+            for _, corner in ipairs(mailCorners) do
+                getglobal("MailFrame" .. corner):SetTexture(skin[corner])
+            end
+            MailFrameTopLeft:SetPoint("TOPLEFT", "MailFrame", "TOPLEFT", skin.x, skin.y)
+
+            if not reading then
+                -- Arriving at the form repaints it and clears the mode a Reply had set.
                 SendMailFrame_Update()
                 SendMailFrame.sendMode = "send"
             end
@@ -191,17 +224,12 @@
                 end
                 index = index + 1
             end
-            -- Page arrows (ref l.188-198).
-            if MailFrame.pageNum == 1 then
-                InboxPrevPageButton:Disable()
-            else
-                InboxPrevPageButton:Enable()
-            end
-            if (MailFrame.pageNum * BENILLA_INBOXITEMS_TO_DISPLAY) < numItems then
-                InboxNextPageButton:Enable()
-            else
-                InboxNextPageButton:Disable()
-            end
+            -- Page arrows (ref l.188-198): back is dead on the first page, forward is dead once
+            -- this page reaches the end of the list. `lastOnPage` is the list index this page's
+            -- last row would carry if it were full.
+            local lastOnPage = MailFrame.pageNum * BENILLA_INBOXITEMS_TO_DISPLAY
+            if MailFrame.pageNum == 1 then InboxPrevPageButton:Disable() else InboxPrevPageButton:Enable() end
+            if lastOnPage < numItems then InboxNextPageButton:Enable() else InboxNextPageButton:Disable() end
             -- InboxCurrentPage is declared in the ref XML (l.329) but NO reference Lua ever writes
             -- it — the real 1.12 window shows nothing there, so neither do we.
         end

@@ -9,7 +9,7 @@
         artifacts, never committed — the 0068/0138 pattern; line cites below are into that
         extraction's own `ref-CharacterFrame.xml`/`.lua`, `ref-PaperDollFrame.xml`/`.lua`,
         `ref-UIParent.lua`, `ref-GlobalStrings.lua`). `CharacterFrameTabButtonTemplate` is ALREADY
-        transcribed in `UiPanels.xml:507-563` (battle-tested by Merchant/QuestLog, 0138) — reused
+        defined in `UiPanels.xml:507-563` (battle-tested by Merchant/QuestLog, 0138) — reused
         here, not redefined.
 
         Docks the left UIPanel slot exactly like Gossip/Merchant/Quest/QuestLog (`UiPanels.xml`
@@ -101,7 +101,7 @@
             shared template's own Scripts block at l.8-37), just keyed off `GetInventorySlotInfo(
             "AmmoSlot")` instead of e.g. `"HeadSlot"`. Whatever `PLAYER_AMMO_ID`/bag-summing happens
             for that particular slot id is the parallel binding's own implementation detail, invisible
-            to this Lua — transcribed here exactly as the ref wires it.
+            to this Lua — re-expressed here exactly as the ref wires it.
           - `$parentStock` (the ammo slot's yellow "in bags" count, ref `ref-PaperDollFrame.xml:
             970-978`): no Lua in this session's extraction ever populates it (likely an ammo-picker-
             addon-only overlay outside this pull) — dropped rather than guessed at.
@@ -310,7 +310,7 @@
         -- keybind path cannot disagree. l.47's trailing PlaySound is the ref's OWN redundant second
         -- igCharacterInfoTab — ToggleCharacter already plays it on the "switch to this tab" path, so
         -- this second call only matters when the window is ALREADY open on this same tab, i.e. the
-        -- HideUIPanel branch — transcribed verbatim rather than "fixed" since it's the ref's own
+        -- HideUIPanel branch — kept rather than "fixed" since it's the ref's own
         -- behavior, not a bug of ours.
         function BenillaCharacterFrameTab_OnClick(id)
             ToggleCharacter(BENILLA_CHARACTERFRAME_SUBFRAMES[id])
@@ -402,7 +402,7 @@
         end
 
         -- ── The paper-doll page (ref PaperDollFrame.lua) ────────────────────────────────────────
-        -- ref PaperDollFrame_OnLoad (l.6-29), the label lines (l.7-13) transcribed verbatim: the
+        -- ref PaperDollFrame_OnLoad (l.6-29), the label lines (l.7-13) kept as the ref has them: the
         -- labels live ONLY in the row template's $parentLabel (gold GameFontNormalSmall, LEFT) and
         -- Lua fills them — never a re-declared region in an instance (the ref's instances carry no
         -- <Layers> at all, and this engine's template expansion appends children, so a re-declared
@@ -432,37 +432,79 @@
             frame:RegisterEvent("UNIT_ATTACK")
         end
 
-        -- ref PaperDollFrame_OnEvent(event, unit) (l.37-76), the unit-token branch only (unit ==
-        -- "player" always true here — no pet/other-unit reuse in phase 1a) and this file's
-        -- registered subset only. `unit` is the DECLARED second parameter, not the `arg1` global:
-        -- the XML passes `arg1` into it exactly as the reference's own does (PaperDollFrame.xml),
-        -- so an addon calling the 1.12 arity is read correctly rather than off a stale global.
+        -- Every row of the sheet, in the order a full repaint fills them. The order is load-bearing
+        -- at the ranged end: SetRangedAttack is what decides `PaperDollFrame.noRanged`, and the two
+        -- ranged rows after it read that flag rather than re-deciding it.
+        --
+        -- Rows are NAMED, not referenced. Resolving each through the global table at call time is
+        -- what the reference's own call-by-name got for free, and the paper-doll setters are prime
+        -- addon-hook territory: a table of captured function values would keep calling the setter an
+        -- addon replaced.
+        local paperDollRows = {
+            "PaperDollFrame_SetLevel",
+            "PaperDollFrame_SetStats",
+            "PaperDollFrame_SetResistances",
+            "PaperDollFrame_SetArmor",
+            "PaperDollFrame_SetDamage",
+            "PaperDollFrame_SetAttackPower",
+            "PaperDollFrame_SetAttackBothHands",
+            "PaperDollFrame_SetRangedAttack",
+            "PaperDollFrame_SetRangedDamage",
+            "PaperDollFrame_SetRangedAttackPower",
+        }
+
+        -- A weapon that changed how hard it hits and one that changed how often move the same four
+        -- rows, so the two events share a list rather than a copy of one.
+        local weaponRows = {
+            "PaperDollFrame_SetDamage",
+            "PaperDollFrame_SetRangedAttack",
+            "PaperDollFrame_SetRangedDamage",
+            "PaperDollFrame_SetAttackBothHands",
+        }
+
+        -- Which rows a single change moves, keyed by the event reporting it. The reference spells
+        -- this out as an if/elseif ladder and then keeps a second, hand-parallel copy of the row
+        -- order in OnShow; one table read two ways cannot drift the way two call lists do.
+        --
+        -- Only this file's registered subset appears (see PaperDollFrame_OnLoad's note on the
+        -- omitted events). PLAYER_ENTERING_WORLD is registered and deliberately absent: the ref's
+        -- one use for it is `CharacterModelFrame:SetUnit("player")`, and our CharacterModelFrame is
+        -- a booth-texture stand-in rather than a live model widget (this file's header) — there is
+        -- no SetUnit to call. It keeps its early return below rather than a row here, because the
+        -- reference returns on it before even the visibility check.
+        local rowsMovedBy = {
+            UNIT_LEVEL = { "PaperDollFrame_SetLevel" },
+            UNIT_STATS = { "PaperDollFrame_SetStats" },
+            UNIT_RESISTANCES = { "PaperDollFrame_SetResistances", "PaperDollFrame_SetArmor" },
+            UNIT_ATTACK = { "PaperDollFrame_SetAttackBothHands" },
+            UNIT_ATTACK_POWER = { "PaperDollFrame_SetAttackPower" },
+            UNIT_DAMAGE = weaponRows,
+            UNIT_ATTACK_SPEED = weaponRows,
+            UNIT_RANGED_ATTACK_POWER = {
+                "PaperDollFrame_SetRangedAttack", "PaperDollFrame_SetRangedAttackPower",
+            },
+        }
+
+        local function paintRows(rows)
+            for i = 1, table.getn(rows) do
+                getglobal(rows[i])()
+            end
+        end
+
+        -- `unit` is the DECLARED second parameter, not the `arg1` global: the XML passes `arg1` into
+        -- it exactly as the reference's own does (PaperDollFrame.xml), so an addon calling the 1.12
+        -- arity is read correctly rather than off a stale global. Only the player's own sheet is
+        -- driven from here (no pet/other-unit reuse in phase 1a), and only while it is on screen —
+        -- a hidden page is repainted wholesale by OnShow when it comes back.
         function PaperDollFrame_OnEvent(event, unit)
-            local frame = this
             if event == "PLAYER_ENTERING_WORLD" then
                 return
             end
-            if not frame:IsVisible() then return end
+            if not this:IsVisible() then return end
             if unit ~= "player" then return end
-            if event == "UNIT_LEVEL" then
-                PaperDollFrame_SetLevel()
-            elseif event == "UNIT_DAMAGE" or event == "UNIT_ATTACK_SPEED" then
-                PaperDollFrame_SetDamage()
-                PaperDollFrame_SetRangedAttack()
-                PaperDollFrame_SetRangedDamage()
-                PaperDollFrame_SetAttackBothHands()
-            elseif event == "UNIT_ATTACK" then
-                PaperDollFrame_SetAttackBothHands()
-            elseif event == "UNIT_RESISTANCES" then
-                PaperDollFrame_SetResistances()
-                PaperDollFrame_SetArmor()
-            elseif event == "UNIT_STATS" then
-                PaperDollFrame_SetStats()
-            elseif event == "UNIT_ATTACK_POWER" then
-                PaperDollFrame_SetAttackPower()
-            elseif event == "UNIT_RANGED_ATTACK_POWER" then
-                PaperDollFrame_SetRangedAttack()
-                PaperDollFrame_SetRangedAttackPower()
+            local rows = rowsMovedBy[event]
+            if rows then
+                paintRows(rows)
             end
         end
 
@@ -471,16 +513,7 @@
         -- vanilla-always-false, so CharacterAmmoSlot simply never has a reason to hide; it ships
         -- with no hidden="true" at all (see its own Button below).
         function PaperDollFrame_OnShow()
-            PaperDollFrame_SetLevel()
-            PaperDollFrame_SetStats()
-            PaperDollFrame_SetResistances()
-            PaperDollFrame_SetArmor()
-            PaperDollFrame_SetDamage()
-            PaperDollFrame_SetAttackPower()
-            PaperDollFrame_SetAttackBothHands()
-            PaperDollFrame_SetRangedAttack()
-            PaperDollFrame_SetRangedDamage()
-            PaperDollFrame_SetRangedAttackPower()
+            paintRows(paperDollRows)
         end
         -- ref PaperDollFrame_OnHide (l.587-592) is entirely commented-out in the ref itself (the
         -- ShoppingTooltip/compare-tooltip lines, OMIT) — nothing to transcribe, no OnHide wired.
@@ -533,9 +566,20 @@
             end
         end
 
-        -- ref PaperDollFrame_SetResistances (l.176-228). `resistanceLevel` is a proper `local` here
-        -- (the ref leaks it as an implicit global, harmless there — Lua 5.0's default — but our
-        -- sandboxed globals table is worth not littering).
+        -- One word for how well a school is covered, from resistance-per-level. The bands descend,
+        -- so the first threshold cleared names it and a ratio of zero or less clears none of them.
+        -- (The reference leaves the answer in an implicit global; a pure function of the ratio is
+        -- both the honest shape and one less name in our sandboxed globals table.)
+        local function resistanceBand(ratio)
+            if ratio > 5 then return RESISTANCE_EXCELLENT end
+            if ratio > 3.75 then return RESISTANCE_VERYGOOD end
+            if ratio > 2.5 then return RESISTANCE_GOOD end
+            if ratio > 1.25 then return RESISTANCE_FAIR end
+            if ratio > 0 then return RESISTANCE_POOR end
+            return RESISTANCE_NONE
+        end
+
+        -- ref PaperDollFrame_SetResistances (l.176-228).
         function PaperDollFrame_SetResistances()
             for i = 1, BENILLA_NUM_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
@@ -561,30 +605,20 @@
                     end
                     frame.tooltip = frame.tooltip .. FONT_COLOR_CODE_CLOSE .. " )"
                 end
+                -- The divisor floors at 20 because the reference does (l.210-211: it reads the level,
+                -- then clamps on the NEXT line — an earlier note here cited l.210 alone and called
+                -- the floor ours). The `or 1` is the only difference: the ref would error on a nil
+                -- level, and nothing is gained by reproducing that.
                 local unitLevel = math.max(UnitLevel("player") or 1, 20)
-                local magicResistanceNumber = resistance / unitLevel
-                local resistanceLevel
-                if magicResistanceNumber > 5 then
-                    resistanceLevel = RESISTANCE_EXCELLENT
-                elseif magicResistanceNumber > 3.75 then
-                    resistanceLevel = RESISTANCE_VERYGOOD
-                elseif magicResistanceNumber > 2.5 then
-                    resistanceLevel = RESISTANCE_GOOD
-                elseif magicResistanceNumber > 1.25 then
-                    resistanceLevel = RESISTANCE_FAIR
-                elseif magicResistanceNumber > 0 then
-                    resistanceLevel = RESISTANCE_POOR
-                else
-                    resistanceLevel = RESISTANCE_NONE
-                end
                 frame.tooltipSubtext = format(RESISTANCE_TOOLTIP_SUBTEXT,
-                    getglobal("RESISTANCE_TYPE" .. resistId), unitLevel, resistanceLevel)
+                    getglobal("RESISTANCE_TYPE" .. resistId), unitLevel,
+                    resistanceBand(resistance / unitLevel))
             end
         end
 
         -- ref PaperDollFrame_SetArmor (l.230-250). NOTE the ref's own third UnitArmor return
-        -- (`armor`) is unused here too — PaperDollFormatStat gets `base`, not `armor`; transcribed
-        -- verbatim, not "fixed".
+        -- (`armor`) is unused here too — PaperDollFormatStat gets `base`, not `armor`; the ref's
+        -- behavior kept, not "fixed".
         function PaperDollFrame_SetArmor(unit, prefix)
             unit = unit or "player"
             prefix = prefix or "Character"
@@ -609,17 +643,85 @@
             local base, modifier = UnitDefense(unit)
             local frame = getglobal(prefix .. "DefenseFrame")
             local text = getglobal(prefix .. "DefenseFrameStatText")
-            local posBuff = 0
-            local negBuff = 0
-            if modifier > 0 then
-                posBuff = modifier
-            elseif modifier < 0 then
-                negBuff = modifier
-            end
-            PaperDollFormatStat(DEFENSE_COLON, base, posBuff, negBuff, frame, text)
+            -- The sign is all that decides which side of the pair the one modifier lands on, and a
+            -- modifier of zero lands on neither.
+            PaperDollFormatStat(DEFENSE_COLON, base, math.max(modifier, 0), math.min(modifier, 0),
+                frame, text)
         end
 
-        -- ref PaperDollFrame_SetDamage (l.274-372).
+        -- ── Weapon swings: the arithmetic and the wording, once ────────────────────────────────────
+        -- Three rows read a swing — main hand, off hand, ranged — and it is the same calculation
+        -- with the same vocabulary each time, so it lives here instead of two and three times over.
+
+        -- The sheet's green and red for damage figures. Byte-identical to Fonts.xml's GREEN/RED
+        -- font-colour codes today, and kept separate on purpose: these are the damage row's own
+        -- colours, and reading them off the font palette would tie one to the other.
+        local DAMAGE_UP_COLOR = "|cff20ff20"
+        local DAMAGE_DOWN_COLOR = "|cffff2020"
+
+        -- What the weapon itself swings for. The numbers we are handed already have the flat
+        -- physical bonuses added and the percent multiplier applied; the row shows those, but the
+        -- tooltip breaks out where they came from, so the un-modified swing has to be recovered.
+        -- Returns that raw range, the modified average, and the gap the modifiers make between them.
+        local function unscaleSwing(minDamage, maxDamage, bonusPos, bonusNeg, percent)
+            local rawMin = (minDamage / percent) - bonusPos - bonusNeg
+            local rawMax = (maxDamage / percent) - bonusPos - bonusNeg
+            local baseDamage = (rawMin + rawMax) * 0.5
+            local fullDamage = (baseDamage + bonusPos + bonusNeg) * percent
+            return rawMin, rawMax, fullDamage, fullDamage - baseDamage
+        end
+
+        -- Both ends of a swing, rounded outwards and floored at 1 — a weapon swinging for a
+        -- fraction of a point still reads as a weapon.
+        local function swingBounds(minDamage, maxDamage)
+            return math.max(math.floor(minDamage), 1), math.max(math.ceil(maxDamage), 1)
+        end
+
+        -- The range as a tooltip writes it, always spaced.
+        local function damageRange(minDamage, maxDamage)
+            local low, high = swingBounds(minDamage, maxDamage)
+            return low .. " - " .. high
+        end
+
+        -- The range as the ROW writes it: spaced while both ends are two digits, tightened up once
+        -- either reaches three and the row starts running out of width.
+        local function damageFigure(minDamage, maxDamage)
+            local low, high = swingBounds(minDamage, maxDamage)
+            if low < 100 and high < 100 then
+                return low .. " - " .. high
+            end
+            return low .. "-" .. high
+        end
+
+        -- The tooltip's account of what modified the raw range: the flat bonus, then the multiplier,
+        -- each coloured by which way it went and left out entirely when it is not in play.
+        local function damageModifiers(tooltip, bonusPos, bonusNeg, percent)
+            if bonusPos > 0 then
+                tooltip = tooltip .. DAMAGE_UP_COLOR .. " +" .. bonusPos .. "|r"
+            end
+            if bonusNeg < 0 then
+                tooltip = tooltip .. DAMAGE_DOWN_COLOR .. " " .. bonusNeg .. "|r"
+            end
+            if percent > 1 then
+                tooltip = tooltip .. DAMAGE_UP_COLOR .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+            elseif percent < 1 then
+                tooltip = tooltip .. DAMAGE_DOWN_COLOR .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+            end
+            return tooltip
+        end
+
+        -- Which way a modified figure is tinted. Only asked once a caller knows something modified
+        -- it, so a zero bonus never reaches here and has no colour of its own.
+        local function damageColor(totalBonus)
+            if totalBonus > 0 then
+                return DAMAGE_UP_COLOR
+            end
+            return DAMAGE_DOWN_COLOR
+        end
+
+        -- ref PaperDollFrame_SetDamage (l.274-372). The off hand is the same swing read twice: the
+        -- flat bonuses and the multiplier are the character's, not the weapon's, so both hands take
+        -- them, and only the speed and the raw range differ.
         function PaperDollFrame_SetDamage(unit, prefix)
             unit = unit or "player"
             prefix = prefix or "Character"
@@ -628,68 +730,29 @@
             local speed, offhandSpeed = UnitAttackSpeed(unit)
             local minDamage, maxDamage, minOffHandDamage, maxOffHandDamage, physicalBonusPos, physicalBonusNeg, percent =
                 UnitDamage(unit)
-            local displayMin = math.max(math.floor(minDamage), 1)
-            local displayMax = math.max(math.ceil(maxDamage), 1)
-            minDamage = (minDamage / percent) - physicalBonusPos - physicalBonusNeg
-            maxDamage = (maxDamage / percent) - physicalBonusPos - physicalBonusNeg
-            local baseDamage = (minDamage + maxDamage) * 0.5
-            local fullDamage = (baseDamage + physicalBonusPos + physicalBonusNeg) * percent
-            local totalBonus = fullDamage - baseDamage
-            local damagePerSecond = math.max(fullDamage, 1) / speed
-            local damageTooltip = math.max(math.floor(minDamage), 1) .. " - " .. math.max(math.ceil(maxDamage), 1)
-            local colorPos = "|cff20ff20"
-            local colorNeg = "|cffff2020"
+            local figure = damageFigure(minDamage, maxDamage)
+            local rawMin, rawMax, fullDamage, totalBonus =
+                unscaleSwing(minDamage, maxDamage, physicalBonusPos, physicalBonusNeg, percent)
+            local damageTooltip = damageRange(rawMin, rawMax)
             if totalBonus == 0 then
-                if displayMin < 100 and displayMax < 100 then
-                    damageText:SetText(displayMin .. " - " .. displayMax)
-                else
-                    damageText:SetText(displayMin .. "-" .. displayMax)
-                end
+                damageText:SetText(figure)
             else
-                local color
-                if totalBonus > 0 then color = colorPos else color = colorNeg end
-                if displayMin < 100 and displayMax < 100 then
-                    damageText:SetText(color .. displayMin .. " - " .. displayMax .. "|r")
-                else
-                    damageText:SetText(color .. displayMin .. "-" .. displayMax .. "|r")
-                end
-                if physicalBonusPos > 0 then
-                    damageTooltip = damageTooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
-                end
-                if physicalBonusNeg < 0 then
-                    damageTooltip = damageTooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
-                end
-                if percent > 1 then
-                    damageTooltip = damageTooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                elseif percent < 1 then
-                    damageTooltip = damageTooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                end
+                damageText:SetText(damageColor(totalBonus) .. figure .. "|r")
+                damageTooltip =
+                    damageModifiers(damageTooltip, physicalBonusPos, physicalBonusNeg, percent)
             end
             damageFrame.damage = damageTooltip
             damageFrame.attackSpeed = speed
-            damageFrame.dps = damagePerSecond
+            damageFrame.dps = math.max(fullDamage, 1) / speed
             if offhandSpeed then
-                minOffHandDamage = (minOffHandDamage / percent) - physicalBonusPos - physicalBonusNeg
-                maxOffHandDamage = (maxOffHandDamage / percent) - physicalBonusPos - physicalBonusNeg
-                local offhandBaseDamage = (minOffHandDamage + maxOffHandDamage) * 0.5
-                local offhandFullDamage = (offhandBaseDamage + physicalBonusPos + physicalBonusNeg) * percent
-                local offhandDamagePerSecond = math.max(offhandFullDamage, 1) / offhandSpeed
-                local offhandDamageTooltip =
-                    math.max(math.floor(minOffHandDamage), 1) .. " - " .. math.max(math.ceil(maxOffHandDamage), 1)
-                if physicalBonusPos > 0 then
-                    offhandDamageTooltip = offhandDamageTooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
-                end
-                if physicalBonusNeg < 0 then
-                    offhandDamageTooltip = offhandDamageTooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
-                end
-                if percent > 1 then
-                    offhandDamageTooltip = offhandDamageTooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                elseif percent < 1 then
-                    offhandDamageTooltip = offhandDamageTooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                end
-                damageFrame.offhandDamage = offhandDamageTooltip
+                local offMin, offMax, offhandFullDamage = unscaleSwing(
+                    minOffHandDamage, maxOffHandDamage, physicalBonusPos, physicalBonusNeg, percent)
+                -- The off hand gets its breakdown unconditionally: it has no row of its own to keep
+                -- plain, only the tooltip's second half.
+                damageFrame.offhandDamage = damageModifiers(damageRange(offMin, offMax),
+                    physicalBonusPos, physicalBonusNeg, percent)
                 damageFrame.offhandAttackSpeed = offhandSpeed
-                damageFrame.offhandDps = offhandDamagePerSecond
+                damageFrame.offhandDps = math.max(offhandFullDamage, 1) / offhandSpeed
             else
                 damageFrame.offhandAttackSpeed = nil
             end
@@ -707,6 +770,26 @@
                 math.max(base + posBuff + negBuff, 0) / ATTACK_POWER_MAGIC_NUMBER)
         end
 
+        -- An attack rating and whatever is moving it, on one row. Nothing moving it means the bare
+        -- number and no hover plate to explain; otherwise the row carries the modified TOTAL, tinted
+        -- by which way it went, and the plate carries the split that produced it. Both the melee row
+        -- and the ranged row read exactly this way.
+        local function setAttackRating(frame, text, base, modifier)
+            if modifier == 0 then
+                text:SetText(base)
+                frame.tooltip = nil
+                return
+            end
+            local color = RED_FONT_COLOR_CODE
+            local sign = " "
+            if modifier > 0 then
+                color = GREEN_FONT_COLOR_CODE
+                sign = " +"
+            end
+            frame.tooltip = base .. color .. sign .. modifier .. FONT_COLOR_CODE_CLOSE
+            text:SetText(color .. (base + modifier) .. FONT_COLOR_CODE_CLOSE)
+        end
+
         -- ref PaperDollFrame_SetAttackBothHands (l.391-417) — the weapon-skill line (decision 0208's
         -- own "to confirm": the equipped-weapon subclass -> skill-id table is UnitAttackBothHands's
         -- own concern, not this file's).
@@ -714,21 +797,8 @@
             unit = unit or "player"
             prefix = prefix or "Character"
             local mainHandAttackBase, mainHandAttackMod = UnitAttackBothHands(unit)
-            local frame = getglobal(prefix .. "AttackFrame")
-            local text = getglobal(prefix .. "AttackFrameStatText")
-            if mainHandAttackMod == 0 then
-                text:SetText(mainHandAttackBase)
-                frame.tooltip = nil
-            else
-                local color = RED_FONT_COLOR_CODE
-                if mainHandAttackMod > 0 then
-                    color = GREEN_FONT_COLOR_CODE
-                    frame.tooltip = mainHandAttackBase .. color .. " +" .. mainHandAttackMod .. FONT_COLOR_CODE_CLOSE
-                else
-                    frame.tooltip = mainHandAttackBase .. color .. " " .. mainHandAttackMod .. FONT_COLOR_CODE_CLOSE
-                end
-                text:SetText(color .. (mainHandAttackBase + mainHandAttackMod) .. FONT_COLOR_CODE_CLOSE)
-            end
+            setAttackRating(getglobal(prefix .. "AttackFrame"),
+                getglobal(prefix .. "AttackFrameStatText"), mainHandAttackBase, mainHandAttackMod)
         end
 
         -- ref PaperDollFrame_SetRangedAttack (l.419-466). `hasRelic`/UnitHasRelicSlot DROPPED
@@ -758,19 +828,7 @@
                 PaperDollFrame_SetRangedDamage()
             end
             if not rangedTexture then return end
-            if rangedAttackMod == 0 then
-                text:SetText(rangedAttackBase)
-                frame.tooltip = nil
-            else
-                local color = RED_FONT_COLOR_CODE
-                if rangedAttackMod > 0 then
-                    color = GREEN_FONT_COLOR_CODE
-                    frame.tooltip = rangedAttackBase .. color .. " +" .. rangedAttackMod .. FONT_COLOR_CODE_CLOSE
-                else
-                    frame.tooltip = rangedAttackBase .. color .. " " .. rangedAttackMod .. FONT_COLOR_CODE_CLOSE
-                end
-                text:SetText(color .. (rangedAttackBase + rangedAttackMod) .. FONT_COLOR_CODE_CLOSE)
-            end
+            setAttackRating(frame, text, rangedAttackBase, rangedAttackMod)
         end
 
         -- ref PaperDollFrame_SetRangedDamage (l.468-537).
@@ -788,42 +846,18 @@
             end
             local rangedAttackSpeed, minDamage, maxDamage, physicalBonusPos, physicalBonusNeg, percent =
                 UnitRangedDamage(unit)
-            local displayMin = math.max(math.floor(minDamage), 1)
-            local displayMax = math.max(math.ceil(maxDamage), 1)
-            minDamage = (minDamage / percent) - physicalBonusPos - physicalBonusNeg
-            maxDamage = (maxDamage / percent) - physicalBonusPos - physicalBonusNeg
-            local baseDamage = (minDamage + maxDamage) * 0.5
-            local fullDamage = (baseDamage + physicalBonusPos + physicalBonusNeg) * percent
-            local totalBonus = fullDamage - baseDamage
+            local figure = damageFigure(minDamage, maxDamage)
+            local rawMin, rawMax, fullDamage, totalBonus =
+                unscaleSwing(minDamage, maxDamage, physicalBonusPos, physicalBonusNeg, percent)
             local damagePerSecond = math.max(fullDamage, 1) / rangedAttackSpeed
-            local tooltip = math.max(math.floor(minDamage), 1) .. " - " .. math.max(math.ceil(maxDamage), 1)
+            local tooltip = damageRange(rawMin, rawMax)
             if totalBonus == 0 then
-                if displayMin < 100 and displayMax < 100 then
-                    damageText:SetText(displayMin .. " - " .. displayMax)
-                else
-                    damageText:SetText(displayMin .. "-" .. displayMax)
-                end
+                damageText:SetText(figure)
             else
-                local colorPos = "|cff20ff20"
-                local colorNeg = "|cffff2020"
-                local color
-                if totalBonus > 0 then color = colorPos else color = colorNeg end
-                if displayMin < 100 and displayMax < 100 then
-                    damageText:SetText(color .. displayMin .. " - " .. displayMax .. "|r")
-                else
-                    damageText:SetText(color .. displayMin .. "-" .. displayMax .. "|r")
-                end
-                if physicalBonusPos > 0 then
-                    tooltip = tooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
-                end
-                if physicalBonusNeg < 0 then
-                    tooltip = tooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
-                end
-                if percent > 1 then
-                    tooltip = tooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                elseif percent < 1 then
-                    tooltip = tooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
-                end
+                damageText:SetText(damageColor(totalBonus) .. figure .. "|r")
+                tooltip = damageModifiers(tooltip, physicalBonusPos, physicalBonusNeg, percent)
+                -- Only the modified case gets a hover plate here: an unmodified bow has nothing to
+                -- explain beyond the figure already on the row.
                 damageFrame.tooltip = tooltip .. " " .. format(DPS_TEMPLATE, damagePerSecond)
             end
             damageFrame.attackSpeed = rangedAttackSpeed
@@ -988,7 +1022,7 @@
             BenillaPaperDollSlot_Update(button)
         end
 
-        -- Left: the reference's modifier fork verbatim (ref l.647-660) — CTRL previews the worn
+        -- Left: the reference's own modifier fork (ref l.647-660) — CTRL previews the worn
         -- item in the dressing room (decision 1060), SHIFT posts its link into an open chat edit
         -- box (decision 1059), and neither falls through to a pickup a real modified click would
         -- never trigger. Plain click: PickupInventoryItem (pick up / place / swap / cancel,
@@ -1191,9 +1225,9 @@
         -- UIParent.lua:2), against which the 0.03 click nudge above is a ~1.7° tap. Every 1.12 model
         -- pane wires it (PaperDollFrame l.222-224, DressUpFrame.xml:202-204, TabardFrame.xml:406-408).
         -- It used to be omitted here for want of `GetButtonState` — that method now answers "PUSHED"
-        -- for a LIVE mouse-held button (decision 0288 P3), so the ref's own loop ships verbatim.
-        -- Verbatim INCLUDES the ref's sign quirk: the held branches run OPPOSITE to the click helpers
-        -- (held-LEFT adds, held-RIGHT subtracts). Not a transcription slip — quoted, not re-derived.
+        -- for a LIVE mouse-held button (decision 0288 P3), so the ref's own loop ships here.
+        -- That INCLUDES the ref's sign quirk: the held branches run OPPOSITE to the click helpers
+        -- (held-LEFT adds, held-RIGHT subtracts). Not a slip of ours — the ref's own, not re-derived.
         function BenillaPaperDollModel_OnUpdate(frame, elapsed)
             local step = elapsed * 2 * PI * ROTATIONS_PER_SECOND
             if getglobal(frame:GetName() .. "RotateLeftButton"):GetButtonState() == "PUSHED" then
@@ -1373,7 +1407,7 @@
                  l.65-78), on the minimize-button art this codebase's close buttons all use (no
                  UIPanelCloseButton template ships — Gossip/Bag/Merchant's own header comments).
                  OnLoad raises the frame level +1 (the same idiom CharacterNameFrame above uses,
-                 transcribed from the ref): the window's own art is PaperDollFrame's BACKGROUND
+                 the ref's own): the window's own art is PaperDollFrame's BACKGROUND
                  layer — a full-window sibling created AFTER this button — so at the shared default
                  level 0 the page's art paints over the button by creation order (order.rs). The ref's
                  close button rides the client's show-time bucket-tail re-insertion instead; benilla

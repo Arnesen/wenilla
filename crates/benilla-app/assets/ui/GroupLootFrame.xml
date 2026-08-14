@@ -1,10 +1,10 @@
 <Ui>
     <!--
         benilla's group-loot roll window (decision 0591) — the Need/Greed/Pass dialog: four stacked
-        `GroupLootFrame`s, transcribed from the real 1.12 client (`LootFrame.xml` l.243-533,
+        `GroupLootFrame`s, re-expressed from the real 1.12 client (`LootFrame.xml` l.243-533,
         `LootFrame.lua` l.246-296, `UIParent.lua` l.513-515/1577 — all extracted, scratchpad
         `WoW/_extracted_framexml/`). Geometry, art paths, and behavior below are QUOTED from those
-        (line citations inline); the Lua is transcribed logic turned onto our own `loot_roll` engine
+        (line citations inline); the Lua is re-expressed logic turned onto our own `loot_roll` engine
         seam (`benilla-ui/src/script/loot_roll.rs`, decision 0591) and its app feed
         (`crates/benilla/src/ui_loot_roll.rs`).
 
@@ -46,7 +46,7 @@
 
         THE DRESSING-ROOM / CHAT-LINK CLICK LANDED (decisions 1059/1060 — this note used to read "no
         dressing room exists", which was true until the room did). The ref icon button's Ctrl-click
-        `DressUpItemLink`/Shift-click `ChatFrameEditBox:Insert` (ref l.353-361) are transcribed in
+        `DressUpItemLink`/Shift-click `ChatFrameEditBox:Insert` (ref l.353-361) are re-expressed in
         `BenillaGroupLootFrame_Icon_OnClick` below, over the `GetLootRollItemLink(rollID)` binding the
         same arc added to `loot_roll.rs`. Still dropped: the ref's `this.hasItem = 1` OnLoad flag
         (ref l.338-340) and its `CursorUpdate()`/`ResetCursor()`/`CursorOnUpdate()` hover-cursor calls
@@ -274,7 +274,7 @@
             GameTooltip:Hide()
         end
 
-        -- The item icon's click (ref $parentIconFrame OnClick, LootFrame.xml l.353-361, transcribed
+        -- The item icon's click (ref $parentIconFrame OnClick, LootFrame.xml l.353-361, re-expressed
         -- whole): CTRL previews the rolled item in the dressing room (decision 1060), SHIFT posts
         -- its link into an open chat edit box (decision 1059) — "link me that" being most of what a
         -- roll popup gets asked. Both read `GetLootRollItemLink(rollID)`, the binding this arc added

@@ -63,6 +63,27 @@ macro_rules! corpus_or_skip {
     };
 }
 
+/// The corpus **and** a client install — for the tests whose subject is a global that comes from
+/// the reference file this client SOURCES off the player's own patch chain rather than shipping
+/// ([`super::reference_ui`], decision 1234).
+///
+/// `corpus_or_skip!` alone is the wrong precondition for them. With the corpus present but no
+/// install, `ContainerFrameItemButton_OnEnter`/`_OnClick` are *legitimately* nil — that is the
+/// documented "no install, no file" behaviour, not a defect — and the test then fails for a reason
+/// that is not a bug. `reference_ui`'s own header already says tests that need the file gate on the
+/// install the way every other client-data test does; these four never got that gate when 1234
+/// added the sourcing seam and the tests in one landing.
+///
+/// It stayed invisible because it only bites where the install is *not* found, which on a dev
+/// machine is only `scripts/gates.sh`'s `player-tests` rung: `--no-default-features` compiles out
+/// the `dev` project-folder candidate, so the `WoW` symlink beside the worktree stops being visible.
+macro_rules! corpus_and_install_or_skip {
+    () => {{
+        let _data = benilla_formats::wow_data_or_skip!();
+        corpus_or_skip!()
+    }};
+}
+
 fn read_toc(root: &Path, name: &str) -> Toc {
     let path = root.join(name).join(format!("{name}.toc"));
     Toc::parse(&benilla_ui::source::decode(
@@ -537,7 +558,7 @@ fn the_roster_seat_names_the_character_the_addons_will_meet() {
 /// hover over every slot raised and no tooltip ever appeared.
 #[test]
 fn hovering_a_bagnon_slot_shows_the_items_tooltip() {
-    let root = corpus_or_skip!();
+    let root = corpus_and_install_or_skip!();
     let mut s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
 
@@ -574,7 +595,7 @@ fn hovering_a_bagnon_slot_shows_the_items_tooltip() {
 /// `PickupContainerItem(this:GetParent():GetID(), this:GetID())`. The observable is the cursor.
 #[test]
 fn left_clicking_a_bagnon_slot_picks_the_item_up() {
-    let root = corpus_or_skip!();
+    let root = corpus_and_install_or_skip!();
     let mut s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
 
@@ -615,7 +636,7 @@ fn left_clicking_a_bagnon_slot_picks_the_item_up() {
 /// `UseContainerItem(bag, slot)` — use/equip the item.
 #[test]
 fn right_clicking_a_bagnon_slot_uses_the_item() {
-    let root = corpus_or_skip!();
+    let root = corpus_and_install_or_skip!();
     let mut s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
 
@@ -638,7 +659,7 @@ fn right_clicking_a_bagnon_slot_uses_the_item() {
 /// `ignoreModifiers` arm. Driven as a real gesture: press, move past the threshold, release.
 #[test]
 fn dragging_a_bagnon_slot_picks_the_item_up() {
-    let root = corpus_or_skip!();
+    let root = corpus_and_install_or_skip!();
     let mut s = open_bagnon(&root);
     let occupied = bagnon_button_for_slot(&s, 0, 1);
     let empty = bagnon_button_for_slot(&s, 0, 2);

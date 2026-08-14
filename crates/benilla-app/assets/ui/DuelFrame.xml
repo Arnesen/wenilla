@@ -1,10 +1,13 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!--
-        The duel UI (decision 0633): the reference's two duel dialogs on the shared StaticPopup
-        engine (UiPanels.xml) plus the UIParent duel-event driver, transcribed from the patch-chain
-        FrameXML (mpqx extraction, decision 0246): StaticPopup.lua l.1103-1120 (DUEL_REQUESTED +
-        DUEL_OUTOFBOUNDS), UIParent.lua l.98-101 (the registrations) + l.378-393 (the event arms).
-        Strings verbatim from GlobalStrings.lua.
+        The duel UI (decision 0633): the two duel dialogs on our shared StaticPopup engine
+        (UiPanels.xml) plus the duel-event driver. The patch-chain FrameXML (mpqx extraction,
+        decision 0246) is the SPECIFICATION — StaticPopup.lua l.1103-1120 (DUEL_REQUESTED +
+        DUEL_OUTOFBOUNDS), UIParent.lua l.98-101 (the registrations) + l.378-393 (the event arms)
+        — and what it fixes is contract: the two dialog keys, the StaticPopupDialogs field names,
+        the sound kit and the two timeouts are all addressed by name, so they are reproduced
+        exactly while the entries around them are written here in our own shape. The strings are
+        the shipped enUS values from GlobalStrings.lua, quoted as data.
 
         Duels have no window of their own — these two dialogs ARE the whole duel UI. Everything
         else is engine-side: the "Duel starting: N" countdown and the outcome line are
@@ -20,40 +23,45 @@
         the forfeit is the server's.
     -->
     <Script><![CDATA[
-        -- ── Strings (GlobalStrings.lua, verbatim) ───────────────────────────────────────────────
+        -- ── Strings (the shipped enUS GlobalStrings.lua values, quoted as data) ─────────────────
         local DUEL_REQUESTED = "%s has challenged you to a duel."            -- l.957
         local DUEL_OUTOFBOUNDS_TIMER = "Exiting duel area, you will forfeit in %d %s."  -- l.956
         local ACCEPT = "Accept"
         local DECLINE = "Decline"
 
-        -- ── The challenge dialog — StaticPopup.lua l.1103-1116, verbatim ────────────────────────
-        -- No accept-guard flag (unlike PARTY_INVITE): the ref's entry declines only on an explicit
+        -- ── The challenge dialog (spec: StaticPopup.lua l.1103-1116) ────────────────────────────
+        -- Written scalars-first, handlers-last: what the dialog IS, then what answering it does.
+        --
+        -- No accept-guard flag (unlike PARTY_INVITE): the entry declines only on an explicit
         -- OnCancel, so a timeout or an override hides it WITHOUT sending anything. That is not an
         -- oversight to "fix" — the server's own 60 s is not a thing either; an unanswered challenge
-        -- simply sits until one side acts. ESC does decline (hideOnEscape routes through OnCancel).
+        -- simply sits until one side acts.
         StaticPopupDialogs["DUEL_REQUESTED"] = {
             text = DUEL_REQUESTED,
             button1 = ACCEPT,
             button2 = DECLINE,
             sound = "igPlayerInvite",
+            timeout = 60,
+            hideOnEscape = 1,
+            -- The two buttons are the two replies. ESC arrives here as well — hideOnEscape routes
+            -- an escape through OnCancel — so backing out and declining are deliberately one path.
             OnAccept = function()
                 AcceptDuel()
             end,
             OnCancel = function()
                 CancelDuel()
             end,
-            timeout = 60,
-            hideOnEscape = 1,
         }
 
-        -- ── The out-of-bounds warning — StaticPopup.lua l.1117-1120, verbatim ───────────────────
-        -- Two fields and nothing else: the engine's countdown branch owns the text.
+        -- ── The out-of-bounds warning (spec: StaticPopup.lua l.1117-1120) ───────────────────────
+        -- Two fields and nothing else: no buttons, because there is nothing to answer, and no
+        -- text of its own — the engine's countdown branch writes it every tick.
         StaticPopupDialogs["DUEL_OUTOFBOUNDS"] = {
             text = DUEL_OUTOFBOUNDS_TIMER,
             timeout = 10,
         }
 
-        -- ── The UIParent event arms (UIParent.lua l.378-393, verbatim) ──────────────────────────
+        -- ── The duel event arms (spec: UIParent.lua l.378-393) ──────────────────────────────────
         function BenillaDuelDriver_OnEvent()
             if event == "DUEL_REQUESTED" then
                 StaticPopup_Show("DUEL_REQUESTED", arg1)

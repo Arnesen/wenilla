@@ -1,12 +1,15 @@
 <!--
-    The fullscreen world map — transcribed from the 1.12 FrameXML WorldMapFrame.xml/.lua
-    (decision 0203 phase 2), restored verbatim by decision 0221 (the windowed / 1.14-header
-    direction of 0214/0217/0219 is parked; this faithful fullscreen sheet is the baseline we
-    return to). The map is pure FrameXML over the worldmap host API (benilla-ui
-    script/worldmap.rs): detail tiles are plain textures whose art the Lua swaps per selection
-    (GetMapInfo → Interface\WorldMap\<name>\<name>1..12), the player blip is positioned from
-    GetPlayerMapPosition exactly like the reference, navigation is SetMapZoom/-ToCurrentZone/
-    ProcessMapClick.
+    The fullscreen world map — our implementation of the behaviour the 1.12 FrameXML
+    WorldMapFrame.xml/.lua specifies (decision 0203 phase 2; decision 0221 settled the layout on
+    the fullscreen sheet — the windowed / 1.14-header direction of 0214/0217/0219 is parked, and
+    this faithful fullscreen sheet is the baseline we return to). The reference is the SPEC, not
+    the source of this text: the names are its contract (globals addons call, frame and template
+    names, art paths, every constant and texcoord) and the code that uses them is ours. The map
+    is pure FrameXML over the worldmap host API (benilla-ui script/worldmap.rs): detail tiles are
+    plain textures whose art the Lua swaps per selection (GetMapInfo →
+    Interface\WorldMap\<name>\<name>1..12), the player blip is positioned from
+    GetPlayerMapPosition in the same 0..1 map space the reference uses, navigation is
+    SetMapZoom/-ToCurrentZone/ProcessMapClick.
 
     IN (this file): the FULLSCREEN frame + blackout, the 12-piece parchment chrome, the title,
     the 1002×668 detail frame with its 12 tiles + ADD highlight, the discovery-overlay pool
@@ -33,7 +36,7 @@
         NUM_WORLDMAP_DETAIL_TILES = 12;
         NUM_WORLDMAP_OVERLAYS = 0;
 
-        -- ref WorldMapFrame.lua l.509-515, verbatim. Through the PANEL MANAGER, not a bare
+        -- ref WorldMapFrame.lua l.509-515 is the spec. Through the PANEL MANAGER, not a bare
         -- Show/Hide: the map is registered `area = "full"` (UiPanels.xml), which is what makes it
         -- take the screen from the other windows on the way in and — the reason this changed —
         -- what stops it opening from behind the game menu, the one window that still could
@@ -60,9 +63,30 @@
             WorldMapFrame:SetScale(scale);
         end
 
-        -- ref-WorldMapFrame.lua WorldMapFrame_Update(): the tile swap, the discovery-overlay
-        -- pool, and the zoom-out arming (POI landmarks are still deferred). The "World" fallback
-        -- is the reference's own hack for the nil GetMapInfo at the world level — kept verbatim.
+        -- One overlay tile's extent along one axis: how many pixels of art it draws, and how wide
+        -- the FILE holding them is. Every tile is a full 256 except the last of a row or column,
+        -- which carries whatever remains of the overlay — and its file is padded up to the next
+        -- power of two (16 the smallest the art uses), so that tile shows only the leading
+        -- pixels/file fraction of it. Both axes want the same answer, so they ask the same way.
+        local function overlayTileExtent(index, count, span)
+            if ( index < count ) then
+                return 256, 256;
+            end
+            local pixels = mod(span, 256);
+            if ( pixels == 0 ) then
+                pixels = 256;
+            end
+            local file = 16;
+            while ( file < pixels ) do
+                file = file * 2;
+            end
+            return pixels, file;
+        end
+
+        -- The repaint (spec: ref WorldMapFrame.lua WorldMapFrame_Update): the tile swap, the
+        -- discovery-overlay pool, and the zoom-out arming (POI landmarks are still deferred). The
+        -- "World" fallback is the reference's own hack for the nil GetMapInfo at the world level,
+        -- kept because our host answers nil at that level for the same reason.
         function WorldMapFrame_Update()
             local mapFileName = GetMapInfo();
             if ( not mapFileName ) then
@@ -72,72 +96,46 @@
                 getglobal("WorldMapDetailTile"..i):SetTexture("Interface\\WorldMap\\"..mapFileName.."\\"..mapFileName..i);
             end
 
-            -- The discovery overlays (ref WorldMapFrame.lua:94-153): the base tiles are the
-            -- unexplored parchment; each REVEALED sub-area (GetNumMapOverlays / GetMapOverlayInfo,
-            -- filtered host-side by the explored bitset) paints its detailed art on top. Pool
-            -- ARTWORK textures on WorldMapDetailFrame on demand, slice each overlay into 256-px
-            -- tiles whose file sizes round up to the next power of two, park the leftovers hidden.
-            -- Native offsets — the map renders at its native 1024×768 (no WORLDMAP_SX/SY scale,
-            -- unlike the parked windowed layout); the overlays share the detail tiles' coord space.
-            local numOverlays = GetNumMapOverlays();
-            local textureName, textureWidth, textureHeight, offsetX, offsetY;
-            local textureCount = 0;
-            local texture;
-            local texturePixelWidth, textureFileWidth, texturePixelHeight, textureFileHeight;
-            local numTexturesWide, numTexturesTall, neededTextures;
-            for i=1, numOverlays do
-                textureName, textureWidth, textureHeight, offsetX, offsetY = GetMapOverlayInfo(i);
-                numTexturesWide = ceil(textureWidth/256);
-                numTexturesTall = ceil(textureHeight/256);
-                neededTextures = textureCount + (numTexturesWide * numTexturesTall);
-                if ( neededTextures > NUM_WORLDMAP_OVERLAYS ) then
-                    for j=NUM_WORLDMAP_OVERLAYS+1, neededTextures do
-                        WorldMapDetailFrame:CreateTexture("WorldMapOverlay"..j, "ARTWORK");
+            -- The discovery overlays (spec: ref WorldMapFrame.lua, "Setup the overlays"): the base
+            -- tiles are the unexplored parchment, and each REVEALED sub-area (GetNumMapOverlays /
+            -- GetMapOverlayInfo, filtered host-side by the explored bitset) paints its detailed
+            -- art over them. That art is cut into a grid of 256-px tiles, numbered 1..n across
+            -- then down, which we lay onto ARTWORK textures pooled on WorldMapDetailFrame — the
+            -- pool grows on demand, never shrinks, and the tail left over from a busier map is
+            -- parked hidden below. Offsets are native pixels: the map renders at its native
+            -- 1024×768 (no WORLDMAP_SX/SY scale, unlike the parked windowed layout), so the
+            -- overlays share the detail tiles' coordinate space untouched.
+            local used = 0;
+            for overlay = 1, GetNumMapOverlays() do
+                local art, artWidth, artHeight, originX, originY = GetMapOverlayInfo(overlay);
+                local columns = ceil(artWidth/256);
+                local rows = ceil(artHeight/256);
+                local wanted = used + (columns * rows);
+                if ( wanted > NUM_WORLDMAP_OVERLAYS ) then
+                    for slot = NUM_WORLDMAP_OVERLAYS + 1, wanted do
+                        WorldMapDetailFrame:CreateTexture("WorldMapOverlay"..slot, "ARTWORK");
                     end
-                    NUM_WORLDMAP_OVERLAYS = neededTextures;
+                    NUM_WORLDMAP_OVERLAYS = wanted;
                 end
-                for j=1, numTexturesTall do
-                    if ( j < numTexturesTall ) then
-                        texturePixelHeight = 256;
-                        textureFileHeight = 256;
-                    else
-                        texturePixelHeight = mod(textureHeight, 256);
-                        if ( texturePixelHeight == 0 ) then
-                            texturePixelHeight = 256;
-                        end
-                        textureFileHeight = 16;
-                        while(textureFileHeight < texturePixelHeight) do
-                            textureFileHeight = textureFileHeight * 2;
-                        end
-                    end
-                    for k=1, numTexturesWide do
-                        textureCount = textureCount + 1;
-                        texture = getglobal("WorldMapOverlay"..textureCount);
-                        if ( k < numTexturesWide ) then
-                            texturePixelWidth = 256;
-                            textureFileWidth = 256;
-                        else
-                            texturePixelWidth = mod(textureWidth, 256);
-                            if ( texturePixelWidth == 0 ) then
-                                texturePixelWidth = 256;
-                            end
-                            textureFileWidth = 16;
-                            while(textureFileWidth < texturePixelWidth) do
-                                textureFileWidth = textureFileWidth * 2;
-                            end
-                        end
-                        texture:SetWidth(texturePixelWidth);
-                        texture:SetHeight(texturePixelHeight);
-                        texture:SetTexCoord(0, texturePixelWidth/textureFileWidth, 0, texturePixelHeight/textureFileHeight);
-                        texture:ClearAllPoints();
-                        texture:SetPoint("TOPLEFT", offsetX + (256 * (k-1)), -(offsetY + (256 * (j - 1))));
-                        texture:SetTexture(textureName..(((j - 1) * numTexturesWide) + k));
-                        texture:Show();
-                    end
+                -- Tile n of the overlay is file <art>n, and its place in the grid follows from n.
+                for tile = 1, columns * rows do
+                    local column = mod(tile - 1, columns) + 1;
+                    local row = ceil(tile / columns);
+                    local wide, fileWide = overlayTileExtent(column, columns, artWidth);
+                    local tall, fileTall = overlayTileExtent(row, rows, artHeight);
+                    used = used + 1;
+                    local texture = getglobal("WorldMapOverlay"..used);
+                    texture:SetWidth(wide);
+                    texture:SetHeight(tall);
+                    texture:SetTexCoord(0, wide/fileWide, 0, tall/fileTall);
+                    texture:ClearAllPoints();
+                    texture:SetPoint("TOPLEFT", originX + (256 * (column - 1)), -(originY + (256 * (row - 1))));
+                    texture:SetTexture(art..tile);
+                    texture:Show();
                 end
             end
-            for i=textureCount+1, NUM_WORLDMAP_OVERLAYS do
-                getglobal("WorldMapOverlay"..i):Hide();
+            for slot = used + 1, NUM_WORLDMAP_OVERLAYS do
+                getglobal("WorldMapOverlay"..slot):Hide();
             end
 
             if ( GetCurrentMapContinent() == 0 ) then
@@ -147,7 +145,7 @@
             end
         end
 
-        -- ref verbatim: zone view → its continent; continent view → the world.
+        -- The reference's rule: zone view → its continent; continent view → the world.
         function WorldMapZoomOutButton_OnClick()
             if ( GetCurrentMapZone() ~= 0 ) then
                 SetMapZoom(GetCurrentMapContinent());
@@ -156,9 +154,9 @@
             end
         end
 
-        -- ── The continent/zone dropdowns (ref verbatim, except the vararg walk: the reference's
-        -- `arg.n` is written as select("#", ...), the 5.1-native spelling and this tree's house
-        -- style for it). ──────────────────────────────────────────────────────────────────────
+        -- ── The continent/zone dropdowns (the reference's wiring; its `arg.n` vararg walk is
+        -- written here as select("#", ...), the 5.1-native spelling and this tree's house style
+        -- for it). ────────────────────────────────────────────────────────────────────────────
         function WorldMapContinentsDropDown_OnLoad()
             UIDropDownMenu_Initialize(this, WorldMapContinentsDropDown_Initialize);
             UIDropDownMenu_SetWidth(130);
@@ -223,50 +221,60 @@
             end
         end
 
-        -- ref verbatim: left click drills in via ProcessMapClick on normalized button coords;
-        -- anything else zooms out.
+        -- Where the cursor sits inside a map-sized frame, as a fraction of it measured from the
+        -- TOPLEFT: (0,0) the top-left corner of the map art, (1,1) the bottom-right. Both sides of
+        -- the host's map API — the click (ProcessMapClick) and the hover (UpdateMapHighlight) —
+        -- take a position in exactly that space, and the cursor arrives in screen pixels with the
+        -- y axis pointing the other way, so this is the one conversion between them: undo the
+        -- frame's effective scale, then measure from its edges, which a frame gives up as its
+        -- center and its size (each edge being half the size away from the center).
+        local function cursorMapPosition(frame)
+            local cursorX, cursorY = GetCursorPosition();
+            local scale = frame:GetEffectiveScale();
+            local midX, midY = frame:GetCenter();
+            local frameWidth = frame:GetWidth();
+            local frameHeight = frame:GetHeight();
+            local fromLeft = (cursorX / scale) - (midX - (frameWidth/2));
+            local fromTop = (midY + (frameHeight/2)) - (cursorY / scale);
+            return fromLeft / frameWidth, fromTop / frameHeight;
+        end
+
+        -- Left click drills into whatever the host finds at that map position; every other button
+        -- is the zoom-out shortcut (ref WorldMapButton_OnClick — ours takes no button argument,
+        -- since nothing but the map button itself routes here).
         function WorldMapButton_OnClick(mouseButton)
             CloseDropDownMenus();
             if ( mouseButton == "LeftButton" ) then
-                local x, y = GetCursorPosition();
-                x = x / WorldMapButton:GetEffectiveScale();
-                y = y / WorldMapButton:GetEffectiveScale();
-                local centerX, centerY = WorldMapButton:GetCenter();
-                local width = WorldMapButton:GetWidth();
-                local height = WorldMapButton:GetHeight();
-                local adjustedY = (centerY + (height/2) - y) / height;
-                local adjustedX = (x - (centerX - (width/2))) / width;
-                ProcessMapClick( adjustedX, adjustedY);
+                ProcessMapClick(cursorMapPosition(WorldMapButton));
             else
                 WorldMapZoomOutButton_OnClick();
             end
         end
 
-        -- ref WorldMapButton_OnUpdate, reduced to hover + the player blip (party/raid/flags/
-        -- corpse/ping are deferred with their wire). UpdateMapHighlight is a stub until the
-        -- area-bitmap source lands (wow-re dispatch) — nil name/fileName take the hide paths.
+        -- The per-frame hover pass (spec: ref WorldMapButton_OnUpdate), reduced to the area
+        -- highlight + the player blip (party/raid/flags/ping are deferred with their wire).
+        -- UpdateMapHighlight is a stub until the area-bitmap source lands (wow-re dispatch) — a
+        -- nil area/art takes the hide paths.
         function WorldMapButton_OnUpdate(elapsed)
-            local x, y = GetCursorPosition();
-            x = x / this:GetEffectiveScale();
-            y = y / this:GetEffectiveScale();
-            local centerX, centerY = this:GetCenter();
             local width = this:GetWidth();
             local height = this:GetHeight();
-            local adjustedY = (centerY + (height/2) - y ) / height;
-            local adjustedX = (x - (centerX - (width/2))) / width;
-            local name, fileName, texPercentageX, texPercentageY, textureX, textureY, scrollChildX, scrollChildY = UpdateMapHighlight( adjustedX, adjustedY );
-            WorldMapFrameAreaLabel:SetText(name or "");
-            if ( fileName ) then
-                WorldMapHighlight:SetTexCoord(0, texPercentageX, 0, texPercentageY);
-                WorldMapHighlight:SetTexture("Interface\\WorldMap\\"..fileName.."\\"..fileName.."Highlight");
-                textureX = textureX * width;
-                textureY = textureY * height;
-                scrollChildX = scrollChildX * width;
-                scrollChildY = -scrollChildY * height;
-                if ( (textureX > 0) and (textureY > 0) ) then
-                    WorldMapHighlight:SetWidth(textureX);
-                    WorldMapHighlight:SetHeight(textureY);
-                    WorldMapHighlight:SetPoint("TOPLEFT", "WorldMapDetailFrame", "TOPLEFT", scrollChildX, scrollChildY);
+            local area, art, cropX, cropY, sizeX, sizeY, atX, atY =
+                UpdateMapHighlight(cursorMapPosition(this));
+            WorldMapFrameAreaLabel:SetText(area or "");
+            if ( art ) then
+                -- The sub-area under the cursor lights up: <zone>Highlight holds one shape per
+                -- sub-area, of which crop names the fraction actually used (the file is padded to
+                -- a power of two), while size and at are the shape's extent and top-left corner as
+                -- fractions of the map — so both scale by the button's pixel size. Nothing to draw
+                -- for a degenerate shape, but the art is still swapped in for the next frame.
+                WorldMapHighlight:SetTexCoord(0, cropX, 0, cropY);
+                WorldMapHighlight:SetTexture("Interface\\WorldMap\\"..art.."\\"..art.."Highlight");
+                local drawWidth = sizeX * width;
+                local drawHeight = sizeY * height;
+                if ( drawWidth > 0 and drawHeight > 0 ) then
+                    WorldMapHighlight:SetWidth(drawWidth);
+                    WorldMapHighlight:SetHeight(drawHeight);
+                    WorldMapHighlight:SetPoint("TOPLEFT", "WorldMapDetailFrame", "TOPLEFT", atX * width, -atY * height);
                     WorldMapHighlight:Show();
                 end
             else
@@ -283,7 +291,7 @@
                 WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
                 WorldMapPlayer:Show();
             end
-            -- Position corpse (ref WorldMapFrame.lua:443-452, verbatim law: (0,0) = hide).
+            -- Position corpse (ref WorldMapFrame.lua:443-452 — the law is that (0,0) means hide).
             local corpseX, corpseY = GetCorpseMapPosition();
             if ( corpseX == 0 and corpseY == 0 ) then
                 WorldMapCorpse:Hide();

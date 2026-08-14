@@ -1,9 +1,9 @@
 <Ui>
     <!--
-        benilla's Enchanting window (decision 0437 phase 3): the 1.12 `CraftFrame`, transcribed from
+        benilla's Enchanting window (decision 0437 phase 3): the 1.12 `CraftFrame`, re-expressed from
         the reference `Blizzard_CraftUI.xml`/`.lua` (session scratchpad `ref-ui/`, decision 0246
         discipline — never committed) onto our own engine/feeds. Geometry/art-paths/structure below are
-        QUOTED from the ref (line citations inline); the Lua is transcribed logic turned onto benilla's
+        QUOTED from the ref (line citations inline); the Lua is the ref's logic turned onto benilla's
         Era API (`GetCraftName`/`GetCraftDisplaySkillLine`/`GetNumCrafts`/`GetCraftInfo`/reagents/
         `GetCraftSpellFocus`/`DoCraft`/`CloseCraft`, decision 0437's engine surface,
         `crates/benilla-ui/src/script/craft.rs`). The exact twin of `TradeSkillFrame.xml` — same
@@ -155,7 +155,7 @@
               TradeSkillFrame.xml's own idiom — with ONE exception: `CREATE` is declared as a REAL Lua
               GLOBAL (`CREATE = CREATE or "Create"`, guarded so a second file loading it stays
               idempotent), not `local`, because `getglobal(GetCraftButtonToken())` (ref l.106, faithfully
-              transcribed in `BenillaCraftFrame_Update` below) needs an actual `_G["CREATE"]` entry to
+              kept in `BenillaCraftFrame_Update` below) needs an actual `_G["CREATE"]` entry to
               resolve — a genuine structural requirement of that ref call, not a style choice.
               `GRAY_FONT_COLOR`/`HIGHLIGHT_FONT_COLOR` are Fonts.xml globals (CharacterFrame.xml's own
               precedent for reading them unqualified).
@@ -238,8 +238,8 @@
             icon:Show()
             icon:SetNormalTexture(GetCraftIcon(id) or BENILLA_FALLBACK_ICON)
 
-            -- The description + the Reagents label's DYNAMIC reposition (ref l.312-318, transcribed
-            -- verbatim): when there's a description, the label sits 10px below its bottom edge; when
+            -- The description + the Reagents label's DYNAMIC reposition (ref l.312-318, re-expressed
+            -- here): when there's a description, the label sits 10px below its bottom edge; when
             -- there isn't, it sits directly where the (blank) description would have been.
             if GetCraftDescription(id) then
                 getglobal("BenillaCraftDescription"):SetText(GetCraftDescription(id))
@@ -312,7 +312,7 @@
             else
                 getglobal("BenillaCraftCollapseAllButton"):Enable() -- ref l.158 (no matching Disable()
                 -- anywhere in Craft's own ref — a real asymmetry vs. TradeSkill's own l.86/94 pair,
-                -- transcribed as-is, not "fixed").
+                -- kept as the ref has it, not "fixed").
             end
 
             local scrollFrame = getglobal("BenillaCraftListScrollFrame")

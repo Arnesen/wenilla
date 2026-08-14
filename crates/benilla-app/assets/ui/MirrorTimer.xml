@@ -1,8 +1,9 @@
 <Ui>
     <!--
-        The mirror timers - the 1.12 MirrorTimer1/2/3, transcribed from the extracted reference
-        (Interface\FrameXML\MirrorTimer.xml/.lua, mpqx; decision 0874). Geometry, textures, colors
-        and the countdown integration are the reference's own.
+        The mirror timers - our MirrorTimer1/2/3. The extracted reference
+        (Interface\FrameXML\MirrorTimer.xml/.lua, mpqx; decision 0874) is the SPECIFICATION here,
+        not the source: it fixes the frame and function names addons bind to, the geometry, the
+        textures and the four colours, and this file is our own implementation of that contract.
 
         "Mirror" is the client's word for a timer whose authority is the SERVER: the client never
         computes breath or fatigue. The server ships a value + a signed rate and the frame
@@ -16,18 +17,19 @@
         look up the bar's caption ("Fatigue" / "Breath"; there is no FEIGNDEATH_LABEL in the 1.12
         GlobalStrings, so that one shows an empty caption, exactly as the reference does).
 
-        Departures from the reference, all three deliberate:
+        Where our behaviour departs from the reference's, all three deliberate:
 
         1. THE START DRIVER. The reference registers MIRROR_TIMER_START on UIParent itself and
            calls MirrorTimer_Show from UIParent_OnEvent (ref UIParent.lua l.97 + l.374-375). Our
            UIParent.xml is script-only - it has no frame of its own to register events on - so the
            hidden MirrorTimerDriver below hosts that one registration and makes the identical call.
 
-        2. THE FREE-DIALOG LOOP BOUND. The reference's second loop in MirrorTimer_Show iterates to
-           STATICPOPUP_NUMDIALOGS, a copy-paste from StaticPopup.lua (its first loop, over the same
-           frames, correctly uses MIRRORTIMER_NUMTIMERS). With 3 frames and 3 client timer types
-           the bug is latent - but it would index a nil MirrorTimer4. Corrected to the constant
-           that names these frames.
+        2. ONE WALK OVER THE POOL, NOT TWO. The reference asks its two questions - "is this timer
+           already on a bar?" then "is any bar idle?" - in two separate loops, and bounds the
+           second by STATICPOPUP_NUMDIALOGS, a copy-paste from StaticPopup.lua that would index a
+           nil MirrorTimer4 the day the two constants diverge. A bar already carrying the timer
+           wins over an idle one wherever either sits, so one pass answers both questions and
+           cannot run off the end of the pool.
 
         3. THE PAUSE ARG. The reference's MIRROR_TIMER_PAUSE branch reads the same arg1 as both a
            timer name (`arg1 ~= this.timer`, above) and a number (`arg1 > 0`), so a real pause
@@ -35,110 +37,108 @@
            substitutes a full START instead (Player::SendMirrorTimers says so in the source). We
            read the flag from arg2, which is what both branches plainly intend.
 
-        MirrorTimerColors carries a "DEATH" entry the reference never uses (no timer type maps to
-        it); kept verbatim.
-
         POSITION: TOP, y=-96 - the reference's own anchor, under the top-center of the screen, with
         timers 2 and 3 stacking downward from it.
     -->
     <Script><![CDATA[
         MIRRORTIMER_NUMTIMERS = 3
 
-        MirrorTimerColors = {}
-        MirrorTimerColors["EXHAUSTION"] = { r = 1.00, g = 0.90, b = 0.00 }
-        MirrorTimerColors["BREATH"] = { r = 0.00, g = 0.50, b = 1.00 }
-        MirrorTimerColors["DEATH"] = { r = 1.00, g = 0.70, b = 0.00 }
-        MirrorTimerColors["FEIGNDEATH"] = { r = 1.00, g = 0.70, b = 0.00 }
+        -- The bar colour per timer type, keyed by the name that arrives on the wire. DEATH is in
+        -- the published set even though nothing in 1.12 ever raises a timer of that type - the
+        -- table is the contract, so it carries the whole set and not just the three we see.
+        MirrorTimerColors = {
+            EXHAUSTION = { r = 1.00, g = 0.90, b = 0.00 },
+            BREATH     = { r = 0.00, g = 0.50, b = 1.00 },
+            DEATH      = { r = 1.00, g = 0.70, b = 0.00 },
+            FEIGNDEATH = { r = 1.00, g = 0.70, b = 0.00 },
+        }
 
+        -- Which bar `timer` belongs on. A bar already carrying it wins wherever it sits - the
+        -- server re-sends a whole START on every change, and a re-STATE must land back in place
+        -- instead of eating another bar; failing that the first idle bar takes it, and if all
+        -- three are busy the timer simply goes unshown (see departure 2).
+        local function claim_bar(timer)
+            local idle
+            for index = 1, MIRRORTIMER_NUMTIMERS do
+                local bar = getglobal("MirrorTimer" .. index)
+                if bar:IsVisible() then
+                    if bar.timer == timer then
+                        return bar
+                    end
+                elseif not idle then
+                    idle = bar
+                end
+            end
+            return idle
+        end
+
+        -- Hand a bar back to the pool: off screen, holding nothing.
+        local function release_bar(bar)
+            bar:Hide()
+            bar.timer = nil
+        end
+
+        -- Raise or re-seat one timer. Milliseconds on the wire, seconds on the bar; `scale` is
+        -- the server's signed rate, which OnUpdate integrates from here.
         function MirrorTimer_Show(timer, value, maxvalue, scale, paused, label)
-            -- Pick a free dialog to use
-            local dialog = nil
-            if not dialog then
-                -- Find an open dialog of the requested type
-                for index = 1, MIRRORTIMER_NUMTIMERS, 1 do
-                    local frame = getglobal("MirrorTimer"..index)
-                    if frame:IsVisible() and (frame.timer == timer) then
-                        dialog = frame
-                        break
-                    end
-                end
-            end
-            if not dialog then
-                -- Find a free dialog (ref: STATICPOPUP_NUMDIALOGS - see departure 2)
-                for index = 1, MIRRORTIMER_NUMTIMERS, 1 do
-                    local frame = getglobal("MirrorTimer"..index)
-                    if not frame:IsVisible() then
-                        dialog = frame
-                        break
-                    end
-                end
-            end
-            if not dialog then
+            local bar = claim_bar(timer)
+            if not bar then
                 return nil
             end
 
-            dialog.timer = timer
-            dialog.value = (value / 1000)
-            dialog.scale = scale
-            if paused > 0 then
-                dialog.paused = 1
-            else
-                dialog.paused = nil
-            end
+            bar.timer = timer
+            bar.value = value / 1000
+            bar.scale = scale
+            bar.paused = paused > 0 and 1 or nil
 
-            -- Set the text of the dialog
-            local text = getglobal(dialog:GetName().."Text")
-            text:SetText(label)
+            local name = bar:GetName()
+            getglobal(name .. "Text"):SetText(label)
 
-            -- Set the status bar of the dialog
-            local statusbar = getglobal(dialog:GetName().."StatusBar")
+            local fill = getglobal(name .. "StatusBar")
             local color = MirrorTimerColors[timer]
-            statusbar:SetMinMaxValues(0, (maxvalue / 1000))
-            statusbar:SetValue(dialog.value)
-            statusbar:SetStatusBarColor(color.r, color.g, color.b)
+            fill:SetMinMaxValues(0, maxvalue / 1000)
+            fill:SetValue(bar.value)
+            fill:SetStatusBarColor(color.r, color.g, color.b)
 
-            dialog:Show()
-
-            return dialog
+            bar:Show()
+            return bar
         end
 
         function MirrorTimerFrame_OnLoad()
+            -- The two events that address a timer already running...
             this:RegisterEvent("MIRROR_TIMER_PAUSE")
             this:RegisterEvent("MIRROR_TIMER_STOP")
+            -- ...and the one that ends whatever this bar was holding.
             this:RegisterEvent("PLAYER_ENTERING_WORLD")
             this.timer = nil
         end
 
         function MirrorTimerFrame_OnEvent()
             if event == "PLAYER_ENTERING_WORLD" then
-                this:Hide()
-                this.timer = nil
+                -- A worldport ends every timer the old world was running; a stale breath bar must
+                -- not survive the loading screen.
+                release_bar(this)
+                return
             end
-            if not this:IsShown() or (arg1 ~= this.timer) then
+            -- Everything below names one running timer. Anything else is another bar's business.
+            if not this:IsShown() or arg1 ~= this.timer then
                 return
             end
             if event == "MIRROR_TIMER_PAUSE" then
-                -- ref: `if arg1 > 0` on the name it just string-compared (see departure 3)
-                if arg2 and arg2 > 0 then
-                    this.paused = 1
-                else
-                    this.paused = nil
-                end
-                return
-            end
-            if event == "MIRROR_TIMER_STOP" then
-                this:Hide()
-                this.timer = nil
+                -- The flag rides in arg2 (departure 3), and absent means running.
+                this.paused = (arg2 and arg2 > 0) and 1 or nil
+            elseif event == "MIRROR_TIMER_STOP" then
+                release_bar(this)
             end
         end
 
+        -- The whole of the client-side motion: between packets the bar walks itself along the
+        -- rate the server named. Nothing here decides anything - drowning is the server's call.
         function MirrorTimerFrame_OnUpdate(frame, elapsed)
-            if frame.paused then
-                return
+            if not frame.paused then
+                frame.value = frame.value + frame.scale * elapsed
+                getglobal(frame:GetName() .. "StatusBar"):SetValue(frame.value)
             end
-            local statusbar = getglobal(frame:GetName().."StatusBar")
-            frame.value = (frame.value + frame.scale * elapsed)
-            statusbar:SetValue(frame.value)
         end
 
         -- The ref's UIParent_OnEvent MIRROR_TIMER_START arm, rehosted (see departure 1).

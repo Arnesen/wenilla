@@ -1,15 +1,17 @@
 <Ui>
     <!--
-        The combo-point dots (decision 0869) — the reference `FrameXML/ComboFrame.xml` +
-        `ComboFrame.lua` transcribed, geometry QUOTED verbatim (offsets, sizes, TexCoords and the
-        five fade constants are the reference's own), renamed onto our frames and driven by our
-        `PLAYER_COMBO_POINTS` feed.
+        The combo-point dots (decision 0869) — our implementation of the behaviour the reference's
+        `FrameXML/ComboFrame.xml` + `ComboFrame.lua` specify, on our frames and driven by our
+        `PLAYER_COMBO_POINTS` feed. The Lua below is our own; what IS quoted, deliberately, is the
+        published surface and the measurements: the global function and constant names addons call,
+        and every number — offsets, sizes, TexCoords and the five fade durations are the reference's
+        own, because they are facts about how the real interface looks and moves, not choices.
 
         ONE `Interface\ComboFrame\ComboPoint` sheet holds all three layers, split by TexCoords: the
         dim socket (0 .. 0.375), the lit highlight (0.375 .. 0.5625) and the additive shine
         (0.5625 .. 1). A point that comes up fades its highlight in, and the highlight's completion
         hands off to the shine's fade-in → fade-out — the reference's two-hop `finishedFunc` chain,
-        which our `UIFrameFade` (UiPanels.xml) supports verbatim.
+        which our `UIFrameFade` (UiPanels.xml) implements in full.
 
         NO CLASS TEST HERE, and none is missing: this file gates on `GetComboPoints() > 0` and
         nothing else because the reference does, and `0x51a190` carries both real gates itself —
@@ -118,7 +120,10 @@
 
     <Script>
         <![CDATA[
-        -- ref ComboFrame.lua l.1-6, verbatim.
+        -- The reference's global names, carrying the reference's measured timings: addons read
+        -- these by name, and the five durations are what the real interface's fades take, so both
+        -- halves are fixed. MAX_COMBO_POINTS lives in the ref's TargetFrame.lua; we have no such
+        -- file, and CombatText.xml's five-point flash reads it, so it is declared here.
         MAX_COMBO_POINTS = 5;
         COMBOFRAME_FADE_IN = 0.3;
         COMBOFRAME_FADE_OUT = 0.5;
@@ -127,54 +132,67 @@
         COMBOFRAME_SHINE_FADE_OUT = 0.4;
         COMBO_FRAME_LAST_NUM_POINTS = 0;
 
-        -- ref ComboFrame.lua `ComboPointsFrame_OnEvent`. Only points ABOVE the last count animate
-        -- (`i > COMBO_FRAME_LAST_NUM_POINTS`) — a repaint at the same count must not re-flare every
-        -- dot, which is why the last count is remembered across events rather than recomputed.
+        -- Dot `index`'s two animated layers: the lit point, and the additive flare over it. The
+        -- socket beneath them never moves, so nothing ever needs to reach for it.
+        local function comboPointLayers(index)
+            return getglobal("ComboPoint"..index.."Highlight"),
+                getglobal("ComboPoint"..index.."Shine");
+        end
+
+        -- Repaint the dots for the count `GetComboPoints` reports. Only points ABOVE the previous
+        -- count animate: a repaint at an unchanged count (PLAYER_TARGET_CHANGED fires one on every
+        -- re-select) must not re-flare dots that are already lit — which is why the count is
+        -- remembered across events instead of being read back off the dots.
         function ComboPointsFrame_OnEvent()
-            local comboPoints = GetComboPoints();
-            if comboPoints > 0 then
+            local points = GetComboPoints();
+            if points > 0 then
                 if not ComboFrame:IsVisible() then
                     ComboFrame:Show();
                     UIFrameFadeIn(ComboFrame, COMBOFRAME_FADE_IN);
                 end
                 for i = 1, MAX_COMBO_POINTS do
-                    local comboPointHighlight = getglobal("ComboPoint"..i.."Highlight");
-                    local comboPointShine = getglobal("ComboPoint"..i.."Shine");
-                    if i <= comboPoints then
-                        if i > COMBO_FRAME_LAST_NUM_POINTS then
-                            local fadeInfo = {};
-                            fadeInfo.mode = "IN";
-                            fadeInfo.timeToFade = COMBOFRAME_HIGHLIGHT_FADE_IN;
-                            fadeInfo.finishedFunc = ComboPointShineFadeIn;
-                            fadeInfo.finishedArg1 = comboPointShine;
-                            UIFrameFade(comboPointHighlight, fadeInfo);
-                        end
-                    else
-                        comboPointHighlight:SetAlpha(0);
-                        comboPointShine:SetAlpha(0);
+                    local highlight, shine = comboPointLayers(i);
+                    if i > points then
+                        -- Past the count: dark at once, never animated back down.
+                        highlight:SetAlpha(0);
+                        shine:SetAlpha(0);
+                    elseif i > COMBO_FRAME_LAST_NUM_POINTS then
+                        -- Newly earned: light it, and hand the finished fade on to its flare.
+                        UIFrameFade(highlight, {
+                            mode = "IN",
+                            timeToFade = COMBOFRAME_HIGHLIGHT_FADE_IN,
+                            finishedFunc = ComboPointShineFadeIn,
+                            finishedArg1 = shine,
+                        });
                     end
                 end
             else
-                ComboPoint1Highlight:SetAlpha(0);
-                ComboPoint1Shine:SetAlpha(0);
+                -- Nothing banked. The frame goes away, so only the first dot is worth clearing:
+                -- the loop above blanks every dot past the count the next time one is earned.
+                local highlight, shine = comboPointLayers(1);
+                highlight:SetAlpha(0);
+                shine:SetAlpha(0);
                 ComboFrame:Hide();
             end
-            COMBO_FRAME_LAST_NUM_POINTS = comboPoints;
+            COMBO_FRAME_LAST_NUM_POINTS = points;
         end
 
-        function ComboPointShineFadeIn(frame)
-            local fadeInfo = {};
-            fadeInfo.mode = "IN";
-            fadeInfo.timeToFade = COMBOFRAME_SHINE_FADE_IN;
-            fadeInfo.finishedFunc = ComboPointShineFadeOut;
-            fadeInfo.finishedArg1 = frame:GetName();
-            UIFrameFade(frame, fadeInfo);
+        -- Leg two of the chain, reached as the highlight finishes: flare the shine in, and book
+        -- leg three off ITS completion. The hand-off travels by NAME because a fade's finishedArg
+        -- rides on the frame's own fadeInfo, and the reference notes the same self-reference
+        -- problem where it does this.
+        function ComboPointShineFadeIn(shine)
+            UIFrameFade(shine, {
+                mode = "IN",
+                timeToFade = COMBOFRAME_SHINE_FADE_IN,
+                finishedFunc = ComboPointShineFadeOut,
+                finishedArg1 = shine:GetName(),
+            });
         end
 
-        -- The name round-trip is the reference's own workaround ("hack since a frame can't have a
-        -- reference to itself in it") — kept, so the chain reads as its source does.
-        function ComboPointShineFadeOut(frameName)
-            UIFrameFadeOut(getglobal(frameName), COMBOFRAME_SHINE_FADE_OUT);
+        -- Leg three: the flare burns back out on its own.
+        function ComboPointShineFadeOut(shineName)
+            UIFrameFadeOut(getglobal(shineName), COMBOFRAME_SHINE_FADE_OUT);
         end
         ]]>
     </Script>

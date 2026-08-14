@@ -20,7 +20,6 @@ use benilla_world::model_render::{
 };
 use benilla_world::sky::SkyMaterial;
 use benilla_world::sun::{CelestialMaterial, StarMaterial};
-use benilla_world::wmo_sky::{WmoSkyboxExt, WmoSkyboxMaterial};
 
 use super::WarmRig;
 
@@ -44,8 +43,8 @@ use super::WarmRig;
 /// celestial rig, the star dome, the cloud dome, the gradient dome, the liquid frame sets), so
 /// by the time the menagerie spawns behind the entry cover, iterating the store IS the complete
 /// reachable set — warming can never drift from what's spawned. The one exception is the WMO
-/// skybox, whose materials are built on first need: its pipeline key is texture-independent, so
-/// one representative material covers the lane.
+/// skybox, whose materials are built on first need; since decision 1264 it is not a lane of its own
+/// at all but a cross of `WowModelMaterial` keys, warmed with the model cross below.
 #[derive(SystemParam)]
 pub(super) struct WarmLanes<'w> {
     celestial: ResMut<'w, Assets<CelestialMaterial>>,
@@ -53,7 +52,6 @@ pub(super) struct WarmLanes<'w> {
     clouds: ResMut<'w, Assets<CloudMaterial>>,
     sky: ResMut<'w, Assets<SkyMaterial>>,
     liquid: ResMut<'w, Assets<LiquidMaterial>>,
-    skybox: ResMut<'w, Assets<WmoSkyboxMaterial>>,
     /// The plain-`StandardMaterial` lanes (0938): representatives for the on-demand nameplate
     /// and raid-mark materials go through this store the way their builders do.
     standard: ResMut<'w, Assets<StandardMaterial>>,
@@ -121,6 +119,10 @@ pub(super) fn spawn_menagerie(
     // milliseconds behind a loading bar once per run, while a missed one is a director-felt live
     // stall. The observed set (28) is the floor, not the target.
     let mut mats: Vec<Handle<WowModelMaterial>> = Vec::new();
+    // The sky lane is kept apart from `mats`: it rides the STATIC layout only and is never
+    // far-twinned (a camera-anchored backdrop has no side of the water plane —
+    // `model_render::classify_water_side` skips it) nor booth-duplicated (no portrait sees a sky).
+    let mut sky_mats: Vec<Handle<WowModelMaterial>> = Vec::new();
     for two_sided in [false, true] {
         for blend in [
             ModelBlend::Opaque,
@@ -155,6 +157,7 @@ pub(super) fn spawn_menagerie(
                         None,
                         None,
                         false,
+                        false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
                     ));
                 }
@@ -193,6 +196,7 @@ pub(super) fn spawn_menagerie(
                         None,
                         None,
                         false,
+                        false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
                     ));
                 }
@@ -203,6 +207,49 @@ pub(super) fn spawn_menagerie(
             mats.push(zfill_material(
                 cache, materials, None, two_sided, cutout, light,
             ));
+        }
+        // The **WMO-skybox lane** (decision 1264): `sky_depth` is a `WowModelKey` axis — it
+        // compiles the shader's forced-far-depth branch — so every skybox batch is a pipeline the
+        // world cross above does not cover, however identical the rest of its key. Built exactly
+        // the way `M2BatchMaterials::skybox` builds them: depth-write pinned off, depth-test
+        // pinned on, the batch's own blend and sidedness. `CavernsOfTimeSky.m2` authors Opaque,
+        // AlphaTest, Blend and additive-Blend across both sidednesses; Mod/Mod2x are warmed too
+        // because nothing stops a skybox authoring them. Unwarmed, walking into the Caverns of
+        // Time crater is 21 live compiles in the frame the sky appears.
+        for blend in [
+            ModelBlend::Opaque,
+            ModelBlend::AlphaTest,
+            ModelBlend::Blend,
+            ModelBlend::Mod,
+            ModelBlend::Mod2x,
+        ] {
+            for additive in [false, true] {
+                sky_mats.push(model_material(
+                    cache,
+                    materials,
+                    None,
+                    blend,
+                    two_sided,
+                    false,
+                    false,
+                    true, // every skybox batch the chain ships authors UNLIT
+                    additive,
+                    false,
+                    true,  // …depth-write off
+                    false, // …depth-test on
+                    FogPolicy::Off,
+                    false,
+                    ShadeSel::Lit,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true, // the sky lane
+                    light,
+                ));
+            }
         }
     }
     // The ground-clutter lane (specialize's over-blend), both sidednesses — the first
@@ -240,6 +287,7 @@ pub(super) fn spawn_menagerie(
                 None,
                 None,
                 false,
+                false, // warms the WORLD lane; the sky lane warms with its own model
                 light,
             );
             if let Some(m) = materials.get(&plain) {
@@ -287,6 +335,7 @@ pub(super) fn spawn_menagerie(
                         None,
                         None,
                         false,
+                        false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
                     );
                     if let Some(m) = materials.get(&h) {
@@ -354,6 +403,18 @@ pub(super) fn spawn_menagerie(
         }
     }
 
+    // The WMO-skybox rows (decision 1264): the STATIC PLAIN layout only, and only on the world
+    // camera. `wmo_sky::build_skybox` inserts POSITION + NORMAL + UV_0 — `layouts[0]` exactly — a
+    // skybox is never skinned (the asteroid belts' bones are a deferral, not a shipped lane), never
+    // vertex-coloured (M2 carries no MOCV), never far-twinned, and never reaches a portrait booth.
+    {
+        let (plain_mesh, plain_aabb, _) = &layouts[0];
+        for mat in &sky_mats {
+            spawn_model_rig(commands, cam, None, plain_mesh, plain_aabb, false, mat);
+            count += 1;
+        }
+    }
+
     // The sky and water lanes (decision 0945 — 0837's scope was model-lane-only, and every hole
     // was a director-felt stall: the sun disc first drawn on stepping outdoors, the first water
     // in view, a spell's shards mid-cast). Every material that EXISTS in these Startup-populated
@@ -417,19 +478,6 @@ pub(super) fn spawn_menagerie(
     for mat in lane_handles(&mut lanes.liquid) {
         spawn_lane_rig(commands, cam, None, &liquid_mesh, None, mat, &mut count);
     }
-    // WMO skybox: the one on-demand lane — its materials are built at first need, but the
-    // pipeline key is texture-independent, so one representative built the way
-    // `wmo_sky::build_skybox` builds them covers the lane.
-    let skybox = lanes.skybox.add(WmoSkyboxMaterial {
-        base: StandardMaterial {
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        },
-        extension: WmoSkyboxExt::default(),
-    });
-    spawn_lane_rig(commands, cam, None, &posuv, None, skybox, &mut count);
-
     // The plain-`StandardMaterial` lanes (0938 — the director's evening log). The fallback cube
     // (`entities::CubeAssets`, drawn while any entity's model streams) uses the production mesh
     // + materials, on the world camera AND a booth layer (a cube-bodied target can reach a
@@ -594,9 +642,10 @@ fn spawn_lane_rig<M: Material>(
     *count += 1;
 }
 
-/// A tiny triangle carrying POSITION + UV_0 only — the layout the real `Stars.m2` patches and
-/// the WMO skybox batches ship (`sun::setup` / `wmo_sky::build_skybox` insert exactly these
-/// two attributes). Main-world-resident (`RenderAssetUsages::default()`), so `calculate_bounds`
+/// A tiny triangle carrying POSITION + UV_0 only — the layout the real `Stars.m2` patches ship
+/// (`sun::setup` inserts exactly these two attributes). The WMO skybox used to share it; since
+/// decision 1264 it draws on the model lane and carries that lane's NORMAL too, so it rides
+/// `layouts[0]` instead. Main-world-resident (`RenderAssetUsages::default()`), so `calculate_bounds`
 /// covers it — no explicit Aabb needed.
 fn warm_pos_uv_mesh() -> Mesh {
     let mut m = Mesh::new(

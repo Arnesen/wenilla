@@ -104,6 +104,13 @@ pub struct MatKey {
     /// z-write on, drawn before its model's colour batches. Its own key axis so a twin can never
     /// dedupe onto a colour material.
     zfill: bool,
+    /// This batch is part of a **WMO skybox** ([`crate::wmo_sky`]) — the building-owned painted sky,
+    /// drawn on this lane like any other M2 since decision 1264. Its own key axis because the lane
+    /// changes pipeline state ([`SKY_DEPTH_MARKER`]: forced far depth, no early-Z) and sort rung
+    /// ([`skybox_sort_bias`]), so a skybox batch must never dedupe onto the identical-looking world
+    /// batch — `CavernsOfTimeSky` and Elwynn share no texture today, but nothing enforces that and
+    /// the collision would be a world doodad silently drawn at the far plane.
+    sky_depth: bool,
 }
 
 /// The per-material static terrain-shade **selector** baked into `sun_scale.x` — NOT an intensity
@@ -204,6 +211,9 @@ pub fn model_material(
     // WINDOW midpoint-light flag (`WowModelExt::sidn`).
     sidn: Option<[u8; 3]>,
     window: bool,
+    // This batch belongs to a **WMO skybox** — the sky lane: forced far depth, no rasterizer bias,
+    // and the skybox sort rung instead of the ordinary batch-order eps. See [`MatKey::sky_depth`].
+    sky_depth: bool,
     light: &Buffer,
 ) -> Handle<WowModelMaterial> {
     let key = MatKey {
@@ -228,6 +238,7 @@ pub fn model_material(
         sidn,
         window,
         zfill: false,
+        sky_depth,
     };
     if let Some(h) = cache.fetch(&key) {
         return h;
@@ -279,10 +290,17 @@ pub fn model_material(
     // load-bearing only for SAME-CENTRE stacks (M2 item overlays, always low-index); WMO batches
     // sort by their own distinct mesh centres. The cap stays under `FAR_KEY_PULL` so a far twin
     // of a capped batch still lands on the far band's one key integer.
-    let depth_bias = if matches!(alpha_mode, AlphaMode::Blend) {
-        (f32::from(batch_order) * BATCH_ORDER_SORT_EPS).min(BATCH_ORDER_SORT_CAP)
-    } else {
+    //
+    // The SKY lane takes the same shape one rung down: a skybox is camera-anchored, so its view-z
+    // is a few tens of yards and it would sort after the world's transparents rather than behind
+    // them ([`crate::sky_order::WMO_SKYBOX_BIAS`]). Its opaque batches still take no bias — the
+    // painted cube faces are in the opaque pass, which is exactly where the reference puts them.
+    let depth_bias = if !matches!(alpha_mode, AlphaMode::Blend) {
         0.0
+    } else if sky_depth {
+        skybox_sort_bias(batch_order)
+    } else {
+        (f32::from(batch_order) * BATCH_ORDER_SORT_EPS).min(BATCH_ORDER_SORT_CAP)
     };
     let base = match texture {
         Some(image) => StandardMaterial {
@@ -351,7 +369,8 @@ pub fn model_material(
                         | (u16::from(blend == ModelBlend::Mod) << 7)
                         | (u16::from(blend == ModelBlend::Mod2x) << 8)
                         | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
-                        | (u16::from(env_map) * ENV_MAP_MARKER),
+                        | (u16::from(env_map) * ENV_MAP_MARKER)
+                        | (u16::from(sky_depth) * SKY_DEPTH_MARKER),
                 ),
                 0.0,
             ),
@@ -460,6 +479,40 @@ pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
 /// only what the fragment stage samples, so it needs no pipeline of its own (decision 0837).
 pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 
+/// `clutter_fade.z` marker bit 13: the **WMO-skybox lane** — this batch is part of a building's
+/// painted sky, so `specialize` compiles the shader's `WOW_SKY_DEPTH` branch (forced far depth) and
+/// drops the rasterizer bias constant. It *is* a
+/// [`benilla_assets::materials::WowModelKey`] axis, unlike [`ENV_MAP_MARKER`]: writing
+/// `@builtin(frag_depth)` costs the pipeline its early-Z, so exactly one camera-anchored model may
+/// pay it and every other draw in the frame must keep the pipeline that doesn't.
+pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
+
+/// Sort-bias step per authored batch on the **WMO-skybox lane** — [`BATCH_ORDER_SORT_EPS`]'s job,
+/// resized for the rung it has to survive.
+///
+/// The plain 1e-3 eps cannot be used here: added to [`crate::sky_order::WMO_SKYBOX_BIAS`] (−6e4) it
+/// falls *under the f32 ulp at that magnitude* (2¹⁵·2⁻²³ = 0.0039), so every batch rounds onto the
+/// same bias and the sort tie the eps exists to break comes back in silence. This step is 4 ulps
+/// there — exactly representable, strictly monotone. The tie is not a rare coplanar case on this
+/// lane: a skybox is anchored at the eye, so *every* pair of its batches shares a sort distance,
+/// every frame.
+pub(crate) const SKYBOX_ORDER_EPS: f32 = 0.015625;
+
+/// The skybox band's ceiling. With [`FAR_KEY_PULL`] it keeps the whole band on ONE pipeline-key
+/// integer — 0837's law: the base `StandardMaterialKey` packs `depth_bias as i32`, so a band
+/// straddling an integer is a live pipeline compile per side. Pulled by just under 1 and capped at
+/// 0.9, every batch lands in `(RUNG − 0.99, RUNG − 0.09]`, which truncates toward zero onto the
+/// same integer for all of them. The cap ties batches past index 57 (`0.9 / SKYBOX_ORDER_EPS`); the
+/// largest skybox the chain ships is 21 batches (`CavernsOfTimeSky.m2`).
+pub(crate) const SKYBOX_ORDER_CAP: f32 = 0.9;
+
+/// This batch's slot in the skybox band: the lane rung, pulled onto one pipeline key, plus the
+/// authored batch order. See [`SKYBOX_ORDER_EPS`] and [`crate::sky_order::WMO_SKYBOX_BIAS`].
+fn skybox_sort_bias(batch_order: u16) -> f32 {
+    crate::sky_order::WMO_SKYBOX_BIAS - FAR_KEY_PULL
+        + (f32::from(batch_order) * SKYBOX_ORDER_EPS).min(SKYBOX_ORDER_CAP)
+}
+
 /// The twin's `Transparent3d` sort bias (yards; **negative = drawn earlier** — the sign law is
 /// `sky_order`'s module doc). It must clear the spread of one model's part AABB centres, so **all**
 /// of a fading model's twins draw before **any** of its colour parts — the reference achieves the
@@ -524,6 +577,9 @@ pub fn zfill_material(
         sidn: None,
         window: false,
         zfill: true,
+        // A depth-prime twin exists to write depth for a fading model; the sky writes none, so no
+        // skybox batch ever has one (`M2BatchMaterials::skybox` builds no twins at all).
+        sky_depth: false,
     };
     if let Some(h) = cache.fetch(&key) {
         return h;
@@ -871,7 +927,12 @@ fn classify_part(
     let far_now = marked || swapped;
     let qualifies = match materials.get(near.id()) {
         Some(m) => {
-            matches!(m.base.alpha_mode, AlphaMode::Blend) && m.extension.model_flags.x <= 0.5
+            matches!(m.base.alpha_mode, AlphaMode::Blend)
+                && m.extension.model_flags.x <= 0.5
+                // A WMO skybox is anchored at the eye and forces the far depth: it has no side of
+                // the water plane to be on, and the far twin's −4e4 would sink its own sort rung
+                // into the world band. The sky is never part of the interleave.
+                && (m.extension.clutter_fade.z as u16) & SKY_DEPTH_MARKER == 0
         }
         None => false,
     };
@@ -1116,6 +1177,57 @@ mod tests {
             super::far_sort_bias(0.0) as i32,
             "the far band stays one pipeline key across the whole capped eps range"
         );
+    }
+
+    /// The **WMO-skybox band**: the four properties the lane's whole ordering rests on, none of
+    /// which survives being reasoned about in prose (decision 1264). The band is arithmetic at a
+    /// magnitude where f32 stops being able to represent the steps, which is exactly how the
+    /// ordinary eps would have failed here in silence.
+    #[test]
+    fn the_skybox_band_orders_its_batches_on_one_pipeline_key() {
+        // `CavernsOfTimeSky.m2` is 21 batches; `order` is the index + 1.
+        let band: Vec<f32> = (0..=21).map(super::skybox_sort_bias).collect();
+
+        // 1. STRICTLY INCREASING — the whole point. At −6e4 the ordinary 1e-3 eps rounds every
+        //    one of these onto the same f32 and the sort tie the eps exists to break comes back.
+        for pair in band.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "skybox batch order does not resolve at the rung's magnitude: {pair:?} — \
+                 SKYBOX_ORDER_EPS is under the f32 ulp there"
+            );
+        }
+
+        // 2. ONE PIPELINE KEY for the whole band (0837's law: `StandardMaterialKey` packs
+        //    `depth_bias as i32`, so a band straddling an integer is a live compile per side).
+        //    Checked for ANY u16 order, not just the 21 real ones — the cap is what holds it.
+        let key = band[0] as i32;
+        for order in [0u16, 1, 21, 57, 58, 1000, u16::MAX] {
+            assert_eq!(
+                super::skybox_sort_bias(order) as i32,
+                key,
+                "batch order {order} mints a second skybox pipeline"
+            );
+        }
+
+        // 3. UNDER EVERY WORLD TRANSPARENT. The deepest a world draw can sort is the far-side
+        //    water rung plus a far-plane view-z; the skybox's own camera-anchored view-z (its
+        //    shell radius, ~94 yd for Caverns of Time) rides on top of the rung and must not
+        //    close the gap.
+        const FAR_PLANE: f32 = 3000.0;
+        const SHELL: f32 = 128.0;
+        let deepest_world = crate::sky_order::FAR_SIDE_BIAS - FAR_PLANE - super::FAR_KEY_PULL;
+        assert!(
+            band.last().unwrap() + SHELL < deepest_world,
+            "a skybox can sort in front of a world transparent — the painted sky would paint \
+             over it (sky_order::WMO_SKYBOX_BIAS)"
+        );
+
+        // 4. The rung is the SMALLEST job it can be, per `sky_order`'s "as small as its ordering
+        //    job allows": a magnitude an order over the world band is margin, two is drift.
+        const {
+            assert!(crate::sky_order::WMO_SKYBOX_BIAS > 10.0 * crate::sky_order::FAR_SIDE_BIAS);
+        }
     }
 
     /// The far-side twin is its source shifted exactly one water rung with the marker bit added —

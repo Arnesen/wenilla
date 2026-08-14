@@ -1383,11 +1383,41 @@ pub(crate) struct LoginStageMessage {
 
 /// The session ended (socket death, logout's teardown edge) — bridged from the Net drain's
 /// `Disconnected` arm. [`crate::login`]'s policy reads it as "the IO thread is back at its
-/// pre-logon park": with pending credentials it schedules the silent re-auth (decision 0539 §3 —
-/// 0065's seamless reconnect, paced app-side).
+/// pre-logon park"; whether anything re-authenticates is [`Self::ends_the_session`]'s answer.
 #[derive(Message, Clone)]
 pub(crate) struct DisconnectedMessage {
     pub(crate) reason: String,
+    /// How it ended — the fact the whole post-session behaviour turns on (decision 1262).
+    pub(crate) end: benilla_protocol::SessionEnd,
+    /// **Is this the reference's `DISCONNECTED_FROM_SERVER`** — the session over, the client back
+    /// at the account screen behind a "Disconnected from server" dialog, and nothing retried?
+    ///
+    /// Decided **once**, by [`Self::new`], at the one edge where the event enters the app
+    /// (decision 1262). Four readers act on it — the world teardown, the screen flip, the black
+    /// cover, the credential policy — and they may not disagree: a teardown that keeps the avatar
+    /// for a reconnect that never comes is exactly the avatar-less free camera the report
+    /// described. Carrying the verdict rather than re-deriving it four times is what makes that
+    /// structural instead of conventional.
+    pub(crate) session_over: bool,
+}
+
+impl DisconnectedMessage {
+    /// The session-end event as the app sees it, with [`Self::session_over`] settled here and
+    /// nowhere else.
+    ///
+    /// It is `false` twice over. A [`SessionEnd::LoggedOut`](benilla_protocol::SessionEnd::LoggedOut)
+    /// teardown is the relist *inside* one session — the roster that follows IS the character
+    /// select the player asked for. And an unattended run ([`crate::run_mode::unattended_login`])
+    /// keeps 0065's seamless reconnect: a probe has nobody to press Okay.
+    pub(crate) fn new(reason: String, end: benilla_protocol::SessionEnd) -> Self {
+        let session_over =
+            end == benilla_protocol::SessionEnd::Lost && !crate::run_mode::unattended_login();
+        Self {
+            reason,
+            end,
+            session_over,
+        }
+    }
 }
 
 /// A login attempt failed before the roster (decision 0539): `code` is the server's auth result

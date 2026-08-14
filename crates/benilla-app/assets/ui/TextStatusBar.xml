@@ -1,11 +1,12 @@
 <!--
-    The shared status-bar numerals machinery (ref-TextStatusBar.lua + ref-TextStatusBar.xml,
-    transcribed whole — decision 1082). A bar opts in by calling TextStatusBar_Initialize() in its
-    OnLoad (setting `textLockable`), wiring a FontString via SetTextStatusBarText(bar, text), and
-    routing its OnEnter/OnLeave/OnValueChanged through the Show/Hide/Update functions here. The
-    text is "value / max", shown while hovered (a lockShow refcount) or always when the
-    `statusBarText` cvar is "1" ("Status Text" in the options; our GetCVar returns nil for a cvar
-    the engine doesn't carry, which reads as OFF — the 1.12 default).
+    The shared status-bar readout machinery — the contract 1.12's TextStatusBar.lua/.xml defines
+    (decision 1082), written here in our own terms. A bar opts in by calling
+    TextStatusBar_Initialize() in its OnLoad (setting `textLockable`), wiring a FontString via
+    SetTextStatusBarText(bar, text), and routing its OnEnter/OnLeave/OnValueChanged through the
+    Show/Hide/Update functions here. The text is "value / max", shown while hovered (a lockShow
+    refcount) or always when the `statusBarText` cvar is "1" ("Status Text" in the options; our
+    GetCVar returns nil for a cvar the engine doesn't carry, which reads as OFF — the 1.12
+    default).
 
     Customers: the XP bar (ActionBar.xml) and, since decision 1143, the player and pet frames'
     health/power bars (UnitFrames.xml). `textLockable` is what the statusBarText cvar pins, and
@@ -16,6 +17,19 @@
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
+        -- The readout has exactly three reasons to be on screen, and every function below is some
+        -- combination of them: the Status Text option pins it (only on a bar that opted in with
+        -- `textLockable`), the pointer is on the bar (a refcount, so nested hovers balance), or the
+        -- bar is showing its zero text — a phrase rather than a number, which stands on its own.
+        --
+        -- The option test is the one of the three that reads from outside the bar, and it is asked
+        -- from three places, so it lives here once. It takes the option's VALUE rather than calling
+        -- GetCVar itself: the CVAR_UPDATE handler is handed the new value along with the event and
+        -- must not go asking the engine for the one it is being told about.
+        local function optionPins(bar, setting)
+            return setting == "1" and bar.textLockable
+        end
+
         -- `bar` is optional and falls back to `this`, the same shape TextStatusBar_UpdateTextString
         -- below already has (and for the same reason): the ref calls this from a bar's own OnLoad,
         -- where `this` is the bar, but our unit frames wire their children from ONE shared
@@ -28,6 +42,8 @@
             bar.lockShow = 0
         end
 
+        -- Hand a bar the FontString its readout lives in. A bar without one is never an error
+        -- below — it simply has nothing to say, and every entry point here checks for that.
         function SetTextStatusBarText(bar, text)
             if not bar or not text then
                 return
@@ -36,49 +52,58 @@
         end
 
         function TextStatusBar_OnEvent(cvar, value)
-            if event == "CVAR_UPDATE" and cvar == "STATUS_BAR_TEXT" then
-                if this.TextString then
-                    if value == "1" and this.textLockable then
-                        this.TextString:Show()
-                    elseif this.lockShow == 0 then
-                        this.TextString:Hide()
-                    end
-                end
+            if event ~= "CVAR_UPDATE" or cvar ~= "STATUS_BAR_TEXT" or not this.TextString then
+                return
+            end
+            -- Switching the option ON pins the readout up at once. Switching it off only puts the
+            -- readout away when nothing else is holding it there: a hover in progress keeps its own,
+            -- and gets to hide it when it ends.
+            if optionPins(this, value) then
+                this.TextString:Show()
+            elseif this.lockShow == 0 then
+                this.TextString:Hide()
             end
         end
 
+        -- Repaint one bar's readout from the value it is currently carrying. `textStatusBar` is
+        -- optional and falls back to `this` for the same reason TextStatusBar_Initialize's is.
         function TextStatusBar_UpdateTextString(textStatusBar)
             if not textStatusBar then
                 textStatusBar = this
             end
-            local string = textStatusBar.TextString
-            if string then
-                local value = textStatusBar:GetValue()
-                local valueMin, valueMax = textStatusBar:GetMinMaxValues()
-                if valueMax > 0 then
-                    textStatusBar:Show()
-                    if value == 0 and textStatusBar.zeroText then
-                        string:SetText(textStatusBar.zeroText)
-                        textStatusBar.isZero = 1
-                        string:Show()
-                    else
-                        textStatusBar.isZero = nil
-                        if textStatusBar.prefix then
-                            string:SetText(textStatusBar.prefix .. " " .. value .. " / " .. valueMax)
-                        else
-                            string:SetText(value .. " / " .. valueMax)
-                        end
-                        if GetCVar("statusBarText") == "1" and textStatusBar.textLockable then
-                            string:Show()
-                        elseif textStatusBar.lockShow > 0 then
-                            string:Show()
-                        else
-                            string:Hide()
-                        end
-                    end
-                else
-                    textStatusBar:Hide()
-                end
+            local readout = textStatusBar.TextString
+            if not readout then
+                return
+            end
+            local value = textStatusBar:GetValue()
+            local _, valueMax = textStatusBar:GetMinMaxValues()
+            -- No ceiling is not the same thing as a bar at zero (below): it means the bar does not
+            -- apply to this unit at all, so the BAR leaves the screen rather than reading out a
+            -- number. Its readout is left exactly as it stands and comes back with it.
+            if valueMax <= 0 then
+                textStatusBar:Hide()
+                return
+            end
+            textStatusBar:Show()
+            if value == 0 and textStatusBar.zeroText then
+                -- Empty, and this bar has a phrase for empty. The phrase displaces the numbers and
+                -- is shown outright: it is a message, so neither the option nor a hover gates it,
+                -- and `isZero` is the flag that tells the hover not to take it away again.
+                textStatusBar.isZero = 1
+                readout:SetText(textStatusBar.zeroText)
+                readout:Show()
+                return
+            end
+            textStatusBar.isZero = nil
+            if textStatusBar.prefix then
+                readout:SetText(textStatusBar.prefix .. " " .. value .. " / " .. valueMax)
+            else
+                readout:SetText(value .. " / " .. valueMax)
+            end
+            if optionPins(textStatusBar, GetCVar("statusBarText")) or textStatusBar.lockShow > 0 then
+                readout:Show()
+            else
+                readout:Hide()
             end
         end
 
@@ -98,31 +123,29 @@
             end
         end
 
+        -- One more hold on the readout. `lockShow` counts rather than flags because two things can
+        -- be holding it open at once: the character sheet takes a hold for as long as it is open
+        -- (CharacterFrame_OnShow, decision 1146) and a hover on the same bar takes a second one on
+        -- top. Only the last release puts the readout away, so the hover still balances.
         function ShowTextStatusBarText(bar)
             if bar and bar.TextString then
-                if not bar.lockShow then
-                    bar.lockShow = 0
-                end
+                bar.lockShow = (bar.lockShow or 0) + 1
                 bar.TextString:Show()
-                bar.lockShow = bar.lockShow + 1
             end
         end
 
+        -- One hold released. The count floors at none rather than going negative, so an unbalanced
+        -- release — a frame hidden out from under a hover — cannot strand the readout on screen.
         function HideTextStatusBarText(bar)
             if bar and bar.TextString then
-                if not bar.lockShow then
-                    bar.lockShow = 0
-                end
-                if bar.lockShow > 0 then
-                    bar.lockShow = bar.lockShow - 1
-                end
-                -- The ref reads `this.isZero` here — a leak of the handler's own frame into a
-                -- helper that otherwise takes `bar`. Equivalent at every call site (each caller
-                -- passes its handler's own frame), so it is written as `bar` — which also keeps
-                -- the function callable outside a handler, where `this` is nil.
-                if bar.lockShow > 0 or bar.isZero == 1 then
-                    bar.TextString:Show()
-                elseif GetCVar("statusBarText") == "1" and bar.textLockable then
+                bar.lockShow = math.max((bar.lockShow or 0) - 1, 0)
+                -- Releasing a hold only puts the readout away if none of the three reasons is left.
+                -- The ref reads `this.isZero` for the middle one — a leak of the handler's own frame
+                -- into a helper that otherwise takes `bar`. Equivalent at every call site (each
+                -- caller passes its handler's own frame), so it is written as `bar`, which also
+                -- keeps the function callable outside a handler, where `this` is nil.
+                if bar.lockShow > 0 or bar.isZero == 1
+                        or optionPins(bar, GetCVar("statusBarText")) then
                     bar.TextString:Show()
                 else
                     bar.TextString:Hide()

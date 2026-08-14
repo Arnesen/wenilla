@@ -1,8 +1,13 @@
 <!--
-    The dropdown kit — transcribed from the 1.12 FrameXML UIDropDownMenuTemplates.xml +
-    UIDropDownMenu.lua (decision 0203 phase 2's closing sub-slice, widened for decision 0434
-    phase 5: the unit popups are the first MENU-mode + submenu customer; the world map's
-    continent/zone pickers and the trainer/tradeskill filters stay on the level-1 capsule path).
+    The dropdown kit — our own implementation of the 1.12 dropdown widget set. The reference
+    (FrameXML UIDropDownMenuTemplates.xml + UIDropDownMenu.lua) is the SPECIFICATION it answers to,
+    not the source of this text: the global names, the `info` table's field names, every geometry
+    constant and every observable behaviour below are the reference's and are load-bearing (addons
+    call, replace and read them by name); the code that expresses them is ours, and is written the
+    way we would write it — shared helpers, field lists and lookup tables where the reference
+    repeats itself. Decision 0203 phase 2's closing sub-slice, widened for decision 0434 phase 5:
+    the unit popups are the first MENU-mode + submenu customer; the world map's continent/zone
+    pickers and the trainer/tradeskill filters stay on the level-1 capsule path.
 
     IN: UIDropDownMenuTemplate (the capsule: LabelFrame art trio, $parentText, the scroll-down
     toggle button), UIDropDownMenuButtonTemplate (row: highlight, check, right-side icon, expand
@@ -18,9 +23,9 @@
     THE COLOR SWATCH ROW came in with the colour picker (ColorPickerFrame.xml): the full
     `hasColorSwatch` / `r` / `g` / `b` / `swatchFunc` / `hasOpacity` / `opacity` / `opacityFunc` /
     `cancelFunc` field set, the `$parentColorSwatch` button on the row template, and
-    `UIDropDownMenuButton_OpenColorPicker` (ref UIDropDownMenu.lua l.801-815). It is the second half
-    of one feature, not a separate one: `hasColorSwatch` draws the square, clicking the square is
-    the ONLY way the reference's colour picker ever opens, and `hasColorSwatch` is **145 files /
+    `UIDropDownMenuButton_OpenColorPicker` (spec: UIDropDownMenu.lua l.801-815). It is the second
+    half of one feature, not a separate one: `hasColorSwatch` draws the square, clicking the square
+    is the ONLY way the reference's colour picker ever opens, and `hasColorSwatch` is **145 files /
     82 corpus addons**.
 
     OUT (each waits for its first customer): menu level 3 (UIDROPDOWNMENU_MAXLEVELS is 2 — the
@@ -53,7 +58,7 @@
       color swatch, which is OUT". The swatch is IN now, so the ref's own anchor is restored:
       `RIGHT relativeTo="$parentColorSwatch" relativePoint="LEFT"`.)
     - The list OnShow resets showTimer AND isCounting (the ref writes `showTime`, a field
-      nothing reads — transcribed as the intent, not the typo).
+      nothing reads — we implement the intent, not the typo).
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
@@ -66,25 +71,59 @@
         UIDROPDOWNMENU_MENU_LEVEL = 1;
         UIDROPDOWNMENU_MENU_VALUE = nil;
         UIDROPDOWNMENU_SHOW_TIME = 2;
-        -- List of open menus (ref verbatim; UnitPopup's OnUpdate enable/disable pass walks it).
+        -- Which menus are open, keyed by level. UnitPopup writes it and its OnUpdate enable/disable
+        -- pass walks it; each list's own OnHide clears its entry.
         OPEN_DROPDOWNMENUS = {};
 
-        -- ref Initialize: reset every list at or above the current level (or all of them when a
-        -- different dropdown takes over), store + run the init function, apply displayMode.
+        -- ── The kit's vocabulary ──────────────────────────────────────────────────────────────
+        -- Four things this file says over and over, said once here.
+
+        -- Every named child in the kit is `<owner's name><suffix>`: a row's Check/NormalText/Icon/
+        -- ExpandArrow/ColorSwatch/InvisibleButton, a capsule's Left/Middle/Right/Text/Button, the
+        -- swatch's NormalTexture. (The reference spells this two different ways for the same
+        -- object — off the list name plus the row index, and off the row itself.)
+        local function menuChild(frame, suffix)
+            return getglobal(frame:GetName()..suffix);
+        end
+
+        -- A row addressed the way the by-address API addresses it: level + index.
+        local function listRow(level, index)
+            return getglobal("DropDownList"..level.."Button"..index);
+        end
+
+        -- The `info` fields a row simply carries. AddButton copies them onto the row so the row's
+        -- own handlers — its click, the width settle, the colour square — can read them back later.
+        -- These names are the published API: the list is the documentation.
+        local ROW_FIELDS = {
+            "func", "owner", "arg1", "arg2", "keepShownOnClick", "tooltipTitle", "tooltipText",
+            "hasArrow", "notCheckable", "icon",
+            "hasColorSwatch", "hasOpacity", "opacity", "opacityFunc", "swatchFunc", "cancelFunc",
+        };
+
+        -- A capsule remembers its selection under exactly one of these; adopting one drops the
+        -- other two, which is why they can never disagree.
+        local SELECTION_KEYS = { "selectedName", "selectedID", "selectedValue" };
+
+        -- The capsule's three-piece LabelFrame art.
+        local CAPSULE_ART = { "Left", "Middle", "Right" };
+
+        -- Reset the levels this dropdown is about to rebuild, remember + run its init function,
+        -- then apply displayMode. A DIFFERENT dropdown taking the menu over resets the whole stack
+        -- from level 1; the same one keeps whatever sits above the level it is rebuilding.
         function UIDropDownMenu_Initialize(frame, initFunction, displayMode, level)
-            if ( not frame ) then
-                frame = this;
-            end
-            if ( frame:GetName() ~= UIDROPDOWNMENU_OPEN_MENU ) then
+            frame = frame or this;
+            local name = frame:GetName();
+            local takeover = (name ~= UIDROPDOWNMENU_OPEN_MENU);
+            if ( takeover ) then
                 UIDROPDOWNMENU_MENU_LEVEL = 1;
             end
-            UIDROPDOWNMENU_INIT_MENU = frame:GetName();
+            UIDROPDOWNMENU_INIT_MENU = name;
             for i = 1, UIDROPDOWNMENU_MAXLEVELS, 1 do
-                local dropDownList = getglobal("DropDownList"..i);
-                if ( i >= UIDROPDOWNMENU_MENU_LEVEL or frame:GetName() ~= UIDROPDOWNMENU_OPEN_MENU ) then
-                    dropDownList.numButtons = 0;
-                    for j=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
-                        getglobal("DropDownList"..i.."Button"..j):Hide();
+                if ( takeover or i >= UIDROPDOWNMENU_MENU_LEVEL ) then
+                    local list = getglobal("DropDownList"..i);
+                    list.numButtons = 0;
+                    for j = 1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                        listRow(i, j):Hide();
                     end
                 end
             end
@@ -94,18 +133,17 @@
                 initFunction(level);
             end
             if ( displayMode == "MENU" ) then
-                -- Hide the capsule art when the frame has it (see the header deviation).
-                local left = getglobal(frame:GetName().."Left");
-                if ( left ) then
-                    left:Hide();
-                    getglobal(frame:GetName().."Middle"):Hide();
-                    getglobal(frame:GetName().."Right"):Hide();
+                -- Drop the capsule art, when the frame has any (see the header deviation).
+                if ( getglobal(name.."Left") ) then
+                    for _, part in ipairs(CAPSULE_ART) do
+                        getglobal(name..part):Hide();
+                    end
                 end
                 frame.displayMode = "MENU";
             end
         end
 
-        -- The ref's width law, run from the list's OnUpdate (the header's WIDTH SETTLE): rows
+        -- The reference's width law, run from the list's OnUpdate (the header's WIDTH SETTLE): rows
         -- measure text + 60, +10 for an arrow OR a colour swatch, +10 for an icon, -30 when
         -- notCheckable; the list takes max + 15. Waits until every text row has a real (nonzero)
         -- measure. (The ref's `if ( info.hasArrow or info.hasColorSwatch )` is ONE +10, not two —
@@ -123,7 +161,7 @@
                 local text = button:GetText();
                 if ( text and text ~= "" ) then
                     want = want + 1;
-                    local width = getglobal(button:GetName().."NormalText"):GetWidth();
+                    local width = menuChild(button, "NormalText"):GetWidth();
                     if ( width > 0 ) then
                         seen = seen + 1;
                         width = width + 60;
@@ -155,270 +193,248 @@
             listFrame.pendingWidth = nil;
         end
 
-        -- The ref's off-screen flip, from the same OnUpdate chain (needs the resolved rect —
-        -- header's second settle). Level 1 re-seats against its stored anchor; level 2+ flips
-        -- around its anchor row with the ref's (-11/0, -14/+14) offset table.
+        -- Which of the list's corners meets which corner of its seat once the list is known to hang
+        -- off the bottom and/or the right of the screen. Level 1 re-seats against the anchor Toggle
+        -- stored and needs no nudge; a submenu flips around the row that opened it, and the nudge
+        -- is what keeps the flipped list glued to that row.
+        local FLIP = {
+            bottomRight = { seat = { "BOTTOMRIGHT", "BOTTOMLEFT" },
+                            row  = { "BOTTOMRIGHT", "BOTTOMLEFT", -11, -14 } },
+            bottom      = { seat = { "BOTTOMLEFT", "TOPLEFT" },
+                            row  = { "BOTTOMLEFT", "BOTTOMRIGHT", 0, -14 } },
+            right       = { seat = { "TOPRIGHT", "TOPLEFT" },
+                            row  = { "TOPRIGHT", "TOPLEFT", -11, 14 } },
+        };
+
+        -- The off-screen flip, from the same OnUpdate chain as the width (it needs the resolved
+        -- rect — the header's second settle).
         function UIDropDownMenu_SettleFlip(listFrame)
             local x, y = listFrame:GetCenter();
             if ( not x or not y ) then
                 return; -- not resolved yet; next update
             end
             listFrame.pendingFlip = nil;
-            local offscreenY, offscreenX;
-            if ( (y - listFrame:GetHeight()/2) < 0 ) then
-                offscreenY = 1;
+            local rightEdge = listFrame:GetRight();
+            local offBottom = (y - listFrame:GetHeight()/2) < 0;
+            local offRight = (rightEdge ~= nil) and (rightEdge > GetScreenWidth());
+            local flip;
+            if ( offBottom and offRight ) then
+                flip = FLIP.bottomRight;
+            elseif ( offBottom ) then
+                flip = FLIP.bottom;
+            elseif ( offRight ) then
+                flip = FLIP.right;
+            else
+                return; -- it fits; the seat Toggle gave it stands
             end
-            if ( listFrame:GetRight() and listFrame:GetRight() > GetScreenWidth() ) then
-                offscreenX = 1;
-            end
-            if ( not offscreenY and not offscreenX ) then
-                return;
-            end
+            listFrame:ClearAllPoints();
             if ( listFrame:GetID() == 1 ) then
-                local anchorPoint, relativePoint;
-                if ( offscreenY and offscreenX ) then
-                    anchorPoint = "BOTTOMRIGHT";
-                    relativePoint = "BOTTOMLEFT";
-                elseif ( offscreenY ) then
-                    anchorPoint = "BOTTOMLEFT";
-                    relativePoint = "TOPLEFT";
-                elseif ( offscreenX ) then
-                    anchorPoint = "TOPRIGHT";
-                    relativePoint = "TOPLEFT";
-                end
-                listFrame:ClearAllPoints();
+                local corner = flip.seat;
                 if ( listFrame.cursorMode ) then
-                    -- Cursor menus keep their screen-space seat, only the corner changes.
-                    listFrame:SetPoint(anchorPoint, "UIParent", "BOTTOMLEFT", listFrame.seatX, listFrame.seatY);
+                    -- Cursor menus keep their screen-space seat; only the corner changes.
+                    listFrame:SetPoint(corner[1], "UIParent", "BOTTOMLEFT", listFrame.seatX, listFrame.seatY);
                 else
-                    listFrame:SetPoint(anchorPoint, listFrame.seatTo, relativePoint, listFrame.seatX, listFrame.seatY);
+                    listFrame:SetPoint(corner[1], listFrame.seatTo, corner[2], listFrame.seatX, listFrame.seatY);
                 end
             else
-                local anchorPoint, relativePoint, offsetX, offsetY;
-                if ( offscreenY and offscreenX ) then
-                    anchorPoint = "BOTTOMRIGHT";
-                    relativePoint = "BOTTOMLEFT";
-                    offsetX = -11;
-                    offsetY = -14;
-                elseif ( offscreenY ) then
-                    anchorPoint = "BOTTOMLEFT";
-                    relativePoint = "BOTTOMRIGHT";
-                    offsetX = 0;
-                    offsetY = -14;
-                else
-                    anchorPoint = "TOPRIGHT";
-                    relativePoint = "TOPLEFT";
-                    offsetX = -11;
-                    offsetY = 14;
-                end
-                listFrame:ClearAllPoints();
-                listFrame:SetPoint(anchorPoint, listFrame.anchorFrame, relativePoint, offsetX, offsetY);
+                local corner = flip.row;
+                listFrame:SetPoint(corner[1], listFrame.anchorFrame, corner[2], corner[3], corner[4]);
             end
         end
 
-        -- The list OnUpdate: settle width, then the flip, then the 2s hover-away auto-close
-        -- (ref verbatim: counting starts on OnLeave, never on open).
+        -- The list's per-frame work: settle the width, then the flip (both wait on measures that
+        -- land a frame after the open — the header), then run the hover-away countdown.
         function UIDropDownMenu_OnUpdate(elapsed)
             if ( this.pendingWidth ) then
                 UIDropDownMenu_SettleWidth(this);
             elseif ( this.pendingFlip ) then
                 UIDropDownMenu_SettleFlip(this);
             end
-            if ( this:IsVisible() ) then
-                if ( not this.showTimer or not this.isCounting ) then
-                    return;
-                elseif ( this.showTimer < 0 ) then
-                    this:Hide();
-                    this.showTimer = nil;
-                    this.isCounting = nil;
-                else
-                    this.showTimer = this.showTimer - elapsed;
-                end
+            -- The countdown runs only on a visible list that a StartCounting has armed (never on
+            -- open); reaching zero is what closes a menu the mouse walked away from.
+            if ( not this:IsVisible() or not this.isCounting or not this.showTimer ) then
+                return;
+            end
+            if ( this.showTimer < 0 ) then
+                this.showTimer = nil;
+                this.isCounting = nil;
+                this:Hide();
+            else
+                this.showTimer = this.showTimer - elapsed;
             end
         end
 
-        -- The countdown pair walks the level chain (ref verbatim): a submenu's hover state
-        -- drives its PARENT list's timer, so the whole stack lives or dies together.
-        function UIDropDownMenu_StartCounting(frame)
-            if ( frame.parent ) then
-                UIDropDownMenu_StartCounting(frame.parent);
-            else
-                frame.showTimer = UIDROPDOWNMENU_SHOW_TIME;
-                frame.isCounting = 1;
+        -- A submenu's hover state drives its ROOT list's timer, so the whole open stack lives or
+        -- dies together: both ends of the countdown climb `parent` to the list that owns the stack.
+        local function timerRoot(frame)
+            while ( frame.parent ) do
+                frame = frame.parent;
             end
+            return frame;
+        end
+
+        function UIDropDownMenu_StartCounting(frame)
+            local root = timerRoot(frame);
+            root.showTimer = UIDROPDOWNMENU_SHOW_TIME;
+            root.isCounting = 1;
         end
 
         function UIDropDownMenu_StopCounting(frame)
-            if ( frame.parent ) then
-                UIDropDownMenu_StopCounting(frame.parent);
-            else
-                frame.isCounting = nil;
+            local root = timerRoot(frame);
+            root.isCounting = nil;
+        end
+
+        -- The kit's one selection test, answering in the reference's own `[nil, 1]` currency. Name
+        -- beats id beats value, and only the first key the capsule actually carries is consulted —
+        -- note that GetSelectedID answers for a value-selected capsule too (it scans the open level
+        -- for the row), so the value arm below is reached only when that scan found nothing.
+        local function rowChecked(frame, button)
+            local name = UIDropDownMenu_GetSelectedName(frame);
+            if ( name ) then
+                return button:GetText() == name and 1 or nil;
+            end
+            local id = UIDropDownMenu_GetSelectedID(frame);
+            if ( id ) then
+                return button:GetID() == id and 1 or nil;
+            end
+            local value = UIDropDownMenu_GetSelectedValue(frame);
+            if ( value ) then
+                return button.value == value and 1 or nil;
             end
         end
 
-        -- ref AddButton: configure the row from the info table (the attribute list is the ref's
-        -- own doc block — text/value/func/checked/isTitle/disabled/notClickable/notCheckable/
-        -- hasArrow/icon+tCoords/textR-G-B/justifyH/keepShownOnClick/owner/arg1/arg2/tooltips).
-        -- Width rides the settle (header), not an AddButton-time measure.
-        function UIDropDownMenu_AddButton(info, level)
-            if ( not level ) then
-                level = 1;
+        -- Paint one row's checked state. The tick and the locked highlight always move together,
+        -- and the row remembers what it was told (its click handler reads it back).
+        local function paintChecked(button, checked)
+            if ( checked ) then
+                button:LockHighlight();
+                menuChild(button, "Check"):Show();
+            else
+                button:UnlockHighlight();
+                menuChild(button, "Check"):Hide();
             end
+            button.checked = checked;
+        end
+
+        -- Build one menu row from an `info` table — `.text`/`.value`/`.func`/`.checked`/`.isTitle`/
+        -- `.disabled`/`.notClickable`/`.notCheckable`/`.hasArrow`/`.icon` + `.tCoord*`/`.textR-G-B`/
+        -- `.justifyH`/`.keepShownOnClick`/`.owner`/`.arg1`/`.arg2`/the tooltip pair/the colour-swatch
+        -- set. That table is the published API and its field names are the contract. Width rides the
+        -- settle (header), not an AddButton-time measure.
+        function UIDropDownMenu_AddButton(info, level)
+            level = level or 1;
             local listFrame = getglobal("DropDownList"..level);
             local listFrameName = listFrame:GetName();
             local index = listFrame.numButtons + 1;
             if ( index > UIDROPDOWNMENU_MAXBUTTONS or level > UIDROPDOWNMENU_MAXLEVELS ) then
-                return; -- ref raises a dev-error dialog here (OUT, header)
+                return; -- the ref raises a dev-error dialog here (OUT, header)
             end
             listFrame.numButtons = index;
 
-            local button = getglobal(listFrameName.."Button"..index);
-            local normalText = getglobal(button:GetName().."NormalText");
-            local icon = getglobal(button:GetName().."Icon");
-            -- Captures OnEnter/OnLeave over a disabled row so the menu doesn't time out (ref).
-            local invisibleButton = getglobal(button:GetName().."InvisibleButton");
-
-            button:SetDisabledTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b);
+            local button = listRow(level, index);
+            local normalText = menuChild(button, "NormalText");
+            local icon = menuChild(button, "Icon");
+            -- Captures OnEnter/OnLeave over a disabled row so the menu doesn't time out.
+            local invisibleButton = menuChild(button, "InvisibleButton");
             invisibleButton:Hide();
             button:Enable();
 
+            -- The label, and its colour: a row carrying its own textR/G/B wears it in both the
+            -- normal and the highlight state, so the label doesn't change colour under the mouse.
             if ( info.text ) then
                 button:SetText(info.text);
-                if ( info.icon ) then
-                    icon:SetTexture(info.icon);
-                    if ( info.tCoordLeft ) then
-                        icon:SetTexCoord(info.tCoordLeft, info.tCoordRight, info.tCoordTop, info.tCoordBottom);
-                    end
-                    icon:Show();
-                else
-                    icon:Hide();
+                local r, g, b = info.textR, info.textG, info.textB;
+                if ( not r ) then
+                    r, g, b = HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b;
                 end
-                if ( info.textR ) then
-                    button:SetTextColor(info.textR, info.textG, info.textB);
-                    button:SetHighlightTextColor(info.textR, info.textG, info.textB);
-                else
-                    button:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
-                    button:SetHighlightTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
-                end
+                button:SetTextColor(r, g, b);
+                button:SetHighlightTextColor(r, g, b);
             else
                 button:SetText("");
+            end
+
+            -- The right-hand icon rides on the label: a row with no text has no icon either.
+            if ( info.text and info.icon ) then
+                icon:SetTexture(info.icon);
+                if ( info.tCoordLeft ) then
+                    icon:SetTexCoord(info.tCoordLeft, info.tCoordRight, info.tCoordTop, info.tCoordBottom);
+                end
+                icon:Show();
+            else
                 icon:Hide();
             end
 
-            button.func = info.func;
-            button.owner = info.owner;
-            -- The colour-swatch half of the info table (ref l.229-233), passed to the row so the
-            -- swatch's OnClick can hand it all to ColorPickerFrame. `swatchFunc` becomes the
-            -- picker's `func`, which is why it is the picker's LIVE-preview callback and not an
-            -- on-accept one.
-            button.hasOpacity = info.hasOpacity;
-            button.opacity = info.opacity;
-            button.opacityFunc = info.opacityFunc;
-            button.cancelFunc = info.cancelFunc;
-            button.swatchFunc = info.swatchFunc;
-            button.keepShownOnClick = info.keepShownOnClick;
-            button.tooltipTitle = info.tooltipTitle;
-            button.tooltipText = info.tooltipText;
-            button.arg1 = info.arg1;
-            button.arg2 = info.arg2;
-            button.hasArrow = info.hasArrow;
-            button.notCheckable = info.notCheckable;
-            button.icon = info.icon;
-            if ( info.value ) then
-                button.value = info.value;
-            elseif ( info.text ) then
-                button.value = info.text;
-            else
-                button.value = nil;
+            -- Everything the row simply carries over, then the value, which falls back to the label
+            -- so a menu built from plain text rows still has values to dispatch on.
+            for _, field in ipairs(ROW_FIELDS) do
+                button[field] = info[field];
             end
+            button.value = info.value or info.text;
 
+            local expandArrow = menuChild(button, "ExpandArrow");
             if ( info.hasArrow ) then
-                getglobal(listFrameName.."Button"..index.."ExpandArrow"):Show();
+                expandArrow:Show();
             else
-                getglobal(listFrameName.."Button"..index.."ExpandArrow"):Hide();
+                expandArrow:Hide();
             end
 
-            -- The ref's per-row anchor dance: notCheckable rows pull the text to the row's left
-            -- edge (titles/actions); checkable rows leave the 27px check column; MENU mode
-            -- tucks checkable rows 6px tighter.
+            -- The row's left inset, and its label's seat inside it. A notCheckable row (titles,
+            -- plain actions) pulls the label to the row's left edge and sits 10px in; a checkable
+            -- row leaves the 27px check column and sits 12px in — 6px tighter under MENU mode,
+            -- whose frames have no capsule for the rows to line up beneath.
             local xPos = 5;
             local yPos = -((button:GetID() - 1) * UIDROPDOWNMENU_BUTTON_HEIGHT) - UIDROPDOWNMENU_BORDER_HEIGHT;
             normalText:ClearAllPoints();
-            if ( info.notCheckable ) then
-                if ( info.justifyH and info.justifyH == "CENTER" ) then
-                    normalText:SetPoint("CENTER", button:GetName(), "CENTER", -7, 0);
-                else
-                    normalText:SetPoint("LEFT", button:GetName(), "LEFT", 0, 0);
-                end
-                xPos = xPos + 10;
-            else
+            if ( not info.notCheckable ) then
                 xPos = xPos + 12;
                 normalText:SetPoint("LEFT", button:GetName(), "LEFT", 27, 0);
+            elseif ( info.justifyH == "CENTER" ) then
+                xPos = xPos + 10;
+                normalText:SetPoint("CENTER", button:GetName(), "CENTER", -7, 0);
+            else
+                xPos = xPos + 10;
+                normalText:SetPoint("LEFT", button:GetName(), "LEFT", 0, 0);
             end
 
-            local frame;
-            if ( UIDROPDOWNMENU_OPEN_MENU ) then
-                frame = getglobal(UIDROPDOWNMENU_OPEN_MENU);
+            -- Whose menu this is: the open capsule, or — nothing open yet — the one initializing.
+            local frame = UIDROPDOWNMENU_OPEN_MENU and getglobal(UIDROPDOWNMENU_OPEN_MENU);
+            if ( frame and frame.displayMode == "MENU" and not info.notCheckable ) then
+                xPos = xPos - 6;
             end
-            if ( frame and frame.displayMode == "MENU" ) then
-                if ( not info.notCheckable ) then
-                    xPos = xPos - 6;
-                end
-            end
-            if ( not frame ) then
-                frame = getglobal(UIDROPDOWNMENU_INIT_MENU);
-            end
+            frame = frame or getglobal(UIDROPDOWNMENU_INIT_MENU);
             button:SetPoint("TOPLEFT", listFrameName, "TOPLEFT", xPos, yPos);
 
-            -- Selection by name/id/value against the owning frame (ref verbatim).
-            if ( frame ) then
-                if ( UIDropDownMenu_GetSelectedName(frame) ) then
-                    if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
-                        info.checked = 1;
-                    end
-                elseif ( UIDropDownMenu_GetSelectedID(frame) ) then
-                    if ( button:GetID() == UIDropDownMenu_GetSelectedID(frame) ) then
-                        info.checked = 1;
-                    end
-                elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
-                    if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
-                        info.checked = 1;
-                    end
-                end
+            -- A row the owning capsule points at comes up checked. `info.checked` is only ever set
+            -- here, never cleared: a caller that declared the row checked keeps it.
+            if ( frame and rowChecked(frame, button) ) then
+                info.checked = 1;
             end
+            paintChecked(button, info.checked);
 
-            if ( info.checked ) then
-                button:LockHighlight();
-                getglobal(listFrameName.."Button"..index.."Check"):Show();
-            else
-                button:UnlockHighlight();
-                getglobal(listFrameName.."Button"..index.."Check"):Hide();
-            end
-            button.checked = info.checked;
-
-            -- The colour square (ref l.318-328). Its NormalTexture is the swatch art, tinted to the
-            -- row's colour; the row keeps r/g/b so the swatch's OnClick can seed the picker.
-            local colorSwatch = getglobal(listFrameName.."Button"..index.."ColorSwatch");
+            -- The colour square: its NormalTexture IS the swatch art, tinted to the row's colour,
+            -- and the row keeps r/g/b so the square's own OnClick can seed the picker from them.
+            local colorSwatch = menuChild(button, "ColorSwatch");
             if ( info.hasColorSwatch ) then
-                getglobal(colorSwatch:GetName().."NormalTexture"):SetVertexColor(info.r, info.g, info.b);
-                button.r = info.r;
-                button.g = info.g;
-                button.b = info.b;
+                button.r, button.g, button.b = info.r, info.g, info.b;
+                menuChild(colorSwatch, "NormalTexture"):SetVertexColor(button.r, button.g, button.b);
                 colorSwatch:Show();
             else
                 colorSwatch:Hide();
             end
-            button.hasColorSwatch = info.hasColorSwatch;
 
-            -- notClickable disables white; isTitle disables gold (ref order — title wins).
+            -- Three ways a row lands disabled, each choosing the colour its label wears while it is:
+            -- a title is gold, a notClickable row is white, a plainly disabled one keeps the gray
+            -- default. A title wins, which is the reference's own order (it applies isTitle second).
+            local disabledColor = GRAY_FONT_COLOR;
             if ( info.notClickable ) then
                 info.disabled = 1;
-                button:SetDisabledTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
+                disabledColor = HIGHLIGHT_FONT_COLOR;
             end
             if ( info.isTitle ) then
                 info.disabled = 1;
-                button:SetDisabledTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
+                disabledColor = NORMAL_FONT_COLOR;
             end
+            button:SetDisabledTextColor(disabledColor.r, disabledColor.g, disabledColor.b);
             if ( info.disabled ) then
                 button:Disable();
                 invisibleButton:Show();
@@ -428,116 +444,93 @@
             button:Show();
         end
 
-        -- ref Refresh: re-derive each row's check + lock state and push the selected row's label
-        -- into the capsule text. Width stays the settle's job (header).
+        -- Re-derive every row's check + lock state on one level, and push the selected row's label
+        -- into the capsule's own text. Width stays the settle's job (header).
         function UIDropDownMenu_Refresh(frame, useValue, dropdownLevel)
-            if ( not frame ) then
-                frame = this;
-            end
-            if ( not dropdownLevel ) then
-                dropdownLevel = UIDROPDOWNMENU_MENU_LEVEL;
-            end
-            for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
-                local button = getglobal("DropDownList"..dropdownLevel.."Button"..i);
-                local checked = nil;
-                if ( UIDropDownMenu_GetSelectedName(frame) ) then
-                    if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
-                        checked = 1;
-                    end
-                elseif ( UIDropDownMenu_GetSelectedID(frame) ) then
-                    if ( button:GetID() == UIDropDownMenu_GetSelectedID(frame) ) then
-                        checked = 1;
-                    end
-                elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
-                    if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
-                        checked = 1;
-                    end
-                end
-                local checkImage = getglobal("DropDownList"..dropdownLevel.."Button"..i.."Check");
+            frame = frame or this;
+            dropdownLevel = dropdownLevel or UIDROPDOWNMENU_MENU_LEVEL;
+            for i = 1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                local button = listRow(dropdownLevel, i);
+                local checked = rowChecked(frame, button);
                 if ( checked ) then
                     if ( useValue ) then
                         UIDropDownMenu_SetText(button.value, frame);
                     else
                         UIDropDownMenu_SetText(button:GetText(), frame);
                     end
-                    button:LockHighlight();
-                    checkImage:Show();
-                else
-                    button:UnlockHighlight();
-                    checkImage:Hide();
                 end
-                button.checked = checked;
+                paintChecked(button, checked);
             end
         end
 
-        function UIDropDownMenu_SetSelectedName(frame, name, useValue)
-            frame.selectedName = name;
-            frame.selectedID = nil;
-            frame.selectedValue = nil;
+        -- The three setters are one operation: adopt one selection key, drop the other two, repaint.
+        local function selectBy(frame, key, selection, useValue)
+            for _, field in ipairs(SELECTION_KEYS) do
+                frame[field] = nil;
+            end
+            frame[key] = selection;
             UIDropDownMenu_Refresh(frame, useValue);
+        end
+
+        function UIDropDownMenu_SetSelectedName(frame, name, useValue)
+            selectBy(frame, "selectedName", name, useValue);
         end
 
         function UIDropDownMenu_SetSelectedValue(frame, value, useValue)
-            frame.selectedName = nil;
-            frame.selectedID = nil;
-            frame.selectedValue = value;
-            UIDropDownMenu_Refresh(frame, useValue);
+            selectBy(frame, "selectedValue", value, useValue);
         end
 
         function UIDropDownMenu_SetSelectedID(frame, id, useValue)
-            frame.selectedID = id;
-            frame.selectedName = nil;
-            frame.selectedValue = nil;
-            UIDropDownMenu_Refresh(frame, useValue);
+            selectBy(frame, "selectedID", id, useValue);
         end
 
         function UIDropDownMenu_GetSelectedName(frame)
             return frame.selectedName;
         end
 
-        -- ref: falls back to scanning the current level's rows for a name/value match.
-        function UIDropDownMenu_GetSelectedID(frame)
-            if ( frame.selectedID ) then
-                return frame.selectedID;
-            else
-                for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
-                    local button = getglobal("DropDownList"..UIDROPDOWNMENU_MENU_LEVEL.."Button"..i);
-                    if ( UIDropDownMenu_GetSelectedName(frame) ) then
-                        if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
-                            return i;
-                        end
-                    elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
-                        if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
-                            return i;
-                        end
-                    end
-                end
-            end
-        end
-
         function UIDropDownMenu_GetSelectedValue(frame)
             return frame.selectedValue;
         end
 
-        -- ref verbatim: run the row's func (`this` stays the row through the call), then either
-        -- toggle the check in place (keepShownOnClick) or close this list.
+        -- With no explicit id, answer with the index of the row the selected name — failing that,
+        -- the selected value — points at on the open level.
+        function UIDropDownMenu_GetSelectedID(frame)
+            if ( frame.selectedID ) then
+                return frame.selectedID;
+            end
+            local name = UIDropDownMenu_GetSelectedName(frame);
+            local value = UIDropDownMenu_GetSelectedValue(frame);
+            if ( not name and not value ) then
+                return nil;
+            end
+            for i = 1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                local button = listRow(UIDROPDOWNMENU_MENU_LEVEL, i);
+                if ( name ) then
+                    if ( button:GetText() == name ) then
+                        return i;
+                    end
+                elseif ( button.value == value ) then
+                    return i;
+                end
+            end
+        end
+
+        -- A row's click: run its func with `this` still on the row, then either flip the check in
+        -- place (keepShownOnClick) or shut the list the row belongs to. A row with no func does
+        -- nothing at all — not even the sound.
         function UIDropDownMenuButton_OnClick()
-            local func = this.func;
-            if ( func ) then
-                func(this.arg1, this.arg2);
-            else
+            if ( not this.func ) then
                 return;
             end
-            if ( this.keepShownOnClick ) then
-                if ( this.checked ) then
-                    getglobal(this:GetName().."Check"):Hide();
-                    this.checked = nil;
-                else
-                    getglobal(this:GetName().."Check"):Show();
-                    this.checked = 1;
-                end
-            else
+            this.func(this.arg1, this.arg2);
+            if ( not this.keepShownOnClick ) then
                 this:GetParent():Hide();
+            elseif ( this.checked ) then
+                this.checked = nil;
+                menuChild(this, "Check"):Hide();
+            else
+                this.checked = 1;
+                menuChild(this, "Check"):Show();
             end
             PlaySound("UChatScrollButton");
         end
@@ -546,55 +539,48 @@
             getglobal("DropDownList"..(level or 1)):Hide();
         end
 
-        -- ref ToggleDropDownMenu(level, value, dropDownFrame, anchorName, xOffset, yOffset):
-        -- same-owner toggle closes; otherwise (re)build via the stored initialize, seat the
-        -- list (default capsule seat / named anchor / "cursor"), swap the backdrop for MENU
-        -- mode, and show. Width + off-screen flip settle from OnUpdate (header).
+        -- Open (or re-open) one level of the shared menu. The capsule that is already showing this
+        -- level closes it; anything else rebuilds through the stored initialize, seats the list (the
+        -- capsule seat, a named anchor, or the cursor), dresses it for its display mode and shows
+        -- it. Width and the off-screen flip settle from OnUpdate (header).
         function ToggleDropDownMenu(level, value, dropDownFrame, anchorName, xOffset, yOffset)
-            if ( not level ) then
-                level = 1;
-            end
+            level = level or 1;
             UIDROPDOWNMENU_MENU_LEVEL = level;
             UIDROPDOWNMENU_MENU_VALUE = value;
-            local listFrame = getglobal("DropDownList"..level);
             local listFrameName = "DropDownList"..level;
-            local tempFrame;
-            if ( not dropDownFrame ) then
-                tempFrame = this:GetParent();
-            else
-                tempFrame = dropDownFrame;
-            end
-            if ( listFrame:IsVisible() and (UIDROPDOWNMENU_OPEN_MENU == tempFrame:GetName()) ) then
+            local listFrame = getglobal(listFrameName);
+            -- Called straight off a capsule's scroll button, `this` is that button and the capsule
+            -- it serves is its parent.
+            local owner = dropDownFrame or this:GetParent();
+            if ( listFrame:IsVisible() and UIDROPDOWNMENU_OPEN_MENU == owner:GetName() ) then
                 listFrame:Hide();
                 return;
             end
             listFrame:Hide();
 
-            -- The ref's uiScale correction, arriving with its first scaled customer (0992: the
-            -- options window rides SetScale, and a list at scale 1 would draw its rows ~28%
-            -- larger than the capsule they serve): the shared list wears the OWNER's effective
-            -- scale for this open. Every pre-0992 customer sits at effective scale 1 — no-op.
-            local listScale = tempFrame:GetEffectiveScale();
+            -- The uiScale correction, arriving with its first scaled customer (0992: the options
+            -- window rides SetScale, and a list at scale 1 would draw its rows ~28% larger than the
+            -- capsule they serve): the shared list wears the OWNER's effective scale for this open.
+            -- Every pre-0992 customer sits at effective scale 1 — no-op.
+            local listScale = owner:GetEffectiveScale();
             listFrame:SetScale(listScale);
 
             if ( level == 1 ) then
-                if ( not dropDownFrame ) then
-                    dropDownFrame = this:GetParent();
-                end
+                dropDownFrame = owner;
                 UIDROPDOWNMENU_OPEN_MENU = dropDownFrame:GetName();
                 listFrame:ClearAllPoints();
                 listFrame.cursorMode = nil;
                 local point, relativeTo, relativePoint;
                 if ( not anchorName ) then
                     -- The capsule seat (header deviation), overridable via SetAnchor.
-                    xOffset = dropDownFrame.xOffset or 8;
-                    yOffset = dropDownFrame.yOffset or 7;
                     point = dropDownFrame.point or "TOPLEFT";
                     relativeTo = dropDownFrame.relativeTo or dropDownFrame:GetName();
                     relativePoint = dropDownFrame.relativePoint or "BOTTOMLEFT";
+                    xOffset = dropDownFrame.xOffset or 8;
+                    yOffset = dropDownFrame.yOffset or 7;
                 elseif ( anchorName == "cursor" ) then
-                    -- Cursor coords are scale-1 units; a scaled list's anchor offsets are in
-                    -- ITS space, so divide (the ref's own cursor/uiScale dance).
+                    -- Cursor coords are scale-1 units, and a scaled list's anchor offsets are in
+                    -- ITS space, so divide (the reference's own cursor/uiScale dance).
                     local cursorX, cursorY = GetCursorPosition();
                     point = "TOPLEFT";
                     relativeTo = "UIParent";
@@ -612,48 +598,44 @@
                     end
                 end
                 listFrame:SetPoint(point, relativeTo, relativePoint, xOffset, yOffset);
-                -- The flip's re-seat data (SettleFlip).
+                -- What the flip re-seats against (SettleFlip).
                 listFrame.seatTo = relativeTo;
                 listFrame.seatX = xOffset;
                 listFrame.seatY = yOffset;
             else
-                if ( not dropDownFrame ) then
-                    dropDownFrame = getglobal(UIDROPDOWNMENU_OPEN_MENU);
-                end
+                dropDownFrame = dropDownFrame or getglobal(UIDROPDOWNMENU_OPEN_MENU);
                 listFrame:ClearAllPoints();
-                -- Anchor to the row itself whether `this` is the row (whose parent is the bare
-                -- list, name length 13) or its ExpandArrow child (ref's strsub/strlen check).
-                local anchorFrame;
-                if ( string.sub(this:GetParent():GetName(), 1, 12) == "DropDownList" and string.len(this:GetParent():GetName()) == 13 ) then
+                -- Anchor to the row itself, whether `this` is the row (whose parent is the bare
+                -- list — name length 13) or the row's ExpandArrow child.
+                local parentName = this:GetParent():GetName();
+                local anchorFrame = parentName;
+                if ( string.sub(parentName, 1, 12) == "DropDownList" and string.len(parentName) == 13 ) then
                     anchorFrame = this:GetName();
-                else
-                    anchorFrame = this:GetParent():GetName();
                 end
                 listFrame:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 0, 0);
                 listFrame.anchorFrame = anchorFrame;
             end
 
-            -- MENU mode swaps the dialog box for the tooltip-style backdrop (ref).
+            -- MENU mode swaps the dialog box for the tooltip-style backdrop; exactly one is up.
+            local wanted, unwanted = "Backdrop", "MenuBackdrop";
             if ( dropDownFrame and dropDownFrame.displayMode == "MENU" ) then
-                getglobal(listFrameName.."Backdrop"):Hide();
-                getglobal(listFrameName.."MenuBackdrop"):Show();
-            else
-                getglobal(listFrameName.."Backdrop"):Show();
-                getglobal(listFrameName.."MenuBackdrop"):Hide();
+                wanted, unwanted = "MenuBackdrop", "Backdrop";
             end
+            getglobal(listFrameName..wanted):Show();
+            getglobal(listFrameName..unwanted):Hide();
 
             UIDropDownMenu_Initialize(dropDownFrame, dropDownFrame.initialize, nil, level);
             if ( listFrame.numButtons == 0 ) then
                 return;
             end
 
-            -- Declared-width capsules apply synchronously (the proven pre-0434 path); auto-sized
-            -- menus ride the settle.
+            -- A capsule that declared a width applies it synchronously (the proven pre-0434 path);
+            -- auto-sized menus ride the settle.
             listFrame.fixedWidth = nil;
             if ( dropDownFrame.noResize and dropDownFrame.dropWidth ) then
                 listFrame.fixedWidth = dropDownFrame.dropWidth;
-                for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
-                    getglobal(listFrameName.."Button"..i):SetWidth(listFrame.fixedWidth);
+                for i = 1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                    listRow(level, i):SetWidth(listFrame.fixedWidth);
                 end
                 listFrame:SetWidth(listFrame.fixedWidth + 32);
             end
@@ -661,10 +643,7 @@
         end
 
         function CloseDropDownMenus(level)
-            if ( not level ) then
-                level = 1;
-            end
-            for i=level, UIDROPDOWNMENU_MAXLEVELS, 1 do
+            for i = (level or 1), UIDROPDOWNMENU_MAXLEVELS, 1 do
                 getglobal("DropDownList"..i):Hide();
             end
         end
@@ -687,131 +666,162 @@
             return closed
         end
 
-        -- ref verbatim + dropWidth (the declared width the fixed path reuses — see the header).
+        -- The capsule's declared width: the Middle art stretches to it, the frame itself carries the
+        -- two 25px end caps, and the label gets 25px less than the art. `dropWidth` is ours — the
+        -- fixed-width path in Toggle reuses the number (see the header).
         function UIDropDownMenu_SetWidth(width, frame)
-            if ( not frame ) then
-                frame = this;
-            end
-            getglobal(frame:GetName().."Middle"):SetWidth(width);
+            frame = frame or this;
+            menuChild(frame, "Middle"):SetWidth(width);
             frame:SetWidth(width + 25 + 25);
-            getglobal(frame:GetName().."Text"):SetWidth(width - 25);
+            menuChild(frame, "Text"):SetWidth(width - 25);
             frame.dropWidth = width;
             frame.noResize = 1;
         end
 
         function UIDropDownMenu_SetButtonWidth(width, frame)
-            if ( not frame ) then
-                frame = this;
-            end
+            frame = frame or this;
             if ( width == "TEXT" ) then
-                width = getglobal(frame:GetName().."Text"):GetWidth();
+                width = menuChild(frame, "Text"):GetWidth();
             end
-            getglobal(frame:GetName().."Button"):SetWidth(width);
+            menuChild(frame, "Button"):SetWidth(width);
             frame.noResize = 1;
         end
 
         function UIDropDownMenu_SetText(text, frame)
-            if ( not frame ) then
-                frame = this;
-            end
-            getglobal(frame:GetName().."Text"):SetText(text);
+            frame = frame or this;
+            menuChild(frame, "Text"):SetText(text);
         end
 
         function UIDropDownMenu_GetText(frame)
-            if ( not frame ) then
-                frame = this;
-            end
-            return getglobal(frame:GetName().."Text"):GetText();
+            frame = frame or this;
+            return menuChild(frame, "Text"):GetText();
         end
 
+        -- Forget the selection and strip the marks off the open level's rows. Deliberately NOT a
+        -- Refresh: the reference found refreshing from here a bottleneck, and the rows are about to
+        -- be rebuilt anyway.
         function UIDropDownMenu_ClearAll(frame)
-            frame.selectedID = nil;
-            frame.selectedName = nil;
-            frame.selectedValue = nil;
+            for _, field in ipairs(SELECTION_KEYS) do
+                frame[field] = nil;
+            end
             UIDropDownMenu_SetText("", frame);
-            for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
-                local button = getglobal("DropDownList"..UIDROPDOWNMENU_MENU_LEVEL.."Button"..i);
+            for i = 1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                local button = listRow(UIDROPDOWNMENU_MENU_LEVEL, i);
                 button:UnlockHighlight();
-                getglobal(button:GetName().."Check"):Hide();
+                menuChild(button, "Check"):Hide();
             end
         end
+
+        -- Where the capsule's own label sits: against the left cap, against the right one (clear of
+        -- the scroll button), or centred on the Middle art. {point, art piece, its point, x, y}.
+        local JUSTIFY = {
+            LEFT   = { "LEFT",   "Left",   "LEFT",    27, 2 },
+            RIGHT  = { "RIGHT",  "Right",  "RIGHT",  -43, 2 },
+            CENTER = { "CENTER", "Middle", "CENTER",  -5, 2 },
+        };
 
         function UIDropDownMenu_JustifyText(justification, frame)
-            if ( not frame ) then
-                frame = this;
-            end
-            local text = getglobal(frame:GetName().."Text");
+            frame = frame or this;
+            local text = menuChild(frame, "Text");
             text:ClearAllPoints();
-            if ( justification == "LEFT" ) then
-                text:SetPoint("LEFT", frame:GetName().."Left", "LEFT", 27, 2);
-            elseif ( justification == "RIGHT" ) then
-                text:SetPoint("RIGHT", frame:GetName().."Right", "RIGHT", -43, 2);
-            elseif ( justification == "CENTER" ) then
-                text:SetPoint("CENTER", frame:GetName().."Middle", "CENTER", -5, 2);
+            local seat = JUSTIFY[justification];
+            if ( seat ) then
+                text:SetPoint(seat[1], frame:GetName()..seat[2], seat[3], seat[4], seat[5]);
             end
         end
 
         function UIDropDownMenu_SetAnchor(xOffset, yOffset, dropdown, point, relativeTo, relativePoint)
-            if ( not dropdown ) then
-                dropdown = this;
-            end
-            dropdown.xOffset = xOffset;
-            dropdown.yOffset = yOffset;
-            dropdown.point = point;
-            dropdown.relativeTo = relativeTo;
-            dropdown.relativePoint = relativePoint;
+            dropdown = dropdown or this;
+            dropdown.point, dropdown.relativeTo, dropdown.relativePoint = point, relativeTo, relativePoint;
+            dropdown.xOffset, dropdown.yOffset = xOffset, yOffset;
         end
 
+        -- The dropdown a menu handler is acting for: the open capsule, or `this` when nothing is
+        -- open (a row's own func asking who it belongs to).
         function UIDropDownMenu_GetCurrentDropDown()
-            if ( UIDROPDOWNMENU_OPEN_MENU ) then
-                return getglobal(UIDROPDOWNMENU_OPEN_MENU);
+            if ( not UIDROPDOWNMENU_OPEN_MENU ) then
+                return this;
             end
-            return this;
+            return getglobal(UIDROPDOWNMENU_OPEN_MENU);
         end
 
         function UIDropDownMenuButton_GetChecked()
-            return getglobal(this:GetName().."Check"):IsVisible();
+            return menuChild(this, "Check"):IsVisible();
         end
 
         function UIDropDownMenuButton_GetName()
-            return getglobal(this:GetName().."NormalText"):GetText();
+            return menuChild(this, "NormalText"):GetText();
         end
 
-        -- ref l.801-815, verbatim. THE entry point to the colour picker: every colour option in
-        -- every FrameXML dropdown and every Ace2/Dewdrop menu row lands here. Note what it does
-        -- that the picker itself does not — `previousValues` is captured HERE, and it is the table
-        -- `cancelFunc` is handed, so Cancel restoring the old colour is this line's doing.
+        -- The picker fields a swatch row seeds under the same name on both sides. `swatchFunc` is
+        -- the exception, set beside them: it lands on the picker as `func`, which is why it is the
+        -- LIVE-preview callback and not an on-accept one.
+        local PICKER_FIELDS = { "hasOpacity", "opacity", "opacityFunc", "cancelFunc" };
+
+        -- THE entry point to the colour picker (spec: UIDropDownMenu.lua l.801-815): every colour
+        -- option in every FrameXML dropdown and every Ace2/Dewdrop menu row lands here. Note what it
+        -- does that the picker itself does not — `previousValues` is captured HERE, and it is the
+        -- table `cancelFunc` is handed, so Cancel restoring the old colour is this function's doing.
         function UIDropDownMenuButton_OpenColorPicker(button)
             CloseMenus();
-            if ( not button ) then
-                button = this;
-            end
+            button = button or this;
             UIDROPDOWNMENU_MENU_VALUE = button.value;
             ColorPickerFrame.func = button.swatchFunc;
-            ColorPickerFrame.hasOpacity = button.hasOpacity;
-            ColorPickerFrame.opacityFunc = button.opacityFunc;
-            ColorPickerFrame.opacity = button.opacity;
+            for _, field in ipairs(PICKER_FIELDS) do
+                ColorPickerFrame[field] = button[field];
+            end
             ColorPickerFrame:SetColorRGB(button.r, button.g, button.b);
             ColorPickerFrame.previousValues = {r = button.r, g = button.g, b = button.b, opacity = button.opacity};
-            ColorPickerFrame.cancelFunc = button.cancelFunc;
             ShowUIPanel(ColorPickerFrame);
         end
 
+        -- The by-address trio: an addon that knows a row's level and index, rather than holding the
+        -- row itself, reaches it through these.
         function UIDropDownMenu_DisableButton(level, id)
-            getglobal("DropDownList"..level.."Button"..id):Disable();
+            listRow(level, id):Disable();
         end
 
         function UIDropDownMenu_EnableButton(level, id)
-            getglobal("DropDownList"..level.."Button"..id):Enable();
+            listRow(level, id):Enable();
         end
 
         function UIDropDownMenu_SetButtonText(level, id, text, r, g, b)
-            local button = getglobal("DropDownList"..level.."Button"..id);
+            local button = listRow(level, id);
             button:SetText(text);
             if ( r ) then
                 button:SetTextColor(r, g, b);
                 button:SetHighlightTextColor(r, g, b);
             end
+        end
+
+        -- ── What the row template's handlers do ───────────────────────────────────────────────
+        -- Everything that sits on a menu row — the row itself, its colour square, its expand arrow,
+        -- the invisible cover over a disabled row — means the same two things to the menu when the
+        -- mouse arrives and when it leaves, and both are about the row's LIST rather than the row:
+        -- the timeout that closes a menu the mouse walked away from lives on the list, and so does
+        -- the level number that decides which lists count as deeper than this one. Five handlers
+        -- want exactly that, so it is written here once instead of five times in markup.
+
+        function UIDropDownMenuRow_HoverIn(list)
+            UIDropDownMenu_StopCounting(list);
+            CloseDropDownMenus(list:GetID() + 1);
+        end
+
+        function UIDropDownMenuRow_HoverOut(list)
+            UIDropDownMenu_StartCounting(list);
+        end
+
+        -- A `hasArrow` row opens its submenu one level below the list it sits in, carrying the row's
+        -- value as that submenu's context. Hovering the row, hovering the arrow and clicking the
+        -- arrow are three ways to ask for the same thing.
+        function UIDropDownMenuRow_OpenSubmenu(row)
+            ToggleDropDownMenu(row:GetParent():GetID() + 1, row.value);
+        end
+
+        -- The colour square's hover feedback. The square itself IS the row's colour, so the only
+        -- thing free to react is the 14x14 backing behind it: gold under the mouse, white off it.
+        function UIDropDownMenuSwatch_Highlight(swatch, color)
+            getglobal(swatch:GetName().."SwatchBg"):SetVertexColor(color.r, color.g, color.b);
         end
     ]]></Script>
 
@@ -854,18 +864,18 @@
                     </Layer>
                 </Layers>
                 <Scripts>
+                    <!-- The open closes the menu first — that is `OpenColorPicker`'s own first
+                         line, so it is not repeated here. -->
                     <OnClick>
-                        CloseMenus();
                         UIDropDownMenuButton_OpenColorPicker(this:GetParent());
                     </OnClick>
                     <OnEnter>
-                        CloseDropDownMenus(this:GetParent():GetParent():GetID() + 1);
-                        getglobal(this:GetName().."SwatchBg"):SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
-                        UIDropDownMenu_StopCounting(this:GetParent():GetParent());
+                        UIDropDownMenuRow_HoverIn(this:GetParent():GetParent());
+                        UIDropDownMenuSwatch_Highlight(this, NORMAL_FONT_COLOR);
                     </OnEnter>
                     <OnLeave>
-                        getglobal(this:GetName().."SwatchBg"):SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
-                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                        UIDropDownMenuRow_HoverOut(this:GetParent():GetParent());
+                        UIDropDownMenuSwatch_Highlight(this, HIGHLIGHT_FONT_COLOR);
                     </OnLeave>
                 </Scripts>
                 <NormalTexture name="$parentNormalTexture" file="Interface\ChatFrame\ChatFrameColorSwatch"/>
@@ -875,14 +885,16 @@
                 <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
                 <Scripts>
                     <OnClick>
-                        ToggleDropDownMenu(this:GetParent():GetParent():GetID() + 1, this:GetParent().value);
+                        UIDropDownMenuRow_OpenSubmenu(this:GetParent());
                     </OnClick>
+                    <!-- Hovering the arrow opens the submenu, so this is the one hover on the row
+                         that must NOT close the deeper levels — only the timeout stops. -->
                     <OnEnter>
-                        ToggleDropDownMenu(this:GetParent():GetParent():GetID() + 1, this:GetParent().value);
+                        UIDropDownMenuRow_OpenSubmenu(this:GetParent());
                         UIDropDownMenu_StopCounting(this:GetParent():GetParent());
                     </OnEnter>
                     <OnLeave>
-                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                        UIDropDownMenuRow_HoverOut(this:GetParent():GetParent());
                     </OnLeave>
                 </Scripts>
                 <NormalTexture file="Interface\ChatFrame\ChatFrameExpandArrow"/>
@@ -898,11 +910,10 @@
                 </Anchors>
                 <Scripts>
                     <OnEnter>
-                        UIDropDownMenu_StopCounting(this:GetParent():GetParent());
-                        CloseDropDownMenus(this:GetParent():GetParent():GetID() + 1);
+                        UIDropDownMenuRow_HoverIn(this:GetParent():GetParent());
                     </OnEnter>
                     <OnLeave>
-                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                        UIDropDownMenuRow_HoverOut(this:GetParent():GetParent());
                     </OnLeave>
                 </Scripts>
             </Button>
@@ -911,18 +922,20 @@
             <OnClick>
                 UIDropDownMenuButton_OnClick();
             </OnClick>
+            <!-- A row that has a submenu opens it on hover; a row that has not closes whatever is
+                 deeper. Either way the list's timeout stops and the row lights up. -->
             <OnEnter>
                 if ( this.hasArrow ) then
-                    ToggleDropDownMenu(this:GetParent():GetID() + 1, this.value);
+                    UIDropDownMenuRow_OpenSubmenu(this);
+                    UIDropDownMenu_StopCounting(this:GetParent());
                 else
-                    CloseDropDownMenus(this:GetParent():GetID() + 1);
+                    UIDropDownMenuRow_HoverIn(this:GetParent());
                 end
                 getglobal(this:GetName().."Highlight"):Show();
-                UIDropDownMenu_StopCounting(this:GetParent());
             </OnEnter>
             <OnLeave>
                 getglobal(this:GetName().."Highlight"):Hide();
-                UIDropDownMenu_StartCounting(this:GetParent());
+                UIDropDownMenuRow_HoverOut(this:GetParent());
             </OnLeave>
         </Scripts>
         <ButtonText name="$parentNormalText">
@@ -1021,7 +1034,8 @@
         </Scripts>
     </Button>
 
-    <!-- The capsule (ref UIDropDownMenuTemplate, verbatim art + geometry). -->
+    <!-- The capsule (spec: ref UIDropDownMenuTemplate). Its art, geometry and texcoords are the
+         reference's own numbers — that is what makes it the same widget rather than a lookalike. -->
     <Frame name="UIDropDownMenuTemplate" virtual="true">
         <Size><AbsDimension x="40" y="32"/></Size>
         <Layers>
@@ -1076,8 +1090,9 @@
 
     <!-- The two shared lists (the ref authors DropDownList1..3; level 3 waits for a customer).
 
-         The per-instance <Scripts> are the ref's own (UIDropDownMenu.xml l.9-18, l.25-28) and were
-         missing here until they were measured; each line earns its place separately:
+         The per-instance <Scripts> answer the three jobs the reference hangs off these two elements
+         (spec: ref UIDropDownMenu.xml l.9-18, l.25-28). They were missing here entirely until they
+         were measured; each earns its place separately:
 
          · `CloseDropDownMenus(level+1)` is the SUBMENU CATCH-ALL, and it is why the ref hangs it
            off OnHide rather than off the toggle. `ToggleDropDownMenu`'s close arm is a bare

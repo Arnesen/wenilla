@@ -37,8 +37,8 @@ fn minimap_zoom_buttons_resync_when_switching_inside_and_outside() {
         .unwrap();
     s.run("function PlaySound() end").unwrap();
     load_xml(&s, "Fonts.xml");
-    // The shipped load order provides GameTooltip before the cluster; Minimap_Update's verbatim
-    // ref block (the PVP tint slice, decision 0287) touches it from OnLoad on.
+    // The shipped load order provides GameTooltip before the cluster; Minimap_Update's tooltip
+    // half (the PVP tint slice, decision 0287) touches it from OnLoad on.
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MinimapCluster.xml");
 
@@ -155,7 +155,7 @@ fn tod_window(s: &UiScript) -> (f64, f64, f64, f64) {
         .unwrap()
 }
 
-/// The verbatim `GameTimeFrame_Update` law: the 50-px window over the 128×64 UI-TOD-Indicator
+/// `GameTimeFrame_Update`'s law, exactly: the 50-px window over the 128×64 UI-TOD-Indicator
 /// sits on the LEFT half (the sun) through the game day and slides +0.5 to the RIGHT half (the
 /// moon) outside it — night is before 5:30 AM or from 9:00 PM, boundaries included exactly as
 /// the ref compares (`< DAWN or >= DUSK`).
@@ -189,7 +189,7 @@ fn game_time_frame_slides_the_sun_moon_window_on_the_game_clock() {
 
 /// Hovering the indicator through the REAL pointer path (hit-test → OnEnter) shows the game-time
 /// tooltip, live-updates it while owned (the `IsOwned` refresh branch), and hides it on leave.
-/// This also pins the two loader-side pieces the transcription leans on: the `<Scripts>` walker's
+/// This also pins the two loader-side pieces this frame leans on: the `<Scripts>` walker's
 /// mouse auto-enable (the frame declares no enableMouse, like the reference — without the law the
 /// hit-test never captures) and the `<HitRectInsets>` hull.
 #[test]
@@ -210,7 +210,7 @@ fn hovering_the_indicator_shows_and_live_updates_the_game_time_tooltip() {
         s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
         "OnEnter owns the tooltip (the Scripts-walker auto-enable capturing at {x},{y})"
     );
-    // TwentyFourHourTime = 1 (enGB LocalizeFrames, the transcription header): 21:07, not 9:07 PM.
+    // TwentyFourHourTime = 1 (enGB LocalizeFrames, per GameTime.xml's header): 21:07, not 9:07 PM.
     let text = |s: &UiScript| {
         s.eval::<String>("return GameTooltipTextLeft1:GetText()")
             .unwrap()

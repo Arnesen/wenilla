@@ -146,7 +146,7 @@
 
         -- ref ToggleInspect (l.67-83) + InspectFrame_ShowSubFrame (l.85-93). With one page shipped
         -- the interesting branch is the ref's own "clicking the tab of the page already showing
-        -- CLOSES the window" — transcribed rather than smoothed away, because that is what the real
+        -- CLOSES the window" — kept rather than smoothed away, because that is what the real
         -- tab does. ToggleInspect is BARE (not Benilla-prefixed), the addon-facing name, matching
         -- this codebase's ToggleCharacter/ToggleQuestLog precedent.
         function ToggleInspect(tab)
@@ -178,7 +178,7 @@
         end
 
         -- ref InspectFrame_OnUpdate (l.61-65): the window closes the moment there is no target.
-        -- Transcribed verbatim including its bluntness — the ref checks "target" specifically, even
+        -- The ref's behaviour kept, bluntness included — the ref checks "target" specifically, even
         -- when inspecting a party token, so inspecting a party member and then clearing your target
         -- closes the window. That is the shipped 1.12 behavior.
         function BenillaInspectFrame_OnUpdate(frame)

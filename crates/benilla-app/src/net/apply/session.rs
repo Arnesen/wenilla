@@ -135,9 +135,10 @@ pub(super) fn logged_out(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn disconnected(
     reason: String,
+    end: benilla_protocol::SessionEnd,
     commands: &mut Commands,
     index: &mut GuidIndex,
-    self_guid: &SelfGuid,
+    self_guid: &mut SelfGuid,
     status: &mut NetStatus,
     names: &mut NameCache,
     items: &mut Items,
@@ -164,9 +165,11 @@ pub(super) fn disconnected(
 ) {
     // The reconnect-policy feed first (decision 0539): [`crate::login`] reads it as "the IO thread
     // is back at its pre-logon park".
-    disconnects.write(DisconnectedMessage {
-        reason: reason.clone(),
-    });
+    // Is the session over, or is this the pause inside one? Settled once, here, and carried on the
+    // message to every other reader (decision 1262).
+    let msg = DisconnectedMessage::new(reason.clone(), end);
+    let over = msg.session_over;
+    disconnects.write(msg);
     warn!("net: {reason} — tearing down the streamed world");
     // An announced-but-unfinished far teleport died with the socket.
     pending_transfer.0 = None;
@@ -181,7 +184,16 @@ pub(super) fn disconnected(
     // connection loss is not a world event, and index-less fading entities would race
     // the reconnect's re-creates. Entities already mid-fade left the index earlier and
     // finish fading on their own.
-    let keep = self_guid.0;
+    //
+    // **Unless the session is over** (decision 1262), and then the avatar goes too, exactly as
+    // [`logged_out`] takes it: 0065 spares it *for the reconnect*, and with no reconnect coming
+    // that spared body is a puppet with no server behind it. Keeping it was the free camera —
+    // `SelfGuid` set, no entity, an entry that never finished — so the fact that decides whether
+    // anything reconnects has to be the same fact that decides whether the body stays.
+    let keep = if over { None } else { self_guid.0 };
+    if over {
+        self_guid.0 = None;
+    }
     index.0.retain(|guid, e| {
         if Some(*guid) == keep {
             return true;

@@ -41,7 +41,7 @@
         TAB STRIP — reuses the house's EXISTING tab kit, not a hand-rolled `BenillaTalentFrame.
         selectedTab` variable. The task brief's own ENGINE API note flagged `PanelTemplates_*` as
         unavailable ("implement your own small select/deselect Lua") — verified false this session:
-        `UiPanels.xml:502-578` already transcribes the FULL kit (`PanelTemplates_SetNumTabs/_SetTab/
+        `UiPanels.xml:502-578` already provides the FULL kit (`PanelTemplates_SetNumTabs/_SetTab/
         _GetSelectedTab/_UpdateTabs/_SelectTab/_DeselectTab/_TabResize`), and `CharacterFrameTab-
         ButtonTemplate` (`UiPanels.xml:603-654`) is ALREADY battle-tested by CharacterFrame.xml's own
         tab. Better still: the REFERENCE's own `TalentTabTemplate` (Blizzard_TalentUITemplates.xml:3)
@@ -54,7 +54,7 @@
         own `TalentButtonTemplate` inline OnEnter, Blizzard_TalentUITemplates.xml:92) and
         `PanelTemplates_GetSelectedTab(TalentFrame)` (read by TalentFrame.lua's own functions) are
         THE SAME FIELD — `PanelTemplates_SetTab` stores straight onto `frame.selectedTab` — so this
-        file transcribes each call site exactly as the reference itself spells it, not a benilla-
+        file spells each call site exactly as the reference itself does, not a benilla-
         introduced inconsistency.
 
         SCROLL DESIGN — a real ScrollFrame with a FIXED-HEIGHT child, not the reference's own dynamic
@@ -144,7 +144,7 @@
             fires it (grepped `crates/benilla-ui/src`, `crates/benilla/src`) — forward-compatible,
             harmless, the same "transcribe the hook even if nothing drives it yet" posture as
             HitRectInsets above.
-          - Bare `min`/`max`/`select` (used verbatim in `_DrawLines`/`_SetPrereqs` below): CONFIRMED
+          - Bare `min`/`max`/`select` (used unqualified in `_DrawLines`/`_SetPrereqs` below): CONFIRMED
             available — `min`/`max` are house-stdlib aliases for `math.min`/`math.max`
             (`benilla-ui/src/script/stdlib.rs`), `select` is stock Lua 5.1. The ref's own `arg`/`arg.n`
             Lua-5.0 vararg table (`_SetPrereqs`) is written the 5.1-native way
@@ -171,17 +171,38 @@
         CHARACTER_POINTS1_COLON = CHARACTER_POINTS1_COLON or "Talent Points:"
         MASTERY_POINTS_SPENT = MASTERY_POINTS_SPENT or "Points spent in %s Talents:" -- :2674
 
-        -- ── This window's own constants (ref Blizzard_TalentUI.lua:2-11, bare-named exactly as the
-        -- ref names them — none collide with anything else in this engine, grepped) ─────────────────
-        MAX_NUM_TALENTS = 20
+        -- ── This window's own constants ─────────────────────────────────────────────────────────
+        --
+        -- Spec: ref Blizzard_TalentUI.lua:2-11. The NAMES and VALUES are the contract — a tree's
+        -- data is laid out against them and addons read them — so those are the reference's; the
+        -- grouping is ours, by what each one is for rather than by the order they happen to appear.
+
+        -- The tree's shape: eight rows of four cells, never more than twenty talents in one tree.
         MAX_NUM_TALENT_TIERS = 8
         NUM_TALENT_COLUMNS = 4
-        TALENT_BRANCH_ARRAY = {}
-        TALENT_BUTTON_SIZE = 32
-        MAX_NUM_BRANCH_TEXTURES = 30
-        MAX_NUM_ARROW_TEXTURES = 30
+        MAX_NUM_TALENTS = 20
+
+        -- Where that shape lands inside the scroll child: the first cell sits INITIAL_TALENT_
+        -- OFFSET_X/Y in from its top-left corner and every next one is a PITCH further along.
+        -- TALENT_BUTTON_SIZE is how far the connector art reaches out of a cell, NOT the talent
+        -- button's own 37px size — the two are independent (this file's header comment, "The
+        -- talent button"). Naming the pitch is what let the two places that used to spell out
+        -- `((n - 1) * 63) + INITIAL_TALENT_OFFSET_…` — the button placement and the connector draw
+        -- — collapse into the one `talentCellOrigin` below, so they cannot drift apart.
         INITIAL_TALENT_OFFSET_X = 35
         INITIAL_TALENT_OFFSET_Y = 20
+        TALENT_BUTTON_SIZE = 32
+        BENILLA_TALENT_GRID_PITCH = 63
+
+        -- The connector art comes out of two fixed pools, claimed in order by each repaint and
+        -- hidden again past the last one claimed (BenillaTalentFrame_Get*Texture below).
+        MAX_NUM_BRANCH_TEXTURES = 30
+        MAX_NUM_ARROW_TEXTURES = 30
+
+        -- One drawing-state cell per grid position — built once in OnLoad, cleared (never rebuilt)
+        -- by every repaint. What a cell records is written down at `clearBranchCell` below.
+        TALENT_BRANCH_ARRAY = {}
+
         -- Benilla-prefixed + renumbered (5 -> 3): this file's header comment, "SCOPE CALL".
         BENILLA_MAX_TALENT_TABS = 3
         -- The scroll child's fixed height: this file's header comment, "SCROLL DESIGN".
@@ -192,64 +213,95 @@
                                          -- own BENILLA_QUESTLOG_SCROLL_STEP precedent for a real
                                          -- ScrollFrame's per-notch pixel step)
 
-        -- ref Blizzard_TalentUI.lua:13-69, verbatim.
-        TALENT_BRANCH_TEXTURECOORDS = {
-            up = {
-                [1] = {0.12890625, 0.25390625, 0, 0.484375},
-                [-1] = {0.12890625, 0.25390625, 0.515625, 1.0}
-            },
-            down = {
-                [1] = {0, 0.125, 0, 0.484375},
-                [-1] = {0, 0.125, 0.515625, 1.0}
-            },
-            left = {
-                [1] = {0.2578125, 0.3828125, 0, 0.5},
-                [-1] = {0.2578125, 0.3828125, 0.5, 1.0}
-            },
-            right = {
-                [1] = {0.2578125, 0.3828125, 0, 0.5},
-                [-1] = {0.2578125, 0.3828125, 0.5, 1.0}
-            },
-            topright = {
-                [1] = {0.515625, 0.640625, 0, 0.5},
-                [-1] = {0.515625, 0.640625, 0.5, 1.0}
-            },
-            topleft = {
-                [1] = {0.640625, 0.515625, 0, 0.5},
-                [-1] = {0.640625, 0.515625, 0.5, 1.0}
-            },
-            bottomright = {
-                [1] = {0.38671875, 0.51171875, 0, 0.5},
-                [-1] = {0.38671875, 0.51171875, 0.5, 1.0}
-            },
-            bottomleft = {
-                [1] = {0.51171875, 0.38671875, 0, 0.5},
-                [-1] = {0.51171875, 0.38671875, 0.5, 1.0}
-            },
-            tdown = {
-                [1] = {0.64453125, 0.76953125, 0, 0.5},
-                [-1] = {0.64453125, 0.76953125, 0.5, 1.0}
-            },
-            tup = {
-                [1] = {0.7734375, 0.8984375, 0, 0.5},
-                [-1] = {0.7734375, 0.8984375, 0.5, 1.0}
-            },
-        }
+        -- ── The branch/arrow atlases: CUT from the sheet, not typed out ─────────────────────────
+        --
+        -- Spec: the same two tables the reference builds (ref Blizzard_TalentUI.lua:13-69) — same
+        -- global names, same [direction][+1/-1] shape, same quads to the bit. Written our own way,
+        -- because what these are is not 104 fractions: both sheets are ONE STRIP of 32px cells
+        -- with the lit variant on the top row and the greyed variant directly beneath it, so a
+        -- direction is fully described by three facts — which cell carries its art, whether it is
+        -- drawn u-reversed, and how tall the drawn part of a row is. Those facts are the spec
+        -- below and the loop under them cuts the quads, which is both shorter and legible: the
+        -- strip's layout is visible in the source instead of implied by the numbers.
+        --
+        -- The grid is MEASURED, not inferred from the fractions — both BLPs pulled out of the
+        -- live patch chain this session (`mpqx <Data> 'Interface\TalentFrame\UI-Talent*.blp'`,
+        -- dimensions off the BLP2 header):
+        --   UI-TalentBranches  256 x 64  — seven 32px cells on a 33px pitch (x = 0, 33, 66, …)
+        --   UI-TalentArrows     64 x 64  — two 32px cells, butted, no gutter
+        -- Every edge is therefore n/256 or n/64 — exact binary fractions, so the divides below are
+        -- exact in doubles and these quads are bit-identical to the ones the reference lists.
+        --
+        -- Three things in the data that look like mistakes and are the sheet's own:
+        --   · `left` and `right` are the SAME quad. There is one piece of horizontal branch art;
+        --     which side of the button it lands on is the draw loop's doing (xOffset -/+
+        --     TALENT_BUTTON_SIZE in _Update below), not the sheet's.
+        --   · the corner pieces are drawn in ONE handedness — `topleft`/`bottomleft` are
+        --     `topright`/`bottomright` with u reversed (SetTexCoord reads left > right as a
+        --     mirror), which is how one drawing serves both.
+        --   · the two VERTICAL pieces take a 31px row, leaving a 2px gutter across the sheet's
+        --     middle, where every other cell takes the flat 32. The greyed row stays the lit
+        --     row's reflection through the midline either way — one `rowH` drives both.
+        local function talentSheetQuads(sheetW, sheetH, cellW, pitch, spec)
+            local quads = {}
+            for name, cell in pairs(spec) do
+                local u0, u1 = cell[1] * pitch / sheetW, (cell[1] * pitch + cellW) / sheetW
+                if cell.flip then u0, u1 = u1, u0 end
+                local v = (cell.rowH or cellW) / sheetH
+                quads[name] = { [1] = { u0, u1, 0, v }, [-1] = { u0, u1, 1 - v, 1.0 } }
+            end
+            return quads
+        end
 
-        TALENT_ARROW_TEXTURECOORDS = {
-            top = {
-                [1] = {0, 0.5, 0, 0.5},
-                [-1] = {0, 0.5, 0.5, 1.0}
-            },
-            right = {
-                [1] = {1.0, 0.5, 0, 0.5},
-                [-1] = {1.0, 0.5, 0.5, 1.0}
-            },
-            left = {
-                [1] = {0.5, 1.0, 0, 0.5},
-                [-1] = {0.5, 1.0, 0.5, 1.0}
-            },
-        }
+        -- Which cell serves which direction (the reference's own key names, which is where the
+        -- reading of each cell's art comes from): 0 `down`, 1 `up`, 2 the horizontal run, 3 the
+        -- bottom corners, 4 the top corners, 5 the T pointing down, 6 the T pointing up.
+        TALENT_BRANCH_TEXTURECOORDS = talentSheetQuads(256, 64, 32, 33, {
+            down        = { 0, rowH = 31 },
+            up          = { 1, rowH = 31 },
+            left        = { 2 },
+            right       = { 2 },
+            bottomright = { 3 },
+            bottomleft  = { 3, flip = true },
+            topright    = { 4 },
+            topleft     = { 4, flip = true },
+            tdown       = { 5 },
+            tup         = { 6 },
+        })
+
+        -- cell 0 is the arrow that points up the column; cell 1 is the sideways one, mirrored for
+        -- the other hand.
+        TALENT_ARROW_TEXTURECOORDS = talentSheetQuads(64, 64, 32, 32, {
+            top   = { 0 },
+            left  = { 1 },
+            right = { 1, flip = true },
+        })
+
+        -- ── The branch grid ─────────────────────────────────────────────────────────────────────
+        --
+        -- A cell of TALENT_BRANCH_ARRAY holds the talent that occupies its grid position (`id`),
+        -- and the drawing state of the connector art passing THROUGH that position: four half-
+        -- branches (`up`/`down`/`left`/`right`, each the piece of a segment on this cell's side of
+        -- the join) and three arrowheads. Every one of those is either 0 — nothing drawn here — or
+        -- the ±1 that the draw pass indexes TALENT_BRANCH_TEXTURECOORDS/TALENT_ARROW_TEXTURECOORDS
+        -- by: +1 the lit art, -1 the greyed. That is the whole reason a met and an unmet prereq are
+        -- one code path in two colours rather than two code paths.
+        --
+        -- Clearing rather than rebuilding keeps the 32 cells allocated exactly once (OnLoad), and
+        -- puts their field set in ONE place instead of two that can drift apart.
+        local function clearBranchCell(cell)
+            cell.id = nil
+            cell.up, cell.down, cell.left, cell.right = 0, 0, 0, 0
+            cell.topArrow, cell.leftArrow, cell.rightArrow = 0, 0, 0
+            return cell
+        end
+
+        -- A grid cell's top-left corner inside the scroll child. The talent button seats exactly on
+        -- it; the connector art seats at the reference's own 2px inset from it (+2 x, -2 y).
+        local function talentCellOrigin(tier, column)
+            return (column - 1) * BENILLA_TALENT_GRID_PITCH + INITIAL_TALENT_OFFSET_X,
+                -((tier - 1) * BENILLA_TALENT_GRID_PITCH) - INITIAL_TALENT_OFFSET_Y
+        end
 
         -- ── The window: toggle (ref TalentFrame_Toggle, l.73-79) ────────────────────────────────
         -- Renamed ToggleTalentFrame — this file's header comment, "ONE deliberate naming deviation".
@@ -272,13 +324,11 @@
             -- UNIT_PORTRAIT_UPDATE: this file's header comment (engine-gap notes) — never fired
             -- today, registered anyway for ref fidelity/forward-compat.
             frame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
+            -- The grid's one allocation: every repaint clears these same cells in place.
             for i = 1, MAX_NUM_TALENT_TIERS do
                 TALENT_BRANCH_ARRAY[i] = {}
                 for j = 1, NUM_TALENT_COLUMNS do
-                    TALENT_BRANCH_ARRAY[i][j] = {
-                        id = nil, up = 0, left = 0, right = 0, down = 0,
-                        leftArrow = 0, rightArrow = 0, topArrow = 0,
-                    }
+                    TALENT_BRANCH_ARRAY[i][j] = clearBranchCell({})
                 end
             end
         end
@@ -298,7 +348,7 @@
             PlaySound("TalentScreenClose")
         end
 
-        -- ref TalentFrame_OnEvent (l.110-118) — no IsVisible() guard: transcribed exactly as THIS
+        -- ref TalentFrame_OnEvent (l.110-118) — no IsVisible() guard: followed exactly as THIS
         -- reference does it (it refreshes even while hidden; a different window guarding its own
         -- OnEvent, e.g. SpellBookFrame, is that window's own choice, not borrowed here).
         function BenillaTalentFrame_OnEvent(frame)
@@ -313,7 +363,7 @@
 
         -- ref TalentFrameTalent_OnEvent (Blizzard_TalentUITemplates.xml:120-124) — the hovered
         -- button's own CHARACTER_POINTS_CHANGED re-poll. GameTooltip:IsOwned VERIFIED present
-        -- (`benilla-ui/src/script/tooltip/verbs.rs:107`), transcribed as-is (not an emulation).
+        -- (`benilla-ui/src/script/tooltip/verbs.rs:107`), used as-is (not an emulation).
         function BenillaTalentButton_OnEvent(button)
             if GameTooltip:IsOwned(button) then
                 GameTooltip:SetTalent(PanelTemplates_GetSelectedTab(BenillaTalentFrame), button:GetID())
@@ -448,9 +498,15 @@
                 end
             end
 
-            -- Draw the prereq branches (ref l.232-320, verbatim). UpdateScrollChildRect() DROPPED
+            -- Now paint the routes the pass above marked onto the grid (spec: ref l.232-320): walk
+            -- every cell in order, claim a pooled texture for each piece of art it asks for, and
+            -- hide whatever is left of the pools at the end. UpdateScrollChildRect() is DROPPED
             -- from the tier loop's tail — this file's header comment ("SCROLL DESIGN": a fixed-
             -- height child never needs its range re-derived).
+            --
+            -- `ignoreUp` deliberately survives from one cell to the NEXT: an empty cell carrying a
+            -- straight vertical through it draws its own `down` piece one row lower, so the cell
+            -- below must not draw the `up` piece again on top of it.
             local node
             local xOffset, yOffset
             local ignoreUp
@@ -460,10 +516,9 @@
             for i = 1, MAX_NUM_TALENT_TIERS do
                 for j = 1, NUM_TALENT_COLUMNS do
                     node = TALENT_BRANCH_ARRAY[i][j]
-
-                    -- Setup offsets
-                    xOffset = ((j - 1) * 63) + INITIAL_TALENT_OFFSET_X + 2
-                    yOffset = -((i - 1) * 63) - INITIAL_TALENT_OFFSET_Y - 2
+                    -- The cell's own corner, then the connector art's inset inside it.
+                    xOffset, yOffset = talentCellOrigin(i, j)
+                    xOffset, yOffset = xOffset + 2, yOffset - 2
 
                     if node.id then
                         -- Has talent
@@ -618,134 +673,135 @@
             return requirementsMet
         end
 
-        -- ref TalentFrame_DrawLines (l.398-527) — verbatim (bare min/max confirmed available,
-        -- this file's header comment, `benilla-ui/src/script/stdlib.rs`). message() calls DROPPED
-        -- at their 3 sites (this file's header comment); the `return`s that followed them are kept.
-        function BenillaTalentFrame_DrawLines(buttonTier, buttonColumn, tier, column, requirementsMet)
-            if requirementsMet then
-                requirementsMet = 1
-            else
-                requirementsMet = -1
-            end
+        -- ── Routing one prereq onto the grid ────────────────────────────────────────────────────
+        --
+        -- Spec: ref TalentFrame_DrawLines (l.398-527). A route is never stored as a path; each cell
+        -- it crosses simply records which of its own half-branches and arrowheads the route lit,
+        -- and the value recorded is the route's STATE — +1 met, -1 unmet — which is the very key
+        -- the draw pass looks the art up by (`clearBranchCell` above).
+        --
+        -- The one rule every leg obeys: a route may not run through a cell that holds a talent of
+        -- its own, because the connector art would land under that button. Each leg scans its span
+        -- first and abandons the whole route rather than draw over one. (The reference raises a
+        -- `message()` at three of those points; the diagnostic is dropped and the abandonment kept
+        -- — this file's header comment, "message()". No 1.12 tree trips any of them.)
+        --
+        -- These five are the grid's vocabulary; the routing below is written entirely in them.
 
-            -- Check to see if are in the same column
-            if buttonColumn == column then
-                -- Check for blocking talents
-                if (buttonTier - tier) > 1 then
-                    -- If more than one tier difference
-                    for i = tier + 1, buttonTier - 1 do
-                        if TALENT_BRANCH_ARRAY[i][buttonColumn].id then
-                            -- If there's an id, there's a blocker
-                            return
-                        end
-                    end
-                end
+        -- One link of a vertical run: the lower half of the upper cell plus the upper half of the
+        -- cell beneath it. Two half-branches are what make one drawn segment.
+        local function linkDown(tier, column, state)
+            TALENT_BRANCH_ARRAY[tier][column].down = state
+            TALENT_BRANCH_ARRAY[tier + 1][column].up = state
+        end
 
-                -- Draw the lines
-                for i = tier, buttonTier - 1 do
-                    TALENT_BRANCH_ARRAY[i][buttonColumn].down = requirementsMet
-                    if (i + 1) <= (buttonTier - 1) then
-                        TALENT_BRANCH_ARRAY[i + 1][buttonColumn].up = requirementsMet
-                    end
-                end
+        -- The same across, left cell to right cell.
+        local function linkRight(tier, column, state)
+            TALENT_BRANCH_ARRAY[tier][column].right = state
+            TALENT_BRANCH_ARRAY[tier][column + 1].left = state
+        end
 
-                -- Set the arrow
-                TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].topArrow = requirementsMet
-                return
+        -- Does a talent sit anywhere in this span of one tier / of one column? (An empty span —
+        -- adjacent cells with nothing between them — is trivially clear.)
+        local function occupiedAcross(tier, fromColumn, toColumn)
+            for i = fromColumn, toColumn do
+                if TALENT_BRANCH_ARRAY[tier][i].id then return true end
             end
-            -- Check to see if they're in the same tier
-            if buttonTier == tier then
-                local left = min(buttonColumn, column)
-                local right = max(buttonColumn, column)
+            return false
+        end
 
-                -- See if the distance is greater than one space
-                if (right - left) > 1 then
-                    -- Check for blocking talents
-                    for i = left + 1, right - 1 do
-                        if TALENT_BRANCH_ARRAY[tier][i].id then
-                            -- If there's an id, there's a blocker
-                            return
-                        end
-                    end
-                end
-                -- If we get here then we're in the clear
-                for i = left, right - 1 do
-                    TALENT_BRANCH_ARRAY[tier][i].right = requirementsMet
-                    TALENT_BRANCH_ARRAY[tier][i + 1].left = requirementsMet
-                end
-                -- Determine where the arrow goes
-                if buttonColumn < column then
-                    TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].rightArrow = requirementsMet
-                else
-                    TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].leftArrow = requirementsMet
-                end
-                return
+        local function occupiedDown(column, fromTier, toTier)
+            for i = fromTier, toTier do
+                if TALENT_BRANCH_ARRAY[i][column].id then return true end
             end
-            -- Now we know the prereq is diagonal from us
-            local left = min(buttonColumn, column)
-            local right = max(buttonColumn, column)
-            -- Don't check the location of the current button
-            if left == column then
-                left = left + 1
-            else
-                right = right - 1
-            end
-            -- Check for blocking talents
-            local blocked = nil
-            for i = left, right do
-                if TALENT_BRANCH_ARRAY[tier][i].id then
-                    -- If there's an id, there's a blocker
-                    blocked = 1
-                end
-            end
-            left = min(buttonColumn, column)
-            right = max(buttonColumn, column)
-            if not blocked then
-                TALENT_BRANCH_ARRAY[tier][buttonColumn].down = requirementsMet
-                TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].up = requirementsMet
+            return false
+        end
 
-                for i = tier, buttonTier - 1 do
-                    TALENT_BRANCH_ARRAY[i][buttonColumn].down = requirementsMet
-                    TALENT_BRANCH_ARRAY[i + 1][buttonColumn].up = requirementsMet
-                end
-
-                for i = left, right - 1 do
-                    TALENT_BRANCH_ARRAY[tier][i].right = requirementsMet
-                    TALENT_BRANCH_ARRAY[tier][i + 1].left = requirementsMet
-                end
-                -- Place the arrow
-                TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].topArrow = requirementsMet
-                return
-            end
-            -- If we're here then we were blocked trying to go vertically first so we have to go
-            -- over first, then up
-            if left == buttonColumn then
-                left = left + 1
-            else
-                right = right - 1
-            end
-            -- Check for blocking talents
-            for i = left, right do
-                if TALENT_BRANCH_ARRAY[buttonTier][i].id then
-                    -- If there's an id, then this layout is undrawable
-                    return
-                end
-            end
-            -- If we're here we can draw the line
-            left = min(buttonColumn, column)
-            right = max(buttonColumn, column)
-
-            for i = tier, buttonTier - 1 do
-                TALENT_BRANCH_ARRAY[i][column].up = requirementsMet
-                TALENT_BRANCH_ARRAY[i + 1][column].down = requirementsMet
-            end
-
-            -- Determine where the arrow goes
+        -- The arrowhead on the dependent talent's own cell, pointing back along the way the route
+        -- came in — right if the prereq lies to the right of us, left if it lies to the left.
+        local function pointArrowSideways(cell, buttonColumn, column, state)
             if buttonColumn < column then
-                TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].rightArrow = requirementsMet
+                cell.rightArrow = state
             else
-                TALENT_BRANCH_ARRAY[buttonTier][buttonColumn].leftArrow = requirementsMet
+                cell.leftArrow = state
             end
+        end
+
+        -- Mark the route from a prerequisite at (tier, column) to the talent that depends on it at
+        -- (buttonTier, buttonColumn). Called once per prereq by BenillaTalentFrame_SetPrereqs.
+        function BenillaTalentFrame_DrawLines(buttonTier, buttonColumn, tier, column, requirementsMet)
+            local state = -1
+            if requirementsMet then state = 1 end
+            -- The dependent talent's own cell: SetPrereqs' caller has already stamped its `id`, so
+            -- it always exists. Every branch below ends by marking an arrowhead on it.
+            local cell = TALENT_BRANCH_ARRAY[buttonTier][buttonColumn]
+
+            -- STRAIGHT UP THE COLUMN. One vertical run, and the last link stops half short: the
+            -- talent's own cell wears the arrowhead where an `up` stub would otherwise go.
+            if buttonColumn == column then
+                if occupiedDown(column, tier + 1, buttonTier - 1) then return end
+                for i = tier, buttonTier - 1 do
+                    if i + 1 < buttonTier then
+                        linkDown(i, column, state)
+                    else
+                        TALENT_BRANCH_ARRAY[i][column].down = state
+                    end
+                end
+                cell.topArrow = state
+                return
+            end
+
+            -- ALONG THE TIER. One horizontal run between the two columns, arrowhead on the side
+            -- the prereq lies. Both halves of every join are marked, including the talent's own.
+            if buttonTier == tier then
+                local left, right = min(buttonColumn, column), max(buttonColumn, column)
+                if occupiedAcross(tier, left + 1, right - 1) then return end
+                for i = left, right - 1 do
+                    linkRight(tier, i, state)
+                end
+                pointArrowSideways(cell, buttonColumn, column, state)
+                return
+            end
+
+            -- DIAGONAL, so the route must turn one corner, and there are two corners to choose
+            -- from. Preferred: run ACROSS the prereq's own tier to our column, then DOWN it. What
+            -- has to be clear for that is the prereq's tier from the cell NEXT to the prereq
+            -- through to the corner at our own column — the prereq's own cell is where the route
+            -- starts, so it is never in its own way.
+            local left, right = min(buttonColumn, column), max(buttonColumn, column)
+            local from, to = left, right
+            if left == column then from = left + 1 else to = right - 1 end
+            if not occupiedAcross(tier, from, to) then
+                -- The corner and our own cell's top half, marked outright: the loop below covers
+                -- both, EXCEPT when the prereq sits below us and the run is empty.
+                TALENT_BRANCH_ARRAY[tier][buttonColumn].down = state
+                cell.up = state
+                for i = tier, buttonTier - 1 do
+                    linkDown(i, buttonColumn, state)
+                end
+                for i = left, right - 1 do
+                    linkRight(tier, i, state)
+                end
+                cell.topArrow = state
+                return
+            end
+
+            -- That corner is blocked, so take the other one: DOWN the prereq's column first, then
+            -- across our own tier — which now has to be the clear span, from our cell to the corner.
+            from, to = left, right
+            if left == buttonColumn then from = left + 1 else to = right - 1 end
+            if occupiedAcross(buttonTier, from, to) then return end
+            -- Two reference quirks live in these three lines and BOTH are deliberately kept, because
+            -- they are what the real client draws: the across leg is never marked at all (the
+            -- reference's own two lines for it are commented out at Blizzard_TalentUI.lua:508-509),
+            -- and each vertical segment is attributed to the OUTER halves of its two cells rather
+            -- than the facing ones — the mirror image of `linkDown`, which is why that helper is not
+            -- used here.
+            for i = tier, buttonTier - 1 do
+                TALENT_BRANCH_ARRAY[i][column].up = state
+                TALENT_BRANCH_ARRAY[i + 1][column].down = state
+            end
+            pointArrowSideways(cell, buttonColumn, column, state)
         end
 
         -- ref TalentFrameTalent_OnClick (Blizzard_TalentUITemplates.xml:97-99).
@@ -768,25 +824,19 @@
             BenillaTalentFrame.talentPoints = cp1
         end
 
-        -- ref SetTalentButtonLocation (l.549-553).
+        -- Seat a talent button on its grid cell (spec: ref SetTalentButtonLocation, l.549-553) —
+        -- the same corner the connector art insets from, so the two can never drift apart.
         function BenillaSetTalentButtonLocation(button, tier, column)
-            local x = ((column - 1) * 63) + INITIAL_TALENT_OFFSET_X
-            local y = -((tier - 1) * 63) - INITIAL_TALENT_OFFSET_Y
+            local x, y = talentCellOrigin(tier, column)
             button:SetPoint("TOPLEFT", button:GetParent(), "TOPLEFT", x, y)
         end
 
-        -- ref TalentFrame_ResetBranches (l.555-568).
+        -- Back to a blank grid before a repaint re-derives it (spec: ref TalentFrame_ResetBranches,
+        -- l.555-568). The field set lives at `clearBranchCell`, shared with OnLoad's build.
         function BenillaTalentFrame_ResetBranches()
             for i = 1, MAX_NUM_TALENT_TIERS do
                 for j = 1, NUM_TALENT_COLUMNS do
-                    TALENT_BRANCH_ARRAY[i][j].id = nil
-                    TALENT_BRANCH_ARRAY[i][j].up = 0
-                    TALENT_BRANCH_ARRAY[i][j].down = 0
-                    TALENT_BRANCH_ARRAY[i][j].left = 0
-                    TALENT_BRANCH_ARRAY[i][j].right = 0
-                    TALENT_BRANCH_ARRAY[i][j].rightArrow = 0
-                    TALENT_BRANCH_ARRAY[i][j].leftArrow = 0
-                    TALENT_BRANCH_ARRAY[i][j].topArrow = 0
+                    clearBranchCell(TALENT_BRANCH_ARRAY[i][j])
                 end
             end
         end

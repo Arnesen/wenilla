@@ -1,10 +1,10 @@
 <Ui>
     <!--
-        benilla's Skills tab (decision 0437 phase 4): the 1.12 `SkillFrame`, transcribed from the
+        benilla's Skills tab (decision 0437 phase 4): the 1.12 `SkillFrame`, re-expressed from the
         reference FrameXML `SkillFrame.{xml,lua}` (session scratchpad `ref-ui/`, decision 0246
         discipline — never committed) onto our own engine/feeds. Geometry/art-paths below are QUOTED
         from the ref (line citations inline, into that same `SkillFrame.xml`/`.lua`); the Lua is
-        transcribed logic turned onto benilla's Era API (`GetNumSkillLines`/`GetSkillLineInfo`/
+        the ref's logic turned onto benilla's Era API (`GetNumSkillLines`/`GetSkillLineInfo`/
         `Expand`/`CollapseSkillHeader`/`SetSelectedSkill`/`GetSelectedSkill`, decision 0437's skills
         seam, `crates/benilla-ui/src/script/skills.rs`, built alongside this file).
 
@@ -160,8 +160,8 @@
                 bgTexture:SetVertexColor(0.0, 0.0, 0.75, 0.5)
                 bar:SetMinMaxValues(0, skillMaxRank)
                 bar:SetValue(skillRank)
-                -- ref SkillFrame.lua:178-186, transcribed byte-exact (this file's header comment,
-                -- deviation 4).
+                -- the ref's rank-text law (SkillFrame.lua:178-186), re-expressed here (this file's
+                -- header comment, deviation 4).
                 if skillModifier == 0 then
                     rankText:SetText(skillRank .. "/" .. skillMaxRank)
                 else

@@ -311,11 +311,21 @@ fn drive_loading_screen(
         MessageReader<crate::net::WorldportMessage>,
         MessageReader<crate::net::TeleportMessage>,
         MessageReader<crate::net::LoggedOutMessage>,
+        MessageReader<crate::net::DisconnectedMessage>,
         Option<Res<crate::net::PendingTransfer>>,
         Option<Res<crate::char_select::Roster>>,
     ),
 ) {
-    let (state, mut entered, mut worldports, mut teleports, mut logouts, transfer, roster) = edges;
+    let (
+        state,
+        mut entered,
+        mut worldports,
+        mut teleports,
+        mut logouts,
+        mut lost,
+        transfer,
+        roster,
+    ) = edges;
     let now = time.elapsed_secs();
     let map_id = current_map.as_ref().map(|m| m.0);
     // The physics hold releases on the same residency signal that clears this screen (decision
@@ -362,13 +372,25 @@ fn drive_loading_screen(
     // down, but `CharSelect` only applies at the NEXT frame's state transition — cover the dead
     // world with plain black until the glue owns the screen. No art, no bar: the ref's
     // world→glue swap is a black cut, not a loading screen.
-    if logouts.read().next().is_some() {
+    // A dead session is the same world→glue cut (decision 1262), and it needs this arm more than
+    // logout does: the entry race raises the cover on `EnteredWorldMessage` a few lines up and
+    // arms `awaiting_snap` for a snap the dead socket will never send, so without the disarm here
+    // the cover is what the player would have been left staring at.
+    let session_over = lost.read().any(|m| m.session_over);
+    if logouts.read().next().is_some() || session_over {
         screen.active = true;
         screen.blackout = true;
         screen.awaiting_snap = false;
         screen.pending_map = None;
         screen.ready_frames = 0;
-        info!("loading screen: blackout (logout)");
+        info!(
+            "loading screen: blackout ({})",
+            if session_over {
+                "session lost"
+            } else {
+                "logout"
+            }
+        );
     }
     if screen.blackout && *state.get() != crate::char_select::ClientState::InWorld {
         // The glue is up (it renders above this root); the cover's job is done.

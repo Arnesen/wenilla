@@ -1,8 +1,9 @@
 <Ui>
     <!--
         The player buff/debuff bar and the temporary-weapon-enchant row (decisions 0255/0257 — the
-        player aura arc). Geometry, textures, colours, every timing constant AND now the data path
-        are the real 1.12 BuffFrame's (extracted Interface\FrameXML\BuffFrame.xml/.lua).
+        player aura arc). benilla's own code against the real 1.12 BuffFrame's contract: the
+        extracted Interface\FrameXML\BuffFrame.xml/.lua is the SPECIFICATION, and geometry,
+        textures, colours, every timing constant AND the data path are read off it.
 
         THE INDEX SPACE — the thing to understand before touching a handler. There are TWO numbers
         here and they are not the same number:
@@ -23,8 +24,8 @@
         table and the traps are `benilla_ui::script::aura`'s module header).
 
         This file used to read the Era `UnitBuff`/`UnitDebuff` pair because the 1.12 verbs did not
-        exist. They landed in b2ede294, so the adaptation is gone: the handlers below are the
-        reference's, on the reference's numbers.
+        exist. They landed in b2ede294, so the adaptation is gone: the handlers below run on the
+        reference's own verbs and the reference's own numbers.
 
         SCOPE. The LOCAL PLAYER's auras, plus the reference's two temporary-weapon-enchant slots.
         0255 left TemporaryEnchantFrame out ("there is no weapon-enchant wire yet"); there is —
@@ -64,7 +65,7 @@
 
         THE COUNTDOWN IS A POLL, NOT A CACHE. The aura EVENT is the discrete-change edge (icon,
         stacks, dispel class); the remaining time is re-read every frame by every visible button.
-        That is the reference's own division of labour and it is now literally its code —
+        That is the reference's own division of labour and this file keeps it exactly —
         BuffButton_Update caches the buff POSITION on PLAYER_AURAS_CHANGED, BuffButton_OnUpdate
         calls GetPlayerBuffTimeLeft with it each frame (ref BuffFrame.lua l.128-130) — and caching
         the expiry on the event instead is what made refreshed buffs freeze at "0 s" and freshly
@@ -76,7 +77,8 @@
         the same verb over the same cache behind the same gate and the same CMSG_CANCEL_AURA queue;
         this file simply no longer needs the Era spelling.
 
-        DEVIATIONS from the reference .lua/.xml (noted, not bugs):
+        BEHAVIOURAL DEPARTURES from the specification (noted, not bugs — everything else observable
+        is the reference's, however differently this file spells it):
         - The count FontString is BLANKED ("") rather than hidden — an empty string draws nothing,
           same look. A site that predates region Show/Hide; equivalent either way. (The DURATION
           strings used the same shortcut until 1139 and no longer do: a hidden setting has to hide
@@ -167,6 +169,29 @@
             end
         end
 
+        -- Half of the square wave, run down by one frame. BuffFrameFlashTime is the time LEFT in
+        -- the current half; when it goes under, the state flips and the counter reloads with the
+        -- new half's length. The overshoot is carried into that half — unless it is longer than
+        -- the half itself, in which case the whole period is kept rather than skipped, so a
+        -- stalled frame costs at most one beat of drift instead of racing the pulse forward.
+        local function buffFlashAdvance(elapsed)
+            BuffFrameFlashTime = BuffFrameFlashTime - elapsed
+            if BuffFrameFlashTime >= 0 then
+                return
+            end
+            local overtime = -BuffFrameFlashTime
+            if BuffFrameFlashState == 0 then
+                BuffFrameFlashState = 1
+                BuffFrameFlashTime = BUFF_FLASH_TIME_ON
+            else
+                BuffFrameFlashState = 0
+                BuffFrameFlashTime = BUFF_FLASH_TIME_OFF
+            end
+            if overtime < BuffFrameFlashTime then
+                BuffFrameFlashTime = BuffFrameFlashTime - overtime
+            end
+        end
+
         function BuffFrame_OnUpdate(elapsed)
             -- The tooltip re-poll's throttle (ref l.29-33): oscillates around zero with a
             -- TOOLTIP_UPDATE_TIME period, and BuffButton_OnUpdate refreshes a hovered plate only on
@@ -178,27 +203,23 @@
                 BuffFrameUpdateTime = BuffFrameUpdateTime + TOOLTIP_UPDATE_TIME
             end
 
-            BuffFrameFlashTime = BuffFrameFlashTime - elapsed
-            if BuffFrameFlashTime < 0 then
-                local overtime = -BuffFrameFlashTime
-                if BuffFrameFlashState == 0 then
-                    BuffFrameFlashState = 1
-                    BuffFrameFlashTime = BUFF_FLASH_TIME_ON
-                else
-                    BuffFrameFlashState = 0
-                    BuffFrameFlashTime = BUFF_FLASH_TIME_OFF
-                end
-                if overtime < BuffFrameFlashTime then
-                    BuffFrameFlashTime = BuffFrameFlashTime - overtime
-                end
-            end
-
+            -- The pulse's level for this frame: a 0..1 ramp up across the ON half and back down
+            -- across the OFF half (both scaled by BUFF_FLASH_TIME_ON — the reference's own choice,
+            -- and invisible while the two halves are the same length), squashed into
+            -- [BUFF_MIN_ALPHA, 1] so a warning icon dims rather than disappears.
+            --
+            -- Computed into a LOCAL and published once. BUFF_ALPHA_VALUE is read by every visible
+            -- button, so it is not scratch space: the reference assigns the raw ramp to it and then
+            -- squashes it in a second statement, which leaves the global holding an un-squashed
+            -- value for the length of one statement.
+            buffFlashAdvance(elapsed)
+            local level
             if BuffFrameFlashState == 1 then
-                BUFF_ALPHA_VALUE = (BUFF_FLASH_TIME_ON - BuffFrameFlashTime) / BUFF_FLASH_TIME_ON
+                level = (BUFF_FLASH_TIME_ON - BuffFrameFlashTime) / BUFF_FLASH_TIME_ON
             else
-                BUFF_ALPHA_VALUE = BuffFrameFlashTime / BUFF_FLASH_TIME_ON
+                level = BuffFrameFlashTime / BUFF_FLASH_TIME_ON
             end
-            BUFF_ALPHA_VALUE = (BUFF_ALPHA_VALUE * (1 - BUFF_MIN_ALPHA)) + BUFF_MIN_ALPHA
+            BUFF_ALPHA_VALUE = (level * (1 - BUFF_MIN_ALPHA)) + BUFF_MIN_ALPHA
         end
 
         -- BuffButtons_UpdatePositions (BuffFrame.lua l.152-160): the ROW PITCH depends on whether a
@@ -306,29 +327,32 @@
         -- frames (`UiScript::tick`), exactly as the client's does, so a hidden button's stale
         -- buffIndex is never read.
         function BuffButton_OnUpdate()
-            local buffDuration = getglobal(this:GetName() .. "Duration")
-            if this.untilCancelled == 1 then
-                buffDuration:Hide()
+            local button = this
+            -- A permanent aura has nothing to count down and nothing to flash toward, so it is
+            -- done in one line: UpdateDuration with no time left is exactly "hide the timer",
+            -- which is the whole of the reference's early-out here. (The reference reaches for the
+            -- $parentDuration region itself to do it, on every frame of every visible button, and
+            -- then throws that region away and lets UpdateDuration look it up again.)
+            if button.untilCancelled == 1 then
+                BuffFrame_UpdateDuration(button, nil)
                 return
             end
 
-            local buffIndex = this.buffIndex
+            local buffIndex = button.buffIndex
             local timeLeft = GetPlayerBuffTimeLeft(buffIndex)
             -- The flash is NOT gated on the timer setting: the reference pulses a button in its last
             -- 31s whether or not a number is drawn under it, and with the timers off it is the only
             -- thing left saying "about to drop".
             if timeLeft < BUFF_WARNING_TIME then
-                this:SetAlpha(BUFF_ALPHA_VALUE)
+                button:SetAlpha(BUFF_ALPHA_VALUE)
             else
-                this:SetAlpha(1.0)
+                button:SetAlpha(1.0)
             end
 
-            BuffFrame_UpdateDuration(this, timeLeft)
+            BuffFrame_UpdateDuration(button, timeLeft)
 
-            if BuffFrameUpdateTime > 0 then
-                return
-            end
-            if GameTooltip and GameTooltip:IsOwned(this) then
+            -- A tooltip we own is re-read on the throttle's beat, not every frame.
+            if BuffFrameUpdateTime <= 0 and GameTooltip and GameTooltip:IsOwned(button) then
                 GameTooltip:SetPlayerBuff(buffIndex)
             end
         end
@@ -339,72 +363,65 @@
             CancelPlayerBuff(this.buffIndex)
         end
 
-        -- The temporary-weapon-enchant row (ref l.162-233). GetWeaponEnchantInfo is the whole data
-        -- path: two flags, two remaining-MILLISECOND counts, two charge counts. Off hand takes
-        -- TempEnchant1 and main hand the next free slot, so with both enchanted the main hand sits
-        -- to the LEFT of the off hand — the reference's own ordering.
-        function BuffFrame_Enchant_OnUpdate(elapsed)
-            local hasMainHandEnchant, mainHandExpiration, mainHandCharges, hasOffHandEnchant, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
+        -- Clear enchant slots `first`..2 — the tail of the row nothing is using this frame.
+        local function buffEnchantClear(first)
+            for slot = first, 2 do
+                getglobal("TempEnchant" .. slot):Hide()
+                getglobal("TempEnchant" .. slot .. "Duration"):Hide()
+            end
+        end
 
-            -- No enchants, kick out early — and park BuffFrame back on its resting point.
+        -- The temporary-weapon-enchant row (ref l.162-233). GetWeaponEnchantInfo is the whole data
+        -- path: two flags, two remaining-MILLISECOND counts, two charge counts (the charges are
+        -- read by nobody here, and are named only to spell the API's shape out).
+        --
+        -- The two hands are the same six steps on different numbers, so they are one loop over a
+        -- two-row table rather than the reference's two copies of the block. OFF HAND FIRST is the
+        -- part that matters: the row packs from slot 1 rightwards, so with both weapons enchanted
+        -- the main hand lands in slot 2 and therefore sits to the LEFT of the off hand.
+        function BuffFrame_Enchant_OnUpdate(elapsed)
+            local hasMainHandEnchant, mainHandExpiration, mainHandCharges,
+                  hasOffHandEnchant, offHandExpiration, offHandCharges = GetWeaponEnchantInfo()
+
+            -- Nothing enchanted: clear the whole row and park BuffFrame back on its resting point.
             if not hasMainHandEnchant and not hasOffHandEnchant then
-                TempEnchant1:Hide()
-                TempEnchant1Duration:Hide()
-                TempEnchant2:Hide()
-                TempEnchant2Duration:Hide()
+                buffEnchantClear(1)
                 BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPRIGHT", 0, 0)
                 return
             end
 
-            local enchantButton
-            local textureName
-            local enchantIndex = 0
-            if hasOffHandEnchant then
-                enchantIndex = enchantIndex + 1
-                textureName = GetInventoryItemTexture("player", 17)
-                TempEnchant1:SetID(17)
-                TempEnchant1Icon:SetTexture(textureName or BENILLA_FALLBACK_ICON)
-                TempEnchant1:Show()
+            local filled = 0
+            for _, hand in ipairs({
+                -- `slot` is the live API's inventory id, which is also what the button's hover
+                -- reads back off itself to ask for the ITEM's tooltip.
+                { enchanted = hasOffHandEnchant,  expiration = offHandExpiration,  slot = 17 },
+                { enchanted = hasMainHandEnchant, expiration = mainHandExpiration, slot = 16 },
+            }) do
+                if hand.enchanted then
+                    filled = filled + 1
+                    local button = getglobal("TempEnchant" .. filled)
+                    button:SetID(hand.slot)
+                    getglobal(button:GetName() .. "Icon"):SetTexture(
+                        GetInventoryItemTexture("player", hand.slot) or BENILLA_FALLBACK_ICON)
+                    button:Show()
 
-                if offHandExpiration then
-                    offHandExpiration = offHandExpiration / 1000
-                end
-                BuffFrame_UpdateDuration(TempEnchant1, offHandExpiration)
-
-                if offHandExpiration and offHandExpiration < BUFF_WARNING_TIME then
-                    TempEnchant1:SetAlpha(BUFF_ALPHA_VALUE)
-                else
-                    TempEnchant1:SetAlpha(1.0)
-                end
-            end
-            if hasMainHandEnchant then
-                enchantIndex = enchantIndex + 1
-                enchantButton = getglobal("TempEnchant" .. enchantIndex)
-                textureName = GetInventoryItemTexture("player", 16)
-                enchantButton:SetID(16)
-                getglobal(enchantButton:GetName() .. "Icon"):SetTexture(textureName or BENILLA_FALLBACK_ICON)
-                enchantButton:Show()
-
-                if mainHandExpiration then
-                    mainHandExpiration = mainHandExpiration / 1000
-                end
-                BuffFrame_UpdateDuration(enchantButton, mainHandExpiration)
-
-                if mainHandExpiration and mainHandExpiration < BUFF_WARNING_TIME then
-                    enchantButton:SetAlpha(BUFF_ALPHA_VALUE)
-                else
-                    enchantButton:SetAlpha(1.0)
+                    -- The wire counts an enchant down in MILLISECONDS; everything the row draws is
+                    -- in seconds. A nil expiration is "no countdown known", which the timer and the
+                    -- warning flash both read as "nothing to warn about".
+                    local timeLeft = hand.expiration and (hand.expiration / 1000)
+                    BuffFrame_UpdateDuration(button, timeLeft)
+                    if timeLeft and timeLeft < BUFF_WARNING_TIME then
+                        button:SetAlpha(BUFF_ALPHA_VALUE)
+                    else
+                        button:SetAlpha(1.0)
+                    end
                 end
             end
-            -- Hide unused enchants
-            for i = enchantIndex + 1, 2 do
-                getglobal("TempEnchant" .. i):Hide()
-                getglobal("TempEnchant" .. i .. "Duration"):Hide()
-            end
+            buffEnchantClear(filled + 1)
 
-            -- Position buff frame: the row is `enchantIndex` icons wide, and the bar starts one
-            -- 5px gutter to its left.
-            TemporaryEnchantFrame:SetWidth(enchantIndex * 32)
+            -- Position buff frame: the row is `filled` icons wide, and the bar starts one 5px
+            -- gutter to its left.
+            TemporaryEnchantFrame:SetWidth(filled * 32)
             BuffFrame:SetPoint("TOPRIGHT", "TemporaryEnchantFrame", "TOPLEFT", -5, 0)
         end
 
@@ -427,17 +444,21 @@
         -- known" case. Hidden, not blanked — see the header's deviation note.
         function BuffFrame_UpdateDuration(buffButton, timeLeft)
             local duration = getglobal(buffButton:GetName() .. "Duration")
-            if SHOW_BUFF_DURATIONS == "1" and timeLeft then
-                duration:SetText(SecondsToTimeAbbrev(timeLeft))
-                if timeLeft < BUFF_DURATION_WARNING_TIME then
-                    duration:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
-                else
-                    duration:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
-                end
-                duration:Show()
-            else
+            -- Two ways to have no number to draw: the setting is off, or nothing has told us how
+            -- long is left (the enchant row's "no countdown known").
+            if SHOW_BUFF_DURATIONS ~= "1" or not timeLeft then
                 duration:Hide()
+                return
             end
+            duration:SetText(SecondsToTimeAbbrev(timeLeft))
+            -- Gold most of the way, white inside the last minute — the number's own warning, a
+            -- half-minute ahead of the icon starting to pulse.
+            local color = NORMAL_FONT_COLOR
+            if timeLeft < BUFF_DURATION_WARNING_TIME then
+                color = HIGHLIGHT_FONT_COLOR
+            end
+            duration:SetVertexColor(color.r, color.g, color.b)
+            duration:Show()
         end
     ]]></Script>
 

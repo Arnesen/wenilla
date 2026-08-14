@@ -405,12 +405,13 @@ pub(super) fn apply_net_updates(
                 logout.apply_response(reason, instant)
             }
             SessionEvent::LogoutCancelled => logout.apply_cancelled(),
-            SessionEvent::Disconnected { reason } => {
+            SessionEvent::Disconnected { reason, end } => {
                 session::disconnected(
                     reason,
+                    end,
                     &mut commands,
                     &mut index,
-                    &self_guid,
+                    &mut self_guid,
                     &mut status,
                     &mut names,
                     &mut items,

@@ -1,11 +1,19 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!--
-        The death arc's UI (decision 0308 slices 1/3): the reference's death dialogs registered on
-        the shared StaticPopup engine (UiPanels.xml), and the UIParent death-event driver,
-        transcribed from the patch-chain FrameXML (mpqx extraction, decision 0246):
-        StaticPopup.lua l.375-505 (DEATH + RESURRECT×3), l.1134-1201 (XP_LOSS×2 + RECOVER_CORPSE*),
-        UIParent.lua l.237-262 + l.399-436 (the event arms). Strings verbatim from
-        GlobalStrings.lua. The engine-side events feeding this: PLAYER_DEAD/ALIVE/UNGHOST +
+        The death arc's UI (decision 0308 slices 1/3): our death dialogs, registered on the shared
+        StaticPopup engine (UiPanels.xml), plus the event driver that raises and clears them.
+
+        The patch-chain FrameXML (mpqx extraction, decision 0246) is the SPECIFICATION for what
+        each dialog says, offers and answers — StaticPopup.lua l.375-505 (DEATH + RESURRECT×3),
+        l.1134-1201 (XP_LOSS×2 + RECOVER_CORPSE*), UIParent.lua l.237-262 + l.399-436 (the event
+        arms). The field names below are the published registry API that addons write into, so
+        they are the reference's and cannot be renamed; the code that fills them is ours. Six of
+        the eight dialogs share one disposition and are stamped with it rather than repeating it,
+        the three resurrect offers and the two spirit-healer confirms are each one shape built
+        more than once, and the driver is a single event switch. Strings are the reference's own
+        (GlobalStrings.lua), which is data, not authorship.
+
+        The engine-side events feeding this: PLAYER_DEAD/ALIVE/UNGHOST +
         RESURRECT_REQUEST + CONFIRM_XP_LOSS fire from `death.rs`'s state machine;
         CORPSE_IN_RANGE/OUT_OF_RANGE/IN_INSTANCE join with the slice-2 corpse-run range gate
         (registered now — they simply don't fire yet). Deferred with 0308 §8: the SKINNED/
@@ -32,56 +40,73 @@
         local DECLINE = "Decline"
         local CANCEL = "Cancel"
 
-        -- ── The DEATH (release) dialog — StaticPopup.lua l.375-414, verbatim behavior ────────────
-        -- OnShow seeds timeleft from GetReleaseTimeRemaining(): >0 counts down through the engine's
-        -- per-tick DEATH text; −1 swaps in the no-timer text (no countdown). Timeout expiry is a
-        -- silent hide — the SERVER force-releases at 6:00 (0308 §1). No hideOnEscape: ESC never
-        -- dismisses it. Button2 is soulstone-only (HasSoulstone() is nil in v1 → hidden, and the
-        -- OnCancel clicked-branch falls through to RepopMe()).
-        StaticPopupDialogs["DEATH"] = {
+        -- ── The corpse-side disposition ──────────────────────────────────────────────────────────
+        -- Six of these eight dialogs are about a body on the floor, and every one of them wants
+        -- the same three things from the engine: it must be legal to raise while you are dead
+        -- (`whileDead` — that is the whole point of the arc), it takes precedence over a running
+        -- cinematic, and a logout must not quietly close it out from under you. Stamped on here
+        -- instead of retyped six times; the fields still land on the entry, so an addon reading
+        -- StaticPopupDialogs["DEATH"].whileDead sees exactly what the reference's does.
+        local function register_corpse_dialog(which, entry)
+            entry.whileDead = 1
+            entry.interruptCinematic = 1
+            entry.notClosableByLogout = 1
+            StaticPopupDialogs[which] = entry
+        end
+
+        -- How long a resurrect offer stands once it becomes answerable. It is both the engine's
+        -- own countdown (`timeout`) and the value OnShow re-seeds past the recovery delay.
+        local RESURRECT_OFFER_SECONDS = 60
+
+        -- ── The release dialog (spec: StaticPopup.lua l.375-414) ─────────────────────────────────
+        -- OnShow seeds `timeleft` from GetReleaseTimeRemaining(), which the engine renders through
+        -- its per-tick DEATH text; −1 means this map has no forced release (an instance), so the
+        -- static wording goes in and nothing counts down. `timeout = 0` because the countdown is
+        -- the SERVER's to enforce — it force-releases at 6:00 (0308 §1) — and there is deliberately
+        -- no hideOnEscape: you cannot dismiss dying. Button2 appears only with a soulstone on you,
+        -- which is never in v1 (HasSoulstone() is nil), so a cancel falls through to the release.
+        register_corpse_dialog("DEATH", {
             text = DEATH_RELEASE_TIMER,
             button1 = DEATH_RELEASE,
             button2 = USE_SOULSTONE,
+            DisplayButton2 = function()
+                return HasSoulstone()
+            end,
             OnShow = function()
+                local name = this:GetName()
                 this.timeleft = GetReleaseTimeRemaining()
-                local text = HasSoulstone()
-                if text then
-                    getglobal(this:GetName() .. "Button2"):SetText(text)
-                end
                 if this.timeleft == -1 then
-                    getglobal(this:GetName() .. "Text"):SetText(DEATH_RELEASE_NOTIMER)
+                    getglobal(name .. "Text"):SetText(DEATH_RELEASE_NOTIMER)
+                end
+                -- The soulstone names its own button ("Reincarnate", "Use Soulstone", …).
+                local soulstone = HasSoulstone()
+                if soulstone then
+                    getglobal(name .. "Button2"):SetText(soulstone)
                 end
             end,
             OnAccept = function()
                 RepopMe()
             end,
             OnCancel = function(data, reason)
-                if reason == "override" then
+                -- Only a real click on button2 is an answer. "override" and "timeout" are the
+                -- engine taking the dialog away, and neither is the player choosing anything.
+                if reason ~= "clicked" then
                     return
                 end
-                if reason == "timeout" then
-                    return
+                if HasSoulstone() then
+                    UseSoulstone()
+                else
+                    RepopMe()
                 end
-                if reason == "clicked" then
-                    if HasSoulstone() then
-                        UseSoulstone()
-                    else
-                        RepopMe()
-                    end
-                end
-            end,
-            DisplayButton2 = function()
-                return HasSoulstone()
             end,
             timeout = 0,
-            whileDead = 1,
-            interruptCinematic = 1,
-            notClosableByLogout = 1,
             cancels = "RECOVER_CORPSE",
-        }
+        })
 
-        -- ── RECOVER_CORPSE — StaticPopup.lua l.1182-1202 (slice 2's range gate shows it) ─────────
-        StaticPopupDialogs["RECOVER_CORPSE"] = {
+        -- ── At the corpse (spec: StaticPopup.lua l.1182-1202) — slice 2's range gate raises these.
+        -- Accept is gated behind the recovery delay and, once taken, the dialog STAYS: reclaiming
+        -- is the server's to confirm, and it does so with the descriptor deltas that stand you up.
+        register_corpse_dialog("RECOVER_CORPSE", {
             StartDelay = GetCorpseRecoveryDelay,
             delayText = RECOVER_CORPSE_TIMER,
             text = RECOVER_CORPSE_TEXT,
@@ -91,107 +116,113 @@
                 return 1
             end,
             timeout = 0,
-            whileDead = 1,
-            interruptCinematic = 1,
-            notClosableByLogout = 1,
-        }
-        StaticPopupDialogs["RECOVER_CORPSE_INSTANCE"] = {
+        })
+        -- Your body is inside a dungeon you are standing outside of: a notice, not an offer, so
+        -- it carries no button at all.
+        register_corpse_dialog("RECOVER_CORPSE_INSTANCE", {
             text = RECOVER_CORPSE_INSTANCE_TEXT,
             timeout = 0,
-            whileDead = 1,
-            interruptCinematic = 1,
-            notClosableByLogout = 1,
-        }
+        })
 
-        -- ── The RESURRECT trio — StaticPopup.lua l.416-505: sickness / no-sickness / no-timer.
-        -- Decline (or the 60 s timeout) answers the offer and re-shows DEATH if still unreleased.
-        local function resurrect_entry(text, delayText)
+        -- ── Somebody else's offer (spec: StaticPopup.lua l.416-505) ──────────────────────────────
+        -- Three registry keys, one shape: with sickness, without, and without a recovery timer to
+        -- wait out. They differ only in the wording and in whether the offer is delay-gated, so
+        -- they are built rather than written three times.
+        --
+        -- Refusing an offer (or letting it lapse) has to undo the `cancels = "DEATH"` that raising
+        -- it did — otherwise a declined resurrect leaves you dead with nothing on screen to
+        -- release from.
+        local function restore_release_dialog()
+            if UnitIsDead("player") then
+                StaticPopup_Show("DEATH")
+            end
+        end
+        local function resurrect_offer(offer_text, delay_text)
             return {
-                StartDelay = delayText and GetCorpseRecoveryDelay or nil,
-                delayText = delayText,
-                text = text,
+                text = offer_text,
                 button1 = ACCEPT,
                 button2 = DECLINE,
-                OnShow = function()
-                    this.timeleft = GetCorpseRecoveryDelay() + 60
-                end,
                 OnAccept = function()
                     AcceptResurrect()
                 end,
                 OnCancel = function()
                     DeclineResurrect()
-                    if UnitIsDead("player") then
-                        StaticPopup_Show("DEATH")
-                    end
+                    restore_release_dialog()
                 end,
-                timeout = 60,
-                whileDead = 1,
+                -- The countdown. Given a `delay_text` the offer is gated: Accept stays dead and
+                -- that text counts the corpse-recovery cooldown down; without one (the no-timer
+                -- variant) Accept is live at once. Either way the offer lapses a minute after it
+                -- becomes answerable, which is why OnShow re-seeds `timeleft` past the gate
+                -- instead of leaving `timeout`'s minute to start the moment it appears.
+                StartDelay = delay_text and GetCorpseRecoveryDelay or nil,
+                delayText = delay_text,
+                OnShow = function()
+                    this.timeleft = GetCorpseRecoveryDelay() + RESURRECT_OFFER_SECONDS
+                end,
+                timeout = RESURRECT_OFFER_SECONDS,
                 cancels = "DEATH",
-                interruptCinematic = 1,
-                notClosableByLogout = 1,
                 hideOnEscape = 1,
             }
         end
-        StaticPopupDialogs["RESURRECT"] = resurrect_entry(RESURRECT_REQUEST_TEXT, RESURRECT_REQUEST_TIMER)
-        StaticPopupDialogs["RESURRECT_NO_SICKNESS"] =
-            resurrect_entry(RESURRECT_REQUEST_NO_SICKNESS, RESURRECT_REQUEST_NO_SICKNESS_TIMER)
-        StaticPopupDialogs["RESURRECT_NO_TIMER"] = resurrect_entry(RESURRECT_REQUEST_NO_SICKNESS, nil)
+        register_corpse_dialog("RESURRECT",
+            resurrect_offer(RESURRECT_REQUEST_TEXT, RESURRECT_REQUEST_TIMER))
+        register_corpse_dialog("RESURRECT_NO_SICKNESS",
+            resurrect_offer(RESURRECT_REQUEST_NO_SICKNESS, RESURRECT_REQUEST_NO_SICKNESS_TIMER))
+        register_corpse_dialog("RESURRECT_NO_TIMER",
+            resurrect_offer(RESURRECT_REQUEST_NO_SICKNESS))
 
-        -- ── The spirit healer's XP_LOSS two-step — StaticPopup.lua l.1134-1180: the first Accept
-        -- rewrites to the "Are you sure" text (data cleared, dialog stays via return 1), the second
-        -- sends AcceptXPLoss(); walking out of range auto-hides (the entry's own OnUpdate poll).
-        StaticPopupDialogs["XP_LOSS"] = {
-            text = CONFIRM_XP_LOSS,
-            button1 = ACCEPT,
-            button2 = CANCEL,
-            OnAccept = function(data)
-                if data then
-                    getglobal(this:GetParent():GetName() .. "Text"):SetText(
-                        format(CONFIRM_XP_LOSS_AGAIN, data))
-                    this:GetParent().data = nil
+        -- ── The spirit healer's price (spec: StaticPopup.lua l.1134-1180) ────────────────────────
+        -- Both variants ask twice. The first Accept rewrites the dialog to a blunter second ask
+        -- and clears `data`; the truthy return keeps it open. The second Accept — now with no data
+        -- — sends the answer. So `data` is at once the payload and the "which ask is this" flag,
+        -- which is why the driver below hands the no-sickness variant a bare 1.
+        --
+        -- The second ask is a FUNCTION, not a string, because only one of the two has anything to
+        -- substitute: the no-sickness wording carries a bare "25% durability" that format() would
+        -- read as a conversion and choke on.
+        --
+        -- Neither offer outlives walking away from the healer, so both poll the distance.
+        local function close_when_out_of_reach(elapsed, dialog)
+            if not CheckSpiritHealerDist() then
+                dialog:Hide()
+            end
+        end
+        local function spirit_healer_confirm(first_ask, second_ask)
+            return {
+                text = first_ask,
+                button1 = ACCEPT,
+                button2 = CANCEL,
+                OnAccept = function(data)
+                    if not data then
+                        AcceptXPLoss()
+                        return
+                    end
+                    -- `this` is the button the engine clicked; the dialog is its parent.
+                    local dialog = this:GetParent()
+                    getglobal(dialog:GetName() .. "Text"):SetText(second_ask(data))
+                    dialog.data = nil
                     return 1
-                else
-                    AcceptXPLoss()
-                end
-            end,
-            OnUpdate = function(elapsed, dialog)
-                if not CheckSpiritHealerDist() then
-                    dialog:Hide()
-                end
-            end,
-            timeout = 0,
-            exclusive = 1,
-            whileDead = 1,
-            showAlert = 1,
-            hideOnEscape = 1,
-        }
-        StaticPopupDialogs["XP_LOSS_NO_SICKNESS"] = {
-            text = CONFIRM_XP_LOSS_NO_SICKNESS,
-            button1 = ACCEPT,
-            button2 = CANCEL,
-            OnAccept = function(data)
-                if data then
-                    getglobal(this:GetParent():GetName() .. "Text"):SetText(
-                        CONFIRM_XP_LOSS_AGAIN_NO_SICKNESS)
-                    this:GetParent().data = nil
-                    return 1
-                else
-                    AcceptXPLoss()
-                end
-            end,
-            OnUpdate = function(elapsed, dialog)
-                if not CheckSpiritHealerDist() then
-                    dialog:Hide()
-                end
-            end,
-            timeout = 0,
-            exclusive = 1,
-            whileDead = 1,
-            showAlert = 1,
-            hideOnEscape = 1,
-        }
+                end,
+                OnUpdate = close_when_out_of_reach,
+                timeout = 0,
+                exclusive = 1,
+                whileDead = 1,
+                showAlert = 1,
+                hideOnEscape = 1,
+            }
+        end
+        StaticPopupDialogs["XP_LOSS"] = spirit_healer_confirm(CONFIRM_XP_LOSS, function(sickness)
+            return format(CONFIRM_XP_LOSS_AGAIN, sickness)
+        end)
+        StaticPopupDialogs["XP_LOSS_NO_SICKNESS"] = spirit_healer_confirm(
+            CONFIRM_XP_LOSS_NO_SICKNESS,
+            function()
+                return CONFIRM_XP_LOSS_AGAIN_NO_SICKNESS
+            end)
 
-        -- ── The death-event driver — UIParent.lua l.237-262 + l.399-436, transcribed ─────────────
+        -- ── The driver (spec: UIParent.lua l.237-262 + l.399-436) ───────────────────────────────
+        -- One switch over the arc's events. The reference spreads these arms through the whole of
+        -- UIParent_OnEvent; ours has a frame of its own (below) and nothing else to share it with.
         function BenillaDeathDriver_OnEvent()
             if event == "PLAYER_DEAD" then
                 if not StaticPopup_Visible("DEATH") then
@@ -216,19 +247,20 @@
                     StaticPopup_Show("RESURRECT_NO_TIMER", arg1)
                 end
             elseif event == "CONFIRM_XP_LOSS" then
-                local resSicknessTime = GetResSicknessDuration()
-                if resSicknessTime then
-                    local dialog = StaticPopup_Show("XP_LOSS", resSicknessTime)
-                    if dialog then
-                        dialog.data = resSicknessTime
-                    end
+                -- If the healer would charge resurrection sickness, its duration goes into the
+                -- text; if not there is nothing to quote, and the bare 1 handed over instead is
+                -- only the "this is still the first ask" marker the two-step above reads.
+                local sickness = GetResSicknessDuration()
+                local dialog
+                if sickness then
+                    dialog = StaticPopup_Show("XP_LOSS", sickness)
                 else
-                    local dialog = StaticPopup_Show("XP_LOSS_NO_SICKNESS")
-                    if dialog then
-                        dialog.data = 1
-                    end
+                    dialog = StaticPopup_Show("XP_LOSS_NO_SICKNESS")
                 end
-                -- The ref hides the gossip window under the confirm (UIParent.lua l.412).
+                if dialog then
+                    dialog.data = sickness or 1
+                end
+                -- The confirm covers the healer's gossip window (spec: UIParent.lua l.412).
                 local gossip = getglobal("GossipFrame")
                 if gossip and gossip:IsVisible() then
                     HideUIPanel(gossip)

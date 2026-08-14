@@ -19,19 +19,41 @@
 //! without a MOSB, 0 counter-examples (`benilla-extract skyboxscan`) — was true and still is; it just
 //! never established *which* group the renderer tests, and it was over-read as if it had.
 //!
-//! Five roots exercise both halves: the four Caverns of Time shells (unreleased in 1.12) and
-//! **`Stratholme_B`**, the burning city. Four more name a skybox no group ever asks for (DireMaul's
+//! Five roots exercise both halves: **`Stratholme_B`**, the burning city, and the four Caverns of
+//! Time shells — which are *not* out of reach in 1.12, whatever the instance portals do.
+//! `CavernsofTime.wmo` is placed in the live world at Kalimdor tile (39, 47), MODF `uniqueId`
+//! 398759, and standing in the crater at `.go xyz -8437.16 -4222.44 -211.58 1` the cull's down-ray
+//! seeds group 29 (`flags 0x42805` — `SHOW_SKYBOX` set) and this resolve fires. An earlier note here
+//! read "unreleased" as "unreachable" and concluded this branch never actually picks; the director
+//! walked into it.
+//!
+//! Four more roots name a skybox no group ever asks for (DireMaul's
 //! instance shell, `Stratholme_A`, and the two Sunken Temple roots — whose MOSB isn't even a model
 //! path, it's the string "the temple of atal'hakkar"), so keying off the chunk alone would still
 //! paint skies the reference never shows. This is why Stratholme's sky is red where the zone light
 //! says otherwise: map 329's only reachable `Light.dbc` atmosphere (global row 341 → `LightParams`
 //! 336) is a khaki-brown gradient with a near-black apex, and it is not what draws in there.
 //!
-//! What we draw is the model as authored: `StratholmeSkybox.m2` is a static, emissive, two-sided cube
-//! (three batches × 8 verts, one texture pair per axis), anchored at the camera with identity rotation
-//! — the same treatment [`crate::sky`] gives its dome. Occlusion is **not** the box's radius: like
-//! every sky element it forces the far depth (`wmo_skybox.wgsl`; the law is in [`crate::sky_order`]),
-//! so the world paints over it and the 26-yard shell is free to sit inside the room's own geometry.
+//! **A skybox is an ordinary M2, and is drawn as one** (decision 1264). This lane used to have a
+//! private mesh builder and a private material — positions, UVs, one texture, everything opaque —
+//! which is a faithful drawing of `StratholmeSkybox.m2` (three opaque batches × 8 verts, one texture
+//! pair per axis, no animation) and of nothing else. `CavernsOfTimeSky.m2` is the counter-example the
+//! chain also ships: **21 batches across four blend modes** — a painted cube, six ADDITIVE star
+//! sheets on the cube's own faces, five alpha-blended planet cards, three alpha-tested asteroid belts
+//! on rotating bones. Drawn opaque, the star sheet — whose RGB is near-white and whose stars live in
+//! its ALPHA channel — paints a flat white sheet over the painted sky, and the planets and belts
+//! become dark cards. That is the director's *"the whole ceiling is white … some of the cool effects
+//! seem missing"* in Caverns of Time.
+//!
+//! So the batches go through [`crate::model_render`]'s material lane like every other model
+//! ([`M2BatchMaterials::skybox`]), which is where the blend law, the 224/255 alpha-key reference, the
+//! additive gamma premultiply and the authored batch order already live, byte-verified. Three things
+//! are the *sky's* and are set here, not read off the batch: the forced far depth, depth-write off,
+//! and depth-test on — the rationale is on `skybox()`.
+//!
+//! Occlusion is **not** the box's radius: like every sky element it forces the far depth (the law is
+//! in [`crate::sky_order`]), so the world paints over it and the shell is free to sit inside the
+//! room's own geometry.
 //!
 //! **Scope — the skybox replaces the WHOLE celestial pass, not just the backdrop.** `CSky::Render`
 //! carries one shared boolean (`0x6d49cd` sets it, `0x6d49fb`/`0x6d4a2e` clear it once any slot's
@@ -48,17 +70,10 @@
 use std::collections::HashSet;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
-use bevy::pbr::{
-    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
-    MaterialPlugin,
-};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-};
-use bevy::shader::ShaderRef;
 
+use crate::model_render::M2BatchMaterials;
 use crate::view::WorldCamera;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::WmoModel;
@@ -68,36 +83,6 @@ use benilla_assets::{LockRecover, WorldAssets};
 /// module doc for how the bit was identified). Mirrored between the root's MOGI table and each group
 /// file's MOGP header; we read the MOGP copy the loader already keeps in `WmoGroupNav::flags`.
 const SHOW_SKYBOX: u32 = 0x40000;
-
-/// Unlit textured backdrop over a `StandardMaterial` shell — the shell supplies `unlit` +
-/// `cull_mode: None` (the box is viewed from inside) and the texture; the extension's fragment shader
-/// emits the texel raw and forces the sky pass's far depth.
-pub type WmoSkyboxMaterial = ExtendedMaterial<StandardMaterial, WmoSkyboxExt>;
-
-/// No per-material uniforms — the fragment reads the base-colour texture and nothing else.
-#[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
-pub struct WmoSkyboxExt {}
-
-impl MaterialExtension for WmoSkyboxExt {
-    fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_world/shaders/wmo_skybox.wgsl".into()
-    }
-
-    /// Depth-write OFF, exactly as [`crate::sky::SkyExt`] does it: the backdrop must leave the
-    /// z-buffer at its clear value over sky pixels so the forced-far glare quads stay occluded by
-    /// *world* geometry alone.
-    fn specialize(
-        _pipeline: &MaterialExtensionPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
-        }
-        Ok(())
-    }
-}
 
 /// The skybox model the camera's room asks for this frame — `None` (the overwhelming default) means
 /// the [`crate::sky`] gradient dome is the backdrop. Resolved from [`CameraInteriorClaim`]: the same
@@ -129,8 +114,9 @@ pub(crate) struct WmoSkyPlugin;
 
 impl Plugin for WmoSkyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<WmoSkyboxMaterial>::default())
-            .init_resource::<CameraWmoSkybox>()
+        // No `MaterialPlugin` of its own any more: a skybox batch is a `WowModelMaterial` like every
+        // other model batch, and that plugin is already loaded.
+        app.init_resource::<CameraWmoSkybox>()
             .init_resource::<BuiltSkyboxes>()
             .add_systems(
                 Update,
@@ -197,9 +183,10 @@ fn resolve_camera_skybox(
     }
 }
 
-/// Build the wanted skybox's entities the first time it is asked for. The model is tiny (three static
-/// batches) and there are five in the whole game, so a built one is kept for the session rather than
-/// torn down on leaving the room — walking in and out of Stratholme's gate must not re-decode art.
+/// Build the wanted skybox's entities the first time it is asked for. The models are small (3 batches
+/// for Stratholme, 21 for Caverns of Time) and there are five in the whole game, so a built one is
+/// kept for the session rather than torn down on leaving the room — walking in and out of
+/// Stratholme's gate must not re-decode art.
 fn build_skybox(
     mut commands: Commands,
     want: Res<CameraWmoSkybox>,
@@ -207,12 +194,18 @@ fn build_skybox(
     world_assets: Option<ResMut<WorldAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<WmoSkyboxMaterial>>,
+    mut mats: M2BatchMaterials,
 ) {
     let Some(path) = want.0.as_deref() else {
         return;
     };
     if built.0.contains(path) {
+        return;
+    }
+    // The shared light buffer is created in the render world's shadow at startup; a build that ran
+    // before it would bake materials against nothing. Retry — and do NOT latch `built` here, or the
+    // first frame in the room would permanently give up on the sky.
+    if !mats.ready() {
         return;
     }
     let Some(mut world_assets) = world_assets else {
@@ -232,7 +225,7 @@ fn build_skybox(
             return;
         }
     };
-    for sub in &subs {
+    for (i, sub) in subs.iter().enumerate() {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -243,23 +236,30 @@ fn build_skybox(
             .map(|p| wow_to_bevy(*p).to_array())
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        // The model lane's vertex stage declares `world_normal` unconditionally and fills it under
+        // `VERTEX_NORMALS`; the sky is unlit and never reads it, but the attribute has to be there
+        // for the layout the shared shader was compiled against.
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            sub.normals
+                .iter()
+                .map(|n| wow_to_bevy(*n).to_array())
+                .collect::<Vec<_>>(),
+        );
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
         mesh.insert_indices(Indices::U32(sub.indices.clone()));
-        // The batch's own authored address mode (decision 0763) — a skybox's UVs sit inside 0..1, but
-        // reading the flags costs nothing and keeps this lane off a private convention.
+        // The batch's own authored address mode (decision 0763) — a skybox's UVs sit inside 0..1 for
+        // the cube faces, but Caverns of Time's asteroid belts tile theirs over ±21 wraps.
         let texture = sub
             .texture
             .as_deref()
             .and_then(|t| world_assets.texture(t, (sub.wrap_x, sub.wrap_y), &mut images));
-        let material = materials.add(WmoSkyboxMaterial {
-            base: StandardMaterial {
-                base_color_texture: texture,
-                unlit: true,
-                cull_mode: None, // authored two-sided, and we view the box from inside
-                ..default()
-            },
-            extension: WmoSkyboxExt {},
-        });
+        // `i + 1` is the authored-batch-order convention (`0` = unordered): the transparent half of
+        // a skybox is camera-anchored, so every one of its batches shares a sort distance and the
+        // order is the only thing keeping the layers from re-flipping every frame.
+        let Some(material) = mats.skybox(sub, texture, u16::try_from(i + 1).unwrap_or(0)) else {
+            return; // light buffer vanished mid-build; `built` is unlatched, so we retry
+        };
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),

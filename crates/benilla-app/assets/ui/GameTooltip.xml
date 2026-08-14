@@ -91,7 +91,7 @@
             tooltip.default = 1
         end
 
-        -- The two-line UI-element tooltip (ref-GameTooltip.lua l.107-123, quoted): a white label,
+        -- The two-line UI-element tooltip (spec: ref-GameTooltip.lua l.107-123): a white label,
         -- then the long explanation wrapped underneath in NORMAL_FONT_COLOR — the whole reason a
         -- 1.12 hover over the ping meter or a micro button is a paragraph and not four words.
         -- With detailed tips on it seats at the DEFAULT corner, not beside the owner; with them off
@@ -115,25 +115,34 @@
             BenillaTooltip_AddNewbieTipFor(this, normalText, r, g, b, newbieText, noNormalText)
         end
 
-        -- The explicit-owner form our FrameXML uses. Same body the reference's has, with the owner
-        -- threaded rather than taken from `this` — kept under a Benilla name so it can never be
-        -- mistaken for a reference global an addon might call or replace.
+        -- The explicit-owner form our FrameXML uses, and where the behaviour above actually lives:
+        -- the owner is threaded in rather than read off `this`. Kept under a Benilla name so it can
+        -- never be mistaken for a reference global an addon might call or replace.
         function BenillaTooltip_AddNewbieTipFor(owner, normalText, r, g, b, newbieText, noNormalText)
-            if SHOW_NEWBIE_TIPS == "1" then
-                GameTooltip_SetDefaultAnchor(GameTooltip, owner)
-                if normalText then
-                    GameTooltip:SetText(normalText, r, g, b)
-                    GameTooltip:AddLine(newbieText, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
-                else
-                    GameTooltip:SetText(newbieText, r, g, b, 1, 1)
-                end
-                GameTooltip:Show()
-            else
+            -- Detailed tips OFF is the short shape: the label alone, beside whatever it labels.
+            -- A caller that says its label is worthless on its own then has nothing left to show.
+            if SHOW_NEWBIE_TIPS ~= "1" then
                 if not noNormalText then
                     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
                     GameTooltip:SetText(normalText, r, g, b)
                 end
+                return
             end
+            -- Detailed tips ON: a paragraph, and paragraphs go to the screen corner instead of
+            -- crowding the thing they explain.
+            GameTooltip_SetDefaultAnchor(GameTooltip, owner)
+            if normalText then
+                -- Label in the caller's colour; the explanation under it, wrapped, always in
+                -- NORMAL_FONT_COLOR — the two lines are deliberately not the same colour.
+                GameTooltip:SetText(normalText, r, g, b)
+                GameTooltip:AddLine(newbieText, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+            else
+                -- No label, so the explanation IS the tooltip: it takes the caller's colour, plus
+                -- SetText's alpha and wrap flags (args 5 and 6) — the wrap the second line above
+                -- would otherwise have carried.
+                GameTooltip:SetText(newbieText, r, g, b, 1, 1)
+            end
+            GameTooltip:Show()
         end
 
         -- ref GameTooltip_OnHide (ref-GameTooltip.lua l.100-104, quoted): the plate colours
@@ -219,32 +228,38 @@
             return 1.0, 1.0, 1.0
         end
 
-        -- HealthBar_OnValueChanged (ref-HealthBar.lua, quoted; the tooltip bar passes no
-        -- `smooth`, so the fill reads the ref's plain green).
+        -- The health bar's own fill colour (spec: ref-HealthBar.lua, the whole file).
+        --
+        -- Two colourings in one handler. `smooth` asks for the health RAMP — green at the top of
+        -- the range, red at the bottom, and between them a two-segment fade that pins one channel
+        -- at full and slides the other, so the halfway mark reads solid yellow. Without it the bar
+        -- is flat green whatever it reads. Blue is 0 either way, which is what keeps the fade
+        -- inside the red-yellow-green wedge and never lets it wash out.
+        --
+        -- **Nothing passes `smooth` — not us and not the reference.** Verified: our only caller is
+        -- the status bar's `<OnValueChanged>` below (one argument), and 1.12's own two callers are
+        -- ref-GameTooltipTemplate.xml l.593 and ref-UnitFrame.lua l.181, both of which forward
+        -- `value` alone. So the ramp has never coloured a bar in this game; it is kept because it
+        -- is the contract an addon replacing a unit frame may still call with two arguments.
+        --
+        -- A value outside the bar's own range leaves the colour untouched rather than being clamped
+        -- to an end of the ramp — the reference's own guard, kept as the reference has it.
         function HealthBar_OnValueChanged(value, smooth)
             if not value then return end
-            local r, g, b
-            local min, max = this:GetMinMaxValues()
+            local bar = this
+            local min, max = bar:GetMinMaxValues()
             if value < min or value > max then return end
-            if (max - min) > 0 then
-                value = (value - min) / (max - min)
-            else
-                value = 0
-            end
+            local r, g = 0.0, 1.0
             if smooth then
-                if value > 0.5 then
-                    r = (1.0 - value) * 2
-                    g = 1.0
+                local filled = 0
+                if max > min then filled = (value - min) / (max - min) end
+                if filled > 0.5 then
+                    r, g = (1.0 - filled) * 2, 1.0
                 else
-                    r = 1.0
-                    g = value * 2
+                    r, g = 1.0, filled * 2
                 end
-            else
-                r = 0.0
-                g = 1.0
             end
-            b = 0.0
-            this:SetStatusBarColor(r, g, b)
+            bar:SetStatusBarColor(r, g, 0.0)
         end
 
         -- `self or this` for the same reason as GameTooltip_OnHide: an addon inheriting

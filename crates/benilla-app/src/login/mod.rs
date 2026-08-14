@@ -6,10 +6,15 @@
 //! This module owns the **credential policy** — the 0193 §3 mirror for the IO thread's pre-logon
 //! park: the env fast path (any of `WOW_USER`/`WOW_PASS`/`WOW_CHAR` explicitly set auto-submits
 //! with the old `one`/`pone` defaults, so every probe/smoke invocation keeps working), the
-//! pending-credentials resubmit that preserves 0065's seamless reconnect (paced at the flat 3 s,
-//! app-side — the IO thread never sleeps), and the director's typed submit. A *refused* code
-//! (bad password) clears the intent and shows the authored `AUTH_*` dialog — never an auto-retry
-//! against a refusal.
+//! pending-credentials resubmit (paced at the flat 3 s, app-side — the IO thread never sleeps),
+//! and the director's typed submit. A *refused* code (bad password) clears the intent and shows
+//! the authored `AUTH_*` dialog — never an auto-retry against a refusal.
+//!
+//! **A session that is lost is over** (decision 1262): the reference's `GlueParent.lua` answers
+//! `DISCONNECTED_FROM_SERVER` with `SetGlueScreen("login")` + `GlueDialog_Show("DISCONNECTED")`,
+//! and so does this. 0065's seamless reconnect survives only where nobody is here to type — an
+//! unattended run ([`crate::run_mode::unattended_login`]) — because a client that
+//! re-authenticates on its own takes the account back off whoever just displaced it.
 //!
 //! Module split: this file (state, policy, input, dialogs, the saved-account persistence),
 //! [`screen`] (the authored layout, transcribed from `AccountLogin.xml`).
@@ -99,8 +104,9 @@ enum IoPark {
 /// authenticated (or asked) with, the in-flight/park bookkeeping, and the resubmit timer.
 #[derive(Resource, Default)]
 pub(crate) struct LoginIntent {
-    /// The session's credentials — kept while in-world so a reconnect re-authenticates silently
-    /// (0065); cleared by select's Back, a refusal code, or a Cancel.
+    /// The session's credentials — kept while in-world so the logout relist and an unattended
+    /// run's reconnect re-authenticate silently (0065); cleared by select's Back, a refusal code,
+    /// a Cancel, and by a lost session (1262 — they are the session's, and the session is over).
     creds: Option<(String, String)>,
     /// A submit is in flight (between our send and its LoginFailed/CharacterList answer).
     in_flight: bool,
@@ -209,10 +215,10 @@ fn drive_policy(
     // The login smoke drives its own credentials instead.
     if !intent.env_read {
         intent.env_read = true;
-        let any_set = ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
-            .iter()
-            .any(|k| std::env::var_os(k).is_some());
-        if any_set && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
+        // The same fact a lost session asks about (decision 1262) — read from the one place that
+        // owns it, so "the harness logs in for us" and "the harness logs back in for us" can never
+        // be two different answers.
+        if crate::run_mode::unattended_login() && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
             let user = std::env::var("WOW_USER").unwrap_or_else(|_| "one".into());
             let pass = std::env::var("WOW_PASS").unwrap_or_else(|_| "pone".into());
             // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
@@ -276,13 +282,28 @@ fn drive_policy(
         }
     }
     for msg in disconnects.read() {
-        // The IO thread is heading back to its pre-logon park. With session credentials the
-        // re-auth is silent: immediate after a clean logout (the roster IS the select screen the
-        // app now shows), paced after a stream death (the old reconnect delay, app-side).
+        // The IO thread is heading back to its pre-logon park.
         intent.park = IoPark::AtLogin;
         intent.in_flight = false;
+        if msg.session_over {
+            // The reference's `DISCONNECTED_FROM_SERVER` (decision 1262): `GlueParent.lua` answers
+            // it with `SetGlueScreen("login")` + `GlueDialog_Show("DISCONNECTED")` — the account
+            // screen and one Okay button. Nothing retries, and the credentials go with the session:
+            // a client that re-authenticates on its own steals the account back from whoever just
+            // displaced it, which is the ping-pong the report described.
+            warn!(
+                "login: {} — session over, back to the login screen",
+                msg.reason
+            );
+            intent.clear();
+            dialog.open_error(strings.text("DISCONNECTED", "Disconnected from server"));
+            continue;
+        }
+        // Otherwise the session continues through the park and the re-auth is silent: immediate
+        // after a clean logout (the roster IS the select screen the app now shows), paced after a
+        // stream death an unattended run must recover from on its own (0065, paced app-side).
         if intent.creds.is_some() {
-            let delay = if msg.reason == "logged out" {
+            let delay = if msg.end == benilla_protocol::SessionEnd::LoggedOut {
                 0.0
             } else {
                 RETRY_DELAY_SECS
@@ -570,7 +591,7 @@ fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWrite
 
 /// Which dialog is up: the connecting status (Cancel button, text driven by the stages) or an
 /// error (Okay button).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DialogKind {
     Status,
     Error,
@@ -741,9 +762,36 @@ fn save_account(name: &str) {
 
 // ── Instruments ──────────────────────────────────────────────────────────────────────────────────
 
-/// The login smoke (`WOW_LOGIN_SMOKE=user:pass`, decision 0539 §7): once the screen is up, submit
-/// those credentials through the real screen path; exit success on reaching CharSelect, log + exit
-/// failure on a refusal — the wrong-password path is provable headlessly.
+/// Split `WOW_LOGIN_SMOKE=user:pass[:Character]` into its three fields. **Three-way, once**: a
+/// `split_once(':')` here would hand the character name to the password, which is exactly what it
+/// did on this instrument's first live run (`result 0x04`, and the wrong-password path is what
+/// this smoke exists to prove, so it looked plausible).
+fn smoke_spec(spec: &str) -> (&str, &str, Option<&str>) {
+    let mut parts = spec.splitn(3, ':');
+    let user = parts.next().unwrap_or_default();
+    let pass = parts.next().unwrap_or_default();
+    let character = parts.next().map(str::trim).filter(|n| !n.is_empty());
+    (user, pass, character)
+}
+
+/// The optional third field — the body to enter as, or `None` for the plain
+/// reach-character-select smoke. [`crate::char_select`]'s roster policy is what actually answers
+/// the roster with it.
+pub(crate) fn smoke_character(spec: &str) -> Option<String> {
+    smoke_spec(spec).2.map(str::to_string)
+}
+
+/// The login smoke (`WOW_LOGIN_SMOKE=user:pass[:Character]`, decision 0539 §7): once the screen is
+/// up, submit those credentials through the real screen path; exit success on reaching CharSelect,
+/// log + exit failure on a refusal — the wrong-password path is provable headlessly.
+///
+/// **Naming a character keeps the run going into the world instead of exiting** (decision 1262).
+/// This is the only headless way to reach the world down the *player's* path: `WOW_CHAR` also
+/// enters the world, but setting it makes the run **unattended**
+/// ([`crate::run_mode::unattended_login`]), and an unattended run takes the other branch at every
+/// session decision — so the attended half was untestable without a person at the keyboard. The
+/// pick itself stays `char_select`'s (`apply_roster_policy` reads the third field the same way it
+/// reads `WOW_CHAR`); this only declines to exit. Pair with `WOW_PROBE_EXIT_AT` to bound the run.
 #[allow(clippy::too_many_arguments)]
 fn debug_login_smoke(
     state: Res<State<ClientState>>,
@@ -760,7 +808,7 @@ fn debug_login_smoke(
     };
     match *phase {
         0 if *state.get() == ClientState::Login && time.elapsed_secs() > 2.0 => {
-            let (user, pass) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            let (user, pass, _) = smoke_spec(&spec);
             info!("login-smoke: submitting as {user}");
             let (user, pass) = (user.to_string(), pass.to_string());
             send_login(&mut intent, &submit, &abandon, &user, &pass, true);
@@ -777,8 +825,15 @@ fn debug_login_smoke(
                 }
                 *phase = 2;
             } else if *state.get() == ClientState::CharSelect {
-                info!("login-smoke: reached character select — done");
-                exit.write(AppExit::Success);
+                match smoke_character(&spec) {
+                    Some(name) => {
+                        info!("login-smoke: reached character select — entering as {name}");
+                    }
+                    None => {
+                        info!("login-smoke: reached character select — done");
+                        exit.write(AppExit::Success);
+                    }
+                }
                 *phase = 2;
             }
         }
@@ -789,6 +844,134 @@ fn debug_login_smoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stand `drive_policy` up on its own with the env fast path already spent, so the policy
+    /// under test is the disconnect arm and nothing else — and so an ambient `WOW_USER` in
+    /// whatever shell runs the suite cannot seed credentials behind the assertions.
+    fn policy_app() -> App {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // Held for the App's life: a dropped receiver would turn every submit into an `Err` and
+        // hide a policy that sent one.
+        std::mem::forget(rx);
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<LoginIntent>()
+            .init_resource::<LoginDialog>()
+            .insert_resource(LoginSubmit(tx))
+            .insert_resource(LoginAbandon(std::sync::Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )))
+            .add_message::<LoginStageMessage>()
+            .add_message::<LoginFailedMessage>()
+            .add_message::<DisconnectedMessage>()
+            .add_systems(Update, drive_policy);
+        app.world_mut().resource_mut::<LoginIntent>().env_read = true;
+        app
+    }
+
+    /// **A lost session does not log itself back in** (decision 1262).
+    ///
+    /// This is the whole of the displacement report: log into the same account from the reference
+    /// client, vmangos kicks us with a bare socket close, and 0065's paced resubmit — which cannot
+    /// see *why* the socket died, because nothing on the wire says — re-authenticated three seconds
+    /// later and kicked the client that had just displaced us. The account ping-ponged. The
+    /// reference's `GlueParent.lua` answers `DISCONNECTED_FROM_SERVER` with the login screen and a
+    /// one-button dialog, and retries nothing.
+    #[test]
+    fn a_lost_session_clears_the_credentials_and_shows_the_dialog() {
+        let mut app = policy_app();
+        app.world_mut().resource_mut::<LoginIntent>().creds = Some(("one".into(), "pone".into()));
+        app.world_mut().write_message(DisconnectedMessage {
+            reason: "disconnected: world stream closed: failed to fill whole buffer".into(),
+            end: benilla_protocol::SessionEnd::Lost,
+            session_over: true,
+        });
+        app.update();
+
+        let intent = app.world().resource::<LoginIntent>();
+        assert!(
+            intent.creds.is_none(),
+            "the session's credentials die with the session — keeping them is what won the \
+             account back off the client that displaced us",
+        );
+        assert!(intent.retry_at.is_none(), "and nothing is scheduled");
+        let dialog = app.world().resource::<LoginDialog>();
+        assert_eq!(dialog.kind, Some(DialogKind::Error));
+        // The fallback literal: this App has no GlueStrings, and the table's own row is
+        // `DISCONNECTED = "Disconnected from server";` (GlueStrings.lua) — the same words.
+        assert_eq!(dialog.text, "Disconnected from server");
+    }
+
+    /// A **clean logout's** teardown rides the same message and must keep its silent relist: the
+    /// IO thread returns to the pre-logon park, and the roster it comes back with IS the character
+    /// select the player asked for. Breaking this would strand `/logout` on the login screen.
+    #[test]
+    fn a_logout_teardown_still_relists_at_once() {
+        let mut app = policy_app();
+        app.world_mut().resource_mut::<LoginIntent>().creds = Some(("one".into(), "pone".into()));
+        app.world_mut().write_message(DisconnectedMessage {
+            reason: "logged out".into(),
+            end: benilla_protocol::SessionEnd::LoggedOut,
+            session_over: false,
+        });
+        app.update();
+
+        let intent = app.world().resource::<LoginIntent>();
+        assert!(
+            intent.creds.is_some(),
+            "a logout keeps the account signed in"
+        );
+        assert!(
+            intent.in_flight,
+            "and the same tick resubmits — the delay for a logout is 0, so the roster comes \
+             straight back",
+        );
+        assert!(
+            app.world().resource::<LoginDialog>().kind.is_none(),
+            "with no dialog: nothing went wrong",
+        );
+    }
+
+    /// An **unattended** run keeps 0065's paced reconnect on a lost session — the verdict rides
+    /// the message, so the policy honours it without re-reading the environment.
+    #[test]
+    fn an_unattended_run_still_reconnects_on_its_own() {
+        let mut app = policy_app();
+        app.world_mut().resource_mut::<LoginIntent>().creds =
+            Some(("probe1".into(), "pprobe1".into()));
+        app.world_mut().write_message(DisconnectedMessage {
+            reason: "disconnected: connection reset".into(),
+            end: benilla_protocol::SessionEnd::Lost,
+            session_over: false,
+        });
+        app.update();
+
+        let intent = app.world().resource::<LoginIntent>();
+        assert!(intent.creds.is_some());
+        assert_eq!(
+            intent.retry_at,
+            Some(RETRY_DELAY_SECS),
+            "paced by the flat 3 s off a zeroed clock, not fired on the spot",
+        );
+        assert!(app.world().resource::<LoginDialog>().kind.is_none());
+    }
+
+    /// The smoke spec splits three ways — the character name must never end up in the password.
+    /// A `split_once` did exactly that on the instrument's first live run, and the refusal it
+    /// produced (`0x04`) is indistinguishable from the wrong-password case this smoke exists to
+    /// exercise.
+    #[test]
+    fn the_smoke_spec_splits_three_ways() {
+        assert_eq!(
+            smoke_spec("probe1:pprobe1:Probeone"),
+            ("probe1", "pprobe1", Some("Probeone"))
+        );
+        assert_eq!(smoke_spec("probe1:pprobe1"), ("probe1", "pprobe1", None));
+        // A trailing colon names no body; a password may not itself contain one (the client caps
+        // both fields at 16 letters and vmangos accounts have none).
+        assert_eq!(smoke_spec("one:pass:"), ("one", "pass", None));
+        assert_eq!(smoke_spec("one"), ("one", "", None));
+    }
 
     /// The code→string map quotes the client's own strings for the vmangos-verified rows.
     #[test]

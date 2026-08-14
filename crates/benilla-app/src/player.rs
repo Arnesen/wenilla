@@ -216,10 +216,14 @@ impl Plugin for PlayerPlugin {
                     .run_if(not(resource_exists::<crate::run_mode::CaptureMode>))
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
-            // A confirmed `/logout` releases the avatar: the streamed entity is despawned by the
-            // net drain, and dropping `active` re-arms the take-control latch for the next login
-            // (possibly a different character). Ungated — the message lands as the state flips.
-            .add_systems(Update, wire_in::release_on_logout.in_set(WorldStage::Input))
+            // A session END releases the avatar — a confirmed `/logout`, or a lost session
+            // (decision 1262): the streamed entity is despawned by the net drain either way, and
+            // dropping `active` re-arms the take-control latch for the next login (possibly a
+            // different character). Ungated — the message lands as the state flips.
+            .add_systems(
+                Update,
+                wire_in::release_on_session_end.in_set(WorldStage::Input),
+            )
             // Mirror our body's collision height onto `Player` for the swim arm (decision 0645).
             // A *continuous* sync rather than a one-shot at take-control, for the reason the
             // take-control branch itself records: a cross-map worldport re-streams the `SelfPlayer`

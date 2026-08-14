@@ -1,6 +1,6 @@
 <Ui>
     <!--
-        Interface\FrameXML\BasicControls.xml, transcribed — the reference's second file, right
+        Interface\FrameXML\BasicControls.xml, re-expressed — the reference's second file, right
         after Fonts.xml, and one of the smallest in FrameXML. It carries four things an addon can
         reach and we had none of:
 
@@ -25,7 +25,7 @@
     <Script><![CDATA[
         -- ── _ERRORMESSAGE / message (ref BasicControls.xml l.5-15) ─────────────────────────────
         --
-        -- VERBATIM, including `debuginfo()`. That line was guarded here when this file landed,
+        -- COMPLETE, including `debuginfo()`. That line was guarded here when this file landed,
         -- because `debuginfo` was an engine global we lacked and whose behaviour was uncarved —
         -- and declaring a no-op under a real 1.12 name is exactly the "capability absent without a
         -- failure" class 1203 named. wow-re has since carved it (2026-08-11): `0x7027f0` is

@@ -1,7 +1,7 @@
 <Ui>
     <!--
         benilla's MACRO window (decision 0983) — the 384x512 macro editor + its name/icon popup,
-        transcribed from the real 1.12 `Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml`
+        re-expressed from the real 1.12 `Interface\AddOns\Blizzard_MacroUI\Blizzard_MacroUI.xml`
         and `.lua` (extracted from the MPQ chain to session scratch; director-local reference
         artifacts, never committed — the 0068/0138 pattern. Line cites below are into that
         extraction). All the art it names is shipped: `Interface\MacroFrame\MacroFrame-Icon`,
@@ -168,7 +168,7 @@
             end
         end
 
-        -- ref l.51-120, transcribed.
+        -- ref l.51-120, re-expressed.
         function BenillaMacroFrame_Update()
             BenillaMacroFrame_EnsureSelection()
             local frame = getglobal("BenillaMacroFrame")

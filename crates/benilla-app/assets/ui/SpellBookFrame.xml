@@ -11,9 +11,9 @@
         (`UiPanels.xml`'s `UIPanelWindows["SpellBookFrame"] = { area = "left", pushable =
         0 }`, mirroring the ref's own `SpellBookFrame` row) — so it competes for/replaces those
         windows, never stacks with them. `ToggleSpellBook(bookType)` (ref `SpellBookFrame.lua:
-        9-50`) is the addon-facing entry point; like every frame name here it is the reference's own
-        `ToggleQuestLog` precedent) is the show/hide entry point; the app's 'P' binding calls it
-        with `BOOKTYPE_SPELL` (`ui_script/input.rs`, ref `Bindings.xml:582-583`).
+        9-50`) is the show/hide entry point, and it is addon-facing: it wears the reference's bare
+        name for the same reason `ToggleCharacter`/`ToggleQuestLog` do. The app's 'P' binding calls
+        it with `BOOKTYPE_SPELL` (`ui_script/input.rs`, ref `Bindings.xml:582-583`).
 
         Every frame this file defines wears the REFERENCE's name (`SpellBookFrame`, `SpellButton1`,
         …), because addons address them by it — the `Benilla` prefix these carried until the
@@ -408,35 +408,40 @@
             local subSpellString = getglobal(name .. "SubSpellName")
             local cooldown = getglobal(name .. "Cooldown")
             local autocastable = getglobal(name .. "AutoCastable")
-            -- ref l.328: the out-of-tab DISABLE is `(bookType ~= BOOKTYPE_PET) and ...` — the pet
+            local highlightTexture = getglobal(name .. "Highlight")
+            local normalTexture = getglobal(name .. "NormalTexture")
+
+            -- TWO WAYS A SLOT COMES UP EMPTY, one dress for both. Past the end of the tab the
+            -- button also goes DEAD; a slot the book counts but has no icon for stays live and
+            -- only puts its highlight kit back to the square. Everything else the two do — the
+            -- five regions down, the autocast bit cleared, the ring unchecked, the button's own
+            -- ring back to plain white — is the same blanking, and it is written once here rather
+            -- than once per arm.
+            --
+            -- ref l.328: the out-of-tab test is `(bookType ~= BOOKTYPE_PET) and ...` — the pet
             -- page has no tab to be out of, so a pet button past the end of the book falls to the
-            -- no-texture branch below and stays ENABLED. Faithful, and harmless: an enabled button
+            -- no-icon arm instead and stays ENABLED. Faithful, and harmless: an enabled button
             -- with no spell behind it clicks into GetSpellName's nil and does nothing.
-            if (not isPet) and id > (offset + numSpells) then
+            local outOfTab = (not isPet) and id > (offset + numSpells)
+            if outOfTab then
                 button:Disable()
-                iconTexture:Hide()
-                spellString:Hide()
-                subSpellString:Hide()
-                cooldown:Hide()
-                autocastable:Hide()
-                button.autocasting = nil
-                button:SetChecked(0)
-                getglobal(name .. "NormalTexture"):SetVertexColor(1.0, 1.0, 1.0)
-                return
             else
                 button:Enable()
             end
-            local texture = GetSpellTexture(id, SpellBookFrame.bookType)
-            local highlightTexture = getglobal(name .. "Highlight")
-            local normalTexture = getglobal(name .. "NormalTexture")
-            if (not texture) or (texture == "") then
+            local texture
+            if not outOfTab then
+                texture = GetSpellTexture(id, SpellBookFrame.bookType)
+            end
+            if outOfTab or (not texture) or (texture == "") then
                 iconTexture:Hide()
                 spellString:Hide()
                 subSpellString:Hide()
                 cooldown:Hide()
                 autocastable:Hide()
                 button.autocasting = nil
-                highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+                if not outOfTab then
+                    highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+                end
                 button:SetChecked(0)
                 normalTexture:SetVertexColor(1.0, 1.0, 1.0)
                 return
@@ -446,11 +451,8 @@
             -- widget stays hidden (CooldownFrame_SetTimer's own gate) and the icon reads 40%.
             local start, duration, enable = GetSpellCooldown(id, SpellBookFrame.bookType)
             CooldownFrame_SetTimer(cooldown, start, duration, enable)
-            if enable == 1 then
-                iconTexture:SetVertexColor(1.0, 1.0, 1.0)
-            else
-                iconTexture:SetVertexColor(0.4, 0.4, 0.4)
-            end
+            local brightness = (enable == 1) and 1.0 or 0.4
+            iconTexture:SetVertexColor(brightness, brightness, brightness)
             -- ref l.367-377: the autocast pair. `GetSpellAutocast` answers (nil, nil) for the
             -- player book by the engine's own short-circuit, so this needs no isPet guard — the
             -- overlay and the sparkle simply never come on outside the pet page.
@@ -459,15 +461,21 @@
             button.autocasting = autoCastEnabled
             local spellName, subSpellName = GetSpellName(id, SpellBookFrame.bookType)
             local isPassive = IsSpellPassive(id, SpellBookFrame.bookType)
+            -- A passive slot wears a whole different dress — the button ring blacked right out,
+            -- the round passive highlight in place of the square one, and the name in the passive
+            -- grey. Three values that always travel together, so they are chosen once and applied
+            -- once instead of each verb appearing in both arms.
+            local ringLevel, highlightFile, nameColor
             if isPassive then
-                normalTexture:SetVertexColor(0, 0, 0)
-                highlightTexture:SetTexture("Interface\\Buttons\\UI-PassiveHighlight")
-                spellString:SetTextColor(PASSIVE_SPELL_FONT_COLOR.r, PASSIVE_SPELL_FONT_COLOR.g, PASSIVE_SPELL_FONT_COLOR.b)
+                ringLevel, highlightFile, nameColor =
+                    0, "Interface\\Buttons\\UI-PassiveHighlight", PASSIVE_SPELL_FONT_COLOR
             else
-                normalTexture:SetVertexColor(1.0, 1.0, 1.0)
-                highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
-                spellString:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                ringLevel, highlightFile, nameColor =
+                    1.0, "Interface\\Buttons\\ButtonHilight-Square", NORMAL_FONT_COLOR
             end
+            normalTexture:SetVertexColor(ringLevel, ringLevel, ringLevel)
+            highlightTexture:SetTexture(highlightFile)
+            spellString:SetTextColor(nameColor.r, nameColor.g, nameColor.b)
             iconTexture:SetTexture(texture)
             spellString:SetText(spellName)
             subSpellString:SetText(subSpellName)
@@ -551,19 +559,15 @@
                 + (SPELLS_PER_PAGE * ((SPELLBOOK_PAGENUMBERS[SpellBookFrame.selectedSkillLine] or 1) - 1))
         end
 
-        -- ref SpellBook_UpdatePageArrows (l.467-479).
+        -- ref SpellBook_UpdatePageArrows (l.467-479). An arrow is live exactly while the page it
+        -- points at is a DIFFERENT page. Stated as an inequality rather than a range test on
+        -- purpose: the pet book's arrows write a counter its own page ignores (the do-not-fix
+        -- notes above), so a page number can sit outside 1..maxPages, and when it does BOTH arrows
+        -- stay live — which is the reference's answer, not an accident of this spelling.
         function SpellBook_UpdatePageArrows()
             local currentPage, maxPages = SpellBook_GetCurrentPage()
-            if currentPage == 1 then
-                SpellBookPrevPageButton:Disable()
-            else
-                SpellBookPrevPageButton:Enable()
-            end
-            if currentPage == maxPages then
-                SpellBookNextPageButton:Disable()
-            else
-                SpellBookNextPageButton:Enable()
-            end
+            if currentPage ~= 1 then SpellBookPrevPageButton:Enable() else SpellBookPrevPageButton:Disable() end
+            if currentPage ~= maxPages then SpellBookNextPageButton:Enable() else SpellBookNextPageButton:Disable() end
         end
 
         -- ref SpellBook_GetCurrentPage (l.481-493), both branches. `maxPages` is clamped to at

@@ -51,6 +51,30 @@ pub(crate) fn scenario_active() -> bool {
     std::env::var("WOW_CAPTURE").is_ok()
 }
 
+/// **Is anything but a person answering this session's login?** (`$WOW_USER` / `$WOW_PASS` /
+/// `$WOW_CHAR` — the login screen's env fast path.)
+///
+/// The player answer is `false`, and it is the default: with none of these set the client opens at
+/// the login screen and waits for somebody to type. Setting any of them *is* a harness saying "log
+/// in without me" — a probe, a smoke, a rig — so it is also the honest answer to the question a
+/// dead session asks: **is there anybody here to log back in?**
+///
+/// That question decides what a lost session does (decision 1262). A person gets the reference's
+/// answer — the world torn down, the account screen, "Disconnected from server", and nothing
+/// retried until they say so. An unattended run keeps 0065's seamless reconnect, because the
+/// alternative is a probe parked on a login dialog for the rest of its wall-clock. One environment
+/// fact, several readers, no shared symbol — the module doc's pattern, same as [`scenario_active`],
+/// and the reason the login policy's own fast path asks here instead of re-reading the three names.
+///
+/// The session-loss readers never call this directly: [`crate::net::DisconnectedMessage::new`]
+/// asks once, at the wire edge, and every reader acts on the verdict it carries — so the teardown,
+/// the screen flip and the credential policy cannot answer it three different ways.
+pub(crate) fn unattended_login() -> bool {
+    ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
 /// **Which screen the client starts on.** A player starts at the login screen, always; a capture
 /// boots straight into the world (no net, no picker), and a *glue* capture boots onto the very
 /// screen it photographs.

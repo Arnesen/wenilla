@@ -1,9 +1,10 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <!--
-        The social window (decision 0668) — the reference's FriendsFrame, transcribed from the
-        patch-chain FrameXML (mpqx extraction, decision 0246): `FriendsFrame.lua` (987 lines) and
-        `FriendsFrame.xml` (the FriendsListFrame / IgnoreListFrame / WhoFrame subtrees). Geometry,
-        row counts, art paths and behaviour are the ref's; the strings are GlobalStrings verbatim.
+        The social window (decision 0668) — our FriendsFrame. The patch-chain FrameXML (mpqx
+        extraction, decision 0246) is the SPECIFICATION: `FriendsFrame.lua` (987 lines) and
+        `FriendsFrame.xml` (the FriendsListFrame / IgnoreListFrame / WhoFrame subtrees) fix the
+        global names addons bind to, the geometry, the row counts and the art paths, and the
+        strings are GlobalStrings' own. The code answering to all that is ours.
 
         Shape: ONE window with a tab strip, and inside tab 1 a second Friends/Ignore toggle-tab
         pair — the ref's own two-level arrangement, not a simplification. `FriendsFrame.selectedTab`
@@ -66,6 +67,17 @@
         BENILLA_FRIENDS_SUBFRAMES = {
             "FriendsListFrame", "IgnoreListFrame", "WhoFrame",
         }
+
+        -- Six of this window's buttons are live only while a row of the right kind is selected,
+        -- and each list re-decides all of its own on every repaint. One call per button, taking
+        -- the condition, keeps that decision readable as the one-liner it actually is.
+        local function set_enabled(button, on)
+            if on then
+                button:Enable()
+            else
+                button:Disable()
+            end
+        end
 
         -- ── Sub-frame switching (ref FriendsFrame_ShowSubFrame l.25-33) ────────────────────────
         function FriendsFrame_ShowSubFrame(frameName)
@@ -142,27 +154,22 @@
             local numFriends = GetNumFriends()
             frame.selectedFriend = GetSelectedFriend()
 
-            -- The three action buttons follow the SELECTED friend, not the list: offline friends
-            -- can be removed but not whispered or invited (ref l.154-172).
-            if numFriends > 0 then
-                if frame.selectedFriend == 0 then
-                    SetSelectedFriend(1)
-                    frame.selectedFriend = GetSelectedFriend()
-                end
-                local _, _, _, _, connected = GetFriendInfo(frame.selectedFriend)
-                if connected then
-                    FriendsFrameSendMessageButton:Enable()
-                    FriendsFrameGroupInviteButton:Enable()
-                else
-                    FriendsFrameSendMessageButton:Disable()
-                    FriendsFrameGroupInviteButton:Disable()
-                end
-                FriendsFrameRemoveFriendButton:Enable()
-            else
-                FriendsFrameSendMessageButton:Disable()
-                FriendsFrameGroupInviteButton:Disable()
-                FriendsFrameRemoveFriendButton:Disable()
+            -- A non-empty list always has a selection; the first row stands in if nothing else
+            -- does (spec: ref l.154-158).
+            local anyFriends = numFriends > 0
+            if anyFriends and frame.selectedFriend == 0 then
+                SetSelectedFriend(1)
+                frame.selectedFriend = GetSelectedFriend()
             end
+
+            -- The three action buttons follow the SELECTED friend, not the list — and only two of
+            -- them need that friend to be online: you can drop someone from the list whether or
+            -- not they are logged in, but there is nobody there to whisper or invite (ref
+            -- l.159-172).
+            local online = anyFriends and select(5, GetFriendInfo(frame.selectedFriend))
+            set_enabled(FriendsFrameSendMessageButton, online)
+            set_enabled(FriendsFrameGroupInviteButton, online)
+            set_enabled(FriendsFrameRemoveFriendButton, anyFriends)
 
             local offset = FauxScrollFrame_GetOffset(FriendsFrameFriendsScrollFrame)
             for i = 1, FRIENDS_TO_DISPLAY do
@@ -204,15 +211,12 @@
             local frame = FriendsFrame
             local numIgnores = GetNumIgnores()
             frame.selectedIgnore = GetSelectedIgnore()
-            if numIgnores > 0 then
-                if frame.selectedIgnore == 0 then
-                    SetSelectedIgnore(1)
-                    frame.selectedIgnore = GetSelectedIgnore()
-                end
-                FriendsFrameStopIgnoreButton:Enable()
-            else
-                FriendsFrameStopIgnoreButton:Disable()
+            local anyIgnores = numIgnores > 0
+            if anyIgnores and frame.selectedIgnore == 0 then
+                SetSelectedIgnore(1)
+                frame.selectedIgnore = GetSelectedIgnore()
             end
+            set_enabled(FriendsFrameStopIgnoreButton, anyIgnores)
 
             local offset = FauxScrollFrame_GetOffset(FriendsFrameIgnoreScrollFrame)
             for i = 1, IGNORES_TO_DISPLAY do
@@ -290,13 +294,11 @@
                 end
             end
 
-            -- The two who buttons need a selected row (ref l.302-309).
-            if not frame.selectedWho then
-                WhoFrameGroupInviteButton:Disable()
-                WhoFrameAddFriendButton:Disable()
-            else
-                WhoFrameGroupInviteButton:Enable()
-                WhoFrameAddFriendButton:Enable()
+            -- The two who buttons need a selected row, and both act by NAME — so the selection is
+            -- resolved to one here and the buttons read it back (ref l.302-309).
+            set_enabled(WhoFrameGroupInviteButton, frame.selectedWho)
+            set_enabled(WhoFrameAddFriendButton, frame.selectedWho)
+            if frame.selectedWho then
                 frame.selectedName = GetWhoInfo(frame.selectedWho)
             end
 

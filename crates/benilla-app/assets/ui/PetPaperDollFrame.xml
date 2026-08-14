@@ -44,14 +44,14 @@
             machinery does.
           - `PET_UI_UPDATE` / `PET_UI_CLOSE` are **registered but nothing fires them yet** (nothing
             in the app sources either event). Registered anyway rather than dropped: the ref's own
-            handler arms are transcribed whole, and `UNIT_PET` + `PET_BAR_UPDATE` — both of which we
+            handler arms are re-expressed whole, and `UNIT_PET` + `PET_BAR_UPDATE` — both of which we
             DO fire — already cover the same "the pet went away while its page was open" case
             through the identical branch.
           - **CLOSED (decision 1062):** the level line's family word and the diet tooltip both
             landed. `UnitCreatureFamily("pet")` and `GetPetFoodTypes()` are real bindings now, fed
             from `CreatureFamily.dbc` (the word + its pet-food mask) and `ItemPetFood.dbc` (the
             eight diet names) through the pet's cached creature template; `BuildListString` is the
-            ref's own `UIParent.lua:1051` joiner, transcribed in `UIParent.xml`. Both call sites
+            ref's own `UIParent.lua:1051` joiner, re-expressed in `UIParent.xml`. Both call sites
             below dropped their existence guards. The ref's OWN `if ( UnitCreatureFamily("pet") )`
             guard stays — nil is still reachable (a template with no family; the creature query not
             yet answered) and a blank level line is the ref's answer to it.
@@ -181,15 +181,32 @@
             end
             getglobal("PetLoyaltyText"):SetText(GetPetLoyalty())
             PetExpBar_Update()
+
+            -- The two panes this page has to draw itself, for two DIFFERENT reasons (both below):
+            -- the resistance column genuinely differs from the character page's, while the stat
+            -- block is the same logic that only duplicates because PetStatFrame/CharacterStatFrame
+            -- share no prefix for a `prefix..` renderer to take.
             PetPaperDollFrame_SetResistances()
             PetPaperDollFrame_SetStats()
-            PaperDollFrame_SetDamage("pet", "Pet")
-            PaperDollFrame_SetRangedDamage("pet", "Pet")
-            PaperDollFrame_SetAttackPower("pet", "Pet")
-            PaperDollFrame_SetRangedAttackPower("pet", "Pet")
-            PaperDollFrame_SetArmor("pet", "Pet")
+
+            -- ...and then the shared rows, which are not this page's code at all: every one of
+            -- these is CharacterFrame.xml's own renderer, handed ("pet", "Pet") where the character
+            -- page hands it ("player", "Character"), so `prefix.."ArmorFrame"` resolves PetArmorFrame
+            -- here and CharacterArmorFrame there. That substitution IS the page (header comment).
+            -- Called top-to-bottom in the order the rows are anchored on screen — each renderer only
+            -- writes its own row's FontStrings from live API state, so nothing here reads anything
+            -- another one wrote and the order is free.
             PaperDollFrame_SetAttackBothHands("pet", "Pet")
+            PaperDollFrame_SetAttackPower("pet", "Pet")
+            PaperDollFrame_SetDamage("pet", "Pet")
             PaperDollFrame_SetDefense("pet", "Pet")
+            PaperDollFrame_SetArmor("pet", "Pet")
+            -- The pet sheet has no ranged rows at all, and these two say so themselves — both open
+            -- with the reference's own `if unit == "pet" then return end` (CharacterFrame.xml). They
+            -- are called anyway so that both pages drive the identical set of renderers and neither
+            -- can quietly fall behind the other.
+            PaperDollFrame_SetRangedDamage("pet", "Pet")
+            PaperDollFrame_SetRangedAttackPower("pet", "Pet")
 
             -- The hunter-only block (ref l.83-93): the diet icon and the training-point line are
             -- the two things a warlock's minion never has. `canGainXP` is HasPetUI's second return.
@@ -210,7 +227,7 @@
         -- ref PetPaperDollFrame_SetResistances (l.96-137). Deliberately NOT the character page's
         -- version: the pet's has no resistance-quality subtext (no `RESISTANCE_TOOLTIP_SUBTEXT`
         -- line at all) and colours the NUMBER off its own sign rather than off pos-vs-neg
-        -- magnitude — two real differences in the reference, transcribed rather than unified.
+        -- magnitude — two real differences in the reference, kept rather than unified.
         function PetPaperDollFrame_SetResistances()
             for i = 1, BENILLA_NUM_PET_RESISTANCE_TYPES do
                 local resistId = BENILLA_MAGICRES_IDS[i]
@@ -490,7 +507,7 @@
                     <OnEnter>
                         -- ref l.267-270, unguarded now that both halves exist (decision 1062):
                         -- `GetPetFoodTypes` is a real binding and `BuildListString` is the ref's
-                        -- own UIParent.lua joiner, transcribed in UIParent.xml.
+                        -- own UIParent.lua joiner, re-expressed in UIParent.xml.
                         --
                         -- `BuildListString()` returns NIL on an empty list and `format`'s "%s"
                         -- would error on it, so the pairing matters. Two things keep it safe, and
@@ -600,7 +617,7 @@
                             <OnLoad>self:EnableMouse(true)</OnLoad>
                             <!-- ref l.429-433: the pet's attack row shows the BARE tooltip title, with
                                  no ATTACK_TOOLTIP_SUBTEXT line — the character page's own row adds it.
-                                 Transcribed as the ref has it. -->
+                                 Kept as the ref has it. -->
                             <OnEnter>
                                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                                 GameTooltip:SetText(ATTACK_TOOLTIP, 1.0, 1.0, 1.0)

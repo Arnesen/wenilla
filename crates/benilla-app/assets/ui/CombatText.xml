@@ -1,11 +1,14 @@
 <Ui>
     <!--
         The center-screen scrolling combat text (decision 0578) — the 1.11+ "Floating Combat Text"
-        option. TRANSCRIBED from the shipped load-on-demand addon `Blizzard_CombatText`
-        (patch.MPQ `Interface\AddOns\Blizzard_CombatText\`, extracted to
-        WoW/_extracted_addons/Blizzard_CombatText/): screen-space FontStrings scrolling up from
-        UIParent-bottom +384 (≈ over the character), driven by the engine events the addon
-        registers. Deviations from the ref, each named:
+        option, written here in our own terms. The shipped load-on-demand addon
+        `Blizzard_CombatText` (patch.MPQ `Interface\AddOns\Blizzard_CombatText\`, extracted to
+        WoW/_extracted_addons/Blizzard_CombatText/) is the SPECIFICATION, and what it fixes is
+        contract: the message-type keys, the option family, the scroll/fade/crit envelope and
+        every number in them are all addressed by name from addons, so they are reproduced exactly
+        while the code that carries them is ours. The picture: screen-space FontStrings scrolling
+        up from UIParent-bottom +384 (≈ over the character), driven by the engine events this
+        frame registers. Where our behaviour departs from the spec, it is named:
         - The ref is load-on-demand (`UIParentLoadAddOn` when SHOW_COMBAT_TEXT == "1"); we load
           always and let CombatText_UpdateDisplayedMessages gate registration, ref-identically.
         - SHOW_COMBAT_TEXT defaults "1" here (ref "0") — the director's ask IS the enabled
@@ -20,63 +23,91 @@
           gates, not this file (0875).
         - Lua 5.0 `for k,v in t` iteration becomes explicit index loops (5.1 VM), backwards
           where the body removes.
+        - COMBAT_TEXT_TYPE_INFO is grown from a compact spec (colour · gate · flags · the types
+          that share them) walked by the loop under it, instead of one literal per row: the same
+          facts with the repetition taken out. The table it produces IS the contract — the same
+          keys with the same values, and one fresh entry table per key, because `show` is
+          rewritten per entry and an addon may edit any of them.
+        - The two low-resource warnings, the two flow directions in CombatText_AddMessage, and the
+          "park a string back at the seat" step all appear once here; the spec writes each of them
+          out twice.
         The wire → messageType mapping feeding COMBAT_TEXT_UPDATE lives app-side
         (net/apply/combat_log.rs + ui_unit.rs) and is PROVISIONAL pending the dispatched wow-re
         emission pin (decision 0578).
     -->
     <Script><![CDATA[
+        -- ── The pool ────────────────────────────────────────────────────────────────────────────
+        -- One screen line per pool string, and the list of the ones currently in flight. The pool
+        -- is fixed: a message arriving with all twenty busy evicts the oldest.
         NUM_COMBAT_TEXT_LINES = 20
-        COMBAT_TEXT_SCROLLSPEED = 1.9
-        COMBAT_TEXT_FADEOUT_TIME = 1.3
-        COMBAT_TEXT_HEIGHT = 25
-        COMBAT_TEXT_CRIT_MAXHEIGHT = 60
-        COMBAT_TEXT_CRIT_MINHEIGHT = 30
-        COMBAT_TEXT_CRIT_SCALE_TIME = 0.05
-        COMBAT_TEXT_CRIT_SHRINKTIME = 0.2
         COMBAT_TEXT_TO_ANIMATE = {}
-        COMBAT_TEXT_STAGGER_RANGE = 20
+
+        -- ── Where a line sits ───────────────────────────────────────────────────────────────────
+        -- COMBAT_TEXT_LOCATIONS is the seat and the target the current float mode implies; it is
+        -- filled in by CombatText_UpdateDisplayedMessages, not here. A new line is pushed clear of
+        -- everything already in flight by one line plus COMBAT_TEXT_SPACING, but the stack never
+        -- runs further than COMBAT_TEXT_MAX_OFFSET from the seat — past that it starts over. The
+        -- staggered types jitter sideways by up to half COMBAT_TEXT_STAGGER_RANGE either way, so a
+        -- flurry of hits does not print as one column.
+        COMBAT_TEXT_LOCATIONS = {}
         COMBAT_TEXT_SPACING = 10
         COMBAT_TEXT_MAX_OFFSET = 130
+        COMBAT_TEXT_STAGGER_RANGE = 20
+
+        -- ── How long a line lives ───────────────────────────────────────────────────────────────
+        -- It travels for COMBAT_TEXT_SCROLLSPEED seconds; COMBAT_TEXT_FADEOUT_TIME is when the
+        -- fade STARTS, not how long it takes, so the fade is the tail of the same window.
+        COMBAT_TEXT_SCROLLSPEED = 1.9
+        COMBAT_TEXT_FADEOUT_TIME = 1.3
+
+        -- ── How big it is drawn ─────────────────────────────────────────────────────────────────
+        -- An ordinary line is COMBAT_TEXT_HEIGHT and stays there. A crit "pops": seeded at the
+        -- minimum, grown to the maximum across CRIT_SCALE_TIME, and back down to ordinary size by
+        -- CRIT_SHRINKTIME (CombatText_OnUpdate walks that envelope).
+        COMBAT_TEXT_HEIGHT = 25
+        COMBAT_TEXT_CRIT_MINHEIGHT = 30
+        COMBAT_TEXT_CRIT_MAXHEIGHT = 60
+        COMBAT_TEXT_CRIT_SCALE_TIME = 0.05
+        COMBAT_TEXT_CRIT_SHRINKTIME = 0.2
+
+        -- ── When the low-resource warnings latch ────────────────────────────────────────────────
+        -- Fractions of the bar, tested on the way down; see CombatText_LowResourceWarning.
         COMBAT_TEXT_LOW_HEALTH_THRESHOLD = 0.2
         COMBAT_TEXT_LOW_MANA_THRESHOLD = 0.2
-        COMBAT_TEXT_LOCATIONS = {}
 
-        -- The option family's saved-variables (ref UIOptionsFrame.lua l.125-152), at the ref
-        -- defaults except the master (see the header). Each is assigned AT FILE SCOPE and
-        -- registered on the line under it — the reference's own load order (decision 1128):
-        -- defaults first, the saved chunk over the top, consumers third; reverse any two and a
-        -- saved value can never win. The Options window's Combat page drives all fourteen
-        -- (decision 1134) and takes its Defaults values from these very assignments, read at the
-        -- row's OnLoad — which runs before the saved chunk — so each default lives in one place,
-        -- here, and the panel cannot drift from it.
-        SHOW_COMBAT_TEXT = "1"
-        RegisterForSave("SHOW_COMBAT_TEXT")
-        COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_LOW_HEALTH_MANA")
-        COMBAT_TEXT_SHOW_AURAS = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_AURAS")
-        COMBAT_TEXT_SHOW_AURA_FADE = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_AURA_FADE")
-        COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_COMBAT_STATE")
-        COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_DODGE_PARRY_MISS")
-        COMBAT_TEXT_SHOW_RESISTANCES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_RESISTANCES")
-        COMBAT_TEXT_SHOW_REPUTATION = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_REPUTATION")
-        COMBAT_TEXT_SHOW_REACTIVES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_REACTIVES")
-        COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_FRIENDLY_NAMES")
-        COMBAT_TEXT_SHOW_COMBO_POINTS = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_COMBO_POINTS")
-        COMBAT_TEXT_SHOW_MANA = "0"
-        RegisterForSave("COMBAT_TEXT_SHOW_MANA")
-        COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
-        RegisterForSave("COMBAT_TEXT_SHOW_HONOR_GAINED")
-        COMBAT_TEXT_FLOAT_MODE = "1"
-        RegisterForSave("COMBAT_TEXT_FLOAT_MODE")
+        -- The option family: every saved global this feature owns, next to the value it ships
+        -- with. All fourteen sit at the spec's defaults (UIOptionsFrame.lua l.69-84) except the
+        -- master SHOW_COMBAT_TEXT, which ships "1" against the spec's "0" — the director's ask IS
+        -- the enabled experience (see the header).
+        --
+        -- Each name is assigned AT FILE SCOPE and registered for saving in the same pass, because
+        -- the load order is what makes a saved value stick (decision 1128): defaults first, the
+        -- saved chunk over the top, consumers third; reverse any two and a saved value can never
+        -- win. The Options window's Combat page drives all fourteen (decision 1134) and takes its
+        -- "Defaults" from these very globals, read at each row's OnLoad — which runs before the
+        -- saved chunk — so a default lives in exactly one place, this table, and the panel cannot
+        -- drift from it.
+        local combatTextOptions = {
+            {"SHOW_COMBAT_TEXT", "1"},
+            {"COMBAT_TEXT_SHOW_LOW_HEALTH_MANA", "1"},
+            {"COMBAT_TEXT_SHOW_AURAS", "1"},
+            {"COMBAT_TEXT_SHOW_AURA_FADE", "0"},
+            {"COMBAT_TEXT_SHOW_COMBAT_STATE", "1"},
+            {"COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", "0"},
+            {"COMBAT_TEXT_SHOW_RESISTANCES", "0"},
+            {"COMBAT_TEXT_SHOW_REPUTATION", "0"},
+            {"COMBAT_TEXT_SHOW_REACTIVES", "0"},
+            {"COMBAT_TEXT_SHOW_FRIENDLY_NAMES", "0"},
+            {"COMBAT_TEXT_SHOW_COMBO_POINTS", "0"},
+            {"COMBAT_TEXT_SHOW_MANA", "0"},
+            {"COMBAT_TEXT_SHOW_HONOR_GAINED", "1"},
+            {"COMBAT_TEXT_FLOAT_MODE", "1"},
+        }
+        for i = 1, getn(combatTextOptions) do
+            local name, default = combatTextOptions[i][1], combatTextOptions[i][2]
+            setglobal(name, default)
+            RegisterForSave(name)
+        end
 
         -- The message words (shipped enUS GlobalStrings values, hardcoded like the rest of our
         -- enUS-only data; or-guarded so an earlier definition wins).
@@ -108,66 +139,126 @@
         COMBAT_TEXT_HONOR_GAINED = COMBAT_TEXT_HONOR_GAINED or "Honor %s"
 
         --[[
-        List of COMBAT_TEXT_TYPE_INFO attributes (ref comment, verbatim)
-        ======================================================
-        r, g, b = [floats]  --  The floating text color
-        show = [nil, 1]  --  Display this message type in the UI
-        isStaggered = [nil, 1]  --  Randomly stagger these messages from left to right
-        var = [nil, 1]  --  This messageType is shown if this variable resolves to "1"
+        COMBAT_TEXT_TYPE_INFO — one entry per message type, and the four things an entry says:
+
+            r, g, b       the colour the line prints in, as 0..1 floats
+            show          1 while this type is currently being printed, nil while it is not.
+                          CombatText_UpdateDisplayedMessages rewrites it for every gated type from
+                          the option `var` names, so an entry carrying `var` and no `show` has
+                          merely not been refreshed yet, while an entry carrying `show` and no
+                          `var` is on for as long as the feature itself is
+            isStaggered   1 to jitter the line sideways instead of printing it on the centre line
+            var           the name of the saved global that gates this type; nil = ungated
+
+        This table is API: addons index it by message-type key and read and write these fields, so
+        the keys and the values are exactly the specification's. The rows below are OURS — almost
+        every type shares its colour and its gate with several others, so the facts are written
+        once per group and the loop underneath expands them into one entry per type. Fresh table
+        per entry, never a shared one: `show` is rewritten per entry, and an addon may edit any
+        single entry without that leaking into its neighbours.
         ]]
+
+        -- The six colours the whole table draws from.
+        local CT_WHITE = {1, 1, 1}
+        local CT_RED = {1, 0.1, 0.1}
+        local CT_GREEN = {0.1, 1, 0.1}
+        local CT_BLUE = {0.1, 0.1, 1}
+        local CT_VIOLET = {0.79, 0.3, 0.85}
+        local CT_GOLD = {1, 0.82, 0}
+
+        -- Colour · gate · flags · the message types that share them. `always` is the `show` an
+        -- ungated type is born with; `jitter` is `isStaggered`; `gate` is `var`.
+        local combatTextSpec = {
+            -- Always on. Only the master toggle takes these away.
+            {colour = CT_RED, always = 1, jitter = 1, types = {"DAMAGE"}},
+            {colour = CT_RED, always = 1, types = {"DAMAGE_CRIT"}},
+            {colour = CT_VIOLET, always = 1, types = {"SPELL_DAMAGE"}},
+            {colour = CT_WHITE, always = 1, types = {"SPLIT_DAMAGE"}},
+            {colour = CT_GREEN, always = 1, types = {"HEAL", "HEAL_CRIT", "PERIODIC_HEAL", "SPELL_CAST"}},
+
+            -- Never on by themselves: no `always`, no gate, so `show` is nil and stays nil. They
+            -- carry a colour so that anything which does switch one on has one ready.
+            {colour = CT_WHITE, types = {"INTERRUPT", "ENCHANTMENT_ADDED", "ENCHANTMENT_REMOVED",
+                "DISPEL_FAILED", "SPELL_CAST_START", "SPELL_DISPELLED", "DAMAGE_SHIELD",
+                "EXTRA_ATTACKS"}},
+
+            -- "Show dodge/parry/miss": swings that went nowhere, melee in red and spells in white.
+            -- The melee whiffs jitter because several can land in the same instant.
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS", jitter = 1,
+                types = {"MISS", "DODGE", "PARRY", "EVADE"}},
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS",
+                types = {"IMMUNE", "DEFLECT"}},
+            {colour = CT_WHITE, gate = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS",
+                types = {"SPELL_MISSED", "SPELL_DODGED", "SPELL_PARRIED", "SPELL_EVADED",
+                    "SPELL_IMMUNE", "SPELL_DEFLECTED", "SPELL_REFLECTED"}},
+
+            -- "Show resistances": a hit that landed but was partly eaten.
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_RESISTANCES",
+                types = {"BLOCK", "ABSORB", "RESIST", "PROC_RESISTED"}},
+            {colour = CT_WHITE, gate = "COMBAT_TEXT_SHOW_RESISTANCES", types = {"SPELL_BLOCKED"}},
+            {colour = CT_VIOLET, gate = "COMBAT_TEXT_SHOW_RESISTANCES",
+                types = {"SPELL_ABSORBED", "SPELL_RESISTED"}},
+
+            -- The aura pair — what landed, and what wore off — each split by whose side it helps.
+            {colour = CT_GREEN, gate = "COMBAT_TEXT_SHOW_AURAS", types = {"AURA_START"}},
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_AURAS", types = {"AURA_START_HARMFUL"}},
+            {colour = CT_GREEN, gate = "COMBAT_TEXT_SHOW_AURA_FADE", types = {"AURA_END"}},
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_AURA_FADE", types = {"AURA_END_HARMFUL"}},
+
+            -- Resources and standing: everything you gained rather than took.
+            {colour = CT_BLUE, gate = "COMBAT_TEXT_SHOW_MANA",
+                types = {"MANA", "RAGE", "FOCUS", "ENERGY"}},
+            {colour = CT_BLUE, gate = "COMBAT_TEXT_SHOW_COMBO_POINTS", types = {"COMBO_POINTS"}},
+            {colour = CT_BLUE, gate = "COMBAT_TEXT_SHOW_REPUTATION", types = {"FACTION"}},
+            {colour = CT_BLUE, gate = "COMBAT_TEXT_SHOW_HONOR_GAINED", types = {"HONOR_GAINED"}},
+
+            -- The state warnings, each on its own switch.
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA",
+                types = {"HEALTH_LOW", "MANA_LOW"}},
+            {colour = CT_RED, gate = "COMBAT_TEXT_SHOW_COMBAT_STATE",
+                types = {"ENTERING_COMBAT", "LEAVING_COMBAT"}},
+            {colour = CT_GOLD, gate = "COMBAT_TEXT_SHOW_REACTIVES", types = {"SPELL_ACTIVE"}},
+        }
+
         COMBAT_TEXT_TYPE_INFO = {}
-        COMBAT_TEXT_TYPE_INFO["INTERRUPT"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["DAMAGE_CRIT"] = {r = 1, g = 0.1, b = 0.1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["DAMAGE"] = {r = 1, g = 0.1, b = 0.1, isStaggered = 1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["MISS"] = {r = 1, g = 0.1, b = 0.1, isStaggered = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["BLOCK"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["ABSORB"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["RESIST"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["EVADE"] = {r = 1, g = 0.1, b = 0.1, isStaggered = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["DODGE"] = {r = 1, g = 0.1, b = 0.1, isStaggered = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["PARRY"] = {r = 1, g = 0.1, b = 0.1, isStaggered = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["IMMUNE"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["DEFLECT"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["ENCHANTMENT_REMOVED"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["ENCHANTMENT_ADDED"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["PERIODIC_HEAL"] = {r = 0.1, g = 1, b = 0.1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["MANA"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_MANA"}
-        COMBAT_TEXT_TYPE_INFO["RAGE"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_MANA"}
-        COMBAT_TEXT_TYPE_INFO["FOCUS"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_MANA"}
-        COMBAT_TEXT_TYPE_INFO["ENERGY"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_MANA"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_ABSORBED"] = {r = 0.79, g = 0.3, b = 0.85, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_RESISTED"] = {r = 0.79, g = 0.3, b = 0.85, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["PROC_RESISTED"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["DISPEL_FAILED"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["SPELL_CAST"] = {r = 0.1, g = 1, b = 0.1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["SPELL_CAST_START"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["AURA_END"] = {r = 0.1, g = 1, b = 0.1, var = "COMBAT_TEXT_SHOW_AURA_FADE"}
-        COMBAT_TEXT_TYPE_INFO["AURA_END_HARMFUL"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_AURA_FADE"}
-        COMBAT_TEXT_TYPE_INFO["AURA_START"] = {r = 0.1, g = 1, b = 0.1, var = "COMBAT_TEXT_SHOW_AURAS"}
-        COMBAT_TEXT_TYPE_INFO["AURA_START_HARMFUL"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_AURAS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_DAMAGE"] = {r = 0.79, g = 0.3, b = 0.85, show = 1}
-        COMBAT_TEXT_TYPE_INFO["SPELL_DODGED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_PARRIED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_BLOCKED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_RESISTANCES"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_EVADED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_IMMUNE"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_DEFLECTED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_REFLECTED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_MISSED"] = {r = 1, g = 1, b = 1, var = "COMBAT_TEXT_SHOW_DODGE_PARRY_MISS"}
-        COMBAT_TEXT_TYPE_INFO["SPELL_ACTIVE"] = {r = 1, g = 0.82, b = 0, var = "COMBAT_TEXT_SHOW_REACTIVES"}
-        COMBAT_TEXT_TYPE_INFO["FACTION"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_REPUTATION"}
-        COMBAT_TEXT_TYPE_INFO["HEAL_CRIT"] = {r = 0.1, g = 1, b = 0.1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["HEAL"] = {r = 0.1, g = 1, b = 0.1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["DAMAGE_SHIELD"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["SPELL_DISPELLED"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["EXTRA_ATTACKS"] = {r = 1, g = 1, b = 1}
-        COMBAT_TEXT_TYPE_INFO["SPLIT_DAMAGE"] = {r = 1, g = 1, b = 1, show = 1}
-        COMBAT_TEXT_TYPE_INFO["HONOR_GAINED"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_HONOR_GAINED"}
-        COMBAT_TEXT_TYPE_INFO["HEALTH_LOW"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA"}
-        COMBAT_TEXT_TYPE_INFO["MANA_LOW"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_LOW_HEALTH_MANA"}
-        COMBAT_TEXT_TYPE_INFO["ENTERING_COMBAT"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_COMBAT_STATE"}
-        COMBAT_TEXT_TYPE_INFO["LEAVING_COMBAT"] = {r = 1, g = 0.1, b = 0.1, var = "COMBAT_TEXT_SHOW_COMBAT_STATE"}
-        COMBAT_TEXT_TYPE_INFO["COMBO_POINTS"] = {r = 0.1, g = 0.1, b = 1, var = "COMBAT_TEXT_SHOW_COMBO_POINTS"}
+        for i = 1, getn(combatTextSpec) do
+            local row = combatTextSpec[i]
+            for j = 1, getn(row.types) do
+                COMBAT_TEXT_TYPE_INFO[row.types[j]] = {
+                    r = row.colour[1],
+                    g = row.colour[2],
+                    b = row.colour[3],
+                    show = row.always,
+                    isStaggered = row.jitter,
+                    var = row.gate,
+                }
+            end
+        end
+
+        -- A latched low-resource warning. The line prints on the crossing INTO the danger band and
+        -- not again until the bar has climbed back out of it — otherwise every tick of a fight
+        -- spent under 20% would print another one. `flag` names the field on the CombatText frame
+        -- that remembers we already warned; `low` is the caller's verdict, because "low" is not
+        -- the same question for the two bars (mana additionally requires the bar to BE mana: a
+        -- rage or energy user is never low on mana). Returns the message type to print, or nil.
+        local function CombatText_LowResourceWarning(flag, low, messageType)
+            if not low then
+                CombatText[flag] = nil
+                return nil
+            end
+            if CombatText[flag] then
+                return nil
+            end
+            CombatText[flag] = 1
+            return messageType
+        end
+
+        -- The engine events whose entire meaning is "print this message type". Everything else
+        -- either carries its own type in arg1 (COMBAT_TEXT_UPDATE) or IS its own type.
+        local combatTextStateMessage = {
+            PLAYER_REGEN_DISABLED = "ENTERING_COMBAT",
+            PLAYER_REGEN_ENABLED = "LEAVING_COMBAT",
+        }
 
         function CombatText_OnLoad()
             CombatText_UpdateDisplayedMessages()
@@ -175,70 +266,57 @@
         end
 
         function CombatText_OnEvent(event)
-            -- Set up the messageType
+            -- What we are about to print: the type (which picks the colour and the gating), the
+            -- payload it formats from, the finished line, and the optional "crit" presentation.
             local messageType, message
-            -- Set the message data
             local data = arg2
             local displayType
 
             if event == "UNIT_HEALTH" then
                 if arg1 == "player" then
-                    if UnitHealth("player") / UnitHealthMax("player") <= COMBAT_TEXT_LOW_HEALTH_THRESHOLD then
-                        if not CombatText.lowHealth then
-                            messageType = "HEALTH_LOW"
-                            CombatText.lowHealth = 1
-                        end
-                    else
-                        CombatText.lowHealth = nil
-                    end
+                    local low = UnitHealth("player") / UnitHealthMax("player") <= COMBAT_TEXT_LOW_HEALTH_THRESHOLD
+                    messageType = CombatText_LowResourceWarning("lowHealth", low, "HEALTH_LOW")
                 end
                 if not messageType then
                     return
                 end
             elseif event == "UNIT_POWER_UPDATE" then
-                -- Ref: UNIT_MANA + UnitMana/UnitManaMax (header deviation — the Era surface).
+                -- Spec: UNIT_MANA + UnitMana/UnitManaMax (header deviation — the Era surface).
+                -- Power type 0 is mana; the same event also carries rage, focus and energy, none
+                -- of which has a low warning.
                 local mana = UnitMana("player")
                 local powerType = UnitPowerType("player")
                 if arg1 == "player" then
-                    if mana / UnitManaMax("player") <= COMBAT_TEXT_LOW_MANA_THRESHOLD and powerType == 0 then
-                        if not CombatText.lowMana then
-                            messageType = "MANA_LOW"
-                            CombatText.lowMana = 1
-                        end
-                    else
-                        CombatText.lowMana = nil
-                    end
+                    local low = mana / UnitManaMax("player") <= COMBAT_TEXT_LOW_MANA_THRESHOLD and powerType == 0
+                    messageType = CombatText_LowResourceWarning("lowMana", low, "MANA_LOW")
                 end
                 if not messageType then
                     return
                 end
-            elseif event == "PLAYER_REGEN_DISABLED" then
-                messageType = "ENTERING_COMBAT"
-            elseif event == "PLAYER_REGEN_ENABLED" then
-                messageType = "LEAVING_COMBAT"
             elseif event == "PLAYER_COMBO_POINTS" then
-                local comboPoints = GetComboPoints()
-                if comboPoints > 0 then
-                    messageType = "COMBO_POINTS"
-                    data = comboPoints
-                    if MAX_COMBO_POINTS and comboPoints == MAX_COMBO_POINTS then
-                        displayType = "crit"
-                    end
-                else
+                -- The count itself is the payload, and a full bar is worth a crit-sized line.
+                -- Spending them fires this too, with nothing left to announce.
+                data = GetComboPoints()
+                if data <= 0 then
                     return
+                end
+                messageType = "COMBO_POINTS"
+                if data == MAX_COMBO_POINTS then
+                    displayType = "crit"
                 end
             elseif event == "COMBAT_TEXT_UPDATE" then
                 messageType = arg1
             else
-                messageType = event
+                messageType = combatTextStateMessage[event] or event
             end
 
-            -- Process the messageType and format the message
+            -- The type decides the colour and whether this is printed at all. An unknown type
+            -- is white and, having no `show`, prints nothing — which is how a message type we do
+            -- not know about stays silent instead of erroring.
             local info = COMBAT_TEXT_TYPE_INFO[messageType]
             if not info then
                 info = {r = 1, g = 1, b = 1}
             end
-            -- See if we should display the message or not
             if not info.show then
                 return
             end
@@ -319,7 +397,8 @@
                 end
             end
 
-            -- Add the message
+            -- A branch that produced no line (the empty type, or a global-string lookup that
+            -- came back nil) simply prints nothing.
             if message then
                 CombatText_AddMessage(message, COMBAT_TEXT_SCROLL_FUNCTION, info.r, info.g, info.b, displayType, isStaggered)
             end
@@ -341,7 +420,8 @@
                         local alpha = 1 - ((value.scrollTime - COMBAT_TEXT_FADEOUT_TIME) / (COMBAT_TEXT_SCROLLSPEED - COMBAT_TEXT_FADEOUT_TIME))
                         value:SetAlpha(max(alpha, 0))
                     end
-                    -- Handle crit
+                    -- The crit pop: up to the maximum inside the scale window, back down by the
+                    -- shrink time, then it stops being a crit and holds its size.
                     if value.isCrit then
                         if value.scrollTime <= COMBAT_TEXT_CRIT_SCALE_TIME then
                             value:SetTextHeight(floor(COMBAT_TEXT_CRIT_MINHEIGHT + ((COMBAT_TEXT_CRIT_MAXHEIGHT - COMBAT_TEXT_CRIT_MINHEIGHT) * value.scrollTime / COMBAT_TEXT_CRIT_SCALE_TIME)))
@@ -355,6 +435,14 @@
             end
         end
 
+        -- A string that is not in flight: invisible, hidden, and back on the seat so the next
+        -- caller measures it from a known place. Both ways out of the animation list end here.
+        local function CombatText_ParkString(string)
+            string:SetAlpha(0)
+            string:Hide()
+            string:SetPoint("TOP", UIParent, "BOTTOM", COMBAT_TEXT_LOCATIONS.startX, COMBAT_TEXT_LOCATIONS.startY)
+        end
+
         function CombatText_AddMessage(message, scrollFunction, r, g, b, displayType, isStaggered)
             local string, noStringsAvailable = CombatText_GetAvailableString()
             if noStringsAvailable then
@@ -364,71 +452,72 @@
             string:SetText(message)
             string:SetTextColor(r, g, b)
             string.scrollTime = 0
+
+            -- Where the line is seated. `flow` is the direction the STACK grows — back down the
+            -- way the run came, so -1 when the mode floats upward and +1 when it floats down —
+            -- and having it as a number is what lets one walk serve both modes. Start at the
+            -- string's own parked edge, then push clear of every line already in flight by one
+            -- 16-unit line plus COMBAT_TEXT_SPACING; if that has carried the stack further than
+            -- COMBAT_TEXT_MAX_OFFSET from the seat, start the column over at the parked edge
+            -- instead of marching off the screen. (`GetBottom`/`GetTop` are nil before the first
+            -- layout resolve — the parked seat stands in; identical after frame 1.)
+            local flow, parkedY
+            if COMBAT_TEXT_LOCATIONS.startY < COMBAT_TEXT_LOCATIONS.endY then
+                flow = -1
+                parkedY = string:GetBottom()
+            else
+                flow = 1
+                parkedY = string:GetTop()
+            end
+            parkedY = parkedY or COMBAT_TEXT_LOCATIONS.startY
+
+            local seatY = parkedY
+            for i = 1, getn(COMBAT_TEXT_TO_ANIMATE) do
+                local clearOf = COMBAT_TEXT_TO_ANIMATE[i].yPos + flow * (16 + COMBAT_TEXT_SPACING)
+                if (clearOf - seatY) * flow >= 0 then
+                    seatY = clearOf
+                end
+            end
+            if (seatY - COMBAT_TEXT_LOCATIONS.startY) * flow > COMBAT_TEXT_MAX_OFFSET then
+                seatY = parkedY
+            end
+
+            -- Everything `displayType` decides, in one place. A crit pops through its own scale
+            -- envelope and always takes the straight scroll (an arc would fight the pop); a crit or
+            -- a sticky ends where it began, so it holds the seat instead of travelling; anything
+            -- else takes the caller's scroll and runs the whole way.
             if displayType == "crit" then
                 string.scrollFunction = CombatText_StandardScroll
+                string.isCrit = 1
+                string.endY = COMBAT_TEXT_LOCATIONS.startY
+                string:SetTextHeight(COMBAT_TEXT_CRIT_MINHEIGHT)
             else
                 string.scrollFunction = scrollFunction
-            end
-
-            -- See which direction the message should flow. (`GetBottom`/`GetTop` are nil before
-            -- the first layout resolve — the parked seat stands in; identical after frame 1.)
-            local lowestMessage
-            if COMBAT_TEXT_LOCATIONS.startY < COMBAT_TEXT_LOCATIONS.endY then
-                -- Flowing up
-                lowestMessage = string:GetBottom() or COMBAT_TEXT_LOCATIONS.startY
-                for i = 1, getn(COMBAT_TEXT_TO_ANIMATE) do
-                    local value = COMBAT_TEXT_TO_ANIMATE[i]
-                    if lowestMessage >= value.yPos - 16 - COMBAT_TEXT_SPACING then
-                        lowestMessage = value.yPos - 16 - COMBAT_TEXT_SPACING
-                    end
-                end
-                if lowestMessage < (COMBAT_TEXT_LOCATIONS.startY - COMBAT_TEXT_MAX_OFFSET) then
-                    lowestMessage = string:GetBottom() or COMBAT_TEXT_LOCATIONS.startY
-                end
-            else
-                -- Flowing down
-                lowestMessage = string:GetTop() or COMBAT_TEXT_LOCATIONS.startY
-                for i = 1, getn(COMBAT_TEXT_TO_ANIMATE) do
-                    local value = COMBAT_TEXT_TO_ANIMATE[i]
-                    if lowestMessage <= value.yPos + 16 + COMBAT_TEXT_SPACING then
-                        lowestMessage = value.yPos + 16 + COMBAT_TEXT_SPACING
-                    end
-                end
-                if lowestMessage > (COMBAT_TEXT_LOCATIONS.startY + COMBAT_TEXT_MAX_OFFSET) then
-                    lowestMessage = string:GetTop() or COMBAT_TEXT_LOCATIONS.startY
-                end
-            end
-
-            -- Handle crits
-            if displayType == "crit" then
-                string.endY = COMBAT_TEXT_LOCATIONS.startY
-                string.isCrit = 1
-                string:SetTextHeight(COMBAT_TEXT_CRIT_MINHEIGHT)
-            elseif displayType == "sticky" then
-                string.endY = COMBAT_TEXT_LOCATIONS.startY
                 string:SetTextHeight(COMBAT_TEXT_HEIGHT)
-            else
-                string.endY = COMBAT_TEXT_LOCATIONS.endY
-                string:SetTextHeight(COMBAT_TEXT_HEIGHT)
+                if displayType == "sticky" then
+                    string.endY = COMBAT_TEXT_LOCATIONS.startY
+                else
+                    string.endY = COMBAT_TEXT_LOCATIONS.endY
+                end
             end
 
-            -- Stagger the text if flagged
-            local staggerAmount = 0
-            if isStaggered then
-                staggerAmount = random(0, COMBAT_TEXT_STAGGER_RANGE) - COMBAT_TEXT_STAGGER_RANGE / 2
-            end
-
-            -- Alternate x direction
-            if not CombatText.xDir or CombatText.xDir < 0 then
-                CombatText.xDir = 1
-            else
+            -- The fountain arcs alternate sides, so consecutive lines do not trace one path.
+            if CombatText.xDir == 1 then
                 CombatText.xDir = -1
+            else
+                CombatText.xDir = 1
             end
             string.xDir = CombatText.xDir
-            string.startX = COMBAT_TEXT_LOCATIONS.startX + staggerAmount
-            string.startY = lowestMessage
-            string.yPos = lowestMessage
-            string:SetPoint("TOP", UIParent, "BOTTOM", string.startX, lowestMessage)
+
+            -- Staggered types jitter up to half COMBAT_TEXT_STAGGER_RANGE either side of centre.
+            string.startX = COMBAT_TEXT_LOCATIONS.startX
+            if isStaggered then
+                string.startX = string.startX + random(0, COMBAT_TEXT_STAGGER_RANGE) - COMBAT_TEXT_STAGGER_RANGE / 2
+            end
+
+            string.startY = seatY
+            string.yPos = seatY
+            string:SetPoint("TOP", UIParent, "BOTTOM", string.startX, seatY)
             string:SetAlpha(1)
             string:Show()
             tinsert(COMBAT_TEXT_TO_ANIMATE, string)
@@ -438,9 +527,7 @@
             for i = 1, getn(COMBAT_TEXT_TO_ANIMATE) do
                 if COMBAT_TEXT_TO_ANIMATE[i] == string then
                     tremove(COMBAT_TEXT_TO_ANIMATE, i)
-                    string:SetAlpha(0)
-                    string:Hide()
-                    string:SetPoint("TOP", UIParent, "BOTTOM", COMBAT_TEXT_LOCATIONS.startX, COMBAT_TEXT_LOCATIONS.startY)
+                    CombatText_ParkString(string)
                     break
                 end
             end
@@ -466,15 +553,13 @@
         function CombatText_ClearAnimationList()
             COMBAT_TEXT_TO_ANIMATE = {}
             for i = 1, NUM_COMBAT_TEXT_LINES do
-                local string = getglobal("CombatText" .. i)
-                string:SetAlpha(0)
-                string:Hide()
-                string:SetPoint("TOP", UIParent, "BOTTOM", COMBAT_TEXT_LOCATIONS.startX, COMBAT_TEXT_LOCATIONS.startY)
+                CombatText_ParkString(getglobal("CombatText" .. i))
             end
         end
 
         function CombatText_UpdateDisplayedMessages()
-            -- Unregister events if combat text is disabled
+            -- The master toggle is enforced at the source: with the feature off we stop
+            -- listening entirely rather than filtering every message as it arrives.
             if SHOW_COMBAT_TEXT == "0" then
                 CombatText:UnregisterEvent("COMBAT_TEXT_UPDATE")
                 CombatText:UnregisterEvent("UNIT_HEALTH")
@@ -491,7 +576,8 @@
                 CombatText:RegisterEvent("PLAYER_REGEN_DISABLED")
                 CombatText:RegisterEvent("PLAYER_REGEN_ENABLED")
             end
-            -- Update shown messages
+            -- Re-read every gated type's option into its `show`. This is the only writer of
+            -- `show` for a type that carries a `var`, so it runs on every option change.
             for messageType, value in pairs(COMBAT_TEXT_TYPE_INFO) do
                 if value.var then
                     if getglobal(value.var) == "1" then
@@ -505,7 +591,8 @@
             -- 0582), so the ref constants stand verbatim (0581's px shim retired). The ref's
             -- uiScale-cvar division joins when a cvar system exists.
             local uiScale = 1
-            -- Update scrolldirection
+            -- The float mode picks the path and the run: modes 1 and 3 rise to 609 (3 on an
+            -- arc), mode 2 falls to 159. All three start at the same seat.
             if COMBAT_TEXT_FLOAT_MODE == "1" then
                 COMBAT_TEXT_SCROLL_FUNCTION = CombatText_StandardScroll
                 COMBAT_TEXT_LOCATIONS = {

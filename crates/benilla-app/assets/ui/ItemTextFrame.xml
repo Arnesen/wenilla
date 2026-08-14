@@ -1,10 +1,12 @@
 <Ui>
     <!--
         The item-text reader — letters, books, plaques (the mail arc's "permanent copy" lands
-        here). Transcribed from the reference ItemTextFrame.xml (354 l) + ItemTextFrame.lua
-        (104 l); geometry/art quoted verbatim, names the reference's own. Driven by the engine's
-        item-text seam (benilla-ui/src/script/item_text.rs) + crate::ui_item_text's feed/drain:
-        the app fires the reference event flow ITEM_TEXT_BEGIN → ITEM_TEXT_READY → ITEM_TEXT_CLOSED.
+        here). The Lua below is OURS; the reference ItemTextFrame.xml (354 l) + ItemTextFrame.lua
+        (104 l) are the SPECIFICATION it satisfies — frame/region names, the event flow, the
+        material art paths and the geometry/art are the reference's and are quoted as such.
+        Driven by the engine's item-text seam (benilla-ui/src/script/item_text.rs) +
+        crate::ui_item_text's feed/drain: the app fires the reference event flow
+        ITEM_TEXT_BEGIN → ITEM_TEXT_READY → ITEM_TEXT_CLOSED.
 
         ADAPTATIONS (the MailFrame.xml precedents):
           · The body scroll (ItemTextScrollFrame, UIPanelScrollFrameTemplate 280×355 at -66,-76) is
@@ -12,22 +14,26 @@
             a very long page clips. The ref's own flanking scrollbar art (UI-Character-ScrollBar
             top/bottom + the black middle strip) is quoted verbatim as inert layers, so the right
             edge reads exactly like the reference at rest.
-          · ItemTextPageText is SimpleHTML in the ref — transcribed as a FontString at the same
+          · ItemTextPageText is SimpleHTML in the ref — drawn here as a FontString at the same
             rect (our letters/pages are plain text; an HTML page renders as its markup, accepted).
-          · The Lua's ScrollFrame-only verbs (UpdateScrollChildRect, ScrollBar SetValue/Hide,
-            scrollBarHideable) are dropped with the live scrollbar.
-          · GetMaterialTextColors + the two material color tables live in the reference Fonts.xml /
-            UIParent.lua — inlined here Benilla-scoped (the MoneyInput-shim precedent), quoted
-            verbatim.
+          · The ScrollFrame-only verbs the reference's OnLoad/READY use (UpdateScrollChildRect,
+            ScrollBar SetValue/Hide, scrollBarHideable) are dropped with the live scrollbar.
+          · The two material colour TABLES are the reference's data (its Fonts.xml), quoted
+            verbatim — the numbers ARE the look. They live here Benilla-scoped (the MoneyInput-shim
+            precedent) because our own Fonts.xml deliberately doesn't ship the reference's two
+            globals; the lookup around them is ours, under the reference's published name.
           · GlobalStrings inlined: PREV "Prev", NEXT "Next", ITEM_TEXT_FROM "From," (the reference
             string really is comma'd).
-          · ITEM_TEXT_TRANSLATION (the foreign-language progress bar) is transcribed but never
+          · ITEM_TEXT_TRANSLATION (the foreign-language progress bar) is implemented but never
             fires — no translation mechanic on our letters; the StatusBar stays hidden.
           · <HitRectInsets> quoted verbatim for fidelity but currently inert (the loader ignores
             the element).
     -->
     <Script><![CDATA[
-        -- ref Fonts.xml l.27-42 (quoted verbatim, Benilla-scoped).
+        -- ── The material palette ─────────────────────────────────────────────────────────────
+        -- The six materials a page can be printed on, and the ink each one takes. The COLOURS are
+        -- the reference's own data (its Fonts.xml l.27-42) and are quoted verbatim: a different
+        -- number is a different look. Benilla-scoped names — see the header.
         BENILLA_MATERIAL_TEXT_COLOR_TABLE = {
             ["Default"] = {0.18, 0.12, 0.06},
             ["Stone"] = {1.0, 1.0, 1.0},
@@ -44,7 +50,9 @@
             ["Silver"] = {0.93, 0.82, 0},
             ["Bronze"] = {0.93, 0.82, 0}
         }
-        -- ref UIParent.lua l.1880-1888.
+        -- The page ink and the title ink for a material, under the reference's published name
+        -- (its UIParent.lua l.1880-1888). Falls back to "Default" unless BOTH halves are known, so
+        -- an unrecognised material never gets one table's colour and the other's default.
         function GetMaterialTextColors(material)
             local textColor = BENILLA_MATERIAL_TEXT_COLOR_TABLE[material]
             local titleColor = BENILLA_MATERIAL_TITLETEXT_COLOR_TABLE[material]
@@ -55,99 +63,155 @@
             return textColor, titleColor
         end
 
-        -- ref ItemTextFrame.lua l.1-8.
+        -- ── The reader's regions, by role ────────────────────────────────────────────────────
+        -- The four material corners are one SET: a page is either bare parchment (all four off)
+        -- or dressed in a material, in which case each corner wears that material's own art.
+        -- Naming the suffixes once is also what makes the art path a single expression.
+        local MATERIAL_CORNERS = { "TopLeft", "TopRight", "BotLeft", "BotRight" }
+
+        -- Everything a fresh ITEM_TEXT_BEGIN clears away. At that point only the title is known,
+        -- so only the title stays on screen — the page and all of its paging chrome go.
+        local PAGE_CHROME = {
+            "ItemTextScrollFrame", "ItemTextCurrentPage", "ItemTextStatusBar",
+            "ItemTextPrevPageButton", "ItemTextNextPageButton",
+        }
+
+        local function ShowOrHide(region, wanted)
+            if wanted then
+                region:Show()
+            else
+                region:Hide()
+            end
+        end
+
+        -- A page always HAS a material: the server may name none, and the frame's own art is
+        -- already parchment, so that is what "none" means.
+        local function PageMaterial()
+            return ItemTextGetMaterial() or "Parchment"
+        end
+
+        -- Dress the page's four corners in its material. Parchment IS the frame's own art, so
+        -- parchment leaves the corners off and lets the bare frame show through; anything else
+        -- lights all four and points each at its own slice of that material's art set.
+        local function DressPage(material)
+            if material == "Parchment" then
+                for _, corner in ipairs(MATERIAL_CORNERS) do
+                    getglobal("ItemTextMaterial" .. corner):Hide()
+                end
+                return
+            end
+            local art = "Interface\\ItemTextFrame\\ItemText-" .. material .. "-"
+            for _, corner in ipairs(MATERIAL_CORNERS) do
+                local layer = getglobal("ItemTextMaterial" .. corner)
+                layer:Show()
+                layer:SetTexture(art .. corner)
+            end
+        end
+
+        -- Put the reader on screen. The panel manager is allowed to refuse (something
+        -- native-center is holding the screen) — and then we are not reading after all, so the
+        -- server has to be told, or the session stays open behind a window that never appeared.
+        -- The reference makes the same check, on both of the paths that open this window.
+        local function OpenReader(frame)
+            ShowUIPanel(frame)
+            if not frame:IsVisible() then
+                CloseItemText()
+            end
+        end
+
+        -- ── The event flow ───────────────────────────────────────────────────────────────────
+        -- One function per event of the reference's flow: ItemTextFrame_OnLoad registers FLOW in
+        -- order and ItemTextFrame_OnEvent dispatches into Handlers by name. (The reference states
+        -- the same pairing twice — four RegisterEvent calls, then a four-arm `if event == …`
+        -- chain — which is how a fifth event gets added to one of them and not the other.)
+        local FLOW = {
+            "ITEM_TEXT_BEGIN", "ITEM_TEXT_TRANSLATION", "ITEM_TEXT_READY", "ITEM_TEXT_CLOSED",
+        }
+        local Handlers = {}
+
+        -- A text has been opened. Only its title is known yet, so the page is cleared away and
+        -- the ink is set for the material the pages are going to arrive on.
+        function Handlers.ITEM_TEXT_BEGIN(frame)
+            ItemTextTitleText:SetText(ItemTextGetItem())
+            for _, name in ipairs(PAGE_CHROME) do
+                getglobal(name):Hide()
+            end
+            local ink = GetMaterialTextColors(PageMaterial())
+            ItemTextPageText:SetTextColor(ink[1], ink[2], ink[3])
+        end
+
+        -- A foreign-language page is being translated: the turn buttons stand down and the
+        -- progress bar takes over, ranged across the arg1 seconds the server quoted (OnUpdate
+        -- fills it). Never fires on our letters — see the header.
+        function Handlers.ITEM_TEXT_TRANSLATION(frame)
+            ItemTextPrevPageButton:Hide()
+            ItemTextNextPageButton:Hide()
+            frame.translationElapsed = 0
+            ItemTextStatusBar:SetMinMaxValues(0, arg1)
+            ItemTextStatusBar:Show()
+            OpenReader(frame)
+        end
+
+        -- A page has arrived. A letter signs off with its sender (ITEM_TEXT_FROM — the reference
+        -- string really is comma'd); anything else just gets its trailing blank line. The paging
+        -- row appears only when there is another page to be on, and then each button shows only
+        -- if there is something in its direction.
+        function Handlers.ITEM_TEXT_READY(frame)
+            local creator = ItemTextGetCreator()
+            local body = "\n" .. ItemTextGetText()
+            if creator then
+                body = body .. "\n\n" .. "From," .. "\n" .. creator .. "\n\n"
+            else
+                body = body .. "\n"
+            end
+            ItemTextPageText:SetText(body)
+            ItemTextScrollFrame:Show()
+
+            local pageNumber = ItemTextGetPage()
+            local hasNext = ItemTextHasNextPage()
+            DressPage(PageMaterial())
+            if pageNumber > 1 or hasNext then
+                ItemTextCurrentPage:SetText(pageNumber)
+                ItemTextCurrentPage:Show()
+                ShowOrHide(ItemTextPrevPageButton, pageNumber > 1)
+                ShowOrHide(ItemTextNextPageButton, hasNext)
+            end
+            ItemTextStatusBar:Hide()
+            OpenReader(frame)
+        end
+
+        function Handlers.ITEM_TEXT_CLOSED(frame)
+            HideUIPanel(frame)
+        end
+
         function ItemTextFrame_OnLoad()
-            this:RegisterEvent("ITEM_TEXT_BEGIN")
-            this:RegisterEvent("ITEM_TEXT_TRANSLATION")
-            this:RegisterEvent("ITEM_TEXT_READY")
-            this:RegisterEvent("ITEM_TEXT_CLOSED")
+            for _, event in ipairs(FLOW) do
+                this:RegisterEvent(event)
+            end
         end
 
-        -- ref l.10-96.
         function ItemTextFrame_OnEvent(event)
-            if event == "ITEM_TEXT_BEGIN" then
-                ItemTextTitleText:SetText(ItemTextGetItem())
-                ItemTextScrollFrame:Hide()
-                ItemTextCurrentPage:Hide()
-                ItemTextStatusBar:Hide()
-                ItemTextPrevPageButton:Hide()
-                ItemTextNextPageButton:Hide()
-                local material = ItemTextGetMaterial()
-                if not material then material = "Parchment" end
-                local textColor = GetMaterialTextColors(material)
-                ItemTextPageText:SetTextColor(textColor[1], textColor[2], textColor[3])
-                return
-            end
-            if event == "ITEM_TEXT_TRANSLATION" then
-                ItemTextPrevPageButton:Hide()
-                ItemTextNextPageButton:Hide()
-                this.translationElapsed = 0
-                ItemTextStatusBar:SetMinMaxValues(0, arg1)
-                ItemTextStatusBar:Show()
-                ShowUIPanel(this)
-                if not this:IsVisible() then CloseItemText() end
-                return
-            end
-            if event == "ITEM_TEXT_READY" then
-                local creator = ItemTextGetCreator()
-                if creator then
-                    creator = "\n\n".."From,".."\n"..creator.."\n\n"   -- ITEM_TEXT_FROM
-                    ItemTextPageText:SetText("\n"..ItemTextGetText()..creator)
-                else
-                    ItemTextPageText:SetText("\n"..ItemTextGetText().."\n")
-                end
-                ItemTextScrollFrame:Show()
-                local page = ItemTextGetPage()
-                local next = ItemTextHasNextPage()
-                local material = ItemTextGetMaterial()
-                if not material then material = "Parchment" end
-                if material == "Parchment" then
-                    ItemTextMaterialTopLeft:Hide()
-                    ItemTextMaterialTopRight:Hide()
-                    ItemTextMaterialBotLeft:Hide()
-                    ItemTextMaterialBotRight:Hide()
-                else
-                    ItemTextMaterialTopLeft:Show()
-                    ItemTextMaterialTopRight:Show()
-                    ItemTextMaterialBotLeft:Show()
-                    ItemTextMaterialBotRight:Show()
-                    ItemTextMaterialTopLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopLeft")
-                    ItemTextMaterialTopRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-TopRight")
-                    ItemTextMaterialBotLeft:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotLeft")
-                    ItemTextMaterialBotRight:SetTexture("Interface\\ItemTextFrame\\ItemText-"..material.."-BotRight")
-                end
-                if (page > 1) or next then
-                    ItemTextCurrentPage:SetText(page)
-                    ItemTextCurrentPage:Show()
-                    if page > 1 then
-                        ItemTextPrevPageButton:Show()
-                    else
-                        ItemTextPrevPageButton:Hide()
-                    end
-                    if next then
-                        ItemTextNextPageButton:Show()
-                    else
-                        ItemTextNextPageButton:Hide()
-                    end
-                end
-                ItemTextStatusBar:Hide()
-                ShowUIPanel(this)
-                if not this:IsVisible() then CloseItemText() end
-                return
-            end
-            if event == "ITEM_TEXT_CLOSED" then
-                HideUIPanel(this)
-                return
+            local handler = Handlers[event]
+            if handler then
+                handler(this)
             end
         end
 
-        -- ref l.98-104.
+        -- The translation bar's clock: while the bar is up it fills with the seconds spent so far.
         function ItemTextFrame_OnUpdate(elapsed)
-            if ItemTextStatusBar:IsVisible() then
-                elapsed = this.translationElapsed + elapsed
-                ItemTextStatusBar:SetValue(elapsed)
-                this.translationElapsed = elapsed
+            if not ItemTextStatusBar:IsVisible() then
+                return
             end
+            local spent = this.translationElapsed + elapsed
+            ItemTextStatusBar:SetValue(spent)
+            this.translationElapsed = spent
+        end
+
+        -- Both page buttons are one gesture in two directions: the paging click, then the
+        -- engine's own page request. `turnPage` is ItemTextPrevPage or ItemTextNextPage.
+        function ItemTextFrame_TurnPage(turnPage)
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            turnPage()
         end
     ]]></Script>
     <Frame name="ItemTextFrame" toplevel="true" movable="true" enableMouse="true" hidden="true" parent="UIParent">
@@ -281,10 +345,7 @@
                     </Layer>
                 </Layers>
                 <Scripts>
-                    <OnClick>
-                        PlaySound("igMainMenuOptionCheckBoxOn")
-                        ItemTextPrevPage()
-                    </OnClick>
+                    <OnClick>ItemTextFrame_TurnPage(ItemTextPrevPage)</OnClick>
                 </Scripts>
                 <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
@@ -302,10 +363,7 @@
                     </Layer>
                 </Layers>
                 <Scripts>
-                    <OnClick>
-                        PlaySound("igMainMenuOptionCheckBoxOn")
-                        ItemTextNextPage()
-                    </OnClick>
+                    <OnClick>ItemTextFrame_TurnPage(ItemTextNextPage)</OnClick>
                 </Scripts>
                 <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
                 <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>

@@ -82,6 +82,30 @@ pub enum LoginStage {
     Handshaking,
 }
 
+/// **How a world session ended** — the fact [`SessionEvent::Disconnected`] carries alongside its
+/// reason string, and the one the client's whole post-session behaviour hangs on (decision 1262).
+///
+/// The two are not shades of the same thing. A logout is a door the player walked through, and the
+/// roster on the other side of it is the character-select screen they asked for. A loss is a door
+/// that slammed: the reference's engine fires `DISCONNECTED_FROM_SERVER`, and its `GlueParent.lua`
+/// answers `SetGlueScreen("login")` + `GlueDialog_Show("DISCONNECTED")` — back to the account
+/// screen, one Okay button, no retry. Before this the app told them apart by comparing the reason
+/// *string* to `"logged out"`, which is how "the session died" and "the session ended" came to share
+/// one code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// A clean, client-initiated logout the server confirmed (`SMSG_LOGOUT_COMPLETE`). The IO
+    /// thread cycles the connection and a fresh [`SessionEvent::CharacterList`] follows — the
+    /// teardown here is bookkeeping between two halves of one continuous session.
+    LoggedOut,
+    /// The stream died under us: a socket error, an EOF, or a post-roster handshake failure. A
+    /// **displacement kick is exactly this** and carries nothing else — vmangos's
+    /// `WorldSession::KickPlayer` is a bare `CloseSocket()`, no packet (verified in
+    /// `vmangos-core/src/game/Server/WorldSession.cpp`), so "another client took the account" and
+    /// "the server went away" are the same event on the wire and get the same answer.
+    Lost,
+}
+
 /// One decoded event from the world stream. Carries only primitives + the coarse [`EntityKind`]
 /// classification — no wire types leak to the app, and no running state lives here.
 #[derive(Debug, Clone)]
@@ -131,8 +155,8 @@ pub enum SessionEvent {
     LogoutResponse { reason: u32, instant: bool },
     /// The server dropped a pending logout at our `CMSG_LOGOUT_CANCEL` (`SMSG_LOGOUT_CANCEL_ACK`).
     LogoutCancelled,
-    /// The session ended (socket closed / handshake failure); carries a human-readable reason.
-    Disconnected { reason: String },
+    /// The session ended; carries a human-readable reason and **how** it ended ([`SessionEnd`]).
+    Disconnected { reason: String, end: SessionEnd },
     /// An object entered range / was created: a unit, player, or GameObject at a raw-WoW pose. Carries
     /// the interpreted spawn identity (`display_id`/`scale`, decoded per object type here so the app
     /// needn't know the wire layout) plus the full descriptor `fields` mask the ECS seeds its per-object

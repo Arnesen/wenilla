@@ -1,21 +1,24 @@
 <Ui>
     <!--
-        The UIPanel slot manager (decision 0084 §2) — benilla's own transcription of Blizzard's
-        UIParent.lua panel-window plumbing, script-only (no frames of its own). Loaded FIRST in the
-        shipped-XML list (ui_script.rs) so `UIPanelWindows`/`ShowUIPanel`/`HideUIPanel` exist before
-        any panel frame's OnLoad/OnEvent references them.
+        The UIPanel slot manager (decision 0084 §2) — benilla's own implementation of the
+        panel-window plumbing the reference keeps in UIParent.lua. Loaded FIRST in the shipped-XML
+        list (ui_script.rs) so `UIPanelWindows`/`ShowUIPanel`/`HideUIPanel` exist before any panel
+        frame's OnLoad/OnEvent references them.
 
-        Ground truth: the 1.12 `UIParent.lua` extract (scratchpad/UIParent.lua, patch-2.MPQ), quoted
-        verbatim in the line-numbered comments below — never re-derived. v1 scope (pin §3): the
-        **left + center two-slot logic only**. The real client's `full`/`doublewide` areas, the
-        `CanOpenPanels`/full-screen/native-center gates and `UIChildWindows` are all out of scope —
-        no benilla panel uses them yet — but the registration table keeps their exact shape
-        (`area`, `pushable`, `whileDead`) so a later row drops in unchanged. **`UISpecialFrames`
-        left that list in decision 1206**: it is not ours to use, it is the table an ADDON writes
-        its own window into, and 34 corpus call sites do.
+        Specification: the 1.12 `UIParent.lua` extract (patch-2.MPQ), cited by line number
+        throughout so every rule below can be checked against it. What is quoted VERBATIM is the
+        **data** — each `UIPanelWindows` row's `area`/`pushable`/`whileDead`, which IS the
+        reference's window arbitration (a different number is a different window order), and the
+        `UISpecialFrames` seeds. The code around that data is ours.
 
-        Frame names here are OUR shipped names (`Benilla*`); UIParent.lua's names (`GossipFrame`,
-        `MerchantFrame`, `LootFrame`) are the semantic reference the pin cites, not what we register.
+        Scope: `left`, `center` and `full` are all live. `doublewide` and `UIChildWindows` are not
+        — nothing benilla ships wants them — but the registration table keeps their exact shape so
+        a later row drops in unchanged. **`UISpecialFrames` is not ours to write into** (decision
+        1206): it is the table an ADDON puts its own window in, and 34 corpus call sites do.
+
+        Rows are keyed by the frame names we actually ship. Most of those ARE the reference's own
+        (`GossipFrame`, `MerchantFrame`, `LootFrame`); where ours differs, the row is `Benilla*` and
+        its comment names the reference row it stands in for.
     -->
     <Script><![CDATA[
         -- UIParent.lua l.14-42: UIPanelWindows["FrameName"] = { area, pushable, whileDead }. Only the
@@ -216,101 +219,66 @@
             return slots.fullscreen
         end
 
+        -- The area a frame is REGISTERED for — or nil, which is equally the answer for no frame at
+        -- all and for a frame this manager has never heard of. Four rules below turn on exactly
+        -- that question ("is a native-center window holding the screen?", "is the frame parked at
+        -- center a left-area one that should slide back?"), and all four want an absent frame and
+        -- an unregistered one to answer the same way. The reference open-codes the pair of nil
+        -- checks at each site, which is four chances to leave one of them out.
+        local function AreaOf(frame)
+            local info = frame and UIPanelWindows[frame:GetName()]
+            return info and info.area
+        end
+
         -- CanOpenPanels() — UIParent.lua l.887-910. Its dead-player arms are commented out in the
         -- reference itself (both of them, with the note that the fear/out-of-control gate was
         -- "previously"); what survives is one rule: **a native-center frame open ⇒ nothing else
         -- opens**. The game menu is the only such frame (decision 0674), so this reads: with the
         -- ESC menu up, no window opens — not from a keybind, not from an NPC's OPEN_WINDOW.
         function CanOpenPanels()
-            local centerFrame = GetCenterFrame()
-            if not centerFrame then
-                return 1
-            end
-            local info = UIPanelWindows[centerFrame:GetName()]
-            if info and info.area == "center" then
+            if AreaOf(GetCenterFrame()) == "center" then
                 return nil
             end
             return 1
         end
 
-        -- ShowUIPanel(frame) — UIParent.lua l.649-751, the left+center slice (pin §3 steps 1,3-5)
-        -- plus the native-center mode decision 0674 needed. Still skipped by scope: full-screen
-        -- (l.668-675, l.692-696 — no `full` row is registered; benilla's world map is a plain
-        -- toplevel, not a panel) and `doublewide` (l.707-710 — likewise none).
-        function ShowUIPanel(frame, force)
-            if not frame or frame:IsVisible() then
-                return
-            end
-
-            local info = UIPanelWindows[frame:GetName()]
-            -- l.655-657. Note the reference's own precedence: an UNREGISTERED frame is not gated
-            -- (the `info and` term), so a bare toplevel still shows with the menu up.
-            if not CanOpenPanels() and info and info.area ~= "center" then
-                return
-            end
-            if not info then
-                frame:Show()
-                return
-            end
-
-            -- UnitIsDead doesn't exist yet (pin §3) — guarded rather than assumed absent-forever.
+        -- Everything that can REFUSE an open, asked in the reference's own order (UIParent.lua
+        -- l.663-689). Answers false when the frame must not open. Not a pure predicate, and that
+        -- is the point: `force` is precisely the right to throw the incumbent out instead of being
+        -- turned away, so each refusal and its eviction are one decision and are written as one.
+        local function AdmitPanel(info, force)
+            -- A dead player gets only the windows that asked for it. UnitIsDead doesn't exist yet
+            -- (pin §3) — guarded rather than assumed absent-forever.
             if type(UnitIsDead) == "function" and UnitIsDead("player") and not info.whileDead then
-                return
+                return false
             end
-
-            -- l.668-675: a full-screen frame open ignores every non-full open request (`force`
-            -- evicts it instead). The world map is the only `full` row, so this reads: nothing opens
-            -- behind the map.
+            -- l.668-675: nothing opens behind a full-screen frame. The world map is the only
+            -- `full` row we register, so this reads: nothing opens behind the map.
             if GetFullScreenFrame() and info.area ~= "full" then
-                if force then
-                    SetFullScreenFrame(nil)
-                else
-                    return
+                if not force then
+                    return false
                 end
+                SetFullScreenFrame(nil)
             end
-
-            -- l.677-689: with a native-center frame open, only another center request gets through
-            -- — `force` evicts it instead of refusing. Redundant with the CanOpenPanels gate above
-            -- for every caller that doesn't force (the reference double-checks it too); kept because
-            -- it is the ONLY path that can displace the menu, and dropping it would silently turn
-            -- `force` into a no-op. No benilla caller passes `force` yet.
-            local centerFrame = GetCenterFrame()
-            if centerFrame then
-                local centerInfo = UIPanelWindows[centerFrame:GetName()]
-                if centerInfo and centerInfo.area == "center" and info.area ~= "center" then
-                    if force then
-                        SetCenterFrame(nil)
-                    else
-                        return
-                    end
+            -- l.677-689: with a native-center frame open, only another center request gets
+            -- through. Redundant with the caller's CanOpenPanels gate for anything that doesn't
+            -- force (the reference double-checks it too); kept because it is the ONLY path that
+            -- can displace the menu, and dropping it would silently turn `force` into a no-op.
+            -- No benilla caller passes `force` yet.
+            if AreaOf(GetCenterFrame()) == "center" and info.area ~= "center" then
+                if not force then
+                    return false
                 end
+                SetCenterFrame(nil)
             end
+            return true
+        end
 
-            -- l.692-696: full-screen frames just replace each other, and they take everything with
-            -- them on the way in.
-            if info.area == "full" then
-                CloseAllWindows()
-                SetFullScreenFrame(frame)
-                return
-            end
-
-            -- l.697-702: native-center frames just replace each other and take the screen —
-            -- everything else closes first. `skipSetPoint` is the load-bearing argument: the menu
-            -- keeps its own CENTER anchor instead of being dropped at the left-area seat.
-            if info.area == "center" then
-                CloseWindows()
-                CloseAllBags()
-                SetCenterFrame(frame, 1)
-                return
-            end
-
-            if info.area ~= "left" then
-                -- No full/doublewide row is registered — defensive fallback only.
-                frame:Show()
-                return
-            end
-
-            -- Try to put it on the left (l.719-723).
+        -- Seating a **left-area** panel (l.719-751). The left slot is what it wants; `pushable`
+        -- settles what happens to whoever is already sitting there. Read the comparisons as "the
+        -- higher number is the one that gets moved along" — and two zeroes will not move for each
+        -- other at all, which is what makes one NPC window replace another outright.
+        local function SeatLeftAreaPanel(frame, info)
             local leftFrame = GetLeftFrame()
             if not leftFrame then
                 SetLeftFrame(frame)
@@ -319,64 +287,101 @@
 
             local leftInfo = UIPanelWindows[leftFrame:GetName()]
             local centerFrame = GetCenterFrame()
-            if not centerFrame then
-                -- If neither is pushable, replace (l.729-732 — the gossip<->merchant case).
-                if leftInfo.pushable == 0 and info.pushable == 0 then
-                    SetLeftFrame(frame)
-                    return
-                end
-                -- Highest priority goes to center (l.735-741).
-                if leftInfo.pushable > info.pushable then
-                    MovePanelToCenter()
-                    SetLeftFrame(frame)
-                else
+            if centerFrame then
+                -- Both seats taken (l.744-751): outrank the center occupant and it slides back to
+                -- the left while we take center; otherwise settle for replacing the left one.
+                if info.pushable > UIPanelWindows[centerFrame:GetName()].pushable then
+                    MovePanelToLeft()
                     SetCenterFrame(frame)
+                else
+                    SetLeftFrame(frame)
                 end
-                return
-            end
-
-            -- Center is already taken too (l.744-751).
-            local centerInfo = UIPanelWindows[centerFrame:GetName()]
-            if info.pushable > centerInfo.pushable then
-                MovePanelToLeft()
-                SetCenterFrame(frame)
-            else
+            elseif leftInfo.pushable == 0 and info.pushable == 0 then
+                -- Neither will budge — two NPC sessions — so we replace it outright (l.729-732,
+                -- the gossip<->merchant case).
                 SetLeftFrame(frame)
+            elseif leftInfo.pushable > info.pushable then
+                -- The incumbent outranks us, so it is promoted to center and we take the left slot
+                -- it vacates (l.735-741 — highest priority goes to center).
+                MovePanelToCenter()
+                SetLeftFrame(frame)
+            else
+                SetCenterFrame(frame)
             end
         end
 
-        -- HideUIPanel(frame) — UIParent.lua l.754-786, v1 left+center slice (the real fn's
-        -- full-screen branch, l.759-763, is dropped: no full-screen row ships).
+        -- ShowUIPanel(frame) — UIParent.lua l.649-751, the left+center+full slice (pin §3 steps
+        -- 1,3-5, plus the native-center mode decision 0674 needed and the `full` slot the world
+        -- map took in 0203/0674). Still skipped by scope: `doublewide` (l.707-710 — no such row is
+        -- registered), which is why the last arm below is a bare Show.
+        --
+        -- Two questions, in order: may it open at all, and where does it sit.
+        function ShowUIPanel(frame, force)
+            if not frame or frame:IsVisible() then
+                return
+            end
+
+            local info = UIPanelWindows[frame:GetName()]
+            -- l.655-657. Note the reference's own precedence: an UNREGISTERED frame is not gated
+            -- (the `info and` term), so a bare toplevel still shows with the menu up. The gate is
+            -- asked unconditionally, because addons replace CanOpenPanels and expect to be asked.
+            local panelsAllowed = CanOpenPanels()
+            if not panelsAllowed and info and info.area ~= "center" then
+                return
+            end
+            if not info then
+                frame:Show()
+                return
+            end
+            if not AdmitPanel(info, force) then
+                return
+            end
+
+            if info.area == "full" then
+                -- l.692-696: full-screen frames just replace each other, and they take everything
+                -- else with them on the way in.
+                CloseAllWindows()
+                SetFullScreenFrame(frame)
+            elseif info.area == "center" then
+                -- l.697-702: native-center frames likewise replace each other and take the
+                -- screen. `skipSetPoint` is the load-bearing argument here — the menu keeps its
+                -- own CENTER anchor instead of being dropped at the left-area seat.
+                CloseWindows()
+                CloseAllBags()
+                SetCenterFrame(frame, 1)
+            elseif info.area == "left" then
+                SeatLeftAreaPanel(frame, info)
+            else
+                -- No `doublewide` row is registered — defensive fallback only.
+                frame:Show()
+            end
+        end
+
+        -- HideUIPanel(frame) — UIParent.lua l.754-786. Which seat is the frame sitting in? That is
+        -- the whole function: vacate that one. A frame in no seat at all was never this manager's
+        -- to place, so it is simply hidden.
         function HideUIPanel(frame)
             if not frame or not frame:IsShown() then
                 return
             end
 
-            -- l.759-763.
             if frame == GetFullScreenFrame() then
                 SetFullScreenFrame(nil)
-                return
-            end
-
-            if frame == GetCenterFrame() then
+            elseif frame == GetCenterFrame() then
                 SetCenterFrame(nil)
-                return
-            end
-
-            if frame == GetLeftFrame() then
-                local centerFrame = GetCenterFrame()
-                if centerFrame then
-                    local info = UIPanelWindows[centerFrame:GetName()]
-                    if info and info.area == "left" then
-                        MovePanelToLeft()
-                        return
-                    end
+            elseif frame == GetLeftFrame() then
+                -- l.777-782: a LEFT-area panel parked at center (it was pushed there) slides back
+                -- into the seat we are giving up, rather than being stranded beside an empty left
+                -- slot. A native-center frame stays where it is.
+                if AreaOf(GetCenterFrame()) == "left" then
+                    MovePanelToLeft()
+                else
+                    SetLeftFrame(nil)
                 end
-                SetLeftFrame(nil)
-                return
+            else
+                -- Seated nowhere: a plain toplevel, or an addon's frame we never placed.
+                frame:Hide()
             end
-
-            frame:Hide()
         end
 
         -- UISpecialFrames (UIParent.lua l.52-55) — **the addon's own ESC list**, and the reason
@@ -414,11 +419,10 @@
 
             HideUIPanel(leftFrame)
             HideUIPanel(fullScreenFrame)
-            if centerFrame then
-                local info = UIPanelWindows[centerFrame:GetName()]
-                if not info or info.area ~= "center" or not ignoreCenter then
-                    HideUIPanel(centerFrame)
-                end
+            -- `ignoreCenter` spares a NATIVE-center frame and nothing else: a left-area panel
+            -- merely parked at the center seat closes with the rest of them.
+            if centerFrame and not (ignoreCenter and AreaOf(centerFrame) == "center") then
+                HideUIPanel(centerFrame)
             end
 
             -- The special frames, the reference's own loop (l.947-954): a plain Hide, never
@@ -715,12 +719,12 @@
             end
         end
 
-        -- ── The inspect-cursor pair (ref UIParent.lua l.1805-1817, VERBATIM) ──────────────────
+        -- ── The inspect-cursor pair (ref UIParent.lua l.1805-1817) ────────────────────────────
         -- `CursorUpdate` is the ctrl-hover "can I inspect this?" cursor swap, and `CursorOnUpdate`
         -- is the OnUpdate wrapper that only re-runs it while the tooltip is still ours. Both are
         -- **FrameXML, not engine** (`reference/1.12-globals.tsv` marks them `framexml`, while
         -- `ResetCursor` and `ShowInspectCursor` beside them are `engine`) — so they are ours to
-        -- transcribe, and every piece they reach for already resolves here: `IsControlKeyDown`,
+        -- write, and every piece they reach for already resolves here: `IsControlKeyDown`,
         -- `ShowInspectCursor`, `ResetCursor` and `GameTooltip:IsOwned` are all present.
         --
         -- Two corpus addons call `CursorUpdate` (AdvancedTradeSkillWindow, WhoHas) and one calls
@@ -745,7 +749,9 @@
             end
         end
 
-        -- SetDesaturation(texture, desaturation) — ref UIParent.lua l.1499-1510, verbatim. The
+        -- SetDesaturation(texture, desaturation) — ref UIParent.lua l.1499-1510, plus two guards
+        -- it does not have: a nil texture, and a texture carrying no `SetDesaturated` method at
+        -- all (the reference calls it unconditionally, l.1501; ours cannot, see below). The
         -- reference itself has a no-shader fallback, and OURS IS ALWAYS THAT PATH: this engine has
         -- no SetDesaturated, so `shaderSupported` is false exactly as on a 1.12 card without the
         -- desaturation shader, and the grey comes from the ref's own vertex-colour branch. Written
@@ -767,7 +773,7 @@
         end
 
         -- ── The shared dialog IS the ref's StaticPopup engine (decision 0308 §3) ─────────────────
-        -- Transcribed from the patch-chain StaticPopup.lua (mpqx extraction, decision 0246):
+        -- Re-expressed from the patch-chain StaticPopup.lua (mpqx extraction, decision 0246):
         -- the StaticPopupDialogs registry + StaticPopup_Show(which, arg1, arg2) + the OnUpdate
         -- countdown/StartDelay machinery — the death arc's dialogs exercise nearly all of it, and
         -- StaticPopup_Show/StaticPopupDialogs are 1.14 addon-API surface (0068). v1 scope:
@@ -1201,61 +1207,84 @@
             end
         end
 
-        -- ── The shared frame-fade kit — ref UIParent.lua:1103-1219, transcribed VERBATIM (the
-        -- while-index iteration included; tinsert/tDeleteItem spelled as table.insert / the
-        -- remove loop). The ref drives UIFrameFadeUpdate from UIParent's OnUpdate; our driver is
-        -- the BenillaFadeDriver frame below. Callers: the quest detail write-on
-        -- (QuestFrame.xml) fades TextAlphaDependentFrame in over QUESTINFO_FADE_IN. ──────────────
+        -- ── The shared frame-fade kit — ref UIParent.lua:1103-1219 is the specification (the
+        -- function names are its published API and the arithmetic is the same lerp); the code is
+        -- ours. FADEFRAMES is a plain ARRAY walked by index rather than by `pairs`, because
+        -- UIFrameFadeUpdate removes from it mid-walk. The ref drives UIFrameFadeUpdate from
+        -- UIParent's OnUpdate; our driver is the BenillaFadeDriver frame below. Callers: the quest
+        -- detail write-on (QuestFrame.xml) fades TextAlphaDependentFrame in over
+        -- QUESTINFO_FADE_IN. ─────────────────────────────────────────────────────────────────────
         FADEFRAMES = {}
 
-        function UIFrameFadeRemoveFrame(frame)
-            local index = 1
+        -- Where `frame` sits in the fade list, searching from `from` onward, or nil. Three of the
+        -- verbs below ask exactly this question, and the reference spells the index walk out
+        -- longhand inside each of them.
+        local function FadeIndexOf(frame, from)
+            local index = from or 1
             while FADEFRAMES[index] do
                 if FADEFRAMES[index] == frame then
-                    table.remove(FADEFRAMES, index)
-                else
-                    index = index + 1
+                    return index
                 end
+                index = index + 1
+            end
+            return nil
+        end
+
+        function UIFrameFadeRemoveFrame(frame)
+            local index = FadeIndexOf(frame)
+            while index do
+                table.remove(FADEFRAMES, index)
+                -- Resume from the hole rather than from the start: a frame listed twice goes twice.
+                index = FadeIndexOf(frame, index)
             end
         end
 
+        -- Where each mode starts and ends when the caller doesn't say. The tests below are
+        -- `not fadeInfo.startAlpha`, so an explicit 0 — falsey in most languages, TRUTHY in Lua —
+        -- is the caller's and stands.
+        local FADE_ENDPOINTS = {
+            IN = { startAlpha = 0, endAlpha = 1.0 },
+            OUT = { startAlpha = 1.0, endAlpha = 0 },
+        }
+
         function UIFrameFade(frame, fadeInfo)
-            if not fadeInfo.mode then fadeInfo.mode = "IN" end
-            if fadeInfo.mode == "IN" then
-                if not fadeInfo.startAlpha then fadeInfo.startAlpha = 0 end
-                if not fadeInfo.endAlpha then fadeInfo.endAlpha = 1.0 end
-            elseif fadeInfo.mode == "OUT" then
-                if not fadeInfo.startAlpha then fadeInfo.startAlpha = 1.0 end
-                if not fadeInfo.endAlpha then fadeInfo.endAlpha = 0 end
+            if not fadeInfo.mode then
+                fadeInfo.mode = "IN"
+            end
+            local endpoints = FADE_ENDPOINTS[fadeInfo.mode]
+            if endpoints then
+                if not fadeInfo.startAlpha then fadeInfo.startAlpha = endpoints.startAlpha end
+                if not fadeInfo.endAlpha then fadeInfo.endAlpha = endpoints.endAlpha end
             end
             frame:SetAlpha(fadeInfo.startAlpha)
             frame.fadeInfo = fadeInfo
-            -- Already fading? Leave the running fade alone (the ref's early return).
-            local index = 1
-            while FADEFRAMES[index] do
-                if FADEFRAMES[index] == frame then return end
-                index = index + 1
+            -- Already in the list? The new info is installed above and takes over on the next
+            -- tick; the frame keeps its place instead of being listed twice (the ref's early
+            -- return).
+            if FadeIndexOf(frame) then
+                return
             end
             frame:Show()
             table.insert(FADEFRAMES, frame)
         end
 
+        -- The two directions are one call with the mode flipped; whatever endpoints the caller
+        -- leaves out, UIFrameFade fills in above.
+        local function FadeToMode(mode, frame, timeToFade, startAlpha, endAlpha)
+            UIFrameFade(frame, {
+                mode = mode,
+                timeToFade = timeToFade,
+                startAlpha = startAlpha,
+                endAlpha = endAlpha,
+            })
+        end
+
         function UIFrameFadeIn(frame, timeToFade, startAlpha, endAlpha)
-            local fadeInfo = {}
-            fadeInfo.mode = "IN"
-            fadeInfo.timeToFade = timeToFade
-            fadeInfo.startAlpha = startAlpha
-            fadeInfo.endAlpha = endAlpha
-            UIFrameFade(frame, fadeInfo)
+            FadeToMode("IN", frame, timeToFade, startAlpha, endAlpha)
         end
 
         function UIFrameFadeOut(frame, timeToFade, startAlpha, endAlpha)
-            local fadeInfo = {}
-            fadeInfo.mode = "OUT"
-            fadeInfo.timeToFade = timeToFade
-            fadeInfo.startAlpha = startAlpha
-            fadeInfo.endAlpha = endAlpha
-            UIFrameFade(frame, fadeInfo)
+            FadeToMode("OUT", frame, timeToFade, startAlpha, endAlpha)
         end
 
         function UIFrameFadeUpdate(elapsed)
@@ -1291,10 +1320,8 @@
         end
 
         function UIFrameIsFading(frame)
-            local index = 1
-            while FADEFRAMES[index] do
-                if FADEFRAMES[index] == frame then return 1 end
-                index = index + 1
+            if FadeIndexOf(frame) then
+                return 1
             end
             return nil
         end

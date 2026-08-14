@@ -230,7 +230,7 @@
         chatType("BATTLEGROUND",                         1,  93, 255, 127,   0)
         chatType("BATTLEGROUND_LEADER",                  0,  94, 255, 219, 183)
 
-        -- ── BenillaFCF: the FloatingChatFrame behaviors, transcribed (ref FloatingChatFrame.lua)
+        -- ── BenillaFCF: the FloatingChatFrame behaviors, re-expressed (ref FloatingChatFrame.lua)
         -- Quoted constants: CHAT_TAB_SHOW_DELAY=0.2, CHAT_FRAME_FADE_TIME=0.15,
         -- DEFAULT_CHATFRAME_ALPHA=0.25, CHAT_BUTTON_FLASH_TIME=0.5,
         -- MESSAGE_SCROLLBUTTON_INITIAL_DELAY=0, MESSAGE_SCROLLBUTTON_SCROLL_DELAY=0.05.
@@ -328,7 +328,7 @@
             BenillaFCF.flashLeft = 60
         end
 
-        -- PanelTemplates_TabResize(5, tab), transcribed: the ref sizes every docked tab to its
+        -- PanelTemplates_TabResize(5, tab), re-expressed: the ref sizes every docked tab to its
         -- label (FCF_DockUpdate) — middle slice = text width + 5, tab = middle + the two 16px
         -- caps; the flash/highlight bands follow the Left/Right pieces by anchor. The label
         -- width is host-measured (GetStringWidth), so early frames may see 0 — the OnUpdate
@@ -470,7 +470,7 @@
             end
         end
 
-        -- ── BenillaUIMenu: the 1.12 UIMenu kit, transcribed (ref UIMenu.lua — the chat menu's
+        -- ── BenillaUIMenu: the 1.12 UIMenu kit, re-expressed (ref UIMenu.lua — the chat menu's
         -- row engine: fixed 16px rows in a tooltip-backdrop box, a 2 s no-hover timeout that
         -- walks up parentMenu chains, nested submenus opened on row hover). Constants quoted.
         -- Scoped here because the chat menu is its only consumer; a second consumer graduates

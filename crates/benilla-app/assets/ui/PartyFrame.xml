@@ -1,10 +1,11 @@
 <Ui>
     <!--
         The party member frames + the group-invite popup (decision 0434 phase 3). Geometry, art
-        paths, behavior laws, and the popup entry are QUOTED from the reference client's own
-        FrameXML, extracted through the full MPQ patch chain (decision 0246; survey 2026-07-17):
+        paths and behavior laws are MEASURED against the reference client's own FrameXML, extracted
+        through the full MPQ patch chain (decision 0246; survey 2026-07-17):
         PartyFrame.xml, PartyFrameTemplates.xml, PartyMemberFrame.lua, StaticPopup.lua ("PARTY_INVITE"),
-        UIParent.lua (the PARTY_INVITE_REQUEST wiring). Data flow is ours: the app feeds
+        UIParent.lua (the PARTY_INVITE_REQUEST wiring) — the code below is our own. Data flow is
+        ours too: the app feeds
         party1..party4 unit snapshots + the PartyState roster (crates/benilla/src/ui_party.rs) and
         fires the PARTY_* events; the popup's Accept/Decline queue PartyRequests the app drains.
 
@@ -26,7 +27,7 @@
         DOUBLE-DECLINE, KEPT: the ref's popup calls DeclineGroup() in OnCancel AND again in OnHide
         (only OnAccept sets the inviteAccepted guard), so a clicked Decline sends two
         CMSG_GROUP_DECLINE. vmangos silently ignores the second (no pending invite -> early
-        return). Transcribed verbatim rather than "fixed" - the wire tolerates it and the guard's
+        return). Matched rather than "fixed" - the wire tolerates it and the guard's
         real job is the timeout/override/escape paths.
     -->
     <Script><![CDATA[
@@ -52,32 +53,59 @@
         NUM_RAID_GROUPS = 8
         MEMBERS_PER_RAID_GROUP = 5
 
-        -- StaticPopup entry, quoted from the ref's StaticPopup.lua (INVITATION =
-        -- "%s invites you to a group.", GlobalStrings:2586-area; sound + 60 s silent timeout +
-        -- whileDead + hideOnEscape are the ref's own fields).
+        -- ── The group-invite popup ────────────────────────────────────────────────────────────
+        -- The strings and the three flags are the reference's own (INVITATION = "%s invites you to
+        -- a group.", GlobalStrings:2586-area; a 60 s silent timeout, answerable while dead,
+        -- closable with ESC).
+        --
+        -- The whole of its behaviour turns on ONE latch, `inviteAccepted`, and the four hooks below
+        -- are just the four moments that read or write it. It lives on the registry entry rather
+        -- than in an upvalue here because that is where the reference keeps it and an addon
+        -- inspecting the dialog expects to find it there — which is why each hook goes back through
+        -- `StaticPopupDialogs["PARTY_INVITE"]` instead of closing over a local.
+        --
+        -- They are named rather than inlined so the entry below reads as the manifest it is: four
+        -- strings, three flags, four hooks.
+
+        -- Every showing starts unanswered — including a re-show of the same entry, which is what a
+        -- second invite arriving while the first is up does.
+        local function PartyInvite_OnShow()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
+        end
+
+        -- The only path that answers the server affirmatively, and the only one that latches.
+        local function PartyInvite_OnAccept()
+            AcceptGroup()
+            StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
+        end
+
+        local function PartyInvite_OnCancel()
+            DeclineGroup()
+        end
+
+        -- The catch-all. EVERY way this dialog leaves the screen lands here — Decline, the 60 s
+        -- timeout, ESC, and another dialog overriding it — and the latch is what tells the one
+        -- that already said yes from the four that never answered at all. A clicked Decline
+        -- therefore declines twice (OnCancel, then here); see DOUBLE-DECLINE in the header, which
+        -- is the reference's behaviour and the wire tolerates it.
+        local function PartyInvite_OnHide()
+            if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
+                DeclineGroup()
+            end
+        end
+
         StaticPopupDialogs["PARTY_INVITE"] = {
             text = INVITATION,
             button1 = ACCEPT,
             button2 = DECLINE,
             sound = "igPlayerInvite",
-            OnShow = function()
-                StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
-            end,
-            OnAccept = function()
-                AcceptGroup()
-                StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
-            end,
-            OnCancel = function()
-                DeclineGroup()
-            end,
-            OnHide = function()
-                if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
-                    DeclineGroup()
-                end
-            end,
             timeout = 60,
             whileDead = 1,
             hideOnEscape = 1,
+            OnShow = PartyInvite_OnShow,
+            OnAccept = PartyInvite_OnAccept,
+            OnCancel = PartyInvite_OnCancel,
+            OnHide = PartyInvite_OnHide,
         }
 
         -- ref PartyMemberFrame.lua's OnLoad: cache children, register, first paint.

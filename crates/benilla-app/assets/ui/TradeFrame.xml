@@ -23,6 +23,20 @@
     <Script><![CDATA[
         BENILLA_MAX_TRADE_ITEMS = 7    -- MAX_TRADE_ITEMS (ref TradeFrame.lua l.1)
 
+        -- One side's accept glow. A column's highlight and the enchant slot's below it are one
+        -- indicator in two frames — they light and drop together, never apart — so both the repaint
+        -- and TradeFrame_SetAcceptState go through here rather than each spelling out four calls.
+        -- The four frames are TradeHighlight{Player,Recipient}[Enchant], declared at the bottom.
+        local function setTradeGlow(column, enchantSlot, lit)
+            if lit then
+                column:Show()
+                enchantSlot:Show()
+            else
+                column:Hide()
+                enchantSlot:Hide()
+            end
+        end
+
         -- ── Load / event dispatch (ref TradeFrame_OnLoad l.4 / TradeFrame_OnEvent l.18) ───────────
         function TradeFrame_OnLoad()
             local frame = this
@@ -100,10 +114,10 @@
             -- Our gold is the editable input, reflected via PLAYER_TRADE_MONEY (not repainted here, so
             -- the repaint never clobbers mid-typing); only the partner's read-only gold repaints.
             BenillaMoney_Set("TradeRecipientMoneyFrame", GetTargetTradeMoney())
-            TradeHighlightPlayer:Hide()
-            TradeHighlightRecipient:Hide()
-            TradeHighlightPlayerEnchant:Hide()
-            TradeHighlightRecipientEnchant:Hide()
+            -- A repaint puts both glows down. TRADE_ACCEPT_UPDATE is the only thing that raises
+            -- them, so whatever is standing comes straight back on the next one.
+            setTradeGlow(TradeHighlightPlayer, TradeHighlightPlayerEnchant, false)
+            setTradeGlow(TradeHighlightRecipient, TradeHighlightRecipientEnchant, false)
         end
 
         -- One slot's paint, shared by both columns (ref TradeFrame_UpdatePlayerItem l.54 /
@@ -178,36 +192,36 @@
             end
         end
 
-        -- The accept glow (ref TradeFrame_SetAcceptState l.116): each side's column + enchant-slot
-        -- highlight tracks who has pressed Trade; our own accept disables the Trade button.
+        -- Who has pressed Trade (spec: ref TradeFrame_SetAcceptState l.116). The event carries BOTH
+        -- sides' states, so this is a straight repaint of two indicators rather than a toggle — and
+        -- our own half is kept on the frame, because the Cancel button below is the only reader of
+        -- whether there is an accept of ours to withdraw.
+        --
+        -- The extra thing our own accept does is lock the Trade button, so a standing accept cannot
+        -- be sent a second time; Cancel is what takes it back.
         function TradeFrame_SetAcceptState(playerState, targetState)
             TradeFrame.acceptState = playerState
-            if playerState == 1 then
-                TradeHighlightPlayer:Show()
-                TradeHighlightPlayerEnchant:Show()
+            local weAccepted = playerState == 1
+            setTradeGlow(TradeHighlightPlayer, TradeHighlightPlayerEnchant, weAccepted)
+            setTradeGlow(TradeHighlightRecipient, TradeHighlightRecipientEnchant, targetState == 1)
+            if weAccepted then
                 TradeFrameTradeButton:Disable()
             else
-                TradeHighlightPlayer:Hide()
-                TradeHighlightPlayerEnchant:Hide()
                 TradeFrameTradeButton:Enable()
-            end
-            if targetState == 1 then
-                TradeHighlightRecipient:Show()
-                TradeHighlightRecipientEnchant:Show()
-            else
-                TradeHighlightRecipient:Hide()
-                TradeHighlightRecipientEnchant:Hide()
             end
         end
 
-        -- Cancel (ref TradeFrameCancelButton_OnClick l.136): with our accept up, drop it (stay in the
-        -- trade); otherwise close the window (→ OnHide → CloseTrade).
+        -- Cancel is two verbs on one button (spec: ref TradeFrameCancelButton_OnClick l.136). With
+        -- an accept of ours standing it withdraws only THAT and the trade stays open — the button
+        -- is the only way back out of the lock above. With no accept up there is nothing to
+        -- withdraw, so it means "leave", and closing the window is what sends that (→ OnHide →
+        -- CloseTrade).
         function TradeFrameCancelButton_OnClick()
-            if TradeFrame.acceptState == 1 then
-                CancelTradeAccept()
-            else
+            if TradeFrame.acceptState ~= 1 then
                 HideUIPanel(TradeFrame)
+                return
             end
+            CancelTradeAccept()
         end
     ]]></Script>
 

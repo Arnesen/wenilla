@@ -1,9 +1,9 @@
 <Ui>
     <!--
-        benilla's crafting window (decision 0437 phase 2): the 1.12 `TradeSkillFrame`, transcribed from
+        benilla's crafting window (decision 0437 phase 2): the 1.12 `TradeSkillFrame`, re-expressed from
         the reference `Blizzard_TradeSkillUI.xml`/`.lua` (session scratchpad `ref-ui/`, decision 0246
         discipline — never committed) onto our own engine/feeds. Geometry/art-paths/structure below are
-        QUOTED from the ref (line citations inline); the Lua is transcribed logic turned onto benilla's
+        QUOTED from the ref (line citations inline); the Lua is the ref's logic turned onto benilla's
         Era API (`GetTradeSkillLine`/`GetNumTradeSkills`/`GetTradeSkillInfo`/reagents/tools/cooldown/
         `DoTradeSkill`/`CloseTradeSkill`, decision 0437's engine surface, built alongside this file).
 
@@ -43,7 +43,7 @@
              earlier revision named it an INTERIM pinned to the dispatch; folded back this session).
              `GetTradeSkillInfo`'s `skillType` is `"header"` for a group row (the created item's
              `(ItemClass, ItemSubClass)`, named from `ItemSubClass.dbc`, engine-sorted) — the ref's
-             header branch is restored below verbatim (ref l.118-127: `SetText`, the +/- fold icon +
+             header branch is restored below (ref l.118-127: `SetText`, the +/- fold icon +
              hover-glow swap on `isExpanded`, `TradeSkillTypeColor["header"]` now reachable) and so is
              `SetSelection`'s header branch (ref l.184-192: a header click folds its group and never
              selects). `Expand/CollapseTradeSkillSubClass` are real now (engine-side); the row
@@ -76,7 +76,7 @@
              the same frame (`ui_tradeskill.rs`'s `drain_trade_skill`) — so neither the dropdown click
              handlers nor the CollapseAll click below call `BenillaTradeSkillFrame_Update()` directly,
              matching the ref's own restraint (ref l.303-312/406-414 never do either).
-          2. THE SPELL-FOCUS TOOL NEVER REDDENS. `BuildColoredListString` (below) is transcribed
+          2. THE SPELL-FOCUS TOOL NEVER REDDENS. `BuildColoredListString` (below) is
              byte-faithful — it reds an unmet tool — but `GetTradeSkillTools`'s `hasTool` has no
              client-side proximity check yet (0437 INTERIM, pinned to the §5 dispatch), so v1 never
              actually reds a tool in practice. The util is ready for when the check lands.

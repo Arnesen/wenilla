@@ -1,6 +1,8 @@
 <!--
-    The HUD minimap cluster — transcribed from the 1.12 FrameXML Minimap.xml (decision 0203
-    phase 1). The <Minimap> widget itself is the engine-rendered map hole: benilla-ui carries its
+    The HUD minimap cluster — our own implementation of what the 1.12 FrameXML Minimap.xml
+    specifies (decision 0203 phase 1), which is cited throughout for the names, the geometry, the
+    art and the event wiring: that half is the API addons reposition and hook by name, and none of
+    it is ours to invent. The <Minimap> widget itself is the engine-rendered map hole: benilla-ui carries its
     rect + zoom, and the app (`minimap.rs`) fills it with the streamed tile window, the
     MinimapMask circle, and the player arrow; everything in THIS file is the chrome the reference
     authors around that hole, at the reference's own geometry and art.
@@ -34,69 +36,146 @@
             end
         end
 
-        -- ref-Minimap.lua Minimap_Update(), verbatim — the PVP tint rides GetZonePVPInfo
-        -- (decision 0287; closes the "zone PVP state we don't track yet" reduction that kept
-        -- the label gold), plus the ref's refresh-while-hovered tooltip block.
-        function Minimap_Update()
-            MinimapZoneText:SetText(GetMinimapZoneText());
-            local pvpType, factionName, isArena = GetZonePVPInfo();
-            if ( isArena ) then
-                MinimapZoneText:SetTextColor(1.0, 0.1, 0.1);
-            elseif ( pvpType == "friendly" ) then
-                MinimapZoneText:SetTextColor(0.1, 1.0, 0.1);
-            elseif ( pvpType == "hostile" ) then
-                MinimapZoneText:SetTextColor(1.0, 0.1, 0.1);
+        -- The zone label's tint, keyed by the zone's PvP disposition. Colours quoted from
+        -- ref-Minimap.lua (they are measurements of the real interface, not choices of ours); the
+        -- table is ours, because five branches that differ only in three floats want to be data.
+        local ZONE_PVP_TINT = {
+            friendly  = { r = 0.1, g = 1.0, b = 0.1 },
+            hostile   = { r = 1.0, g = 0.1, b = 0.1 },
+            contested = { r = 1.0, g = 0.7, b = 0 },
+        };
+
+        -- Every line of the zone tooltip is drawn the same way — plain white, nothing in the
+        -- right-hand column — so the stanza is written once here instead of once per line.
+        local function AddZoneTooltipLine(text)
+            GameTooltip:AddLine(text, "", 1.0, 1.0, 1.0);
+        end
+
+        -- The zone's "whose land is this" line, or nil for a zone that is nobody's (sanctuary, or
+        -- a disposition we don't recognise). Free-for-all is deliberately NOT decided here: the
+        -- two callers below reach it by genuinely different routes and have to keep doing so — see
+        -- the note in Minimap_Update.
+        local function ZoneTerritoryLine(pvpType, factionName)
+            if ( pvpType == "friendly" or pvpType == "hostile" ) then
+                return format(FACTION_CONTROLLED_TERRITORY, factionName);
             elseif ( pvpType == "contested" ) then
-                MinimapZoneText:SetTextColor(1.0, 0.7, 0);
+                return CONTESTED_TERRITORY;
+            end
+            return nil;
+        end
+
+        -- Our implementation of what ref-Minimap.lua's Minimap_Update() specifies: relabel the
+        -- minimap's zone line, tint it for the zone's PVP state (decision 0287 — GetZonePVPInfo
+        -- closes the "zone PVP state we don't track yet" reduction that kept the label gold), and
+        -- refresh the hover tooltip if — and only if — the cursor is already parked on the label,
+        -- so a zone change under the mouse updates what is on screen.
+        function Minimap_Update()
+            local zoneName = GetMinimapZoneText();
+            MinimapZoneText:SetText(zoneName);
+
+            local pvpType, factionName, isArena = GetZonePVPInfo();
+            -- An arena zone is free-for-all, so it wears the hostile red whatever the zone's own
+            -- type says; resolving that override after the lookup keeps it in one place. A zone
+            -- with no tint of its own (sanctuary, or a type we don't know) stays normal gold.
+            local tint = ZONE_PVP_TINT[pvpType];
+            if ( isArena ) then
+                tint = ZONE_PVP_TINT.hostile;
+            end
+            if ( tint ) then
+                MinimapZoneText:SetTextColor(tint.r, tint.g, tint.b);
             else
                 MinimapZoneText:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
             end
 
-            if ( GameTooltip:IsOwned(MinimapZoneTextButton) ) then
-                GameTooltip:SetOwner(MinimapZoneTextButton, "ANCHOR_LEFT");
-                GameTooltip:AddLine(GetMinimapZoneText(), "", 1.0, 1.0, 1.0);
-                if ( (pvpType == "friendly") or (pvpType == "hostile") ) then
-                    GameTooltip:AddLine(format(FACTION_CONTROLLED_TERRITORY, factionName), "", 1.0, 1.0, 1.0);
-                elseif ( pvpType == "contested" ) then
-                    GameTooltip:AddLine(CONTESTED_TERRITORY, "", 1.0, 1.0, 1.0);
-                elseif ( pvpType == "arena" ) then
-                    GameTooltip:AddLine(FREE_FOR_ALL_TERRITORY, "", 1.0, 1.0, 1.0);
-                end
-                GameTooltip:Show();
+            if ( not GameTooltip:IsOwned(MinimapZoneTextButton) ) then
+                return;
+            end
+            -- AT MOST ONE territory line on this path, and free-for-all is an ALTERNATIVE to the
+            -- faction line here, reached off `pvpType` rather than off `isArena` — so with the
+            -- live API (which never reports "arena" as a type) it never fires at all. That is the
+            -- reference's own asymmetry with MinimapZoneTextButton_OnEnter below, where the FFA
+            -- line is an EXTRA line gated on `isArena`. The two disagree, they are kept apart
+            -- deliberately, and converging them would be a behaviour change wearing a tidy-up's
+            -- clothes — which is why ZoneTerritoryLine stops short of this arm.
+            local territory = ZoneTerritoryLine(pvpType, factionName);
+            if ( pvpType == "arena" ) then
+                territory = FREE_FOR_ALL_TERRITORY;
+            end
+            GameTooltip:SetOwner(MinimapZoneTextButton, "ANCHOR_LEFT");
+            AddZoneTooltipLine(zoneName);
+            if ( territory ) then
+                AddZoneTooltipLine(territory);
+            end
+            GameTooltip:Show();
+        end
+
+        -- The zone label's own hover tooltip. Minimap_Update above refreshes this same tooltip in
+        -- place while the cursor is parked here, but the two are NOT one routine: this one adds
+        -- the free-for-all line as an EXTRA line gated on `isArena` (so an arena that is also
+        -- contested says both), while Minimap_Update reaches it off `pvpType == "arena"` INSTEAD
+        -- of the faction line. See the note there; the difference is the reference's, it is what
+        -- players actually see, and it is preserved on purpose.
+        function MinimapZoneTextButton_OnEnter()
+            GameTooltip:SetOwner(this, "ANCHOR_LEFT");
+            AddZoneTooltipLine(GetMinimapZoneText());
+
+            local pvpType, factionName, isArena = GetZonePVPInfo();
+            local territory = ZoneTerritoryLine(pvpType, factionName);
+            if ( territory ) then
+                AddZoneTooltipLine(territory);
+            end
+            if ( isArena ) then
+                AddZoneTooltipLine(FREE_FOR_ALL_TERRITORY);
+            end
+            GameTooltip:Show();
+        end
+
+        -- The end of the track a step of `step` is heading for. The two ends are not spelled the
+        -- same way — index 0 is a constant, the tight end rides however many levels the widget
+        -- carries — which is the only reason the +/- buttons need saying twice at all.
+        local function MinimapZoomLimit(step)
+            if ( step < 0 ) then
+                return 0;
+            end
+            return Minimap:GetZoomLevels() - 1;
+        end
+
+        -- One zoom step, either direction (ref-Minimap.lua's two click handlers say this twice in
+        -- mirror image; benilla says it once and hands it the direction). Three things happen: the
+        -- OPPOSITE button is re-armed, because a step this way always leaves room to come back;
+        -- the widget moves; and this button greys if the step landed on its own end of the track.
+        -- Note the limit is read AFTER the step, so a widget that clamps the move is still asked
+        -- where it actually ended up.
+        local function MinimapZoomStep(step, sound, button, opposite)
+            opposite:Enable();
+            PlaySound(sound);
+            Minimap:SetZoom(Minimap:GetZoom() + step);
+            if ( Minimap:GetZoom() == MinimapZoomLimit(step) ) then
+                button:Disable();
             end
         end
 
-        -- ref-Minimap.lua zoom clicks, verbatim: step the widget, re-arm both buttons, disable
-        -- the one at its bound.
         function Minimap_ZoomInClick()
-            MinimapZoomOut:Enable();
-            PlaySound("igMiniMapZoomIn");
-            Minimap:SetZoom(Minimap:GetZoom() + 1);
-            if ( Minimap:GetZoom() == (Minimap:GetZoomLevels() - 1) ) then
-                MinimapZoomIn:Disable();
-            end
+            MinimapZoomStep(1, "igMiniMapZoomIn", MinimapZoomIn, MinimapZoomOut);
         end
 
         function Minimap_ZoomOutClick()
-            MinimapZoomIn:Enable();
-            PlaySound("igMiniMapZoomOut");
-            Minimap:SetZoom(Minimap:GetZoom() - 1);
-            if ( Minimap:GetZoom() == 0 ) then
-                MinimapZoomOut:Disable();
-            end
+            MinimapZoomStep(-1, "igMiniMapZoomOut", MinimapZoomOut, MinimapZoomIn);
         end
 
-        -- ref-Minimap.lua Minimap_OnEvent's MINIMAP_UPDATE_ZOOM branch, verbatim: re-sync both
-        -- buttons to the CURRENT zoom. The app fires MINIMAP_UPDATE_ZOOM when the active zoom index
-        -- switches (stepping inside/outside flips to the other, independent level), so the +/- greying
-        -- follows the map you are actually on instead of the one you left.
+        -- Re-sync BOTH buttons to the zoom as it stands, which is what a click cannot do: a click
+        -- knows which way it moved, this does not. The app fires MINIMAP_UPDATE_ZOOM when the
+        -- active zoom index switches (stepping inside/outside flips to the other, independent
+        -- level), so the +/- greying follows the map you are actually on instead of the one you
+        -- left. Both ends are re-armed first and then at most one is greyed again — a widget with
+        -- a single zoom level sits on both ends at once, and the tight end wins that tie.
         function Minimap_UpdateZoom()
             MinimapZoomIn:Enable();
             MinimapZoomOut:Enable();
             local zoom = Minimap:GetZoom();
-            if ( zoom == (Minimap:GetZoomLevels() - 1) ) then
+            if ( zoom == MinimapZoomLimit(1) ) then
                 MinimapZoomIn:Disable();
-            elseif ( zoom == 0 ) then
+            elseif ( zoom == MinimapZoomLimit(-1) ) then
                 MinimapZoomOut:Disable();
             end
         end
@@ -125,6 +204,32 @@
         function MiniMapMailFrame_OnEnter()
             GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
             GameTooltip:SetText(HAVE_MAIL);
+        end
+
+        -- The tracking icon, same shape as the mail frame above. `GetTrackingTexture()` is the
+        -- WHOLE of the state: the icon path of the one tracking effect the aura rebuild diverts
+        -- out of the buff bar (`ui_aura`), or nil when nothing is tracked — so there is nothing to
+        -- reconcile, the answer is either an icon to wear or a reason to get out of the way.
+        -- PLAYER_AURAS_CHANGED is the only signal that can change it (ref-Minimap.xml l.109-174
+        -- registers nothing else on this frame). Note the icon is NOT cleared on the way out: the
+        -- frame is hidden, and the next tracking effect repaints it before it is seen again.
+        function MiniMapTrackingFrame_OnEvent()
+            if ( event ~= "PLAYER_AURAS_CHANGED" ) then
+                return;
+            end
+            local tracking = GetTrackingTexture();
+            if ( not tracking ) then
+                MiniMapTrackingFrame:Hide();
+                return;
+            end
+            MiniMapTrackingIcon:SetTexture(tracking);
+            MiniMapTrackingFrame:Show();
+        end
+
+        -- Hovering the icon names the tracking spell itself, which the tooltip knows how to build.
+        function MiniMapTrackingFrame_OnEnter()
+            GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
+            GameTooltip:SetTrackingSpell();
         end
 
     ]]></Script>
@@ -174,18 +279,7 @@
                 </Layers>
                 <Scripts>
                     <OnEnter>
-                        GameTooltip:SetOwner(this, "ANCHOR_LEFT");
-                        GameTooltip:AddLine(GetMinimapZoneText(), "", 1.0, 1.0, 1.0);
-                        local pvpType, factionName, isArena = GetZonePVPInfo();
-                        if ( (pvpType == "friendly") or (pvpType == "hostile") ) then
-                            GameTooltip:AddLine(format(FACTION_CONTROLLED_TERRITORY, factionName), "", 1.0, 1.0, 1.0);
-                        elseif ( pvpType == "contested" ) then
-                            GameTooltip:AddLine(CONTESTED_TERRITORY, "", 1.0, 1.0, 1.0);
-                        end
-                        if ( isArena ) then
-                            GameTooltip:AddLine(FREE_FOR_ALL_TERRITORY, "", 1.0, 1.0, 1.0);
-                        end
-                        GameTooltip:Show();
+                        MinimapZoneTextButton_OnEnter();
                     </OnEnter>
                     <OnLeave>
                         GameTooltip:Hide();
@@ -224,9 +318,10 @@
                     </Anchor>
                 </Anchors>
                 <Frames>
-                    <!-- ref-Minimap.xml l.109-174, verbatim — the tracking icon (the mail frame's
-                         nesting precedent: a child of the round Minimap WIDGET, whose TOPLEFT the
-                         (-15,0) anchor hangs off). Driven by PLAYER_AURAS_CHANGED →
+                    <!-- ref-Minimap.xml l.109-174 for the names, geometry and art — the tracking
+                         icon (the mail frame's nesting precedent: a child of the round Minimap
+                         WIDGET, whose TOPLEFT the (-15,0) anchor hangs off). Driven by
+                         PLAYER_AURAS_CHANGED →
                          GetTrackingTexture(): the reference's aura-cache rebuild diverts a
                          tracking-effect aura (Find Minerals, Track Beasts, …) out of the buff bar
                          into a tracking global this icon shows (byte-verified — the {0x2c,0x2d,0x97}
@@ -274,15 +369,7 @@
                                 this:RegisterEvent("PLAYER_AURAS_CHANGED");
                             </OnLoad>
                             <OnEvent>
-                                if ( event == "PLAYER_AURAS_CHANGED" ) then
-                                    local icon = GetTrackingTexture();
-                                    if ( icon ) then
-                                        MiniMapTrackingIcon:SetTexture(icon);
-                                        MiniMapTrackingFrame:Show();
-                                    else
-                                        MiniMapTrackingFrame:Hide();
-                                    end
-                                end
+                                MiniMapTrackingFrame_OnEvent();
                             </OnEvent>
                             <OnMouseUp>
                                 if ( arg1 == "RightButton" ) then
@@ -290,8 +377,7 @@
                                 end
                             </OnMouseUp>
                             <OnEnter>
-                                GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
-                                GameTooltip:SetTrackingSpell();
+                                MiniMapTrackingFrame_OnEnter();
                             </OnEnter>
                             <OnLeave>
                                 GameTooltip:Hide();

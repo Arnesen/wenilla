@@ -19,7 +19,10 @@
         Token slots (the commands and reactions) return the NAMES OF GLOBALS rather than values,
         which is the reference's own convention (`PetActionBarFrame.lua:98-104`): the name keys are
         GlobalStrings' (PET_ACTION_ATTACK, PET_MODE_DEFENSIVE, …), and the texture globals are
-        declared below, quoted verbatim from `PetActionBarFrame.lua:6-12`.
+        declared below. Both halves of that mapping are a contract we do not get to choose — the
+        names are what `ui_pet/bar.rs` hands back and the icons are real files in the install — so
+        the specification for them is `PetActionBarFrame.lua:6-12`; see the declaration's own note
+        for what IS ours about the layout.
 
         Geometry QUOTED from the ref (PetActionBarFrame.xml): frame 509x43; the two UI-PetBar shelf
         strips (256x44 at TOPLEFT with TexCoords 0..1 / 0.015625..0.359375, then 184x44 to its
@@ -61,16 +64,31 @@
     <Script><![CDATA[
         NUM_PET_ACTION_SLOTS = 10
 
-        -- The token textures, quoted verbatim from ref PetActionBarFrame.lua:6-12. They are
-        -- GLOBALS on purpose: `GetPetActionInfo` returns the NAME of one for a token slot, and the
-        -- paint below resolves it with getglobal, exactly as the reference does.
+        -- ── The token icons ───────────────────────────────────────────────────────────────────
+        --
+        -- These are GLOBALS on purpose, and the names are a contract, not a choice:
+        -- `GetPetActionInfo` hands back the NAME of one of them for a token slot and the paint
+        -- below resolves it with getglobal — the reference's own convention, and the one
+        -- `ui_pet/bar.rs` writes against. The icon paths are the reference's too; they name real
+        -- .blp files in the install, so there is nothing to choose there either.
+        --
+        -- What IS ours is the grouping. The bar's tokens come in two families and `ui_pet/bar.rs`
+        -- already separates them at the seam that names these — `command_token` (the orders you
+        -- give, keyed `PET_ACTION_*`) and `reaction_token` (the stance the pet holds, keyed
+        -- `PET_MODE_*`) — so they are laid out in those two families, in that file's own order,
+        -- and the two halves of the mapping read side by side. The reference keeps them in one
+        -- undifferentiated block, which hides the split.
+
+        -- Commands — the four orders, in `ui_pet/bar.rs`'s `command_token` order.
+        PET_WAIT_TEXTURE       = "Interface\\Icons\\Spell_Nature_TimeStop"
+        PET_FOLLOW_TEXTURE     = "Interface\\Icons\\Ability_Tracking"
+        PET_ATTACK_TEXTURE     = "Interface\\Icons\\Ability_GhoulFrenzy"
+        PET_DISMISS_TEXTURE    = "Interface\\Icons\\Spell_Shadow_Teleport"
+
+        -- Reactions — the three stances, in `ui_pet/bar.rs`'s `reaction_token` order.
+        PET_PASSIVE_TEXTURE    = "Interface\\Icons\\Ability_Seal"
         PET_DEFENSIVE_TEXTURE  = "Interface\\Icons\\Ability_Defend"
         PET_AGGRESSIVE_TEXTURE = "Interface\\Icons\\Ability_Racial_BloodRage"
-        PET_PASSIVE_TEXTURE    = "Interface\\Icons\\Ability_Seal"
-        PET_ATTACK_TEXTURE     = "Interface\\Icons\\Ability_GhoulFrenzy"
-        PET_FOLLOW_TEXTURE     = "Interface\\Icons\\Ability_Tracking"
-        PET_WAIT_TEXTURE       = "Interface\\Icons\\Spell_Nature_TimeStop"
-        PET_DISMISS_TEXTURE    = "Interface\\Icons\\Spell_Shadow_Teleport"
 
         -- ── The autocast sparkle ──────────────────────────────────────────────────────────────
         --

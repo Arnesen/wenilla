@@ -1,18 +1,20 @@
 <Ui>
     <!--
-        The cast bar - the 1.12 CastingBarFrame, transcribed from the extracted reference
-        (Interface\FrameXML\CastingBarFrame.xml/.lua, mpqx; decision 0137 phase 1). Geometry,
-        textures, colors, and every timing constant are the reference's own. Driven by the
-        SPELLCAST_* events crate::ui_cast fires off the wire (START name,ms / STOP / FAILED /
-        INTERRUPTED / DELAYED / CHANNEL_START ms,name / CHANNEL_UPDATE ms / CHANNEL_STOP).
+        The cast bar — benilla's own implementation of the 1.12 CastingBarFrame contract. The
+        extracted reference (Interface\FrameXML\CastingBarFrame.xml/.lua, mpqx; decision 0137
+        phase 1) is the SPECIFICATION: geometry, textures, colors, and every timing constant are
+        read off it, and the observable lifecycle below is the one it defines. The code is ours.
+        Driven by the SPELLCAST_* events crate::ui_cast fires off the wire (START name,ms / STOP /
+        FAILED / INTERRUPTED / DELAYED / CHANNEL_START ms,name / CHANNEL_UPDATE ms / CHANNEL_STOP).
 
         The reference's globals (CastingBarText/Spark/Flash) are named regions, so they publish as
-        globals here exactly as they do there; `this` is the firing frame (RF-0025). Departures
-        from the reference .lua: its dead code (`CastingBarFrameStatusBar = CastingBarFrame`, a
-        self-alias — we just use the frame; the `if not this:IsVisible() then this:Hide() end`
-        no-op guard at the top of the STOP branch; the two write-only `this.mode` stores nothing
-        reads), and the flash/fade steps normalized to the reference tick rate (the
-        CASTING_BAR_REF_TICK comment below — decision 0454).
+        globals here exactly as they do there; `this` is the firing frame (RF-0025), and every
+        handler below reads it once into a named local rather than threading the global through a
+        dozen method calls. Deliberate departures from the specification's own .lua: its dead code
+        (the `if not this:IsVisible() then this:Hide() end` no-op guard at the head of the STOP
+        branch; the two write-only `this.mode` stores nothing reads), and the flash/fade steps
+        normalized to the reference tick rate (the CASTING_BAR_REF_TICK comment below —
+        decision 0454).
 
         SPELLCAST_DELAYED is live: SMSG_SPELL_DELAYED (pushback on taking a hit) is decoded and fed,
         so a hit slides the bar's window out instead of letting it finish early (decision 0256).
@@ -41,152 +43,193 @@
         FAILED = FAILED or "Failed"
         INTERRUPTED = INTERRUPTED or "Interrupted"
 
+        -- THE BAR'S WHOLE VOCABULARY, one entry per wire event, each taking the frame. OnLoad
+        -- registers this table's keys and OnEvent looks the incoming event up in it, so the set
+        -- the bar LISTENS for and the set it can ANSWER are the same set by construction — there
+        -- is no second list to fall out of step with. (The reference spells both halves out: eight
+        -- RegisterEvent calls, then a sixty-line if-chain testing the same eight strings back.)
+        local castingBarEvent = {}
+
+        -- Seat the fill at `value` and ride the spark on its leading edge. The bar is 195px wide,
+        -- so a fraction of `span` scales straight to a pixel offset from the frame's LEFT. A cast
+        -- and a channel differ only in which value and which span they hand in.
+        local function castingBarTrack(bar, value, span)
+            bar:SetValue(value)
+            CastingBarFlash:Hide()
+            local sparkPosition = ((value - bar.startTime) / span) * 195
+            -- Pushback slides startTime PAST the wall clock, so a cast really can sit before its
+            -- own window's start for a frame or two. (A channel cannot — its value counts down
+            -- from the far end and stops at startTime — so here the clamp is dead weight rather
+            -- than a change of behaviour.)
+            if sparkPosition < 0 then
+                sparkPosition = 0
+            end
+            CastingBarSpark:SetPoint("CENTER", CastingBarFrame, "LEFT", sparkPosition, 2)
+        end
+
+        -- A cast opens: orange, a full window anchored on the clock, the spark at the left edge.
+        castingBarEvent.SPELLCAST_START = function(bar)
+            bar:SetStatusBarColor(1.0, 0.7, 0.0)
+            CastingBarSpark:Show()
+            bar.startTime = GetTime()
+            bar.maxValue = bar.startTime + (arg2 / 1000)
+            bar:SetMinMaxValues(bar.startTime, bar.maxValue)
+            bar:SetValue(bar.startTime)
+            CastingBarText:SetText(arg1)
+            bar:SetAlpha(1.0)
+            bar.holdTime = 0
+            bar.casting = 1
+            bar.fadeOut = nil
+            bar:Show()
+        end
+
+        -- A channel opens. Its args are START's the other way round — milliseconds first, then the
+        -- name — and its fill DRAINS, so the bar is seated at the far end and walks back.
+        castingBarEvent.SPELLCAST_CHANNEL_START = function(bar)
+            bar:SetStatusBarColor(1.0, 0.7, 0.0)
+            CastingBarSpark:Show()
+            bar.maxValue = 1
+            bar.startTime = GetTime()
+            bar.endTime = bar.startTime + (arg1 / 1000)
+            bar.duration = arg1 / 1000
+            bar:SetMinMaxValues(bar.startTime, bar.endTime)
+            bar:SetValue(bar.endTime)
+            CastingBarText:SetText(arg2)
+            bar:SetAlpha(1.0)
+            bar.holdTime = 0
+            bar.casting = nil
+            bar.channeling = 1
+            bar.fadeOut = nil
+            bar:Show()
+        end
+
+        -- The server's mid-channel correction: the window keeps its LENGTH and is re-anchored to
+        -- end arg1 ms from now, so a pushback eats into what is left rather than extending it.
+        castingBarEvent.SPELLCAST_CHANNEL_UPDATE = function(bar)
+            if not bar:IsShown() then
+                return
+            end
+            local span = bar.endTime - bar.startTime
+            bar.endTime = GetTime() + (arg1 / 1000)
+            bar.startTime = bar.endTime - span
+            bar:SetMinMaxValues(bar.startTime, bar.endTime)
+        end
+
+        -- Pushback on taking a hit (SMSG_SPELL_DELAYED, decision 0256): BOTH ends of the window
+        -- slide out by arg1 ms, so the cast has that much longer to run and the spark jumps back.
+        -- A hit never cancels the bar.
+        castingBarEvent.SPELLCAST_DELAYED = function(bar)
+            if not bar:IsShown() then
+                return
+            end
+            local pushback = arg1 / 1000
+            bar.startTime = bar.startTime + pushback
+            bar.maxValue = bar.maxValue + pushback
+            bar:SetMinMaxValues(bar.startTime, bar.maxValue)
+        end
+
+        -- The cast landed, or a channel ran its course: green, full, and the completion bloom
+        -- armed at alpha 0 for OnUpdate to ramp. `flag` names the one field the event clears,
+        -- which is the only thing that separates the two of them.
+        local function castingBarFinished(bar, flag)
+            if not bar:IsShown() then
+                return
+            end
+            bar:SetValue(bar.maxValue)
+            bar:SetStatusBarColor(0.0, 1.0, 0.0)
+            CastingBarSpark:Hide()
+            CastingBarFlash:SetAlpha(0.0)
+            CastingBarFlash:Show()
+            bar[flag] = nil
+            bar.flash = 1
+            bar.fadeOut = 1
+        end
+        castingBarEvent.SPELLCAST_STOP = function(bar) castingBarFinished(bar, "casting") end
+        castingBarEvent.SPELLCAST_CHANNEL_STOP = function(bar) castingBarFinished(bar, "channeling") end
+
+        -- The cast did NOT land: red, the reason where the spell's name was, and held opaque for
+        -- CASTING_BAR_HOLD_TIME before the fade starts — no completion bloom. A channel is never
+        -- ended this way (the server closes one with CHANNEL_STOP), so a live channel ignores both.
+        local function castingBarAborted(bar, reason)
+            if not bar:IsShown() or bar.channeling then
+                return
+            end
+            bar:SetValue(bar.maxValue)
+            bar:SetStatusBarColor(1.0, 0.0, 0.0)
+            CastingBarSpark:Hide()
+            CastingBarText:SetText(reason)
+            bar.casting = nil
+            bar.fadeOut = 1
+            bar.holdTime = GetTime() + CASTING_BAR_HOLD_TIME
+        end
+        castingBarEvent.SPELLCAST_FAILED = function(bar) castingBarAborted(bar, FAILED) end
+        castingBarEvent.SPELLCAST_INTERRUPTED = function(bar) castingBarAborted(bar, INTERRUPTED) end
+
         function CastingBarFrame_OnLoad()
-            this:RegisterEvent("SPELLCAST_START")
-            this:RegisterEvent("SPELLCAST_STOP")
-            this:RegisterEvent("SPELLCAST_FAILED")
-            this:RegisterEvent("SPELLCAST_INTERRUPTED")
-            this:RegisterEvent("SPELLCAST_DELAYED")
-            this:RegisterEvent("SPELLCAST_CHANNEL_START")
-            this:RegisterEvent("SPELLCAST_CHANNEL_UPDATE")
-            this:RegisterEvent("SPELLCAST_CHANNEL_STOP")
-            this.casting = nil
-            this.holdTime = 0
-            -- The ref's own last line of this function (`CastingBarFrame.lua:16`), and the one
-            -- line of it we dropped: a plain alias global. `CastingBarFrame` IS the StatusBar in
-            -- 1.12 — there is no separate child frame — so the reference publishes the name an
-            -- addon would look for, and then uses it itself for the rest of the file.
+            local bar = this
+            for spellcast in pairs(castingBarEvent) do
+                bar:RegisterEvent(spellcast)
+            end
+            bar.casting = nil
+            bar.holdTime = 0
+            -- The alias global the reference publishes at the end of its own OnLoad
+            -- (`CastingBarFrame.lua:16`). `CastingBarFrame` IS the StatusBar in 1.12 — there is no
+            -- separate child frame — so the name an addon reaches for has to resolve to the frame
+            -- itself.
             --
             -- 11 corpus addons index `CastingBarFrameStatusBar`, and it was the largest single
-            -- name in the whole session-start `attempt to index global` row. Nothing warned:
-            -- a line dropped INSIDE a function we otherwise transcribed verbatim is invisible to
-            -- every instrument here. `framexml-transcription-diff.py` compares elements and
-            -- handlers, not function bodies, and would not even pair these two files (ours is
-            -- CastingBar.xml, the reference's is CastingBarFrame.xml).
-            CastingBarFrameStatusBar = CastingBarFrame
-            this:Hide()
+            -- name in the whole session-start `attempt to index global` row. It went missing here
+            -- once and nothing warned: a line dropped from INSIDE a function is invisible to every
+            -- instrument we have. `framexml-transcription-diff.py` compares elements and handlers,
+            -- not function bodies, and would not even pair these two files (ours is CastingBar.xml,
+            -- the reference's is CastingBarFrame.xml).
+            CastingBarFrameStatusBar = bar
+            bar:Hide()
         end
 
         function CastingBarFrame_OnEvent()
-            if event == "SPELLCAST_START" then
-                this:SetStatusBarColor(1.0, 0.7, 0.0)
-                CastingBarSpark:Show()
-                this.startTime = GetTime()
-                this.maxValue = this.startTime + (arg2 / 1000)
-                this:SetMinMaxValues(this.startTime, this.maxValue)
-                this:SetValue(this.startTime)
-                CastingBarText:SetText(arg1)
-                this:SetAlpha(1.0)
-                this.holdTime = 0
-                this.casting = 1
-                this.fadeOut = nil
-                this:Show()
-            elseif event == "SPELLCAST_STOP" or event == "SPELLCAST_CHANNEL_STOP" then
-                if this:IsShown() then
-                    this:SetValue(this.maxValue)
-                    this:SetStatusBarColor(0.0, 1.0, 0.0)
-                    CastingBarSpark:Hide()
-                    CastingBarFlash:SetAlpha(0.0)
-                    CastingBarFlash:Show()
-                    if event == "SPELLCAST_STOP" then
-                        this.casting = nil
-                    else
-                        this.channeling = nil
-                    end
-                    this.flash = 1
-                    this.fadeOut = 1
-                end
-            elseif event == "SPELLCAST_FAILED" or event == "SPELLCAST_INTERRUPTED" then
-                if this:IsShown() and not this.channeling then
-                    this:SetValue(this.maxValue)
-                    this:SetStatusBarColor(1.0, 0.0, 0.0)
-                    CastingBarSpark:Hide()
-                    if event == "SPELLCAST_FAILED" then
-                        CastingBarText:SetText(FAILED)
-                    else
-                        CastingBarText:SetText(INTERRUPTED)
-                    end
-                    this.casting = nil
-                    this.fadeOut = 1
-                    this.holdTime = GetTime() + CASTING_BAR_HOLD_TIME
-                end
-            elseif event == "SPELLCAST_DELAYED" then
-                if this:IsShown() then
-                    this.startTime = this.startTime + (arg1 / 1000)
-                    this.maxValue = this.maxValue + (arg1 / 1000)
-                    this:SetMinMaxValues(this.startTime, this.maxValue)
-                end
-            elseif event == "SPELLCAST_CHANNEL_START" then
-                this:SetStatusBarColor(1.0, 0.7, 0.0)
-                CastingBarSpark:Show()
-                this.maxValue = 1
-                this.startTime = GetTime()
-                this.endTime = this.startTime + (arg1 / 1000)
-                this.duration = arg1 / 1000
-                this:SetMinMaxValues(this.startTime, this.endTime)
-                this:SetValue(this.endTime)
-                CastingBarText:SetText(arg2)
-                this:SetAlpha(1.0)
-                this.holdTime = 0
-                this.casting = nil
-                this.channeling = 1
-                this.fadeOut = nil
-                this:Show()
-            elseif event == "SPELLCAST_CHANNEL_UPDATE" then
-                if this:IsShown() then
-                    local origDuration = this.endTime - this.startTime
-                    this.endTime = GetTime() + (arg1 / 1000)
-                    this.startTime = this.endTime - origDuration
-                    this:SetMinMaxValues(this.startTime, this.endTime)
-                end
+            local handle = castingBarEvent[event]
+            if handle then
+                handle(this)
             end
         end
 
         function CastingBarFrame_OnUpdate()
-            if this.casting then
-                local status = GetTime()
-                if status > this.maxValue then
-                    status = this.maxValue
+            local bar = this
+            if bar.casting then
+                -- The fill IS the wall clock, pinned at the window's end once the cast is spent.
+                local now = GetTime()
+                if now > bar.maxValue then
+                    now = bar.maxValue
                 end
-                this:SetValue(status)
-                CastingBarFlash:Hide()
-                local sparkPosition = ((status - this.startTime) / (this.maxValue - this.startTime)) * 195
-                if sparkPosition < 0 then
-                    sparkPosition = 0
-                end
-                CastingBarSpark:SetPoint("CENTER", CastingBarFrame, "LEFT", sparkPosition, 2)
-            elseif this.channeling then
-                local time = GetTime()
-                if time > this.endTime then
-                    time = this.endTime
-                end
-                if time == this.endTime then
-                    this.channeling = nil
-                    this.fadeOut = 1
+                castingBarTrack(bar, now, bar.maxValue - bar.startTime)
+            elseif bar.channeling then
+                local now = GetTime()
+                if now >= bar.endTime then
+                    bar.channeling = nil
+                    bar.fadeOut = 1
                     return
                 end
-                local barValue = this.startTime + (this.endTime - time)
-                this:SetValue(barValue)
-                CastingBarFlash:Hide()
-                local sparkPosition = ((barValue - this.startTime) / (this.endTime - this.startTime)) * 195
-                CastingBarSpark:SetPoint("CENTER", CastingBarFrame, "LEFT", sparkPosition, 2)
-            elseif GetTime() < this.holdTime then
+                -- A channel drains: the value is the window's start plus what is LEFT of it, so
+                -- the fill empties from full instead of filling from empty.
+                castingBarTrack(bar, bar.startTime + (bar.endTime - now), bar.endTime - bar.startTime)
+            elseif GetTime() < bar.holdTime then
                 return
-            elseif this.flash then
+            elseif bar.flash then
                 local alpha = CastingBarFlash:GetAlpha() + CASTING_BAR_FLASH_STEP * (arg1 * CASTING_BAR_REF_TICK)
                 if alpha < 1 then
                     CastingBarFlash:SetAlpha(alpha)
                 else
                     CastingBarFlash:SetAlpha(1.0)
-                    this.flash = nil
+                    bar.flash = nil
                 end
-            elseif this.fadeOut then
-                local alpha = this:GetAlpha() - CASTING_BAR_ALPHA_STEP * (arg1 * CASTING_BAR_REF_TICK)
+            elseif bar.fadeOut then
+                local alpha = bar:GetAlpha() - CASTING_BAR_ALPHA_STEP * (arg1 * CASTING_BAR_REF_TICK)
                 if alpha > 0 then
-                    this:SetAlpha(alpha)
+                    bar:SetAlpha(alpha)
                 else
-                    this.fadeOut = nil
-                    this:Hide()
+                    bar.fadeOut = nil
+                    bar:Hide()
                 end
             end
         end

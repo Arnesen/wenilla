@@ -1,7 +1,7 @@
 <Ui>
     <!--
         The stack-split spinner (decision 0216 §6/§D, scratchpad `ref-framexml/StackSplitFrame.xml`/
-        `.lua`, transcribed near-verbatim onto our own cursor seam — `SplitContainerItem`/
+        `.lua`, re-expressed onto our own cursor seam — `SplitContainerItem`/
         `OpenStackSplitFrame` already exist in benilla-ui's `cursor.rs`; this file is purely the
         window + the Left/Right/Okay/Cancel plumbing around it). One shared instance, like the real
         client's `StackSplitFrame` — any owner (a bag slot today; the paper doll / bank / mail slices

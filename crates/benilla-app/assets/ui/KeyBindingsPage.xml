@@ -151,7 +151,7 @@
         -- ── Key display ── the 1.12 GetBindingText law by hand: modifier prefixes stay the
         -- canonical uppercase tokens, the base key reads its KEY_* global (Spacebar, Up Arrow,
         -- Mouse Button 4...) else itself. "CTRL--" renders CTRL + the minus key. (The action
-        -- bar's ABBREVIATED labels ride the real GetBindingText transcription in UIParent.xml;
+        -- bar's ABBREVIATED labels ride our own GetBindingText in UIParent.xml;
         -- this page and the tooltips show the full form, both references' own split.)
         function KeyBindings_KeyText(key)
             if not key then

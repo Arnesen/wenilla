@@ -1,12 +1,16 @@
 <Ui>
     <!--
-        benilla's Reputation tab: the 1.12 `ReputationFrame`, transcribed from the reference
-        FrameXML `ReputationFrame.{xml,lua}` onto our own engine and feeds. Every geometry number,
-        art path and TexCoord below is QUOTED from the reference with its line cite inline (cites
-        read `ref l.N` into `ReputationFrame.xml`, `ref-lua l.N` into `ReputationFrame.lua`); the
-        Lua is transcribed logic turned onto benilla's Era API — the twelve reputation globals of
+        benilla's Reputation tab: our own build of the 1.12 `ReputationFrame`. The reference
+        FrameXML `ReputationFrame.{xml,lua}` is the SPECIFICATION throughout — what the page must
+        look like and do — and it is cited line by line at every site (cites read `ref l.N` into
+        `ReputationFrame.xml`, `ref-lua l.N` into `ReputationFrame.lua`). Every geometry number, art
+        path and TexCoord below is QUOTED from it, because those are the client's facts and there is
+        no other value they could take; the Lua is ours, written against that specification and onto
+        benilla's Era API — the twelve reputation globals of
         `crates/benilla-ui/src/script/reputation.rs`, whose module doc is the display law this file
-        paints, over `crates/benilla-app/src/ui_reputation.rs`'s feed.
+        paints, over `crates/benilla-app/src/ui_reputation.rs`'s feed. Where a line still reads
+        exactly like the reference's it is because the frame names and the API are the
+        addon-visible contract and neither is ours to vary.
 
         A CHILD PAGE of `CharacterFrame` (ref l.211: `parent="CharacterFrame"`, `id="3"`), shown and
         hidden by `CharacterFrame_ShowSubFrame` — but a SEPARATE top-level file, the SkillFrame.xml /
@@ -160,39 +164,155 @@
             return getglobal("FACTION_STANDING_LABEL" .. standingID) or ""
         end
 
-        -- Fill the detail popup for the row at `factionIndex` — ref-lua l.106-133, split out of
-        -- the update loop only so that function stays readable; the body is the reference's,
-        -- branch for branch. Called only when the popup is up AND this row is the selected one.
-        function BenillaReputationDetail_Fill(factionIndex, name, description, atWarWith, canToggleAtWar, isWatched)
-            ReputationDetailFactionName:SetText(name)
-            ReputationDetailFactionDescription:SetText(description)
-            if atWarWith then
-                ReputationDetailAtWarCheckBox:SetChecked(1)
+        -- A checkbox takes the client's 1/nil rather than a boolean, and every box on this page is
+        -- driven straight off a flag out of the faction tuple — so one verb, not an if/else pair
+        -- per box.
+        function BenillaReputation_SetBoxChecked(box, on)
+            box:SetChecked(on and 1 or nil)
+        end
+
+        -- The selection glow is a PAIR of textures, because the row's frame art is two pieces
+        -- (`$parentHighlight1` reaches back over the name, `2` caps the bar's right end). They are
+        -- always raised and dropped together, from three places: the update below, and the row's
+        -- own OnEnter/OnLeave.
+        function BenillaReputationBar_SetGlow(barName, lit)
+            local left, right = getglobal(barName .. "Highlight1"), getglobal(barName .. "Highlight2")
+            if lit then
+                left:Show()
+                right:Show()
             else
-                ReputationDetailAtWarCheckBox:SetChecked(nil)
-            end
-            if canToggleAtWar then
-                ReputationDetailAtWarCheckBox:Enable()
-                ReputationDetailAtWarCheckBoxText:SetTextColor(RED_FONT_COLOR.r, RED_FONT_COLOR.g, RED_FONT_COLOR.b)
-            else
-                ReputationDetailAtWarCheckBox:Disable()
-                ReputationDetailAtWarCheckBoxText:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
-            end
-            if IsFactionInactive(factionIndex) then
-                ReputationDetailInactiveCheckBox:SetChecked(1)
-            else
-                ReputationDetailInactiveCheckBox:SetChecked(nil)
-            end
-            if isWatched then
-                ReputationDetailMainScreenCheckBox:SetChecked(1)
-            else
-                ReputationDetailMainScreenCheckBox:SetChecked(nil)
+                left:Hide()
+                right:Hide()
             end
         end
 
-        -- The list page (ref-lua ReputationFrame_Update, l.32-149) — transcribed whole, onto the
-        -- house faux-scroll kit and with the reference's own unread `rightBarTexture` local dropped
-        -- (this file's header comment, deviation 6).
+        -- Fill the detail popup for the row at `factionIndex` (ref-lua l.106-133 is the
+        -- specification). Called only when the popup is up AND this row is the selected one.
+        -- Everything it touches is a `ReputationDetail*` widget, which is the addon-visible name
+        -- and so not ours to vary; what IS ours is that the three tick states are one verb and the
+        -- at-war label's colour is written once instead of once per arm.
+        function BenillaReputationDetail_Fill(factionIndex, name, description, atWarWith, canToggleAtWar, isWatched)
+            ReputationDetailFactionName:SetText(name)
+            ReputationDetailFactionDescription:SetText(description)
+            BenillaReputation_SetBoxChecked(ReputationDetailAtWarCheckBox, atWarWith)
+            -- A peace-forced faction cannot be fought, so its box is dead and the label greys off
+            -- the angry red to say so.
+            local label = GRAY_FONT_COLOR
+            if canToggleAtWar then
+                label = RED_FONT_COLOR
+                ReputationDetailAtWarCheckBox:Enable()
+            else
+                ReputationDetailAtWarCheckBox:Disable()
+            end
+            ReputationDetailAtWarCheckBoxText:SetTextColor(label.r, label.g, label.b)
+            BenillaReputation_SetBoxChecked(ReputationDetailInactiveCheckBox, IsFactionInactive(factionIndex))
+            BenillaReputation_SetBoxChecked(ReputationDetailMainScreenCheckBox, isWatched)
+        end
+
+        -- A row SLOT is a pair of twins on one line — the header BUTTON `ReputationHeader<i>` and
+        -- the faction STATUSBAR `ReputationBar<i>` with all its furniture — of which exactly one is
+        -- ever up. The two verbs below cover every state a slot can be in (a header, a faction, or
+        -- nothing at all), and each raises the twin it wants and drops the other, so no caller has
+        -- to remember the pairing.
+
+        -- Slot `i` has nothing to hold: both twins go dark (ref-lua l.141-143).
+        function BenillaReputationSlot_Clear(i)
+            getglobal("ReputationHeader" .. i):Hide()
+            getglobal("ReputationBar" .. i):Hide()
+        end
+
+        -- Slot `i` holds the visible row at `factionIndex`. Split out of the update loop so that
+        -- loop is about the SCROLL WINDOW and this is about ONE ROW; the eleven-wide faction tuple
+        -- then has exactly one reader in the file. ref-lua l.51-139 is the specification, and the
+        -- reference's own unread `rightBarTexture` local is not carried (this file's header
+        -- comment, deviation 6).
+        function BenillaReputationSlot_Paint(i, factionIndex, gender)
+            local bar = getglobal("ReputationBar" .. i)
+            local header = getglobal("ReputationHeader" .. i)
+            local check = getglobal("ReputationBar" .. i .. "Check")
+            local name, description, standingID, barMin, barMax, barValue, atWarWith,
+                canToggleAtWar, isHeader, isCollapsed, isWatched = GetFactionInfo(factionIndex)
+
+            if isHeader then
+                -- A GROUP HEADER: the group's name, the fold icon its state calls for, and the
+                -- visible index a click on it folds by. The icon says what the click WILL do — an
+                -- open group offers the minus that shuts it, a shut one the plus that opens it.
+                local foldIcon = "Interface\\Buttons\\UI-MinusButton-Up"
+                if isCollapsed then
+                    foldIcon = "Interface\\Buttons\\UI-PlusButton-Up"
+                end
+                header.index = factionIndex
+                header.isCollapsed = isCollapsed
+                header:SetText(name)
+                header:SetNormalTexture(foldIcon)
+                header:Show()
+                bar:Hide()
+                check:Hide()
+                return
+            end
+
+            -- A FACTION: the name and the standing word it currently wears.
+            local standingText = BenillaReputation_StandingLabel(standingID, gender)
+            local factionName = getglobal("ReputationBar" .. i .. "FactionName")
+            factionName:SetText(name)
+            getglobal("ReputationBar" .. i .. "FactionStanding"):SetText(standingText)
+
+            -- The crossed-swords pennant off the row's right end.
+            local atWarIndicator = getglobal("ReputationBar" .. i .. "AtWarCheck")
+            if atWarWith then
+                atWarIndicator:Show()
+            else
+                atWarIndicator:Hide()
+            end
+
+            -- The engine hands the rank window over ABSOLUTE for exactly this reason:
+            -- reputation.rs's module doc names the reference's own normalization (ref-lua l.79-82)
+            -- as the contract the tuple is written against. The bar's range is the window's WIDTH,
+            -- its value the distance into it, and the hover tooltip is the same pair spelled out.
+            local rankWidth = barMax - barMin
+            local progress = barValue - barMin
+            bar.id = factionIndex
+            bar.standingText = standingText
+            bar.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. " " .. progress .. " / " .. rankWidth .. FONT_COLOR_CODE_CLOSE
+            bar:SetMinMaxValues(0, rankWidth)
+            bar:SetValue(progress)
+            -- UNGUARDED, deliberately, exactly as the reference has it (ref-lua l.89).
+            -- `GetFactionInfo` is eleven wide on EVERY path including a miss, and its miss puts the
+            -- client's own `1` in the standingID slot for precisely this index (reputation.rs
+            -- `unknown_faction`) — so the caller's `factionIndex <= numFactions` gate is belt, and
+            -- that `1` is braces. Adding a nil-check here would be inventing a branch the client
+            -- does not have and cannot reach.
+            local color = FACTION_BAR_COLORS[standingID]
+            bar:SetStatusBarColor(color.r, color.g, color.b)
+            bar:SetID(factionIndex)
+            bar:Show()
+            header:Hide()
+
+            -- The watched checkmark rides the END of the name string, so the name box gives up 10
+            -- of its 110px to make room for it (ref-lua l.95-103).
+            if isWatched then
+                check:Show()
+                factionName:SetWidth(100)
+                check:SetPoint("LEFT", factionName, "LEFT", factionName:GetStringWidth(), 0)
+            else
+                check:Hide()
+                factionName:SetWidth(110)
+            end
+
+            -- The selected row keeps its glow with the mouse away, and is the one that fills the
+            -- popup while the popup is open (ref-lua l.105-139).
+            local selected = factionIndex == GetSelectedFaction()
+            if selected and ReputationDetailFrame:IsShown() then
+                BenillaReputationDetail_Fill(factionIndex, name, description, atWarWith,
+                    canToggleAtWar, isWatched)
+            end
+            BenillaReputationBar_SetGlow("ReputationBar" .. i, selected)
+        end
+
+        -- The list page (ref-lua ReputationFrame_Update, l.32-149 is the specification): fit the
+        -- scroll window to the list, then bind each of the fixed slots to the row the offset puts
+        -- under it, on the house faux-scroll kit rather than the reference's real ScrollFrame
+        -- (this file's header comment, deviation 4).
         function ReputationFrame_Update()
             local numFactions = GetNumFactions()
             local scrollFrame = getglobal("ReputationListScrollFrame")
@@ -210,92 +330,10 @@
             local gender = UnitSex("player")
             for i = 1, NUM_FACTIONS_DISPLAYED do
                 local factionIndex = factionOffset + i
-                local factionBar = getglobal("ReputationBar" .. i)
-                local factionHeader = getglobal("ReputationHeader" .. i)
-                local factionCheck = getglobal("ReputationBar" .. i .. "Check")
                 if factionIndex <= numFactions then
-                    local name, description, standingID, barMin, barMax, barValue, atWarWith,
-                        canToggleAtWar, isHeader, isCollapsed, isWatched = GetFactionInfo(factionIndex)
-                    if isHeader then
-                        -- ref-lua l.52-63.
-                        factionHeader:SetText(name)
-                        if isCollapsed then
-                            factionHeader:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
-                        else
-                            factionHeader:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
-                        end
-                        factionHeader.index = factionIndex
-                        factionHeader.isCollapsed = isCollapsed
-                        factionBar:Hide()
-                        factionHeader:Show()
-                        factionCheck:Hide()
-                    else
-                        -- ref-lua l.65-139.
-                        local factionStanding = BenillaReputation_StandingLabel(standingID, gender)
-                        local factionName = getglobal("ReputationBar" .. i .. "FactionName")
-                        factionName:SetText(name)
-                        getglobal("ReputationBar" .. i .. "FactionStanding"):SetText(factionStanding)
-
-                        local atWarIndicator = getglobal("ReputationBar" .. i .. "AtWarCheck")
-                        if atWarWith then
-                            atWarIndicator:Show()
-                        else
-                            atWarIndicator:Hide()
-                        end
-
-                        -- Normalize values (ref-lua l.79-82). The engine hands these over ABSOLUTE
-                        -- for exactly this reason: reputation.rs's module doc names the reference's
-                        -- own three lines as the contract the tuple is written against.
-                        barMax = barMax - barMin
-                        barValue = barValue - barMin
-                        barMin = 0
-
-                        factionBar.id = factionIndex
-                        factionBar.standingText = factionStanding
-                        factionBar.tooltip = HIGHLIGHT_FONT_COLOR_CODE .. " " .. barValue .. " / " .. barMax .. FONT_COLOR_CODE_CLOSE
-                        factionBar:SetMinMaxValues(0, barMax)
-                        factionBar:SetValue(barValue)
-                        -- UNGUARDED, deliberately, exactly as the reference has it (ref-lua l.89).
-                        -- `GetFactionInfo` is eleven wide on EVERY path including a miss, and its
-                        -- miss puts the client's own `1` in the standingID slot for precisely this
-                        -- index (reputation.rs `unknown_faction`) — so the reference's own
-                        -- `factionIndex <= numFactions` gate above is belt, and that `1` is braces.
-                        -- Adding a nil-check here would be inventing a branch the client does not
-                        -- have and cannot reach.
-                        local color = FACTION_BAR_COLORS[standingID]
-                        factionBar:SetStatusBarColor(color.r, color.g, color.b)
-                        factionBar:SetID(factionIndex)
-                        factionBar:Show()
-                        factionHeader:Hide()
-
-                        -- The watched checkmark rides the END of the name string, so the name box
-                        -- narrows by 10 to make room (ref-lua l.95-103, verbatim).
-                        if isWatched then
-                            factionCheck:Show()
-                            factionName:SetWidth(100)
-                            factionCheck:SetPoint("LEFT", factionName, "LEFT", factionName:GetStringWidth(), 0)
-                        else
-                            factionCheck:Hide()
-                            factionName:SetWidth(110)
-                        end
-
-                        -- ref-lua l.105-139: the selected row wears the highlight pair, and fills
-                        -- the popup if it is open.
-                        if factionIndex == GetSelectedFaction() then
-                            if ReputationDetailFrame:IsShown() then
-                                BenillaReputationDetail_Fill(factionIndex, name, description,
-                                    atWarWith, canToggleAtWar, isWatched)
-                            end
-                            getglobal("ReputationBar" .. i .. "Highlight1"):Show()
-                            getglobal("ReputationBar" .. i .. "Highlight2"):Show()
-                        else
-                            getglobal("ReputationBar" .. i .. "Highlight1"):Hide()
-                            getglobal("ReputationBar" .. i .. "Highlight2"):Hide()
-                        end
-                    end
+                    BenillaReputationSlot_Paint(i, factionIndex, gender)
                 else
-                    factionHeader:Hide()
-                    factionBar:Hide()
+                    BenillaReputationSlot_Clear(i)
                 end
             end
             -- ref-lua l.146-148: nothing selected means nothing to detail. `GetSelectedFaction`
@@ -307,18 +345,19 @@
         end
 
         -- A bar click toggles the popup for that faction (ref-lua ReputationBar_OnClick,
-        -- l.151-159). Parameterless and reading `this`, exactly as the reference writes it: our
+        -- l.151-159): the row that is already showing shuts it, any other row moves the selection
+        -- and opens it. Parameterless and reading `this`, exactly as the reference writes it: our
         -- dispatcher sets `this` before invoking a handler (script/event.rs `invoke_with_globals`)
         -- and it stays set through the call, the same contract ScrollTemplates.xml's
         -- `FauxScrollFrame_OnVerticalScroll` already relies on.
         function ReputationBar_OnClick()
-            if ReputationDetailFrame:IsShown() and (GetSelectedFaction() == this.id) then
+            if ReputationDetailFrame:IsShown() and GetSelectedFaction() == this.id then
                 ReputationDetailFrame:Hide()
-            else
-                SetSelectedFaction(this.id)
-                ReputationDetailFrame:Show()
-                ReputationFrame_Update()
+                return
             end
+            SetSelectedFaction(this.id)
+            ReputationDetailFrame:Show()
+            ReputationFrame_Update()
         end
 
         -- A header click folds or unfolds its group (ref l.9-15, the template's own OnClick).
@@ -517,23 +556,22 @@
                 </Scripts>
             </Frame>
         </Frames>
-        <!-- ref l.189-207, transcribed verbatim: hovering swaps the standing word for the raw
-             "value / max" and lights the glow; leaving puts the word back and drops the glow unless
-             this row is the selected one. -->
+        <!-- ref l.189-207 is the specification: hovering swaps the standing word for the raw
+             "value / max" the update stamped on the bar and lights the glow; leaving puts the word
+             back and drops the glow again — unless this row is the SELECTED one, which keeps it.
+             Both strings and both glow states were put on the bar by the update above, so the
+             hover only chooses between them; the glow pair goes through that function's own verb
+             so a hover and a repaint can never disagree about which textures are up. -->
         <Scripts>
             <OnEnter>
-                if (this.tooltip) then
+                if this.tooltip then
                     getglobal(this:GetName() .. "FactionStanding"):SetText(this.tooltip)
                 end
-                getglobal(this:GetName() .. "Highlight1"):Show()
-                getglobal(this:GetName() .. "Highlight2"):Show()
+                BenillaReputationBar_SetGlow(this:GetName(), 1)
             </OnEnter>
             <OnLeave>
                 getglobal(this:GetName() .. "FactionStanding"):SetText(this.standingText)
-                if (GetSelectedFaction() ~= this.id) then
-                    getglobal(this:GetName() .. "Highlight1"):Hide()
-                    getglobal(this:GetName() .. "Highlight2"):Hide()
-                end
+                BenillaReputationBar_SetGlow(this:GetName(), GetSelectedFaction() == this.id)
             </OnLeave>
             <OnMouseUp>ReputationBar_OnClick()</OnMouseUp>
         </Scripts>

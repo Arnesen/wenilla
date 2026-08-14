@@ -1,9 +1,12 @@
 <Ui>
     <!--
-        Interface\FrameXML\ColorPickerFrame.xml, transcribed — the shared colour dialog. Line
-        numbers below are that file's (336 lines, XML only; it ships no `.lua`, its whole script is
-        inline and the one function that drives it, `UIDropDownMenuButton_OpenColorPicker`, lives in
-        UIDropDownMenu.lua).
+        The shared colour dialog — our own implementation of the window that
+        Interface\FrameXML\ColorPickerFrame.xml specifies. Line numbers below are that file's (336
+        lines, XML only; it ships no `.lua`, its whole script is inline and the one function that
+        drives it, `UIDropDownMenuButton_OpenColorPicker`, lives in UIDropDownMenu.lua). It is
+        cited throughout as the SPECIFICATION — for the names, the geometry, the sounds and the
+        call order, all of which are the API addons are written against and none of which we are
+        free to invent. The Lua in this file is ours.
 
         WHY IT IS HERE, in the arc's own terms: **86 of the 218 corpus addons reach
         `ColorPickerFrame`, 80 reach `OpacitySliderFrame`** — and 1207's lesson applies before those
@@ -139,17 +142,26 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- ref l.60-77. Cancel is declared FIRST because Okay anchors to it. Its OnClick is the
-                 reference's, verbatim: hide, then hand the addon back what it had. -->
+            <!-- ref l.60-77 for the name, the geometry and the sound. Cancel is declared FIRST
+                 because Okay anchors to it. -->
             <Button name="ColorPickerCancelButton" inherits="GameMenuButtonTemplate" text="CANCEL">
                 <Anchors>
                     <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-10" y="10"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnClick>
+                        -- Dismiss first, undo second — the undo is the CALLER's code, and a
+                        -- cancelFunc that opens a window of its own should not have to fight this
+                        -- one for the panel slot.
                         HideUIPanel(this:GetParent());
-                        if ( ColorPickerFrame.cancelFunc ) then
-                            ColorPickerFrame.cancelFunc(ColorPickerFrame.previousValues);
+                        -- This window remembers nothing itself: `previousValues` is the snapshot
+                        -- whoever opened it left behind (`UIDropDownMenuButton_OpenColorPicker`
+                        -- fills it in; Dewdrop closes over its own copy and ignores it) and
+                        -- `cancelFunc` is the caller's restore. Both are optional fields on the
+                        -- frame, so a caller that set neither simply gets the window closed.
+                        local cancelFunc = ColorPickerFrame.cancelFunc;
+                        if ( cancelFunc ) then
+                            cancelFunc(ColorPickerFrame.previousValues);
                         end
                         PlaySound("igMainMenuOptionCheckBoxOn");
                     </OnClick>
@@ -166,9 +178,16 @@
                 <Scripts>
                     <OnClick>
                         HideUIPanel(this:GetParent());
+                        -- Commit. Neither callback is handed the values: both read the widget and
+                        -- the slider for themselves, which is the contract every corpus caller is
+                        -- written against. `func` is deliberately NOT guarded (header) — a caller
+                        -- that opened the window without one should hear about it. The alpha half
+                        -- genuinely is optional: a caller that never asked for opacity has no
+                        -- reason to supply one.
                         ColorPickerFrame.func();
-                        if ( ColorPickerFrame.opacityFunc ) then
-                            ColorPickerFrame.opacityFunc();
+                        local opacityFunc = ColorPickerFrame.opacityFunc;
+                        if ( opacityFunc ) then
+                            opacityFunc();
                         end
                         PlaySound("igMainMenuOptionCheckBoxOn");
                     </OnClick>
@@ -209,8 +228,11 @@
                 </Layers>
                 <Scripts>
                     <OnValueChanged>
-                        if ( ColorPickerFrame.opacityFunc ) then
-                            ColorPickerFrame.opacityFunc();
+                        -- Live preview: every step of the drag reaches the caller, which is what
+                        -- makes the alpha follow the thumb instead of jumping at Okay.
+                        local opacityFunc = ColorPickerFrame.opacityFunc;
+                        if ( opacityFunc ) then
+                            opacityFunc();
                         end
                     </OnValueChanged>
                 </Scripts>
@@ -220,17 +242,23 @@
             </Slider>
         </Frames>
         <Scripts>
-            <!-- ref l.161-170. The opacity slider is opt-in per caller, and the window narrows by
-                 the slider's 60 units when nobody asked for it. -->
+            <!-- ref l.161-170 for the two widths. The opacity slider is opt-in per caller, and the
+                 window narrows by the slider's 60 units when nobody asked for it. -->
             <OnShow>
+                -- Seeding the slider AFTER showing it is deliberate: SetValue fires
+                -- OnValueChanged, so the caller's opacityFunc runs against a slider that is
+                -- already on screen and against a window still at its old width — the reference's
+                -- own order, and observable to any addon whose preview writes through. The width
+                -- is settled once, at the end, instead of in both arms.
+                local width = 305;
                 if ( this.hasOpacity ) then
                     OpacitySliderFrame:Show();
                     OpacitySliderFrame:SetValue(this.opacity);
-                    this:SetWidth(365);
+                    width = 365;
                 else
                     OpacitySliderFrame:Hide();
-                    this:SetWidth(305);
                 end
+                this:SetWidth(width);
             </OnShow>
             <!-- ref l.171-176. The widget's own slot, fired by SetColorRGB with the colour the
                  widget now holds (colorselect.rs). This is the ONLY thing that paints the swatch —

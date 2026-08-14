@@ -1,10 +1,11 @@
 <Ui>
     <!--
         The durability alert — the "armor guy" under the minimap (director-directed this round,
-        with the doll-slot broken tint). Geometry, texture cells, colors, and the show/hide law are
-        QUOTED from the real 1.12 DurabilityFrame (extracted Interface\FrameXML\DurabilityFrame.xml
-        + .lua): 11 alert regions off one Interface\Durability\UI-Durability-Icons atlas — 8 body
-        pieces (Head, Shoulders, Chest, Waist, Legs, Feet, Wrists, Hands) that show TOGETHER when
+        with the doll-slot broken tint). Geometry, texture cells and colors are MEASUREMENTS of the
+        real 1.12 DurabilityFrame (extracted Interface\FrameXML\DurabilityFrame.xml + .lua) and the
+        show/hide law is the same law, written here in our own terms: 11 alert regions off one
+        Interface\Durability\UI-Durability-Icons atlas — 8 body pieces
+        (Head, Shoulders, Chest, Waist, Legs, Feet, Wrists, Hands) that show TOGETHER when
         any of them alerts, plus 3 showSeparate pieces (Weapon, Shield/OffWeapon, Ranged) that each
         show only when itself alerted. The whole frame hides at zero alerts.
 
@@ -30,8 +31,9 @@
     -->
     <Script>
         <![CDATA[
-        -- ref DurabilityFrame.lua, quoted verbatim (the iteration order is the alert INDEX the
-        -- engine answers; `value.slot` names the texture).
+        -- The alert regions, in the engine's own order: the array index IS the index
+        -- GetInventoryAlertStatus answers for, and `slot` names the texture that draws it. The
+        -- last three are the ones that speak for themselves; the eight above are one figure.
         INVENTORY_ALERT_STATUS_SLOTS = {
             [1] = {slot = "Head"},
             [2] = {slot = "Shoulders"},
@@ -53,51 +55,70 @@
             [4] = {r = 0.93, g = 0.07, b = 0.07},
         }
 
-        -- ref DurabilityFrame_SetAlerts, quoted (the pairs() loop for the 1.12 `for index, value
-        -- in TABLE do` iteration; the enchantTimer arm is the ref's own disabled residue).
+        -- Which texture draws a slot. Every slot but the off hand has exactly one glyph named
+        -- after it; the off hand has TWO — a shield and a second sword — and only one of them is
+        -- ever on screen, so picking one is also hiding the other. That is the whole reason this
+        -- is a lookup with a branch in it rather than a name concatenation.
+        local function DurabilityGlyph(slot)
+            if slot ~= "Shield" then
+                return getglobal("Durability" .. slot)
+            end
+            if OffhandHasWeapon() then
+                DurabilityShield:Hide()
+                return DurabilityOffWeapon
+            end
+            DurabilityOffWeapon:Hide()
+            return DurabilityShield
+        end
+
+        -- Repaint the armour figure from the engine's per-region verdicts. Two passes, because the
+        -- eight body pieces are ONE alert between them: any of them alerting shows all eight, and
+        -- that is not known until the walk is over. (The enchantTimer nil is the reference's own
+        -- disabled residue — statuses 1/2 are its switched-off enchant-expiry alerts, so nothing
+        -- ever arms the timer and this only ever clears a field that was already nil.)
         function DurabilityFrame_SetAlerts()
             DurabilityFrame.enchantTimer = nil
             local numAlerts = 0
-            local texture, color, showDurability
-            for index, value in pairs(INVENTORY_ALERT_STATUS_SLOTS) do
-                texture = getglobal("Durability" .. value.slot)
-                if value.slot == "Shield" then
-                    if OffhandHasWeapon() then
-                        DurabilityShield:Hide()
-                        texture = DurabilityOffWeapon
-                    else
-                        DurabilityOffWeapon:Hide()
-                        texture = DurabilityShield
-                    end
-                end
+            local showDurability
+            local body, numBody = {}, 0
 
-                local alertStatus = GetInventoryAlertStatus(index)
-                color = INVENTORY_ALERT_COLORS[alertStatus]
+            for index, value in pairs(INVENTORY_ALERT_STATUS_SLOTS) do
+                local texture = DurabilityGlyph(value.slot)
+                local color = INVENTORY_ALERT_COLORS[GetInventoryAlertStatus(index)]
+                -- Alerted pieces wear their status colour at full strength; the rest sit in the
+                -- faded white the art is authored against, which is what the body figure's
+                -- un-alerted pieces read as when one of their neighbours has lit up.
                 if color then
-                    texture:SetVertexColor(color.r, color.g, color.b, 1.0)
-                    if value.showSeparate then
-                        texture:Show()
-                    else
-                        showDurability = 1
-                    end
                     numAlerts = numAlerts + 1
+                    texture:SetVertexColor(color.r, color.g, color.b, 1.0)
                 else
                     texture:SetVertexColor(1.0, 1.0, 1.0, 0.5)
-                    if value.showSeparate then
+                end
+                if value.showSeparate then
+                    -- Weapon, off hand, ranged: each is its own alert and its own decision.
+                    if color then
+                        texture:Show()
+                    else
                         texture:Hide()
                     end
-                end
-            end
-            for index, value in pairs(INVENTORY_ALERT_STATUS_SLOTS) do
-                if not value.showSeparate then
-                    if showDurability then
-                        getglobal("Durability" .. value.slot):Show()
-                    else
-                        getglobal("Durability" .. value.slot):Hide()
+                else
+                    numBody = numBody + 1
+                    body[numBody] = texture
+                    if color then
+                        showDurability = 1
                     end
                 end
             end
 
+            for i = 1, numBody do
+                if showDurability then
+                    body[i]:Show()
+                else
+                    body[i]:Hide()
+                end
+            end
+
+            -- Nothing to warn about at all means no armour guy.
             if numAlerts > 0 then
                 DurabilityFrame:Show()
             else
