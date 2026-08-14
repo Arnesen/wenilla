@@ -310,6 +310,21 @@ pub(super) fn feed_item_stats(
     let Some(mut script) = script else {
         return;
     };
+    // **`GetBindLocation()`'s push, and it happens BEFORE the early return below.**
+    //
+    // The name resolution lives here because this system already owns it for the hearthstone's
+    // `$z` token, and a second AreaTable lookup elsewhere is the two-parallel-paths drift that has
+    // cost this codebase real bugs — the binding and the token must never disagree about where the
+    // player is bound. But the item feed idles whenever nothing is pending, and the bind point
+    // arrives long after world entry (`SMSG_BINDPOINTUPDATE` at login and on every re-bind), so the
+    // push cannot sit behind that gate.
+    let home_area: Option<String> = home_bind
+        .as_deref()
+        .and_then(|b| b.0)
+        .and_then(|id| area_names.as_deref()?.0.resolve(id as i32))
+        .map(str::to_string);
+    script.set_bind_location(home_area.as_deref().unwrap_or_default());
+
     pending.extend(items.take_fresh());
     pending.extend(script.take_item_stat_asks());
     if pending.is_empty() {
@@ -317,11 +332,6 @@ pub(super) fn feed_item_stats(
     }
     let spell_res = spells.as_deref();
     let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
-    let home_area: Option<String> = home_bind
-        .as_deref()
-        .and_then(|b| b.0)
-        .and_then(|id| area_names.as_deref()?.0.resolve(id as i32))
-        .map(str::to_string);
     // A bind-point change re-substitutes every held view: templates pushed before the login's
     // SMSG_BINDPOINTUPDATE landed carry a raw $z otherwise (the hearthstone's login race).
     if *last_home != home_area {

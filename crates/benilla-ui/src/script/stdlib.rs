@@ -458,8 +458,7 @@ fn install_time(lua: &Lua) -> mlua::Result<()> {
             // Against a string return, `dt["wday"]` is nil, `nil ~= 3` forever, and the addon spins
             // the client — which is exactly what it did to the survey the moment a separate fix let
             // Accountant reach this function at all.
-            if false && body == "*t" {
-                // TOGGLE-A/B
+            if body == "*t" {
                 let (year, month, day, hour, min, sec, wday, yday) = civil_from_epoch(secs);
                 let t = lua.create_table()?;
                 t.set("year", year)?;

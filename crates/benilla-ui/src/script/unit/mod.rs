@@ -383,19 +383,80 @@ fn pick_unit_token(a: &Option<String>, b: &Option<String>) -> Option<String> {
     }
 }
 
+/// The token prefixes 1.12's resolver `0x515970` recognises, in its own order.
+///
+/// The order is the binary's and is preserved even though our recogniser is order-insensitive:
+/// `partypet` must be tested before `party` and `raidpet` before `raid` for a *resolver* to pick the
+/// right unit, and the day this grows from a boolean into a resolver, the list is already right.
+///
+/// **These are PREFIX tests.** The compare length is the literal's, and `_strnicmp` stops at either
+/// string's NUL, so `"playerfoo"` matches `player` — which is why it is a quiet nil rather than a
+/// raise. `npc` is the sole FULL-STRING compare in the resolver, so `"npctarget"` matches nothing
+/// and raises; it is deliberately absent from this list and handled separately below.
+const UNIT_TOKEN_PREFIXES: [&str; 8] = [
+    "player",
+    "pet",
+    "target",
+    "partypet",
+    "party",
+    "raidpet",
+    "raid",
+    "mouseover",
+];
+
+/// Does 1.12's resolver RECOGNISE this token — whether or not it names a live unit?
+///
+/// This is the whole raise/nil distinction, so it is worth being exact about what it is not: it does
+/// not ask whether a unit exists. `"party5"` on a solo character, `"pet"` with no pet, and
+/// `"playerfoo"` are all *recognised* and answer nil; only a token the resolver's nine compares
+/// never match raises `Unknown unit name`.
+pub(crate) fn token_recognised(token: &str) -> bool {
+    // `npc` full-string, everything else a prefix — and folded, like every compare in the resolver
+    // (`SStrCmpI` -> `_strnicmp`, ASCII only; 1247).
+    token.eq_ignore_ascii_case("npc")
+        || UNIT_TOKEN_PREFIXES
+            .iter()
+            .any(|p| token.len() >= p.len() && token[..p.len()].eq_ignore_ascii_case(p))
+}
+
+/// The gate every `Unit*` binding puts an addon-supplied token through.
+///
+/// **An unrecognised token RAISES and does not return** — `0x515970` falls off the end of its nine
+/// compares into `luaL_error(L, "Unknown unit name: %s")`, which longjmps (wow-re
+/// `system/ui/scratch/unit-token-grammar.md`). Ours answered nil for everything unknown, which is
+/// 1203's shape pointed the other way: a failure the client reports, silently swallowed.
+///
+/// The split is THREE-way, not two, and the two quiet legs are as carved:
+///   * **absent argument** — quiet nil (the per-binding argument gates are NOT uniform; `UnitName`
+///     has its own `lua_isstring` gate and `UnitExists` has none at all, and only those two poles
+///     are verified, so this does not invent a gate for the other ~102);
+///   * **`""`** — quiet nil;
+///   * a **recognised** token naming nothing (`"party5"` solo, `"playerfoo"`) — quiet nil.
+pub(crate) fn check_unit_token(token: &Option<String>) -> mlua::Result<()> {
+    match token {
+        Some(t) if !t.is_empty() && !token_recognised(t) => {
+            Err(mlua::Error::runtime(format!("Unknown unit name: {t}")))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Read a unit token's snapshot under a short model borrow, mapping it through `f`; `default` when the
 /// token is absent (the "unit doesn't exist" path).
+///
+/// Raises for an unrecognised token ([`check_unit_token`]) before it looks anything up.
 fn with_unit<T>(
     lua: &Lua,
     token: &Option<String>,
     default: T,
     f: impl FnOnce(&UnitState) -> T,
-) -> T {
+) -> mlua::Result<T> {
+    check_unit_token(token)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    match token.as_ref().and_then(|t| model.unit(t)) {
+    Ok(match token.as_ref().and_then(|t| model.unit(t)) {
         Some(u) => f(u),
         None => default,
-    }
+    })
 }
 
 /// The `Unit*`/`GetQuestGreenRange` Lua binding registrations — split from this module's

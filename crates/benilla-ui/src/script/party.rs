@@ -772,16 +772,27 @@ mod tests {
         assert!(s
             .eval::<bool>(r#"return UnitInRaid("mouseover") == nil"#)
             .unwrap());
-        // It NEVER raises: a missing, wrong-typed or unknown token is all nil.
-        for call in [
-            "UnitInRaid()",
-            "UnitInRaid(nil)",
-            "UnitInRaid(7)",
-            r#"UnitInRaid("nosuchtoken")"#,
-        ] {
+        // **The input partition, and it is NOT "never raises".** This test used to assert that a
+        // missing, wrong-typed or unknown token is all nil, on a wow-re finding that published "no
+        // error path". That claim was refuted by a later §5 cross-check and corrected at the source
+        // (`raid-roster-bindings.md` §1: *"The grammar is now enumerated and it settles the other
+        // way"*), which named `UnitInRaid` as one of exactly three verbs carrying the wrong claim.
+        //
+        // Quiet nil: `0x6f3690` returns NULL for a missing or uncoercible argument, `0x515970` maps
+        // NULL/empty to GUID `0:0`, and `0x4baee0` short-circuits `0:0` to false at entry.
+        for call in ["UnitInRaid()", "UnitInRaid(nil)", r#"UnitInRaid("party3")"#] {
             assert!(
                 s.eval::<bool>(&format!("return {call} == nil")).unwrap(),
-                "{call} must answer nil, not raise"
+                "{call} must answer nil"
+            );
+        }
+        // Raise: a token matching none of the nine prefixes reaches
+        // `luaL_error("Unknown unit name: %s")` and longjmps — and a NUMBER is coerced to a string
+        // first, so it raises too. `UnitInRaid("bogus")` never returns on the real client.
+        for call in ["UnitInRaid(7)", r#"UnitInRaid("nosuchtoken")"#] {
+            assert!(
+                s.run(call).is_err(),
+                "{call} must raise — the token resolves to no prefix at all"
             );
         }
     }

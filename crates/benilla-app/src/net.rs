@@ -88,6 +88,7 @@ impl Plugin for NetPlugin {
             .init_resource::<ServerWallClock>()
             .init_resource::<Reputations>()
             .init_resource::<HomeBind>()
+            .init_resource::<PlayedTimeAnswer>()
             .init_resource::<Proficiencies>()
             .init_resource::<crate::names::NameCache>()
             .init_resource::<crate::go_templates::GameObjectTemplates>()
@@ -468,6 +469,15 @@ pub(crate) struct Reputations(pub(crate) Vec<(u8, i32)>);
 /// `None` until the packet lands.
 #[derive(Resource, Default)]
 pub(crate) struct HomeBind(pub(crate) Option<u32>);
+
+/// The `/played` answer awaiting delivery to the VM (`SMSG_PLAYED_TIME`): total seconds played and
+/// seconds since the last level-up.
+///
+/// A one-slot mailbox rather than a queue: the reply answers a request, the server sends one per
+/// request, and a second landing before the first is drained would mean the first is already stale.
+/// `None` whenever there is nothing undelivered.
+#[derive(Resource, Default)]
+pub(crate) struct PlayedTimeAnswer(pub(crate) Option<(u32, u32)>);
 
 /// The player's equip proficiencies (`SMSG_SET_PROFICIENCY`, at login + on train): item class
 /// (2 weapons / 4 armor) → allowed-subclass bitmask — the client's `0xc4d4a0[class]` store.

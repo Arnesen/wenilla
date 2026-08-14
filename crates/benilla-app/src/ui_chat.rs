@@ -58,6 +58,10 @@ impl Plugin for UiChatPlugin {
             // Push before the input pass so a line is on screen the same frame it decodes (mirrors
             // the loot/merchant feeds).
             .add_systems(Update, feed::feed_chat.before(UiInput))
+            // RequestTimePlayed() -> CMSG_PLAYED_TIME, and SMSG_PLAYED_TIME -> TIME_PLAYED_MSG.
+            // Beside the chat feed because /played is a chat command and the answer prints there
+            // too; before the input pass for the same reason feed_chat is.
+            .add_systems(Update, feed::played_time_bridge.before(UiInput))
             // The input: open on ENTER (after the UI input pass has set UiKeyboardCapture, so we
             // don't reopen the box that's already eating keys), then drain any submitted line. Both
             // touch the single NonSend VM, so they chain. In-world only (decision 0193): at the

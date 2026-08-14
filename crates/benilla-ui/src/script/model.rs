@@ -927,7 +927,18 @@ pub(crate) struct Model {
     /// wire: `LANG_ADDON` in the language field, a four-value distribution set, and a payload the
     /// binding already composed as `prefix` TAB `message`.
     pub(crate) addon_sends: Vec<super::addon_message::AddonSend>,
+    /// `RequestTimePlayed()` asks queued since the app last drained them — each is one
+    /// `CMSG_PLAYED_TIME`. A COUNT, not a payload, for [`super::pvp`]'s reason: the packet is
+    /// empty, so two asks in a frame are two sends rather than one collapsed intent.
+    pub(crate) played_time_asks: u32,
     pub(crate) realm_name: String,
+    /// The hearthstone bind location's NAME, behind `GetBindLocation()` — the app resolves the
+    /// `SMSG_BINDPOINTUPDATE` area id through the same AreaTable catalog the hearthstone's `$z`
+    /// token already uses, and pushes the resolved string here.
+    ///
+    /// Empty only before that packet has landed — `""`, never nil, matching [`Self::realm_name`]
+    /// beside it: a consumer concatenates this (`Necrosis.lua:1089`), so nil would be a raise.
+    pub(crate) bind_location: String,
     /// Frames per second, behind `GetFramerate()`. Pushed per tick by the app, which owns the
     /// clock this crate does not have.
     pub(crate) framerate: f64,
@@ -1170,7 +1181,9 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             chat_sends: Vec::new(),
             addon_sends: Vec::new(),
+            played_time_asks: 0,
             realm_name: String::new(),
+            bind_location: String::new(),
             framerate: 0.0,
             modifiers: (false, false, false),
             money: 0,

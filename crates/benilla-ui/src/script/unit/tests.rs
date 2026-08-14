@@ -551,9 +551,11 @@ fn faction_group_pair_and_the_pvp_toggle() {
     assert!(s
         .eval::<bool>(r#"local a, b = UnitFactionGroup("target") return a == nil and b == nil"#)
         .unwrap());
-    // An absent unit answers the same way.
+    // An absent unit answers the same way. (This read `"focus"` until the unrecognised-token raise
+    // landed — a token 1.12 does not have at all, so it now raises rather than being "absent". The
+    // question the line means to ask needs a RECOGNISED token that names nothing.)
     assert!(s
-        .eval::<bool>(r#"local a = UnitFactionGroup("focus") return a == nil"#)
+        .eval::<bool>(r#"local a = UnitFactionGroup("party4") return a == nil"#)
         .unwrap());
 
     assert_eq!(s.take_pvp_toggles(), 0, "nothing queued yet");
@@ -640,11 +642,16 @@ fn unit_affecting_combat_is_one_or_nil_and_hides_the_missing_unit() {
             .unwrap(),
         "an unresolvable token is the SAME nil a peaceful unit gives"
     );
-    // A number is accepted and stringified (`0x6f3510` is number-OR-string): it resolves the
-    // token "5", finds nothing, and answers nil — it does not raise.
-    assert!(s
-        .eval::<bool>("return UnitAffectingCombat(5) == nil")
-        .unwrap());
+    // **A number is accepted and stringified — and that is exactly why it RAISES.** The gate
+    // `0x6f3510` is number-OR-string, so `5` is coerced via `%.14g` to the token `"5"`; `"5"` then
+    // matches none of the resolver's nine prefixes and falls into
+    // `luaL_error("Unknown unit name: %s")`. This assertion read `== nil` and "it does not raise"
+    // until wow-re's own §5 cross-check refuted the no-error-path claim it rested on
+    // (`raid-roster-bindings.md` §1) — the acceptance was right, the conclusion was not.
+    assert!(
+        s.run("UnitAffectingCombat(5)").is_err(),
+        "a number is coerced to a token that matches nothing, so it raises"
+    );
 }
 
 /// A missing or wrong-typed argument **raises** — `0x6f4940` is `luaL_error` and does not return,
@@ -810,8 +817,10 @@ fn a_unit_token_resolves_whatever_its_case() {
         "the directional pick folds case too"
     );
 
-    // An unseated token is still absent whatever its case — folding must not invent units.
-    for spelling in ["bogus", "BOGUS", "Party1"] {
+    // An unseated but RECOGNISED token is still absent whatever its case — folding must not invent
+    // units. (`bogus` moved out of this list when the unrecognised-token raise landed: it is not
+    // "absent", it is not a unit token at all, and the client says so.)
+    for spelling in ["Party1", "PARTY1", "raid9", "MouseOver"] {
         assert!(
             !s.eval::<bool>(&format!(r#"return UnitExists("{spelling}")"#))
                 .unwrap(),
@@ -840,4 +849,73 @@ fn seating_a_token_folds_its_key_too() {
         !s.eval::<bool>(r#"return UnitExists("target")"#).unwrap(),
         "removal folds too — no shadowed entry survives"
     );
+}
+
+/// **An unrecognised token RAISES; a recognised one that names nothing is a quiet nil.**
+///
+/// `0x515970` falls off the end of its nine compares into `luaL_error(L, "Unknown unit name: %s")`,
+/// which longjmps and never returns (wow-re `system/ui/scratch/unit-token-grammar.md`). Ours
+/// answered nil for everything unknown — 1203's shape pointed the other way, a failure the client
+/// reports and we swallowed.
+///
+/// The split is THREE-way, and the two quiet legs are the ones a "raise on nil" implementation gets
+/// wrong.
+#[test]
+fn an_unrecognised_unit_token_raises_and_a_recognised_empty_one_does_not() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+
+    // RAISE: nothing the resolver's compares match.
+    for bogus in ["bogus", "focus", "boss1", "arena1"] {
+        let err = s
+            .run(&format!(r#"UnitName("{bogus}")"#))
+            .expect_err(&format!("{bogus} must raise"))
+            .to_string();
+        assert!(
+            err.contains(&format!("Unknown unit name: {bogus}")),
+            "the raise carries the client's own text and the offending token: {err}"
+        );
+    }
+    // `npc` is the SOLE full-string compare, so a suffix on it matches nothing at all.
+    assert!(s.run(r#"UnitName("npctarget")"#).is_err());
+    // …while `npc` itself is recognised, folded like everything else.
+    assert!(s.run(r#"UnitName("NPC")"#).is_ok());
+
+    // QUIET NIL, leg 1: a recognised token naming nothing here.
+    for absent in [
+        "party5",
+        "raid17",
+        "pet",
+        "mouseover",
+        "partypet2",
+        "raidpet3",
+    ] {
+        assert!(
+            s.eval::<Option<String>>(&format!(r#"return UnitName("{absent}")"#))
+                .unwrap()
+                .is_none(),
+            "{absent} is recognised and absent — nil, not a raise"
+        );
+    }
+    // QUIET NIL, leg 2: a recognised PREFIX with a junk suffix. The compares are prefix tests that
+    // stop at either NUL, so `playerfoo` matches `player` and never reaches the raise.
+    for junk in ["playerfoo", "raidx", "petx", "targetish"] {
+        assert!(
+            s.eval::<Option<String>>(&format!(r#"return UnitName("{junk}")"#))
+                .unwrap()
+                .is_none(),
+            "{junk} matches a PREFIX, so it is a quiet nil — not a raise. This is the leg an \
+             implementation that raises on \"did not resolve\" gets wrong."
+        );
+    }
+    // QUIET NIL, leg 3: the empty string and an absent argument. The per-binding argument gates are
+    // NOT uniform in the client and only two poles are verified, so this asserts the resolver's
+    // behaviour and does not invent a gate.
+    assert!(s.run(r#"UnitName("")"#).is_ok());
+    assert!(s.run("UnitName()").is_ok());
+
+    // A two-unit call gates BOTH arguments.
+    assert!(s.run(r#"UnitIsUnit("player", "bogus")"#).is_err());
+    assert!(s.run(r#"UnitIsUnit("bogus", "player")"#).is_err());
+    assert!(s.run(r#"UnitIsUnit("player", "party3")"#).is_ok());
 }

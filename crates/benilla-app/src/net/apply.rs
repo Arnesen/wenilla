@@ -190,7 +190,15 @@ pub(super) fn apply_net_updates(
             ResMut<crate::ui_action::UiErrorKeys>,
             // The ask-once book-page cache (decision 1105) — every readable's text, keyed by
             // `PageText` id; the reader session repaints off it.
-            ResMut<crate::ui_item_text::PageTexts>,
+            // Paired into one slot: the group is itself at Bevy's 16-param ceiling, so a 17th
+
+            // entry stops the whole system implementing `SystemParam` — nesting is the same
+
+            // escape this tuple already is.
+            (
+                ResMut<crate::ui_item_text::PageTexts>,
+                ResMut<crate::net::PlayedTimeAnswer>,
+            ),
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -337,7 +345,7 @@ pub(super) fn apply_net_updates(
             mut mirror_timers,
             mut pet_bar,
             mut ui_error_keys,
-            mut page_texts,
+            (mut page_texts, mut played_time_answer),
         ),
     ) = caches;
     let (
@@ -742,6 +750,10 @@ pub(super) fn apply_net_updates(
                 chat::area_trigger_message(text, &mut chat_log)
             }
             SessionEvent::PlayedTime { total, level } => {
+                // BOTH halves, and they are not redundant. The chat breakdown is our stand-in for
+                // the reference's `ChatFrame_DisplayTimePlayed`, which we do not ship; the mailbox
+                // is what becomes `TIME_PLAYED_MSG(total, level)` for an addon that asked.
+                played_time_answer.0 = Some((total, level));
                 chat::played_time(total, level, &mut chat_log)
             }
             SessionEvent::RandomRoll {

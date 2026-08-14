@@ -394,6 +394,10 @@ fn manifest_path(root: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+/// The per-addon VM-instruction bound (see its use in [`survey_one`]). Measured: the heaviest
+/// legitimate corpus addon runs 4M, and 214 of 218 run under 1M.
+const ADDON_INSTRUCTION_BUDGET: u64 = 200_000_000;
+
 fn survey_one(
     root: &Path,
     name: &str,
@@ -434,6 +438,20 @@ fn survey_one(
             }
         }
     };
+    // **A time bound, so one non-terminating addon cannot take the whole survey with it.**
+    //
+    // 1247 met the failure this exists for: `date("*t")` returned a string where Lua returns a
+    // table, so an addon's `while` never ended and the 218-addon run simply stopped finishing —
+    // no roster to diff, no column to compare, no error row to read, and the cause found by
+    // bisecting the corpus BY HAND. A wrong number is recoverable; an instrument that does not
+    // return is not.
+    //
+    // The budget is MEASURED, not guessed. Across the corpus at the time of writing, 214 of 218
+    // addons execute fewer than 1M VM instructions in a whole survey (the counter's resolution);
+    // the heaviest legitimate one is Enchantrix at 4M, then FuBar_CTRaid and BigWigs at 1M. So
+    // this is ~50x the heaviest real addon — far enough out that a fixture growing new seats
+    // cannot drift into it, and near enough that a runaway reports in about a second.
+    script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
     script.set_screen_size(1024.0, 768.0);
     // Before anything runs: the AddOn API must answer for the whole installed set, not for nothing.
     // `None` roots because a survey must never read or write the director's real saved variables
@@ -510,6 +528,8 @@ fn survey_one(
         .union(&wants.tested_methods)
         .cloned()
         .collect();
+    eprintln!("INSTRMEASURE\t{name}\t{}", script.instructions_used());
+    eprintln!("INSTRM	{name}	{}", script.instructions_used());
     let oracle = widget_method_kinds(&script, &asked);
     let missing_methods = unresolved_from(&oracle, &wants.wanted_methods);
     let optional_methods = unresolved_from(&oracle, &wants.tested_methods);
@@ -1224,6 +1244,14 @@ fn seat_a_session(script: &mut UiScript) {
     // empty addon registry: a state the real client cannot be in.
     script.register_cvars(crate::cvars::REGISTERED.iter().copied());
     script.set_realm_name("Harness");
+    // THE BIND POINT. `GetBindLocation()` answered `""` in every VM, and a logged-in character with
+    // no hearth location is not a state one is in — the server sends `SMSG_BINDPOINTUPDATE` at
+    // login, before any addon runs. Same argument as the purse and the nil faction group.
+    //
+    // Three corpus addons read it, in three separate files (FuBar_TransporterFu, Necrosis,
+    // _LazyPig), and one of them CONCATENATES the result — so an empty seat is the difference
+    // between exercising their path and not.
+    script.set_bind_location("Stormwind City");
     script.set_unit(
         "player",
         Some(benilla_ui::script::UnitState {
@@ -3746,6 +3774,13 @@ mod dependency_tests {
             .unwrap(),
             (false, true),
             "one objective outstanding, one done"
+        );
+
+        // The bind point — a plain string, and the reason it is seated is that an addon
+        // CONCATENATES it (`Necrosis.lua:1089`), where an empty answer reads as no hearth at all.
+        assert_eq!(
+            s.eval::<String>("return GetBindLocation()").unwrap(),
+            "Stormwind City"
         );
 
         // The purse — and asserted as its three coin fields, not as one number, because that is the

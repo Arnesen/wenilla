@@ -720,3 +720,40 @@ fn needs_name(chat_type: u8) -> bool {
             | m::CHAT_MSG_BATTLEGROUND_LEADER
     )
 }
+
+/// **`RequestTimePlayed()` out, `TIME_PLAYED_MSG` back** — the two halves of `/played` for an addon.
+///
+/// The request is a count-drain ([`benilla_ui::script::UiScript::take_played_time_asks`], the pvp
+/// queue's shape): the packet is empty, so two asks are two sends. The answer is a one-slot mailbox
+/// the net apply pass fills, and it is delivered as the event rather than a return value, because
+/// that is how the API answers — `RequestTimePlayed()` itself returns nothing.
+///
+/// **This does NOT replace the chat breakdown beside it.** `net::apply::chat::played_time` prints
+/// the TIME_PLAYED_TOTAL/LEVEL lines because we do not ship `ChatFrame_DisplayTimePlayed`, which is
+/// what the reference's own `TIME_PLAYED_MSG` handler does. The two are the reference's two
+/// consumers of one packet, not a doubling: an addon that registers the event does its own thing
+/// with the numbers, and the player still sees `/played` answer in chat.
+pub(crate) fn played_time_bridge(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    commands: Res<NetCommands>,
+    answer: Option<ResMut<crate::net::PlayedTimeAnswer>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for _ in 0..script.take_played_time_asks() {
+        let _ = commands.0.send(crate::net::ClientCommand::PlayedTime);
+    }
+    let Some(mut answer) = answer else {
+        return;
+    };
+    if let Some((total, level)) = answer.0.take() {
+        script.fire_event(
+            "TIME_PLAYED_MSG",
+            vec![
+                benilla_ui::script::ScriptValue::Int(i64::from(total)),
+                benilla_ui::script::ScriptValue::Int(i64::from(level)),
+            ],
+        );
+    }
+}

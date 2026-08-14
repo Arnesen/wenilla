@@ -577,6 +577,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetUnit",
         lua.create_function(|lua, (this, token): (Table, String)| {
+            // Same gate as every `Unit*` verb: `SetUnit` resolves its argument through the client's
+            // one token resolver, so an unrecognised name raises here too rather than drawing an
+            // empty tooltip. NOT inside `render_unit` — the app's own push calls that with a
+            // canonical token and must never be gated against itself.
+            crate::script::unit::check_unit_token(&Some(token.clone()))?;
             let ok = render_unit(lua, &this, &token)?;
             Ok(if ok {
                 mlua::Value::Integer(1)

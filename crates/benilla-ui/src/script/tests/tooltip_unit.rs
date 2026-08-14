@@ -43,7 +43,13 @@ fn creature_line_law() {
         assert(TTTextLeft2:GetText() == "Alpha")
         assert(TTTextLeft3:GetText() == "Level 10 Beast (Elite)", "got " .. TTTextLeft3:GetText())
         assert(TTTextLeft4:GetText() == "Skinnable")
-        assert(tt:SetUnit("nosuch") == nil, "a missing unit answers nil")
+        -- A RECOGNISED token naming nothing answers nil...
+        assert(tt:SetUnit("party4") == nil, "a recognised but absent unit answers nil")
+        -- ...while an UNRECOGNISED one raises, because SetUnit resolves through the client's one
+        -- token resolver like every Unit* verb (wow-re raid-roster-bindings.md §1: a token matching
+        -- none of the nine prefixes reaches `luaL_error("Unknown unit name: %s")` and longjmps).
+        -- This used to read `SetUnit("nosuch") == nil`, which was the refuted claim.
+        assert(pcall(tt.SetUnit, tt, "nosuch") == false, "an unrecognised token raises")
     "#,
     )
     .unwrap();

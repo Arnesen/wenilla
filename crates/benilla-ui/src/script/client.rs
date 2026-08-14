@@ -87,6 +87,45 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // `RequestTimePlayed()` — ask the server for /played, answered by `TIME_PLAYED_MSG`.
+    //
+    // **The request and the answer are two halves and only both are worth having.** The binding
+    // queues a `CMSG_PLAYED_TIME` the app drains; the app fires `TIME_PLAYED_MSG(total, level)`
+    // when `SMSG_PLAYED_TIME` lands. Shipping only this half would be 1203 exactly: `QuestHistory`
+    // calls it and then waits on an event that never comes, which is quieter and worse than the
+    // `attempt to call global` it gets today.
+    //
+    // It returns nothing — the answer arrives as an event, never as a return value.
+    g.set(
+        "RequestTimePlayed",
+        lua.create_function(|lua, ()| {
+            lua.app_data_mut::<Model>()
+                .expect("model app_data")
+                .played_time_asks += 1;
+            Ok(())
+        })?,
+    )?;
+
+    // `GetBindLocation()` — the hearthstone's bind location NAME, as the reference's own hearth
+    // confirmation prints it (`StaticPopup.lua:1742` formats it straight into the dialog text).
+    //
+    // Three corpus addons read it, in three separate files: FuBar_TransporterFu
+    // (`TransporterFu.lua:456`), Necrosis (`Necrosis.lua:1089`) and _LazyPig (`LazyPig.lua:623`).
+    //
+    // **`""` until the app pushes one, never nil — the same choice `GetRealmName` above makes, for
+    // the same reason.** Necrosis CONCATENATES the result (`..GetBindLocation()`), so a nil is a
+    // raise rather than a blank; the reference holds a string buffer that is empty before
+    // `SMSG_BINDPOINTUPDATE` lands, and no logged-in character is ever without a bind point, so the
+    // empty window is ours alone. Conflating "not yet known" with "bound nowhere" is the price, and
+    // it is the price the neighbouring verb already pays deliberately.
+    g.set(
+        "GetBindLocation",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            lua.create_string(&model.bind_location)
+        })?,
+    )?;
+
     // `GetFramerate()` — frames per second, as a number.
     //
     // 71 addons in the corpus call it; every performance readout on the ecosystem's FuBar/Titan
@@ -105,6 +144,25 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl super::UiScript {
+    /// Drain the `RequestTimePlayed()` asks queued since the last call — each one is a
+    /// `CMSG_PLAYED_TIME`. [`super::UiScript::take_pvp_toggles`]'s shape, and a count for the same
+    /// reason: the request packet is empty, so nothing distinguishes two asks but their number.
+    pub fn take_played_time_asks(&mut self) -> u32 {
+        std::mem::take(&mut self.model_mut().played_time_asks)
+    }
+
+    /// Push the hearthstone bind location's name — the host's half of `GetBindLocation`.
+    ///
+    /// The app resolves `SMSG_BINDPOINTUPDATE`'s AreaTable id through the same catalog the
+    /// hearthstone's `$z` token already goes through, so the two can never disagree about where the
+    /// player is bound. Idempotent; the empty string means the packet has not landed yet.
+    pub fn set_bind_location(&mut self, area_name: &str) {
+        let mut model = self.model_mut();
+        if model.bind_location != area_name {
+            model.bind_location = area_name.to_string();
+        }
+    }
+
     /// Push the realm name — the host's half of `GetRealmName` (decision 1195).
     ///
     /// Set at world entry from the realm the session actually connected to. Idempotent, and the

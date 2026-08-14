@@ -302,7 +302,19 @@ const SCRIPT_KINDS: [&str; 32] = [
 /// [`pointer`]. What stays here is construction and the small host-facing state pushes/queries.
 pub struct UiScript {
     lua: Lua,
+    /// VM instructions executed, counted only while a budget is installed
+    /// ([`UiScript::set_instruction_budget`]). `Arc` because the hook callback outlives this
+    /// borrow; `Relaxed` because nothing orders against it — it is a bound, not a clock.
+    instructions: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// How often the instruction hook fires — the resolution of an instruction budget.
+///
+/// mlua's own documentation warns that a low value "can incur a very high overhead", and nothing
+/// wants a precise bound: the question a budget answers is "is this chunk ever going to stop?",
+/// where being out by a million instructions costs nothing and firing every instruction would cost
+/// the whole survey's runtime.
+pub const INSTRUCTION_HOOK_STEP: u32 = 1_000_000;
 
 /// The chunk name the CLIENT gives an addon's file: `Interface\AddOns\<Folder>\<File>`.
 ///
@@ -393,7 +405,10 @@ impl UiScript {
         worldmap::install(&lua)?;
         net_stats::install(&lua)?;
 
-        Ok(UiScript { lua })
+        Ok(UiScript {
+            lua,
+            instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        })
     }
 
     /// The embedded VM — for the Bevy plugin / TOC-XML loader to add the game-state API bindings
@@ -401,6 +416,60 @@ impl UiScript {
     /// object model this crate installs.
     pub fn lua(&self) -> &Lua {
         &self.lua
+    }
+
+    /// **Bound how long a chunk may run, so an infinite loop reports instead of hanging.**
+    ///
+    /// A missing capability in this engine has always been a silently WRONG ANSWER — a setter that
+    /// ignores you, a getter that says nil (1203/1205/1211/1230). Decision 1247 met the other kind:
+    /// `date("*t")` returned a string where Lua returns a table, so `Accountant_WeekStart`'s
+    /// `while thisDay ~= weekstart` never terminated and the addon spun the VM forever. That is
+    /// invisible to every instrument we own, because an instrument that never returns produces no
+    /// roster to diff, no column to compare and no error row to read — the 218-addon survey simply
+    /// stopped finishing, and the cause was found by bisecting the corpus BY HAND.
+    ///
+    /// So a caller that runs untrusted chunks can bound them. Past `budget` VM instructions the
+    /// hook raises, and the raise propagates like any other Lua error: the addon reports as failed
+    /// with a distinctive message, and everything after it still runs.
+    ///
+    /// **This is opt-in and the app does not use it.** A real session must not kill a player's
+    /// addon for being slow — the budget exists for harnesses, which run 218 strangers' code in one
+    /// process and cannot afford one of them to be unbounded.
+    ///
+    /// The hook fires every [`INSTRUCTION_HOOK_STEP`] instructions rather than every instruction:
+    /// mlua's own docs warn that a low value "can incur a very high overhead", and the step is the
+    /// resolution of the bound, which nothing here needs to be precise.
+    pub fn set_instruction_budget(&self, budget: u64) {
+        let used = self.instructions.clone();
+        used.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.lua.set_hook(
+            mlua::HookTriggers {
+                every_nth_instruction: Some(INSTRUCTION_HOOK_STEP),
+                ..Default::default()
+            },
+            move |_, _| {
+                let n = used.fetch_add(
+                    u64::from(INSTRUCTION_HOOK_STEP),
+                    std::sync::atomic::Ordering::Relaxed,
+                ) + u64::from(INSTRUCTION_HOOK_STEP);
+                if n > budget {
+                    return Err(mlua::Error::runtime(format!(
+                        "benilla: instruction budget exhausted after {n} VM instructions — \
+                         treating this as a non-terminating loop"
+                    )));
+                }
+                Ok(mlua::VmState::Continue)
+            },
+        );
+    }
+
+    /// VM instructions executed since the last [`Self::set_instruction_budget`], to the resolution
+    /// of [`INSTRUCTION_HOOK_STEP`]. Zero when no budget was ever set — the hook is what counts.
+    ///
+    /// Reported rather than merely used, because the budget has to be CHOSEN from the corpus and a
+    /// number nobody can read is a number nobody can revisit.
+    pub fn instructions_used(&self) -> u64 {
+        self.instructions.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set the screen-root rect from a pixel size (`[0,0]` origin, y-up). Top-level frames anchor to
