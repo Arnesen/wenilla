@@ -63,6 +63,18 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
         FIELD_PLAYER_WATCHED_FACTION_INDEX,
         FIELD_PLAYER_FIELD_COINAGE + 85
     );
+    // Far sight is the guid pair immediately before the combo-target pair, which is itself the two
+    // dwords before the live-tested XP pair — so it is chain-locked from BOTH ends against tested
+    // anchors and needs none of its own: keyring 648 +64 = 712, +2 combo 714, +2 XP 716. Worth
+    // asserting because vmangos's hex comment for this field reads 0x2C2 = 706, six low (the same
+    // drift as COINAGE/XP); its enum arithmetic, which is what the server compiles, agrees with us.
+    assert_eq!(FIELD_PLAYER_FARSIGHT, UNIT_END + 0x20C);
+    assert_eq!(
+        FIELD_PLAYER_FARSIGHT,
+        FIELD_PLAYER_KEYRING_SLOT_1 + 2 * 32,
+        "far sight closes the 32-slot keyring array"
+    );
+    assert_eq!(FIELD_PLAYER_FARSIGHT + 2, FIELD_PLAYER_FIELD_COMBO_TARGET);
     // The combo-target GUID is the two dwords immediately BEFORE the live-tested XP pair, so it
     // needs no anchor of its own. The binary agrees from the other side: `GetComboPoints 0x51a190`
     // reads it at `[player+0xe68]+0x838`, and 0x838/4 = 0x20E (decision 0875).

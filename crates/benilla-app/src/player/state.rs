@@ -468,6 +468,39 @@ pub(crate) struct Player {
     pub(super) follow_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
+    /// **The server has taken the reins off us** — `SMSG_CLIENT_CONTROL_UPDATE` naming our own guid
+    /// with `allowMove = 0`. Set while somebody is mind-controlling us; cleared when control comes
+    /// back (B211).
+    ///
+    /// This is the *whole* of what stops a mind-controlled player walking away, and that is a
+    /// verified property of the server rather than an assumption: vmangos never roots the victim,
+    /// sends it no speed change, its `StopMoving()` is a documented no-op for a possessed player,
+    /// and `HandleMovementOpcodes` carries no charm check — so it will accept and apply any
+    /// movement we choose to send. Nothing else is coming; if the client does not stop itself,
+    /// nothing stops.
+    ///
+    /// Deliberately **not** a [`MoveModes`] entry. That family is the four ack'd server modes
+    /// (decision 0866), each with its own SMSG/ack pair and its own movement-flag bit; this owes no
+    /// ack, carries no flag, and suppresses turning too — which root explicitly does not.
+    pub(crate) control_lost: bool,
+    /// A mover the server just took back from us, still owed its `CMSG_MOVE_NOT_ACTIVE_MOVER`.
+    ///
+    /// Parked here rather than sent at the wire drain because the release carries a *pose*, and the
+    /// controller is the only thing that owns one. Cleared the frame it goes out.
+    pub(crate) release_mover: Option<u64>,
+    /// **We hold somebody else's reins** — a unit the server handed us and we claimed as our mover
+    /// (mind-controlling a creature, Eye of Kilrogg). `None` whenever the mover is our own body.
+    ///
+    /// While this holds, the controller must not drive our own body onto the wire, and the reason
+    /// is sharper than tidiness: outbound `MSG_MOVE_*` carry **no guid** — the server attributes
+    /// them to whatever we last claimed — so streaming our body's pose under a claimed creature's
+    /// mover would teleport that creature onto us. Suppressing our body is also simply what
+    /// possession looks like: your own character stands still while you drive the other thing.
+    ///
+    /// Driving the held unit is the named residual (decision 1269): its capsule, speeds and
+    /// take-control edge are all still the avatar's alone, so for now the possessed unit stays put
+    /// rather than moving wrongly.
+    pub(crate) foreign_mover: Option<u64>,
     /// Feet position in **Bevy** coords (converted to raw WoW only when sending to the server).
     pub(crate) pos: Vec3,
     /// Vertical velocity (yd/s, Bevy +Y up) for gravity/jump/fall. Integrated each frame; zeroed while

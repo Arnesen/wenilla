@@ -989,6 +989,12 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_MOUNTSPECIAL_ANIM => ServerPacket::MountSpecialAnim {
             guid: read_u64_le(&mut r)?,
         },
+        // The control handoff: PACKED guid (unlike the flourish above) + one byte (VERIFIED
+        // vmangos `Server/Packets/Misc.cpp:677-682` — `WriteAsPacked()`, then `uint8 allowMove`).
+        opcode::SMSG_CLIENT_CONTROL_UPDATE => ServerPacket::ClientControlUpdate {
+            mover: read_packed_guid(&mut r)?,
+            allow_move: read_u8(&mut r)? != 0,
+        },
         // The taxi/flight-master family (decision 0484): the map (SHOWTAXINODES), a status
         // answer/first-visit learn (TAXINODE_STATUS), the activate verdict, and the multi-hop
         // path ack (NEW_TAXI_PATH, empty body).

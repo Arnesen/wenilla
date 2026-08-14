@@ -182,6 +182,16 @@ impl ObjectFields {
     pub fn player_money(&self) -> Option<u32> {
         self.get_u32(FIELD_PLAYER_FIELD_COINAGE)
     }
+    /// `PLAYER_FARSIGHT` — the object our view is anchored to while a far-sight effect runs (Mind
+    /// Vision, Sentry Totem, the Ornate Spyglass), or `None` when the view is our own body.
+    ///
+    /// PRIVATE, so like [`Self::player_xp`] it only ever streams for our own avatar — which is the
+    /// whole consumer: this answers "what does the camera orbit", never anything about another
+    /// player. `0` is the cleared state and reads as `None`, following the house convention for
+    /// guid fields ([`Self::unit_charmed_by`] and friends): a zero guid is absence, not an object.
+    pub fn player_farsight(&self) -> Option<u64> {
+        self.get_guid(FIELD_PLAYER_FARSIGHT).filter(|&g| g != 0)
+    }
     /// `PLAYER_XP` — our current experience within the level (`UnitXP("player")`). `None` for a
     /// non-player unit (no PLAYER block) or before the field has streamed; a PRIVATE field, so it
     /// only ever arrives for our own avatar's descriptor.

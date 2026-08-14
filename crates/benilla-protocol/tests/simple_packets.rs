@@ -474,3 +474,57 @@ fn transfer_pending_both_shapes_and_abort_parse_and_decode() {
         [SessionEvent::TransferAborted { reason: 2 }]
     ));
 }
+
+/// `SMSG_CLIENT_CONTROL_UPDATE` — the possession handoff. Golden hex is hand-derived from
+/// vmangos's builder (`Server/Packets/Misc.cpp:677-682`): `moverGuid.WriteAsPacked()` then
+/// `uint8 allowMove`. The packed form is a mask byte whose bit *i* marks a non-zero byte *i* of
+/// the little-endian u64, followed by exactly those bytes — so the same guid costs a different
+/// number of bytes depending on its value, and getting the mask wrong desynchronises everything
+/// after it in the stream.
+///
+/// **The two cases below are the two the app must tell apart**, and they differ only in a guid:
+/// the server grants control by naming somebody *else* and revokes it by naming *us*.
+#[test]
+fn client_control_update_reads_a_packed_mover_and_the_allow_byte() {
+    // Grant: a creature guid 0xF130000C1A00A2B4 with allowMove = 1. Non-zero LE bytes are
+    // b4 a2 00 1a 0c 00 30 f1 → indices 0,1,3,4,6,7 → mask 0b1101_1011 = 0xdb.
+    let grant = hx("dbb4a21a0c30f101");
+    match messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &grant).unwrap() {
+        ServerPacket::ClientControlUpdate { mover, allow_move } => {
+            assert_eq!(mover, 0xF130_000C_1A00_A2B4);
+            assert!(allow_move);
+        }
+        other => panic!("client control update, got {}", other.name()),
+    }
+    // Revoke: our own player guid 0x45 (one non-zero byte, index 0 → mask 0x01) with
+    // allowMove = 0. This is the shape a mind-controlled player receives about themselves, and
+    // the whole of what stops them walking away — vmangos never roots them.
+    let revoke = hx("014500");
+    let revoke = messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &revoke)
+        .expect("revoke parses");
+    assert!(matches!(
+        revoke,
+        ServerPacket::ClientControlUpdate {
+            mover: 0x45,
+            allow_move: false
+        }
+    ));
+    assert!(matches!(
+        decode(revoke).as_slice(),
+        [SessionEvent::ClientControl {
+            mover: 0x45,
+            allow_move: false
+        }]
+    ));
+    // A zero guid packs to a lone zero mask byte and no guid bytes at all — the degenerate case
+    // that would read the allow byte AS the guid if the mask were mishandled.
+    let empty = messages::parse_server(messages::opcode::SMSG_CLIENT_CONTROL_UPDATE, &hx("0001"))
+        .expect("empty guid parses");
+    assert!(matches!(
+        empty,
+        ServerPacket::ClientControlUpdate {
+            mover: 0,
+            allow_move: true
+        }
+    ));
+}

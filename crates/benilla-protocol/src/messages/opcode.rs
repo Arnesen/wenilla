@@ -145,6 +145,21 @@ pub const SMSG_CAST_RESULT: u16 = 0x0130; // 304
 
 // The pet action bar's inbound wire (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:
 // 377/378/710/312). Bodies in [`super::pet`].
+/// The control handoff (VERIFIED vmangos `Opcodes_1_12_1.h`: 345; built at
+/// `Server/Packets/Misc.cpp:677-682`). Body: **packed** mover guid, then a `u8` `allowMove`.
+///
+/// It is the whole of possession's control half, and it is a *statement about one unit*, not a
+/// swap: the server always sends it to our own session, naming some unit and whether we may drive
+/// it. Mind Control's start sends the caster `(victim, 1)` and the victim `(victim, 0)`; the end
+/// sends the caster `(self, 1)` **then** `(victim, 0)`, and the victim `(victim, 1)`.
+///
+/// **Two consequences the server leans on us for.** It expects a
+/// [`CMSG_SET_ACTIVE_MOVER`] reply and drops every `MSG_MOVE_*` for the new mover until it
+/// arrives (`Player::GetConfirmedMover`). And it never immobilises a possessed *player* — no root,
+/// no speed change, and its `StopMoving()` is a documented no-op for one — nor does it validate
+/// their movement, so `allowMove = 0` for our own guid is the **only** thing standing between a
+/// mind-controlled player and walking away. Enforcing that is the client's job.
+pub const SMSG_CLIENT_CONTROL_UPDATE: u16 = 0x0159; // 345
 /// The whole pet bar in one body — the ten slots, the react/command state, the pet's spell list
 /// and its cooldowns. Its **8-byte guid-only form is the teardown** (`Player::RemovePetActionBar`),
 /// and the only signal that the bar has gone away.
@@ -441,6 +456,27 @@ pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
 pub const CMSG_SETSHEATHED: u16 = 0x01E0; // 480
 pub const CMSG_AUTH_SESSION: u16 = 0x01ED;
 pub const CMSG_SET_ACTIVE_MOVER: u16 = 0x026A;
+/// The other half of the mover handshake (VERIFIED vmangos `Opcodes_1_12_1.h`: 721,
+/// `MovementHandler.cpp:886-965`). Body: the full u64 guid of the mover we are *giving up*, then a
+/// whole `MovementInfo`. It clears the server's `m_clientMoverGuid` and re-broadcasts a stop under
+/// the old guid, so skipping it strands observers on that mover's last relayed pose.
+pub const CMSG_MOVE_NOT_ACTIVE_MOVER: u16 = 0x02D1; // 721
+/// The far-sight **toggle vote** (VERIFIED vmangos `Opcodes_1_12_1.h`: 634,
+/// `MiscHandler.cpp:1138-1155`). Body is a single `u8`: `1` = look through the object, `0` = look
+/// through my own body again.
+///
+/// **The client never names the object.** The server resolves it from `PLAYER_FARSIGHT`, which
+/// only the server writes — so this is a vote on a view it already chose, not a request. Both
+/// branches pass `update_far_sight_field = false`, so **neither touches the field**: it keeps
+/// naming the object while the view toggles under it.
+///
+/// **Sending `0` is destructive and must be deliberate.** It moves the server's *visibility*
+/// source back to our body while `PLAYER_FARSIGHT` still names the object — the world around that
+/// object stops streaming while the camera is still anchored to it. Sending nothing is the safe
+/// default: the server tracks no reply, and it has already attached the viewpoint before we could
+/// answer. `1` is a no-op in every normal flow (`Camera::SetView` early-returns on an unchanged
+/// source); it exists for the buff-click toggle, whose only shipped user is Sentry Totem.
+pub const CMSG_FAR_SIGHT: u16 = 0x027A; // 634
 /// Empty body. The real client sends it from exactly ONE site — inside the local auto-repeat
 /// cancel `0x6ea080` (`0x6ea0c6`) — so it rides along with *every* cancel trigger (wow-re
 /// `nocked-ammo-cancel.md`). vmangos `HandleCancelAutoRepeatSpellOpcode` interrupts the held

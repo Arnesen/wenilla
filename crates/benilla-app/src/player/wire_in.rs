@@ -21,14 +21,44 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
 use crate::net::{
-    ClientCommand, Guid, MoveKind, MoveModeMessage, NetCommands, SelfMoveMessage, SelfPlayer,
-    SpeedChangeMessage, TeleportMessage, WorldportMessage,
+    ClientCommand, ClientControlMessage, Guid, MoveKind, MoveModeMessage, NetCommands,
+    SelfMoveMessage, SelfPlayer, SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
 use benilla_world::world_map::CurrentMap;
 
 use super::camera::FlyCam;
 use super::{movement_net, Player, SETTLE_TIMEOUT};
+
+/// What one `SMSG_CLIENT_CONTROL_UPDATE` means for us — the four cases its two fields make, named.
+///
+/// Worth a type because the packet is genuinely ambiguous read casually: it is a statement *about a
+/// unit*, not an assignment, and the naive reading ("the mover is now `mover`") silently inverts
+/// the mind-controlled victim — the case where the server names **us** to say we may no longer
+/// move. That victim is half of B211, so the inversion would have shipped as the bug it was meant
+/// to fix.
+#[derive(Debug, PartialEq, Eq)]
+enum ControlVerdict {
+    /// Somebody is driving our body. We stop moving it — nothing else will stop us.
+    Revoked,
+    /// Our own body is ours again.
+    Restored,
+    /// We were handed the reins of another unit, and owe it a mover claim.
+    Granted(u64),
+    /// A unit we were driving was taken back, and owes a parting pose.
+    Released(u64),
+}
+
+/// Classify a control update. `self_guid` is `None` only before login has named us, where nothing
+/// can be "about me" yet.
+fn control_verdict(mover: u64, allow_move: bool, self_guid: Option<u64>) -> ControlVerdict {
+    match (self_guid == Some(mover), allow_move) {
+        (true, false) => ControlVerdict::Revoked,
+        (true, true) => ControlVerdict::Restored,
+        (false, true) => ControlVerdict::Granted(mover),
+        (false, false) => ControlVerdict::Released(mover),
+    }
+}
 
 /// Drain this frame's server-authored movement messages, apply them to the mover, and send each
 /// ack. Returns the frame's forced-speed changes: pre-control/detached they were acked here with
@@ -49,12 +79,50 @@ pub(super) fn apply_server_moves(
     speed_msgs: &mut MessageReader<SpeedChangeMessage>,
     mode_msgs: &mut MessageReader<MoveModeMessage>,
     self_moves: &mut MessageReader<SelfMoveMessage>,
+    control_msgs: &mut MessageReader<ClientControlMessage>,
+    self_guid: Option<u64>,
     transports: &Query<
         (&Transform, &Guid),
         (With<Transport>, Without<SelfPlayer>, Without<FlyCam>),
     >,
     self_pose: Option<(Vec3, f32)>,
 ) -> Vec<SpeedChangeMessage> {
+    // The control handoff (B211). Two questions, and they are NOT the same one: "is this about my
+    // own body?" and "may that unit move?". The server revokes by naming *us* with allowMove=0 —
+    // which is what a mind-controlled player receives about themselves — and grants by naming
+    // somebody else, so a single "the mover is now `mover`" reading gets the victim backwards.
+    //
+    // The claim reply is not optional. vmangos discards every `MSG_MOVE_*` for a mover it has not
+    // confirmed (`Player::GetConfirmedMover`), so a grant we never answer leaves the possessed unit
+    // frozen server-side while our client cheerfully walks it around locally.
+    for c in control_msgs.read() {
+        match control_verdict(c.mover, c.allow_move, self_guid) {
+            ControlVerdict::Revoked => player.control_lost = true,
+            ControlVerdict::Restored => {
+                player.control_lost = false;
+                player.foreign_mover = None;
+                // Re-claim ourselves as the mover — the same claim login makes.
+                let _ = net_cmds
+                    .0
+                    .send(ClientCommand::SetActiveMover { guid: c.mover });
+            }
+            // Claim them, or the server drops everything we send for that unit. Recording the
+            // claim is what stops the controller streaming OUR body's pose under their guid —
+            // outbound moves carry none of their own, so that would teleport them onto us.
+            ControlVerdict::Granted(guid) => {
+                player.foreign_mover = Some(guid);
+                let _ = net_cmds.0.send(ClientCommand::SetActiveMover { guid });
+            }
+            // The matching `CMSG_MOVE_NOT_ACTIVE_MOVER` rides the controller's own park, which
+            // owns the pose that has to go in it.
+            ControlVerdict::Released(guid) => {
+                if player.foreign_mover == Some(guid) {
+                    player.foreign_mover = None;
+                }
+                player.release_mover = Some(guid);
+            }
+        }
+    }
     // Cross-map worldport (`.tele Orgrimmar`, initial-login map, a boat crossing the sea): the net
     // bridge surfaced it as a message earlier this frame (WorldStage::Net). Snap the avatar, bump
     // `CurrentMap` so the terrain streamer swaps ADTs on the next frame, and ack if required (the
@@ -493,5 +561,84 @@ mod self_move_tests {
             );
         }
         assert_eq!(f::ON_TRANSPORT & f::SERVER_AUTHORED, 0);
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    const ME: u64 = 0x0000_0000_0000_0045;
+    const VICTIM: u64 = 0x0000_0000_0000_0099;
+    const CREATURE: u64 = 0xF130_000C_1A00_A2B4;
+
+    /// The victim's inversion trap, stated as a test: the packet that revokes control names **us**,
+    /// so "the mover is now `mover`" would read it as *gaining* control of ourselves at the exact
+    /// moment we lost it — and a mind-controlled player would keep walking, which is the reported
+    /// bug (B211's second half).
+    #[test]
+    fn naming_us_is_never_a_grant_and_naming_another_is_never_about_our_body() {
+        assert_eq!(
+            control_verdict(ME, false, Some(ME)),
+            ControlVerdict::Revoked,
+            "the server revokes by naming US — this is the mind-controlled victim's packet"
+        );
+        assert_eq!(
+            control_verdict(ME, true, Some(ME)),
+            ControlVerdict::Restored
+        );
+        assert_eq!(
+            control_verdict(CREATURE, true, Some(ME)),
+            ControlVerdict::Granted(CREATURE)
+        );
+        assert_eq!(
+            control_verdict(CREATURE, false, Some(ME)),
+            ControlVerdict::Released(CREATURE)
+        );
+    }
+
+    /// vmangos's real Mind Control sequences, in order, from both sides of the spell. The caster's
+    /// *end* sequence is the one worth pinning: it restores us BEFORE releasing the victim, so a
+    /// handler that keyed off "the last packet wins" would leave the caster unable to move.
+    #[test]
+    fn the_mind_control_sequences_classify_in_order() {
+        // Caster, possession start: one grant naming the victim. (`Unit::UpdateControl`.)
+        assert_eq!(
+            control_verdict(VICTIM, true, Some(ME)),
+            ControlVerdict::Granted(VICTIM)
+        );
+        // Caster, possession end: `(self, 1)` then `(victim, 0)` — restore first, release second.
+        let caster_end = [
+            control_verdict(ME, true, Some(ME)),
+            control_verdict(VICTIM, false, Some(ME)),
+        ];
+        assert_eq!(
+            caster_end,
+            [ControlVerdict::Restored, ControlVerdict::Released(VICTIM)],
+            "restore lands BEFORE the release; last-packet-wins would strand the caster"
+        );
+
+        // Victim's own client, from ITS point of view (self_guid == VICTIM): revoked at the start,
+        // restored at the end. Both name the victim; only the byte differs.
+        assert_eq!(
+            control_verdict(VICTIM, false, Some(VICTIM)),
+            ControlVerdict::Revoked
+        );
+        assert_eq!(
+            control_verdict(VICTIM, true, Some(VICTIM)),
+            ControlVerdict::Restored
+        );
+    }
+
+    /// Before login names us, nothing can be about our body — and in particular a packet must not
+    /// classify as `Revoked` and silently freeze the character the moment control starts.
+    #[test]
+    fn an_unknown_self_guid_never_revokes_our_own_body() {
+        assert_eq!(
+            control_verdict(ME, false, None),
+            ControlVerdict::Released(ME),
+            "with no self guid this is somebody else's unit, not our body being frozen"
+        );
+        assert_eq!(control_verdict(ME, true, None), ControlVerdict::Granted(ME));
     }
 }

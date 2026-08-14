@@ -152,6 +152,9 @@ pub(crate) struct ExteriorCullPlugin;
 
 impl Plugin for ExteriorCullPlugin {
     fn build(&self, app: &mut App) {
+        if std::env::var_os("WOW_CULL_TRACE").is_some() {
+            app.insert_resource(CullTrace);
+        }
         app.init_resource::<ExteriorCullVerdict>().add_systems(
             PostUpdate,
             apply_exterior_cull
@@ -283,6 +286,51 @@ type UnownedSceneFilter = (
     Without<crate::world_unit::WorldUnit>,
 );
 
+/// **`WOW_CULL_TRACE=1` — one line per body per frame, saying why it drew.**
+///
+/// `cull_bodies`/`cull_bodies_hidden` say *how many*; they cannot say *which*, and the difference
+/// cost three live runs of inference during decision 1270. A body escapes this cull in exactly three
+/// ways — it was never elected (no `WorldUnit::bound`), it claims a WMO room, or a window admitted
+/// its box — and from a screenshot, and from the aggregate counters, all three look identical.
+///
+/// Off (the var unset) this is one `Option` read per body. Deliberately not throttled like
+/// `WOW_VIS_TRACE`: the audience is the server's visibility stream (dozens), and the question it
+/// answers — "which body, on which frame" — is destroyed by sampling.
+fn trace_body(
+    trace: &Option<Res<CullTrace>>,
+    e: Entity,
+    class: &str,
+    gt: &GlobalTransform,
+    room: Option<&crate::wmo_portal::UnitWmoRoom>,
+    bound: Option<&Aabb>,
+    admitted: bool,
+) {
+    if trace.is_none() {
+        return;
+    }
+    let p = gt.translation();
+    println!(
+        "CULL_BODY {e} {class} admitted={admitted} claim={claim} bound={bound} \
+         pos=[{:.1},{:.1},{:.1}]",
+        p.x,
+        p.y,
+        p.z,
+        claim = match room.map(|r| r.room()) {
+            None => "absent".to_string(),
+            Some(None) => "outdoors".to_string(),
+            Some(Some(r)) => format!("g{}", r.group),
+        },
+        bound = match bound {
+            None => "none".to_string(),
+            Some(b) => format!("r{:.1}", Vec3::from(b.half_extents).length()),
+        },
+    );
+}
+
+/// `WOW_CULL_TRACE` — see [`trace_body`].
+#[derive(Resource)]
+pub(crate) struct CullTrace;
+
 /// What the body leg reads per net body — one whole-object test on its root, which is the
 /// reference's own granularity (`0x682f40`), and which takes the whole visual with it: body
 /// geosets, worn gear under their joints, the mount and its rider (`mount::spawn_mount_child`
@@ -296,6 +344,7 @@ type UnownedSceneFilter = (
 /// yet, and an unknown room is a **timing gap, not a verdict** — the same law the missing-`Aabb`
 /// arm above takes, and for the same reason: deciding on absent information flickers the world.
 type ElectedBody = (
+    Entity,
     &'static GlobalTransform,
     &'static crate::world_unit::WorldUnit,
     Option<&'static crate::wmo_portal::UnitWmoRoom>,
@@ -316,6 +365,7 @@ fn apply_exterior_cull(
     mut scene: Query<UnownedScene, UnownedSceneFilter>,
     mut bodies: Query<ElectedBody>,
     mut verdict: ResMut<ExteriorCullVerdict>,
+    trace: Option<Res<CullTrace>>,
 ) {
     let set = |vis: &mut Visibility, target: Visibility| {
         if *vis != target {
@@ -341,15 +391,36 @@ fn apply_exterior_cull(
     // The body leg: one whole-object test per net body (see [`ElectedBody`]), serial because the
     // audience is the server's visibility stream — dozens, not the tens of thousands above.
     let (mut body_n, mut body_hidden) = (0usize, 0usize);
-    for (gt, body, room, mut vis) in &mut bodies {
+    for (e, gt, body, room, mut vis) in &mut bodies {
         let Some(bound) = body.bound.as_ref() else {
-            continue; // the game says this body is not ours to decide — `WorldUnit::bound`
+            // The game says this body is not ours to decide (`WorldUnit::bound`). Traced too: an
+            // un-elected body is invisible to every counter below, which is exactly how a whole
+            // class of creature sat outside this cull unnoticed (decision 1270 §5).
+            trace_body(&trace, e, "unelected", gt, room, None, true);
+            continue;
         };
         body_n += 1;
-        // In a WMO room ⇒ its building's own walk submits it, not the exterior one. No claim yet ⇒
-        // not decided. Either way the gate stands down and the body keeps drawing.
-        let exempt = room.is_none_or(|r| r.room().is_some());
+        // In a WMO room ⇒ its building's own walk submits it, not the exterior one.
+        //
+        // **No claim yet reads as outdoors, not as exempt**, and that asymmetry is the whole of the
+        // director's second report. A claim is `try_insert`ed by `track_unit_interiors` a frame or
+        // two after a body spawns, so "undecided ⇒ admit" let every streaming mob draw through a
+        // sealed ceiling for exactly as long as the gap — which at a cavern's frame rate is most of
+        // a second, per mob, continuously. The two error directions are not symmetric: guessing
+        // *outdoors* makes a mob in your own room appear a frame late, guessing *in a room* makes a
+        // mob outside appear through solid rock. And `UnitWmoRoom::default()` is itself a
+        // no-room claim, so this simply decides the missing component the way the present one would.
+        let exempt = room.is_some_and(|r| r.room().is_some());
         let admitted = exempt || gate.admits(gt, Some(bound));
+        trace_body(
+            &trace,
+            e,
+            if exempt { "in-room" } else { "outdoor" },
+            gt,
+            room,
+            Some(bound),
+            admitted,
+        );
         body_hidden += usize::from(!admitted);
         set(
             &mut vis,
@@ -474,7 +545,7 @@ mod tests {
     /// verdict in spawn order plus the counters.
     fn run_bodies(
         windows: ExteriorWindows,
-        bodies: &[(Vec3, Option<crate::wmo_portal::UnitWmoRoom>)],
+        bodies: &[(Vec3, Option<crate::wmo_portal::UnitWmoRoom>, Aabb)],
     ) -> (Vec<Visibility>, ExteriorCullVerdict) {
         let mut app = App::new();
         app.init_resource::<ExteriorCullVerdict>()
@@ -494,15 +565,14 @@ mod tests {
         ));
         let ids: Vec<Entity> = bodies
             .iter()
-            .map(|(at, room)| {
-                // A yard-ish box on the body's own origin — a creature's authored idle CAaBox.
+            .map(|(at, room, bound)| {
                 let mut e = app.world_mut().spawn((
                     GlobalTransform::from_translation(*at),
                     crate::world_unit::WorldUnit {
                         wades: true,
                         scale: 1.0,
                         height: 2.0,
-                        bound: Some(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5))),
+                        bound: Some(*bound),
                     },
                     Visibility::Inherited,
                 ));
@@ -536,6 +606,15 @@ mod tests {
     }
     const NOT_RAYED_YET: Option<crate::wmo_portal::UnitWmoRoom> = None;
 
+    /// A yard-ish box on the body's own origin — a creature's authored idle CAaBox.
+    fn creature_box() -> Aabb {
+        Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5))
+    }
+    /// …and what the game writes before a body's model has resolved: a point at its origin.
+    fn unresolved() -> Aabb {
+        Aabb::from_min_max(Vec3::ZERO, Vec3::ZERO)
+    }
+
     /// **The Caverns of Time report, as a test** (decision 1270). Sealed room ⇒ no windows ⇒ the
     /// exterior walk never runs, so an outdoor body is not submitted at all — while a body standing
     /// in a WMO room rides the sibling producer `0x6834e0` and still draws. Both bodies sit at the
@@ -546,7 +625,10 @@ mod tests {
         let ahead = Vec3::new(0.0, 0.0, -50.0);
         let (vis, verdict) = run_bodies(
             ExteriorWindows::Windows(Vec::new()),
-            &[(ahead, outdoors()), (ahead, in_a_room())],
+            &[
+                (ahead, outdoors(), creature_box()),
+                (ahead, in_a_room(), creature_box()),
+            ],
         );
         assert_eq!(
             vis,
@@ -556,16 +638,56 @@ mod tests {
         assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 1));
     }
 
-    /// A body whose room has not been rayed yet is **not decided** — an unknown room is a timing
-    /// gap, not a verdict, the same law the missing-`Aabb` arm takes. Asserted in the sealed room,
-    /// which is the only state where the two answers differ.
+    /// **A body whose model has not resolved yet is elected all the same**, on the point at its own
+    /// origin — the director's second report, after the first cut had landed: creatures still
+    /// appearing overhead inside Caverns of Time.
+    ///
+    /// Every streamed mob drew for one whole frame, because the model's extent reaches
+    /// `publish_world_units` only *after* `attach_entity_visuals` has already spawned the visual,
+    /// and a bound-less body was admitted. That looked like a conservative default and was a defect:
+    /// at a cavern's frame rate one frame is most of a second, and mobs stream continuously, so a
+    /// per-body flash reads as "they are still there". The origin never needed waiting for — it is
+    /// the server's own position, exact from the body's first frame.
     #[test]
-    fn an_unrayed_body_is_not_decided() {
-        let (vis, _) = run_bodies(
+    fn a_body_whose_model_has_not_resolved_is_elected_on_its_origin() {
+        let (vis, verdict) = run_bodies(
             ExteriorWindows::Windows(Vec::new()),
-            &[(Vec3::new(0.0, 0.0, -50.0), NOT_RAYED_YET)],
+            &[(Vec3::new(0.0, 0.0, -50.0), outdoors(), unresolved())],
         );
-        assert_eq!(vis, vec![Visibility::Inherited]);
+        assert_eq!(
+            vis,
+            vec![Visibility::Hidden],
+            "a point at the origin is a testable bound — the sealed room must reject it"
+        );
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (1, 1));
+    }
+
+    /// A body whose room has not been rayed yet reads as **outdoors**, and is gated.
+    ///
+    /// This test asserted the opposite when the first cut landed — "an unknown room is a timing gap,
+    /// not a verdict", borrowed from the missing-`Aabb` arm beside it. The director refuted it from
+    /// the screen: creatures still overhead inside Caverns of Time. `track_unit_interiors`
+    /// `try_insert`s a claim a frame or two after a body spawns, so on a continuous stream of mobs
+    /// there is always a handful mid-gap, and admitting them drew each one through the ceiling for
+    /// most of a second.
+    ///
+    /// The lesson is that the two arms are not the same question. A missing bound leaves nothing to
+    /// test, so the cull genuinely cannot decide. A missing *claim* still has a default the
+    /// component itself states — `UnitWmoRoom::default()` is a no-room claim — and the error
+    /// directions are lopsided: a body wrongly called outdoors appears a frame late, a body wrongly
+    /// called indoors appears through solid rock.
+    #[test]
+    fn an_unrayed_body_reads_as_outdoors() {
+        let (vis, verdict) = run_bodies(
+            ExteriorWindows::Windows(Vec::new()),
+            &[(Vec3::new(0.0, 0.0, -50.0), NOT_RAYED_YET, creature_box())],
+        );
+        assert_eq!(
+            vis,
+            vec![Visibility::Hidden],
+            "no claim is not a licence to draw through a sealed room"
+        );
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (1, 1));
     }
 
     /// Outdoors the driver takes its `{0,0,1,1}` leg and every body is submitted as before — the
@@ -575,10 +697,10 @@ mod tests {
         let (vis, verdict) = run_bodies(
             ExteriorWindows::Unrestricted,
             &[
-                (Vec3::new(0.0, 0.0, -50.0), outdoors()),
+                (Vec3::new(0.0, 0.0, -50.0), outdoors(), creature_box()),
                 // Behind the camera, and still submitted: `Unrestricted` is a stand-down, not a
                 // frustum test. Bevy's own cull is what drops this one, one system later.
-                (Vec3::new(0.0, 0.0, 50.0), outdoors()),
+                (Vec3::new(0.0, 0.0, 50.0), outdoors(), creature_box()),
             ],
         );
         assert_eq!(vis, vec![Visibility::Inherited; 2]);
@@ -592,8 +714,8 @@ mod tests {
         let (vis, verdict) = run_bodies(
             ExteriorWindows::Windows(vec![[0.1, -1.0, 1.0, 1.0]]),
             &[
-                (Vec3::new(40.0, 0.0, -50.0), outdoors()),
-                (Vec3::new(-40.0, 0.0, -50.0), outdoors()),
+                (Vec3::new(40.0, 0.0, -50.0), outdoors(), creature_box()),
+                (Vec3::new(-40.0, 0.0, -50.0), outdoors(), creature_box()),
             ],
         );
         assert_eq!(

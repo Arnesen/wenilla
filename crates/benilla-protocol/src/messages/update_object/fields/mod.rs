@@ -324,6 +324,14 @@ const FIELD_PLAYER_VENDORBUYBACK_SLOT_1: u16 = 624; // 12 slots × 2 (item guids
                                                     // PLAYER_FIELD_KEYRING_SLOT_1 — the next link of the same chain the buyback comment walks
                                                     // (624 + 12×2 = 648; +32×2 = 712 = FARSIGHT ✓, which the chain's far end already pins).
 const FIELD_PLAYER_KEYRING_SLOT_1: u16 = 648; // 32 slots × 2 (item guids), wire slots 81–112
+                                              // PLAYER_FARSIGHT — the object our view is anchored to (Mind Vision, Sentry Totem, the Ornate
+                                              // Spyglass), or 0 for "my own body". A 2-field guid, PRIVATE, so it only ever arrives on our own
+                                              // descriptor — exactly the consumer. Its index needs no fresh derivation: it is the next link of
+                                              // the same chain the two comments above walk, and both ends of that chain are tested anchors
+                                              // (648 + 32×2 = 712; +2 combo 714, +2 = XP 716 ✓). vmangos's hex comment reads 0x2C2 = 706 — the
+                                              // same 6-low drift as COINAGE/XP, and not what the server compiles: its enum arithmetic says
+                                              // UNIT_END(0xBC = 188) + 0x20C(524) = 712.
+const FIELD_PLAYER_FARSIGHT: u16 = 712;
 const FIELD_PLAYER_BUYBACK_PRICE_1: u16 = 1226; // 12 × u32 copper, indexed slot−69
 const FIELD_PLAYER_BUYBACK_TIMESTAMP_1: u16 = 1238; // 12 × u32 — the client's sort key only
                                                     // PLAYER_FIELD_COINAGE, our purse in copper (INT, PRIVATE — sent only for our own player, the exact

@@ -48,6 +48,50 @@ impl WorldWriter {
         self.send(opcode, &messages::movement(&info))
     }
 
+    /// Claim `guid` as the unit whose movement we are sending (`CMSG_SET_ACTIVE_MOVER`, a full u64).
+    ///
+    /// **The mover handshake is client-driven — no server packet sets it.** The server states who
+    /// we *may* drive (`SMSG_CLIENT_CONTROL_UPDATE`) and then waits; until this reply lands,
+    /// `Player::GetConfirmedMover` resolves nothing for the new mover and **every** `MSG_MOVE_*` we
+    /// send for it is discarded (vmangos `MovementHandler.cpp:844-884`, which also rejects a claim
+    /// on a unit it never handed us). Login makes this claim for our own body; possession simply
+    /// re-makes it for somebody else's.
+    pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
+    }
+
+    /// Vote on the far-sight view the server has already chosen (`CMSG_FAR_SIGHT`, one `u8`).
+    ///
+    /// The real client sends this from exactly two sites, both inside its far-sight engage/release
+    /// function `0x5ee290`: `1` when the view attaches (`5ee3cb`/`5ee3dd`), `0` when it releases
+    /// (`5ee4f3`/`5ee504`). It names no object — the server resolves that from `PLAYER_FARSIGHT`,
+    /// which only the server writes.
+    pub fn far_sight(&mut self, engage: bool) -> Result<()> {
+        self.send(opcode::CMSG_FAR_SIGHT, &[u8::from(engage)])
+    }
+
+    /// Give up `guid` as our mover (`CMSG_MOVE_NOT_ACTIVE_MOVER`): the full u64 guid being
+    /// released, then a `MovementInfo` at its parting pose.
+    ///
+    /// The pose is the point. vmangos clears its confirmed-mover state and **re-broadcasts a stop
+    /// under the old guid** built from what we send here (`MovementHandler.cpp:886-965`), so
+    /// skipping it strands every observer on that unit's last relayed pose — a possessed creature
+    /// left sliding where the possession ended.
+    pub fn move_not_active_mover(
+        &mut self,
+        guid: u64,
+        flags: u32,
+        pos: [f32; 3],
+        orientation: f32,
+        fall_time: u32,
+    ) -> Result<()> {
+        let mut info = movement_info(pos, orientation, flags);
+        info.fall_time = fall_time;
+        let mut body = messages::full_guid(guid);
+        body.extend_from_slice(&messages::movement(&info));
+        self.send(opcode::CMSG_MOVE_NOT_ACTIVE_MOVER, &body)
+    }
+
     /// Acknowledge that a server-authored spline (Charge/knockback/taxi — an `SMSG_MONSTER_MOVE`
     /// addressed to our own guid) finished: `CMSG_MOVE_SPLINE_DONE` with a `MovementInfo` at the
     /// ride's endpoint and the `spline_id` we were driven by. The server sets `SplineDonePending` for

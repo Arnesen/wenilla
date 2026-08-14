@@ -742,6 +742,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::MountSpecialAnim { guid } => {
             vec![SessionEvent::MountSpecial { guid }]
         }
+        ServerPacket::ClientControlUpdate { mover, allow_move } => {
+            vec![SessionEvent::ClientControl { mover, allow_move }]
+        }
         ServerPacket::ShowTaxiNodes {
             window,
             flightmaster,

@@ -1017,6 +1017,13 @@ pub enum ServerPacket {
     MountSpecialAnim {
         guid: u64,
     },
+    /// `SMSG_CLIENT_CONTROL_UPDATE` — packed mover guid + `u8` allowMove (VERIFIED vmangos
+    /// `Server/Packets/Misc.cpp:677-682`). Always addressed to us; `mover` is the unit it speaks
+    /// about, which is our own guid when the server is taking control *away*.
+    ClientControlUpdate {
+        mover: u64,
+        allow_move: bool,
+    },
     /// `SMSG_SHOWTAXINODES` — the taxi map (vmangos `SendTaxiMenu`, `TaxiHandler.cpp:82-96`;
     /// layout in [`super::taxi::read_show_taxi_nodes`], decision 0484). `window` is the
     /// window-framing constant vmangos always writes `1`; `flightmaster` names the NPC the menu
@@ -1295,6 +1302,7 @@ impl ServerPacket {
             ServerPacket::MountResult { mount: true, .. } => "SMSG_MOUNTRESULT".into(),
             ServerPacket::MountResult { mount: false, .. } => "SMSG_DISMOUNTRESULT".into(),
             ServerPacket::MountSpecialAnim { .. } => "SMSG_MOUNTSPECIAL_ANIM".into(),
+            ServerPacket::ClientControlUpdate { .. } => "SMSG_CLIENT_CONTROL_UPDATE".into(),
             ServerPacket::ShowTaxiNodes { .. } => "SMSG_SHOWTAXINODES".into(),
             ServerPacket::TaxiNodeStatus { .. } => "SMSG_TAXINODE_STATUS".into(),
             ServerPacket::ActivateTaxiReply { .. } => "SMSG_ACTIVATETAXIREPLY".into(),

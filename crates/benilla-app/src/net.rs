@@ -97,6 +97,7 @@ impl Plugin for NetPlugin {
             .add_message::<TeleportMessage>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
+            .add_message::<ClientControlMessage>()
             .add_message::<MoveModeMessage>()
             .add_message::<ServerSoundMessage>()
             .add_message::<EmoteMessage>()
@@ -696,6 +697,23 @@ pub(crate) enum ClientCommand {
         jump: Option<JumpInfo>,
         transport: Option<TransportPose>,
     },
+    /// Claim `guid` as our mover (`CMSG_SET_ACTIVE_MOVER`). Login sends it for our own body; a
+    /// possession handoff re-sends it for the unit we were handed, because the server drops every
+    /// `MSG_MOVE_*` for a mover it has not confirmed.
+    SetActiveMover { guid: u64 },
+    /// Release `guid` as our mover (`CMSG_MOVE_NOT_ACTIVE_MOVER`) at the pose it is parting on —
+    /// the server re-broadcasts a stop under that guid from this payload, so observers do not keep
+    /// the unit sliding.
+    NotActiveMover {
+        guid: u64,
+        flags: u32,
+        pos: [f32; 3],
+        orientation: f32,
+        fall_time: u32,
+    },
+    /// Vote on the far-sight view (`CMSG_FAR_SIGHT`): `true` as it attaches, `false` as it
+    /// releases. The reference sends both; neither names an object.
+    FarSight { engage: bool },
     /// Echo a same-map teleport ack (`MSG_MOVE_TELEPORT_ACK_Client`) — without it the server freezes
     /// our movement until relog.
     TeleportAck { guid: u64, counter: u32 },
@@ -1465,6 +1483,20 @@ pub(crate) struct SelfMoveMessage {
     pub(crate) pitch: f32,
     pub(crate) fall_time: u32,
     pub(crate) jump: Option<benilla_protocol::JumpInfo>,
+}
+
+/// The server granted or revoked control of a unit (`SMSG_CLIENT_CONTROL_UPDATE`). Written by
+/// [`apply_net_updates`] verbatim — the *decision* is the controller's, because only it knows the
+/// live pose it would have to park, so the drain deliberately interprets nothing.
+///
+/// **`mover` is the unit spoken about, not a new subject.** The server revokes by naming *us*
+/// (`mover == self guid`, `allow_move = false`), which is what a mind-controlled player receives
+/// about themselves, and grants by naming somebody else. Reading it as "the new mover" gets the
+/// victim's case exactly backwards — it would hand us control of ourselves at the moment we lost it.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct ClientControlMessage {
+    pub(crate) mover: u64,
+    pub(crate) allow_move: bool,
 }
 
 /// The server changed one of our own mover's speeds (`SMSG_FORCE_*_SPEED_CHANGE` — aura, mount, GM

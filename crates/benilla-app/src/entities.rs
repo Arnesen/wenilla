@@ -469,9 +469,20 @@ fn publish_world_units(
             // answers `None` on purpose**: `transport::tick_transports` writes that root's
             // `Visibility` every frame off its own timetable, and a second writer there is the
             // fight decision 0025 exists to prevent — so the world is told not to decide, rather
-            // than told a box and left to race. Every other body offers its model's box, once it
-            // has one.
-            bound: (!anchored).then_some(bound).flatten().map(|b| b.0),
+            // than told a box and left to race.
+            //
+            // Every other body is elected from its FIRST frame, with a degenerate box at its own
+            // origin until its model resolves. Waiting for the extent looks conservative and is
+            // not: the bound reaches this reconciler only after `attach_entity_visuals` has already
+            // spawned the visual, so "no box yet ⇒ admit" drew every streaming mob for one whole
+            // frame through a sealed ceiling — and a cavern runs slowly enough that one frame is
+            // most of a second. The origin is the server's own position, exact from the start.
+            bound: (!anchored).then(|| {
+                bound.map_or_else(
+                    || bevy::camera::primitives::Aabb::from_min_max(Vec3::ZERO, Vec3::ZERO),
+                    |b| b.0,
+                )
+            }),
         };
         // Only write on a real change: the component is change-detected downstream, and a
         // per-frame rewrite would mark every body dirty for every reader every frame.

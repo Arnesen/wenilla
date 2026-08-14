@@ -644,13 +644,29 @@ pub(super) fn attach_entity_visuals(
                     bevy::camera::primitives::Aabb::from_min_max(clip.bounds_min, clip.bounds_max)
                 })
             });
-            // …and the same box is this body's **election bound** (decision 1270): standing in a
-            // sealed WMO room the reference never submits an outdoor object at all, so the cull
-            // needs one whole-object AABB per body, on its root. Recorded here and restated onto
-            // `WorldUnit::bound` by `publish_world_units` — the one reconciler that answers every
-            // "what is this body to the world" question, exactly as it already does for the
-            // collision height. A body with no authored idle box records none and keeps drawing.
-            if let Some(aabb) = idle_aabb {
+            // This body's **election bound** (decision 1270): standing in a sealed WMO room the
+            // reference never submits an outdoor object at all, so the cull needs one whole-object
+            // AABB per body, on its root. Recorded here and restated onto `WorldUnit::bound` by
+            // `publish_world_units` — the one reconciler that answers every "what is this body to
+            // the world" question, exactly as it already does for the collision height.
+            //
+            // **Not `idle_aabb` above, and that distinction is the whole of it.** `first_seq` is
+            // the *rendering* gate — "is this seed worth a skin + player" (0130's content gate) —
+            // and it is `None` for every model whose idle does not move its bones off the rest
+            // pose. The picker can take that: it falls back per part (`idle_aabb.or(part.aabb)`).
+            // The election cannot, because a body with no bound is a body it never decides — so
+            // reading the render gate here silently exempted a whole class of creature from the
+            // cull, and they kept drawing through the ceiling. `idle_clip` is the same selection
+            // asked as an *identity* (`ModelAnimations`' own doc: "conflating the two is the whole
+            // defect"), and where even that box is unauthored — a degenerate CAaBox is common in
+            // 1.12 art — the model's bind-pose extent is what an unarmed body actually draws.
+            let election_bound = dm
+                .and_then(|m| m.animations.as_ref())
+                .and_then(|a| a.idle_clip())
+                .filter(|c| c.bounds_max.cmpgt(c.bounds_min).all())
+                .map(|c| bevy::camera::primitives::Aabb::from_min_max(c.bounds_min, c.bounds_max))
+                .or_else(|| union_aabb(model.unwrap_or_default().iter().filter_map(|p| p.aabb)));
+            if let Some(aabb) = election_bound {
                 commands.entity(entity).insert(super::ModelBound(aabb));
             }
             // Everything one part's spawn reads from this unit, gathered once (`attach::dress`) —
@@ -912,6 +928,30 @@ pub(super) fn attach_entity_visuals(
 /// the Bevy-graph-driven hosts. `holder` is the rig root that carries (or will carry) the
 /// [`benilla_world::rig_palette::RigSkin`] — every joint marks it with a `RigJoint`, which is what the
 /// palette change-sweep iterates (0720).
+/// The enclosing box of a model's parts — its bind-pose extent, in model space.
+///
+/// The election bound's fallback (decision 1270) for a body whose armed idle authors no CAaBox.
+/// Every part of one model shares that space, so their union is the model, and for a body that is
+/// not armed at all it is exactly what gets drawn. A bind box can be a poor bound for a body whose
+/// idle moves it far (0637's duel flag, modelled 9 yd up and planted by its Stand) — which is why
+/// the authored box is preferred whenever there is one, and why this is a fallback rather than the
+/// rule. Over-large is the safe direction here: it can only admit, never hide.
+fn union_aabb(
+    boxes: impl Iterator<Item = bevy::camera::primitives::Aabb>,
+) -> Option<bevy::camera::primitives::Aabb> {
+    let mut boxes = boxes;
+    let first = boxes.next()?;
+    let (mut min, mut max) = (first.min(), first.max());
+    for b in boxes {
+        min = min.min(b.min());
+        max = max.max(b.max());
+    }
+    Some(bevy::camera::primitives::Aabb::from_min_max(
+        Vec3::from(min),
+        Vec3::from(max),
+    ))
+}
+
 /// A display model's source path as a readable inspector label (the asset path, sans `mpq://` source).
 /// Empty for the model-less variant or a path-less handle.
 fn display_label(handle: &ModelHandle) -> String {

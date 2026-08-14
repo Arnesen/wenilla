@@ -49,12 +49,17 @@ mod movement_net;
 // step through the very same code, the way the reference runs every mover through one controller
 // (decision 0059's byte trail).
 pub(crate) mod mover;
+/// The spyglass zoom — aura 76, a client-local camera override with no wire half at all (B151).
+mod scoped_view;
 mod server_ride;
 mod setup;
 mod state;
 /// The step-up diagnostic probe — the blocked-frame report behind the `stup` trace tag.
 pub(crate) mod step_probe;
 mod swim;
+/// What the camera orbits, when that is not our own body — the far-sight anchor (B151, and Mind
+/// Control's camera half in B211, which rides the same field).
+mod view_subject;
 mod wire_in;
 
 // `apply_self_model_fade` is `pub(crate)`-visible: it is the LAST writer of a self body part's
@@ -169,6 +174,25 @@ impl Plugin for PlayerPlugin {
         );
         app.init_resource::<camera::LookConfig>();
         app.init_resource::<camera::ZoomLimit>();
+        // Far sight: resolve `PLAYER_FARSIGHT` into a pose before `control` reads it to seat the
+        // camera. A separate system rather than another query on `control` for a hard reason —
+        // `control` already holds the self entity's `Transform` mutably, so it cannot also read an
+        // arbitrary unit's.
+        app.init_resource::<view_subject::ViewSubject>()
+            .init_resource::<scoped_view::ScopedView>()
+            .add_systems(
+                Update,
+                (
+                    view_subject::publish_view_subject,
+                    // The spyglass zoom (aura 76) — a different mechanism entirely, sharing only
+                    // the family name. Also before `control`, which reads the scope to hold the rig
+                    // in first person: the reference's camera lock.
+                    scoped_view::apply_scoped_view,
+                )
+                    .in_set(WorldStage::Input)
+                    .before(control)
+                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+            );
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,
             // or under the opaque loading screen (whose covered render is what compiles the
@@ -327,6 +351,10 @@ fn control(
         // The posture queue (decision 0881): `/sit` and its family ask here; the X key is read
         // inline below. One setter, either way.
         MessageReader<StandStateRequest>,
+        // The possession handoff (B211): control of a unit granted or revoked. Lands here rather
+        // than at the net drain because both answers it needs — the mover claim and the parting
+        // pose — are the controller's to give.
+        MessageReader<crate::net::ClientControlMessage>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -341,6 +369,16 @@ fn control(
         // state from here — raw `keys` remain only for the dev chord's free-fly toggle
         // (decision 1043) and the look-session mouse.
         Res<crate::bindings::BindingsState>,
+        // What the camera orbits, when that is not our body ([`view_subject`], B151). Resolved by
+        // a system ordered just before us, because `control` holds the self `Transform` mutably
+        // and so cannot also read the far-sight object's.
+        Res<view_subject::ViewSubject>,
+        // Our own guid — the control handoff (B211) is a statement about *some* unit, and telling
+        // "the server revoked my body" from "the server handed me a creature" is exactly this test.
+        Res<crate::net::SelfGuid>,
+        // The spyglass scope ([`scoped_view`]): while held, the rig is pinned to first person and
+        // the wheel cannot leave it.
+        Res<scoped_view::ScopedView>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
@@ -420,6 +458,9 @@ fn control(
         &speed_capsule.6,
     );
     let binds = &speed_capsule.7;
+    let view_subject = &speed_capsule.8;
+    let self_guid = speed_capsule.9 .0;
+    let scoped = &speed_capsule.10;
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so the avatar isn't also driven while typing (a `.tele` command). Mouse still
@@ -505,7 +546,13 @@ fn control(
     // reference produces by never running the turn emitter at all. Restoring rather than gating
     // inside the session keeps the approved camera path (0050/0366's right-drag coupling) untouched.
     // `mouse_turned` then reads false by construction, so the seated-turn stand-up cannot fire either.
-    if stunned {
+    // Losing the reins has the same shape, and the binary says so explicitly: with the mover global
+    // zeroed, `0x514640` skips the whole tick at `51466c` — input is still *sampled*, the body turn
+    // is skipped at `514474` — while the camera rotate at `514444` happens BEFORE the mover lookup
+    // and so keeps working. A mind-controlled player can still look around; they just cannot turn
+    // or move their body. Same restore, for the same reason, and it covers holding somebody else's
+    // reins too: the turn belongs to whatever we are driving, which is not this body.
+    if stunned || player.control_lost || player.foreign_mover.is_some() {
         player.face_yaw = yaw_before_look;
     }
     let mouse_turned = player.face_yaw != yaw_before_look;
@@ -550,12 +597,28 @@ fn control(
         &mut net.4,
         &mut net.5,
         &mut net.9,
+        &mut net.11,
+        self_guid,
         transports,
         self_player
             .single()
             .ok()
             .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
     );
+
+    // A mover the server took back owes it a parting pose (`CMSG_MOVE_NOT_ACTIVE_MOVER`), and this
+    // is the first point in the frame that has one. Without it the server never clears its
+    // confirmed-mover state and never re-broadcasts the stop, so observers keep the unit sliding on
+    // its last relayed pose.
+    if let Some(guid) = player.release_mover.take() {
+        let _ = net.0 .0.send(crate::net::ClientCommand::NotActiveMover {
+            guid,
+            flags: 0,
+            pos: benilla_assets::coords::bevy_to_wow(player.pos),
+            orientation: player.face_yaw.rem_euclid(std::f32::consts::TAU),
+            fall_time: 0,
+        });
+    }
 
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
 
@@ -611,14 +674,70 @@ fn control(
         // the `sample_splines` transform and set the run animation; here we only carry the
         // follow-camera onto the moving avatar. Input, physics, and the outbound movement stream all
         // yield until the ride ends (where `drive_self_ride` acks `CMSG_MOVE_SPLINE_DONE` and resumes).
+        // Control revoked (B211): somebody is mind-controlling us. Same shape as the ride guard —
+        // camera keeps seating, input and physics and the wire all yield — and for the same reason:
+        // the body is not ours to drive this frame. It is NOT the free-fly branch below, which would
+        // fly the camera off the body; and it is not root, which leaves turning live. Nothing else
+        // will stop us: the server neither roots the victim nor validates their movement, so this
+        // gate IS the immobility (see `Player::control_lost`).
+        //
+        // The park below flushes one `MSG_MOVE_STOP`, which matters — we may have been mid-run at
+        // the moment control was taken, and the server would otherwise keep extrapolating that run
+        // for every observer.
+        // The same gate serves both ways of not driving our own body: the reins taken from us
+        // (mind-controlled), or the reins of something else in our hands. The second is the
+        // sharper one — outbound moves carry no guid, so with a foreign mover claimed, streaming
+        // our body's pose would land on the possessed unit and teleport it onto us. Standing our
+        // own character still is also what possession looks like from the outside.
+        if player.control_lost || player.foreign_mover.is_some() {
+            let pivot_h = self_player
+                .single()
+                .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
+                .unwrap_or(CAM_PIVOT_FALLBACK);
+            let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
+            let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
+                Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
+                None => (player.pos, head, pivot_h),
+            };
+            seat_camera(
+                dt,
+                0.0,
+                orbit_pos,
+                sweep_from,
+                orbit_pivot,
+                &mut rig,
+                &mut cam,
+                &mut cam_t,
+                &collide,
+                cam_probe,
+            );
+            movement_net::park_mover(&net.0 .0, &mut player);
+            return;
+        }
         if player.server_riding {
             let pivot_h = self_player
                 .single()
                 .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
                 .unwrap_or(CAM_PIVOT_FALLBACK);
             let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
+            // Far sight outlives a ride, so it has to be honoured here too — Sentry Totem carries
+            // no interrupt flags at all, which means you can board a taxi with your view still on
+            // the totem. Same substitution as the main path below; skipping it would read as far
+            // sight mysteriously dropping the moment a spline takes the body.
+            let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
+                Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
+                None => (player.pos, head, pivot_h),
+            };
             seat_camera(
-                dt, 0.0, player.pos, head, pivot_h, &mut rig, &mut cam, &mut cam_t, &collide,
+                dt,
+                0.0,
+                orbit_pos,
+                sweep_from,
+                orbit_pivot,
+                &mut rig,
+                &mut cam,
+                &mut cam_t,
+                &collide,
                 cam_probe,
             );
             return;
@@ -1502,6 +1621,23 @@ fn control(
         // framing pivot — see `seat_camera`'s doc for why. Computed here (not in `camera`) because it
         // depends on the avatar's own capsule constants, which are a movement concern.
         let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
+        // The spyglass lock (aura 76): pin the rig to first person for as long as the scope is
+        // held. Parking BOTH the live distance and the wheel target is what makes it a lock rather
+        // than a nudge — the wheel writes `target_distance`, and re-parking here every frame is our
+        // equivalent of the reference's camera flag `0x8` making `SetCameraView` early-return.
+        if scoped.active() {
+            rig.park_distance(0.0);
+        }
+        // Far sight (B151): while `PLAYER_FARSIGHT` names an object, the rig orbits IT instead of
+        // the body — the three arguments below are the entire feature. Everything else in this
+        // system runs untouched, which is the point: Mind Vision leaves you walking, streaming,
+        // hearing and sending movement as yourself while only the picture moves. The sweep origin
+        // moves with the subject too; rooting it at our own head would cast the boom across the
+        // world and jam it on the first wall in between ([`RemoteView::sweep_origin`]).
+        let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
+            Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
+            None => (player.pos, head, cam_pivot_height),
+        };
         // `turn_delta` is the character's own turn this frame (keyboard turn, or the drunk veer)
         // — the deck's yaw delta was already applied to `cam.yaw` at the ride block (frame motion
         // carries the camera unconditionally; only input turns respect `seat_camera`'s
@@ -1509,9 +1645,9 @@ fn control(
         seat_camera(
             dt,
             turn_delta,
-            player.pos,
-            head,
-            cam_pivot_height,
+            orbit_pos,
+            sweep_from,
+            orbit_pivot,
             &mut rig,
             &mut cam,
             &mut cam_t,

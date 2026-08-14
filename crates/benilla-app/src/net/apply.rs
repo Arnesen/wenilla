@@ -127,6 +127,9 @@ pub(super) fn apply_net_updates(
         // A `MSG_MOVE_*` the server addressed to OUR mover (decision 0725): a pose it wrote, with
         // no handshake — the controller applies it in `player::wire_in`.
         MessageWriter<super::SelfMoveMessage>,
+        // The possession handoff (`SMSG_CLIENT_CONTROL_UPDATE`): control of a unit granted or
+        // revoked. Forwarded verbatim — only the controller knows the pose it would have to park.
+        MessageWriter<super::ClientControlMessage>,
     ),
     // One tuple param (the 16-SystemParam ceiling): the ask-once query caches + the gossip/merchant
     // state the net drain fills for the NPC-interaction windows (decision 0081).
@@ -362,6 +365,7 @@ pub(super) fn apply_net_updates(
         mut disconnects,
         mut server_said,
         mut self_moves,
+        mut client_control,
     ) = session_msgs;
     // Descriptor seeds/deltas for objects created *earlier in this same drain* can't land on their
     // entities yet (the spawn `Command` hasn't run), so they accumulate here and flush once at the end.
@@ -1313,6 +1317,12 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::MountSpecial { guid } => {
                 mount::mount_special(guid, &self_guid, &index, &mut audio.14)
+            }
+            // Possession's control half (B211). Forwarded whole and unjudged: the guid may name us
+            // (a revoke) or somebody else (a grant), and only the controller can act on either —
+            // it owns the pose to park and the mover claim to send.
+            SessionEvent::ClientControl { mover, allow_move } => {
+                client_control.write(super::ClientControlMessage { mover, allow_move });
             }
             SessionEvent::Pong { sequence } => session::pong(sequence, &aura.2, &mut status),
             SessionEvent::PacketDropped {

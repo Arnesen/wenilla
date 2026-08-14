@@ -874,6 +874,16 @@ pub enum SessionEvent {
     /// per-player broadcaster does not) — so the app self-suppresses it on receive and plays
     /// its own flourish locally at send time.
     MountSpecial { guid: u64 },
+    /// The server handed us — or took from us — the reins of a unit (`SMSG_CLIENT_CONTROL_UPDATE`).
+    ///
+    /// `mover` is the unit being spoken about, **not** necessarily a new subject: when the server
+    /// takes control away it names *us*, with `allow_move = false`. So the two questions the app
+    /// asks of this are different — "is this about me?" (`mover == self guid`) and "may that unit
+    /// move?" — and conflating them gets the mind-controlled *victim*'s case backwards.
+    ///
+    /// Answering with `CMSG_SET_ACTIVE_MOVER` is not optional when control is granted: vmangos
+    /// discards every `MSG_MOVE_*` for a mover it has not confirmed.
+    ClientControl { mover: u64, allow_move: bool },
     /// A packet the codec dropped on the floor: `unparseable = false` means **no parse arm exists**
     /// for the opcode at all (it fell through to `ServerPacket::Other` — a wire-coverage gap);
     /// `true` means a parser exists but errored on this body (the reader skipped it to keep the
