@@ -437,8 +437,13 @@ pub enum SessionEvent {
         instant: bool,
     },
     /// A nearby unit's chat emote (`SMSG_TEXT_EMOTE`): the `EmotesText.dbc` id; the guid names
-    /// the performer (voice race/sex resolve from its descriptor).
-    TextEmote { guid: u64, text_emote: u32 },
+    /// the performer (voice race/sex resolve from its descriptor). `target_name` is the wire's
+    /// target display name, empty when untargeted — the sentence-form selector, decision 1274.
+    TextEmote {
+        guid: u64,
+        text_emote: u32,
+        target_name: String,
+    },
     /// A unit's anim emote (`SMSG_EMOTE`): the `Emotes.dbc` id (drives the anim + its
     /// `EventSoundID`).
     Emote { guid: u64, emote_id: u32 },

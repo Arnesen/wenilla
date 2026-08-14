@@ -4,14 +4,15 @@
 //! window; [`compose`] is the `ChatFrame_OnEvent` composition law transcribed — the `CHAT_*_GET`
 //! patterns, the `<AFK>/<DND>/<GM>` flag prefix, the `|Hplayer:…|h[Name]|h` link (never on EMOTE
 //! or monster lines), the `[Language]` header, the `[N. Name]` channel prefix with its " - Zone"
-//! tail stripped, and the `CHAT_<X>_NOTICE` channel-notice strings. Formats are QUOTED from the
-//! extracted GlobalStrings (0288's pin, §2/§4); colors come from [`super::event::default_color`].
+//! tail stripped (the SPEECH branch only — a notice prints arg4 whole, 1275), and the
+//! `CHAT_<X>_NOTICE` channel-notice strings. Formats are QUOTED from the extracted GlobalStrings
+//! (0288's pin, §2/§4); colors come from [`super::event::resolved_color`].
 
 use bevy::prelude::*;
 
 use benilla_protocol::messages::channel_notice as notice;
 
-use super::event::{default_color, event_name, group_kinds, ChatEvent, ChatEventKind, ChatGroup};
+use super::event::{event_name, group_kinds, resolved_color, ChatEvent, ChatEventKind, ChatGroup};
 
 /// How long after a received whisper the `TellMessage` alert stays silent
 /// (`CHAT_TELL_ALERT_TIME = 300` — ref ChatFrame.lua l.4: only a tell arriving ≥5 min after the
@@ -111,7 +112,7 @@ pub(crate) fn route(
     };
     // ── our own window: the transcribed ChatFrame_OnEvent, i.e. the first-registered listener ──
     if let Some(line) = compose(event, kind) {
-        let color = default_color(kind);
+        let color = resolved_color(event, kind);
         for idx in 0..2 {
             if windows.wants(idx, kind) {
                 add(script, &format!("ChatFrame{}", idx + 1), &line, color);
@@ -164,8 +165,9 @@ pub(crate) fn compose(event: &ChatEvent, kind: ChatEventKind) -> Option<String> 
         | K::BgSystemHorde => event.text.clone(),
         // "%s is ignoring you." (CHAT_IGNORED, arg2).
         K::Ignored => format!("{} is ignoring you.", event.sender),
-        // "[%s] " .. the member list (CHAT_CHANNEL_LIST_GET).
-        K::ChannelList => format!("[{}] {}", strip_zone(&event.channel), event.text),
+        // "[%s] " .. the member list (CHAT_CHANNEL_LIST_GET, l.1409) — arg4 WHOLE, see
+        // [`strip_zone`]: only the speech branch runs the gsub.
+        K::ChannelList => format!("[{}] {}", event.channel, event.text),
         K::ChannelNotice | K::ChannelNoticeUser => {
             return compose_notice(event);
         }
@@ -253,6 +255,13 @@ fn get_pattern(kind: ChatEventKind) -> &'static str {
 
 /// Strip the zone tail from a channel display name (`gsub(arg4, "%s%-%s.*", "")` —
 /// "General - Elwynn Forest" → "General", "2. Trade - City" → "2. Trade").
+///
+/// **The speech branch is the ONLY caller, and that is the reference's own shape** (1275): the
+/// gsub sits at l.1463, inside the `else` arm that builds a player/monster line, *after* every
+/// notice arm has already returned. CHANNEL_NOTICE (l.1424), CHANNEL_NOTICE_USER (l.1416/1418)
+/// and CHANNEL_LIST (l.1409) each pass **arg4 whole** into their format — so the real client's
+/// join line reads "Joined Channel: [1. General - Elwynn Forest]" while a line spoken in that same
+/// channel is prefixed "[1. General]". We stripped in all four and lost the tail from three.
 fn strip_zone(channel: &str) -> &str {
     match channel.find(" - ") {
         Some(i) => &channel[..i],
@@ -264,8 +273,11 @@ fn strip_zone(channel: &str) -> &str {
 /// `CHAT_<X>_NOTICE` string (GlobalStrings 493-745); `channel` fills `%s` first, the tail names
 /// (already guid-resolved by the bridge) fill the rest. `None` = the 1.12 UI shows nothing for
 /// this notice (MODE_CHANGE has no NOTICE string — flag-change chatter is silent).
+///
+/// `chan` is arg4 **whole**, zone tail and all — see [`strip_zone`] for why the notice arms are
+/// not the gsub's callers.
 pub(crate) fn compose_notice(event: &ChatEvent) -> Option<String> {
-    let chan = strip_zone(&event.channel);
+    let chan = &event.channel;
     let a = &event.sender; // the notice's first name (actor / affected)
     let b = &event.target; // the second name (kicked-by style)
     let n: u8 = event.notice_byte().unwrap_or(0xFF);

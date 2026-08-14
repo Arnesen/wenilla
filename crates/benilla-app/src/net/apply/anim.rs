@@ -14,16 +14,25 @@ use super::super::{EmoteKind, EmoteMessage, GuidIndex};
 
 /// `SMSG_TEXT_EMOTE` — someone performed a `/`-emote (the TextEmote.dbc id; the anim, if any, is
 /// the emote row's).
+///
+/// **Two consequences, and they are independent** (decision 1274): the anim + voice ride the
+/// [`EmoteMessage`] and need the performer *streamed*; the chat sentence is queued for
+/// [`crate::ui_chat`]'s composer and needs only the performer's *name*. An emote from someone
+/// off-screen therefore still prints its line, which is the reference's shape — `0x49dbe0`
+/// resolves a name and never touches the object manager.
 pub(super) fn text_emote(
     guid: u64,
     text_emote: u32,
+    target_name: String,
     index: &GuidIndex,
     out: &mut MessageWriter<EmoteMessage>,
+    chat_log: &mut crate::ui_chat::ChatLog,
 ) {
     out.write(EmoteMessage {
         source: index.0.get(&guid).copied(),
         kind: EmoteKind::Text(text_emote),
     });
+    chat_log.push_text_emote(guid, text_emote, target_name);
 }
 
 /// `SMSG_EMOTE` — a bare Emotes.dbc anim id on a unit (the server-driven one-shot: NPC scripts,

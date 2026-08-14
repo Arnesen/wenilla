@@ -103,6 +103,11 @@ impl SendType {
 
     /// The header's display color = the matching receive kind's table color
     /// (`ChatEdit_UpdateHeader` reads `ChatTypeInfo[type]`).
+    ///
+    /// CHANNEL takes the same override the render path does — `info = ChatTypeInfo["CHANNEL"..
+    /// channel]` (l.1902), the number from `GetChannelName`. It lands on the identical FFC0C0
+    /// while the extras carry CHANNEL's seed color (1275), so the CHANNEL arm below is right
+    /// today; a per-number recolor is what would make the box's number load-bearing here.
     fn color(self) -> [u8; 3] {
         use ChatEventKind as K;
         default_color(match self {

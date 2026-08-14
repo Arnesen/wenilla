@@ -183,8 +183,26 @@ impl Loader<'_> {
             ("DisabledFont", "SetDisabledFontObject"),
         ] {
             for f in children_named(el, child) {
-                if let Some(name) = f.attr("inherits") {
-                    self.call(wrapper, method, name.to_string(), dbg);
+                // These three are `<Font>`-TYPED elements — `CSimpleButton::LoadXML 0x7788c0`
+                // routes them at `0x778bf4` into the SAME `0x783c30` a top-level `<Font>` uses — so
+                // they take `inherits=` and `font=` alike, and `font=` wins: both land in one slot
+                // and `0x770c60` unlinks the previous parent (wow-re
+                // `fontstring-loadxml-font-attrs.md` C5; `font=`'s registry-first path is
+                // `0x783d15` → `0x783d22 call 0x770c60` → `0x783d27 jmp 0x783ee0`).
+                //
+                // Reading only `inherits=` here left every corpus button that writes `font=` on its
+                // own default font — Bagnon writes it at seven sites, which is why its character
+                // list's names and its "Show Bags" label were not the Large/normal faces they ask
+                // for. Real FrameXML always writes `inherits=`, so nothing we ship noticed.
+                //
+                // `style=` is deliberately NOT read: it does not exist in 1.12.1. An isolated-token
+                // scan for it returns zero against nine controls that each return one — it is a
+                // later-client idiom, and the reference writes `<NormalFont inherits="GameFontNormal"/>`
+                // (`UIPanelTemplates.xml:20-22`).
+                for attr in ["inherits", "font"] {
+                    if let Some(name) = f.attr(attr) {
+                        self.call(wrapper, method, name.to_string(), dbg);
+                    }
                 }
                 // An element-level justify (`<NormalFont inherits="QuestFont" justifyH="LEFT"/>`)
                 // lands on the label region itself — v1: one region-level set (the ref declares

@@ -115,19 +115,31 @@ fn message_chat_decodes_every_wire_shape() {
 fn text_emote_and_emote_decode() {
     let body = hx("7700000000000000650000000000000004000000426f6200");
     let p = messages::parse_server(messages::opcode::SMSG_TEXT_EMOTE, &body).unwrap();
+    // The target name is KEPT, not skipped past: it is the sentence-form selector (decision 1274).
+    // The NUL inside `namelen` is trimmed, so the string is exactly the display name.
     assert!(matches!(
-        p,
+        &p,
         ServerPacket::TextEmote {
             guid: 0x77,
             text_emote: 101,
-        }
+            target_name,
+        } if target_name == "Bob"
     ));
     assert!(matches!(
-        decode(p)[..],
+        &decode(p)[..],
         [SessionEvent::TextEmote {
             guid: 0x77,
             text_emote: 101,
-        }]
+            target_name,
+        }] if target_name == "Bob"
+    ));
+
+    // Untargeted: vmangos writes `namelen == 1` and a lone NUL, which must read as the EMPTY
+    // string — the "untargeted" bit — and not as a one-byte name.
+    let body = hx("770000000000000065000000000000000100000000");
+    assert!(matches!(
+        messages::parse_server(messages::opcode::SMSG_TEXT_EMOTE, &body).unwrap(),
+        ServerPacket::TextEmote { ref target_name, .. } if target_name.is_empty()
     ));
 
     let body = hx("060000008800000000000000");

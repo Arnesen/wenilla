@@ -214,6 +214,47 @@ impl Loader<'_> {
                 // SetVertexColor rather than being replaced by it (`RegionData::fill`).
                 self.call_region(region_wrapper, "SetTexture", (c[0], c[1], c[2], c[3]), dbg);
             }
+            // `<Gradient orientation><MinColor/><MaxColor/></Gradient>` — the texture's FOUR-vertex
+            // colour, and the one XML surface that tints a `file=` texture. It survives alongside
+            // the art because it lands in a different field: the child loop writes the vertex
+            // colours (`+0xb8`, stride 4 — `0x77304d`-`0x77305f`, "4 iff count > 1") while `file=`
+            // is read only afterwards into `+0xcc`
+            // (`texture-color-composition.md` §1-2). That is why `<Color>` beside a `file=` is
+            // discarded above and a `<Gradient>` beside one is not.
+            //
+            // Dropping this silently is what painted Bagnon's character-list popup as a WHITE SLAB:
+            // its background art is `ChatFrameBackground`, which is white by design and is meant to
+            // be tinted black→dark-grey by exactly this element (`Bagnon_Core/core/Frame.xml:32`).
+            //
+            // MinColor → the first stop, MaxColor → the second, which is the natural reading and
+            // the Lua binding's own argument order — but the XML arm's stop-to-vertex mapping is
+            // **not byte-read** (wow-re records the `<Gradient>` tag compare at `0x7700b0` and the
+            // stride, not the arm's body). It cannot matter yet: `RegionData::gradient` is folded to
+            // its midpoint by the paint (`script::extract`), which is symmetric in the two stops.
+            // Swapping them becomes visible the day a quad carries a real two-stop tint.
+            if let Some(g) = children_named(region, "Gradient").next() {
+                let stop = |tag: &str| children_named(g, tag).next().map(color_of);
+                // A half-declared gradient is skipped whole rather than half-applied against an
+                // invented default — an absent stop is not a black one.
+                if let (Some(min), Some(max)) = (stop("MinColor"), stop("MaxColor")) {
+                    self.call_region(
+                        region_wrapper,
+                        "SetGradientAlpha",
+                        (
+                            g.attr("orientation").unwrap_or_default().to_string(),
+                            min[0],
+                            min[1],
+                            min[2],
+                            min[3],
+                            max[0],
+                            max[1],
+                            max[2],
+                            max[3],
+                        ),
+                        dbg,
+                    );
+                }
+            }
             // `<TexCoords left right top bottom>`: the UV sub-rect this texture samples (decision
             // 0084 — quadrant/atlas slicing). ref-MerchantFrame.xml l.259/268/395.
             if let Some(tc) = tex_coords_of(region) {
@@ -292,11 +333,40 @@ impl Loader<'_> {
         None
     }
 
+    /// Is `name` a registered `<Font>` OBJECT? The plain registry probe — **no template walk**,
+    /// unlike [`Self::font_object_through_templates`]. This is the reference's `0x783870(value,
+    /// create = 0)` lookup, which is a flat registry hit or nothing; the template chain is
+    /// `inherits=`'s affordance alone.
+    ///
+    /// Case-folded, because 1.12 matches font names with `SStrCmpI` (`0x783870`).
+    fn is_font_object(&self, name: &str) -> bool {
+        let model = self.model();
+        let fonts = model.framexml_fonts.borrow();
+        fonts.contains_key(name) || fonts.keys().any(|k| k.eq_ignore_ascii_case(name))
+    }
+
     /// A `<FontString>`'s font resolution: `inherits="GameFontNormal"` → `SetFontObject` (the named
     /// virtual Font object's face/height/color/outline become this string's defaults), then the
     /// FontString's own `font=`/`<FontHeight>`/`outline=` → `SetFont` overrides. Called before the
     /// generic visual pass (so an explicit `<Color>` still overrides the object's color). An
     /// unregistered `inherits=` target is a warn-once gap, not a dropped region.
+    ///
+    /// **`font=` is a font-object NAME first and a file path only on a miss** — the half of this
+    /// that was missing, and a silent one. The reference tries the registry before the filesystem:
+    /// `0x783d15 call 0x783870(value, create = 0)`, and on a hit takes the same live-link
+    /// `0x770c60` that `SetFontObject` uses, skipping the file-path branch entirely
+    /// (wow-re `system/ui/scratch/font-object-lua-surface.md` §7 + its `LoadXML` surface table
+    /// row 2; `CSimpleFontString::LoadXML 0x770f40` at `0x7710e1`-`0x771114`).
+    ///
+    /// Reading it as a path only is what made Bagnon's item-stack counts unreadable: its
+    /// `<FontString name="$parentCount" font="NumberFontNormal">` (`Bagnon_Core/core/Item.xml:14`)
+    /// stored the literal string `"NumberFontNormal"` as a font PATH, which resolves to no face —
+    /// so height, colour and, above all, `outline="NORMAL"` were all lost, and the atlas fell back
+    /// silently to Friz 12. The black ring around a stack count is that outline (`NumberFontNormal`
+    /// carries no `<Shadow>` in 1.12 — the readability is the halo, not a drop shadow).
+    ///
+    /// Real FrameXML never exercises this: it writes `font=` on `<Font>` elements only, always as a
+    /// path. The addon corpus writes it on FontStrings 117 times.
     pub(super) fn apply_fontstring_font(&mut self, region: &Element, wrapper: &Table, dbg: &str) {
         if let Some(name) = region.attr("inherits") {
             // **Resolved through the TEMPLATE chain, not taken literally.** A FontString's
@@ -328,25 +398,63 @@ impl Loader<'_> {
                 );
             }
         }
-        // Explicit face/size/outline on the FontString itself override the inherited object.
-        let font = region.attr("font").map(str::to_string);
-        let height = children_named(region, "FontHeight")
-            .next()
-            .and_then(abs_value);
-        let outline = region.attr("outline").map(str::to_string);
-        if font.is_some() || height.is_some() || outline.is_some() {
-            // NOT the `SetFont` binding. XML supplies any subset of the three, while the
-            // reference's `SetFont` requires a path AND a height (raising `0x87c69c` otherwise),
-            // because the real client applies XML font attributes in C++ and never through the Lua
-            // method. Routing the loader through the binding is exactly what forced that binding to
-            // stay lenient — one name doing two jobs. This is the XML job.
-            if let Err(e) =
-                crate::script::apply_font_parts(self.lua, wrapper, font, height, outline)
-            {
-                self.report
-                    .errors
-                    .push(format!("{dbg}: region font attrs: {e}"));
+        // **`font=` gates this whole block, and that is the shape of the bytes** — not a set of
+        // independent overrides (`0x7710e1`-`0x771254`, wow-re
+        // `system/ui/scratch/fontstring-loadxml-font-attrs.md`). Three outcomes, and only three:
+        //
+        //  1. `font=` names a **registered font object** → `SetFontObject` (`0x771104` lookup,
+        //     `0x771114 call 0x770c60` — the same live link `inherits=` takes) and then
+        //     `0x771119 jmp 0x771254`, which **skips `<FontHeight>`, `outline=`, `monochrome=` and
+        //     the file load entirely**. The skipped values are not lost: the link forces all five
+        //     changed bits (`0x770d0c`) and the applier `0x770800` pushes the source's
+        //     height/face/outline down through the inherit mask.
+        //  2. `font=` names anything else → a font **FILE**, and `<FontHeight>`/`outline=`/
+        //     `monochrome=` are read as ITS companions (the miss leg, `0x77110b je 0x77111e`).
+        //  3. **No `font=` at all** → `0x7710f1`/`0x7710fa je 0x771254` jump straight past, so
+        //     `<FontHeight>` and `outline=` are **never parsed**. That block's only predecessor is
+        //     the miss leg in (2); the attributes have no independent existence.
+        //
+        // (3) is the one that changes something we already draw. Real FrameXML has exactly one such
+        // site — `ZoneText.xml`'s `AutoFollowStatusText`, `inherits="GameFontNormal"` with a
+        // `<FontHeight val="20">` and no `font=` — so the real client draws that line at
+        // GameFontNormal's **12**, and Blizzard's 20 is dead XML. Our copy carries the same dead 20
+        // and honoured it until now. The corpus has 22 more of these plus 5 stray `outline=`.
+        //
+        // Only `spacing=`/`justifyH`/`justifyV`/`<Color>`/`<Shadow>` sit past the join and are
+        // genuine post-link overrides — they are applied elsewhere (`apply_region_layout` /
+        // `apply_region_visual`), which is already the right side of this line.
+        match region.attr("font") {
+            Some(name) if self.is_font_object(name) => {
+                if let Err(e) = wrapper.call_method::<()>("SetFontObject", name.to_string()) {
+                    self.warn_once(
+                        &format!("fontobj:{name}"),
+                        format!("{dbg}: <FontString font=\"{name}\">: {e}"),
+                    );
+                }
             }
+            Some(path) => {
+                // A font FILE, with its two companions. NOT the `SetFont` binding: XML supplies any
+                // subset, while the reference's `SetFont` requires a path AND a height (raising
+                // `0x87c69c` otherwise), because the real client applies XML font attributes in C++
+                // and never through the Lua method. Routing the loader through the binding is
+                // exactly what forced that binding to stay lenient — one name doing two jobs.
+                let height = children_named(region, "FontHeight")
+                    .next()
+                    .and_then(abs_value);
+                let outline = region.attr("outline").map(str::to_string);
+                if let Err(e) = crate::script::apply_font_parts(
+                    self.lua,
+                    wrapper,
+                    Some(path.to_string()),
+                    height,
+                    outline,
+                ) {
+                    self.report
+                        .errors
+                        .push(format!("{dbg}: region font attrs: {e}"));
+                }
+            }
+            None => {}
         }
     }
 }

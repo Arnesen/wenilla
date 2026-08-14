@@ -45,8 +45,16 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             sound_id,
             instant,
         }],
-        ServerPacket::TextEmote { guid, text_emote } => {
-            vec![SessionEvent::TextEmote { guid, text_emote }]
+        ServerPacket::TextEmote {
+            guid,
+            text_emote,
+            target_name,
+        } => {
+            vec![SessionEvent::TextEmote {
+                guid,
+                text_emote,
+                target_name,
+            }]
         }
         ServerPacket::Emote { guid, emote_id } => vec![SessionEvent::Emote { guid, emote_id }],
         ServerPacket::InitialSpells {

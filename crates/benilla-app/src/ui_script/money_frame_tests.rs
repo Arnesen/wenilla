@@ -37,6 +37,10 @@ fn harness(money: u64) -> UiScript {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     s.set_money(money);
+    // The digit advances the app feeds once per atlas scale. Fed here so the width arithmetic
+    // below is deliberate rather than an artefact of an unfed VM — a flat 8px per digit makes
+    // every expected number readable as `digits x 8 + icon`.
+    s.set_digit_advances(&[8.0; 10]);
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
 
@@ -206,20 +210,25 @@ fn update_paints_a_static_frame_by_name_and_resizes_it() {
     );
 
     // Every coin is its digits + a 13px icon (MONEY_ICON_WIDTH_SMALL, since this frame is `small`),
-    // and the frame is the surviving coins packed with the -4px MONEY_BUTTON_SPACING gap. Headless
-    // there is no font atlas, so the digit width is 0 and the arithmetic is exactly the icons:
-    // 13 (base) + 13 + 13 + 13 - (-4) - (-4) = 60.
+    // and the frame is the surviving coins packed with the -4px MONEY_BUTTON_SPACING gap:
+    // 13 (base) + 21 + 21 + 21 - (-4) - (-4) = 84, each 21 being one 8px digit plus the icon
+    // (2g 3s 4c is a single digit per denomination).
+    //
+    // **The digits used to contribute 0 here and this test asserted the bare 13s that came of it.**
+    // That was the director's cramped gold on a first open: `ShowCoin` sized each coin from a text
+    // measure that lands a frame later, so it read 0 every first time. It sums the engine's
+    // `BenillaNumberWidth` feed now, which answers in the same tick.
     assert_eq!(
         s.eval::<f64>("return TestPurseGoldButton:GetWidth()")
             .unwrap(),
-        13.0
+        21.0
     );
-    assert_eq!(s.eval::<f64>("return TestPurse:GetWidth()").unwrap(), 60.0);
+    assert_eq!(s.eval::<f64>("return TestPurse:GetWidth()").unwrap(), 84.0);
 
-    // Collapse away two denominations and the frame shrinks to match: 13 + 13 = 26.
+    // Collapse away two denominations and the frame shrinks to match: 13 + 21 = 34.
     s.run("MoneyFrame_Update(\"TestPurse\", 9)").unwrap();
     assert_eq!(shown(&s, "TestPurse"), (false, false, true));
-    assert_eq!(s.eval::<f64>("return TestPurse:GetWidth()").unwrap(), 26.0);
+    assert_eq!(s.eval::<f64>("return TestPurse:GetWidth()").unwrap(), 34.0);
 }
 
 /// The large template uses the 19px icon and its own spacing — the same painter, the other size
@@ -227,15 +236,17 @@ fn update_paints_a_static_frame_by_name_and_resizes_it() {
 #[test]
 fn the_large_template_measures_with_the_nineteen_pixel_icon() {
     let s = harness(20_304);
+    // One 8px digit + the 19px icon — the same digit sum as the small template, over the other
+    // icon constant. That the two differ ONLY by the icon is what this test is for.
     assert_eq!(
         s.eval::<f64>("return TestBigPurseGoldButton:GetWidth()")
             .unwrap(),
-        19.0
+        8.0 + 19.0
     );
     assert_eq!(
         s.eval::<f64>("return TestBigPurse:GetWidth()").unwrap(),
-        19.0 * 4.0 + 8.0,
-        "19 base + three 19px coins, packed with two -4px gaps"
+        19.0 + 27.0 * 3.0 + 8.0,
+        "19 base + three 27px coins, packed with two -4px gaps"
     );
     assert_eq!(
         s.eval::<i64>("return MONEY_ICON_WIDTH").unwrap(),

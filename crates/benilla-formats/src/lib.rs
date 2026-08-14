@@ -123,6 +123,8 @@ mod npc_greeting;
 pub use npc_greeting::{load_npc_greeting_catalog, NpcGreeting, NpcGreetingCatalog};
 mod emotes;
 pub use emotes::{load_emote_sound_catalog, EmoteSoundCatalog};
+mod emote_text;
+pub use emote_text::{load_emote_text_catalog, EmoteLine, EmoteTextCatalog};
 mod environmental_damage;
 pub use environmental_damage::{load_environmental_damage, EnvironmentalDamageTable};
 mod footsteps;

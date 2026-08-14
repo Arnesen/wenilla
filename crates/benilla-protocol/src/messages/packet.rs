@@ -330,11 +330,19 @@ pub enum ServerPacket {
     },
     /// `SMSG_TEXT_EMOTE` — a nearby unit performed a chat emote (`/wave`). Payload VERIFIED
     /// vmangos `EmoteChatBuilder`: `u64 guid, u32 textEmote (EmotesText.dbc), u32 emoteNum,
-    /// u32 namelen, char name[namelen]` (the target's name; namelen ≥ 1). The name is parsed
-    /// past and dropped (the chat line renders from it later; audio keys on ids).
+    /// u32 namelen, char name[namelen]` (the target's name; namelen ≥ 1, a lone NUL when there was
+    /// no target).
+    ///
+    /// **`target_name` is load-bearing and used to be dropped here** (decision 1274 / B156): it is
+    /// what selects the emote's sentence FORM — untargeted vs targeted vs "…at you" — in
+    /// `benilla_formats::EmoteTextCatalog`, and it is the raw wire string, never round-tripped
+    /// through a name cache, exactly as the reference passes it. `emoteNum` really is
+    /// dropped: the receive side reads it off the wire and never consumes it (wow-re
+    /// `ui/scratch/text-emote-composition.md` §3).
     TextEmote {
         guid: u64,
         text_emote: u32,
+        target_name: String,
     },
     /// `SMSG_EMOTE` — a unit plays an anim emote. Payload VERIFIED vmangos
     /// `Unit::HandleEmote`: `u32 emoteId (Emotes.dbc), u64 guid`.

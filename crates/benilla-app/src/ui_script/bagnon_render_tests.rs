@@ -966,3 +966,275 @@ fn the_whole_bagnon_window_survives_being_used() {
         );
     }
 }
+
+/// Bagnon's window with a **stacked** item in the backpack — the count FontString only paints when
+/// the stack is >1 (`SetItemButtonCount`), so the plain [`open_bagnon`] fixture's single Small
+/// Brown Pouch can never exercise it.
+fn open_bagnon_stacked(root: &Path) -> UiScript {
+    let mut s = seat(root, Seat::BeforeAddons);
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            texture: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
+            count: 200,
+            item_id: 4496,
+            quality: Some(1),
+            link: Some("|cffffffff|Hitem:4496:0:0:0|h[Small Brown Pouch]|h|r".into()),
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.run("ToggleBackpack()").expect("ToggleBackpack");
+    for _ in 0..3 {
+        s.tick(0.1);
+    }
+    s.resolve();
+    s
+}
+
+/// The resolved `QuadContent::Text` for the one named FontString, or a panic naming what was found.
+fn text_quad(s: &mut UiScript, owner: &str) -> QuadContent {
+    s.resolve();
+    s.extract()
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Text { text: Some(_), .. })
+                && s.target_owner_name(q.target).as_deref() == Some(owner)
+        })
+        .map(|q| q.content.clone())
+        .unwrap_or_else(|| panic!("no text quad owned by {owner}"))
+}
+
+/// **The director's report: "item stack size text is missing the black bg."**
+///
+/// Bagnon writes `<FontString name="$parentCount" font="NumberFontNormal">`
+/// (`Bagnon_Core/core/Item.xml:14`) — the `font=` attribute, which the reference resolves against
+/// the font-object registry BEFORE the filesystem (`0x783d15 call 0x783870(value, create = 0)`;
+/// see [`super::super::loader`]'s `apply_fontstring_font`). We read it as a path only, so the
+/// literal string `"NumberFontNormal"` became the face: no height, no colour, and no
+/// `outline="NORMAL"` — and the atlas fell back silently to Friz 12.
+///
+/// **The black is the OUTLINE, not a shadow.** `NumberFontNormal` carries no `<Shadow>` in 1.12
+/// (`Fonts.xml:226`, matching the install byte for byte), so `shadow: None` here is correct and is
+/// asserted as such — a future "fix" that adds one would be a divergence, not an improvement.
+#[test]
+fn a_stack_count_wears_the_font_object_its_font_attr_names() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon_stacked(&root);
+
+    let QuadContent::Text {
+        text,
+        font,
+        font_height,
+        outline,
+        shadow,
+        color,
+        ..
+    } = text_quad(&mut s, "BagnonItem1")
+    else {
+        unreachable!("filtered to Text above")
+    };
+
+    assert_eq!(text.as_deref(), Some("200"), "the stack count is on screen");
+    // Every one of these was lost while `font=` was read as a path. The face is the assertion that
+    // the registry was consulted at all; the outline is the one the director can SEE.
+    assert_eq!(
+        font.as_deref(),
+        Some("Fonts\\ARIALN.TTF"),
+        "`font=\"NumberFontNormal\"` must resolve the font OBJECT, not become a font path"
+    );
+    assert_eq!(font_height, Some(14.0), "NumberFontNormal's height");
+    assert_eq!(
+        outline,
+        benilla_ui::script::Outline::Normal,
+        "the black ring around a stack count IS `outline=\"NORMAL\"` — this is the reported symptom"
+    );
+    assert_eq!(
+        color,
+        Some([1.0, 1.0, 1.0, 1.0]),
+        "NumberFontNormal's white"
+    );
+    assert_eq!(
+        shadow, None,
+        "and NO drop shadow: NumberFontNormal has no <Shadow> in 1.12 either (Fonts.xml:226). \
+         The readability is the outline; adding a shadow here would be a divergence"
+    );
+}
+
+/// **The director's report: the character dropdown draws as a solid WHITE box.**
+///
+/// `BagnonPopupFrame` (`Bagnon_Core/core/Frame.xml:23-36`) backs itself with
+/// `Interface\ChatFrame\ChatFrameBackground` — art that is white by design — and tints it
+/// black→dark-grey with a `<Gradient>`. The loader parsed `<Color>` and `<TexCoords>` but never
+/// `<Gradient>`, and dropped it in silence, so the white art rendered untinted.
+///
+/// `<Gradient>` survives beside a `file=` where `<Color>` does not, and that asymmetry is the
+/// point: they land in different fields (vertex colours `+0xb8` vs the texture `+0xcc` —
+/// wow-re `texture-color-composition.md` §1-2).
+#[test]
+fn a_texture_gradient_tints_the_art_it_sits_on() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon_stacked(&root);
+    s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
+        .expect("BagnonDBUI_ShowCharacterList");
+    for _ in 0..3 {
+        s.tick(0.1);
+    }
+    s.resolve();
+
+    let bg = s
+        .extract()
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                     if p.contains("ChatFrameBackground"))
+                && s.target_owner_name(q.target).as_deref() == Some("BagnonDBUICharacterList")
+        })
+        .map(|q| q.content.clone())
+        .expect("the popup's background art reaches the render list");
+
+    let QuadContent::Texture { color, .. } = bg else {
+        unreachable!("filtered to Texture above")
+    };
+    // The two stops are (0,0,0,0.9) and (0.2,0.2,0.2,0.9); `RegionData::gradient` is folded to its
+    // midpoint by the paint, so this is 0.1 grey at the stops' shared alpha. `None` — or white —
+    // is the bug: untinted ChatFrameBackground is the white slab on the director's screen.
+    assert_eq!(
+        color,
+        Some([0.1, 0.1, 0.1, 0.9]),
+        "the <Gradient> must tint the art; untinted this is the reported white box"
+    );
+}
+
+/// **The director's report: "when I first open the bags with bagnon the gold numbers are all
+/// cramped up; if I close and open again it looks good."**
+///
+/// Bagnon's money display is `SmallMoneyFrameTemplate` — OUR `MoneyFrame.xml`. Its `ShowCoin` used
+/// to size each coin with `label:GetStringWidth()`, which is served from the measure round-trip and
+/// therefore reads **0 in the tick that set the text**: every coin came out at exactly one icon
+/// width and the digits overlapped. The second open looked right because the first open's measure
+/// had landed in the cache by then — the reopen was reading the previous open's numbers.
+///
+/// The fix sums `BENILLA_DIGIT_W`, the app's per-digit advance feed
+/// ([`benilla_ui::script::UiScript::set_digit_advances`]) — data pushed ahead, so the answer exists
+/// *in* the tick. That feed's own doc names this frame as what it was built for; only the merchant
+/// price had ever used it.
+///
+/// The assertion is the FIRST open, which is the half that was broken.
+#[test]
+fn a_money_frame_is_the_right_width_on_the_first_open() {
+    let root = corpus_or_skip!();
+    let mut s = seat(&root, Seat::BeforeAddons);
+
+    // 12345g 67s 89c — three denominations with different digit counts, so a width that ignored
+    // the digits (the bug) cannot coincide with one that counts them.
+    s.set_money(123_456_789);
+    // The app feeds this once per atlas scale, before any window opens. A flat 8px advance makes
+    // the expected widths exact arithmetic rather than a font-dependent number.
+    s.set_digit_advances(&[8.0; 10]);
+
+    s.run("ToggleBackpack()").expect("ToggleBackpack");
+    for _ in 0..3 {
+        s.tick(0.1);
+    }
+    s.resolve();
+
+    let widths: Vec<f32> = s
+        .eval(
+            "local o = {} \
+             for _, n in ipairs({\"Gold\", \"Silver\", \"Copper\"}) do \
+               local b = getglobal(\"BagnonMoneyFrame\" .. n .. \"Button\") \
+               table.insert(o, b and b:GetWidth() or -1) \
+             end \
+             return o",
+        )
+        .expect("the three coin buttons");
+
+    // MONEY_ICON_WIDTH_SMALL is 13; the digits are 8px each. 12345 → 5, 67 → 2, 89 → 2.
+    assert_eq!(
+        widths,
+        vec![5.0 * 8.0 + 13.0, 2.0 * 8.0 + 13.0, 2.0 * 8.0 + 13.0],
+        "each coin must be its digits PLUS its icon on the first open. All three coming back at \
+         13.0 — the bare icon width — is the reported cramping: it means the width was taken from \
+         a text measure that had not landed yet"
+    );
+}
+
+/// The font a FontString/Button label actually resolved: `(path, height)`.
+fn resolved_font(s: &UiScript, lua_expr: &str) -> (String, String) {
+    let r: Vec<String> = s
+        .eval(&format!(
+            "local fs = {lua_expr} \
+             if not fs then return {{ \"MISSING\", \"MISSING\" }} end \
+             local p, h = fs:GetFont() \
+             return {{ tostring(p), tostring(h) }}"
+        ))
+        .expect("GetFont");
+    (r[0].clone(), r[1].clone())
+}
+
+/// **A Button's `<NormalFont>`/`<HighlightFont>`/`<DisabledFont>` take `font=` as well as
+/// `inherits=`** — they are `<Font>`-TYPED elements, routed by `CSimpleButton::LoadXML 0x7788c0`
+/// at `0x778bf4` into the same `0x783c30` a top-level `<Font>` uses, so `font=` gets the identical
+/// registry-first treatment (`0x783d15` → `0x783d22 call 0x770c60`).
+///
+/// We read only `inherits=`, so every corpus button declaring `font=` silently kept **no font
+/// object at all**. Bagnon does it at seven sites; `BagnonDBUINameBox` asks for
+/// `GameFontNormalLarge` (16px) and got nothing. Real FrameXML always writes `inherits=`, which is
+/// why nothing we ship ever noticed.
+///
+/// `style=` is deliberately not read — it does not exist in 1.12.1 (an isolated-token scan returns
+/// zero against nine controls each returning one); it is a later-client idiom.
+#[test]
+fn a_button_state_font_takes_the_font_attribute_not_just_inherits() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon_stacked(&root);
+    s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
+        .expect("BagnonDBUI_ShowCharacterList");
+    for _ in 0..3 {
+        s.tick(0.1);
+    }
+
+    assert_eq!(
+        resolved_font(
+            &s,
+            "getglobal(\"BagnonDBUICharacterList1\"):GetFontString()"
+        ),
+        ("Fonts\\FRIZQT__.TTF".into(), "16".into()),
+        "`<NormalFont font=\"GameFontNormalLarge\"/>` must link the font object — 16px, not the \
+         12px default, and emphatically not the nil this returned while only `inherits=` was read"
+    );
+}
+
+/// **A `<FontHeight>` with no `font=` beside it is dead XML**, and so is a bare `outline=`.
+///
+/// `CSimpleFontString::LoadXML`'s height/outline/monochrome block sits at `[0x77111e, 0x771254)`
+/// and its ONLY predecessor is the `font=`-names-a-file miss leg. With no `font=` at all,
+/// `0x7710f1`/`0x7710fa je 0x771254` jump straight past it: the attributes are never parsed. They
+/// have no independent existence — they are companions of a font FILE path, nothing more.
+///
+/// The reference's own FrameXML contains exactly one such site, and it is the proof: `ZoneText.xml`
+/// gives `AutoFollowStatusText` `inherits="GameFontNormal"` (12px) **and** a
+/// `<FontHeight val="20">`. The real client draws that line at 12 and Blizzard's 20 never does
+/// anything. We honoured it — one of the few places benilla was drawing text at a size the
+/// reference does not.
+#[test]
+fn a_fontheight_with_no_font_attr_beside_it_is_never_read() {
+    let root = corpus_or_skip!();
+    let s = open_bagnon_stacked(&root);
+    assert_eq!(
+        resolved_font(&s, "AutoFollowStatusText"),
+        ("Fonts\\FRIZQT__.TTF".into(), "12".into()),
+        "AutoFollowStatusText inherits GameFontNormal (12) and declares <FontHeight val=20> with \
+         no font= — the 20 is dead XML in the reference, so 20 here means we are reading an \
+         attribute the client never reaches"
+    );
+}

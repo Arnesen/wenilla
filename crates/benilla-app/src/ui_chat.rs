@@ -47,9 +47,12 @@ impl Plugin for UiChatPlugin {
             // arm, and silently loads nothing — no zone channels, ever, with no error. A live
             // probe is what caught that; no unit test could, because the tests hand the catalog in.
             // `crate::area`'s `AreaTable.dbc` load carries the same ordering for the same reason.
+            // `EmotesText.dbc` × `EmotesTextData.dbc` (decision 1274) rides the same ordering for
+            // the same reason: the sentence tables are read once, off the open patch chain.
             .add_systems(
                 Startup,
-                channels::load_chat_channels.after(benilla_assets::AssetSet::Open),
+                (channels::load_chat_channels, feed::load_emote_texts)
+                    .after(benilla_assets::AssetSet::Open),
             )
             // The slash-command table (decision 0881), built from the reference's own alias strings
             // once the VM's globals and the emote catalog exist — both are `Startup`, so this runs

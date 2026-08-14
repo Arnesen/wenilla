@@ -314,12 +314,25 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_TEXT_EMOTE => {
             let guid = read_u64_le(&mut r)?;
             let text_emote = read_u32_le(&mut r)?;
+            // Read and dropped on purpose — `emoteNum` selects neither the sentence nor the voice
+            // kit on the receive side (wow-re `ui/scratch/text-emote-composition.md` §3).
             let _emote_num = read_u32_le(&mut r)?;
-            let namelen = read_u32_le(&mut r)?;
+            // The target's name, length-prefixed **including its NUL** (vmangos writes a lone
+            // `0x00` and `namelen == 1` when there was no target). Trimmed at the first NUL, so an
+            // untargeted emote arrives as the empty string — which is precisely the "untargeted"
+            // bit of the sentence-form selector, not a missing value.
+            let namelen = read_u32_le(&mut r)? as usize;
+            let mut name = Vec::with_capacity(namelen.min(64));
             for _ in 0..namelen {
-                read_u8(&mut r)?; // the target's name — chat consumes it later; audio keys on ids
+                name.push(read_u8(&mut r)?);
             }
-            ServerPacket::TextEmote { guid, text_emote }
+            let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            let target_name = String::from_utf8_lossy(&name[..end]).into_owned();
+            ServerPacket::TextEmote {
+                guid,
+                text_emote,
+                target_name,
+            }
         }
         opcode::SMSG_EMOTE => {
             let emote_id = read_u32_le(&mut r)?;

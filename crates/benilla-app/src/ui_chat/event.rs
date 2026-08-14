@@ -419,9 +419,11 @@ pub(crate) fn group_kinds(group: ChatGroup) -> &'static [ChatEventKind] {
     }
 }
 
-/// The kind's default color — the complete shipped table (chat-cache COLORS ≡ wow-re
-/// `chat-color-table.md`, both quoted in 0288's pin; entries this kind set carries). The numbered
-/// CHANNEL1..10 rows all ship the CHANNEL pink until per-number recolor exists (settings).
+/// The kind's row in the color table — NOT necessarily the color a line renders in. The channel
+/// family's row is looked up and then *replaced*; [`resolved_color`] is the law that renders.
+///
+/// The complete shipped table (chat-cache COLORS ≡ wow-re `chat-color-table.md`, both quoted in
+/// 0288's pin; entries this kind set carries).
 pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
     use ChatEventKind as K;
     match kind {
@@ -453,6 +455,48 @@ pub(crate) fn default_color(kind: ChatEventKind) -> [u8; 3] {
         K::BgSystemNeutral => [255, 120, 10],
         K::BgSystemAlliance => [0, 174, 239],
         K::BgSystemHorde => [255, 0, 0],
+    }
+}
+
+/// `ChatTypeInfo["CHANNEL"..n]` — the color of the numbered channel in slot `n` (arg8).
+///
+/// These are not part of the 94-entry static table: the boot seed creates ten *extra* registry
+/// entries named `CHANNEL1`…`CHANNEL10` and colors every one of them from the **live CHANNEL
+/// entry**, so they all start at CHANNEL's FFC0C0 (wow-re `chat-color-table.md`, "Seeding" —
+/// `0x4982c0`, and `ResetChatColors 0x4a09e0` re-does exactly that). Per-number recolor is a
+/// `ChangeChatColor` away, so this stays a function of `n` even though nothing varies by it yet.
+fn channel_row_color(_number: u32) -> [u8; 3] {
+    [255, 192, 192]
+}
+
+/// The color a line actually renders in — `ChatFrame_OnEvent`'s `info` resolution, which is not
+/// simply [`default_color`] of the kind (ref ChatFrame.lua l.1371-1386).
+///
+/// The handler looks up `ChatTypeInfo[type]` and then, for every `CHANNEL*` type, **replaces** it
+/// with the numbered channel's own row — `info = ChatTypeInfo["CHANNEL"..arg8]` (l.1381). Its
+/// guard is `strsub(type,1,7) == "CHANNEL" and type ~= "CHANNEL_LIST" and (arg1 ~= "INVITE" or
+/// type ~= "CHANNEL_NOTICE_USER")`, transcribed below. So the grey CHANNEL_NOTICE row (C0C0C0) is
+/// looked up and then thrown away: a join/leave notice renders in the channel's FFC0C0, which is
+/// what makes those lines read warm rather than white in the real client (1275).
+///
+/// **KNOWN DIVERGENCE — arg8 == 0.** The reference reaches its override only after finding the
+/// channel in `ChatFrame1.channelList`; a miss `return`s and the line never renders at all. That
+/// list is FrameXML's own (`ChatFrame_AddChannel`), which we do not model — our channel list is
+/// the *client-side* one ([`super::edit::ChannelState`]) — so implementing the drop would gate on
+/// the wrong list and silently eat notices about channels we are not in ("Not on channel %s."
+/// being the sharpest case). We render those, in the row the extras are seeded from. 1275.
+pub(crate) fn resolved_color(event: &ChatEvent, kind: ChatEventKind) -> [u8; 3] {
+    use ChatEventKind as K;
+    let invite_notice = kind == K::ChannelNoticeUser
+        && event.notice_byte() == Some(benilla_protocol::messages::channel_notice::INVITE);
+    match kind {
+        K::Channel | K::ChannelJoin | K::ChannelLeave | K::ChannelNotice | K::ChannelNoticeUser
+            if !invite_notice =>
+        {
+            channel_row_color(event.channel_number)
+        }
+        // CHANNEL_LIST and the INVITE notice keep the row they were looked up in.
+        _ => default_color(kind),
     }
 }
 

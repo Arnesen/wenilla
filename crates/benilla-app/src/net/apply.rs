@@ -683,9 +683,18 @@ pub(super) fn apply_net_updates(
                 sound_id,
                 instant,
             } => world::weather(weather_type, grade, sound_id, instant, &mut audio.1),
-            SessionEvent::TextEmote { guid, text_emote } => {
-                anim::text_emote(guid, text_emote, &index, &mut audio.2)
-            }
+            SessionEvent::TextEmote {
+                guid,
+                text_emote,
+                target_name,
+            } => anim::text_emote(
+                guid,
+                text_emote,
+                target_name,
+                &index,
+                &mut audio.2,
+                &mut chat_log,
+            ),
             SessionEvent::Emote { guid, emote_id } => {
                 anim::emote(guid, emote_id, &index, &mut audio.2)
             }

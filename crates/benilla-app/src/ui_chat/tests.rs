@@ -105,6 +105,75 @@ fn system_and_loot_lines_are_verbatim() {
     );
 }
 
+/// B156's visible half, in one assertion: a TEXT_EMOTE line renders **verbatim**, and setting the
+/// performer in `sender` (arg2, for addons) must not make the composer bracket a name onto it the
+/// way it does for SAY. If this ever starts reading "[Bob] Bob waves.", the sender slot has leaked
+/// into the render.
+#[test]
+fn text_emote_lines_are_verbatim_and_never_wear_the_senders_name() {
+    let e = ev(K::TextEmote, "Bob waves at you.", "Bob");
+    assert_eq!(compose(&e, K::TextEmote).unwrap(), "Bob waves at you.");
+    // The control: the same event as a SAY *does* get the bracketed link, so the assertion above
+    // is about the TEXT_EMOTE arm and not about `compose` having stopped decorating anything.
+    assert!(compose(&ev(K::Say, "hi", "Bob"), K::Say)
+        .unwrap()
+        .contains("[Bob]"));
+}
+
+/// The receive half of B156 on the real tables (decision 1274): the five reachable sentence forms,
+/// the performer in arg2, and the three silent rows. The composition law itself is pinned in
+/// `benilla_formats::emote_text`; what this covers is the seam — that the app hands the composer
+/// the right facts and puts the result in the right slots. Skips without client data.
+#[test]
+fn a_received_text_emote_composes_its_sentence_and_names_the_performer() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let cat = benilla_formats::load_emote_text_catalog(&mut chain).expect("emote text catalog");
+    const WAVE: u32 = 101;
+    const SIT: u32 = 86;
+
+    fn them(target: &'static str) -> benilla_formats::EmoteLine<'static> {
+        benilla_formats::EmoteLine {
+            performer: "Bob",
+            performer_is_you: false,
+            performer_female: false,
+            target: if target == "-" { "" } else { target },
+            your_name: "Me",
+        }
+    }
+    fn mine(target: &'static str) -> benilla_formats::EmoteLine<'static> {
+        benilla_formats::EmoteLine {
+            performer: "Me",
+            performer_is_you: true,
+            ..them(target)
+        }
+    }
+    let line = |text_id, l| super::feed::text_emote_event(&cat, text_id, &l);
+
+    for (l, expected) in [
+        (them("Jane"), "Bob waves at Jane."),
+        (them("Me"), "Bob waves at you."),
+        (them("-"), "Bob waves."),
+    ] {
+        let e = line(WAVE, l).expect("a sentence");
+        assert_eq!(e.text, expected);
+        assert_eq!(e.kind, Some(K::TextEmote));
+        // arg2 is the performer, not the target — the reference pushes the performer's NameCache
+        // record (`0x49b47c`).
+        assert_eq!(e.sender, "Bob");
+    }
+    for (l, expected) in [
+        (mine("Jane"), "You wave at Jane."),
+        (mine("-"), "You wave."),
+    ] {
+        let e = line(WAVE, l).expect("a sentence");
+        assert_eq!(e.text, expected);
+        assert_eq!(e.sender, "Me");
+    }
+    // SIT's columns point at EmotesTextData rows that ship blank: no line, not an empty one.
+    assert!(line(SIT, them("-")).is_none(), "/sit prints nothing");
+}
+
 #[test]
 fn level_up_lines_follow_the_reference_order_and_forms() {
     use benilla_protocol::messages::LevelUpInfo;
@@ -213,6 +282,12 @@ fn channel_line_prefixes_the_stripped_channel() {
     );
 }
 
+/// The notice arms print arg4 **whole** — zone tail and all (1275).
+///
+/// The pair to hold in view is [`channel_line_prefixes_the_stripped_channel`] directly above: the
+/// same channel, the same arg4, and the reference renders them differently. `gsub(arg4,
+/// "%s%-%s.*", "")` lives at l.1463, inside the speech `else` arm, *after* every notice arm has
+/// returned — so speech says "[General]" and the join notice says "[General - Elwynn Forest]".
 #[test]
 fn channel_notices_compose_by_the_notice_law() {
     let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
@@ -220,7 +295,7 @@ fn channel_notices_compose_by_the_notice_law() {
     e.notice = "2".into(); // YOU_JOINED
     assert_eq!(
         compose(&e, K::ChannelNotice).unwrap(),
-        "Joined Channel: [General]"
+        "Joined Channel: [General - Elwynn Forest]"
     );
     let mut kick = ChatEvent::text_only(K::ChannelNotice, String::new());
     kick.channel = "World".into();
@@ -520,6 +595,124 @@ fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
     assert_eq!(other.channel_number, 0); // arg8
     assert_eq!(other.channel_base, ""); // arg9 — NOT the name
     assert_eq!(other.zone_channel_id, 0); // arg7
+}
+
+/// **A channel notice renders in the CHANNEL row, not the CHANNEL_NOTICE row** (1275).
+///
+/// `ChatFrame_OnEvent` looks up `ChatTypeInfo[type]` and then overwrites it for the whole channel
+/// family: `info = ChatTypeInfo["CHANNEL"..arg8]` (l.1381). So the grey C0C0C0 the CHANNEL_NOTICE
+/// row carries is looked up and thrown away, and the join line comes out the channel's FFC0C0 —
+/// which is what the director's eye caught: our notices read white-grey where the client's read
+/// warm. Driven through the real router into the real window and read back off the extracted
+/// quad, because the color that matters is the one that reaches the screen.
+#[test]
+fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
+    use benilla_ui::script::QuadContent;
+
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState::default();
+    channels.joined.push("General - Elwynn Forest".into());
+
+    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+    e.channel = "General - Elwynn Forest".into();
+    e.notice = "2".into(); // YOU_JOINED
+    super::feed::deliver(&mut s, &mut windows, &mut channels, &mut e);
+    s.resolve();
+
+    let line = "Joined Channel: [1. General - Elwynn Forest]";
+    let color = s
+        .extract()
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color: Some(c),
+                ..
+            } if t == line => Some(*c),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the notice line {line:?} rendered"));
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(
+        near(color[0], 1.0) && near(color[1], 192.0 / 255.0) && near(color[2], 192.0 / 255.0),
+        "FFC0C0 (the CHANNEL1 row), not C0C0C0 (the CHANNEL_NOTICE row): {color:?}"
+    );
+}
+
+/// The two rows the reference's own guard exempts from that override, and the family it covers.
+///
+/// The condition is `strsub(type,1,7) == "CHANNEL" and type ~= "CHANNEL_LIST" and (arg1 ~= "INVITE"
+/// or type ~= "CHANNEL_NOTICE_USER")` — so CHANNEL_LIST keeps C08080 and an INVITE notice keeps the
+/// CHANNEL_NOTICE_USER grey, while everything else in the family takes the channel's color even
+/// though their own rows differ (CHANNEL_JOIN/LEAVE are C08080, the notices C0C0C0).
+#[test]
+fn the_channel_color_override_covers_the_family_but_not_its_two_exemptions() {
+    use super::event::resolved_color;
+
+    let chan = [255, 192, 192];
+    let mut joined = ev(K::ChannelJoin, "", "Ann");
+    joined.channel_number = 2;
+    assert_eq!(resolved_color(&joined, K::ChannelJoin), chan);
+    assert_eq!(resolved_color(&joined, K::ChannelLeave), chan);
+    assert_eq!(resolved_color(&joined, K::Channel), chan);
+
+    let mut notice = ChatEvent::text_only(K::ChannelNotice, String::new());
+    notice.notice = "3".into(); // YOU_LEFT
+    notice.channel_number = 2;
+    assert_eq!(resolved_color(&notice, K::ChannelNotice), chan);
+    assert_ne!(resolved_color(&notice, K::ChannelNotice), [192, 192, 192]);
+
+    // CHANNEL_LIST: exempt, keeps its own C08080.
+    let list = ChatEvent::text_only(K::ChannelList, "Ann, Bob".into());
+    assert_eq!(resolved_color(&list, K::ChannelList), [192, 128, 128]);
+
+    // INVITE (0x18) on CHANNEL_NOTICE_USER: exempt, keeps the notice grey — and the exemption is
+    // arg1's, so the same kind carrying any other token does take the channel color.
+    let mut invite = ChatEvent::text_only(K::ChannelNoticeUser, String::new());
+    invite.notice = "24".into();
+    assert_eq!(
+        resolved_color(&invite, K::ChannelNoticeUser),
+        [192, 192, 192]
+    );
+    invite.notice = "23".into(); // PLAYER_ALREADY_MEMBER
+    assert_eq!(resolved_color(&invite, K::ChannelNoticeUser), chan);
+}
+
+/// **The leave line still knows its number, because the record dies after the line** (1275).
+///
+/// [`super::feed::deliver`] is the ordering under test: we used to drop the channel from the joined
+/// list before composing, so `stamp_channel` missed and the line came out "Left Channel: [General]"
+/// — unnumbered, and (with the color override above) resolved against arg8 = 0. The reference's
+/// YOU_LEFT arm flags the teardown and runs it *after* the fire (`0x49c5b0` fire, `0x49c5c2 call
+/// 0x49bbd0`), so the line is numbered and an addon's handler still sees the channel.
+#[test]
+fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut channels = super::edit::ChannelState::default();
+    channels.joined.push("World".into());
+    channels.joined.push("General - Elwynn Forest".into());
+
+    let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
+    e.channel = "General - Elwynn Forest".into();
+    e.notice = "3".into(); // YOU_LEFT
+    super::feed::deliver(&mut s, &mut windows, &mut channels, &mut e);
+
+    assert_eq!(e.channel, "2. General - Elwynn Forest", "arg4 was stamped");
+    assert_eq!(
+        e.channel_number, 2,
+        "arg8 — what the color resolves through"
+    );
+    assert_eq!(
+        super::frames::compose(&e, K::ChannelNotice).unwrap(),
+        "Left Channel: [2. General - Elwynn Forest]"
+    );
+    assert_eq!(
+        channels.joined,
+        ["World"],
+        "and only THEN is the record gone"
+    );
 }
 
 /// Every notice byte the composer renders has a token to fire, and vice versa — the two tables are
