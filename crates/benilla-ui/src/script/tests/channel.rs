@@ -108,3 +108,54 @@ fn nothing_is_joined_before_the_server_confirms_it() {
     let id: i64 = s.eval("return GetChannelName('World')").unwrap();
     assert_eq!(id, 0);
 }
+
+/// **`GetChannelList()` is a FLAT vararg of (slot, name) pairs in join order** — not a table, and
+/// not name-first.
+///
+/// Neither wow-re nor any recorded signature pins the shape; two independent consumers do, and the
+/// test asserts what each of them relies on. The reference's `FCFDropDown_LoadChannels` walks
+/// `for i=1, arg.n, 2` and reads `arg[i+1]` as the name, so the pair order is (slot, name) and the
+/// stride is 2. `ChatLog.lua:424` packs it with `{ GetChannelList() }` and tests
+/// `type(value) == "number"` to spot an id, so the values must interleave rather than nest.
+#[test]
+fn get_channel_list_is_a_flat_slot_name_vararg_in_join_order() {
+    let s = joined();
+
+    // Exactly two pairs for two joined channels — the arity `FCFDropDown_LoadChannels` steps over.
+    assert_eq!(
+        s.eval::<i64>("return select('#', GetChannelList())")
+            .unwrap(),
+        4
+    );
+
+    // Pair order and join order, both at once: slot 1 is the FIRST joined, not the alphabetical
+    // first ("Trade - City" would sort ahead of "World").
+    let (s1, n1, s2, n2) = s
+        .eval::<(i64, String, i64, String)>("return GetChannelList()")
+        .unwrap();
+    assert_eq!((s1, n1.as_str()), (1, "World"));
+    assert_eq!((s2, n2.as_str()), (2, "Trade - City"));
+
+    // ChatLog's own walk: packed, the odd entries are numbers and the even ones are names.
+    assert!(s
+        .eval::<bool>(
+            "local t = { GetChannelList() } \
+             return table.getn(t) == 4 and type(t[1]) == 'number' and type(t[2]) == 'string'"
+        )
+        .unwrap());
+
+    // The slot agrees with GetChannelName's, which is the point of sharing the numbering.
+    assert!(s
+        .eval::<bool>("local i = GetChannelName('Trade - City') return i == 2")
+        .unwrap());
+
+    // No channels joined is ZERO returns, so `{ GetChannelList() }` is an empty table rather than
+    // a table of nils — every consumer above already handles that shape.
+    let empty = crate::script::tests::common::script();
+    assert_eq!(
+        empty
+            .eval::<i64>("return select('#', GetChannelList())")
+            .unwrap(),
+        0
+    );
+}

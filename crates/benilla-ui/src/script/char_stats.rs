@@ -255,7 +255,7 @@ pub type InventorySlots = [Option<InvSlotView>; INVENTORY_SLOT_COUNT];
 /// untranscribed. The oddballs among the 24: `BackSlot` shows the **Chest** art and `AmmoSlot` the
 /// **Ranged** art (both confirmed by their `SlotTexture` offset pointing at that other row's
 /// string, not a fresh one).
-const SLOT_INFO: [(&str, i64, &str); 24] = [
+const SLOT_INFO: [(&str, i64, &str); 36] = [
     ("AmmoSlot", 0, "Ranged"),
     ("HeadSlot", 1, "Head"),
     ("NeckSlot", 2, "Neck"),
@@ -280,6 +280,28 @@ const SLOT_INFO: [(&str, i64, &str); 24] = [
     ("Bag1Slot", 21, "Bag"),
     ("Bag2Slot", 22, "Bag"),
     ("Bag3Slot", 23, "Bag"),
+    // The twelve rows this table was short of. The shipped DBC has **36 records, not 24**, and
+    // `Bag1`..`Bag12` at SlotNumbers 64..75 are in the very table this binding scans — 64..69 is
+    // exactly the bank-bag band `ContainerIDToInventoryID` produces. This file used to call them
+    // "a different, unrelated numbering — not `GetInventorySlotInfo` names, out of scope"; that is
+    // refuted, and the scan reaches them like any other row.
+    //
+    // All twelve share ONE string-block offset with `Bag0Slot`..`Bag3Slot` — sixteen rows, one
+    // string (`+1001`). Read at the offset rather than resolved from the row name, because that is
+    // how this column works: 36 rows carry only 17 distinct offsets, which is why `BackSlot` shows
+    // the Chest art and `AmmoSlot` the Ranged art rather than art of their own.
+    ("Bag1", 64, "Bag"),
+    ("Bag2", 65, "Bag"),
+    ("Bag3", 66, "Bag"),
+    ("Bag4", 67, "Bag"),
+    ("Bag5", 68, "Bag"),
+    ("Bag6", 69, "Bag"),
+    ("Bag7", 70, "Bag"),
+    ("Bag8", 71, "Bag"),
+    ("Bag9", 72, "Bag"),
+    ("Bag10", 73, "Bag"),
+    ("Bag11", 74, "Bag"),
+    ("Bag12", 75, "Bag"),
 ];
 
 /// The durability-alert regions in the client's own slot table (`0x806eb8`, VERIFIED wow-re
@@ -812,17 +834,57 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetInventorySlotInfo",
         lua.create_function(|lua, name: String| {
-            let Some((_, id, art)) = SLOT_INFO.iter().find(|(n, _, _)| *n == name) else {
-                return Err(mlua::Error::runtime(format!(
-                    "GetInventorySlotInfo: unknown slot name '{name}'"
-                )));
+            // **The name match is CASE-INSENSITIVE, and that was the whole bug.** `0x4c8215` calls
+            // `0x64a4c0` -> `0x414310`, the CRT `_strnicmp`, whose comparison folds BOTH operands
+            // (`0x414352 add ah,dh` / `0x41435c add al,dh`, with `dh = 0x20` and the A-Z bounds in
+            // `bh`/`bl`) before the byte compare — ASCII folding, which is exactly
+            // `eq_ignore_ascii_case`. Its locale-aware arm folds too, so the verdict does not
+            // depend on one. `maxlen` is `0x7fffffff` and the loop stops at the first NUL on either
+            // side, so it is a FULL-STRING compare, not a prefix. The non-circular control is that
+            // the image also ships a byte-identical case-SENSITIVE wrapper (`0x64a480` ->
+            // `0x40de80`, `rep cmpsb`, no fold) and this binding does not call it.
+            //
+            // Two 1.12-era corpus addons died at session start on this and both worked on the real
+            // client: `FuBar_AmmoFu` passes `"ammoSlot"` and `FuBar_PoisonFu` `"MAINHANDSLOT"`.
+            // The 36 shipped names stay pairwise distinct after folding, so first-match-wins cannot
+            // become ambiguous.
+            let Some((_, id, art)) = SLOT_INFO
+                .iter()
+                .find(|(n, _, _)| n.eq_ignore_ascii_case(&name))
+            else {
+                // The raise is faithful — there is no nil path, and `0x4c823c xor eax,eax; ret` is
+                // dead code after `luaL_error` longjmps. The message is the reference's own
+                // (`.rdata 0x848894`): no `Usage:` prefix, and the offending name is NOT
+                // interpolated. The `Usage:` literals either side of it in the string pool belong
+                // to `KeyRingButtonIDToInvSlotID` and `GetInventoryItemTexture` — the adjacency
+                // trap.
+                return Err(mlua::Error::runtime(
+                    "Invalid inventory slot in GetInventorySlotInfo",
+                ));
             };
             Ok((
                 *id,
+                // The DBC string, VERBATIM. `0x4c825b` pushes `[esi+4]` straight through
+                // (`0x6f3890`, `repne scasb` for the length) with no normalisation anywhere, and
+                // the stored bytes are `interface\paperdoll\UI-PaperDoll-Slot-Bag.blp` — a
+                // LOWERCASE directory, and the `.blp` extension present. Only the
+                // `UI-PaperDoll-Slot-` leaf is mixed case. Texture *loading* would not care (the
+                // asset VFS folds case), but this is a Lua-visible string: anything that compares
+                // it, keys a table by it or concatenates it sees these bytes.
                 Value::String(
-                    lua.create_string(format!("Interface\\Paperdoll\\UI-PaperDoll-Slot-{art}"))?,
+                    lua.create_string(format!(
+                        "interface\\paperdoll\\UI-PaperDoll-Slot-{art}.blp"
+                    ))?,
                 ),
-                false,
+                // `checkRelic` — the NUMBER 1, never a boolean, and only for `RangedSlot`
+                // (`0x4c8263 dec ecx; cmp ecx,0x11`, i.e. SlotNumber 18); nil for every other slot.
+                // It shipped as a constant `false` here, which is falsey like nil but is the wrong
+                // type for a caller that compares it to 1, and wrong outright for the ranged slot.
+                if *id == 18 {
+                    Value::Integer(1)
+                } else {
+                    Value::Nil
+                },
             ))
         })?,
     )?;
@@ -1376,36 +1438,31 @@ mod tests {
     fn get_inventory_slot_info_serves_the_dbc_rows() {
         let s = UiScript::new().unwrap();
         assert_eq!(
-            s.eval::<(i64, String, bool)>(r#"return GetInventorySlotInfo("HeadSlot")"#)
+            s.eval::<(i64, String)>(r#"return GetInventorySlotInfo("HeadSlot")"#)
                 .unwrap(),
-            (
-                1,
-                "Interface\\Paperdoll\\UI-PaperDoll-Slot-Head".into(),
-                false
-            )
+            (1, "interface\\paperdoll\\UI-PaperDoll-Slot-Head.blp".into())
         );
         // The DBC's oddballs: BackSlot shows the Chest art, AmmoSlot the Ranged art.
         assert_eq!(
-            s.eval::<(i64, String, bool)>(r#"return GetInventorySlotInfo("BackSlot")"#)
+            s.eval::<(i64, String)>(r#"return GetInventorySlotInfo("BackSlot")"#)
                 .unwrap(),
             (
                 15,
-                "Interface\\Paperdoll\\UI-PaperDoll-Slot-Chest".into(),
-                false
+                "interface\\paperdoll\\UI-PaperDoll-Slot-Chest".to_string() + ".blp"
             )
         );
         assert_eq!(
-            s.eval::<(i64, String, bool)>(r#"return GetInventorySlotInfo("AmmoSlot")"#)
+            s.eval::<(i64, String)>(r#"return GetInventorySlotInfo("AmmoSlot")"#)
                 .unwrap(),
             (
                 0,
-                "Interface\\Paperdoll\\UI-PaperDoll-Slot-Ranged".into(),
-                false
+                "interface\\paperdoll\\UI-PaperDoll-Slot-Ranged.blp".into()
             )
         );
-        // The four equipped-bag icons (decision 0216 slice 2's bag bar): ids 20..23, re-verified
-        // this session against the real PaperDollItemFrame.dbc — every one shares the same empty-
-        // slot art.
+        // The bag rows: the four equipped-bag icons at 20..23 AND `Bag1`..`Bag12` at 64..75, which
+        // this table was short of until the DBC was re-read (36 records, not 24). All SIXTEEN share
+        // one string-block offset, which is why they answer the same art.
+        const BAG_ART: &str = "interface\\paperdoll\\UI-PaperDoll-Slot-Bag.blp";
         for (name, id) in [
             ("Bag0Slot", 20),
             ("Bag1Slot", 21),
@@ -1413,23 +1470,26 @@ mod tests {
             ("Bag3Slot", 23),
         ] {
             assert_eq!(
-                s.eval::<(i64, String, bool)>(&format!(r#"return GetInventorySlotInfo("{name}")"#))
+                s.eval::<(i64, String)>(&format!(r#"return GetInventorySlotInfo("{name}")"#))
                     .unwrap(),
-                (
-                    id,
-                    "Interface\\Paperdoll\\UI-PaperDoll-Slot-Bag".into(),
-                    false
-                ),
+                (id, BAG_ART.into()),
                 "{name}"
             );
         }
+        for n in 1..=12i64 {
+            assert_eq!(
+                s.eval::<(i64, String)>(&format!(r#"return GetInventorySlotInfo("Bag{n}")"#))
+                    .unwrap(),
+                (63 + n, BAG_ART.into()),
+                "Bag{n}"
+            );
+        }
         assert_eq!(
-            s.eval::<(i64, String, bool)>(r#"return GetInventorySlotInfo("SecondaryHandSlot")"#)
+            s.eval::<(i64, String)>(r#"return GetInventorySlotInfo("SecondaryHandSlot")"#)
                 .unwrap(),
             (
                 17,
-                "Interface\\Paperdoll\\UI-PaperDoll-Slot-SecondaryHand".into(),
-                false
+                "interface\\paperdoll\\UI-PaperDoll-Slot-SecondaryHand.blp".into()
             )
         );
         // An unknown slot name is a Lua error (the client's own behavior).

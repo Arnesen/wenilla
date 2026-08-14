@@ -164,6 +164,45 @@
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="MainMenuBar" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="45"/></Offset></Anchor>
         </Anchors>
+        <!-- The shelf art (ref BonusActionBarFrame.xml l.220-249), declared HIDDEN.
+
+             The header above says this art "is not modeled at all" because raised mode hides it and
+             we are permanently raised. That reasoning was right about the PIXELS and wrong about
+             the NAMES: 1219/1223 settled that the reference does not choose between shown and
+             absent, and "we don't show it" is not a reason for it not to exist. Four frames landed
+             on that principle; these are the first REGIONS to, which is why the sweep that closed
+             the class missed them — it ran over the frames/tables ranking, and a Texture is
+             neither.
+
+             Two corpus addons index them, and both do pure LAYOUT — they do not use the art, they
+             move it, exactly the shape 1223 found for BonusActionBarFrame:
+               zBarEx/zMainBar.lua:288-290  SetParent(MainMenuBar) on all three
+               CT_BottomBar.lua:681-692     ClearAllPoints + SetPoint off-screen
+             Absent, `ShapeshiftBarLeft:ClearAllPoints()` is `attempt to index global` and takes the
+             addon's whole handler with it.
+
+             Geometry and TexCoords quoted: Left and Right are two crops of ONE `ShapeshiftBarEnds`
+             file (0..0.453125 and 0.453125..0.875), Middle its own. hidden="true" is the state
+             raised mode leaves them in, so this still draws nothing. -->
+        <Layers>
+            <Layer level="OVERLAY">
+                <Texture name="ShapeshiftBarLeft" file="Interface\ShapeshiftBar\ShapeshiftBarEnds" hidden="true">
+                    <Size><AbsDimension x="45" y="50"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.453125" top="0" bottom="1"/>
+                </Texture>
+                <Texture name="ShapeshiftBarMiddle" file="Interface\ShapeshiftBar\ShapeshiftBarMiddle" hidden="true">
+                    <Size><AbsDimension x="38" y="50"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftBarLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="1" top="0" bottom="1"/>
+                </Texture>
+                <Texture name="ShapeshiftBarRight" file="Interface\ShapeshiftBar\ShapeshiftBarEnds" hidden="true">
+                    <Size><AbsDimension x="42" y="50"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="ShapeshiftBarMiddle" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.453125" right="0.875" top="0" bottom="1"/>
+                </Texture>
+            </Layer>
+        </Layers>
         <Frames>
             <CheckButton name="ShapeshiftButton1" inherits="BenillaShapeshiftButtonTemplate">
                 <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="11" y="3"/></Offset></Anchor></Anchors>

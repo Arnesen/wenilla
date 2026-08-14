@@ -30,6 +30,28 @@
         real job is the timeout/override/escape paths.
     -->
     <Script><![CDATA[
+        -- ── MAX_RAID_MEMBERS (ref RaidFrame.lua l.2) ─────────────────────────────────────────
+        -- A fact about the protocol, not about our implementation: a 1.12 raid is 40, and the
+        -- `raid1`..`raid40` token space is 40 wide whether or not we build a raid UI. Declared
+        -- here rather than in a RaidFrame.xml because we ship none; party and raid are the same
+        -- subsystem family, and this is the file that already owns the group surface.
+        --
+        -- **The loop it feeds already works.** `for i = 1, MAX_RAID_MEMBERS do UnitName("raid"..i)`
+        -- answers nil for every absent token, which is exactly right for a player not in a raid —
+        -- so the constant is not a promise of a raid UI, it is the bound the token space has.
+        --
+        -- Reached by following a `'for' limit must be a number` five addons shared:
+        -- `CT_RaidAssist.lua:3283` is `for i = 1, MAX_RAID_MEMBERS, 1 do`. Read with `grep -a`,
+        -- because this corpus's Ace files are ISO-8859 and plain grep silently skips them.
+        MAX_RAID_MEMBERS = 40
+        -- Its two siblings, each reached one line further along the same chain
+        -- (`CT_RAOptions.lua:75`, then `:231`). The reference declares all three together at
+        -- RaidFrame.lua l.2-4, and they agree: 40 = 8 x 5. Adding them one at a time as an addon
+        -- asked was the wrong shape — they are one fact about the raid token space, so they land
+        -- as one.
+        NUM_RAID_GROUPS = 8
+        MEMBERS_PER_RAID_GROUP = 5
+
         -- StaticPopup entry, quoted from the ref's StaticPopup.lua (INVITATION =
         -- "%s invites you to a group.", GlobalStrings:2586-area; sound + 60 s silent timeout +
         -- whileDead + hideOnEscape are the ref's own fields).

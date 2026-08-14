@@ -47,6 +47,36 @@
         -- where the reference registers them here. That divergence is recorded in `slash.rs`.
         SlashCmdList = {}
 
+        -- ── ChatTypeGroup / OtherMenuChatTypeGroups — declared, and deliberately EMPTY ────────
+        -- The reference builds `ChatTypeGroup` at ChatFrame.lua l.115-348: 68 entries mapping a
+        -- chat TYPE to the list of `CHAT_MSG_*` events that belong to it, which its
+        -- `ChatFrame_RegisterForMessages` walks to register events on a chat window.
+        --
+        -- Declared here for the same reason `SlashCmdList` above is: an addon REGISTERS ITS OWN
+        -- chat type at file scope, and a missing table is not a missing feature — it is
+        -- `attempt to index global 'ChatTypeGroup'` on the addon's very first chunk. CT_RaidAssist
+        -- does exactly that three lines apart (`CT_RaidAssist.lua:59` assigns
+        -- `ChatTypeGroup["CTRAID"]`, `:63` tinserts into `OtherMenuChatTypeGroups`), and it dies
+        -- there — taking `CT_RA_OnEvent` with it, which is why FOUR MORE corpus addons
+        -- (CT_RABossMods, FixCTGroups, FuBar_CTRaid, SmartRes) die on that function being nil.
+        -- One missing table, five addons.
+        --
+        -- **EMPTY, not populated, and that is the honest shape rather than a shortcut.** Two
+        -- reasons, in order of weight:
+        --   · The 68 entries are 233 lines of the reference's own Lua. We RUN the reference's
+        --     files where we can (1234) and write our own where we cannot; what we do not do is
+        --     paste its source into a repo that mirrors publicly.
+        --   · Nothing would read them. Measured across the 218-addon corpus with `grep -a`:
+        --     CT_RaidAssist is the ONLY addon that touches either table, and it only WRITES. Not
+        --     one addon reads a group out.
+        --
+        -- The divergence that leaves, stated rather than discovered: our chat frames do not
+        -- register through this table at all — `ui_chat` routes host-side, the same split
+        -- `SlashCmdList` records above. So an addon that adds a group gets no routing from it.
+        -- That is the `ChatFrame_OnEvent` architecture question, not this table's.
+        ChatTypeGroup = {}
+        OtherMenuChatTypeGroups = {}
+
         -- ── ChatTypeInfo — the per-chat-type table addons read colors out of ──────────────────
         -- Declared HERE because the 1.12 client declares it at the top of ChatFrame.lua, and it
         -- is an ADDON-FACING table before it is ours: `local info = ChatTypeInfo["SAY"]` then

@@ -1312,6 +1312,50 @@ fn seat_a_session(script: &mut UiScript) {
             ..Default::default()
         }),
     );
+    // A SPELLBOOK. A level-60 warrior with an empty one is a state no real character is in — the
+    // same argument this fixture already makes for a nil `UnitFactionGroup` and an empty CVar
+    // table, and it costs an addon the same way: `TheoryCraftEngine.lua:306` is
+    // `name, texture, offset, numSpells = GetSpellTabInfo(1)` then `for i=1, numSpells`, so an
+    // empty book is `'for' limit must be a number` and the addon dies at session start. The verb
+    // was never the problem — `GetSpellTabInfo` already returns all four values — the FIXTURE was.
+    //
+    // Deliberately modest, and the reason is 1209's: a fixture that seats everything stops
+    // resembling a session anyone has, and every row it lights up is one nobody can attribute. Two
+    // tabs and four spells is a Tuesday. `Attack` is slot 1 because it is on every warrior's, and
+    // three corpus addons look for exactly that name.
+    script.set_spellbook(benilla_ui::script::SpellBookState {
+        tabs: vec![
+            benilla_ui::script::SpellTabView {
+                name: "General".into(),
+                texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
+                offset: 0,
+                num_spells: 2,
+            },
+            benilla_ui::script::SpellTabView {
+                name: "Arms".into(),
+                texture: Some("Interface\\Icons\\Ability_Rogue_Eviscerate".into()),
+                offset: 2,
+                num_spells: 2,
+            },
+        ],
+        slots: vec![
+            spell_slot(6603, "Attack", None),
+            spell_slot(78, "Heroic Strike", Some("Rank 1")),
+            spell_slot(100, "Charge", Some("Rank 1")),
+            spell_slot(772, "Rend", Some("Rank 1")),
+        ],
+    });
+}
+
+/// One seated spellbook slot — the fields a book reader actually reads, defaulted otherwise.
+fn spell_slot(spell_id: u32, name: &str, rank: Option<&str>) -> benilla_ui::script::SpellSlotView {
+    benilla_ui::script::SpellSlotView {
+        spell_id,
+        name: name.to_string(),
+        rank: rank.map(str::to_string),
+        texture: Some("Interface\\Icons\\INV_Misc_QuestionMark".into()),
+        ..Default::default()
+    }
 }
 
 /// Every string key in the VM's `_G`.
@@ -2341,6 +2385,35 @@ pub fn blocked_by(reports: &[AddonReport], pattern: &str) -> Vec<(String, String
 /// A plain substring match against the row as printed, over all four method tables, each hit
 /// labelled with the table it came from — so `--why "EditBox:SetFontObject"` names the addons and
 /// `--why SetFontObject` finds every table that mentions it.
+/// Which addons carry `pattern` in one of the three demand lists — the read-back those rankings
+/// never had.
+///
+/// Every ranked table above is a **count**, and until this existed nothing could ask which addons a
+/// count was made of. That is not a theoretical gap: `GetChannelList` ranked 4 while exactly one
+/// corpus addon's source names it, and establishing that took a hand-rolled grep across a corpus
+/// whose entries are symlinks (so `grep -r` silently reads none of them). A number you cannot open
+/// is a claim rather than a measurement — the same lesson `--why`'s error read-back learned in
+/// 1210/1218/1227, applied to the other three tables.
+///
+/// Matched case-insensitively on a substring, exactly like the error read-back, so a half-remembered
+/// name still finds its row.
+pub fn wanters(
+    reports: &[AddonReport],
+    pattern: &str,
+    pick: impl Fn(&AddonReport) -> &Vec<String>,
+) -> Vec<(String, String)> {
+    let needle = pattern.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for r in reports {
+        for n in pick(r) {
+            if n.to_ascii_lowercase().contains(&needle) {
+                out.push((r.name.clone(), n.clone()));
+            }
+        }
+    }
+    out
+}
+
 pub fn method_rows_matching(reports: &[AddonReport], pattern: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for r in reports {

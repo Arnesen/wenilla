@@ -1022,3 +1022,100 @@ fn unit_creature_type_answers_the_record_then_falls_back_to_humanoid() {
         "got {err}"
     );
 }
+
+/// `GetInventorySlotInfo(slotName)` — `0x4c81b0`, three returns and a **case-insensitive**,
+/// full-string name match.
+///
+/// The case-insensitivity is the whole point: two 1.12-era corpus addons died at session start on
+/// case variants of real names — `FuBar_AmmoFu` passes `"ammoSlot"`, `FuBar_PoisonFu`
+/// `"MAINHANDSLOT"` — and both worked on the real client, because `0x4c8215` reaches the CRT
+/// `_strnicmp`, which folds both operands.
+///
+/// The other two assertions are things a plausible implementation gets wrong and nothing notices:
+/// the third return is the **number 1**, only for `RangedSlot`, never a boolean; and a miss
+/// **raises** with the reference's own message, which carries no `Usage:` prefix and does not
+/// interpolate the offending name.
+#[test]
+fn get_inventory_slot_info_folds_case_and_flags_only_the_ranged_slot() {
+    let s = script();
+
+    // The exact spelling, and the two case variants the corpus actually ships.
+    for name in ["AmmoSlot", "ammoSlot", "AMMOSLOT"] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return GetInventorySlotInfo('{name}')"))
+                .unwrap(),
+            0,
+            "{name} must fold to AmmoSlot"
+        );
+    }
+    assert_eq!(
+        s.eval::<i64>("return GetInventorySlotInfo('MAINHANDSLOT')")
+            .unwrap(),
+        16
+    );
+
+    // Three values, and the second is the empty-slot background art the paper-doll buttons use.
+    assert_eq!(
+        s.eval::<i64>("return select('#', GetInventorySlotInfo('HeadSlot'))")
+            .unwrap(),
+        3
+    );
+    let (id, art) = s
+        .eval::<(i64, String)>("return GetInventorySlotInfo('HeadSlot')")
+        .unwrap();
+    assert_eq!(id, 1);
+    // The DBC string verbatim: LOWERCASE directory and the `.blp` extension. The binding pushes
+    // `[esi+4]` with no normalisation, so a caller that keys a table by this sees these bytes.
+    assert_eq!(art, "interface\\paperdoll\\UI-PaperDoll-Slot-Head.blp");
+
+    // checkRelic: the NUMBER 1 for the ranged slot alone, nil everywhere else — not `false`, which
+    // is falsey like nil but the wrong type for a caller that compares it against 1.
+    assert!(s
+        .eval::<bool>("local _,_,r = GetInventorySlotInfo('RangedSlot') return r == 1")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("local _,_,r = GetInventorySlotInfo('HeadSlot') return r == nil")
+        .unwrap());
+
+    // The twelve rows this table was short of — `Bag1`..`Bag12` at SlotNumbers 64..75, of which
+    // 64..69 is the bank-bag band. They share ONE string offset with Bag0Slot..Bag3Slot, so all
+    // sixteen bag rows answer the same art.
+    assert_eq!(
+        s.eval::<i64>("return GetInventorySlotInfo('Bag1')")
+            .unwrap(),
+        64
+    );
+    assert_eq!(
+        s.eval::<i64>("return GetInventorySlotInfo('bag12')")
+            .unwrap(),
+        75,
+        "the new rows fold case like every other"
+    );
+    assert_eq!(
+        s.eval::<String>("local _,a = GetInventorySlotInfo('Bag6') return a")
+            .unwrap(),
+        s.eval::<String>("local _,a = GetInventorySlotInfo('Bag0Slot') return a")
+            .unwrap(),
+        "all sixteen bag rows share one string-block offset"
+    );
+    // ...and `Bag1` (64) is NOT `Bag1Slot` (21): different names, different ids, both real rows.
+    assert_eq!(
+        s.eval::<i64>("return GetInventorySlotInfo('Bag1Slot')")
+            .unwrap(),
+        21
+    );
+
+    // A miss raises — there is no nil path — with the reference's own string.
+    let err = s
+        .run("GetInventorySlotInfo('NoSuchSlot')")
+        .expect_err("an unknown slot name must raise");
+    let err = format!("{err}");
+    assert!(
+        err.contains("Invalid inventory slot in GetInventorySlotInfo"),
+        "got {err}"
+    );
+    assert!(
+        !err.contains("NoSuchSlot"),
+        "the reference does not interpolate the offending name: {err}"
+    );
+}

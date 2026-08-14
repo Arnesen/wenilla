@@ -103,6 +103,43 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // GetChannelList() → slot1, name1, slot2, name2, … over every joined channel, in join order.
+    //
+    // **The shape is settled by two independent consumers, not by a recorded signature** — wow-re
+    // has the address (`0x4a02d0`, `scratch/bindings.md` l.152) and no contract:
+    //
+    //  · the reference's own `FCFDropDown_LoadChannels(...)` walks `for i=1, arg.n, 2` and reads
+    //    `arg[i+1]` as the NAME (FloatingChatFrame.lua l.445-455) — so the pair is (slot, name),
+    //    in that order, and the caller steps by two;
+    //  · `ChatLog.lua:424` packs it with `{ GetChannelList() }` and tests
+    //    `type(value) == "number"` to spot an id — so it is a FLAT vararg, never a table.
+    //
+    // A third witness pins the flatness harder: `AceComm-2.0.lua:334` unpacks TEN pairs in one
+    // statement, `local _,a,_,b,…,j = GetChannelList()`.
+    //
+    // The slot numbering is [`slot_of`]'s — position in `joined_channels` + 1 — so this verb and
+    // `GetChannelName` can never disagree about which channel is 3.
+    //
+    // Zero joined channels is zero returns, not nil: `{ GetChannelList() }` is then an empty
+    // table, which is what every caller above already handles.
+    //
+    // Demand: 4 addons, and only ONE of them names it in its own source (ChatLog). The other
+    // three — FuBar_BGQueueNumber, FuBar_MageFu, FuBar_TankPointsFu — reach it through their
+    // embedded AceComm-2.0. That gap between "greps for the name" and "wants the name" is why the
+    // survey's own read-back exists (`--why`, d2fcef94) and why a hand grep is not the oracle here.
+    g.set(
+        "GetChannelList",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let mut out = Vec::with_capacity(model.joined_channels.len() * 2);
+            for (i, name) in model.joined_channels.iter().enumerate() {
+                out.push(Value::Integer(i as i64 + 1));
+                out.push(Value::String(lua.create_string(name)?));
+            }
+            Ok(MultiValue::from_vec(out))
+        })?,
+    )?;
+
     Ok(())
 }
 

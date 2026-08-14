@@ -483,6 +483,37 @@ fn main() {
         if rows.is_empty() {
             println!("    (none — no addon's method tables contain that text)");
         }
+        // ...and WHICH ADDONS each demand ranking counted. The rankings print a number per name and
+        // nothing could ask what it was made of, so a row could disagree with the corpus and no
+        // command would say so. It happened: `GetChannelList` ranked 4 while exactly ONE addon's
+        // source names it, and finding that took a hand-rolled grep across a symlinked corpus.
+        // A count you cannot open is a claim, not a measurement.
+        for (label, rows) in [
+            (
+                "globals",
+                addon_harness::wanters(&reports, pattern, |r| &r.missing_globals),
+            ),
+            (
+                "tables",
+                addon_harness::wanters(&reports, pattern, |r| &r.missing_tables),
+            ),
+            (
+                "methods",
+                addon_harness::wanters(&reports, pattern, |r| &r.missing_methods),
+            ),
+        ] {
+            if rows.is_empty() {
+                continue;
+            }
+            println!(
+                "\n  addons whose missing-{label} list matches {pattern:?} ({}) — this is what the \
+                 ranking counted:",
+                rows.len()
+            );
+            for (addon, name) in &rows {
+                println!("    {addon:<36} {name}");
+            }
+        }
     }
 
     if verbose {
