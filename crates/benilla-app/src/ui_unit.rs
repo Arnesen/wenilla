@@ -852,7 +852,17 @@ fn feed_units(
         Some(s)
     });
 
-    script.set_unit("player", player.clone());
+    // `"player"` is pushed only while the descriptor EXISTS: its absence is "no data source",
+    // never "the player stopped existing". The two absent windows are pre-arrival at login —
+    // where a `None` push would erase the roster seat (`seat_from_roster`) that addon file scopes
+    // and the loading-screen UI read — and the logout despawn frames, where `PLAYER_LOGOUT`
+    // handlers still key their saved state by `UnitName("player")` (the reference keeps the unit
+    // valid through its shutdown; a fresh VM starts with no `"player"` anyway, so nothing needs
+    // the clear). `"target"` keeps the unconditional push: a selection's absence IS data — the
+    // deselect/despawn transition the real client also reports.
+    if player.is_some() {
+        script.set_unit("player", player.clone());
+    }
     script.set_unit("target", target.clone());
 
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only

@@ -1,6 +1,6 @@
 //! One-off extraction helper (session tool, not shipped): `mpqx <data-dir> <virtual-path> <out>`.
-//! Reads through the SAME patch chain as the runtime ([`benilla_formats::Chain`], the full
-//! `VANILLA_LOAD_ORDER`) — it used to hand-roll a partial archive list in `benilla-mpq` and silently
+//! Reads through the SAME patch chain as the runtime ([`benilla_formats::Chain`], the full vanilla
+//! mount law) — it used to hand-roll a partial archive list in `benilla-mpq` and silently
 //! miss whole archives (`wmo.MPQ`: "not found" for every building/ship). A path the top archive
 //! **delete-marks** is reported as DELETED (exit 2) — the client doesn't load it; look for a
 //! `Blizzard_*` addon replacement (decision 0246).

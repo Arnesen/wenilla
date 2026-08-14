@@ -1307,3 +1307,87 @@ fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
         "a row's text must end inside the list: text right edge {row_r} > list right edge {list_r}"
     );
 }
+
+/// **Bug 5 — the director's stale offline bags.** Bagnon_Forever mirrors the live bags into
+/// `BagnonForeverData` (its saved variable) so the dropdown can show other characters' inventories
+/// offline. Its recorder does a full scan only on a character's FIRST login; afterwards it trusts
+/// `BAG_UPDATE(bagID)`, and `SaveBagData` **deletes** a bag's record whenever
+/// `GetContainerNumSlots(bag)` reads 0. The feed used to hand it exactly that: on the logout
+/// despawn frame the self store is gone, and diffing the absence as an all-empty snapshot fired a
+/// size-0 `BAG_UPDATE` for every bag — every record erased seconds before the saved-variables
+/// write, leaving each recently-logged-out character money-only ("g" has no delete path) and the
+/// offline view stale. Here: the login scan records the live backpack, and the record must still
+/// be intact after the absent-source frame and the logout events — what the shutdown write
+/// actually persists. The mechanism's own law is pinned beside the feed
+/// (`ui_items::feed::tests::an_absent_self_player_is_no_source_never_an_empty_bag_burst`).
+#[test]
+fn bagnon_forevers_records_survive_the_logout_boundary() {
+    let root = corpus_or_skip!();
+    let mut s = seat(&root, Seat::BeforeAddons);
+
+    // The first-login scan (PLAYER_LOGIN, inside `seat`) recorded the live backpack: 16 slots,
+    // the pouch in slot 1, in Bagnon_Forever's own short-link shape.
+    let record = "local r = BagnonForeverData[GetRealmName()][UnitName('player')] \
+                  return tostring(r[0] and r[0].s), tostring(r[0] and r[0][1])";
+    let (size, item) = s
+        .eval::<(String, String)>(record)
+        .expect("the record reads");
+    assert_eq!(
+        size, "16,0,",
+        "the login scan records the backpack's size row"
+    );
+    assert_eq!(
+        item, "4496",
+        "the login scan records the occupied slot's short link"
+    );
+
+    // An equipped bag arriving on the feed — inventory surface FIRST (the bag item in INV slot
+    // 20), then the container push and its `BAG_UPDATE`: the order the schedule guarantees
+    // (`feed_char.before(feed_containers)`, ui_char.rs). The recorder's size row asks the bag
+    // ITEM's own count and link (`GetInventoryItemLink("player", ContainerIDToInventoryID(1))`);
+    // raced the other way it recorded every equipped bag linkless — the `s = "8,0,"` rows in the
+    // director's data.
+    let mut inv: benilla_ui::script::InventorySlots = Default::default();
+    inv[20] = Some(benilla_ui::script::InvSlotView {
+        item_id: 4497,
+        count: 1,
+        quality: 1,
+        name: Some("Small Green Pouch".into()),
+        link: Some("|cffffffff|Hitem:4497:0:0:0|h[Small Green Pouch]|h|r".into()),
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    s.set_container(
+        1,
+        Some(ContainerState {
+            name: Some("Small Green Pouch".into()),
+            num_slots: 6,
+            slots: Default::default(),
+        }),
+    );
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(1)]);
+    let bag_row = s
+        .eval::<String>(
+            "return tostring(BagnonForeverData[GetRealmName()][UnitName('player')][1].s)",
+        )
+        .expect("the bag row reads");
+    assert_eq!(
+        bag_row, "6,1,4497",
+        "an equipped bag's size row carries its own count and short link"
+    );
+
+    // The logout boundary: the despawn frame (no self store) and then the shutdown's own events.
+    // The record the write persists must be the bags the player actually had.
+    let mut memory = crate::ui_items::feed::FeedMemory::default();
+    crate::ui_items::feed::apply_container_source(&mut s, &mut memory, None, Vec::new());
+    s.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
+    s.fire_event("PLAYER_LOGOUT", Vec::new());
+    let (size, item) = s
+        .eval::<(String, String)>(record)
+        .expect("the record reads");
+    assert_eq!(
+        size, "16,0,",
+        "the logout boundary must not erase the size row"
+    );
+    assert_eq!(item, "4496", "the logout boundary must not erase the slot");
+}

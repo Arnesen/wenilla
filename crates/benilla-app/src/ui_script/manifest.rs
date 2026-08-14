@@ -111,6 +111,12 @@ pub(crate) fn load_ingame_ui(
     identity: Option<&(String, String)>,
     version_check: bool,
 ) -> Vec<String> {
+    // The whole load edge runs bounded (decision 1306): the reference files sourced off the
+    // player's own chain, our builtin, and every addon (which re-arms per addon in
+    // `load_third_party`). A chunk that never returns fails as a load error instead of freezing
+    // the client on the loading screen; the caller disarms once the edge is done
+    // (`lifecycle::load_ingame_ui_on_world_entry`), so the session's steady state runs unhooked.
+    script.set_instruction_budget(super::addons::LOAD_INSTRUCTION_BUDGET);
     // The reference FrameXML this client SOURCES off the patch chain rather than transcribing
     // ([`super::reference_ui`], whose header is the rule). It runs FIRST, before our own files,
     // precisely so that every global we define ourselves overwrites the reference's — its

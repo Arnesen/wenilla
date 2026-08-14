@@ -252,11 +252,14 @@ pub(super) const FALL_FAR_TIME: f32 = 0.5;
 /// Skin width (yd) kept between the capsule and geometry on casts.
 pub(super) const SKIN_WIDTH: f32 = 0.02;
 
-/// Max seconds to hold the avatar after a teleport while the world streams in (see [`Player::settling`]).
-/// Generous — a dense city's spawn + collider queue drains in a couple seconds; this only backstops a
-/// world that never becomes resident (missing data, a stalled stream) so we never hang forever. The
-/// release itself is the terrain streamer's (decision 0737), which also pushes the deadline while the
-/// resident world is still the departed map's (0710's fail-closed law).
+/// Seconds of **stalled** streaming before the post-snap hold gives up (see [`Player::settling`]).
+/// A *stall* budget, not a load budget: the deadline is pushed forward while the resident world is
+/// still the departed map's (0710's fail-closed law) **and while the destination is visibly still
+/// arriving** (any load-progress counter moved — B263, decision 1303). It can therefore only fire
+/// against a stream that has made no progress at all for this long — missing data, dead IO — never
+/// against a slow machine. As a fixed load budget it was measured 0.01 s from firing on a *fast*
+/// machine (a Stormwind arrival consumed 5.99 s of the 6.00 s), which is B263: on any slower
+/// machine it released gravity mid-stream and the body fell through the not-yet-collided city.
 pub(crate) const SETTLE_TIMEOUT: f32 = 6.0;
 
 /// The player body's collision capsule, built once at startup and swept by avian's `MoveAndSlide`
@@ -580,8 +583,15 @@ pub(crate) struct Player {
     /// its own leak patch before 0737 deleted the class).
     pub(crate) settling: bool,
     /// `Time::elapsed_secs` deadline to give up settling and release (see [`Player::settling`]).
-    /// Pushed forward by the streamer while [`Player::world_stale`] (0710's fail-closed law).
+    /// Pushed forward by the streamer while [`Player::world_stale`] (0710's fail-closed law) and
+    /// while any load-progress counter is still moving (B263, decision 1303) — so it measures
+    /// *stall*, and a slow arrival can never exhaust it.
     pub(crate) settle_deadline: f32,
+    /// `Time::elapsed_secs` when the current settle hold began (the snap) — what the `sett` trace
+    /// reports the wait against. The deadline above stopped measuring this the moment it became a
+    /// stall budget: it is re-pushed all through a live stream, so "deadline minus timeout" names
+    /// the last push, not the arrival.
+    pub(crate) settle_since: f32,
     /// **The colliders under our feet may still belong to the map we just left.** Set at every
     /// snap, cleared by the terrain streamer once the destination's own world is resident.
     ///
@@ -753,7 +763,7 @@ impl Player {
     /// the whole diagnosis of a fall-through report, so it goes through the `sett` trace either way.
     pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
         self.settling = false;
-        let waited = SETTLE_TIMEOUT - (self.settle_deadline - now);
+        let waited = now - self.settle_since;
         super::move_trace::settle(resident, waited, self.pos);
     }
 

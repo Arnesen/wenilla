@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use benilla_formats::{ItemDisplay, ItemDisplayCatalog};
-use benilla_protocol::messages::{ActionButton, ACTION_KIND_ITEM};
+use benilla_protocol::messages::{ActionButton, ItemSpellEntry, ACTION_KIND_ITEM};
 use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
@@ -79,6 +79,14 @@ fn fed_texture(app: &mut App) -> Option<String> {
         .unwrap()
 }
 
+/// What the VM answers `ActionBar.xml`'s Count gate — the ref's 1/nil, so `None` is "no".
+fn fed_consumable(app: &mut App) -> Option<i64> {
+    app.world_mut()
+        .non_send_resource::<UiScript>()
+        .eval::<Option<i64>>(&format!("return IsConsumableAction({JERKY_ACTION})"))
+        .unwrap()
+}
+
 /// The whole bug in one test: the first resolve issues the query and can only show the
 /// placeholder; the frame the answer lands, the slot re-resolves and the real icon arrives.
 /// Before decision 0660 the second half never happened — the button kept the question mark for the
@@ -113,6 +121,105 @@ fn a_landed_item_template_redisplays_the_action_slot() {
         Some(JERKY_ICON),
         "the landed template redisplays the slot — the fresh character's food loses its question mark"
     );
+}
+
+/// The Count fontstring's **gate** rides the same landed template as the icon (decision 1301).
+///
+/// `IsConsumableAction 0x4e5250` reads nothing but the slot's item template, so it moves exactly
+/// when the icon does. Fed from the per-frame *state* map it could not: that feed runs `.after`
+/// this one and fires no event of its own for the flag, so the `ACTIONBAR_SLOT_CHANGED` that
+/// repaints the button always carried the previous frame's answer — and at login the previous
+/// frame had no template at all. The button kept its icon and lost its stack number for the whole
+/// session (the director's report, 2026-08-14). This is 0660's race again, one field over, which
+/// is why the guard belongs beside it: the two are one push or they are two bugs.
+#[test]
+fn a_landed_item_template_also_lands_the_consumable_gate() {
+    let (mut app, _rx) = app_with_food_on_the_bar();
+
+    app.update();
+    assert_eq!(
+        fed_consumable(&mut app),
+        None,
+        "a cold template cannot answer the gate — the ask is still in flight"
+    );
+
+    // Tough Jerky's real row (vmangos `item_template` 117, read 2026-08-14): one ON_USE block,
+    // spell 433 Food, SpellCharges **-1** — the destroy-on-use sign `is_consumable` tests.
+    let mut info = test_template("Tough Jerky");
+    info.display_info_id = JERKY_DISPLAY;
+    info.spells = vec![ItemSpellEntry {
+        index: 0,
+        spell_id: 433,
+        trigger: 0,
+        charges: -1,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    }];
+    app.world_mut()
+        .resource_mut::<Items>()
+        .insert_template(JERKY, Some(info));
+
+    app.update();
+    assert_eq!(
+        fed_texture(&mut app).as_deref(),
+        Some(JERKY_ICON),
+        "the icon lands (the control — this half never broke)"
+    );
+    assert_eq!(
+        fed_consumable(&mut app),
+        Some(1),
+        "…and the gate lands with it, on the same push, so the repaint that follows paints a count"
+    );
+}
+
+/// `IsConsumableAction 0x4e5250` — the gate's own law
+/// ([`benilla_protocol::ItemInfo::is_consumable`], fed into [`benilla_ui::script::ActionSlot`]).
+/// The director's B201 is the mount row: an on-use item with no charges wore a stack number under
+/// it because we tested `Class == 0` instead of the reference's two clauses (decision 0926 §3).
+#[test]
+fn is_consumable_is_ammo_thrown_or_a_negative_charge_use_block() {
+    let block = |trigger: u32, charges: i32| ItemSpellEntry {
+        index: 0,
+        spell_id: 439,
+        trigger,
+        charges,
+        cooldown_ms: -1,
+        category: 0,
+        category_cooldown_ms: -1,
+    };
+
+    // The report: a mount. Class 15 Miscellaneous, InventoryType 0, one ON_USE block whose
+    // SpellCharges is 0 — the item is not destroyed by using it.
+    let mut mount = test_template("Red Skeletal Horse");
+    mount.class = 15;
+    mount.spells = vec![block(0, 0)];
+    assert!(!mount.is_consumable(), "a mount has no stack to show");
+
+    // A potion: Class 0, but that is not what decides it — the ON_USE block's -1 charges is.
+    let mut potion = test_template("Minor Healing Potion");
+    potion.spells = vec![block(0, -1)];
+    assert!(potion.is_consumable());
+
+    // …and Class 0 alone (a conjured-water-shaped template with no on-use block at all) is
+    // NOT enough, which is exactly what the old `class == 0` read got wrong in reverse.
+    let classless = test_template("Trade Good");
+    assert!(!classless.is_consumable());
+
+    // The InventoryType clause, both members — ammo and thrown always count, charges or not.
+    for inv in [24u32, 25] {
+        let mut ammo = test_template("Rough Arrow");
+        ammo.inventory_type = inv;
+        assert!(ammo.is_consumable(), "InventoryType {inv} is consumable");
+    }
+    let mut trinket = test_template("Trinket");
+    trinket.inventory_type = 12;
+    assert!(!trinket.is_consumable());
+
+    // An ON_EQUIP proc with negative charges is not an ON_USE block: the trigger must be 0.
+    let mut proc_item = test_template("Proc Weapon");
+    proc_item.spells = vec![block(1, -1)];
+    assert!(!proc_item.is_consumable());
 }
 
 /// The epoch is a *change* gate, not a per-frame re-resolve: once the answer has landed and been

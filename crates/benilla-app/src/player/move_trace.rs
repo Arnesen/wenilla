@@ -118,17 +118,19 @@ pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
 ///
 /// `resident` means the destination's world arrived (scene spawned + collider queue quiet —
 /// decision 0737's release) and the hold released onto it; `!resident` is the
-/// [`super::SETTLE_TIMEOUT`] backstop firing, which switches gravity on with the world never
-/// having become resident. The distinction is invisible from inside the game (both look like "the
-/// loading screen went away") and it is the difference between a world that streamed in time and
-/// one that did not, so the timeout end is also a `warn!` on the ordinary log — a reporter's paste
-/// can then name it without owning a trace.
+/// [`super::SETTLE_TIMEOUT`] backstop firing, which since decision 1303 (B263) means the stream
+/// made **no progress at all** for the whole budget — a genuinely dead stream, never a slow one —
+/// and gravity comes on with the world never having become resident. `waited` is measured from
+/// the snap either way. The distinction is invisible from inside the game (both look like "the
+/// loading screen went away") and it is the difference between a world that arrived and one that
+/// died, so the timeout end is also a `warn!` on the ordinary log — a reporter's paste can then
+/// name it without owning a trace.
 pub(super) fn settle(resident: bool, waited: f32, pos: bevy::prelude::Vec3) {
     if !resident {
         bevy::log::warn!(
-            "settle: TIMED OUT after {waited:.2}s with the world never resident at \
-             ({:.1},{:.1},{:.1}) — releasing anyway. If a building stands here, its collider \
-             had not finished streaming and the body is about to fall through it.",
+            "settle: TIMED OUT {waited:.2}s after the snap with the stream stalled and the world \
+             never resident at ({:.1},{:.1},{:.1}) — releasing anyway. If a building stands \
+             here, its collider never streamed and the body is about to fall through it.",
             pos.x,
             pos.y,
             pos.z,

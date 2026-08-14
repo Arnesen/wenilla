@@ -40,6 +40,7 @@ fn shipped_action_bar_drives_end_to_end() {
             kind: 0x00,
             action: 100,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action(
@@ -49,6 +50,7 @@ fn shipped_action_bar_drives_end_to_end() {
             kind: 0x00,
             action: 101,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -175,6 +177,7 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
             kind: 0x00,
             action: 133,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -264,6 +267,7 @@ fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
             kind: 0x00,
             action: 133,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -321,6 +325,7 @@ fn a_right_click_on_an_action_button_uses_the_action() {
             kind: 0x80, // an ITEM action — the food/mount case the report is about
             action: 4540,
             count: 5,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -372,6 +377,7 @@ fn shift_click_picks_up_not_uses() {
             kind: 0x00,
             action: 111,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -435,6 +441,7 @@ fn the_action_bar_lock_stops_the_drag_and_leaves_shift_click_alone() {
             kind: 0x00,
             action: 111,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -503,6 +510,7 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
             kind: 0x00,
             action: 111,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action(
@@ -512,6 +520,7 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
             kind: 0x00,
             action: 222,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -553,10 +562,15 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
 /// on-use spell with zero charges and `InventoryType` 0, so `IsConsumableAction 0x4e5250` answers
 /// false and the ref paints nothing at all. It repaints on `ACTIONBAR_SLOT_CHANGED` alongside the
 /// icon (the same event the identity resolve fires).
+///
+/// **The gate rides the SLOT, not the state map** (decision 1301). It used to be pushed through
+/// `set_action_state`, and this test set that up *before* the repaint — the opposite of the
+/// runtime order, where the identity feed fires `ACTIONBAR_SLOT_CHANGED` a whole system before the
+/// state feed writes anything. That inversion is why a passing test sat over a fresh character
+/// whose food showed no stack number at all. Every push here is now one `set_action`, which is
+/// the only order the runtime can produce.
 #[test]
 fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
-    use benilla_ui::script::ActionState;
-
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -571,6 +585,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             kind: 0x00, // SPELL
             action: 111,
             count: 42, // the app never actually sets this for a spell — proves the XML, not the feed
+            consumable: false,
         }),
     );
     s.set_action(
@@ -580,17 +595,11 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             kind: 0x80, // ITEM — a stack of food
             action: 117,
             count: 15,
-        }),
-    );
-    s.set_action_state(
-        2,
-        Some(ActionState {
             consumable: true,
-            ..Default::default()
         }),
     );
-    // The report's own shape: an ITEM action the player holds exactly one of, which is NOT
-    // consumable (a mount). The count is fed all the same; the gate is what must suppress it.
+    // The report's own shape: an ITEM action the player holds eleven of, which is NOT consumable
+    // (a mount). The count is fed all the same; the gate is what must suppress it.
     s.set_action(
         3,
         Some(ActionSlot {
@@ -598,13 +607,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             kind: 0x80,
             action: 13332,
             count: 11,
-        }),
-    );
-    s.set_action_state(
-        3,
-        Some(ActionState {
             consumable: false,
-            ..Default::default()
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -649,6 +652,7 @@ fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
             kind: 0x80,
             action: 117,
             count: 0,
+            consumable: true,
         }),
     );
     s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(2)]);
@@ -866,6 +870,7 @@ fn state_events_leave_empty_wells_untinted() {
             kind: 0x00,
             action: 133,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action_state(
@@ -934,6 +939,7 @@ fn an_occupied_slot_going_empty_leaves_no_white_plate() {
             kind: 0x00,
             action: 5185,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action_state(

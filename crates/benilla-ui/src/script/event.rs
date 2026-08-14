@@ -157,8 +157,7 @@ pub(super) fn fire_visibility_changes(lua: &Lua, changed: Vec<FrameHandle>) {
         if let Err(e) = fire(lua, id, name, None, Vec::new()) {
             lua.app_data_mut::<Model>()
                 .expect("model")
-                .errors
-                .push(e.to_string());
+                .record_script_error(e.to_string());
         }
     }
 }

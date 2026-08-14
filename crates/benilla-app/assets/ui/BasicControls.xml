@@ -46,22 +46,18 @@
             _ERRORMESSAGE(text)
         end
 
-        -- ── AND ONE LINE OF THE REFERENCE DELIBERATELY NOT TRANSCRIBED ─────────────────────────
-        -- The reference ends this block with `seterrorhandler(_ERRORMESSAGE);`. We do not.
-        --
-        -- benilla's default handler is `__benilla_script_error` (decision 1195), which pushes into
-        -- `UiScript::errors()` — the channel the corpus harness's whole blocker table is built on,
-        -- and the only place a Lua fault is visible to any instrument we own. Installing
-        -- `_ERRORMESSAGE` would route every runtime error into a modal dialog instead and blind
-        -- `blockers`, `demand` and every A/B that depends on them, to buy a dialog nobody has asked
-        -- for yet.
-        --
-        -- The addon-facing behaviour is unchanged either way: `geterrorhandler()` still answers a
-        -- callable (the 1195 pair), `geterrorhandler()(msg)` still reports, and an addon that
-        -- installs its OWN handler with `seterrorhandler` still wins outright. What differs is only
-        -- which handler is installed when nobody has chosen — and that is ours to choose while the
-        -- error channel is load-bearing for the arc's instruments. Revisit when a player-facing
-        -- Lua-error surface exists; the one line is the whole change.
+        -- ── seterrorhandler(_ERRORMESSAGE): the reference's closing line, now transcribed ──────
+        -- This file withheld exactly this line from when it landed until decision 1305, because
+        -- the engine's error channel (`UiScript::errors()`) was the only place a Lua fault was
+        -- visible to any instrument and a modal would have blinded it. That trade is dissolved,
+        -- not decided differently: the engine now records every caught script error on the host
+        -- channel FIRST and then dispatches it to whatever `geterrorhandler()` answers
+        -- (`dispatch_script_errors_to_handler`, 1305) — so the harness's blocker tables read
+        -- exactly what they always read, and the player gets what the reference always gave them:
+        -- an addon that errors puts the red ScriptErrors dialog on screen instead of failing
+        -- somewhere only a terminal can see (B271's report was debugged entirely off WARN lines).
+        -- An addon that installs its OWN handler still wins outright, exactly as in 1195.
+        seterrorhandler(_ERRORMESSAGE)
 
         -- ── TEXT (ref l.22-26, verbatim) ──────────────────────────────────────────────────────
         -- "This function is used to translate text (actually it's already translated as-is)" is

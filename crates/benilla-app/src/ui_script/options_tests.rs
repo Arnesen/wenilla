@@ -2023,6 +2023,7 @@ fn the_action_bars_page_locks_the_real_bar() {
             kind: 0x00,
             action: 111,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);

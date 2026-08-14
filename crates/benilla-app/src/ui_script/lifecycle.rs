@@ -146,6 +146,10 @@ pub(crate) fn load_ingame_ui_on_world_entry(world: &mut World) {
     // (`AddOn_Load 0x51f240` steps 2 → 4 → 6, decision 1128); reversing it means the defaults
     // always win and nothing can ever be remembered.
     finish_ui_load(&mut script);
+    // The load edge is over: disarm the instruction bound `load_ingame_ui` installed (decision
+    // 1306). From here every OnUpdate and event handler runs unhooked — a session must not kill
+    // a player's addon for being slow; only a load that never returns is fair game.
+    script.clear_instruction_budget();
     world.insert_non_send_resource(script);
     world.insert_resource(AddOnIdentity(identity));
 }
@@ -390,6 +394,10 @@ pub(crate) fn shutdown_on_exit(
 /// `PLAYER_ENTERING_WORLD` keeps its own per-entry latch in [`crate::ui_unit`] and still lands
 /// after this, since it waits on the self descriptor arriving over the wire.
 pub(crate) fn finish_ui_load(script: &mut UiScript) {
+    // Still the load edge, so still bounded (1306) — re-armed because the walk's last addon left
+    // an arbitrary amount on the counter, and the saved-variables chunk plus every PLAYER_LOGIN
+    // handler deserve the full allowance. The entry edge disarms after this returns.
+    script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
     crate::ui_saved::load_saved_variables(script);
     script.fire_event("PLAYER_LOGIN", vec![]);
 }

@@ -105,6 +105,7 @@ pub(super) fn release_post_snap_hold(
     mut player: ResMut<Player>,
     progress: Option<Res<WorldLoadProgress>>,
     time: Res<Time>,
+    mut last_counters: Local<Option<[usize; 4]>>,
 ) {
     let Some(p) = progress else { return };
     // The streamer is the only authority on *which map* the colliders under the avatar belong to.
@@ -113,19 +114,165 @@ pub(super) fn release_post_snap_hold(
     if p.focus_resident && p.total > 0 {
         player.world_stale = false;
     }
+    // Did the stream move since last frame? Any counter changing — a tile spawned, a placement
+    // up, a collider queued or attached — is the destination still arriving. Tracked every frame
+    // (not just while settling) so the first settling frame compares against a real baseline.
+    let counters = [p.ready, p.total, p.colliders_pending, p.placements_pending];
+    let progressed = last_counters.replace(counters) != Some(counters);
     if !player.settling {
         return;
     }
     // The release ends on scene AND colliders, never on ground contact — feet-on-ground dragged
     // the whole mover-mode matrix into a loading decision, and a flyer or swimmer never touched
-    // it. While the resident colliders still belong to the map we just left the deadline is
-    // pushed (0710's fail-closed law: a world that never arrives keeps the hold and the screen).
+    // it. The timeout is a STALL budget, twice over (0710's fail-closed law, extended by B263 /
+    // decision 1303): the deadline is pushed while the resident colliders still belong to the map
+    // we just left, AND while the destination's own stream is visibly advancing. As a fixed load
+    // budget it was 0.01 s from firing on a fast machine (a Stormwind arrival used 5.99 s of the
+    // 6.00), and on a slower one it fired mid-stream — gravity on, the city's collider still in
+    // the build queue, and the body fell to the canyon under the Valley of Heroes with the cover
+    // still up. Only a stream that has made NO progress for the whole budget — missing data, dead
+    // IO — can time out now, which is the case the backstop was always for.
     let now = time.elapsed_secs();
-    if player.world_stale {
-        player.settle_deadline = now + SETTLE_TIMEOUT;
-    } else if p.scene_ready && p.colliders_pending == 0 {
+    if p.scene_ready && p.colliders_pending == 0 && !player.world_stale {
         player.end_settle(true, now);
+    } else if player.world_stale || progressed {
+        player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A test app with the release system registered (a registered system keeps its `Local`
+    /// baseline across frames, which `run_system_once` would reset) and a hand-driven clock.
+    fn app() -> App {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(WorldLoadProgress::default())
+            .insert_resource(Player {
+                settling: true,
+                settle_deadline: SETTLE_TIMEOUT,
+                ..Player::default()
+            })
+            .add_systems(Update, release_post_snap_hold);
+        app
+    }
+
+    /// One frame: advance the clock, mutate the streamer's published progress, run the release.
+    fn step(app: &mut App, dt: f32, tweak: impl FnOnce(&mut WorldLoadProgress)) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(dt));
+        tweak(&mut app.world_mut().resource_mut::<WorldLoadProgress>());
+        app.update();
+    }
+
+    fn settling(app: &mut App) -> bool {
+        app.world().resource::<Player>().settling
+    }
+
+    /// B263 (decision 1303): a stream that keeps arriving keeps the hold, however long it takes.
+    /// The old fixed load budget released gravity at 6 s into a live Stormwind arrival — measured
+    /// 0.01 s from firing even on a fast machine — and the body fell through the not-yet-collided
+    /// city to the canyon under the Valley of Heroes, impact heard under the loading screen.
+    #[test]
+    fn a_slow_but_advancing_stream_never_times_out() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        // 5× the budget of wall-clock, with some counter moving every frame — a slow machine
+        // streaming a big city, five times slower than the budget ever allowed for.
+        for i in 0..(5.0 * SETTLE_TIMEOUT) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = i; // tiles/placements landing one at a time
+                p.colliders_pending = 300 + i % 7;
+                p.scene_ready = false;
+            });
+            assert!(
+                settling(&mut app),
+                "the hold gave up at ~{i}s with the stream still visibly advancing"
+            );
+        }
+    }
+
+    /// The backstop's one remaining target: a stream that makes NO progress for the whole budget
+    /// (missing data, dead IO) still releases, so a broken world can never hold the screen forever.
+    #[test]
+    fn a_genuinely_stalled_stream_still_times_out() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        // Frozen counters, scene never presentable. First frame baselines the Local (counts as
+        // change), then the budget runs undisturbed.
+        for _ in 0..=(SETTLE_TIMEOUT + 2.0) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = 500;
+                p.colliders_pending = 300;
+                p.scene_ready = false;
+            });
+        }
+        assert!(
+            !settling(&mut app),
+            "a dead stream must not hold the body (and the screen) forever"
+        );
+    }
+
+    /// 0710's fail-closed law is untouched: while the resident world is still the departed map's,
+    /// frozen counters push the deadline rather than spending it.
+    #[test]
+    fn a_stale_world_pushes_the_deadline_before_the_stall_budget_starts() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = true;
+        // Twice the budget of stale, frozen frames: no release (focus_resident stays false so
+        // nothing clears the stale flag).
+        for _ in 0..(2.0 * SETTLE_TIMEOUT) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 0;
+                p.scene_ready = false;
+                p.focus_resident = false;
+            });
+            assert!(settling(&mut app), "released over the departed map's floor");
+        }
+        // The destination becomes resident and the stream then stalls: the budget starts HERE.
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        for _ in 0..=(SETTLE_TIMEOUT + 2.0) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = 500;
+                p.colliders_pending = 300;
+                p.scene_ready = false;
+                p.focus_resident = true;
+            });
+        }
+        assert!(
+            !settling(&mut app),
+            "the stall budget never started counting"
+        );
+    }
+
+    /// The ordinary end: scene presentable and colliders quiet releases at once — even on the very
+    /// frame the last counter moved, so residency is never delayed by its own arrival.
+    #[test]
+    fn residency_releases_on_the_frame_it_lands() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = false;
+        step(&mut app, 1.0, |p| {
+            p.total = 2000;
+            p.ready = 1999;
+            p.colliders_pending = 3;
+            p.scene_ready = false;
+        });
+        assert!(settling(&mut app));
+        step(&mut app, 0.1, |p| {
+            p.ready = 2000;
+            p.colliders_pending = 0;
+            p.scene_ready = true;
+        });
+        assert!(!settling(&mut app), "presentable world, hold still on");
     }
 }

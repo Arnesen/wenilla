@@ -134,7 +134,11 @@ pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
             texture,
             kind,
             action,
-            count: 0, // the app's next-frame re-feed resolves the real bag count for an ITEM slot
+            // The engine holds no item knowledge, so neither half of the Count pair can be
+            // answered here: the app's next-frame re-feed resolves the real bag count and the
+            // `IsConsumableAction` gate together, off the item template (decision 1301).
+            count: 0,
+            consumable: false,
         },
     );
     model.action_sets.push((id, pack(kind, action)));
@@ -185,6 +189,7 @@ mod tests {
             kind,
             action,
             count: 0,
+            consumable: false,
         }
     }
 

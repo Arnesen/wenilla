@@ -128,6 +128,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         .set_name("=[benilla wow stdlib]")
         .set_mode(mlua::ChunkMode::Text)
         .exec()?;
+    // Remember the default handler BY IDENTITY, right after installing it — the engine-side
+    // dispatch (decision 1305) skips it (it reports into the host channel, where every dispatched
+    // message already is) and fires only a handler somebody *chose*: FrameXML's `_ERRORMESSAGE`
+    // or an addon's own.
+    let default: mlua::Function = lua.load("return geterrorhandler()").eval()?;
+    lua.set_named_registry_value(super::REG_DEFAULT_ERRORHANDLER, default)?;
     Ok(())
 }
 

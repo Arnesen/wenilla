@@ -83,7 +83,6 @@ fn action_state_bindings_answer_the_reference_conventions() {
             current: true,
             auto_repeat: false,
             is_attack: false,
-            consumable: true,
             equipped: false,
             // 4 s remaining of a 10 s cooldown, running: started at GetTime 94.
             cooldown: Some((94_000, 10_000, true)),
@@ -100,6 +99,21 @@ fn action_state_bindings_answer_the_reference_conventions() {
     assert!(s
         .eval::<bool>("return IsAutoRepeatAction(3) == nil")
         .unwrap());
+    // IsConsumableAction reads the SLOT, not this map (decision 1301) — it is a pure query over
+    // the item template, so it arrives with the icon it gates the count beside.
+    assert!(s
+        .eval::<bool>("return IsConsumableAction(3) == nil")
+        .unwrap());
+    s.set_action(
+        3,
+        Some(ActionSlot {
+            texture: None,
+            kind: 0x80,
+            action: 117,
+            count: 4,
+            consumable: true,
+        }),
+    );
     assert!(s.eval::<bool>("return IsConsumableAction(3) == 1").unwrap());
 
     // GetActionCooldown: the pushed absolute start, verbatim in seconds.

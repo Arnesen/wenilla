@@ -44,6 +44,11 @@ pub struct ActionSlot {
     /// Bag count for an ITEM-kind slot (`GetActionCount`), `0` for every other kind or an empty
     /// bag — the app-resolved value the Count fontstring reads (decision 0216 §7).
     pub count: u32,
+    /// `IsConsumableAction`: the gate the ref's `UpdateCount` puts in front of [`Self::count`]
+    /// (decision 0926 §3). **Identity, not state** — `0x4e5250` reads nothing but the slot's own
+    /// item template, so it changes exactly when the icon does and rides the same push (decision
+    /// 1301; it lived in [`ActionState`] until the login race that split the pair).
+    pub consumable: bool,
 }
 
 /// One action's **dynamic** state — the per-frame half the app's feed pushes beside the slot's
@@ -70,8 +75,6 @@ pub struct ActionState {
     pub auto_repeat: bool,
     /// `IsAttackAction`: the action is the melee auto-attack.
     pub is_attack: bool,
-    /// `IsConsumableAction`: shows the Count fontstring in the ref's `UpdateCount`.
-    pub consumable: bool,
     /// `IsEquippedAction`: an ITEM action currently worn (the green border).
     pub equipped: bool,
     /// The action's cooldown as pushed: `(start_ms, duration_ms, enabled)` with `start_ms` the
@@ -360,9 +363,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsAttackAction",
         lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.is_attack)))?,
     )?;
+    // The Count gate reads the SLOT, not the state map: `IsConsumableAction 0x4e5250` is a pure
+    // query over the item template the icon already came from, so it has to arrive on the same
+    // push the icon does. Split across the two feeds it answered `nil` for the whole session on a
+    // freshly logged-in character (decision 1301).
     g.set(
         "IsConsumableAction",
-        lua.create_function(|lua, action: u32| Ok(state_flag(lua, action, |s| s.consumable)))?,
+        lua.create_function(|lua, action: u32| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            match model.actions.get(&action) {
+                Some(s) if s.consumable => Ok(Value::Integer(1)),
+                _ => Ok(Value::Nil),
+            }
+        })?,
     )?;
     g.set(
         "IsEquippedAction",
@@ -413,6 +426,7 @@ mod tests {
                 kind: 0x00,
                 action: 133,
                 count: 0,
+                consumable: false,
             }),
         );
         s.set_bonus_bar_offset(1);
@@ -443,6 +457,7 @@ mod tests {
                 kind: 0x80,
                 action: 117,
                 count: 4,
+                consumable: false,
             }),
         );
         assert_eq!(s.eval::<i64>("return GetActionCount(5)").unwrap(), 4);
@@ -507,6 +522,7 @@ mod tests {
                 kind,
                 action,
                 count: 0,
+                consumable: false,
             })
         };
         s.set_action(1, slot(0x40, 1)); // macro 1 — "Pull"

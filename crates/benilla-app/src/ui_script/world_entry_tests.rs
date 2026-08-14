@@ -475,3 +475,96 @@ fn reload_outside_the_world_is_dropped() {
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// **B271, the error half.** An addon that raises at file scope while entering world must not
+/// take the client with it: the walk reports it, the sibling addon still loads, and the player
+/// sees the reference's red ScriptErrors dialog (decision 1305) — the report was debugged
+/// entirely off terminal WARN lines because the client showed nothing.
+#[test]
+fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("addon-error");
+    // A second addon, alphabetically FIRST, that dies at file scope — so the probe behind it
+    // proves a broken neighbour drops only itself.
+    let dir = tmp.join("benilla-config/AddOns/AaBroken");
+    std::fs::create_dir_all(&dir).expect("broken addon dir");
+    std::fs::write(dir.join("AaBroken.toc"), "## Interface: 11200\nboom.lua\n").expect("toc");
+    std::fs::write(dir.join("boom.lua"), "error('B271: file-scope boom')\n").expect("lua");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "the addon AFTER the broken one still loads — a neighbour's error drops only itself"
+    );
+
+    // The app's per-frame drain runs the dispatch; the test runs the same call.
+    let mut script = world
+        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+    script.dispatch_script_errors_to_handler();
+    assert!(
+        script
+            .eval::<bool>("return ScriptErrors:IsVisible()")
+            .expect("ScriptErrors exists — BasicControls loaded"),
+        "the ScriptErrors dialog is on screen — `seterrorhandler(_ERRORMESSAGE)` is installed \
+         and the engine dispatched the caught error to it"
+    );
+    let shown: String = script
+        .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
+        .expect("eval")
+        .unwrap_or_default();
+    assert!(
+        shown.contains("B271: file-scope boom"),
+        "the dialog names the actual error, got: {shown:?}"
+    );
+    drop(script);
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// **B271, the freeze half.** An addon that never returns cannot freeze world entry: the load
+/// bound (decision 1306) fails it with the distinctive budget message, the sibling addon still
+/// loads, and this test FINISHING is the claim — before 1306 it would hang here forever.
+#[test]
+fn a_looping_addon_cannot_freeze_world_entry() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("addon-loop");
+    let dir = tmp.join("benilla-config/AddOns/AaSpin");
+    std::fs::create_dir_all(&dir).expect("spin addon dir");
+    std::fs::write(dir.join("AaSpin.toc"), "## Interface: 11200\nspin.lua\n").expect("toc");
+    std::fs::write(dir.join("spin.lua"), "while true do end\n").expect("lua");
+    let mut world = booted_world();
+
+    log_in_as(&mut world, "Onehunter", 1);
+
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "the addon after the spinner still loads — the budget failed one addon, not the entry"
+    );
+    // The budget raise travelled the load walk's failure arm into the handler queue (1305), so
+    // the player-facing dialog is where it lands — the frozen loading screen becomes a dialog
+    // that NAMES the loop.
+    let mut script = world
+        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("VM");
+    script.dispatch_script_errors_to_handler();
+    let shown: String = script
+        .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
+        .expect("eval")
+        .unwrap_or_default();
+    assert!(
+        shown.contains("instruction budget exhausted"),
+        "the dialog names the runaway loop with the budget's distinctive message, got: {shown:?}"
+    );
+
+    drop(script);
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

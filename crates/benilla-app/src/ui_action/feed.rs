@@ -277,7 +277,7 @@ pub(super) fn feed_actions(
         // epoch gate above re-runs this whole resolve the frame the answer lands.
         let mut fresh: HashMap<u32, ActionSlot> = HashMap::new();
         for (slot, button) in &actions.buttons {
-            let (texture, count) = match button.kind {
+            let (texture, count, consumable) = match button.kind {
                 ACTION_KIND_SPELL => {
                     let icon = spells.as_ref().and_then(|sp| {
                         let d = sp.catalog.get(button.action)?;
@@ -291,7 +291,7 @@ pub(super) fn feed_actions(
                             &commands,
                         )
                     });
-                    (icon, 0)
+                    (icon, 0, false)
                 }
                 ACTION_KIND_ITEM => {
                     // The question mark belongs HERE, not in the Lua (decision 0666, correcting
@@ -302,15 +302,23 @@ pub(super) fn feed_actions(
                     // FrameXML *hides* the icon on a nil texture, feeding nil here and letting a
                     // Lua `or` paint the fallback would show a BLANK button on faithful
                     // FrameXML — the placeholder is the engine's, at two sites binary-wide.
-                    let texture = items
-                        .template(button.action, 0, &commands)
-                        .cloned()
+                    let template = items.template(button.action, 0, &commands).cloned();
+                    let texture = template
+                        .as_ref()
                         .and_then(|t| icons.as_ref()?.catalog.get(t.display_info_id)?.icon.clone())
                         .unwrap_or_else(|| MISSING_ITEM_ICON.to_string());
                     let count = store
                         .map(|s| count_of(&s.0, &items, button.action, InventoryScope::CARRIED))
                         .unwrap_or(0);
-                    (Some(texture), count)
+                    // The Count fontstring's gate — `IsConsumableAction 0x4e5250`: ammo/thrown by
+                    // InventoryType, or an ON_USE block with NEGATIVE charges
+                    // ([`ItemInfo::is_consumable`], byte-cited there; decision 0926 §3). It comes
+                    // from the SAME ask-once template the icon does, so it belongs on the same
+                    // push: fed from the per-frame state map instead, it answered the Lua one
+                    // frame late for ever and left a fresh character's food with no stack number
+                    // (decision 1301 — the count's half of 0660's login race).
+                    let consumable = template.as_ref().is_some_and(|t| t.is_consumable());
+                    (Some(texture), count, consumable)
                 }
                 // A MACRO slot serves **the macro's own icon, never its bound spell's** — the one
                 // asymmetry in the icon resolver, byte-verified: `0x4e6a50`'s macro arm
@@ -323,8 +331,9 @@ pub(super) fn feed_actions(
                         .get(button.action as usize)
                         .and_then(|m| m.texture.clone()),
                     0,
+                    false,
                 ),
-                _ => (None, 0),
+                _ => (None, 0, false),
             };
             fresh.insert(
                 u32::from(*slot) + 1,
@@ -333,6 +342,7 @@ pub(super) fn feed_actions(
                     kind: button.kind,
                     action: button.action,
                     count,
+                    consumable,
                 },
             );
         }

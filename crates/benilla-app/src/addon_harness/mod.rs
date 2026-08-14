@@ -394,9 +394,11 @@ fn manifest_path(root: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
-/// The per-addon VM-instruction bound (see its use in [`survey_one`]). Measured: the heaviest
-/// legitimate corpus addon runs 4M, and 214 of 218 run under 1M.
-const ADDON_INSTRUCTION_BUDGET: u64 = 200_000_000;
+/// The per-addon VM-instruction bound (see its use in [`survey_one`]) — the ONE number, shared
+/// with the live client's world-entry arming (decision 1306) so the corpus measurement behind it
+/// (heaviest legitimate addon 4M, 214 of 218 under 1M) cannot drift apart from the bound players
+/// actually run under.
+const ADDON_INSTRUCTION_BUDGET: u64 = crate::ui_script::addons::LOAD_INSTRUCTION_BUDGET;
 
 fn survey_one(
     root: &Path,
@@ -1401,6 +1403,7 @@ fn seat_a_session(script: &mut UiScript) {
             kind: 0x00,
             action: 100,
             count: 0,
+            consumable: false,
         }),
     );
     script.set_action_state(

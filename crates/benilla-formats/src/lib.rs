@@ -263,27 +263,30 @@ pub use taxi_nodes::{load_taxi_nodes, TaxiNode, TaxiNodes};
 mod taxi_path;
 pub use taxi_path::{load_taxi_paths, TaxiPath, TaxiPaths};
 
-/// Vanilla 1.12.1 MPQ load order, **lowest priority first**.
+/// The ten vanilla base content archives, **lowest priority first** — the reference mounter's
+/// table (`0x82e12c`) at its carved fixed priorities (`dbc.MPQ` = 0x36 … `model.MPQ` = 0x3f),
+/// reversed so [`Chain`]'s later-wins order reproduces them (decision 1300).
 ///
-/// Later archives override earlier ones for files sharing an internal path. The base
-/// content archives hold the bulk of the data but carry **no `(listfile)`**; the master
-/// `(listfile)` (and most overrides) live in `patch.MPQ` / `patch-2.MPQ`, which is why the
-/// chain — not a single archive — is the correct unit to read from. Verified against the
-/// build-5875 client (`patch.MPQ` listfile = 26,350 entries).
-pub const VANILLA_LOAD_ORDER: &[&str] = &[
-    "base.MPQ",
+/// This is only the *base* set: `patch.MPQ`, the `patch-?.MPQ` archives, and the optional
+/// `speech2.MPQ` are **discovered**, not listed — the whole mount law lives in [`Chain::open`].
+/// `base.MPQ` is deliberately absent: the reference opens it once for `telemetry.dat` and closes
+/// it before the mounter runs, so its contents are unreachable as assets (wow-re, VERIFIED).
+///
+/// The base archives hold the bulk of the data but carry **no `(listfile)`**; the master
+/// `(listfile)` (and most overrides) live in the patch archives, which is why the chain — not a
+/// single archive — is the correct unit to read from. Verified against the build-5875 client
+/// (`patch.MPQ` listfile = 26,350 entries).
+pub const VANILLA_BASE_ORDER: &[&str] = &[
     "dbc.MPQ",
+    "speech.MPQ",
     "fonts.MPQ",
     "interface.MPQ",
     "misc.MPQ",
-    "model.MPQ",
     "sound.MPQ",
-    "speech.MPQ",
+    "wmo.MPQ",
     "terrain.MPQ",
     "texture.MPQ",
-    "wmo.MPQ",
-    "patch.MPQ",
-    "patch-2.MPQ",
+    "model.MPQ",
 ];
 
 /// Open a [`Chain`] from either a single `.MPQ` file or a vanilla `Data` directory. Thin wrapper over

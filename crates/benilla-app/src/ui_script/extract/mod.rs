@@ -265,6 +265,12 @@ pub(super) fn drive_script(
     }
     drop(measure_span);
     let us_measure = lap();
+    // The player's half of the error contract before the host's (decision 1305): every caught
+    // script error goes to the Lua error handler — `_ERRORMESSAGE` → the ScriptErrors dialog
+    // since BasicControls installs it, an addon's own handler if it chose one — and then the
+    // same errors drain to the log as always. Dispatch first so a handler that itself fails
+    // lands in this frame's drain, not the next one's.
+    script.dispatch_script_errors_to_handler();
     for err in script.take_errors() {
         warn!("ui_script: {err}");
     }

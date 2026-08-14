@@ -254,6 +254,7 @@ pub(super) fn apply_server_moves(
             player.model_yaw = w.orientation; // a teleport snaps the body — no chase across a loading screen
             cam.yaw = w.orientation;
             player.settling = true; // hold (gravity off) until the new map's ground streams in
+            player.settle_since = time.elapsed_secs();
             player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
             // …and the physics world under the new position is still the OLD map's until the
             // streamer swaps it, one stage from now. See [`Player::world_stale`].
@@ -293,6 +294,7 @@ pub(super) fn apply_server_moves(
         player.move_flags = 0;
         player.airborne_since = None; // a snap ends any in-progress jump arc (no phantom FALL_LAND)
         player.settling = true; // hold (gravity off) until the destination's ground/buildings load
+        player.settle_since = time.elapsed_secs();
         player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
         // A far same-map teleport relocates us over ground that has not streamed either — the
         // tiles we were standing on are still the resident ones. See [`Player::world_stale`].
@@ -409,6 +411,7 @@ pub(super) fn apply_server_moves(
             player.active = true;
             if first {
                 player.settling = true; // settle onto the initial ground once it loads (don't fall through)
+                player.settle_since = time.elapsed_secs();
                 player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
                 player.world_stale = true; // nothing is streamed yet — see [`Player::world_stale`]
                                            // The streamed spawn pose carries the server's facing (the character's logout

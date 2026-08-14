@@ -67,6 +67,7 @@ fn shipped_multibars_drive_end_to_end() {
             kind: 0x00,
             action: 100,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action(
@@ -76,6 +77,7 @@ fn shipped_multibars_drive_end_to_end() {
             kind: 0x00,
             action: 200,
             count: 0,
+            consumable: false,
         }),
     );
     s.set_action(
@@ -85,6 +87,7 @@ fn shipped_multibars_drive_end_to_end() {
             kind: 0x00,
             action: 300,
             count: 0,
+            consumable: false,
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
@@ -413,6 +416,7 @@ fn multibar_hover_renders_the_buttons_own_action() {
                 kind: 0x00,
                 action: spell,
                 count: 0,
+                consumable: false,
             }),
         );
         s.set_spell_tooltip(

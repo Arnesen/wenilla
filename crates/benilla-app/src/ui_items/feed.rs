@@ -24,7 +24,7 @@ use super::{
 /// The feed's memory of what it last pushed, for per-bag change events. No cooldown-churn gate:
 /// the pushed triple carries the ABSOLUTE start, which is frame-stable for a running cooldown.
 #[derive(Default)]
-pub(super) struct FeedMemory {
+pub(crate) struct FeedMemory {
     pushed: HashMap<i64, ContainerState>,
     /// The last `HasKey()` pushed — kept only so the transition can be logged once instead of
     /// every frame. It is the gate the entire keyring UI hangs off, and "the keyring never
@@ -602,7 +602,7 @@ fn bag_family_name(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn feed_containers(
+pub(crate) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
@@ -922,10 +922,61 @@ pub(super) fn feed_containers(
         script.set_has_key(key);
     }
 
+    apply_container_source(
+        &mut script,
+        memory,
+        player.is_some().then_some(fresh),
+        transitioned,
+    );
+}
+
+/// The feed's outward half: diff `source` against what was last pushed, push each changed bag into
+/// the VM and fire the reference's events — `BAG_UPDATE(bagID)` (`PLAYERBANKSLOTS_CHANGED(slot)`
+/// for the vault), one `BAG_UPDATE_DELAYED` per batch, then the lock transitions.
+///
+/// **`source: None` means the self player STORE is absent this frame — "no data source", never
+/// "the player has no items."** The two absent windows are pre-arrival at login (the fresh VM's
+/// containers are already empty; nothing to say) and the logout despawn frames:
+/// `SMSG_LOGOUT_COMPLETE` despawns the self entity (`net/apply/session.rs::logged_out`) at least
+/// one full Update before the `OnExit(InWorld)` shutdown, so this runs against a still-live VM.
+/// Diffing the absence as an all-empty snapshot fired a full `BAG_UPDATE` burst whose every bag
+/// read `GetContainerNumSlots() == 0` — and an addon that mirrors bags into its saved variables
+/// deletes a bag's record on size 0 (Bagnon_Forever's `SaveBagData`), so the burst erased the
+/// whole record moments before [`crate::ui_script::shutdown_ui_state`] wrote the file. That was
+/// the director's offline-bags report: every recently-logged-out character money-only, the view
+/// stale. The reference never delivers such a burst — its UI shutdown (`0x490bd0`) runs with the
+/// inventory intact — so here the VM simply keeps its last-pushed state and the shutdown writes
+/// the bags the player actually had. Lock-clear events still flush either way: they are
+/// packet-driven and must not sit around to fire into a later VM.
+pub(crate) fn apply_container_source(
+    script: &mut UiScript,
+    memory: &mut FeedMemory,
+    source: Option<HashMap<i64, ContainerState>>,
+    transitioned: Vec<(i64, u32)>,
+) {
     // Diff whole bags; push + fire BAG_UPDATE per transition, one BAG_UPDATE_DELAYED per batch. A
     // pending-lock transition always flips a slot's `.locked` (part of `ContainerSlot`'s equality),
     // so it always shows up here too — but `transitioned`'s ITEM_LOCK_CHANGED fires unconditionally
     // below rather than leaning on that invariant.
+    if let Some(fresh) = source {
+        diff_and_push(script, memory, fresh);
+    }
+    // The lock-transition event (decision 0218: the bag windows' own repaint trigger) — after the
+    // container push above, so a listener's repaint reads the corrected `.locked` state.
+    for (bag, slot) in transitioned {
+        script.fire_event(
+            "ITEM_LOCK_CHANGED",
+            vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
+        );
+    }
+}
+
+/// The present-source half of [`apply_container_source`]: push every changed bag, announce each.
+fn diff_and_push(
+    script: &mut UiScript,
+    memory: &mut FeedMemory,
+    fresh: HashMap<i64, ContainerState>,
+) {
     let changed: Vec<i64> = fresh
         .keys()
         .chain(memory.pushed.keys())
@@ -973,20 +1024,68 @@ pub(super) fn feed_containers(
         memory.pushed = fresh;
         script.fire_event("BAG_UPDATE_DELAYED", vec![]);
     }
-    // The lock-transition event (decision 0218: the bag windows' own repaint trigger) — after the
-    // container push above, so a listener's repaint reads the corrected `.locked` state.
-    for (bag, slot) in transitioned {
-        script.fire_event(
-            "ITEM_LOCK_CHANGED",
-            vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
-        );
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::charges_count;
+    use super::{apply_container_source, charges_count, FeedMemory};
     use benilla_protocol::messages::ItemSpellEntry;
+    use benilla_ui::script::{ContainerState, UiScript};
+    use std::collections::HashMap;
+
+    /// The logout-wipe law (the director's stale-offline-bags report): an **absent** self player
+    /// store is "no data source", never "the player has no items". `SMSG_LOGOUT_COMPLETE` despawns
+    /// the self entity a full Update before `OnExit(InWorld)` shuts the VM down, and the feed used
+    /// to diff that absence as an all-empty snapshot — a `BAG_UPDATE` burst whose every bag read
+    /// `GetContainerNumSlots() == 0`, which made Bagnon_Forever erase its records right before the
+    /// saved-variables write. A *present* source that lost a bag is a real transition and must
+    /// still announce — the law gates on the source's existence, not on its emptiness.
+    #[test]
+    fn an_absent_self_player_is_no_source_never_an_empty_bag_burst() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            "BAG_EVENTS = 0 \
+             local f = CreateFrame('Frame') \
+             f:RegisterEvent('BAG_UPDATE') \
+             f:SetScript('OnEvent', function() BAG_EVENTS = BAG_EVENTS + 1 end)",
+        )
+        .unwrap();
+        let bag0 = ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: HashMap::new(),
+        };
+        let mut memory = FeedMemory::default();
+
+        // The in-session push: source present, bag new → pushed + announced.
+        apply_container_source(
+            &mut s,
+            &mut memory,
+            Some(HashMap::from([(0, bag0)])),
+            Vec::new(),
+        );
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 16);
+        assert_eq!(s.eval::<i64>("return BAG_EVENTS").unwrap(), 1);
+
+        // The logout despawn frame: no store. The VM keeps its last-pushed bags and no event
+        // fires — an addon reading its bags out of the PLAYER_LOGOUT edge sees them intact.
+        apply_container_source(&mut s, &mut memory, None, Vec::new());
+        assert_eq!(
+            s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(),
+            16,
+            "an absent source must not empty the VM's containers"
+        );
+        assert_eq!(
+            s.eval::<i64>("return BAG_EVENTS").unwrap(),
+            1,
+            "an absent source must not fire a BAG_UPDATE burst"
+        );
+
+        // A PRESENT source without the bag is a genuine transition: push + announce.
+        apply_container_source(&mut s, &mut memory, Some(HashMap::new()), Vec::new());
+        assert_eq!(s.eval::<i64>("return GetContainerNumSlots(0)").unwrap(), 0);
+        assert_eq!(s.eval::<i64>("return BAG_EVENTS").unwrap(), 2);
+    }
 
     fn slot(spell_id: u32, charges: i32) -> ItemSpellEntry {
         ItemSpellEntry {

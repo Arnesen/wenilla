@@ -164,3 +164,84 @@ fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
         "total seconds played and seconds since the last level-up, in that order"
     );
 }
+
+/// **The engine hands caught script errors to the CHOSEN Lua error handler** (decision 1305) —
+/// the reference's `seterrorhandler` contract, which is how `_ERRORMESSAGE`'s dialog (or an
+/// addon's own ImprovedErrorFrame-style handler) ever hears about a failure the engine caught.
+#[test]
+fn a_chosen_error_handler_hears_engine_caught_errors_and_the_default_does_not_duplicate() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "local f = CreateFrame('Frame') \
+         f:RegisterEvent('B271_PROBE') \
+         f:SetScript('OnEvent', function() error('boom from a handler') end)",
+    )
+    .unwrap();
+
+    // Nobody chose a handler: the error lands on the host channel ONCE, and the dispatch —
+    // recognising the stdlib default by identity — adds nothing.
+    s.fire_event("B271_PROBE", vec![]);
+    s.dispatch_script_errors_to_handler();
+    let errors = s.take_errors();
+    assert_eq!(
+        errors.iter().filter(|e| e.contains("boom")).count(),
+        1,
+        "one error, once — the default handler must not double-report: {errors:?}"
+    );
+
+    // An addon chose one: the dispatch fires it with the message, and the host channel STILL
+    // records the error (the dual channel is what keeps the harness's instruments sighted).
+    s.run("caught = {} seterrorhandler(function(msg) table.insert(caught, msg) end)")
+        .unwrap();
+    s.fire_event("B271_PROBE", vec![]);
+    s.dispatch_script_errors_to_handler();
+    assert!(
+        s.eval::<String>("return caught[1]")
+            .unwrap()
+            .contains("boom from a handler"),
+        "the chosen handler received the engine-caught error"
+    );
+    assert_eq!(
+        s.take_errors()
+            .iter()
+            .filter(|e| e.contains("boom"))
+            .count(),
+        1,
+        "and the host channel recorded it too"
+    );
+}
+
+/// **A handler that itself raises cannot recurse the error path** — its failure is recorded on
+/// the host channel only, never re-queued, and the batch stops on the first handler failure.
+#[test]
+fn an_error_handler_that_errors_does_not_recurse() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        "seterrorhandler(function() error('the handler is broken too') end) \
+         local f = CreateFrame('Frame') \
+         f:RegisterEvent('B271_PROBE') \
+         f:SetScript('OnEvent', function() error('original fault') end)",
+    )
+    .unwrap();
+    s.fire_event("B271_PROBE", vec![]);
+    s.dispatch_script_errors_to_handler();
+    let errors = s.take_errors();
+    assert!(
+        errors.iter().any(|e| e.contains("original fault")),
+        "the original fault is on the host channel: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("error handler itself failed")),
+        "and so is the handler's own failure, named as such: {errors:?}"
+    );
+    // A second dispatch finds an EMPTY queue — the handler's failure was never re-queued.
+    s.dispatch_script_errors_to_handler();
+    assert!(
+        s.take_errors().is_empty(),
+        "nothing recurses: the queue drained and the handler failure did not re-enter it"
+    );
+}

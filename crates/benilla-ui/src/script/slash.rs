@@ -63,7 +63,7 @@ impl super::UiScript {
         // The reference passes `strsub(text, strlen(cmdString) + 2)` — everything after the alias
         // and one space. The host has already made that split, so `args` IS that string.
         if let Err(e) = handler.call::<()>(args.to_string()) {
-            self.model_mut().errors.push(format!("/{cmd}: {e}"));
+            self.model_mut().record_script_error(format!("/{cmd}: {e}"));
         }
         true
     }

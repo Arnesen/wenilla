@@ -491,7 +491,10 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
         // (buttons 1,2,3,8,12) so the ui-actionbar capture shows icons seated left-to-right. Slot
         // 80 is an ITEM-kind action (decision 0216 §7) with a synthetic count of 5, so the capture
         // also proves the Count fontstring wires up (`GetActionCount` reads the engine's own
-        // pushed count directly — no live server template needed in a capture).
+        // pushed count directly — no live server template needed in a capture). It must also seed
+        // the `IsConsumableAction` GATE, or the count paints nothing: 0926 put a gate in front of
+        // it that this seed never fed, so the capture quietly stopped showing the "5" it exists to
+        // prove (found while fixing decision 1301).
         script.set_bonus_bar_offset(1);
         for (action, icon, kind, id, count) in [
             (
@@ -540,6 +543,8 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<VmMemo<
                     kind,
                     action: id,
                     count,
+                    // The seed's only ITEM slot is the food stack, which is consumable.
+                    consumable: kind == 0x80,
                 }),
             );
         }

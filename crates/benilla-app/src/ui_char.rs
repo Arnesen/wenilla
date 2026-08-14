@@ -98,7 +98,16 @@ impl Plugin for UiCharPlugin {
         app.init_resource::<CharFeedState>().add_systems(
             Update,
             (
-                feed_char.before(UiInput),
+                // `.before(feed_containers)`: the container feed's `BAG_UPDATE` handlers read the
+                // inventory surface synchronously — an addon mirroring a bag asks the bag ITEM's
+                // own row (`GetInventoryItemLink("player", ContainerIDToInventoryID(bag))`,
+                // Bagnon_Forever's size row) — so the inventory push must land first. Unordered,
+                // the first in-world burst raced it and recorded every equipped bag linkless
+                // (`s = "8,0,"` in the director's Bagnon_Forever data). The house "push before
+                // fire" rule, across the two feeds.
+                feed_char
+                    .before(crate::ui_items::feed::feed_containers)
+                    .before(UiInput),
                 watch_skill_ups.before(UiInput),
                 feed_skills.before(UiInput),
                 drain_skill_abandons.after(UiInput),
@@ -824,12 +833,17 @@ fn feed_char(
     let memo = feed.vm.get(&script);
 
     let Some(store) = self_q.iter().next() else {
-        if memo.last_stats.is_some() || memo.last_inv.is_some() {
-            script.set_player_combat_stats(None);
-            script.set_inventory_slots(Default::default());
-            memo.last_stats = None;
-            memo.last_inv = None;
-        }
+        // The self store's absence is NO DATA, never "the player has nothing equipped". The one
+        // window this branch runs with a previously-fed VM is the logout despawn frames —
+        // `SMSG_LOGOUT_COMPLETE` despawns the entity a full Update before `OnExit(InWorld)` runs
+        // the shutdown, and the `PLAYER_LOGOUT` handlers that follow still read equipment
+        // (`GetInventoryItemLink("player", …)` at logout is a stock addon save pattern; the
+        // reference keeps it valid through its shutdown). The clear this branch used to push was
+        // a pre-1290 relic: one VM then lived across logouts and the next character must not see
+        // this one's inventory — now the VM dies with the session and a fresh one starts empty
+        // ([`crate::ui_script::end_ui_session`]), so the clear only ever fired into a VM about to
+        // run its logout handlers. Same law as the container feed
+        // (`ui_items::feed::apply_container_source`).
         return;
     };
 

@@ -49,7 +49,7 @@ use crate::ui_unit::UnitFeed;
 
 mod drain;
 mod equip_error;
-mod feed;
+pub(crate) mod feed;
 
 use drain::{
     drain_container_autoequips, drain_container_destroys, drain_container_moves,

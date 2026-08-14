@@ -90,28 +90,45 @@ fn error_message_returns_its_argument_and_can_be_replaced() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// The default error handler is still ours, deliberately — BasicControls.xml drops the
-/// reference's `seterrorhandler(_ERRORMESSAGE)` so a runtime fault stays visible to
-/// `UiScript::errors()` (and therefore to the corpus harness) instead of becoming a modal.
-/// The divergence is stated at the site; this is what pins it.
+/// The reference's closing line is transcribed since decision 1305: BasicControls installs
+/// `seterrorhandler(_ERRORMESSAGE)`, so a script error pops the dialog like the real client's —
+/// and the host channel stays sighted because the ENGINE records every caught error before the
+/// dispatch ever runs (that dual channel is what dissolved the old divergence, whose guard this
+/// test used to be).
 #[test]
-fn the_default_error_handler_is_not_replaced_by_error_message() {
-    let s = basic_controls();
+fn error_message_is_the_installed_handler_and_the_host_channel_stays_sighted() {
+    let mut s = basic_controls();
     assert!(
-        !s.eval::<bool>("return geterrorhandler() == _ERRORMESSAGE")
+        s.eval::<bool>("return geterrorhandler() == _ERRORMESSAGE")
             .unwrap(),
-        "installing _ERRORMESSAGE as the default would blind every instrument in the arc"
+        "the reference's own default handler is installed (1305)"
     );
-    // ...but the pair still works, which is what an addon's pcall wrapper actually calls.
+    // An addon's pcall wrapper calls geterrorhandler()(msg) — with _ERRORMESSAGE installed that
+    // pops the dialog, exactly as it does in the real client.
     s.run(r#"geterrorhandler()("reported")"#).unwrap();
     assert!(
-        s.errors().iter().any(|e| e.contains("reported")),
-        "geterrorhandler()(msg) reaches the error channel: {:?}",
+        s.eval::<bool>("return ScriptErrors:IsVisible()").unwrap(),
+        "the dialog is the report now"
+    );
+    assert_eq!(
+        s.eval::<String>("return ScriptErrors_Message:GetText()")
+            .unwrap(),
+        "reported"
+    );
+    // And an ENGINE-caught error still reaches `UiScript::errors()` — the instruments' channel —
+    // with the dispatch adding the dialog on top, not instead.
+    s.run("BrokenProbe = CreateFrame('Frame') BrokenProbe:RegisterEvent('B271_PROBE') BrokenProbe:SetScript('OnEvent', function() error('fault') end)")
+        .unwrap();
+    s.fire_event("B271_PROBE", vec![]);
+    assert!(
+        s.errors().iter().any(|e| e.contains("fault")),
+        "engine-caught errors stay on the host channel: {:?}",
         s.errors()
     );
+    s.dispatch_script_errors_to_handler();
     assert!(
-        !s.eval::<bool>("return ScriptErrors:IsVisible()").unwrap(),
-        "and it does NOT pop the dialog"
+        s.eval::<bool>("return ScriptErrors:IsVisible()").unwrap(),
+        "and the dispatch keeps the dialog up for the player"
     );
 }
 

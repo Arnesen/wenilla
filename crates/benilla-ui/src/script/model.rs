@@ -188,6 +188,14 @@ pub(crate) struct Model {
 
     /// Script errors collected from `pcall`'d handlers (never panics, never prints — decision 0068).
     pub(crate) errors: Vec<String>,
+    /// Script errors awaiting dispatch to the **Lua-side** error handler (decision 1305) — the
+    /// reference calls `geterrorhandler()`'s function on every caught script error, which is how
+    /// FrameXML's `_ERRORMESSAGE` puts the red ScriptErrors dialog on the player's screen. Every
+    /// message recorded through [`Model::record_script_error`] lands here as well as in `errors`;
+    /// [`super::UiScript::dispatch_script_errors_to_handler`] drains it at a safe seam (never from
+    /// inside the failed call). A message produced *by* the handler itself goes to `errors` only —
+    /// that asymmetry is the recursion guard.
+    pub(crate) pending_error_dispatch: Vec<String>,
     /// Non-fatal warnings surfaced to the host (e.g. `CreateFrame`'s ignored `inherits=` template).
     pub(crate) warnings: Vec<String>,
     /// The screen-root rect (`[bottom, left, top, right]`), the anchor base for top-level frames.
@@ -1009,6 +1017,16 @@ impl Model {
         }
     }
 
+    /// Record one script error on **both** channels: the host's `errors` vec (the instruments'
+    /// channel — the harness blocker tables, the app's log drain) and the handler-dispatch queue
+    /// (the player's channel — decision 1305). Every engine-caught script error goes through here;
+    /// a failure raised by the error handler *itself* is pushed to `errors` directly instead,
+    /// which is what keeps the dispatch from recursing.
+    pub(crate) fn record_script_error(&mut self, msg: String) {
+        self.pending_error_dispatch.push(msg.clone());
+        self.errors.push(msg);
+    }
+
     pub(crate) fn unit(&self, token: &str) -> Option<&UnitState> {
         if token.bytes().any(|b| b.is_ascii_uppercase()) {
             self.units_by_lower.get(&token.to_ascii_lowercase())
@@ -1056,6 +1074,7 @@ impl Model {
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),
             errors: Vec::new(),
+            pending_error_dispatch: Vec::new(),
             warnings: Vec::new(),
             // Classic Era's UIParent virtual space is 1024×768-ish; a sensible default the host can
             // override with `set_screen_size`. y-up: [bottom, left, top, right].

@@ -456,11 +456,9 @@ pub(super) fn feed_action_state(
             }
             ACTION_KIND_ITEM => {
                 let template = items.template(button.action, 0, &commands).cloned();
-                // `IsConsumableAction 0x4e5250` — ammo/thrown by InventoryType, or an ON_USE
-                // block with NEGATIVE charges ([`ItemInfo::is_consumable`], byte-cited there).
-                // NOT `Class == 0`: that read was ours, it is not the reference's, and it is what
-                // put a stack number under a mount (Class 15) on the bar.
-                st.consumable = template.as_ref().is_some_and(|t| t.is_consumable());
+                // `IsConsumableAction` is NOT fed from here. It reads nothing but this template
+                // (`0x4e5250`), so it is slot IDENTITY, and it rides the identity feed's push
+                // beside the count it gates — `super::feed`'s ITEM arm, decision 1301.
                 let count = me
                     .map(|(s, _, _, _)| {
                         count_of(&s.0, &items, button.action, InventoryScope::CARRIED)
@@ -577,57 +575,6 @@ mod tests {
             attributes,
             ..Default::default()
         }
-    }
-
-    /// `IsConsumableAction 0x4e5250` — the gate on the bar's Count fontstring
-    /// ([`benilla_protocol::ItemInfo::is_consumable`], fed into [`ActionState::consumable`]).
-    /// The director's B201 is the mount row: an on-use item with no charges wore a stack number
-    /// under it because we tested `Class == 0` instead of the reference's two clauses.
-    #[test]
-    fn is_consumable_is_ammo_thrown_or_a_negative_charge_use_block() {
-        use benilla_protocol::messages::ItemSpellEntry;
-
-        let block = |trigger: u32, charges: i32| ItemSpellEntry {
-            index: 0,
-            spell_id: 439,
-            trigger,
-            charges,
-            cooldown_ms: -1,
-            category: 0,
-            category_cooldown_ms: -1,
-        };
-
-        // The report: a mount. Class 15 Miscellaneous, InventoryType 0, one ON_USE block whose
-        // SpellCharges is 0 — the item is not destroyed by using it.
-        let mut mount = crate::items::test_template("Red Skeletal Horse");
-        mount.class = 15;
-        mount.spells = vec![block(0, 0)];
-        assert!(!mount.is_consumable(), "a mount has no stack to show");
-
-        // A potion: Class 0, but that is not what decides it — the ON_USE block's -1 charges is.
-        let mut potion = crate::items::test_template("Minor Healing Potion");
-        potion.spells = vec![block(0, -1)];
-        assert!(potion.is_consumable());
-
-        // …and Class 0 alone (a conjured-water-shaped template with no on-use block at all) is
-        // NOT enough, which is exactly what the old `class == 0` read got wrong in reverse.
-        let classless = crate::items::test_template("Trade Good");
-        assert!(!classless.is_consumable());
-
-        // The InventoryType clause, both members — ammo and thrown always count, charges or not.
-        for inv in [24u32, 25] {
-            let mut ammo = crate::items::test_template("Rough Arrow");
-            ammo.inventory_type = inv;
-            assert!(ammo.is_consumable(), "InventoryType {inv} is consumable");
-        }
-        let mut trinket = crate::items::test_template("Trinket");
-        trinket.inventory_type = 12;
-        assert!(!trinket.is_consumable());
-
-        // An ON_EQUIP proc with negative charges is not an ON_USE block: the trigger must be 0.
-        let mut proc_item = crate::items::test_template("Proc Weapon");
-        proc_item.spells = vec![block(1, -1)];
-        assert!(!proc_item.is_consumable());
     }
 
     /// The `GetMinMaxRange 0x6e3480` transcription: melee reach floor, the ranged reach pad on

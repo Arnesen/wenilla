@@ -603,6 +603,7 @@ mod tests {
                 kind: 0,
                 action: 133,
                 count: 0,
+                consumable: false,
             }),
         );
 

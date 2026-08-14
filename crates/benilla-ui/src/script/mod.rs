@@ -209,6 +209,12 @@ const REG_TEXTURE_METHODS: &str = "__benilla_texture_methods";
 const REG_TEXTURE_META: &str = "__benilla_texture_meta";
 const REG_FONTSTRING_METHODS: &str = "__benilla_fontstring_methods";
 const REG_FONTSTRING_META: &str = "__benilla_fontstring_meta";
+/// The stdlib's out-of-the-box error handler, kept by identity so
+/// [`UiScript::dispatch_script_errors_to_handler`] can tell "nobody chose a handler" (skip — the
+/// default already reports into the host channel) from "FrameXML or an addon installed one"
+/// (dispatch — that is what the pair exists for). Stored at [`stdlib::install`] time, the one
+/// moment the default is known to be what `geterrorhandler()` answers.
+const REG_DEFAULT_ERRORHANDLER: &str = "__benilla_default_errorhandler";
 
 /// The **Region method map** (`0xcf54b4`) — the 19 names every region leaf reaches through its own
 /// lookup's fallback, carved in wow-re `system/ui/scratch/font-object-lua-surface.md` and asserted
@@ -572,9 +578,12 @@ impl UiScript {
     /// hook raises, and the raise propagates like any other Lua error: the addon reports as failed
     /// with a distinctive message, and everything after it still runs.
     ///
-    /// **This is opt-in and the app does not use it.** A real session must not kill a player's
-    /// addon for being slow — the budget exists for harnesses, which run 218 strangers' code in one
-    /// process and cannot afford one of them to be unbounded.
+    /// **This is opt-in, and the app arms it only on the world-entry load edge** (decision 1306;
+    /// it began harness-only, e463649e). A real session must not kill a player's addon for being
+    /// slow, so steady state — every OnUpdate, every event — runs unhooked; but a load walk that
+    /// never returns is a client frozen on the loading screen with zero diagnostics (B271's
+    /// class), so the entry edge is bounded and [`Self::clear_instruction_budget`] disarms before
+    /// the session's first frame.
     ///
     /// The hook fires every [`INSTRUCTION_HOOK_STEP`] instructions rather than every instruction:
     /// mlua's own docs warn that a low value "can incur a very high overhead", and the step is the
@@ -601,6 +610,14 @@ impl UiScript {
                 Ok(mlua::VmState::Continue)
             },
         );
+    }
+
+    /// Remove an installed instruction budget — the load edge's disarm (decision 1306): the bound
+    /// covers the world-entry walk, and a session's steady state runs unhooked exactly as before.
+    /// The counter keeps its last value, so [`Self::instructions_used`] still answers for the
+    /// phase that just ended.
+    pub fn clear_instruction_budget(&self) {
+        self.lua.remove_hook();
     }
 
     /// VM instructions executed since the last [`Self::set_instruction_budget`], to the resolution
@@ -1105,6 +1122,62 @@ impl UiScript {
         std::mem::take(&mut self.model_mut().warnings)
     }
 
+    /// Report a script error the host caught **outside** the VM's own dispatch — an addon file
+    /// that failed to compile or raised at file scope during the load walk. It joins the
+    /// handler-dispatch queue only: the caller has already logged it (the load walk's per-file
+    /// `error!` + `failures` contract), so putting it in `errors` too would double-log at the
+    /// app's per-frame drain.
+    pub fn report_script_error(&self, msg: &str) {
+        self.model_mut()
+            .pending_error_dispatch
+            .push(msg.to_string());
+    }
+
+    /// Hand every queued script error to the Lua-side error handler — the reference's own shape:
+    /// `seterrorhandler`/`geterrorhandler` are engine globals (wow-re `scratch/lua-dialect.md`,
+    /// the captured `_G`), the engine invokes the registered handler on a caught script error
+    /// (that is the pair's contract — a handler nothing invokes would be two dead globals), and
+    /// FrameXML answers with `_ERRORMESSAGE` → the red ScriptErrors dialog (decision 1305).
+    ///
+    /// Called at a safe seam (the app's per-frame drain), never from inside the failed call.
+    /// Three guards keep it bounded and honest:
+    /// - **The stdlib default handler is skipped by identity.** It reports into
+    ///   [`UiScript::errors`] — where every queued message already is — so dispatching it would
+    ///   only duplicate. The queue still drains, so a handler installed later starts clean.
+    /// - **A handler that raises is recorded on the host channel only** and never re-queued:
+    ///   the error path cannot recurse by construction.
+    /// - **One failure stops the batch** — a broken handler fails the same way for every message,
+    ///   and one line names it.
+    pub fn dispatch_script_errors_to_handler(&mut self) {
+        let pending = std::mem::take(&mut self.model_mut().pending_error_dispatch);
+        if pending.is_empty() {
+            return;
+        }
+        let handler: Option<mlua::Function> = self
+            .lua
+            .globals()
+            .get::<mlua::Function>("geterrorhandler")
+            .ok()
+            .and_then(|g| g.call::<mlua::Function>(()).ok());
+        let Some(handler) = handler else { return };
+        if let Ok(default) = self
+            .lua
+            .named_registry_value::<mlua::Function>(REG_DEFAULT_ERRORHANDLER)
+        {
+            if handler == default {
+                return;
+            }
+        }
+        for msg in pending {
+            if let Err(e) = handler.call::<()>(msg) {
+                self.model_mut()
+                    .errors
+                    .push(format!("error handler itself failed: {e}"));
+                break;
+            }
+        }
+    }
+
     /// Register a named virtual [`FontObject`] (a resolved `<Font>`), overwriting any prior one of
     /// the same name, **and publish it as the Lua global `name`** — the same pair
     /// `Loader::do_font` performs, so a font registered from Rust is addressable from Lua exactly
@@ -1152,7 +1225,7 @@ impl UiScript {
     }
 
     fn push_error(&self, e: mlua::Error) {
-        self.model_mut().errors.push(e.to_string());
+        self.model_mut().record_script_error(e.to_string());
     }
 }
 

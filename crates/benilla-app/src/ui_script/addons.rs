@@ -60,6 +60,15 @@ use super::content;
 /// The folder name under each root, and the reference's own spelling.
 const ADDONS_DIR: &str = "AddOns";
 
+/// The world-entry load's VM instruction bound, per addon (decision 1306) — and the addon
+/// harness's survey bound, one number for both so the measurement stays shared. MEASURED, not
+/// guessed (e463649e): across the 218-addon corpus, 214 addons execute under 1M VM instructions
+/// and the heaviest legitimate one (Enchantrix) reaches 4M — this is ~50x that. An addon that
+/// crosses it is not slow, it is not coming back; the raise fails that addon with a distinctive
+/// message and the walk loads everyone else, where before 1306 the client sat frozen on the
+/// loading screen with zero diagnostics (B271's class).
+pub(crate) const LOAD_INSTRUCTION_BUDGET: u64 = 200_000_000;
+
 /// Where one addon's files come from.
 ///
 /// The two arms are the same question asked of two stores, and keeping them one enum is what lets
@@ -193,6 +202,10 @@ impl Addon {
                     Err(e) => {
                         let e = format!("{}/{file}: {e}", self.name);
                         error!("ui_script: {e}");
+                        // A file-scope failure is a script error, and script errors reach the
+                        // player (1305): queued for the Lua error handler — `_ERRORMESSAGE`'s
+                        // red dialog once BasicControls has run — never only a terminal line.
+                        script.report_script_error(&e);
                         failures.push(e);
                     }
                 }
@@ -218,6 +231,12 @@ impl Addon {
             }
             for e in &report.errors {
                 error!("ui_script({}/{file}): {e}", self.name);
+                // Same contract as the Lua arm above: a `<Script file=>` chunk that raised or an
+                // OnLoad that errored is a script error the player gets to see (1305).
+                // `_ERRORMESSAGE`'s own IsVisible guard shows a burst's FIRST failure only,
+                // which is the reference's behaviour too. Document *parse* failures stay
+                // log-only, like the reference's FrameXML.log.
+                script.report_script_error(&format!("{}/{file}: {e}", self.name));
                 failures.push(format!("{}/{file}: {e}", self.name));
             }
             info!(
@@ -671,7 +690,22 @@ pub(super) fn load_third_party(
             );
             continue;
         }
+        // Re-arm the load bound PER ADDON (decision 1306): the budget is a per-addon fact (the
+        // corpus was measured per addon), and without the reset one runaway would spend the
+        // whole allowance and fail every addon after it for somebody else's loop. A dependency
+        // chain loads under its dependent's arming, which is the same accounting the harness's
+        // per-survey arming gives it.
+        script.set_instruction_budget(LOAD_INSTRUCTION_BUDGET);
         let _ = state.load(script, &addons, &addon.name);
+        let spent = script.instructions_used();
+        if spent > 1_000_000 {
+            // Heavy is worth a line: this counter is how the budget was chosen, and a report
+            // like B271's needs exactly this number without a harness run.
+            info!(
+                "ui_script: {} spent {spent} VM instructions loading",
+                addon.name
+            );
+        }
     }
     state.failures
 }
