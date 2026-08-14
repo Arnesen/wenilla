@@ -11,7 +11,7 @@ use super::common::script;
 /// YOU_JOINED. Join ORDER is the whole numbering law, so the fixture is deliberately not sorted.
 fn joined() -> crate::script::UiScript {
     let mut s = script();
-    s.set_joined_channels(vec!["World".into(), "Trade - City".into()]);
+    s.set_joined_channels(vec![Some("World".into()), Some("Trade - City".into())]);
     s
 }
 

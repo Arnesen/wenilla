@@ -24,10 +24,10 @@ pub(crate) struct Model {
     pub(crate) addons: Vec<super::addon::AddOnInfo>,
     /// The AddOns folder, so `LoadAddOn` can read an addon's files from inside a Lua binding.
     pub(crate) addons_root: Option<std::path::PathBuf>,
-    /// NumberFontNormal's per-digit advances, `'0'..='9'` ([`super::UiScript::set_digit_advances`])
-    /// — the synchronous stand-in for a text measure, read by the `BenillaNumberWidth` binding.
-    /// `None` until the host feeds them, which is every VM without a font atlas (every engine test).
-    pub(crate) digit_advances: Option<[f32; 10]>,
+    /// The host's font engine ([`super::UiScript::set_text_measurer`]) — what lets a metric read
+    /// answer inside the Lua call that asked, instead of a frame later. `None` in every VM without
+    /// a font atlas, which is the measure round-trip's own world and behaves exactly as it did.
+    pub(crate) measurer: Option<Box<dyn super::TextMeasure>>,
     /// Where per-addon saved variables live: the account-scoped folder, then this character's.
     /// Both are directories holding one `<Addon>.lua` per declaring addon.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
@@ -250,7 +250,7 @@ pub(crate) struct Model {
     /// The channels this session has CONFIRMED joining, in join order — the client-side number
     /// law `GetChannelName` answers with ([`super::channel`]). Mirrored from `ui_chat`'s
     /// `ChannelState` by `set_joined_channels`; empty until the server's first YOU_JOINED.
-    pub(crate) joined_channels: Vec<String>,
+    pub(crate) joined_channels: Vec<Option<String>>,
     pub(crate) party: party::PartyState,
     /// Party/loot intents (`AcceptGroup`/`InviteToParty`/`SetLootMethod`/…) queued since the
     /// app's last [`super::UiScript::take_party_requests`] drain — the outbound seam ([`party`]).
@@ -1014,7 +1014,7 @@ impl Model {
         Model {
             addons: Vec::new(),
             addons_root: None,
-            digit_advances: None,
+            measurer: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),

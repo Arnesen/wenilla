@@ -45,7 +45,7 @@
         -- visible denominations into slots 1.. in DISPLAY order (highestFirst=true for the
         -- left-aligned chains) and — the real shrink, MoneyFrame.lua l.202/269 — sizes each slot to
         -- exactly its number + its 13px coin (`SetWidth(GetTextWidth() + iconWidth)` there; the
-        -- app's BENILLA_DIGIT_W advance feed here, summed by BenillaNumberWidth). The static ±4px
+        -- same read here, off the number FontString the slot already owns). The static ±4px
         -- chain-anchor offsets are the real MONEY_BUTTON_SPACING gap, so a shrunk group packs tight,
         -- left-flush in the ltr chains and right-flush in the rtl ones. BenillaMoney_Clear hides
         -- all three slots (the real collapse hides, see the helper).
@@ -59,11 +59,6 @@
             { 0.25, 0.5  }, -- [2] silver
             { 0.5,  0.75 }, -- [3] copper
         }
-
-        -- (BenillaNumberWidth — the digit-sum this kit sizes its slots by — is an ENGINE binding,
-        -- published beside the BENILLA_DIGIT_W feed it reads. It was Lua in this file until
-        -- MoneyFrame.xml's ShowCoin became its second caller and no shipped file turned out to be a
-        -- dependency of both: whichever one owned it, some fixture met it as nil.)
 
         -- Unused slots HIDE (the real collapse — MoneyFrame.lua l.230/247 goldButton:Hide()), never
         -- SetWidth(0): a 0 width means "derive from opposing anchors" to the layout (the client's
@@ -93,16 +88,18 @@
                     slot = slot + 1
                     -- The real shrink: this slot is exactly its number + its 13px coin, and the
                     -- XML anchor chain re-flows off the new width.
-                    local numW = BenillaNumberWidth(vals[d])
+                    -- Text first, then measure it: the engine answers a width read inside the
+                    -- tick that set the text, so the number IS this number and not the last one.
+                    local num = getglobal(prefix .. "Coin" .. slot .. "Num")
+                    num:SetText(vals[d])
+                    local numW = num:GetStringWidth()
                     local slotFrame = getglobal(prefix .. "Coin" .. slot)
                     slotFrame:SetWidth(numW + 13)
                     slotFrame:Show()
                     local icon = getglobal(prefix .. "Coin" .. slot .. "Icon")
                     icon:SetTexture("Interface\\MoneyFrame\\UI-MoneyIcons")
                     icon:SetTexCoord(BENILLA_COIN_TC[d][1], BENILLA_COIN_TC[d][2], 0, 1)
-                    local num = getglobal(prefix .. "Coin" .. slot .. "Num")
                     num:SetWidth(numW)
-                    num:SetText(vals[d])
                 end
             end
             for i = slot + 1, 3 do

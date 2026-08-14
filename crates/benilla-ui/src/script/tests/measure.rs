@@ -340,3 +340,153 @@ fn get_string_width_is_the_natural_width_not_the_box() {
         "the string did not change, so neither did its natural width"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The SYNCHRONOUS measure — a host font engine installed into the VM ([`TextMeasure`])
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A stand-in font engine: every character is `PER_CHAR` wide and every line `LINE_H` tall, wrapped
+/// greedily at the request's wrap width. Deliberately not the real one — what these tests are about
+/// is *when* the answer arrives, and a fake with arithmetic anyone can do in their head is what
+/// makes the assertions readable. The real engine's own numbers are the app's to test.
+struct BlockFont;
+
+const PER_CHAR: f32 = 7.0;
+const LINE_H: f32 = 14.0;
+
+impl TextMeasure for BlockFont {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        let natural = req.text.chars().count() as f32 * PER_CHAR;
+        match req.wrap_width {
+            Some(w) if w > 0.0 && natural > w => {
+                let rows = (natural / w).ceil();
+                (w, rows * LINE_H, natural)
+            }
+            _ => (natural, LINE_H, natural),
+        }
+    }
+}
+
+/// **The director's bug, at the engine.** `SetText` then `GetStringWidth` in ONE tick must answer
+/// with the string's width — the shape `Bagnon_Forever/database/ui.lua:58-59` writes over every
+/// saved character (`button:SetText(player)` then `button:GetTextWidth() + 40`), and the shape the
+/// reference's own `SmallMoneyFrame` writes (MoneyFrame.lua l.202).
+///
+/// Without an engine installed this is 0 until the host's round-trip lands at extract — a frame
+/// later. That is what sized Bagnon's character dropdown to 40px with seven names hanging out of it.
+#[test]
+fn a_width_read_in_the_tick_that_set_the_text_is_not_zero() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(BlockFont));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Host")
+        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        local fs = f:CreateFontString("Label", "ARTWORK")
+        fs:SetPoint("TOPLEFT")
+        -- the corpus idiom: set, then measure, in one statement sequence
+        fs:SetText("Onewarrior")
+        Answer = fs:GetStringWidth()
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<f32>("return Answer").unwrap(),
+        "Onewarrior".len() as f32 * PER_CHAR,
+        "GetStringWidth must answer inside the tick that set the text"
+    );
+}
+
+/// The same read WITHOUT an engine stays 0 and stays served by the round-trip — the pre-existing
+/// behaviour, still exactly itself. Every engine test and every headless run is this VM, so the
+/// synchronous path may never be a correctness precondition for anything.
+#[test]
+fn with_no_engine_installed_the_round_trip_is_still_the_only_answer() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Host")
+        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        local fs = f:CreateFontString("Label", "ARTWORK")
+        fs:SetPoint("TOPLEFT")
+        fs:SetText("Onewarrior")
+        Answer = fs:GetStringWidth()
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<f32>("return Answer").unwrap(), 0.0);
+    assert_eq!(
+        s.fontstrings_needing_measure().len(),
+        1,
+        "and the request is still queued for the host"
+    );
+}
+
+/// A FontString's **box** is right in the frame its text was set, not the frame after: `resolve`
+/// closes the round-trip itself when an engine is installed, so a caller reading `GetWidth()` (the
+/// laid-out extent, not the natural one) gets this string's number and not the previous string's.
+#[test]
+fn resolve_closes_the_round_trip_when_an_engine_is_installed() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(BlockFont));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Host")
+        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        local fs = f:CreateFontString("Label", "ARTWORK")
+        fs:SetPoint("TOPLEFT")
+        fs:SetWidth(35)                 -- a declared width ⇒ the two extents differ
+        fs:SetText("Onewarrior")        -- 70 natural, wraps to 2 rows inside 35
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    assert!(
+        s.fontstrings_needing_measure().is_empty(),
+        "the engine answered its own request during resolve"
+    );
+    assert_eq!(
+        s.eval::<Vec<f32>>(
+            "return { Label:GetWidth(), Label:GetHeight(), Label:GetStringWidth() }"
+        )
+        .unwrap(),
+        vec![35.0, LINE_H * 2.0, 70.0],
+        "laid-out extent from the box, natural width unwrapped — the two must not be conflated"
+    );
+}
+
+/// The same-tick measure and the batch round-trip write the **same cache**, so asking twice costs
+/// one measure — and a caller polling `GetStringWidth` every frame does not re-measure a string
+/// that has not changed.
+#[test]
+fn a_synchronous_measure_satisfies_the_batch_request_too() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_text_measurer(Box::new(BlockFont));
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "Host")
+        f:SetPoint("TOPLEFT"); f:SetSize(400, 300)
+        local fs = f:CreateFontString("Label", "ARTWORK")
+        fs:SetPoint("TOPLEFT")
+        fs:SetText("hello")
+        Answer = fs:GetStringWidth()
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<f32>("return Answer").unwrap(), 5.0 * PER_CHAR);
+    assert!(
+        s.fontstrings_needing_measure().is_empty(),
+        "the Lua read already filled the cache the batch pass keys on"
+    );
+    // …and a new string invalidates it exactly as it always did.
+    s.run("Label:SetText('a longer label')").unwrap();
+    assert_eq!(
+        s.eval::<f32>("return Label:GetStringWidth()").unwrap(),
+        "a longer label".len() as f32 * PER_CHAR,
+        "a stale measure is not this string's metric"
+    );
+}

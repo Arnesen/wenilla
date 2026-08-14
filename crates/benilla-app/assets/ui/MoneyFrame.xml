@@ -50,12 +50,9 @@
         · `message()` (ref l.145, l.173, l.181) — the one-line StaticPopup shim, which belongs to
           BasicControls.xml, a file family we have not built. Guarded, so a misuse of the API stays
           silent instead of erroring on the diagnostic.
-        · `Button:GetTextWidth()` (ref l.202 etc.) — BUILT (it forwards to the label FontString's
-          `GetStringWidth`; it arrived with Bagnon's character list, which sizes itself by it). We
-          still do not call it here, and the reason is timing, not absence: both it and
-          `GetStringWidth` are served from the measure round-trip, which lands a frame after the
-          tick that set the text, so either one reads 0 on the update that needs it. ShowCoin sums
-          BENILLA_DIGIT_W instead — see there.
+        · `Button:GetTextWidth()` (ref l.202 etc.) — BUILT, and called here, exactly as the
+          specification calls it. It forwards to the label FontString's `GetStringWidth`, which the
+          engine now answers inside the tick that asked (`script::measure`).
         · The four `Pickup*`/`Add*` mail verbs the pickup closures name are not in 1.12's `_G` either
           (they are absent from reference/1.12-globals.tsv) — so those closures are as unreachable
           here as they are there. They exist because the table's shape is the contract.
@@ -279,28 +276,20 @@
 
         -- Lay one denomination out: its digits, and the width those digits plus the coin icon need.
         --
-        -- The specification measures with `Button:GetTextWidth()` (ref l.202 and kin), and the real
-        -- client answers that SYNCHRONOUSLY — its font engine is inline, so the coin is the right
-        -- width on the frame that set its text.
+        -- `Button:GetTextWidth()` right after `SetText`, which is what the specification writes
+        -- (ref l.202 and kin) and what the real client answers synchronously off its inline font
+        -- engine, so the coin is the right width on the frame that set its text.
         --
-        -- Ours cannot ask a FontString: `GetStringWidth` is served from the measure round-trip,
-        -- which lands at extract, a frame AFTER the tick that called SetText. Reading it here
-        -- returned 0 on every first open and left all three coins at exactly one icon width, with
-        -- their digits overlapping — the director's "gold numbers are all cramped up when I first
-        -- open the bags; close and open again and it looks good", the reopen being the cached
-        -- measure from the first.
-        --
-        -- So this sums BENILLA_DIGIT_W instead, via MerchantFrame.xml's BenillaNumberWidth: the
-        -- app measures NumberFontNormal's ten digits once per atlas scale and pushes them as data
-        -- (`UiScript::set_digit_advances`), which makes the answer available IN this tick. That
-        -- feed was built for this frame — its doc names "the real SmallMoneyFrame calls
-        -- GetTextWidth mid-update, MoneyFrame.lua l.202" — and only the merchant price ever used
-        -- it. A number is the one string whose width is a pure sum of per-glyph advances (no
-        -- kerning enters the client's step law), which is why the table can be exact here and
-        -- cannot generalise to arbitrary text.
+        -- This read used to return 0 — our measure landed at extract, a frame after the tick — and
+        -- left all three coins at exactly one bare icon width with their digits overlapping: the
+        -- director's "gold numbers are all cramped up when I first open the bags; close and open
+        -- again and it looks good", the reopen being the first open's cached measure. It was served
+        -- for a while by a digits-only advance table, since a number's width is a pure sum of
+        -- per-glyph advances. The engine answers the general question now (`script::measure`), so
+        -- this asks it the way the specification does.
         local function ShowCoin(coin, coinName, amount, iconWidth)
             coin:SetText(amount)
-            coin:SetWidth(BenillaNumberWidth(amount) + iconWidth)
+            coin:SetWidth(coin:GetTextWidth() + iconWidth)
             coin:Show()
         end
 

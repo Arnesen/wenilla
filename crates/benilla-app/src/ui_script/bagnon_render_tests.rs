@@ -1139,7 +1139,7 @@ fn a_money_frame_is_the_right_width_on_the_first_open() {
     s.set_money(123_456_789);
     // The app feeds this once per atlas scale, before any window opens. A flat 8px advance makes
     // the expected widths exact arithmetic rather than a font-dependent number.
-    s.set_digit_advances(&[8.0; 10]);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(8.0)));
 
     s.run("ToggleBackpack()").expect("ToggleBackpack");
     for _ in 0..3 {
@@ -1236,5 +1236,74 @@ fn a_fontheight_with_no_font_attr_beside_it_is_never_read() {
         "AutoFollowStatusText inherits GameFontNormal (12) and declares <FontHeight val=20> with \
          no font= — the 20 is dead XML in the reference, so 20 here means we are reading an \
          attribute the client never reaches"
+    );
+}
+
+/// A stand-in font engine for the fixture: every character `PER_CHAR` wide, one line tall. The
+/// *numbers* the real engine produces are pinned by `ui_text::atlas::metrics_tests` against the
+/// client's own fonts; what these tests are about is that an answer arrives **in the tick that
+/// asked**, which is exactly what a fixture with head-arithmetic widths shows clearly.
+struct BlockFont;
+
+const PER_CHAR: f32 = 7.0;
+
+impl benilla_ui::script::TextMeasure for BlockFont {
+    fn measure(&mut self, req: &benilla_ui::script::MeasureRequest) -> (f32, f32, f32) {
+        let w = req.text.chars().count() as f32 * PER_CHAR;
+        (w, 12.0, w)
+    }
+}
+
+/// **Bug 4 — the director's narrow dropdown.** `Bagnon_Forever/database/ui.lua:56-61` sizes its
+/// character list by setting each row's text and reading the row back in the same tick:
+///
+/// ```lua
+/// button:SetText(player)
+/// if button:GetTextWidth() + 40 > width then width = button:GetTextWidth() + 40 end
+/// ```
+///
+/// With `GetTextWidth` served only by the extract-time round-trip that read **0** for every row, so
+/// the frame took the `0 + 40` floor and drew 40px wide while seven full-width character names hung
+/// out of its right edge — the director's screenshot. The list must now be as wide as its widest
+/// name plus the addon's own 40px of checkbox and padding.
+#[test]
+fn the_character_dropdown_is_as_wide_as_the_names_in_it() {
+    let root = corpus_or_skip!();
+    let mut s = open_bagnon(&root);
+    s.set_text_measurer(Box::new(BlockFont));
+    // Three saved characters on this realm, the longest 10 letters — Bagnon_Forever's own store.
+    s.run(
+        "local realm = GetRealmName() \
+         BagnonForeverData[realm][\"Onewarrior\"] = { g = 100 } \
+         BagnonForeverData[realm][\"Onerogue\"] = { g = 200 }",
+    )
+    .expect("seed the character store");
+    s.run("BagnonDBUI_ShowCharacterList(Bagnon)")
+        .expect("BagnonDBUI_ShowCharacterList");
+    for _ in 0..3 {
+        s.tick(0.1);
+    }
+    s.resolve();
+
+    let widest = "Onewarrior".len() as f32 * PER_CHAR + 40.0;
+    assert_eq!(
+        s.eval::<f32>("return BagnonDBUICharacterList:GetWidth()")
+            .unwrap(),
+        widest,
+        "the list sizes itself from its rows' own text width, read in the tick that set it"
+    );
+    // …and the rows are really inside it: the addon's 6px left inset plus a name, not a 140px
+    // template button overhanging a 40px box.
+    let (list_r, row_r): (f32, f32) = s
+        .eval::<Vec<f32>>(
+            "local l = BagnonDBUICharacterList \
+             return { l:GetLeft() + l:GetWidth(), BagnonDBUICharacterList1:GetLeft() + \
+             BagnonDBUICharacterList1:GetTextWidth() + 24 }",
+        )
+        .map(|v| (v[0], v[1]))
+        .unwrap();
+    assert!(
+        row_r <= list_r,
+        "a row's text must end inside the list: text right edge {row_r} > list right edge {list_r}"
     );
 }

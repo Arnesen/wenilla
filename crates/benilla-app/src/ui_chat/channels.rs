@@ -461,7 +461,7 @@ mod tests {
         // A live session: two zone channels asked for, both confirmed, `/2` targeted.
         walk.held = vec!["General - Tanaris".into(), "LocalDefense - Tanaris".into()];
         walk.at = Some(("Tanaris".into(), false));
-        channels.joined = walk.held.clone();
+        channels.joined = walk.held.iter().cloned().map(Some).collect();
         edit.channel_target = "LocalDefense - Tanaris".into();
         edit.channel_number = 2;
 

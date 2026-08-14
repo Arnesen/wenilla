@@ -1,14 +1,12 @@
-use std::collections::HashMap;
-
 use bevy::math::Rect;
 use bevy::prelude::*;
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Wrap};
+use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Wrap};
 
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::ui_pass::{UiQuad, UvRect};
 
-use super::atlas::{GlyphInfo, GlyphKey, UiFontAtlas};
+use super::atlas::{GlyphKey, TextMetrics, UiFontAtlas};
 use super::markup::{parse_markup, ColorRun};
 use super::DEFAULT_FONT_SIZE;
 
@@ -104,42 +102,44 @@ fn step_extra_of(outline: Outline) -> f32 {
     }
 }
 
-/// Shape `text` on one line and return its total laid-out width (logical px) at `font_size` under
-/// the client's step law ([`client_step`]): the sum of per-glyph steps — the baked atlas advance
-/// (or cosmic-text's own `glyph.w` for a char with no baked glyph), floored, `+ step_extra`. This
-/// is the client's `GetTextWidth` (a sum of `ComputeStep`s), so measure == render == the real
-/// client's width. Empty text is zero-width. Shares [`UiFontAtlas`]'s two disjoint fields by
-/// direct field access, so the caller keeps its `&mut atlas` intact.
-fn measure_line_width(
-    font_system: &mut FontSystem,
-    glyphs: &HashMap<GlyphKey, GlyphInfo>,
-    attrs: &Attrs,
+/// One line's total laid-out width (logical px) at `font_size` under the client's step law
+/// ([`client_step`]): the sum of per-character steps, read from the bake-time table
+/// ([`TextMetrics::char_step`]). This is the client's `GetTextWidth` (a sum of `ComputeStep`s), so
+/// measure == render == the real client's width. Empty text is zero-width.
+///
+/// **No shaper, and that is the point.** The client's law has no kerning term and no neighbour
+/// term, so a string's width is a pure function of its characters, face, size and outline — which
+/// is what lets the lookup be precomputed, and therefore what lets this answer from *inside* a Lua
+/// call ([`benilla_ui::script::TextMeasure`]), where a `&mut FontSystem` could never reach. Every
+/// measurement in the app now runs through this one function, so the synchronous answer and the
+/// batch answer cannot be different numbers.
+///
+/// A character with no baked glyph contributes 0 — see [`TextMetrics::char_step`] for the single
+/// narrow place that differs from the render pen.
+#[cfg(test)]
+pub(crate) fn measure_line_width_for_test(
+    metrics: &TextMetrics,
+    family: &str,
     font_size: f32,
-    scale: f32,
     step_extra: f32,
     text: &str,
 ) -> f32 {
-    if text.is_empty() {
-        return 0.0;
-    }
-    // Shape at the PHYSICAL size (the resolution the atlas baked at), then divide the physical
-    // advances back to logical — the same scaled-face-divided-back path the emit pass uses.
-    let phys = font_size * scale;
-    let mut buffer = Buffer::new(font_system, Metrics::new(phys, phys));
-    buffer.set_wrap(font_system, Wrap::None);
-    buffer.set_text(font_system, text, attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(font_system, false);
-    let mut w = 0.0f32;
-    for run in buffer.layout_runs() {
-        for g in run.glyphs {
-            // Measurement always reads the plain (r=0) cell: advances are variant-invariant,
-            // and every face/size bakes a plain cell (outlined variants are a planned subset).
-            let key: GlyphKey = (g.font_id, g.glyph_id, font_size.to_bits(), 0);
-            let adv = glyphs.get(&key).map(|i| i.advance).unwrap_or(g.w);
-            w += client_step(adv, step_extra, scale);
-        }
-    }
-    w
+    measure_line_width(metrics, family, font_size, step_extra, text)
+}
+
+fn measure_line_width(
+    metrics: &TextMetrics,
+    family: &str,
+    font_size: f32,
+    step_extra: f32,
+    text: &str,
+) -> f32 {
+    // The table's steps are PHYSICAL px (the resolution the atlas baked at); the divide back to
+    // logical is [`client_step`]'s, applied per glyph because the bias is per glyph.
+    text.chars()
+        .filter_map(|c| metrics.char_step(family, font_size, c))
+        .map(|s| (s.floor_sum + step_extra * f32::from(s.glyphs)) / metrics.scale)
+        .sum()
 }
 
 /// The EditBox advance-table answer ([`benilla_ui::script::UiScript::set_editbox_advances`]'s
@@ -169,14 +169,12 @@ pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec)
     if drawn.is_empty() {
         return cum; // pure markup draws nothing — every boundary sits at x = 0
     }
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
+    let family = atlas.metrics.family_for(font.path);
     let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
+    let scale = atlas.metrics.scale;
     let step_extra = step_extra_of(font.outline);
     // Byte offset of each buffer line ('\n'-split) within the DRAWN string — glyph cluster ranges
     // are line-relative, and the map below is indexed in drawn bytes.
@@ -259,14 +257,10 @@ pub(crate) fn line_rows(
     wrap_width: f32,
     font: FontSpec,
 ) -> (Vec<usize>, f32) {
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let family = atlas.metrics.family_for(font.path);
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
     let mut rows = Vec::new();
     let mut base = 0usize; // byte offset of the current '\n' segment within `text`
@@ -277,11 +271,9 @@ pub(crate) fn line_rows(
                 .iter()
                 .flat_map(|line| {
                     wrap_line(
-                        &mut atlas.font_system,
-                        &atlas.glyphs,
-                        &attrs,
+                        &atlas.metrics,
+                        &family,
                         font_size,
-                        scale,
                         step_extra,
                         line,
                         wrap_width,
@@ -348,13 +340,10 @@ fn segment_row_starts(seg: &str, sub: &[Vec<ColorRun>], base: usize, rows: &mut 
 /// mid-word breaks become opportunities even when a space exists) are unmodeled; no shipped
 /// FontString renders CJK, and the one `nonspacewrap` consumer (MinimapZoneText) sits in a
 /// one-line box where opportunity choice can't change the outcome.
-#[allow(clippy::too_many_arguments)] // the shared shaping context + the step-law bias, one each
 fn wrap_line(
-    font_system: &mut FontSystem,
-    glyphs: &HashMap<GlyphKey, GlyphInfo>,
-    attrs: &Attrs,
+    metrics: &TextMetrics,
+    family: &str,
     font_size: f32,
-    scale: f32,
     step_extra: f32,
     line: &[ColorRun],
     max_width: f32,
@@ -368,7 +357,7 @@ fn wrap_line(
     }
 
     greedy_pack(words, max_width, |t| {
-        measure_line_width(font_system, glyphs, attrs, font_size, scale, step_extra, t)
+        measure_line_width(metrics, family, font_size, step_extra, t)
     })
 }
 
@@ -396,38 +385,21 @@ fn wrap_line(
 /// ([`benilla_ui::script::UiScript::fontstrings_needing_measure`]) sizes height-less FontStrings
 /// with this — the real client's layout asks its font engine for string metrics the same way.
 pub(crate) fn measure_text(
-    atlas: &mut UiFontAtlas,
+    metrics: &TextMetrics,
     text: &str,
     wrap_width: Option<f32>,
     font: FontSpec,
 ) -> (f32, f32) {
     let lines = parse_markup(text, [1.0, 1.0, 1.0, 1.0]);
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let family = metrics.family_for(font.path);
+    let font_size = metrics.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     // The step-law bias ([`client_step`]): measure MUST see the same outline-biased steps the
     // render pass lays, or wrap points and measured widths drift from what's drawn.
     let step_extra = step_extra_of(font.outline);
     let render_lines: Vec<Vec<ColorRun>> = match wrap_width {
         Some(w) if w > WRAP_MIN_WIDTH => lines
             .iter()
-            .flat_map(|line| {
-                wrap_line(
-                    &mut atlas.font_system,
-                    &atlas.glyphs,
-                    &attrs,
-                    font_size,
-                    scale,
-                    step_extra,
-                    line,
-                    w,
-                )
-            })
+            .flat_map(|line| wrap_line(metrics, &family, font_size, step_extra, line, w))
             .collect(),
         _ => lines,
     };
@@ -436,15 +408,7 @@ pub(crate) fn measure_text(
         let mut w = 0.0f32;
         for run in line {
             if !run.text.is_empty() {
-                w += measure_line_width(
-                    &mut atlas.font_system,
-                    &atlas.glyphs,
-                    &attrs,
-                    font_size,
-                    scale,
-                    step_extra,
-                    &run.text,
-                );
+                w += measure_line_width(metrics, &family, font_size, step_extra, &run.text);
             }
         }
         max_w = max_w.max(w);
@@ -471,23 +435,17 @@ pub(crate) fn measure_wrapped_rows(
     wrap_width: f32,
     font: FontSpec,
 ) -> u16 {
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
+    let family = atlas.metrics.family_for(font.path);
     // Per-family size snap (the rebase-landed law): rows must count at the exact size the render
     // pass bakes this face at, or band heights drift from the drawn block.
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
     let rows = wrapped_rows(
-        &mut atlas.font_system,
-        &atlas.glyphs,
-        &attrs,
+        &atlas.metrics,
+        &family,
         font_size,
-        scale,
         step_extra,
         text,
         wrap_width,
@@ -498,13 +456,10 @@ pub(crate) fn measure_wrapped_rows(
 /// The wrapped display-row count of `text` at `wrap_width` — the exact [`wrap_line`] pass the
 /// render uses (same step law, same outline bias), shared by [`measure_wrapped_rows`] (the chat
 /// band half) and [`ellipsize_to_fit`]'s fit test. An unconstrained width counts the `\n` lines.
-#[allow(clippy::too_many_arguments)] // the shared shaping context, same shape as wrap_line's
 fn wrapped_rows(
-    font_system: &mut FontSystem,
-    glyphs: &HashMap<GlyphKey, GlyphInfo>,
-    attrs: &Attrs,
+    metrics: &TextMetrics,
+    family: &str,
     font_size: f32,
-    scale: f32,
     step_extra: f32,
     text: &str,
     wrap_width: f32,
@@ -513,19 +468,7 @@ fn wrapped_rows(
     if wrap_width > WRAP_MIN_WIDTH {
         lines
             .iter()
-            .map(|line| {
-                wrap_line(
-                    font_system,
-                    glyphs,
-                    attrs,
-                    font_size,
-                    scale,
-                    step_extra,
-                    line,
-                    wrap_width,
-                )
-                .len()
-            })
+            .map(|line| wrap_line(metrics, family, font_size, step_extra, line, wrap_width).len())
             .sum()
     } else {
         lines.len()
@@ -552,67 +495,27 @@ pub(crate) fn ellipsize_to_fit(
     if rect.width() <= WRAP_MIN_WIDTH || rect.height() <= HEIGHT_LIMIT_MIN {
         return None;
     }
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let family = atlas.metrics.family_for(font.path);
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
     // The line pitch — identical to the emit pass's ([`layout_text_quads`]: the font em, NO
     // outline pad — the byte law, `fontstring-vertical-placement.md`), so the fit test and the
     // drawn stack agree line for line.
-    let font_system = &mut atlas.font_system;
-    let glyphs = &atlas.glyphs;
     // The line-count law lives in `overflow` (it is the FIT law here, not the render stack's) —
     // see `overflow::ellipsize_in_box`.
+    let metrics = &atlas.metrics;
     overflow::ellipsize_in_box(text, rect.height(), font_size, |candidate| {
         wrapped_rows(
-            font_system,
-            glyphs,
-            &attrs,
+            metrics,
+            &family,
             font_size,
-            scale,
             step_extra,
             candidate,
             rect.width(),
         )
     })
-}
-
-/// Per-digit (`'0'..='9'`) step widths (logical px) at the resolved face/size — the synchronous
-/// number-metrics feed behind the script side's money layout ([`benilla_ui::script::UiScript::
-/// set_digit_advances`]). The real `SmallMoneyFrame` sizes each denomination button with
-/// `GetTextWidth` *mid-update* (ref MoneyFrame.lua l.202); our `GetStringWidth` measure round-trip
-/// is a frame late, so the app feeds these once per atlas scale and the Lua sums digits. Each is
-/// the glyph's [`client_step`] under the font's true outline (NumberFontNormal is outlined ⇒ +2),
-/// exactly the width the render pass lays — none of [`measure_text`]'s wrap headroom.
-pub(crate) fn digit_advances(atlas: &mut UiFontAtlas, font: FontSpec) -> [f32; 10] {
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
-    let step_extra = step_extra_of(font.outline);
-    let mut out = [0.0f32; 10];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let s = char::from_digit(i as u32, 10).expect("0..=9").to_string();
-        *slot = measure_line_width(
-            &mut atlas.font_system,
-            &atlas.glyphs,
-            &attrs,
-            font_size,
-            scale,
-            step_extra,
-            &s,
-        );
-    }
-    out
 }
 
 /// The drawn line's origin for the EditBox text-UI overlays: the line's x0 under `justifyH`
@@ -627,14 +530,10 @@ pub(crate) fn line_origin(
     justify: Justify,
     font: FontSpec,
 ) -> (f32, f32, f32) {
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
-    let attrs = Attrs::new().family(Family::Name(&family));
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
-    let scale = atlas.scale;
+    let family = atlas.metrics.family_for(font.path);
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
     // Everything below returns DRAWN-space geometry ([`drawn_k`]): the string's drawn width, the
     // caret cell's height, and the cell top all carry the 0581 rescale the glyph quads take.
@@ -643,15 +542,7 @@ pub(crate) fn line_origin(
     let x0 = match justify.h {
         JustifyH::Left => rect.min.x,
         JustifyH::Center | JustifyH::Right => {
-            let w = k * measure_line_width(
-                &mut atlas.font_system,
-                &atlas.glyphs,
-                &attrs,
-                font_size,
-                scale,
-                step_extra,
-                drawn,
-            );
+            let w = k * measure_line_width(&atlas.metrics, &family, font_size, step_extra, drawn);
             if matches!(justify.h, JustifyH::Center) {
                 rect.min.x + ((rect.width() - w) * 0.5).max(0.0)
             } else {
@@ -788,14 +679,13 @@ fn layout_text_quads_inner(
     let gradient = font.alpha_gradient;
     let lines = parse_markup(text, base_color);
     // Resolve the face: the FontString's `font` path → its baked family, else Friz (the fallback).
-    let family = font
-        .path
-        .and_then(|p| atlas.path_to_family.get(&p.to_ascii_lowercase()))
-        .unwrap_or(&atlas.default_family)
-        .clone();
+    let family = atlas.metrics.family_for(font.path);
     let attrs = Attrs::new().family(Family::Name(&family));
     // Resolve the size: the requested height snapped to the nearest baked size (default 12 if none).
-    let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
+    let font_size = atlas
+        .metrics
+        .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
+    let scale = atlas.metrics.scale;
     // DPI-aware layout: shape at the PHYSICAL size the atlas baked at, then divide advances/bearings
     // back to logical (kerning/hinting computed once at device resolution — never logical shaping with
     // scaled bitmaps pasted in, which drifts). `snap` rounds a logical coordinate to the nearest
@@ -803,7 +693,6 @@ fn layout_text_quads_inner(
     // integer-device-pixel snap the real client does, which keeps a physical-res bitmap crisp instead
     // of resampled. The quad's far edge is then automatically physical-aligned (a baked cell is an
     // integer count of physical texels).
-    let scale = atlas.scale;
     let phys_size = font_size * scale;
     let snap = |v: f32| (v * scale).round() / scale;
 
@@ -852,11 +741,9 @@ fn layout_text_quads_inner(
             .iter()
             .flat_map(|line| {
                 wrap_line(
-                    &mut atlas.font_system,
-                    &atlas.glyphs,
-                    &attrs,
+                    &atlas.metrics,
+                    &family,
                     font_size,
-                    scale,
                     step_extra,
                     line,
                     rect.width(),

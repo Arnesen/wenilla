@@ -112,7 +112,61 @@ impl Plugin for UiChatPlugin {
             )
             .add_systems(
                 OnExit(crate::char_select::ClientState::InWorld),
-                channels::end_session_channels,
+                (channels::end_session_channels, end_session_chat),
             );
+    }
+}
+
+/// **The chat module's session end** — what the reference gets for free by destroying its Lua
+/// state, and we have to do by hand until that teardown lands (1288).
+///
+/// `shutdown_ui_state`'s own doc carves the reference's logout tail: `PLAYER_LEAVING_WORLD` →
+/// `PLAYER_LOGOUT` → the saved files → **destroy the Lua state**. That last step is the one
+/// [`crate::ui_script::IngameUiLoaded`] exists to stand in for; while it does, every window in the
+/// VM keeps its contents across a character switch. The director saw it as the previous
+/// character's `Joined Channel:` lines still sitting under the new character's — chat scrollback
+/// is simply the most visible tenant of a VM that should have been rebuilt.
+///
+/// So this clears what a fresh VM (and a fresh `ui_chat`) would have: both windows' lines, the
+/// edit box's whole cross-open memory — sticky type, the `lastTell` ring, `toldTarget` — and the
+/// undrained feed, whose queued lines were addressed to a character that is gone. It is the same
+/// shape, and the same reasoning, as [`crate::ui_aura`]'s `end_session_aura_state` (0900).
+///
+/// **Not on a reconnect**, deliberately, which is why this is not in [`channels`]'s disconnect
+/// twin: channel membership is *server* state and dies with the server's `Player` object however
+/// the socket ended, but a seamless same-character reconnect (0065) is benilla's own affordance —
+/// the reference has no such thing, it goes to the login screen — and inside it the window keeping
+/// its scrollback is the whole point.
+fn end_session_chat(
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut windows: ResMut<frames::ChatWindows>,
+    mut edit: ResMut<edit::ChatEditState>,
+    mut log: ResMut<ChatLog>,
+) {
+    end_chat_session(
+        script.map(NonSendMut::into_inner),
+        &mut windows,
+        &mut edit,
+        &mut log,
+    );
+}
+
+/// [`end_session_chat`]'s body, callable without a `World` — the clear is the law, the system is
+/// the wiring.
+pub(crate) fn end_chat_session(
+    script: Option<&mut benilla_ui::script::UiScript>,
+    windows: &mut frames::ChatWindows,
+    edit: &mut edit::ChatEditState,
+    log: &mut ChatLog,
+) {
+    *log = ChatLog::default();
+    windows.tell_alert_left = 0.0;
+    // The channel target/number are [`channels::end_session_channels`]'s (1284); everything else
+    // the box remembers across an open is this session's too.
+    *edit = edit::ChatEditState::default();
+    if let Some(script) = script {
+        for frame in ["ChatFrame1", "ChatFrame2"] {
+            crate::ui_script::run_or_warn(script, &format!("{frame}:Clear()"));
+        }
     }
 }

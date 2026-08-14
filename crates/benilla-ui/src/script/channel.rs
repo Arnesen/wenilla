@@ -30,13 +30,23 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::Model;
 
-/// The 1-based slot of `name` in join order, case-insensitively — `GetChannelName`'s first return.
+/// The 1-based slot of `name`, case-insensitively — `GetChannelName`'s first return.
 fn slot_of(model: &Model, name: &str) -> Option<usize> {
     model
         .joined_channels
         .iter()
-        .position(|c| c.eq_ignore_ascii_case(name))
+        .position(|c| c.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name)))
         .map(|i| i + 1)
+}
+
+/// The name occupying slot `n` (1-based), or `None` for out of range **or a freed slot**.
+///
+/// The hole case is the reference's, not a convenience: its by-index lookup `0x49bf30` bounds-checks
+/// against the record count and then demands the entry's own number field equal the index asked for
+/// (`cmp esi,ecx / jnz`), which a leave zeroed (`0x49bbd0`). So a channel left is a number that
+/// answers "not joined" while every channel above it keeps its own (1286).
+fn name_at(model: &Model, n: usize) -> Option<&str> {
+    model.joined_channels.get(n.checked_sub(1)?)?.as_deref()
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -71,7 +81,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     };
                     usize::try_from(n)
                         .ok()
-                        .filter(|n| *n >= 1 && *n <= model.joined_channels.len())
+                        .filter(|n| name_at(&model, *n).is_some())
                 }
                 // The name form. A numeric STRING arrives here and must still resolve as a number:
                 // `ChatFrame.lua:2113` passes the result of a `gsub` — `GetChannelName("1")` — and
@@ -79,7 +89,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::String(s) => {
                     let name = s.to_str()?;
                     match name.trim().parse::<usize>() {
-                        Ok(n) if n >= 1 && n <= model.joined_channels.len() => Some(n),
+                        Ok(n) if name_at(&model, n).is_some() => Some(n),
                         Ok(_) => None,
                         Err(_) => slot_of(&model, &name),
                     }
@@ -92,7 +102,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 // caller on this branch (all four sites bail on the number first).
                 return Ok(MultiValue::from_vec(vec![Value::Integer(0)]));
             };
-            let name = model.joined_channels[slot - 1].clone();
+            let name = name_at(&model, slot).unwrap_or_default().to_string();
             Ok(MultiValue::from_vec(vec![
                 Value::Integer(slot as i64),
                 Value::String(lua.create_string(&name)?),
@@ -132,7 +142,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let mut out = Vec::with_capacity(model.joined_channels.len() * 2);
+            // Occupied slots only — a freed one is a number nothing is on, so it has no pair to
+            // contribute (the reference walks its record array and skips the cleared entries).
             for (i, name) in model.joined_channels.iter().enumerate() {
+                let Some(name) = name.as_deref() else {
+                    continue;
+                };
                 out.push(Value::Integer(i as i64 + 1));
                 out.push(Value::String(lua.create_string(name)?));
             }
@@ -150,7 +165,7 @@ impl super::UiScript {
     /// shape the chat-window work used: that one is a QUEUE the app drains (Lua → app), and this is
     /// app state READ BY Lua, which is the opposite direction. `ui_chat::feed` owns both edges that
     /// change it — the server's YOU_JOINED and YOU_LEFT notices — so it pushes here from one place.
-    pub fn set_joined_channels(&mut self, joined: Vec<String>) {
+    pub fn set_joined_channels(&mut self, joined: Vec<Option<String>>) {
         self.model_mut().joined_channels = joined;
     }
 }

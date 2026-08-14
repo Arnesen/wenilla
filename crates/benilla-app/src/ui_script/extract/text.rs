@@ -188,7 +188,7 @@ pub(super) fn emit(
         // (`ink=`). They diverge by the width of the markup when the advance table is measured over
         // the raw buffer — the caret-out-in-space report (decision 1075) as a pair of numbers.
         let ebox_geom = ebox.map(|ui| {
-            let ink = crate::ui_text::measure_text(atlas, draw_text, None, spec).0;
+            let ink = crate::ui_text::measure_text(&atlas.metrics, draw_text, None, spec).0;
             format!(" caret={:.1} ink={ink:.1}", ui.caret_x * host.scale)
         });
         info!(

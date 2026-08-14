@@ -45,11 +45,18 @@
 mod atlas;
 mod layout;
 mod markup;
+mod measurer;
 
 pub(crate) use atlas::{UiFontAtlas, UiTextPlugin};
+pub(crate) use measurer::{measure_request, AtlasMeasurer};
+
+/// The width law itself, for the differential test that pins it to the pre-table shaped sum
+/// (`atlas::metrics_tests`). Not a production seam — every caller goes through [`measure_text`].
+#[cfg(test)]
+pub(crate) use layout::measure_line_width_for_test;
 pub(crate) use layout::{
-    digit_advances, ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances,
-    line_origin, line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, UI_SEAT_NUDGE,
+    ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances, line_origin,
+    line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, UI_SEAT_NUDGE,
 };
 
 /// The default body text size (logical px) — WoW's own `GameFontNormal`. A `FontString` with no

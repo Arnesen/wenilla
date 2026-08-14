@@ -40,7 +40,7 @@ fn harness(money: u64) -> UiScript {
     // The digit advances the app feeds once per atlas scale. Fed here so the width arithmetic
     // below is deliberate rather than an artefact of an unfed VM — a flat 8px per digit makes
     // every expected number readable as `digits x 8 + icon`.
-    s.set_digit_advances(&[8.0; 10]);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(8.0)));
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "MoneyFrame.xml");
 

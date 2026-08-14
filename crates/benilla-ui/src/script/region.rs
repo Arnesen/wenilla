@@ -646,6 +646,9 @@ pub(super) fn region_set_point(
 /// live in `region::text` and `GetWidth`/`GetHeight` in `region::layout`, and both read it.
 pub(super) fn measured_wh(lua: &Lua, this: &Table) -> mlua::Result<(f32, f32)> {
     let rh = region_handle_of(lua, this)?;
+    // Same-tick measure when a host font engine is installed — see `region::text`'s `natural_w`.
+    // A no-op for a Texture (not a FontString) and for an already-current measure.
+    super::measure::ensure_measured(lua, rh);
     let model = lua.app_data_ref::<Model>().expect("model");
     let d = model.region_data.get(&rh);
     // The key carries the owner's effective_scale ([`RegionData::measure_key`]) — the same

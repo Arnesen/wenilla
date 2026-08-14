@@ -670,46 +670,9 @@ impl UiScript {
             .map(|(&rh, _)| rh)
             .collect();
         for rh in handles {
-            let is_fs = model
-                .arena
-                .region(rh)
-                .is_some_and(|r| matches!(r.kind, crate::widget::RegionKind::FontString));
-            if !is_fs {
-                continue;
+            if let Some(req) = measure_request_for(&mut model, rh) {
+                out.push(req);
             }
-            // The owner's effective_scale: the host measures at the drawn raster size
-            // ([`MeasureRequest::scale`]), and the key carries it so a SetScale re-measures.
-            let scale = model
-                .arena
-                .region(rh)
-                .and_then(|r| model.arena.frame(r.owner))
-                .map(|f| f.effective_scale)
-                .unwrap_or(1.0);
-            let d = model.region_data.get(&rh).expect("live region data");
-            let text = d.text.clone().unwrap_or_default();
-            let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
-            let font = d.font_path.clone();
-            let height = d.font_height;
-            let text_height = d.text_height;
-            let outline = d.outline;
-            // The shared key recipe ([`RegionData::measure_key`]) — the metric reads
-            // (region.rs) check the stored measure against the same hash.
-            let key = d.measure_key(scale);
-            if d.measured.map(|m| m.key) == Some(key) {
-                continue;
-            }
-            let id = model.region_id(rh);
-            out.push(MeasureRequest {
-                id,
-                font,
-                height,
-                text_height,
-                wrap_width,
-                outline,
-                scale,
-                text,
-                key,
-            });
         }
         out
     }
@@ -771,4 +734,50 @@ impl UiScript {
             });
         }
     }
+}
+
+/// The [`MeasureRequest`] region `rh` needs right now, or `None` if it needs none — it is not a
+/// FontString, it holds no text, or its stored measure is already this exact string's.
+///
+/// Hoisted out of [`UiScript::fontstrings_needing_measure`] so the **synchronous** measure
+/// ([`super::measure::ensure_measured`]) builds its request with the identical recipe. The two must
+/// agree byte for byte on the cache key, or a same-tick measure and the batch pass would each think
+/// the other's answer was stale and re-measure forever.
+pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option<MeasureRequest> {
+    let region = model.arena.region(rh)?;
+    if !matches!(region.kind, crate::widget::RegionKind::FontString) {
+        return None;
+    }
+    // The owner's effective_scale: the host measures at the drawn raster size
+    // ([`MeasureRequest::scale`]), and the key carries it so a SetScale re-measures.
+    let scale = model
+        .arena
+        .frame(region.owner)
+        .map(|f| f.effective_scale)
+        .unwrap_or(1.0);
+    let d = model.region_data.get(&rh)?;
+    let text = d.text.clone().filter(|t| !t.is_empty())?;
+    let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
+    let font = d.font_path.clone();
+    let height = d.font_height;
+    let text_height = d.text_height;
+    let outline = d.outline;
+    // The shared key recipe ([`RegionData::measure_key`]) — the metric reads (region.rs) check the
+    // stored measure against the same hash.
+    let key = d.measure_key(scale);
+    if d.measured.map(|m| m.key) == Some(key) {
+        return None;
+    }
+    let id = model.region_id(rh);
+    Some(MeasureRequest {
+        id,
+        font,
+        height,
+        text_height,
+        wrap_width,
+        outline,
+        scale,
+        text,
+        key,
+    })
 }

@@ -467,13 +467,13 @@ fn draw_bubble(
     // else max(measured, 2·border-unit). All in shaped space, rescaled after.
     let cap_s = gx_px(WRAP_W, basis) / s;
     let floor_s = (2.0 * border) / s;
-    let (line_w, _) = measure_text(atlas, &b.text, None, spec);
+    let (line_w, _) = measure_text(&atlas.metrics, &b.text, None, spec);
     let box_w_s = if line_w > cap_s {
         cap_s
     } else {
         line_w.max(floor_s)
     };
-    let (_, box_h_s) = measure_text(atlas, &b.text, Some(box_w_s), spec);
+    let (_, box_h_s) = measure_text(&atlas.metrics, &b.text, Some(box_w_s), spec);
     let (text_w, text_h) = ((box_w_s * s).ceil(), (box_h_s * s).ceil());
 
     // The auto-fit body: the frame hugs the text layout ± the flat margin; BOTTOM-center on

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
@@ -518,6 +519,79 @@ fn default_charset() -> Vec<char> {
 // Integration — the resource, plugin, and Bevy Startup system
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// One character's contribution to a line's width, at one (face, size), **before** the outline
+/// bias — the pre-summed floor of its glyphs' physical advances plus how many glyphs it shaped to.
+///
+/// Two numbers rather than one because the client's step law
+/// ([`super::layout::client_step`]) adds its bias **per glyph**, not per character: a character
+/// that shapes to two glyphs takes two biases. Every character in the baked charset shapes to one
+/// under the client's four faces, so `glyphs` is 1 everywhere today — it is here so the law stays
+/// the law if that ever stops being true.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CharStep {
+    /// Σ `advance.floor()` over the character's glyphs, in **physical** px.
+    pub(super) floor_sum: f32,
+    /// How many glyphs it shaped to — the multiplier on the outline bias.
+    pub(super) glyphs: u16,
+}
+
+/// Everything **width measurement** needs, and nothing that needs `&mut` — the pure-data half of
+/// [`UiFontAtlas`], split out so it can be handed to the script VM as a
+/// [`TextMeasure`](benilla_ui::script::TextMeasure) and answer a `GetStringWidth` inline.
+///
+/// **Why a table instead of a shaper.** The client's width law is a sum of per-glyph steps with no
+/// kerning term (`ComputeStep 0x5ca2d0` — see [`super::layout::client_step`]), so a string's width
+/// is a pure function of its characters, its face, its size and its outline. Nothing about it needs
+/// a shaping engine; the shaper was only ever how we looked an advance up. Precomputing that lookup
+/// at bake time is therefore not an approximation of the measure path — it **is** the measure path,
+/// with the one `&mut`-shaped step hoisted out of the hot loop.
+///
+/// Cheap to clone by design ([`Arc`] at every holder), because the VM's copy and the atlas's are
+/// the same table and must never be two tables.
+pub(crate) struct TextMetrics {
+    /// `(family, baked size bits) -> char -> step` for the baked charset. A character absent here
+    /// has no baked glyph, draws nothing, and measures **zero** — see [`Self::char_step`].
+    pub(super) steps: HashMap<(String, u32), HashMap<char, CharStep>>,
+    /// Blizzard font path (lowercased) → `fontdb` family name.
+    pub(super) path_to_family: HashMap<String, String>,
+    /// The fallback family (Friz Quadrata) for a FontString with no/unknown font path.
+    pub(super) default_family: String,
+    /// The default family's baked sizes (the superset), ascending — [`Self::snap_size`]'s list.
+    pub(super) sizes: Vec<f32>,
+    /// Per-family baked sizes (ascending) — [`Self::snap_for`]'s lookup.
+    pub(super) sizes_by_family: HashMap<String, Vec<f32>>,
+    /// The physical/logical scale the atlas was baked at; every step above is physical px.
+    pub(super) scale: f32,
+}
+
+impl TextMetrics {
+    /// The `fontdb` family a Blizzard font path resolves to, or the default face.
+    pub(super) fn family_for(&self, path: Option<&str>) -> String {
+        path.and_then(|p| self.path_to_family.get(&p.to_ascii_lowercase()))
+            .unwrap_or(&self.default_family)
+            .clone()
+    }
+
+    /// The baked size `want` snaps to **for a specific family** — keyed by the face it resolved, so
+    /// a request never snaps to a size only another face bakes.
+    pub(super) fn snap_for(&self, family: &str, want: f32) -> f32 {
+        let sizes = self.sizes_by_family.get(family).unwrap_or(&self.sizes);
+        nearest_size(sizes, want)
+    }
+
+    /// One character's step at `(family, size)`. `None` for a character with no baked glyph: it
+    /// draws nothing, so it measures nothing. That is a deliberate, narrow divergence from the
+    /// render **pen**, which still tracks such a glyph's shaped advance
+    /// ([`super::layout::layout_text_quads`]) — it applies only to text outside the baked charset,
+    /// i.e. text this client cannot draw at all.
+    pub(super) fn char_step(&self, family: &str, size: f32, c: char) -> Option<CharStep> {
+        self.steps
+            .get(&(family.to_string(), size.to_bits()))
+            .and_then(|m| m.get(&c))
+            .copied()
+    }
+}
+
 /// The baked glyph atlas + live shaping state, built once at Startup from the client's own Friz
 /// Quadrata TTF. See the module doc's v1 simplifications for why only one face/size is baked.
 #[derive(Resource)]
@@ -530,29 +604,15 @@ pub(crate) struct UiFontAtlas {
     pub(super) glyphs: HashMap<GlyphKey, GlyphInfo>,
     /// The packed atlas bitmap, already uploaded.
     pub(super) image: Handle<Image>,
-    /// Blizzard font path (lowercased, e.g. `"fonts\\arialn.ttf"`) → `fontdb` family name — how a
-    /// `FontString`'s resolved `font` path selects its baked face. A path not here falls back to
-    /// [`Self::default_family`].
-    pub(super) path_to_family: HashMap<String, String>,
     /// Per-family baseline-ascender fraction `hhea.asc / (asc + |desc|)` (see [`hhea_ascent_ratio`])
     /// — the term in the client's placement law; [`crate::ui_text::layout`] seats each line's
     /// baseline at `round(size · ratio)`, the face pixel ascender `[CGxFont+0x17c]` that
     /// `glyph_vplace` 0x5d1360 hangs ink from.
     pub(super) family_ascent: HashMap<String, f32>,
-    /// The fallback family (Friz Quadrata) for a `FontString` with no/unknown font path.
-    pub(super) default_family: String,
-    /// The default family's baked sizes (Friz — the superset: [`FONT_SIZES`] +
-    /// [`FRIZ_SPLASH_SIZES`], ascending) — what [`Self::snap_size`] and any family miss snap to.
-    pub(super) sizes: Vec<f32>,
-    /// Per-family baked sizes (ascending) — [`Self::snap_for`]'s lookup, so a face only ever
-    /// snaps to a size it actually baked (a non-Friz face never lands on the Friz-only 26/32).
-    pub(super) sizes_by_family: HashMap<String, Vec<f32>>,
-    /// The physical/logical scale the atlas was baked at (`Window::scale_factor` at build). Every
-    /// baked [`GlyphInfo`] metric is physical px = logical × this; [`layout_text_quads`]/
-    /// [`measure_text`] divide by it to work in logical units and snap positions to `1/scale`
-    /// (the physical-pixel grid). Read once at build; a runtime monitor hop is **ignored** (logged),
-    /// not rebaked — see [`load_fonts_and_build_atlas`].
-    pub(super) scale: f32,
+    /// The width law's inputs — face resolution, size snapping, per-character steps, bake scale.
+    /// Shared (never copied) with the script VM's synchronous measurer, so a string measured
+    /// mid-tick and the same string measured at extract are the same number by construction.
+    pub(crate) metrics: Arc<TextMetrics>,
 }
 
 impl UiFontAtlas {
@@ -561,10 +621,8 @@ impl UiFontAtlas {
     /// The overhead-name mesh bake (`crate::nameplates`) uses it to hang each line from its
     /// byte-law baseline (the world-mode seat, wow-re `name-render-geometry-law.md`).
     pub(crate) fn ascent_ratio(&self, path: Option<&str>) -> f32 {
-        let family = path
-            .and_then(|p| self.path_to_family.get(&p.to_ascii_lowercase()))
-            .unwrap_or(&self.default_family);
-        self.family_ascent.get(family).copied().unwrap_or(0.794)
+        let family = self.metrics.family_for(path);
+        self.family_ascent.get(&family).copied().unwrap_or(0.794)
     }
 
     /// The baked size [`nearest_size`] snaps a requested height to — for a caller outside the
@@ -573,14 +631,12 @@ impl UiFontAtlas {
     /// target size around its own anchor. Snaps against the default family (Friz) — the superset
     /// list, and the face those callers draw.
     pub(crate) fn snap_size(&self, want: f32) -> f32 {
-        nearest_size(&self.sizes, want)
+        nearest_size(&self.metrics.sizes, want)
     }
 
-    /// The baked size `want` snaps to **for a specific family** — the layout path's snap, keyed
-    /// by the face it resolved, so a request never snaps to a size only another face bakes.
-    pub(super) fn snap_for(&self, family: &str, want: f32) -> f32 {
-        let sizes = self.sizes_by_family.get(family).unwrap_or(&self.sizes);
-        nearest_size(sizes, want)
+    /// The shared width-law table — what the script VM's synchronous measurer is built from.
+    pub(crate) fn metrics(&self) -> Arc<TextMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// The packed atlas texture — for the world-pass consumers (the nameplate meshes) that bind
@@ -810,17 +866,82 @@ fn load_fonts_and_build_atlas(
         .get(&friz_family)
         .cloned()
         .unwrap_or_else(|| FONT_SIZES.to_vec());
+    let steps = build_char_steps(&mut font_system, &built.glyphs, &faces, &charset, scale);
     commands.insert_resource(UiFontAtlas {
         font_system,
         glyphs: built.glyphs,
         image,
-        path_to_family,
         family_ascent,
-        default_family: friz_family,
-        sizes: default_sizes,
-        sizes_by_family,
-        scale,
+        metrics: Arc::new(TextMetrics {
+            steps,
+            path_to_family,
+            default_family: friz_family,
+            sizes: default_sizes,
+            sizes_by_family,
+            scale,
+        }),
     });
+}
+
+/// Precompute every baked character's [`CharStep`] at every (face, size) — the width law's lookup
+/// table, shaped **once** here so no measurement ever needs a shaper again.
+///
+/// Each character is shaped alone, which is exactly right rather than a shortcut: the advance that
+/// lands in the sum is the *baked cell's* (`GlyphInfo::advance`), which is the face's own advance
+/// for that glyph and carries no neighbour term — so shaping "abc" and shaping "a","b","c" produce
+/// the same three advances. (Kerning cannot enter: the client's law drops it, and the only path
+/// that would have leaked cosmic-text's kerned `LayoutGlyph::w` is the no-baked-cell fallback,
+/// which by construction cannot fire for a character that is in the charset we just baked.)
+fn build_char_steps(
+    font_system: &mut FontSystem,
+    glyphs: &HashMap<GlyphKey, GlyphInfo>,
+    faces: &[(fontdb::ID, String, Vec<f32>)],
+    charset: &[char],
+    scale: f32,
+) -> HashMap<(String, u32), HashMap<char, CharStep>> {
+    let mut out: HashMap<(String, u32), HashMap<char, CharStep>> = HashMap::new();
+    let mut scratch = String::new();
+    for (_, family, sizes) in faces {
+        let attrs = Attrs::new().family(Family::Name(family));
+        for &size in sizes {
+            let mut table: HashMap<char, CharStep> = HashMap::new();
+            for &c in charset {
+                scratch.clear();
+                scratch.push(c);
+                // Shaped at the PHYSICAL size, exactly as the render pass shapes — so the
+                // no-baked-cell fallback below reads a physical advance like every other one.
+                let phys = size * scale;
+                let mut buffer = Buffer::new(font_system, Metrics::new(phys, phys));
+                buffer.set_wrap(font_system, Wrap::None);
+                buffer.set_text(font_system, &scratch, &attrs, Shaping::Advanced, None);
+                buffer.shape_until_scroll(font_system, false);
+                let mut floor_sum = 0.0f32;
+                let mut n = 0u16;
+                for run in buffer.layout_runs() {
+                    for g in run.glyphs {
+                        let key: GlyphKey = (g.font_id, g.glyph_id, size.to_bits(), 0);
+                        // A charset character with no baked cell was reported in `built.missing`
+                        // and cannot be drawn; its shaped width is still the honest answer for the
+                        // space the render pen will leave.
+                        let adv = glyphs.get(&key).map(|i| i.advance).unwrap_or(g.w);
+                        floor_sum += adv.floor();
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    table.insert(
+                        c,
+                        CharStep {
+                            floor_sum,
+                            glyphs: n,
+                        },
+                    );
+                }
+            }
+            out.insert((family.clone(), size.to_bits()), table);
+        }
+    }
+    out
 }
 
 /// Snap a requested font height to the nearest baked size in `sizes` (never empty — always at least
@@ -912,5 +1033,157 @@ mod outlined_cell_tests {
         // Cell grows by r·round(scale) each side; the advance is the caller's (untouched here).
         let (_, w, h, pad) = outlined_cell(&[255, 255, 255, 255], 2, 2, 2, 1.0);
         assert_eq!((w, h, pad), (6, 6, 2));
+    }
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    /// **The differential test: the step table must measure exactly what shaping the whole string
+    /// measured**, over the real client fonts.
+    ///
+    /// The refactor that made a synchronous `GetStringWidth` possible replaced "shape the run, sum
+    /// each glyph's baked advance under the step law" with "sum each character's precomputed step".
+    /// The two are the same number only because of two facts, and this asserts both at once:
+    ///
+    /// 1. **The decomposition is per character** — these four faces carry no ligature or contextual
+    ///    substitution, so shaping `"Onewarrior"` yields the same glyph sequence as shaping its ten
+    ///    characters one at a time. (Not a given: it is a property of the fonts, and exactly the
+    ///    kind that would go silently wrong.)
+    /// 2. **The advance in the sum was never the kerned one.** [`build_atlas`] shapes each charset
+    ///    character alone and stores *that* advance, and the old measure looked the baked advance
+    ///    up by glyph — so cosmic-text's kerned `LayoutGlyph::w` never entered a baked glyph's
+    ///    width. Which is the client's own law: `ComputeStep 0x5ca2d0` drops kerning.
+    ///
+    /// So the reference implementation below is the pre-refactor code, verbatim, and the table must
+    /// match it to the bit. Skips without an install; the fonts are client data.
+    #[test]
+    fn the_step_table_measures_what_shaping_the_whole_string_measured() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = match benilla_formats::open_chain(&data) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: patch chain would not open: {e:#}");
+                return;
+            }
+        };
+        // Real strings, of the kinds that actually reach a measure: character names (the bug's own
+        // subject), item names, prose, the sequences a ligature table would target, the Latin-1
+        // tail of the baked charset, and the digits the money frame sums.
+        const CORPUS: &[&str] = &[
+            "",
+            " ",
+            "Onewarrior",
+            "Probezero",
+            "Small Brown Pouch",
+            "Staff of the Shadow Flame",
+            "The affluent fiend's fickle offer",
+            "fi fl ffi ffl ff",
+            "AV Ta Wo Yo LT P, r. v.",
+            "0123456789",
+            "Grüße, Ärger; élan côté",
+            "!@#$%^&*()_+-=[]{}|;':\",./<>?",
+        ];
+        let charset = default_charset();
+        let mut checked = 0usize;
+        for (i, &path) in CLIENT_FONTS.iter().enumerate() {
+            let Ok(bytes) = chain.read(path) else {
+                eprintln!("skipping {path}: not in the chain");
+                continue;
+            };
+            let mut font_system = FontSystem::new_with_fonts(std::iter::empty());
+            let mut swash = SwashCache::new();
+            let (id, family) = register_font(&mut font_system, bytes).expect("register");
+            // Two sizes, one small and one large, so a size-dependent hinting difference could not
+            // hide between them; two bake scales, so the physical-px floor is exercised off 1.0.
+            for scale in [1.0f32, 2.0] {
+                let sizes = vec![10.0f32, 20.0];
+                let faces = vec![(id, family.clone(), sizes.clone())];
+                let built = build_atlas(
+                    &mut font_system,
+                    &mut swash,
+                    &faces,
+                    &charset,
+                    (1024.0 * scale).ceil() as u32,
+                    scale,
+                    &HashMap::new(),
+                );
+                let steps =
+                    build_char_steps(&mut font_system, &built.glyphs, &faces, &charset, scale);
+                let metrics = TextMetrics {
+                    steps,
+                    path_to_family: HashMap::from([(path.to_ascii_lowercase(), family.clone())]),
+                    default_family: family.clone(),
+                    sizes: sizes.clone(),
+                    sizes_by_family: HashMap::from([(family.clone(), sizes.clone())]),
+                    scale,
+                };
+                let attrs = Attrs::new().family(Family::Name(&family));
+                for &size in &sizes {
+                    // Both step biases: plain/NORMAL (+1) and THICK (+2).
+                    for step_extra in [1.0f32, 2.0] {
+                        for text in CORPUS {
+                            let want = reference_line_width(
+                                &mut font_system,
+                                &built.glyphs,
+                                &attrs,
+                                size,
+                                scale,
+                                step_extra,
+                                text,
+                            );
+                            let got = crate::ui_text::measure_line_width_for_test(
+                                &metrics, &family, size, step_extra, text,
+                            );
+                            assert_eq!(
+                                got, want,
+                                "{path} @{size} scale {scale} extra {step_extra}: {text:?} — the \
+                                 step table and the shaped sum must be one number"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+            let _ = i;
+        }
+        assert!(
+            checked > 0,
+            "no client font was readable — nothing was proven"
+        );
+    }
+
+    /// The measure **exactly as it was before the step table**: shape the run, take each glyph's
+    /// baked advance (cosmic-text's own `w` only where nothing was baked), floor it, add the
+    /// outline bias, divide back to logical. Kept here, and only here, as the thing the table is
+    /// diffed against.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_line_width(
+        font_system: &mut FontSystem,
+        glyphs: &HashMap<GlyphKey, GlyphInfo>,
+        attrs: &Attrs,
+        font_size: f32,
+        scale: f32,
+        step_extra: f32,
+        text: &str,
+    ) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let phys = font_size * scale;
+        let mut buffer = Buffer::new(font_system, Metrics::new(phys, phys));
+        buffer.set_wrap(font_system, Wrap::None);
+        buffer.set_text(font_system, text, attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(font_system, false);
+        let mut w = 0.0f32;
+        for run in buffer.layout_runs() {
+            for g in run.glyphs {
+                let key: GlyphKey = (g.font_id, g.glyph_id, font_size.to_bits(), 0);
+                let adv = glyphs.get(&key).map(|i| i.advance).unwrap_or(g.w);
+                w += (adv.floor() + step_extra) / scale;
+            }
+        }
+        w
     }
 }

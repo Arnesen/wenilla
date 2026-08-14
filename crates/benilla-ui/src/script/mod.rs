@@ -77,6 +77,7 @@ mod loot_roll;
 mod lua50;
 mod macros;
 mod mail;
+mod measure;
 mod merchant;
 mod messageframe;
 mod minimap;
@@ -148,6 +149,7 @@ pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
 pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
 pub use mail::{MailInboxRow, MailSendRequest, MailState};
+pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo};
@@ -523,7 +525,6 @@ impl UiScript {
             lua,
             instructions: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
-        s.publish_number_width()?;
         Ok(s)
     }
 
@@ -796,6 +797,15 @@ impl UiScript {
             let mut model = self.model_mut();
             Self::resolve_layout(&mut model);
         }
+        // With a font engine installed ([`Self::set_text_measurer`]) the VM closes the measure
+        // round-trip itself, right here — solve, measure what the solve revealed, solve again.
+        // That is the same two-solve shape the host's own drive loop already runs, moved inside so
+        // a FontString's box is right in the frame its text was set rather than the frame after.
+        // Without an engine this is a no-op and the host's batch pass stays the only answer.
+        if self.fill_measures() {
+            let mut model = self.model_mut();
+            Self::resolve_layout(&mut model);
+        }
         event::fire_size_changes(&self.lua);
     }
 
@@ -878,80 +888,6 @@ impl UiScript {
         // Measured extents are auto-size inputs — the layout gate's read set, same as
         // [`Self::set_measured_text`]'s.
         model.touch_layout();
-    }
-
-    /// Feed the number font's per-digit advance widths (logical px, `'0'..='9'` in order) as the
-    /// Lua global table `BENILLA_DIGIT_W` (keyed by digit *string*, `["0"].."["9"]`).
-    ///
-    /// The synchronous half of the money layout's metrics. The real `SmallMoneyFrame` calls
-    /// `GetTextWidth` mid-update (MoneyFrame.lua l.202) and the real client answers it inline;
-    /// our `GetStringWidth` is served from the measure round-trip, which lands at extract — a frame
-    /// AFTER the tick that set the text. A kit that sizes itself from its own label therefore reads
-    /// 0 the first time and stays wrong until something redraws it.
-    ///
-    /// The sum lives in [`Self::publish_number_width`] beside this, not in XML: its two callers are
-    /// in different shipped files and no third file is a dependency of both.
-    pub fn set_digit_advances(&mut self, advances: &[f32; 10]) {
-        self.model_mut().digit_advances = Some(*advances);
-        let set = || -> mlua::Result<()> {
-            let t = self.lua.create_table()?;
-            for (i, w) in advances.iter().enumerate() {
-                t.set(i.to_string(), *w)?;
-            }
-            self.lua.globals().set("BENILLA_DIGIT_W", t)
-        };
-        if let Err(e) = set() {
-            self.model_mut()
-                .errors
-                .push(format!("set_digit_advances: {e}"));
-        }
-    }
-
-    /// Publish `BenillaNumberWidth(n)` — the laid-out width of a number in NumberFontNormal, the
-    /// sum of its digits' advances from the [`Self::set_digit_advances`] feed.
-    ///
-    /// **Exact, not an approximation.** The client's width law is a floor-and-add over a per-glyph
-    /// advance with no kerning term, so a number's width IS the sum of its digits'. That is equally
-    /// why it stops at numbers: arbitrary text still needs the real measure, and a caller that wants
-    /// one still waits a frame.
-    ///
-    /// **Published from here rather than written in XML** — which is where it started, and the move
-    /// is the point. Its callers are `BenillaMoney_Set` (MerchantFrame.xml) and `ShowCoin`
-    /// (MoneyFrame.xml), and there is no third shipped file both of them load: fixtures take
-    /// arbitrary subsets, so whichever file owned it, some fixture met it as nil. Seated at VM
-    /// construction it is simply always there, and the headless fallback lives in one place.
-    ///
-    /// The 7px fallback is for a VM whose host never fed the advances — every engine test, since
-    /// there is no font atlas without the app. In-app the feed lands on the first frame the atlas
-    /// exists.
-    fn publish_number_width(&self) -> mlua::Result<()> {
-        let f = self.lua.create_function(|lua, n: mlua::Value| {
-            // `tostring(n)` semantics: the callers pass a number, but a string is as valid an
-            // argument here as it is to the Lua original this replaces.
-            let s = match &n {
-                mlua::Value::Integer(i) => i.to_string(),
-                mlua::Value::Number(x) => {
-                    if *x == x.trunc() && x.is_finite() {
-                        format!("{}", *x as i64)
-                    } else {
-                        x.to_string()
-                    }
-                }
-                mlua::Value::String(s) => s.to_str()?.to_string(),
-                _ => String::new(),
-            };
-            let model = lua.app_data_ref::<Model>().expect("model");
-            let adv = model.digit_advances;
-            Ok(s.chars()
-                .map(|c| match (c.to_digit(10), adv) {
-                    (Some(d), Some(a)) => a[d as usize],
-                    // A non-digit (a minus sign, a separator) has no advance in the feed, and
-                    // neither does anything before the host has fed one.
-                    _ => 7.0,
-                })
-                .sum::<f32>())
-        })?;
-        self.lua.globals().set("BenillaNumberWidth", f)
     }
 
     // ── Input: pointer-leaves-window cleanup (decision 0216 §3; the hit-test/mouse dispatch that

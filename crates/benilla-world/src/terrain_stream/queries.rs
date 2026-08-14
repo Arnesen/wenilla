@@ -135,6 +135,13 @@ pub(super) fn update_current_area(
     let Some(wow) = focus.body_pos() else {
         return; // no avatar — the area authority follows the character, and there is none
     };
+    if !focus.body_settled() {
+        // …and one whose own world is still arriving has no area worth publishing: the leaf under
+        // it is not yet the leaf it is standing in. Hold the last real answer instead — the
+        // reference is behind a loading screen for exactly this window
+        // ([`ViewFocus::body_settled`], 1287).
+        return;
+    }
     // WMO interior first: the player's down-ray group resolved to its WMOAreaTable world area.
     let interior_area = interior.0.zip(wmo_areas.as_ref()).and_then(|(k, cat)| {
         cat.0

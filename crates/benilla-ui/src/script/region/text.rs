@@ -100,6 +100,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // macro window's character tab changing width every frame). `0` until measured, as ever.
     fn natural_w(lua: &Lua, this: &Table) -> mlua::Result<f32> {
         let rh = region_handle_of(lua, this)?;
+        // Measure NOW if a host font engine is installed — the reference answers this getter from
+        // its font engine inline (`0x79e510` → `0x772890`), and a same-tick `SetText` →
+        // `GetStringWidth` is the corpus's own idiom (`Bagnon_Forever/database/ui.lua:58-59`).
+        // Without an engine this is a no-op and the number below stays 0 until the round-trip.
+        crate::script::measure::ensure_measured(lua, rh);
         let model = lua.app_data_ref::<Model>().expect("model");
         let Some(d) = model.region_data.get(&rh) else {
             return Ok(0.0);

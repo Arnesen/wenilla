@@ -494,13 +494,23 @@ pub(super) fn deliver(
         .notice_byte()
         .filter(|_| event.kind == Some(ChatEventKind::ChannelNotice));
     if notice == Some(channel_notice::YOU_JOINED) && channels.number_of(&event.channel).is_none() {
-        channels.joined.push(event.channel.clone());
-        debug!(
-            "chat: server confirms channel {:?} joined (slot {})",
-            event.channel,
-            channels.joined.len()
-        );
-        script.set_joined_channels(channels.joined.clone());
+        match channels.claim_slot(&event.channel) {
+            Some(slot) => {
+                debug!(
+                    "chat: server confirms channel {:?} joined (slot {slot})",
+                    event.channel
+                );
+                script.set_joined_channels(channels.joined.clone());
+            }
+            // The reference's own ceiling, reached: ten slots, all taken. It answers with a chat
+            // error and no record, so the channel stays unnumbered here too.
+            None => warn!(
+                "chat: server confirms channel {:?} joined but all {} slots are taken — it has no \
+                 number, so /N cannot reach it",
+                event.channel,
+                super::edit::MAX_CHANNELS
+            ),
+        }
     }
     // The wire name, kept before `stamp_channel` decorates arg4 with the slot number.
     let leaving = (notice == Some(channel_notice::YOU_LEFT)).then(|| event.channel.clone());
@@ -508,8 +518,10 @@ pub(super) fn deliver(
     channels.stamp_channel(event);
     route(script, windows, event);
     if let Some(name) = leaving {
-        debug!("chat: server confirms channel {name:?} left");
-        channels.joined.retain(|c| !c.eq_ignore_ascii_case(&name));
+        // Cleared in place, never compacted: slot 2 going empty must not make slot 3 into 2
+        // ([`ChannelState`], 1286).
+        let freed = channels.free_slot(&name);
+        debug!("chat: server confirms channel {name:?} left (slot {freed:?} now free)");
         script.set_joined_channels(channels.joined.clone());
     }
 }

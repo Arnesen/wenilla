@@ -783,7 +783,7 @@ fn money_display_shrinks_to_content_and_stays_flush() {
     load_xml(&s, "MerchantFrame.xml");
     // The app's synchronous number metrics (ui_script feeds NumberFontNormal's real advances once
     // per atlas bake; a uniform 6px here keeps the arithmetic below legible).
-    s.set_digit_advances(&[6.0; 10]);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 
     s.set_money(12_345); // 1g 23s 45c → purse digits "1" / "23" / "45"
     s.set_merchant(Some(MerchantState {
@@ -1172,7 +1172,7 @@ fn trade_recipient_money_renders_the_digit_not_ellipsis() {
     load_xml(&s, "GameTooltip.xml");
     load_xml(&s, "MerchantFrame.xml"); // the BenillaMoney_* helpers
     load_xml(&s, "TradeFrame.xml");
-    s.set_digit_advances(&[6.0; 10]);
+    s.set_text_measurer(Box::new(super::FixedWidthFont(6.0)));
 
     let target = benilla_ui::script::TradeSideState {
         gold: 5, // a partner offering 5 copper → the recipient trio should show "5"

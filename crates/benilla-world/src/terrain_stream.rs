@@ -329,6 +329,20 @@ impl ViewFocus {
     pub(crate) fn body_pos(&self) -> Option<[f32; 3]> {
         self.body
     }
+
+    /// Is there a body **and** is the world under it the one it is standing in?
+    ///
+    /// The area authority's gate (1287) — the same bit [`ViewFocus::paced`] carries, read through
+    /// its own name because it answers a different question here. Through entry, a teleport and a
+    /// world swap the body has been snapped but its destination is still streaming, so the leaf
+    /// area under it is whatever tile happens to be resident: at first login that is the pre-snap
+    /// position's — the map centre, Eastern Plaguelands on map 0 and The Barrens on map 1 — and a
+    /// beat later the outdoor parent of an interior whose WMO claim has not landed yet. Publishing
+    /// those makes the client announce, play the music of, and join the channels of zones the
+    /// player was never in.
+    pub(crate) fn body_settled(&self) -> bool {
+        self.body.is_some() && self.paced
+    }
 }
 
 /// **Where the world streams from when nothing else can say** — the Human start (Northshire),

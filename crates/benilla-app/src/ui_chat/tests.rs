@@ -614,8 +614,8 @@ fn a_channel_we_are_not_in_fires_the_bare_name_and_zeroes() {
 #[test]
 fn stamping_a_channel_splits_the_display_form_from_the_base_name() {
     let mut channels = super::edit::ChannelState::default();
-    channels.joined.push("World".into());
-    channels.joined.push("General - Elwynn Forest".into());
+    channels.claim_slot("World");
+    channels.claim_slot("General - Elwynn Forest");
 
     let mut e = ev(K::Channel, "wts boar livers", "Bob");
     e.channel = "General - Elwynn Forest".into();
@@ -651,7 +651,7 @@ fn a_channel_notice_renders_in_the_channels_color_not_the_notice_row() {
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut channels = super::edit::ChannelState::default();
-    channels.joined.push("General - Elwynn Forest".into());
+    channels.claim_slot("General - Elwynn Forest");
 
     let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
     e.channel = "General - Elwynn Forest".into();
@@ -730,8 +730,8 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
     let mut s = chat_vm();
     let mut windows = super::frames::ChatWindows::default();
     let mut channels = super::edit::ChannelState::default();
-    channels.joined.push("World".into());
-    channels.joined.push("General - Elwynn Forest".into());
+    channels.claim_slot("World");
+    channels.claim_slot("General - Elwynn Forest");
 
     let mut e = ChatEvent::text_only(K::ChannelNotice, String::new());
     e.channel = "General - Elwynn Forest".into();
@@ -749,9 +749,104 @@ fn a_leave_notice_keeps_its_number_because_the_record_dies_after_the_line() {
     );
     assert_eq!(
         channels.joined,
-        ["World"],
-        "and only THEN is the record gone"
+        [Some("World".to_string()), None],
+        "and only THEN is the record gone — as a HOLE at slot 2, not a shortened list (1286)"
     );
+}
+
+/// **A channel that leaves does not renumber the ones that stay** (1286).
+///
+/// The director's teleport tour: `Left Channel: [1. General - Teldrassil]` /
+/// `Joined Channel: [2. General - The Barrens]` / `Left Channel: [1. LocalDefense - Teldrassil]`,
+/// with Trade shuffling 1 → 2 → 3 across the same few seconds — every number in the window moving
+/// because the list closed each hole. The reference frees the slot in place and refills the first
+/// free one, so a zone hop *renames* a channel and leaves its number alone.
+#[test]
+fn a_freed_slot_is_reused_and_the_others_keep_their_numbers() {
+    let mut c = super::edit::ChannelState::default();
+    assert_eq!(c.claim_slot("General - Teldrassil"), Some(1));
+    assert_eq!(c.claim_slot("Trade - City"), Some(2));
+    assert_eq!(c.claim_slot("LocalDefense - Teldrassil"), Some(3));
+
+    // Cross a zone border: General and LocalDefense rename, Trade is untouched.
+    assert_eq!(c.free_slot("General - Teldrassil"), Some(1));
+    assert_eq!(
+        c.claim_slot("General - The Barrens"),
+        Some(1),
+        "the freed slot is reused — the client scans for a zeroed record before growing"
+    );
+    assert_eq!(c.free_slot("LocalDefense - Teldrassil"), Some(3));
+    assert_eq!(c.claim_slot("LocalDefense - The Barrens"), Some(3));
+    assert_eq!(
+        c.number_of("Trade - City"),
+        Some(2),
+        "Trade never moved: /2 still reaches it, which is the whole complaint"
+    );
+
+    // Leaving the city drops Trade; the hole it leaves is what the next join takes.
+    assert_eq!(c.free_slot("Trade - City"), Some(2));
+    assert_eq!(c.name_of(2), None, "a hole answers 'not joined'");
+    assert_eq!(c.number_of("General - The Barrens"), Some(1), "still 1");
+    assert_eq!(
+        c.claim_slot("Trade - City"),
+        Some(2),
+        "and back into slot 2"
+    );
+
+    // The ceiling is the reference's ten (`0x49b9c0: cmp ecx,0xa`), counted in SLOTS.
+    for i in 4..=super::edit::MAX_CHANNELS {
+        assert_eq!(c.claim_slot(&format!("Custom{i}")), Some(i as u32));
+    }
+    assert_eq!(c.claim_slot("OneTooMany"), None);
+    assert_eq!(c.free_slot("Custom7"), Some(7));
+    assert_eq!(
+        c.claim_slot("OneTooMany"),
+        Some(7),
+        "full means no free slot, not a permanent ceiling"
+    );
+}
+
+/// **The next character does not inherit this one's chat window** (1288).
+///
+/// The reference ends a session by destroying its Lua state, so the window that comes back is
+/// empty. We keep the VM (`ui_script::IngameUiLoaded` is the latch standing in for that teardown),
+/// so the director saw the previous character's `Joined Channel:` lines still sitting under the
+/// new character's. Everything the module remembers across a box open goes with the lines.
+#[test]
+fn a_session_end_empties_the_window_and_the_boxs_memory() {
+    let mut s = chat_vm();
+    let mut windows = super::frames::ChatWindows::default();
+    let mut edit = super::edit::ChatEditState::default();
+    let mut log = super::ChatLog::default();
+
+    super::frames::route(&mut s, &mut windows, &ev(K::Say, "hi there", "Bob"));
+    super::frames::route(&mut s, &mut windows, &ev(K::Whisper, "psst", "Ann"));
+    edit.remember_tell("Ann");
+    edit.sticky = super::edit::SendType::Guild;
+    log.push_event(ChatEvent::text_only(K::System, "queued".into()));
+    assert_eq!(
+        lines_in_window(&s),
+        2,
+        "the window has this session's lines"
+    );
+
+    super::end_chat_session(Some(&mut s), &mut windows, &mut edit, &mut log);
+
+    assert_eq!(
+        lines_in_window(&s),
+        0,
+        "and the next character starts clean"
+    );
+    assert!(
+        edit.last_tell.is_empty(),
+        "the tell ring was that character's"
+    );
+    assert_eq!(
+        edit.sticky,
+        super::edit::SendType::Say,
+        "sticky back to SAY"
+    );
+    assert_eq!(windows.tell_alert_left, 0.0, "the chime throttle resets");
 }
 
 /// Every notice byte the composer renders has a token to fire, and vice versa — the two tables are

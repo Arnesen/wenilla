@@ -155,14 +155,33 @@ impl SendType {
     }
 }
 
-/// The channels this session has joined, in join order — the CLIENT-side number law
-/// (`GetChannelName(n)`): `/1` is the first joined, `/2` the second; the numbered display form
-/// ("1. General - Elwynn Forest") and the `[N. Name]` prefixes all derive from this order.
-/// Fed by YOU_JOINED / YOU_LEFT notices ([`super::feed`]); the zone AUTO-join walk that fills it
-/// at login is [`super::channels`].
+/// How many channels the client can hold at once — its allocator refuses the eleventh
+/// (`0x49b9c0: cmp ecx,0xa`), and the ten boot-seeded `CHANNEL1`…`CHANNEL10` color rows are the
+/// same ten (wow-re `chat-color-table.md`).
+pub(crate) const MAX_CHANNELS: usize = 10;
+
+/// The channels this session has joined — the CLIENT-side number law (`GetChannelName(n)`): `/1`
+/// is slot 1, `/2` slot 2; the numbered display form ("1. General - Elwynn Forest") and the
+/// `[N. Name]` prefixes all derive from it. Fed by YOU_JOINED / YOU_LEFT notices
+/// ([`super::feed`]); the zone AUTO-join walk that fills it at login is [`super::channels`].
+///
+/// **It is a SLOT ARRAY, and leaving punches a hole rather than closing one** (1286). The client's
+/// records live in a fixed array at `[0xb4fe04]`, stride `0xa0`, with the entry's own **number**
+/// at `+0x00`; the allocator `0x49b980` scans for an entry whose number is `0` and *reuses* it
+/// (`0x49b9b0`: `cmp dword [edx],0` / `jz`), only growing when none is free and the count is under
+/// **ten** (`0x49b9c0: cmp ecx,0xa`), and the leave path `0x49bbd0` clears that number in place
+/// (`0x49bc1b: mov dword [eax+edx],0`) without shrinking the count. Lookup by index then demands
+/// the entry's number equal the index asked for (`0x49bf30: cmp esi,ecx / jnz`), so a hole answers
+/// "not joined" while every channel above it keeps its number.
+///
+/// A `Vec<String>` cannot express that: `retain` closed the hole and renumbered everything above
+/// it, so walking out of a zone renamed *other* channels — the director saw General and
+/// LocalDefense trade numbers on one zone change, and a `/2` typed after that went somewhere else.
 #[derive(Resource, Default)]
 pub(crate) struct ChannelState {
-    pub joined: Vec<String>,
+    /// Slot `i` is channel number `i + 1`; `None` is a freed slot, kept so the numbers above it
+    /// do not move. Never longer than [`MAX_CHANNELS`].
+    pub joined: Vec<Option<String>>,
     /// `ChatChannels.dbc`, loaded once at Startup ([`super::channels::load_chat_channels`]).
     ///
     /// It lives here because both of its consumers are this type's own business: composing the
@@ -178,8 +197,45 @@ impl ChannelState {
     pub(crate) fn number_of(&self, name: &str) -> Option<u32> {
         self.joined
             .iter()
-            .position(|c| c.eq_ignore_ascii_case(name))
+            .position(|c| c.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name)))
             .map(|i| i as u32 + 1)
+    }
+
+    /// The channel occupying slot `number` (1-based), if any.
+    pub(crate) fn name_of(&self, number: u32) -> Option<&str> {
+        self.joined
+            .get(usize::try_from(number.checked_sub(1)?).ok()?)?
+            .as_deref()
+    }
+
+    /// Give `name` a slot: **the first free one**, else a new one while under [`MAX_CHANNELS`] —
+    /// the reference's allocator `0x49b980` (see [`ChannelState`]). Already-joined answers its own
+    /// number rather than taking a second slot. `None` = all ten are taken.
+    ///
+    /// The reference also prints a chat error when full (`0x49b9c5: push 0x199` → `0x496720`); we
+    /// decline the join and warn instead — one line of feedback we cannot quote without the
+    /// error-string table this build indexes by id, and the structural half is what matters.
+    pub(crate) fn claim_slot(&mut self, name: &str) -> Option<u32> {
+        if let Some(n) = self.number_of(name) {
+            return Some(n);
+        }
+        if let Some(i) = self.joined.iter().position(Option::is_none) {
+            self.joined[i] = Some(name.to_string());
+            return Some(i as u32 + 1);
+        }
+        if self.joined.len() >= MAX_CHANNELS {
+            return None;
+        }
+        self.joined.push(Some(name.to_string()));
+        Some(self.joined.len() as u32)
+    }
+
+    /// Free the slot holding `name` — **cleared in place** (`0x49bbd0`), so every other channel
+    /// keeps its number. Answers the number that just went empty.
+    pub(crate) fn free_slot(&mut self, name: &str) -> Option<u32> {
+        let n = self.number_of(name)?;
+        self.joined[n as usize - 1] = None;
+        Some(n)
     }
 
     /// Fill an event's four channel slots (arg4, arg7, arg8, arg9) in place.
@@ -419,10 +475,10 @@ pub(super) fn channel_switch(
     args: &str,
 ) -> Option<(TypeSwitch, String)> {
     if let Ok(n) = cmd_lower.parse::<u32>() {
-        let name = channels.joined.get(n.checked_sub(1)? as usize)?;
+        let name = channels.name_of(n)?;
         return Some((
             TypeSwitch::Channel {
-                name: name.clone(),
+                name: name.to_string(),
                 number: n,
             },
             args.to_string(),
@@ -438,7 +494,7 @@ pub(super) fn channel_switch(
         } else {
             channels.number_of(chan)?
         };
-        let name = channels.joined.get((number - 1) as usize)?.clone();
+        let name = channels.name_of(number)?.to_string();
         return Some((TypeSwitch::Channel { name, number }, remainder.to_string()));
     }
     None

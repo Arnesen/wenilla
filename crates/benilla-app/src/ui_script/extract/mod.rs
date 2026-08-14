@@ -74,9 +74,6 @@ pub(super) fn drive_script(
     // This frame's `<Minimap>` widget slot, parked for `minimap::emit_minimap` (the UiQuadAppend
     // producer that fills the hole with tile/arrow quads — decision 0203 phase 1).
     mut minimap_widget: ResMut<crate::minimap::MinimapWidget>,
-    // Whether the digit-advance feed has run (once per raster environment: on the first frame
-    // the atlas exists, and again after every seam-scale change — `last_seam` below re-arms it).
-    mut digits_fed: Local<bool>,
     // The seam scale the engine's text-metric caches were answered under. When `s` moves (window
     // resize / fullscreen toggle / uiScale change), every cached measure is stale — see the
     // invalidation below.
@@ -116,12 +113,29 @@ pub(super) fn drive_script(
     // percent — enough that a boot-size measure fails the fullscreen fit test and the ellipsis
     // eats fitting text: the director's "Contr..." rows, reproduced by `WOW_RESIZE`). Declare the
     // staleness at the seam and let every round-trip re-answer under the new `s`.
-    if *last_seam != s {
+    let seam_moved = *last_seam != s;
+    if seam_moved {
         if *last_seam != 0.0 {
             script.invalidate_text_measures();
-            *digits_fed = false;
         }
         *last_seam = s;
+    }
+    // …and re-seat the VM's own font engine at the same edge, for the same reason: an
+    // [`crate::ui_text::AtlasMeasurer`] answers only for the seam it was built under. This is what
+    // makes a `SetText` → `GetStringWidth` pair *inside one Lua update* return a real number
+    // instead of 0 — the reference answers that getter inline (`0x79e510` → `0x772890`), and the
+    // corpus writes it that way (`Bagnon_Forever/database/ui.lua:58-59`).
+    //
+    // Seated BEFORE the tick below, so the first update that runs already has it, and rebuilt only
+    // on the seam edge or the frame the atlas first exists — an `Arc` clone and an `f32`, never a
+    // per-frame cost.
+    if let Some(atlas) = font_atlas.as_deref() {
+        if seam_moved || !script.has_text_measurer() {
+            script.set_text_measurer(Box::new(crate::ui_text::AtlasMeasurer::new(
+                atlas.metrics(),
+                s,
+            )));
+        }
     }
     // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
     // on an idle frame, and the ledger can only rank what has a name — tick (Lua OnUpdate),
@@ -197,37 +211,6 @@ pub(super) fn drive_script(
     }
     let us_resolve = lap();
     let measure_span = bevy::log::info_span!("ui_script: measure").entered();
-    // The digit-advance feed (the synchronous half of the money layout's metrics): measure
-    // NumberFontNormal's '0'..'9' once per atlas scale and push them as `BENILLA_DIGIT_W`, so
-    // `BenillaMoney_Set` can size its coin slots to their numbers *inside* one update — the real
-    // SmallMoneyFrame's GetTextWidth-mid-update shrink (MoneyFrame.lua l.202-269), which the
-    // frame-late GetStringWidth round-trip below can't serve. The font pairing comes from the
-    // registered font object (Fonts.xml stays the single source of truth).
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        if !*digits_fed {
-            if let Some(number_font) = script.font_object("NumberFontNormal") {
-                let adv = crate::ui_text::digit_advances(
-                    atlas,
-                    crate::ui_text::FontSpec {
-                        path: number_font.font.as_deref(),
-                        // The one-to-one drawn px (cap inert at NumberFontNormal's 14) × the
-                        // virtual scale; the widths divide back to UI units below.
-                        height: crate::ui_text::drawn_px(number_font.height, None, s),
-                        // The TRUE outline (NumberFontNormal is NORMAL-outlined): it selects the
-                        // baked ring cell; only a THICK outline also biases the step law
-                        // (`outline-bake-tint.md`) — either way the fed digit widths match what
-                        // the render pass actually lays.
-                        outline: number_font.outline,
-                        paint_halo: true,
-                        alpha_gradient: None,
-                    },
-                );
-                let adv = adv.map(|a| a / s);
-                script.set_digit_advances(&adv);
-                *digits_fed = true;
-            }
-        }
-    }
     // The message-line half of the round-trip: chat ring lines ask for their wrapped ROW COUNT at
     // the frame's resolved width, so the emit pass can stack real content heights (a long line
     // pushes older lines up instead of overlapping them). Same-frame like the FontString half, but
@@ -727,39 +710,14 @@ fn measure_fontstrings(
     if requests.is_empty() {
         return false;
     }
+    // Every answer goes through the ONE measure body ([`crate::ui_text::measure_request`]) the VM's
+    // own synchronous measurer calls, over the same `Arc`-shared table — so a string measured here
+    // and the same string measured mid-tick are not two computations that agree, they are one.
     let measures: Vec<(u32, f32, f32, f32, u64)> = requests
         .iter()
         .map(|r| {
-            // The full raster scale: seam × the owner frame's effective_scale. Measure at the
-            // exact drawn size and divide the whole product back out, so the frame-LOCAL answer
-            // times the layout's scale lands on the drawn glyphs to the pixel (integer-stepped
-            // advances don't commute with scaling — the request's `scale` doc).
-            let rs = s * r.scale;
-            let spec = |()| crate::ui_text::FontSpec {
-                path: r.font.as_deref(),
-                // The render pass's exact drawn px (two regimes × the full scale) —
-                // measure == render, and Lua's GetStringWidth/Height echo the DRAWN size
-                // (0x772890); results divide back to frame-local UI units below.
-                height: crate::ui_text::drawn_px(r.height, r.text_height, rs),
-                // The TRUE outline: THICK biases the client's step law (+1px per glyph —
-                // GlyphStepBase 0x5ca2b0, THICK-only per outline-bake-tint.md) and any outline
-                // adds the +2r line pitch, so measure must see it.
-                outline: r.outline,
-                paint_halo: true,     // measure never paints; irrelevant here
-                alpha_gradient: None, // alpha never changes metrics
-            };
-            let wrap = r.wrap_width.map(|w| w * rs);
-            let (w, h) = crate::ui_text::measure_text(atlas, &r.text, wrap, spec(()));
-            // …and the NATURAL width, which is what `GetStringWidth` answers with (the reference
-            // measures its getter's string with no wrap constraint — wow-re
-            // `fontstring-overflow.md`, "The measurement echo"). A second pass only for the
-            // regions that actually carry a declared width; for the rest the two are one number.
-            let natural = if wrap.is_some() {
-                crate::ui_text::measure_text(atlas, &r.text, None, spec(())).0
-            } else {
-                w
-            };
-            (r.id, w / rs, h / rs, natural / rs, r.key)
+            let (w, h, natural) = crate::ui_text::measure_request(&atlas.metrics, s, r);
+            (r.id, w, h, natural, r.key)
         })
         .collect();
     script.set_measured_text(&measures);

@@ -889,6 +889,24 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) 
     }
 }
 
+/// A fixed-advance stand-in font engine for tests — every character `.0` wide, one line tall,
+/// greedily wrapped. The *numbers* the real engine produces are pinned against the client's own
+/// fonts by `ui_text::atlas::metrics_tests`; a fixture wants arithmetic a reader can do in their
+/// head, and wants a measure to arrive **in the tick that asked** exactly as the app's does.
+#[cfg(test)]
+pub(crate) struct FixedWidthFont(pub(crate) f32);
+
+#[cfg(test)]
+impl benilla_ui::script::TextMeasure for FixedWidthFont {
+    fn measure(&mut self, req: &benilla_ui::script::MeasureRequest) -> (f32, f32, f32) {
+        let natural = req.text.chars().count() as f32 * self.0;
+        match req.wrap_width {
+            Some(w) if w > 0.0 && natural > w => (w, 12.0 * (natural / w).ceil(), natural),
+            _ => (natural, 12.0, natural),
+        }
+    }
+}
+
 #[cfg(test)]
 mod cast_tests;
 
