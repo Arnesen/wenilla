@@ -293,7 +293,12 @@ fn read_under(root: &Path, rel: &str) -> Option<Vec<u8>> {
 /// install, it does not live in one. Resolved through [`crate::local_state`], the only module
 /// allowed to compute that path (0954) — which is already `None` under `$WOW_CAPTURE`, so a
 /// deterministic baseline cannot depend on what somebody has installed (0008).
-fn root() -> Option<PathBuf> {
+///
+/// `pub(crate)` since 1322: the texture side needs the same folder — the sprite decoder's
+/// `Interface\AddOns\` loose-file resolve and the `SetTexture` probe both map that virtual prefix
+/// onto this root (`ui_script::lifecycle::install_texture_resolvers`), so there is exactly one
+/// answer to "where do addons live" however the question is asked.
+pub(crate) fn root() -> Option<PathBuf> {
     root_from(crate::local_state::home())
 }
 

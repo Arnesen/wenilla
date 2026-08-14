@@ -1800,10 +1800,15 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
 
     // t=0: invisible, full size, held a whole fall above the button (and a drift to its left) —
     // the .m2's alpha key (0.000, 0.0), scale key (0.000, 1.0), translation (0.000, (0,0)).
+    //
+    // The pixel figures below are the model's own ratios at the <Model> widget's REAL projection
+    // (1280 px per model unit at this template's modelScale of 1 — BagFrame.xml's header carries
+    // the derivation and why the 1200 that produced 36/48/12 was a back-fit). Same animation,
+    // 6.7% larger: a 38.4 px card, a 51.2 px fall, a 12.8 px drift.
     let (dx, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 48.0).abs() < 0.5 && (dx + 12.0).abs() < 0.5,
-        "starts one fall (48px) above and one drift (12px) left of the button: got ({dx}, {dy})"
+        (dy - 51.2).abs() < 0.5 && (dx + 12.8).abs() < 0.5,
+        "starts one fall (51.2px) above and one drift (12.8px) left: got ({dx}, {dy})"
     );
     assert!(
         alpha(&s, "CharacterBag1Slot") < 0.01,
@@ -1818,19 +1823,19 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
         "opaque by the alpha track's second key"
     );
     assert!(
-        (size(&s, "CharacterBag1Slot") - 36.0 * 1.2).abs() < 0.5,
-        "swollen to 1.2x the 36px icon at the scale track's peak"
+        (size(&s, "CharacterBag1Slot") - 38.4 * 1.2).abs() < 0.5,
+        "swollen to 1.2x the 38.4px card at the scale track's peak"
     );
 
     // t=0.267: back to the icon's own size, still opaque, still parked.
     s.tick(0.134);
     s.resolve();
     assert!(
-        (size(&s, "CharacterBag1Slot") - 36.0).abs() < 0.5,
-        "settled back to the 36px icon at the scale track's third key"
+        (size(&s, "CharacterBag1Slot") - 38.4).abs() < 0.5,
+        "settled back to the 38.4px card at the scale track's third key"
     );
     let (_, dy) = offset(&s, "CharacterBag1Slot");
-    assert!((dy - 48.0).abs() < 0.5, "has not started falling: got {dy}");
+    assert!((dy - 51.2).abs() < 0.5, "has not started falling: got {dy}");
 
     // t=0.5: STILL PARKED — the translation track's second key is (0,0), so the whole first half
     // second is a hang above the bar. The other two tracks are already running down, though: the
@@ -1840,11 +1845,11 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.resolve();
     let (_, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 48.0).abs() < 0.5,
+        (dy - 51.2).abs() < 0.5,
         "has not moved yet at the half second: got {dy}"
     );
     assert!(
-        (size(&s, "CharacterBag1Slot") - 36.0 * 0.686).abs() < 0.5,
+        (size(&s, "CharacterBag1Slot") - 38.4 * 0.686).abs() < 0.5,
         "but is already dwindling: got {}",
         size(&s, "CharacterBag1Slot")
     );
@@ -1859,7 +1864,7 @@ fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
     s.resolve();
     let (_, dy) = offset(&s, "CharacterBag1Slot");
     assert!(
-        (dy - 24.0).abs() < 0.5,
+        (dy - 25.6).abs() < 0.5,
         "half the fall travelled by t=0.75: got {dy}"
     );
 

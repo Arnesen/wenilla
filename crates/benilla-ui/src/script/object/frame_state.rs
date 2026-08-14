@@ -198,34 +198,99 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             }
         })?,
     )?;
+    // SetParent — the runtime reparent, per the byte-verified law (wow-re
+    // `ui/scratch/setparent-runtime-strata-level.md`; decision 1323). The binding half
+    // (`0x7a1550`): the parent argument is a frame table, a NAME string (`0x76c760`), or an
+    // explicit nil — an ABSENT argument is NOT the nil path (`0x6f3400` returns −1) and raises
+    // like an unresolvable name; the cycle guard is the binding's own inline ancestor walk and
+    // RAISES (`0x87cb14`), it does not silently no-op. The arena half is
+    // `reparent_begin`/`reparent_finish`, split so `OnHide` fires between them the way the
+    // reference's hide→show round-trip does — `fire_visibility_changes` reads each frame's live
+    // state for direction, so hide and show must be fired from their own phase, never one
+    // combined list.
     m.set(
         "SetParent",
-        lua.create_function(|lua, (this, parent): (Table, Value)| {
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            let mut it = args.into_iter();
+            let this = match it.next() {
+                Some(Value::Table(t)) => t,
+                _ => return Err(mlua::Error::runtime("expected a frame")),
+            };
             let h = frame_handle_of(lua, &this)?;
+            let who = {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                model
+                    .arena
+                    .frame(h)
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_else(|| "<unnamed>".to_string())
+            };
+            let parent_arg = it.next();
             let new_parent = {
                 let model = lua.app_data_ref::<Model>().expect("model");
-                match &parent {
-                    Value::Table(t) => decode_id(t)
-                        .ok()
-                        .and_then(|id| model.id_to_frame.get(&id).copied()),
-                    Value::String(s) => {
-                        s.to_str().ok().and_then(|n| model.arena.lookup(n.as_ref()))
+                match &parent_arg {
+                    // Explicit nil reparents to the screen root (the strata/level RESET path).
+                    Some(Value::Nil) => None,
+                    Some(Value::Table(t)) => Some(
+                        decode_id(t)
+                            .ok()
+                            .and_then(|id| model.id_to_frame.get(&id).copied())
+                            .ok_or_else(|| {
+                                mlua::Error::runtime(format!(
+                                    "{who}:SetParent(): Couldn't find region named ''"
+                                ))
+                            })?,
+                    ),
+                    Some(Value::String(s)) => {
+                        let n = s.to_str()?.to_string();
+                        Some(model.arena.lookup(&n).ok_or_else(|| {
+                            mlua::Error::runtime(format!(
+                                "{who}:SetParent(): Couldn't find region named '{n}'"
+                            ))
+                        })?)
                     }
-                    _ => None,
+                    // Absent argument, or any other type: the reference never reaches the
+                    // reparent slot (`0x87cb48` raise).
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "{who}:SetParent(): Couldn't find region named ''"
+                        )))
+                    }
                 }
             };
-            let changed = {
+            // The cycle guard raises — `"%s:SetParent(): Would create a loop parenting to %s"`
+            // (`0x7a177f`'s inline `+0x9c` walk, `newParent == self` included).
+            if let Some(np) = new_parent {
+                let model = lua.app_data_ref::<Model>().expect("model");
+                if np == h || model.arena.is_ancestor(h, np) {
+                    let pname = model
+                        .arena
+                        .frame(np)
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_else(|| "<unnamed>".to_string());
+                    return Err(mlua::Error::runtime(format!(
+                        "{who}:SetParent(): Would create a loop parenting to {pname}"
+                    )));
+                }
+            }
+            let hidden = {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                let before = model.arena.frame(h).and_then(|f| f.parent);
-                let changed = model.arena.set_parent(h, new_parent);
-                // A real reparent can move the subtree's effective scale — a layout-gate input
-                // (the arena rejects same-parent/cycle calls, so `before` moving is the test).
-                if model.arena.frame(h).and_then(|f| f.parent) != before {
-                    model.touch_layout();
-                }
-                changed
+                model.arena.reparent_begin(h, new_parent)
             };
-            event::fire_visibility_changes(lua, changed);
+            // None = the verified total no-op (same parent, `0x76ab20`): nothing runs, not even
+            // the layout touch.
+            let Some(hidden) = hidden else { return Ok(()) };
+            let was_visible = !hidden.is_empty();
+            event::fire_visibility_changes(lua, hidden);
+            let shown = {
+                let mut model = lua.app_data_mut::<Model>().expect("model");
+                let shown = model.arena.reparent_finish(h, new_parent, was_visible);
+                // A real reparent moves the subtree's effective scale and anchors — a
+                // layout-gate input.
+                model.touch_layout();
+                shown
+            };
+            event::fire_visibility_changes(lua, shown);
             Ok(())
         })?,
     )?;

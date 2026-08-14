@@ -16,6 +16,9 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 
 mod chain;
 pub use chain::{Chain, ChainEntry};
+/// The UI texture table's other half — loose `.tga` art (addon folders; decision 1322).
+mod tga;
+pub use tga::tga_to_rgba;
 /// Where the WoW install is — the one resolver (decision 1175). Paired with [`Chain`]: this says
 /// *where*, that opens it.
 mod install;

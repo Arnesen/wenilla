@@ -518,22 +518,33 @@ fn local_self_cancel(
     }
 }
 
-/// The casting bar's **label** for a spell — the `name` argument of `SPELLCAST_START` /
-/// `SPELLCAST_CHANNEL_START`, which the reference `CastingBarFrame` puts straight into
-/// `CastingBarText:SetText(...)`.
+/// `SPELLCAST_START`'s **name argument** — what the reference `CastingBarFrame` puts straight into
+/// `CastingBarText:SetText(...)` for a *cast*. Byte-verified at `0x6e7a2d`–`0x6e7a47` (wow-re
+/// `spell/scratch/wave-cast.md`, "The casting-bar TEXT law", §5 cross-checked): the handler tests
+/// `AttributesEx3 & 0x4` and pushes **the empty string `0x882748`** when set, `Name[locale]` when
+/// clear — the event still fires either way, carrying its duration, so the bar is a normal
+/// full-length *untitled* bar rather than a hidden one.
 ///
-/// Almost always the spell's `Spell.dbc` name, with two ways to come back empty:
+/// So two ways to come back empty:
 ///
-/// - **`AttributesEx3 & 0x4`** (`SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`,
-///   [`SpellDisplay::no_casting_bar_text`]) — the attribute that exists precisely so an internal
+/// - **`AttributesEx3 & 0x4`** ([`SpellDisplay::no_casting_bar_text`], the emulators'
+///   `SPELL_ATTR_EX3_NO_CASTING_BAR_TEXT`) — the attribute that exists precisely so an internal
 ///   spell with no player-facing name never puts one on the bar. Three shipped rows carry it, and
-///   one of them is *named after the bit*: **22810 "Opening - No Text"**, the opener the client
-///   casts at `LockType 13` ground containers. Printing the name unconditionally is what put that
-///   placeholder over a gathered Hyacinth Mushroom (B247, decision 1312).
+///   one is *named after the bit*: **22810 "Opening - No Text"**, the opener the client casts at
+///   `LockType 13` ground containers. Printing the name regardless is what put that placeholder
+///   over a gathered Hyacinth Mushroom (B247, decision 1312).
 /// - **no catalog row** (an unknown id, or no client data) — the empty string this always
 ///   returned in that case.
 ///
-/// The bar still shows, fills and sweeps either way; only the text is suppressed.
+/// **This is the CAST bar's law and it does not generalise to the channel bar** — which is why
+/// this is `SPELLCAST_START`'s label and not a shared helper. `0x6e7a2d` is the only
+/// `SpellRec+0x24 & 4` test in the whole image (censused twice), and the channel handler
+/// `0x6e7550` gates on entirely different bits: `AttributesEx3 & 0x2000` fires **no event at all**,
+/// and the name is `Name[locale]` only when `AttributesEx & 0x2000_0000` is set, otherwise the
+/// literal `GetText("CHANNELING")`. Neither is modelled yet — [`CastBarEdge::ChannelStart`] still
+/// passes the plain name — so a channel bar can read a spell name where the reference reads
+/// "Channeling". Named residual, not an oversight: it is a visible change to every channelled
+/// spell and wants the director's eye, not a silent fold-in.
 fn cast_bar_label(spells: Option<&crate::ui_action::Spells>, id: u32) -> String {
     spells
         .and_then(|s| s.catalog.get(id))
@@ -585,7 +596,15 @@ fn feed_cast_bar(
     script.set_casting(
         auto_repeat.0.is_some() || inflight(&pending, &queued_melee, started, now).is_some(),
     );
-    let name = |id: u32| cast_bar_label(spells.as_deref(), id);
+    // The two bars take their names from DIFFERENT laws — see [`cast_bar_label`]. The plain
+    // `Spell.dbc` name is the channel bar's (incomplete) one; the cast bar's is attribute-gated.
+    let channel_name = |id: u32| -> String {
+        spells
+            .as_ref()
+            .and_then(|s| s.catalog.get(id))
+            .map(|d| d.name.clone())
+            .unwrap_or_default()
+    };
     for edge in feed.0.drain(..) {
         let (event, args): (&str, Vec<ScriptValue>) = match edge {
             CastBarEdge::Start {
@@ -594,7 +613,7 @@ fn feed_cast_bar(
             } => (
                 "SPELLCAST_START",
                 vec![
-                    ScriptValue::Str(name(spell_id)),
+                    ScriptValue::Str(cast_bar_label(spells.as_deref(), spell_id)),
                     ScriptValue::Int(i64::from(cast_time_ms)),
                 ],
             ),
@@ -612,7 +631,7 @@ fn feed_cast_bar(
                 "SPELLCAST_CHANNEL_START",
                 vec![
                     ScriptValue::Int(i64::from(duration_ms)),
-                    ScriptValue::Str(name(spell_id)),
+                    ScriptValue::Str(channel_name(spell_id)),
                 ],
             ),
             CastBarEdge::ChannelUpdate { remaining_ms: 0 } => ("SPELLCAST_CHANNEL_STOP", vec![]),
@@ -680,7 +699,8 @@ mod tests {
         assert_eq!(
             cast_bar_label(Some(&spells), 22810),
             "",
-            "the bar fills and sweeps, but shows no name"
+            "the event still fires carrying its duration — a full-length UNTITLED bar, \
+             not a hidden one (0x6e7a33 pushes the empty string, then fires as usual)"
         );
         // The pre-existing empty cases are untouched: an unknown id, and no client data at all.
         assert_eq!(cast_bar_label(Some(&spells), 133), "");

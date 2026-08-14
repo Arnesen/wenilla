@@ -154,6 +154,7 @@ pub use mail::{MailInboxRow, MailSendRequest, MailState};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
+pub use model::TextureProbe;
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo};
 pub use pet::{PetActionView, PetStats};
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};

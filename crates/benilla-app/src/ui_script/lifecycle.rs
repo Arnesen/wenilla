@@ -48,7 +48,7 @@ pub(crate) fn setup_script(world: &mut World) {
 /// dropped the VM and skipped index 0 on the in-game load would fail exactly there — verified in
 /// wow-re's §5 for this change (1291).
 fn install_boot_vm(world: &mut World) {
-    let script = match UiScript::new() {
+    let mut script = match UiScript::new() {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
@@ -56,6 +56,7 @@ fn install_boot_vm(world: &mut World) {
             return;
         }
     };
+    install_texture_resolvers(world, &mut script);
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
     if ui_wanted(world) {
@@ -64,6 +65,33 @@ fn install_boot_vm(world: &mut World) {
         let _ = load_font_registry(&script);
     }
     world.insert_non_send_resource(script);
+}
+
+/// Wire up the two halves of `Interface\AddOns\` texture art (decision 1322): the sprite
+/// decoder's **loose-file root** (so addon-shipped BLP/TGA files render at all — the store's
+/// [`benilla_assets::WorldAssets::set_loose_sprite_root`]) and the VM's **texture probe** (so the
+/// path form of `SetTexture` can answer the reference's 1|nil load verdict — Atlas picks its map
+/// art by that return). Both resolve the same one folder ([`addons::root`], hermetic-`None` under
+/// `$WOW_CAPTURE`), and the probe walks the same [`benilla_assets::sprite_candidates`] the
+/// renderer decodes with, so the verdict the Lua caller gets is the verdict the screen shows.
+///
+/// No `WorldAssets` (no client data) means no backend: nothing to install, and the VM's path form
+/// keeps answering nil — the engine-less truth.
+fn install_texture_resolvers(world: &mut World, script: &mut UiScript) {
+    let root = addons::root();
+    let Some(mut assets) = world.get_resource_mut::<benilla_assets::WorldAssets>() else {
+        return;
+    };
+    assets.set_loose_sprite_root(root.clone());
+    let chain = assets.chain.clone();
+    script.set_texture_probe(Box::new(move |path| {
+        benilla_assets::sprite_candidates(path).iter().any(|c| {
+            chain.lock_recover().contains(c)
+                || root
+                    .as_deref()
+                    .is_some_and(|r| benilla_assets::loose_sprite_file(r, c).is_some())
+        })
+    }));
 }
 
 /// Does this run want the player UI at all? Captures stay pristine — their baselines regression-test

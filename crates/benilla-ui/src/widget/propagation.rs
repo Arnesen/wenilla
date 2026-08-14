@@ -241,38 +241,88 @@ impl WidgetArena {
         }
     }
 
-    // ── Reparenting (set_parent) ─────────────────────────────────────────────────────────────────
+    // ── Reparenting (reparent_begin / reparent_finish) ───────────────────────────────────────────
 
-    /// Reparent `h` under `new_parent` (or `None` for top-level), then propagate effective
-    /// visibility, scale, and alpha down `h`'s subtree — `SetParent` re-inherits the parent chain's
-    /// `effectiveVisible` (`frame-model.md`), and effective scale/alpha likewise depend on the
-    /// chain. Returns the frames whose `effective_visible` changed (as [`set_shown`](Self::set_shown)
-    /// does), so the caller can fire `OnShow`/`OnHide`.
+    /// The runtime reparent, phase 1 of 2 — the guards and the **hide half** of
+    /// `CSimpleFrame::SetParent 0x76ab10`'s byte-verified sequence (wow-re
+    /// `ui/scratch/setparent-runtime-strata-level.md` §2; decision 1323, which corrects this
+    /// module's previous "strata/level are NOT changed by reparenting" — refuted at `0x76ab65`).
     ///
-    /// A reparent that would create a cycle (making `h` its own ancestor) is rejected as a no-op —
-    /// the client guards this with `is_descendant 0x767010` (`propagation.md`). Strata/level are NOT
-    /// changed by reparenting (a frame keeps them until explicitly set).
-    pub fn set_parent(
+    /// Returns `None` for the byte-verified TOTAL no-op — `newParent == currentParent` (`0x76ab20`
+    /// skips *everything*) — and for a dead handle or a cycle (the Lua binding raises on a cycle
+    /// *before* calling here, per the binding's own inline `+0x9c` walk at `0x7a177f`; a direct
+    /// caller gets the silent reject as a backstop). Otherwise `Some(hidden)`: every frame whose
+    /// effective visibility just dropped, in pre-order — empty when the frame was not effectively
+    /// visible ("a reparent of a hidden frame fires neither" event). The caller fires `OnHide` for
+    /// those and then calls [`Self::reparent_finish`]; the hide runs while the frame still hangs
+    /// under its OLD parent, as the reference's `0x76ab41` does before the `+0x9c` store, so an
+    /// `OnHide` handler observes the old parent. (One knowing divergence: the reference unlinks
+    /// from the old parent's child list *before* the hide, so an `OnHide` calling
+    /// `oldParent:GetChildren()` no longer sees the frame there; ours still does — the relink is
+    /// phase 2's, so a handler that itself reparents can't leave the lists half-spliced.)
+    pub fn reparent_begin(
         &mut self,
         h: FrameHandle,
         new_parent: Option<FrameHandle>,
-    ) -> Vec<FrameHandle> {
-        let mut changed = Vec::new();
-        if self.frame(h).is_none() {
-            return changed;
-        }
+    ) -> Option<Vec<FrameHandle>> {
+        self.frame(h)?;
         // Keep only a live new parent; reject a cycle (new_parent == h or below h).
         let new_parent = new_parent.filter(|&p| self.frame(p).is_some());
         if let Some(np) = new_parent {
             if np == h || self.is_ancestor(h, np) {
-                return changed;
+                return None;
             }
         }
-
-        let old_parent = self.frame(h).unwrap().parent;
-        if old_parent == new_parent {
-            return changed;
+        if self.frame(h).unwrap().parent == new_parent {
+            return None;
         }
+        let mut hidden = Vec::new();
+        if self.frame(h).unwrap().effective_visible {
+            self.propagate_visible(h, false, &mut hidden);
+        }
+        Some(hidden)
+    }
+
+    /// Phase 2 — the relink and the rest of `0x76ab10`'s verified sequence: **strata := parent's**
+    /// (`0x76ab5a` → the value-gated subtree force of [`Self::set_frame_strata`]; MEDIUM for nil),
+    /// **level := parent.level + 1 with `propagate = 0`** (`0x76ab65`; 0 for nil), scale
+    /// re-inherit, then the **show half**. Returns the frames whose effective visibility came back
+    /// (fire `OnShow` for those, in order).
+    ///
+    /// Load-bearing consequences, each verified in the note:
+    ///
+    /// - **Existing children keep their absolute levels** (`propagate = 0`; `level_compact
+    ///   0x764eb0`'s one caller is the toplevel Raise, unreachable from here). A child created when
+    ///   the parent sat lower can land BELOW its own parent — the client ships that and nothing
+    ///   repairs it but the child's own `SetFrameLevel` (which is exactly what AtlasLoot's
+    ///   button templates do in `OnShow`, and why its browse panel works on the reference).
+    /// - **The show half is gated on `was_visible`** (`0x76abfd`: `ebx && (parent==0 ||
+    ///   parent->+0xd4)`) — the `+0xd4` cascade only runs inside `0x76ae10`, so a reparent of a
+    ///   hidden (or hidden-chained) frame does NOT recompute effective visibility: moved under a
+    ///   visible parent it stays effectively invisible until something shows it. That staleness is
+    ///   the shipped behaviour, not an oversight to "fix" here.
+    /// - The `OnShow` refire down the re-shown subtree is what lets an addon hand-repair the
+    ///   propagate-0 level law (`this:SetFrameLevel(GetParent():GetFrameLevel()+1)` in `OnShow` —
+    ///   the reference fires it via the `+0x84`/`+0x88` hide→show round-trip on any visible
+    ///   reparent).
+    ///
+    /// `was_visible` is phase 1's `!hidden.is_empty()` — the reference's `ebx`, captured at
+    /// `0x76ab2b` before anything runs. Alpha stays untouched throughout: the client only pushes
+    /// alpha at `SetAlpha` time (module alpha section).
+    pub fn reparent_finish(
+        &mut self,
+        h: FrameHandle,
+        new_parent: Option<FrameHandle>,
+        was_visible: bool,
+    ) -> Vec<FrameHandle> {
+        let mut shown = Vec::new();
+        if self.frame(h).is_none() {
+            return shown; // died inside an OnHide — nothing left to move
+        }
+        let new_parent = new_parent.filter(|&p| self.frame(p).is_some());
+        // Relink from the CURRENT parent (an OnHide handler may itself have reparented; the
+        // reference's unconditional `+0x9c` store at `0x76ab49` means the outer call wins).
+        let old_parent = self.frame(h).unwrap().parent;
         if let Some(op) = old_parent {
             if let Some(of) = self.frame_mut(op) {
                 of.children.retain(|&c| c != h);
@@ -283,13 +333,41 @@ impl WidgetArena {
             self.frame_mut(np).unwrap().children.push(h);
         }
 
-        let pv = self.parent_visible(h);
-        self.propagate_visible(h, pv, &mut changed);
+        let (pstrata, plevel) = match new_parent {
+            Some(np) => {
+                let pf = self.frame(np).expect("live new parent");
+                (pf.strata, pf.level.saturating_add(1))
+            }
+            // SetParent(nil) is a RESET — strata 3 (MEDIUM), level 0 (`0x76aba3`/`0x76abac`) —
+            // not "keep current".
+            None => (Strata::default(), 0),
+        };
+        self.set_frame_strata(h, pstrata);
+        self.set_frame_level(h, plevel, false);
         let ps = self.parent_effective_scale(h);
         self.propagate_scale(h, ps);
-        // Alpha: untouched by a reparent — the client only pushes alpha at SetAlpha time
-        // (module alpha section), so the moved subtree keeps its last-written values.
-        changed
+
+        if was_visible && self.parent_visible(h) {
+            self.propagate_visible(h, true, &mut shown);
+        }
+        shown
+    }
+
+    /// [`Self::reparent_begin`] + [`Self::reparent_finish`] in one call, for callers with no Lua
+    /// to fire between the halves (tests, direct arena use). Returns both phases' visibility
+    /// changes concatenated — hide half first. The Lua binding does NOT use this: it must fire
+    /// `OnHide` between the phases (the events' direction is read from live state at fire time).
+    pub fn set_parent(
+        &mut self,
+        h: FrameHandle,
+        new_parent: Option<FrameHandle>,
+    ) -> Vec<FrameHandle> {
+        let Some(hidden) = self.reparent_begin(h, new_parent) else {
+            return Vec::new();
+        };
+        let was_visible = !hidden.is_empty();
+        let shown = self.reparent_finish(h, new_parent, was_visible);
+        [hidden, shown].concat()
     }
 
     /// Re-link a **region leaf** (Texture/FontString) to a new owner frame — the arena half of

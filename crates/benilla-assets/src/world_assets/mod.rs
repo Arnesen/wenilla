@@ -17,6 +17,7 @@
 //! a texture+blend share a material handle — which is what lets Bevy batch draws.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bevy::image::Image;
@@ -25,7 +26,7 @@ use bevy::render::render_resource::{Buffer, Face};
 
 use crate::materials::{WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
 use crate::SpatialCache;
-use benilla_formats::{read_texture_mip_chain, read_texture_rgba, Chain, ModelBlend};
+use benilla_formats::{blp_to_rgba, read_texture_mip_chain, tga_to_rgba, Chain, ModelBlend};
 
 /// BLP/RGBA -> Bevy `Image` texture helpers (+ solid/cursor/liquid-frame textures). Split out for
 /// size; re-exported so callers keep using `benilla_assets::{solid_layer_chain, …}`.
@@ -69,6 +70,16 @@ pub struct WorldAssets {
     /// (decision 0203). Its own cache for the same reason as the others: the format is baked into
     /// the GPU image.
     masks: HashMap<String, Option<Handle<Image>>>,
+    /// The **loose-file root for `Interface\AddOns\` sprite paths** — the AddOns folder, installed
+    /// by the app ([`Self::set_loose_sprite_root`]), `None` until then and in every capture run
+    /// (the app resolves it through `local_state`, which is hermetic under `$WOW_CAPTURE`).
+    ///
+    /// Addon art never lives in an MPQ: the reference's Storm open reads loose files from the game
+    /// directory, which is how `<Texture file="Interface\AddOns\Atlas\Images\…"/>` works at all.
+    /// Our equivalent maps that virtual prefix onto the one addon root (decision 1185's single
+    /// folder; decision 1322). Only the UI-sprite decoders consult it — world art has no business
+    /// under `AddOns\`.
+    loose_root: Option<PathBuf>,
     /// Materials deduped by their identity (texture path + blend, or the untextured fallback).
     pub model_materials: SpatialCache<MaterialKey, Handle<WowModelMaterial>>,
     /// The shared global-light storage buffer (`lighting::global_light`). Held here so `model_material`
@@ -165,22 +176,90 @@ pub fn sprite_candidates(path: &str) -> [String; 2] {
 /// runtime from a DBC.
 ///
 /// Walks [`sprite_candidates`] in order and takes the first that both reads and decodes; only when
-/// **both** fail is it a miss. A candidate that reads but won't decode falls through exactly like
+/// **all** fail is it a miss. A candidate that reads but won't decode falls through exactly like
 /// one that isn't there — the reference's two loaders both fail silently, so a bad first candidate
 /// can't poison the second.
-fn decode_sprite(chain: &Mutex<Chain>, path: &str) -> Option<(u32, u32, Vec<u8>)> {
+///
+/// Each candidate is asked of **two stores**: the patch chain, then — for `Interface\AddOns\`
+/// paths — the loose addon folder ([`loose_sprite_file`], decision 1322). The chain never holds an
+/// `AddOns\` path (Blizzard's own `Blizzard_*` stubs aside, addon art only exists on disk), so the
+/// order between the stores is unobservable; chain-first keeps every non-addon path on exactly the
+/// code it always ran.
+fn decode_sprite(
+    chain: &Mutex<Chain>,
+    loose_root: Option<&Path>,
+    path: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
     let candidates = sprite_candidates(path);
     let mut chain = chain.lock_recover();
     for candidate in &candidates {
-        if let Ok(decoded) = read_texture_rgba(&mut chain, candidate) {
-            return Some(decoded);
+        if let Ok(bytes) = chain.read_file(candidate) {
+            if let Ok(decoded) = decode_sprite_bytes(&bytes) {
+                return Some(decoded);
+            }
+        }
+        if let Some(file) = loose_root.and_then(|root| loose_sprite_file(root, candidate)) {
+            if let Ok(decoded) = std::fs::read(&file)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| decode_sprite_bytes(&bytes))
+            {
+                return Some(decoded);
+            }
         }
     }
     warn!(
-        "texture miss: '{path}' does not resolve in the patch chain (tried {})",
+        "texture miss: '{path}' does not resolve in the patch chain{} (tried {})",
+        if loose_root.is_some() {
+            " or the AddOns folder"
+        } else {
+            ""
+        },
         candidates.join(", ")
     );
     None
+}
+
+/// Decode one candidate's bytes to RGBA8, picking the format by content: a `BLP2` magic is a BLP,
+/// anything else is offered to the TGA decoder (TGA has no magic; its header validation is the
+/// gate). Content, not extension, because the ecosystem mislabels freely — a BLP named `.tga` and
+/// the reverse both ship in real addon folders, and the pixel bytes always know what they are.
+fn decode_sprite_bytes(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    if bytes.starts_with(b"BLP2") {
+        blp_to_rgba(bytes)
+    } else {
+        tga_to_rgba(bytes)
+    }
+}
+
+/// Map a **normalized** sprite candidate (`interface\addons\<addon>\<…>.blp`, lowercase,
+/// backslashed — [`normalize_path`] has run) onto a file under the loose addon root, or `None` if
+/// it is not an `Interface\AddOns\` path or nothing is there.
+///
+/// The walk matches each component **case-insensitively** (exact join first — free on the
+/// case-insensitive filesystems macOS installs default to — then a `read_dir` scan): the reference
+/// is a Windows client and addons reference their own art in arbitrary case. The candidate cannot
+/// escape the root — `normalize_path` leaves no `/`, and any dot-component is refused before a
+/// filesystem call happens (same lexical posture as `ui_script::addons::read_under`).
+pub fn loose_sprite_file(root: &Path, candidate: &str) -> Option<PathBuf> {
+    let rel = candidate.strip_prefix("interface\\addons\\")?;
+    let mut at = root.to_path_buf();
+    for comp in rel.split('\\') {
+        if comp.is_empty() || comp.starts_with('.') {
+            return None;
+        }
+        let direct = at.join(comp);
+        if direct.exists() {
+            at = direct;
+            continue;
+        }
+        let found = std::fs::read_dir(&at).ok()?.flatten().find(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(comp))
+        })?;
+        at = found.path();
+    }
+    at.is_file().then_some(at)
 }
 
 /// Mutate an asset only when `differs` says its current state doesn't already match.
@@ -256,9 +335,25 @@ impl WorldAssets {
             tiled_sprites: HashMap::new(),
             portraits: HashMap::new(),
             masks: HashMap::new(),
+            loose_root: None,
             model_materials: SpatialCache::default(),
             shared_light,
         }
+    }
+
+    /// Install (or clear) the loose-file root for `Interface\AddOns\` sprite paths — see the
+    /// [`Self::loose_root`] field doc. Called by the app once it knows the AddOns folder; evicts
+    /// cached **misses** so a path asked before the root existed gets a second look (a cached hit
+    /// can only have come from the chain and stays right).
+    pub fn set_loose_sprite_root(&mut self, root: Option<PathBuf>) {
+        if self.loose_root == root {
+            return;
+        }
+        self.loose_root = root;
+        self.sprites.retain(|_, v| v.is_some());
+        self.tiled_sprites.retain(|_, v| v.is_some());
+        self.portraits.retain(|_, v| v.is_some());
+        self.masks.retain(|_, v| v.is_some());
     }
 
     /// Decode + upload a BLP once per path; later requests for the same texture share the handle.
@@ -300,7 +395,7 @@ impl WorldAssets {
         if let Some(cached) = self.sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, path)
+        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
             .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
         self.sprites.insert(key, loaded.clone());
         loaded
@@ -311,7 +406,7 @@ impl WorldAssets {
     /// which resizes the 128×32 frame to the plate's exact size). Same extensionless→`.blp` resolve
     /// as [`Self::sprite_texture`]; not cached (a one-shot decode at load, not a per-frame ask).
     pub fn decode_rgba(&mut self, path: &str) -> Option<(u32, u32, Vec<u8>)> {
-        decode_sprite(&self.chain, path)
+        decode_sprite(&self.chain, self.loose_root.as_deref(), path)
     }
 
     /// A UI sprite decoded with **repeat** (wrap) addressing — the frame `Backdrop` tiled pieces
@@ -328,7 +423,7 @@ impl WorldAssets {
         if let Some(cached) = self.tiled_sprites.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, path)
+        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
             .map(|(w, h, rgba)| images.add(sprite_image_tiled(w, h, rgba)));
         self.tiled_sprites.insert(key, loaded.clone());
         loaded
@@ -347,7 +442,7 @@ impl WorldAssets {
         if let Some(cached) = self.portraits.get(&key) {
             return cached.clone();
         }
-        let loaded = decode_sprite(&self.chain, path)
+        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
             .map(|(w, h, rgba)| images.add(portrait_image(w, h, rgba)));
         self.portraits.insert(key, loaded.clone());
         loaded
@@ -365,8 +460,8 @@ impl WorldAssets {
         if let Some(cached) = self.masks.get(&key) {
             return cached.clone();
         }
-        let loaded =
-            decode_sprite(&self.chain, path).map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
+        let loaded = decode_sprite(&self.chain, self.loose_root.as_deref(), path)
+            .map(|(w, h, rgba)| images.add(mask_image(w, h, rgba)));
         self.masks.insert(key, loaded.clone());
         loaded
     }
@@ -381,8 +476,11 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let (w, h, rgba) =
-            read_texture_rgba(&mut self.chain.lock_recover(), &normalize_path(path)).ok()?;
+        let (w, h, rgba) = benilla_formats::read_texture_rgba(
+            &mut self.chain.lock_recover(),
+            &normalize_path(path),
+        )
+        .ok()?;
         Some(images.add(cursor_texture(w, h, rgba)))
     }
 
@@ -518,4 +616,48 @@ pub struct RenderConfig {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetSet {
     Open,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The disk tree spells its names in mixed case, the candidate arrives normalized-lowercase
+    /// (as [`sprite_candidates`] always hands it over) — the walk must land on the file anyway,
+    /// because the reference is a Windows client and addon authors never matched their own case.
+    #[test]
+    fn loose_sprite_file_maps_addon_paths_case_insensitively() {
+        let root =
+            std::env::temp_dir().join(format!("benilla-loose-sprite-test-{}", std::process::id()));
+        let dir = root.join("Atlas").join("Images").join("Maps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("BlackrockDepths.blp"), b"x").unwrap();
+
+        // The returned SPELLING is filesystem-dependent (a case-insensitive filesystem answers
+        // the exact-join fast path with the candidate's own casing), so the claim is that the
+        // path opens the right file, not how it is spelt.
+        let hit = loose_sprite_file(
+            &root,
+            "interface\\addons\\atlas\\images\\maps\\blackrockdepths.blp",
+        )
+        .expect("mixed-case tree resolves a lowercase candidate");
+        assert_eq!(std::fs::read(&hit).unwrap(), b"x");
+
+        // Not an AddOns path → not this store's question.
+        assert_eq!(loose_sprite_file(&root, "interface\\icons\\foo.blp"), None);
+        // A directory is not a file, and a missing file is a miss, not an error.
+        assert_eq!(loose_sprite_file(&root, "interface\\addons\\atlas"), None);
+        assert_eq!(
+            loose_sprite_file(&root, "interface\\addons\\atlas\\images\\maps\\nope.blp"),
+            None
+        );
+        // Dot-components never reach the filesystem (the read_under posture; `normalize_path`
+        // already forbids `/`, so this is the one lexical escape left to refuse).
+        assert_eq!(
+            loose_sprite_file(&root, "interface\\addons\\..\\..\\etc\\passwd"),
+            None
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

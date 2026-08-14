@@ -647,20 +647,23 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
 
 /// **B228 — the autocast trail's motion, MEASURED off the shipped handler.**
 ///
-/// nazriel reads the shine as "a bit too fast". The health pass answered that from the constants —
-/// the .m2 authors a 2.000 s loop and `BENILLA_PET_AUTOCAST_PERIOD` is 2.0 — which is a read, not a
-/// measurement: it says nothing about whether the OnUpdate wiring turns wall-clock seconds into
-/// that period, and an `elapsed` in the wrong unit would be invisible to it. So this drives the
-/// real `<OnUpdate>` with real seconds and reads the head spark's own SetPoint back.
+/// nazriel reads the shine as "a bit too fast", and the answer turned out to be in the widget's
+/// CLOCK, which no constants read could have reached. `CSimpleModel`'s per-frame OnUpdate advances
+/// its private `CM2Scene` by `__ftol(elapsed * 1000.0)` — **truncated, no fractional carry**, where
+/// the world's driver adds 0.5 first (wow-re `modelframe-animation-clock.md`, §5 cross-checked).
+/// So the reference's 2000 ms band actually takes `2000 * T / floor(T)` ms at frame time T, and is
+/// **never faster than 2.000 s**. An exact 2.000 s emulation — which is what a measurement of our
+/// old wiring confirmed we had — was therefore faster than any real client at any frame rate.
 ///
-/// What is pinned, all of it off the file (`m2bones` on `Interface\Buttons\UI-AutoCastButton.m2`):
-/// a 28.8 px square (0.02 units × 1200 px/unit × the ref Model's 1.2), one lap per 2.000 s, a
-/// corner every 0.500 s, LINEAR between them (`interp == 1` at the bone record's translation
-/// M2Track — so the half-edge sample sits at the half-time, no easing), and the four emitters one
-/// quarter-lap apart. If the reported overspeed is in the period, it fails here; if this holds and
-/// the report stands, the period is exonerated and the gap is in the trail's SHAPE.
+/// This drives the real `<OnUpdate>` with real seconds at real frame times and reads the head
+/// spark's own SetPoint back. What is pinned: the lap comes out SLOW by exactly the truncation's
+/// amount at 60 and 144 fps; the geometry is the 30.72 px square the widget's ortho projection puts
+/// on a 30 px button (0.02 units × 1280 × the ref Model's `SetModelScale` 1.2), origin at the
+/// button's BOTTOM-LEFT because that is the model's own origin; a corner every quarter lap, LINEAR
+/// between them (`interp == 1` at the bone record's translation M2Track, so the half-edge sample
+/// sits at the half-time); and the four emitters one quarter-lap apart.
 #[test]
-fn the_autocast_trail_laps_the_rim_once_every_two_seconds() {
+fn the_autocast_trail_laps_the_rim_the_reference_widgets_slow_way() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_pet_bar(&s);
@@ -692,57 +695,76 @@ fn the_autocast_trail_laps_the_rim_once_every_two_seconds() {
         );
     };
 
-    // 0.02 units × 1200 px/unit × 1.2 = 28.8 px across, so the corners sit ±14.4 from centre.
-    const H: f32 = 14.4;
-    let (bl, tl, tr, br) = ((-H, -H), (-H, H), (H, H), (H, -H));
+    // 0.02 units × 1280 px/unit × 1.2 = 30.72 px across, laid from the button's BOTTOMLEFT — so
+    // the walk runs 0..30.72 in both axes, not ±half from the centre.
+    const S: f32 = 30.72;
+    let (bl, tl, tr, br) = ((0.0, 0.0), (0.0, S), (S, S), (S, 0.0));
 
-    // ── The clock WIRING: four half-second ticks of the shipped OnUpdate, one corner each. This
-    // is the half a constants read cannot reach — `arg1` really is seconds, and the bar's clock
-    // advances 1:1 with it.
-    let corner = |s: &mut UiScript, dt: f32, want: (f32, f32), what: &str| {
-        s.tick(dt);
-        near(head(s, 0), want, what);
+    // ── The CLOCK, at a real frame time. 60 fps ⇒ dt = 16.667 ms ⇒ only **16** banked per frame,
+    // so the 2000 ms band needs 125 frames = **2.083 s of wall clock**. At 2.000 s (120 frames)
+    // the clock has banked 1920 ms = 0.96 of a lap: the head is still on the last edge, running
+    // right-to-left toward home and 0.04 × 122.88 = 4.92 px short of it. That shortfall IS the
+    // bug — it is how much slower than our old exact-2.000 s clock the reference has always been.
+    let frames = |s: &mut UiScript, n: usize, dt: f32| {
+        for _ in 0..n {
+            s.tick(dt);
+        }
     };
-    corner(
-        &mut s,
-        0.5,
-        tl,
-        "0.5 s in: one edge, at the top-left corner",
+    const DT60: f32 = 1.0 / 60.0;
+    frames(&mut s, 120, DT60); // 2.000 s of wall clock
+    near(
+        head(&s, 0),
+        (4.9152, 0.0),
+        "2.000 s at 60 fps: NOT home yet — the reference is slower than the authored band",
     );
-    corner(&mut s, 0.5, tr, "1.0 s: half a lap");
-    corner(&mut s, 0.5, br, "1.5 s: three quarters");
-    corner(
-        &mut s,
-        0.5,
+    frames(&mut s, 5, DT60); // 2.083 s
+    near(
+        head(&s, 0),
         bl,
-        "2.0 s: exactly one lap, back where it started",
+        "2.083 s at 60 fps: one lap, the reference's own 2000*T/floor(T)",
     );
 
-    // ── The position LAW, driven at exact clocks so no tick accumulation can blur it. The
-    // mid-edge sample is the `interp == 1` pin: linear means the half-time is the half-edge, and
-    // a spline-eased track would sit short of it.
-    let at = |s: &UiScript, clock: f32| -> (f32, f32) {
+    // 144 fps truncates harder — 6.944 ms banked as 6 — so the same lap takes 2.315 s there. A
+    // frame-rate-independent clock would land both of these at 2.000 s and fail here.
+    let mut fast = UiScript::new().unwrap();
+    fast.set_screen_size(1024.0, 768.0);
+    load_pet_bar(&fast);
+    declare_token_strings(&fast);
+    fast.set_pet_actions(true, true, true, hunter_slots());
+    fast.fire_event("PET_BAR_UPDATE", vec![]);
+    fast.resolve();
+    frames(&mut fast, 333, 1.0 / 144.0); // 2.313 s of wall clock ⇒ 1998 ms banked
+    let (fx, fy) = head(&fast, 0);
+    assert!(
+        fy == 0.0 && fx > 0.0 && fx < 1.0,
+        "2.313 s at 144 fps: still 2 ms short of the lap, at {fx:?},{fy:?}"
+    );
+
+    // ── The position LAW, driven at exact MILLISECOND clocks so no tick accumulation can blur it.
+    // The mid-edge sample is the `interp == 1` pin: linear means the half-time is the half-edge,
+    // and a spline-eased track would sit short of it.
+    let at = |s: &UiScript, ms: u32| -> (f32, f32) {
         s.run(&format!(
-            "BenillaPetAutocast_Update(PetActionButton4, {clock})"
+            "BenillaPetAutocast_Update(PetActionButton4, {ms})"
         ))
         .unwrap();
         head(s, 0)
     };
-    near(at(&s, 0.0), bl, "clock 0");
+    near(at(&s, 0), bl, "clock 0");
     near(
-        at(&s, 0.25),
-        (-H, 0.0),
+        at(&s, 250),
+        (0.0, S / 2.0),
         "quarter edge in: the LEFT edge's midpoint",
     );
-    near(at(&s, 0.5), tl, "clock 0.5");
-    near(at(&s, 1.0), tr, "clock 1.0");
-    near(at(&s, 1.5), br, "clock 1.5");
-    near(at(&s, 2.0), bl, "clock 2.0 wraps onto clock 0");
+    near(at(&s, 500), tl, "clock 500 ms");
+    near(at(&s, 1000), tr, "clock 1000 ms");
+    near(at(&s, 1500), br, "clock 1500 ms");
+    near(at(&s, 2000), bl, "clock 2000 ms wraps onto clock 0");
 
     // ── The trail is CONTINUOUS, which is what deriving the sample count buys (B228). No two
     // neighbours in a trail sit further apart than the smaller of their two stars is wide, so the
     // streak has no seam at any age. The 8-even-samples version failed this from mid-life back —
-    // 7.2 px apart with 4.3 px stars — and a row of separated dots is what reads as marching.
+    // 7.7 px apart with 4.6 px stars — and a row of separated dots is what reads as marching.
     let worst_gap: f32 = s
         .eval(
             "local worst = 0 \
@@ -765,7 +787,7 @@ fn the_autocast_trail_laps_the_rim_once_every_two_seconds() {
     // ── The four emitters are ONE LAP, a quarter apart — the file's four bones at the four
     // corners, chasing each other (m2bones: pivots at (-0.001,0), (0.019,0), (0.019,0.02),
     // (-0.001,0.02), same track, one corner of phase between neighbours).
-    s.run("BenillaPetAutocast_Update(PetActionButton4, 0.0)")
+    s.run("BenillaPetAutocast_Update(PetActionButton4, 0)")
         .unwrap();
     for (e, want, name) in [
         (0, bl, "emitter 0"),

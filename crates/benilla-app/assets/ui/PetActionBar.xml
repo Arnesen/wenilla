@@ -111,12 +111,23 @@
         --   and shrinks away there. The effect is therefore four comet trails running round the
         --   button's rim, not a rotating ring.
         --
-        -- Model units -> pixels is the same 1200 px/unit calibration BagFrame.xml derived from the
-        -- Cooldown model (its own header carries the derivation), and it CROSS-CHECKS here: the
-        -- lap square is 0.02 units, the ref's Model carries scale="1.2", and 0.02 * 1200 * 1.2 =
-        -- 28.8 px — the rim of a 30 px button, which is where the sparkles visibly run. That
-        -- agreement between two independently-authored UI models is the reason to trust the
-        -- number rather than eyeball a size.
+        -- MODEL UNITS -> PIXELS is the widget's own projection, not a calibration
+        -- (wow-re `system/ui/scratch/modelframe-animation-clock.md`, §1317's fold-back). There is
+        -- no fixed px/unit: the ortho leg gives
+        --
+        --     px per model unit = (5/3) * modelScale * layoutScale * screenHeightPx
+        --
+        -- which in FrameXML units collapses to **1280 * modelScale * layoutScale**, independent of
+        -- aspect and resolution. `scale="1.2"` on the ref's <Model> is SetModelScale, NOT
+        -- Frame:SetScale (`0x76cb36`, stored at `+0x3a0`), so 1 model unit = 1536 FrameXML units
+        -- and the 0.02 path is **30.72** across — 1.024x a 30-unit button, overhanging its top and
+        -- right by 2.4%. The model ORIGIN is the frame rect's BOTTOM-LEFT, not its centre, which is
+        -- why a square authored 0..0.02 lands across the whole button instead of in one quadrant.
+        --
+        -- This corrects the 1200 px/unit figure this header carried until then, which was the right
+        -- formula evaluated at a 720 px screen **with the 1.2 left out** — two errors that nearly
+        -- cancelled (28.8 vs 30.72) and made the wrong number look like it cross-checked. BagFrame's
+        -- Cooldown calibration is the same coincidence and is flagged there.
         --
         -- OUR ONE DEPARTURE is the particle COUNT: 300 live per emitter is 12 000 quads across a
         -- full bar. We draw a SAMPLE of the same trail — each sample sits where the bone was `age`
@@ -125,20 +136,19 @@
         --
         -- **How many samples is DERIVED, not chosen** (B228). It was 8, evenly spaced in age, on
         -- the claim that the trail "reads identically at a fraction" of 300. Nobody had checked
-        -- that claim, and the arithmetic says it is false. The rim is 4 x 28.8 = 115.2 px round and
-        -- the lap is 2.0 s, so the bone travels 57.6 px/s and a particle's 1.0 s life spans 57.6 px
-        -- of rim — two whole edges. Eight even samples therefore sit 7.2 px apart, while the stars
-        -- behind the head are 4.3 px and then 2.9 px across: the back half of every trail was a row
-        -- of SEPARATED DOTS where the file draws one continuous streak. Marching dots are legible
-        -- motion in a way a smooth streak is not, which is the shape of thing a reporter reads as
-        -- "too fast" (nazriel, B228) even at the right period — and the period IS right, measured
-        -- through this file's own OnUpdate in `pet_bar_tests`.
+        -- that claim, and the arithmetic says it is false. The rim is 4 x 30.72 = 122.9 px round
+        -- and the lap is 2.0 s, so the bone travels 61.4 px/s and a particle's 1.0 s life spans
+        -- 61.4 px of rim — two whole edges. Eight even samples therefore sit 7.7 px apart, while
+        -- the stars behind the head are 4.6 px and then 3.1 px across: the back half of every trail
+        -- was a row of SEPARATED DOTS where the file draws one continuous streak. Marching dots are
+        -- legible motion in a way a smooth streak is not, so it read as speed on a loop that runs
+        -- at the authored rate (nazriel, B228).
         --
         -- So the samples are spaced by the file's own SIZE ramp rather than evenly: each step
         -- advances one star-width / OVERLAP of arc. That spends samples in the tail where the
-        -- stars are small and saves them at the head where a 14.4 px star covers everything —
+        -- stars are small and saves them at the head where a 15 px star covers everything —
         -- continuous everywhere, and cheaper than a uniform spacing fine enough for the tail.
-        BENILLA_PET_AUTOCAST_PX_PER_UNIT = 1200
+        BENILLA_PET_AUTOCAST_PX_PER_UNIT = 1280                              -- the ortho leg's
         BENILLA_PET_AUTOCAST_SCALE   = 1.2                                   -- the ref Model's
         BENILLA_PET_AUTOCAST_PERIOD  = 2.0                                   -- seq0 loop, seconds
         BENILLA_PET_AUTOCAST_LIFE    = 1.0                                   -- particle lifespan
@@ -166,20 +176,55 @@
             {1.000, 1.000, 1.000, 0.0},
         }
 
-        -- Where an emitter sits at lap fraction `f` (0..1), as an offset from the button's CENTER
-        -- in pixels. The bone tracks walk the square anticlockwise from its bottom-left corner,
-        -- one edge per quarter-lap; this is that walk, re-centred (the model's square runs 0..0.02
-        -- in both axes, so its centre is at 0.01).
+        -- ── The widget's CLOCK, truncation and all ────────────────────────────────────────────
+        --
+        -- The reference does NOT play this loop at wall-clock rate, and that is the whole of what
+        -- was left of B228. `CSimpleModel` overrides `CSimpleFrame`'s per-frame OnUpdate slot
+        -- (vtable `0x81c608` idx14 -> `0x76d7f0`) and advances its private `CM2Scene` clock by
+        -- `__ftol(elapsed * 1000.0)` — **truncated, with no fractional carry**. The WORLD's driver
+        -- does the same conversion with a `+0.5` first (`0x48366b`); the widget path omits it
+        -- (`0x76d846`). So the widget throws away `frac(elapsed * 1000)` every single frame, and a
+        -- 2000 ms band takes `2000 * T / floor(T)` ms at frame time T ms:
+        --
+        --     30 fps -> 2020 ms   ·   60 fps -> 2083 ms   ·   75 fps -> 2051   ·   144 fps -> 2315
+        --
+        -- It is **never faster than 2.000 s**. Our old exact-2.000 s clock was therefore faster
+        -- than any real 1.12 client at any frame rate — the floor of the range rather than a point
+        -- in it — which is exactly nazriel's "a bit too fast". (wow-re
+        -- `system/ui/scratch/modelframe-animation-clock.md`, §5 cross-checked.)
+        --
+        -- So the clock is an integer MILLISECOND counter here too, advanced the reference's way.
+        -- This is the mechanism, not a tuned constant: it tracks the player's own frame rate the
+        -- way theirs did. Two knowing limits. The reference's `elapsed` is an **f32**, so
+        -- `f32(0.01) * 1000 = 9.99999978` truncates to 9 — a whole millisecond lost at a nominally
+        -- clean frame rate, and the exact hazard the world path's `+0.5` cancels; we do not model
+        -- f32 rounding, so we lose marginally less than it does. And above 1000 fps the reference
+        -- freezes outright (every frame truncates to 0 ms) — reproduced rather than guarded,
+        -- because a guard would be inventing behaviour, but no 2006 client ever reached it and a
+        -- frozen sparkle at four-figure frame rates is this line's fault, not a new bug.
+        BENILLA_PET_AUTOCAST_PERIOD_MS = 2000
+
+        function BenillaPetAutocast_Advance(frame, elapsed)
+            local ms = (frame.clock or 0) + math.floor(elapsed * 1000)
+            frame.clock = math.mod(ms, BENILLA_PET_AUTOCAST_PERIOD_MS)
+            return frame.clock
+        end
+
+        -- Where an emitter sits at lap fraction `f` (0..1), as an offset from the button's
+        -- BOTTOMLEFT in pixels — the model's own origin (see the header), so this is the authored
+        -- square placed exactly where the widget places it: 0..30.72 across a 30 px button, its
+        -- corner on the button's corner, overhanging the top and right by 0.72 px. The bone tracks
+        -- walk it clockwise on screen from that bottom-left corner, one edge per quarter-lap.
         function BenillaPetAutocast_Point(f)
-            local h = BENILLA_PET_AUTOCAST_SIZE / 2
+            local s = BENILLA_PET_AUTOCAST_SIZE
             f = f - math.floor(f)                       -- wrap into 0..1
             local edge = f * 4
             local leg = math.floor(edge)
             local t = edge - leg                        -- 0..1 along this edge
-            if leg == 0 then return -h, -h + t * 2 * h  -- bottom-left -> top-left
-            elseif leg == 1 then return -h + t * 2 * h, h  -- top-left -> top-right
-            elseif leg == 2 then return h, h - t * 2 * h   -- top-right -> bottom-right
-            else return h - t * 2 * h, -h                  -- bottom-right -> bottom-left
+            if leg == 0 then return 0, t * s            -- bottom-left -> top-left
+            elseif leg == 1 then return t * s, s        -- top-left -> top-right
+            elseif leg == 2 then return s, s - t * s    -- top-right -> bottom-right
+            else return s - t * s, 0                    -- bottom-right -> bottom-left
             end
         end
 
@@ -259,7 +304,7 @@
         -- Show and hide are EDGE work, not per-frame work: this runs for all ten buttons every
         -- frame and all but one or two of them are dark, so the old unconditional Hide loop was
         -- spending most of the bar's frame budget re-hiding what was already hidden.
-        function BenillaPetAutocast_Update(button, clock)
+        function BenillaPetAutocast_Update(button, clockMs)
             if not button.autocasting then
                 if button.sparksLit then
                     for i = 1, table.getn(button.sparks) do button.sparks[i]:Hide() end
@@ -269,12 +314,13 @@
             end
             if not button.sparks then BenillaPetAutocast_Create(button) end
             local sparks = button.sparks
-            local lap = clock / BENILLA_PET_AUTOCAST_PERIOD
+            local lap = clockMs / BENILLA_PET_AUTOCAST_PERIOD_MS
             for i = 1, table.getn(sparks) do
                 local spark = sparks[i]
-                -- SetPoint on the SAME point replaces it, so no ClearAllPoints is needed.
+                -- SetPoint on the SAME point replaces it, so no ClearAllPoints is needed. The
+                -- anchor is the button's BOTTOMLEFT because that is the model's own origin.
                 local x, y = BenillaPetAutocast_Point(lap + spark.phase)
-                spark:SetPoint("CENTER", button, "CENTER", x, y)
+                spark:SetPoint("CENTER", button, "BOTTOMLEFT", x, y)
             end
             if not button.sparksLit then
                 for i = 1, table.getn(sparks) do sparks[i]:Show() end
@@ -522,12 +568,9 @@
         -- The shared sparkle clock. One OnUpdate for the whole bar rather than ten: the four
         -- emitters are one looping model, so every autocasting button is in step by construction.
         function BenillaPetActionBar_OnUpdate(frame, elapsed)
-            frame.clock = (frame.clock or 0) + elapsed
-            if frame.clock > BENILLA_PET_AUTOCAST_PERIOD then
-                frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
-            end
+            local clockMs = BenillaPetAutocast_Advance(frame, elapsed)
             for i = 1, NUM_PET_ACTION_SLOTS do
-                BenillaPetAutocast_Update(getglobal("PetActionButton" .. i), frame.clock)
+                BenillaPetAutocast_Update(getglobal("PetActionButton" .. i), clockMs)
             end
         end
 

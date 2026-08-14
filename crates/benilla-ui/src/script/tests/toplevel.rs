@@ -210,18 +210,21 @@ fn the_trigger_is_the_effective_visibility_transition_not_the_show_call() {
     .unwrap();
     assert_eq!(
         level(&mut s, "Dialog"),
-        0,
-        "a Show that moves no effective visibility raises nothing"
+        1,
+        "a Show that moves no effective visibility raises nothing — the 1 is not a raise, it is \
+         SetParent's own level := Holder(0)+1 (decision 1323's re-level law)"
     );
     assert_eq!(level(&mut s, "Board"), 5, "and compacts nothing");
 
     s.run("Holder:Show()").unwrap();
+    // Occupied visible MEDIUM levels at the raise: Holder 0, Dialog 1, Board 5 → compaction
+    // renumbers to {0, 1, 2} (Board → 2), count 3, and the raise writes Dialog := 3.
     assert_eq!(
         level(&mut s, "Dialog"),
-        2,
+        3,
         "Dialog became effective-visible through its parent's Show and raised itself"
     );
-    assert_eq!(level(&mut s, "Board"), 1, "the compaction ran with it");
+    assert_eq!(level(&mut s, "Board"), 2, "the compaction ran with it");
 }
 
 // ── The gate ────────────────────────────────────────────────────────────────────────────────────

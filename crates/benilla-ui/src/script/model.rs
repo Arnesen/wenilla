@@ -15,6 +15,9 @@ use super::{
 // The Rust-side model (plain data; lives in lua.app_data)
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// The host's texture-path resolvability oracle — see [`Model::texture_probe`].
+pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
+
 /// The Rust-side model behind the Lua VM — the arena, the layout inputs + resolved rects, the
 /// id↔handle bijection, region visuals, and the event/script registrations. Held in `lua.app_data`
 /// (interior-mutable) so callbacks reach it; contains **no** mlua handles (the MAXCSTACK discipline).
@@ -28,6 +31,13 @@ pub(crate) struct Model {
     /// answer inside the Lua call that asked, instead of a frame later. `None` in every VM without
     /// a font atlas, which is the measure round-trip's own world and behaves exactly as it did.
     pub(crate) measurer: Option<Box<dyn super::TextMeasure>>,
+    /// The host's texture-path oracle ([`super::UiScript::set_texture_probe`]): does this sprite
+    /// reference resolve to a file — patch chain or loose addon folder? What lets the path form of
+    /// `SetTexture` return the reference's **1 | nil** load verdict inline (wow-re
+    /// `widget-api-batch-benilla.md` Q1 — Atlas branches on it to pick its map art). `None` in an
+    /// engine-less VM (tests, the addon harness), where the path form keeps answering nil: no
+    /// backend, nothing loads — which is also exactly what those tests always saw.
+    pub(crate) texture_probe: Option<TextureProbe>,
     /// Where per-addon saved variables live: the account-scoped folder, then this character's.
     /// Both are directories holding one `<Addon>.lua` per declaring addon.
     pub(crate) addons_saved_account: Option<std::path::PathBuf>,
@@ -1040,6 +1050,7 @@ impl Model {
             addons: Vec::new(),
             addons_root: None,
             measurer: None,
+            texture_probe: None,
             addons_saved_account: None,
             addons_saved_character: None,
             framexml_templates: Default::default(),

@@ -136,29 +136,48 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         // reached us only once the survey started seating the addon registry — the whole point of
         // that instrument fix. The stray `true` is meaningless in 1.12 and the addon author
         // presumably meant a later client's second parameter; either way the client shrugs.
+        // The RETURN is part of the contract (wow-re `widget-api-batch-benilla.md` Q1, VERIFIED):
+        // the path form answers **1 | nil — nil meaning the file did not load** — and the colour
+        // and clear forms answer 1. Atlas is the load-bearing caller: `Atlas_Refresh` does
+        // `local builtIn = AtlasMap:SetTexture("…\Images\Maps\"..zoneID)` and walks its plugin
+        // fallback chain on nil, so a binding that returns nothing draws no map at all whatever
+        // the file resolver does. The load verdict comes from the host's [`Model::texture_probe`]
+        // (existence across patch chain + loose addon folder — the same candidate walk the
+        // renderer resolves with); a VM with no probe installed has no backend, so its path form
+        // stays nil, which is both literally true and what every engine-less test always observed.
         lua.create_function(
             |lua, (this, arg, g, b, a): (Table, Value, Value, Value, Value)| {
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                let data = model.region_data.entry(rh).or_default();
                 // A plain SetTexture makes the region ordinary again — drop any portrait circular mask
                 // and any live-unit-portrait binding.
+                let data = model.region_data.entry(rh).or_default();
                 data.circular = false;
                 data.portrait_unit = None;
                 // Both forms write the SAME `+0xcc` texture slot — the path form loads a file
                 // there (`0x770200`), the colour form generates an 8×8 solid into it
                 // (`0x770360`) — so each clears the other. NEITHER touches the vertex colour at
                 // `+0xb8`: a tint outlives the art it was tinting.
-                match &arg {
+                let loaded = match &arg {
                     // SetTexture("") clears, same as SetTexture(nil) — the ref lua blanks state
-                    // art with the empty string (QuestLogFrame.lua:165-166).
+                    // art with the empty string (QuestLogFrame.lua:165-166). The return for ""
+                    // is read as the path form's failure (nothing loads from an empty name);
+                    // INFERRED — no corpus caller reads it.
                     Value::String(s) if s.to_str()?.is_empty() => {
                         data.texture = None;
                         data.fill = None;
+                        false
                     }
                     Value::String(s) => {
-                        data.texture = Some(s.to_str()?.to_string());
+                        let path = s.to_str()?.to_string();
+                        data.texture = Some(path.clone());
                         data.fill = None;
+                        drop(model);
+                        let model = lua.app_data_ref::<Model>().expect("model");
+                        model
+                            .texture_probe
+                            .as_ref()
+                            .is_some_and(|probe| probe(&path))
                     }
                     // The colour form, and the ONLY branch that looks at the trailing three. A
                     // non-numeric there takes the same default a missing one does, which is what
@@ -176,16 +195,22 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         data.fill =
                             Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
                         data.texture = None;
+                        true
                     }
                     // SetTexture(nil) clears (the live API's blank-the-region form); a cleared
-                    // texture region draws nothing.
+                    // texture region draws nothing. Returns 1 (Q1's `SetTexture(nil) / ()` row).
                     Value::Nil => {
                         data.texture = None;
                         data.fill = None;
+                        true
                     }
-                    _ => {}
-                }
-                Ok(())
+                    _ => false,
+                };
+                Ok(if loaded {
+                    Value::Number(1.0)
+                } else {
+                    Value::Nil
+                })
             },
         )?,
     )?;
@@ -374,4 +399,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+impl crate::script::UiScript {
+    /// Install the host's texture-path oracle — the resolver behind the path form of
+    /// `SetTexture`'s **1 | nil** return ([`Model::texture_probe`]). The host hands in existence
+    /// over its real stores (patch chain + loose addon folder); a VM that never gets one keeps
+    /// answering nil for every path, the engine-less truth.
+    pub fn set_texture_probe(&mut self, probe: crate::script::TextureProbe) {
+        self.model_mut().texture_probe = Some(probe);
+    }
 }

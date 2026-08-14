@@ -13,26 +13,50 @@ impl UiScript {
     /// arguments. Events reach registered frames regardless of visibility, **in registration
     /// order** — the client's `SignalEvent 0x703e50` walks the per-event listener list head-first
     /// (tail-append insert `0x7052d0`, wow-re `event-dispatch-order.md`: FIFO, first-registered
-    /// fires first), re-reading the next node per step, so a frame registered mid-dispatch is
-    /// still visited this dispatch. Cross-frame order is a LAW consumers depend on: both
-    /// ZoneText frames write `PVPInfoTextString` on one event — the last writer decides. Handler
-    /// errors are collected into [`UiScript::errors`], never panicking.
+    /// fires first). Cross-frame order is a LAW consumers depend on: both ZoneText frames write
+    /// `PVPInfoTextString` on one event — the last writer decides. Handler errors are collected
+    /// into [`UiScript::errors`], never panicking.
+    ///
+    /// **The walk steps by a next-listener SAVED BEFORE the handler runs** (`0x703ee8: mov
+    /// edi,[eax+0x4]` — "save the next node before firing"; decision 1324), never by list index.
+    /// That is what makes a handler that UNREGISTERS ITSELF mid-dispatch unable to rob its
+    /// successor — and it is load-bearing in the wild: AceEvent-2.0 treats `PLAYER_LOGIN` /
+    /// `VARIABLES_LOADED` as fire-once events and unregisters its frame *inside* the handler, so
+    /// an index walk skipped whichever addon registered right after AceEvent (Bagnon_Forever's
+    /// saved-bag DB never initialized — the director's `SaveBagData:76` error dialogs). A frame
+    /// registered mid-dispatch tail-appends and is still visited; a handler that unregisters the
+    /// walk's SAVED next stops the dispatch there (the reference frees the node and walks into
+    /// its zeroed links — memory-accident territory we render as a deterministic stop, a knowing
+    /// divergence from an accident, not from a mechanism).
     pub fn fire_event(&mut self, event: &str, args: Vec<ScriptValue>) {
-        // Walk by index, re-reading the live list each step (the client's fresh next-node read) —
-        // one short borrow per step, none held across the handler call.
-        let mut i = 0;
-        loop {
-            let id = {
-                let mut model = self.model_mut();
-                let Some(&h) = model.event_to_frames.get(event).and_then(|l| l.get(i)) else {
-                    break;
-                };
-                model.frame_id(h)
+        let mut at = {
+            let model = self.model_mut();
+            model
+                .event_to_frames
+                .get(event)
+                .and_then(|l| l.first().copied())
+        };
+        while let Some(h) = at {
+            let mut model = self.model_mut();
+            // The saved handle must still be registered — its removal (by the previous handler)
+            // ends the walk, per the doc above.
+            let Some(pos) = model
+                .event_to_frames
+                .get(event)
+                .and_then(|l| l.iter().position(|&x| x == h))
+            else {
+                break;
             };
+            let next = model
+                .event_to_frames
+                .get(event)
+                .and_then(|l| l.get(pos + 1).copied());
+            let id = model.frame_id(h);
+            drop(model);
             if let Err(e) = event::fire_event_handler(&self.lua, id, event, &args) {
                 self.push_error(e);
             }
-            i += 1;
+            at = next;
         }
     }
 

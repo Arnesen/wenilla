@@ -242,12 +242,13 @@
         -- while the window is shown, so it costs nothing the rest of the time.
         function BenillaSpellBookFrame_OnUpdate(frame, elapsed)
             if not BenillaPetAutocast_Update then return end
-            frame.clock = (frame.clock or 0) + elapsed
-            if frame.clock > BENILLA_PET_AUTOCAST_PERIOD then
-                frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
-            end
+            -- The clock advance is the pet bar's too, and SHARED rather than copied: it is the
+            -- reference Model widget's own truncating millisecond accumulator (that file's header
+            -- carries the bytes), and a second hand-rolled copy is exactly how the two surfaces
+            -- would drift apart the next time it is corrected.
+            local clockMs = BenillaPetAutocast_Advance(frame, elapsed)
             for i = 1, SPELLS_PER_PAGE do
-                BenillaPetAutocast_Update(getglobal("SpellButton" .. i), frame.clock)
+                BenillaPetAutocast_Update(getglobal("SpellButton" .. i), clockMs)
             end
         end
 

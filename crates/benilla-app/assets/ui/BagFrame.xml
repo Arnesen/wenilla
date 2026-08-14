@@ -1033,20 +1033,33 @@
         -- starts moving, so the drop reads as the icon being drawn into the bag rather than as a
         -- solid tile sliding. Those numbers are the file's, not ours.
         --
-        -- THE ONE AUTHORED NUMBER is the model-unit → pixel scale, because a <Model> frame's 3D
-        -- projection is not RE-recorded (the ref's ItemAnim frame has no <Size> at all, so the rect
-        -- cannot be it) — see decision 0887's named gap. 1200 px/unit is the sibling calibration:
-        -- CooldownFrameTemplate is the same kind of degenerate UI model, its four quads span 0.04
-        -- units, and at its scale="0.75" that sweep covers a 36px action button ⇒ 0.04·K·0.75 = 36.
-        -- At K = 1200 this model's own numbers land on 36 px of icon (exactly a bag-bar button),
-        -- a 48 px fall and a 12 px sideways drift — which is why the sizes below are stated as the
-        -- model's ratios times the icon, not as free pixels: correct the scale in one place and the
-        -- whole animation stays in proportion.
-        BENILLA_ITEM_PUSH_PX_PER_UNIT = 1200
+        -- THE MODEL-UNIT → PIXEL SCALE is no longer ours to calibrate: the <Model> widget's
+        -- projection is RE-recorded now (wow-re `system/ui/scratch/modelframe-animation-clock.md`,
+        -- dispatched over the pet bar's B228 and folded back with it). The ortho leg gives
+        --
+        --     px per model unit = (5/3) * modelScale * layoutScale * screenHeightPx
+        --
+        -- which in FrameXML units is **1280 * modelScale * layoutScale**, aspect- and
+        -- resolution-independent, with the model ORIGIN at the frame rect's bottom-left. The ref's
+        -- `ItemAnimTemplate` (MainMenuBarBagButtons.xml:4) carries **no `scale` attribute**, so
+        -- modelScale is 1 and the constant is a flat 1280. Decision 0887's named gap is closed.
+        --
+        -- This REPLACES a back-fit, and the back-fit is worth naming because it looked like
+        -- evidence. The old 1200 came from assuming CooldownFrameTemplate's 0.04-unit sweep
+        -- *exactly* covers a 36 px action button at its scale="0.75" (⇒ K = 1200). The assumption
+        -- is the error: at the real projection that sweep is 0.04 · 1280 · 0.75 = **38.4 px**, so
+        -- it overhangs its button by 6.7% rather than fitting it — exactly as the autocast shine's
+        -- 30.72 px square overhangs its 30 px button. Solving against a wrong premise produced a
+        -- number that then "cross-checked" against a second model derived the same wrong way, and
+        -- both files cited the agreement as the reason to trust it.
+        --
+        -- Everything below is the model's own ratios times this constant, so the correction lands
+        -- in one place and the animation stays in proportion.
+        BENILLA_ITEM_PUSH_PX_PER_UNIT = 1280
         BENILLA_ITEM_PUSH_DURATION = 1.0
-        BENILLA_ITEM_PUSH_SIZE  = 0.03 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 36
-        BENILLA_ITEM_PUSH_FALL  = 0.04 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 48
-        BENILLA_ITEM_PUSH_DRIFT = 0.01 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 12
+        BENILLA_ITEM_PUSH_SIZE  = 0.03 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 38.4
+        BENILLA_ITEM_PUSH_FALL  = 0.04 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 51.2
+        BENILLA_ITEM_PUSH_DRIFT = 0.01 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 12.8
         -- {time, value} keyframes, linear between (M2 track interpolation 1) — the file's own keys.
         BENILLA_ITEM_PUSH_ALPHA = { {0.000, 0.0}, {0.133, 1.0}, {0.267, 1.0}, {1.000, 0.0} }
         BENILLA_ITEM_PUSH_SCALE = { {0.000, 1.0}, {0.133, 1.2}, {0.267, 1.0}, {1.000, 0.014} }
