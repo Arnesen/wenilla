@@ -236,6 +236,20 @@ pub struct Frame {
     /// window behind it while keeping its handler installed — a frame with a handler it has not
     /// enabled is deliberately transparent to the wheel.
     pub mouse_wheel_enabled: bool,
+    /// Whether the frame is **keyboard-enabled** (`EnableKeyboard` `0x776f90` / XML
+    /// `enableKeyboard`) — the kind-0/kind-1 bucket membership `0x76af00` writes as
+    /// `[frame+0xcc] |= 1<<kind`.
+    ///
+    /// Default **false**, the client's own default. **The flag round-trips; key DELIVERY is not
+    /// gated on it yet** — the same shape [`Self::mouse_wheel_enabled`] shipped in (1198), and for
+    /// the same reason: the machinery it gates (the strata 8→0 walk, the kind buckets, the
+    /// `OnKeyDown`/`OnKeyUp`/`OnChar` script kinds) does not exist here, so gating on the flag
+    /// would change nothing while pretending otherwise. wow-re's
+    /// `scratch/frame-key-script-delivery.md` §3.2 is explicit that the two are separable:
+    /// `EnableKeyboard(true)` on a script-less frame "puts it in the walk where it is called and
+    /// declines — transparent to everything downstream", so **being enabled is not being a
+    /// handler**, and storing the flag alone is the faithful half rather than a stub of the whole.
+    pub keyboard_enabled: bool,
     /// Clamp-to-screen (`SetClampedToScreen` / XML `clampedToScreen` — the client's geometry
     /// flags **bit4**, applied inside rect assembly `0x767a20`, wow-re `layout.md`): the layout
     /// resolve shifts this frame's assembled rect back inside the screen, size preserved.
@@ -517,6 +531,9 @@ impl WidgetArena {
                 kind,
                 FrameKind::ScrollingMessageFrame | FrameKind::ScrollFrame
             ),
+            // Nothing is keyboard-enabled by construction: `0x76af00` is only ever reached from the
+            // XML attribute or an explicit call, never a ctor (`scripts-auto-enable.md` §1-2).
+            keyboard_enabled: false,
             // A tooltip clamps to the screen by construction (its XML never sets the attribute,
             // yet the reference plate observably never leaves the window — the class supplies
             // geometry flags bit4; decision 0352's law: no tooltip off-screen, ever).

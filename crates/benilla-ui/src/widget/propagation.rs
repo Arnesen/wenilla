@@ -374,6 +374,19 @@ impl WidgetArena {
         }
     }
 
+    /// `EnableKeyboard` (`0x776f90`) — kind-0/kind-1 bucket membership. Stored and answered; the
+    /// key path is not gated on it yet (see [`crate::widget::WidgetState::keyboard_enabled`]).
+    pub fn set_keyboard_enabled(&mut self, h: FrameHandle, enabled: bool) {
+        if let Some(f) = self.frame_mut(h) {
+            f.keyboard_enabled = enabled;
+        }
+    }
+
+    /// Whether the frame is keyboard-enabled. A stale handle reads as `false`.
+    pub fn is_keyboard_enabled(&self, h: FrameHandle) -> bool {
+        self.frame(h).is_some_and(|f| f.keyboard_enabled)
+    }
+
     /// `EnableMouseWheel` — the wheel's own gate, separate from the mouse's (decision 1198).
     pub fn set_mouse_wheel_enabled(&mut self, h: FrameHandle, enabled: bool) {
         if let Some(f) = self.frame_mut(h) {

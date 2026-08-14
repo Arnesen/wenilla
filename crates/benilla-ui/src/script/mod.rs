@@ -153,6 +153,7 @@ pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo};
 pub use pet::{PetActionView, PetStats};
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
+pub(crate) use region::apply_font_parts;
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
 pub use skills::{SkillEntry, SkillsState};

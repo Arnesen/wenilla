@@ -173,8 +173,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
 /// * **`OnKeyDown` / `OnKeyUp` / `OnChar`** (14 + 1 + 4 corpus sites over 13 addons) — **raising,
 ///   and now unblocked**: the delivery law was the second §5 this work dispatched, and it landed
 ///   (wow-re `scratch/frame-key-script-delivery.md`). benilla still has none of the machinery it
-///   describes — no `EnableKeyboard`, no keyboard index, keys routed straight to the focused
-///   EditBox — so the names stay out until it exists, which is the whole rule above. What has to
+///   describes — `EnableKeyboard`/`IsKeyboardEnabled` now exist and the flag round-trips, but there
+///   is still no keyboard index and no strata walk, and keys are routed straight to the focused
+///   EditBox — so the names stay out until that exists, which is the whole rule above. What has to
 ///   get built, so the next pass does not have to re-derive it:
 ///
 ///   The frame must be in the hit-test root's **kind-0 / kind-1 bucket**

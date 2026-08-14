@@ -1,13 +1,24 @@
-//! Region method-table cluster: **text** — a FontString's string, its faces, colour, shadow
-//! and justification. Split out of `region.rs` at the 0716 file-size budget.
+//! Region method-table cluster: **text** — what a `FontString` carries that other text-bearing
+//! widgets do not. Split out of `region.rs` at the 0716 file-size budget.
 //!
-//! **These duplicate names the `<Font>` object table also carries, deliberately for now**: a region
-//! may override its inherited font object per-property, and the severance mask (`FontExplicit`) is
-//! what keeps the two apart. Collapsing them onto one shared block is the follow-on 1231 named.
+//! **This file is now the FontString-only half.** The ten names it used to hand-write a second copy
+//! of — `Set/GetFontObject`, `Set/GetFont`, `Set/GetTextColor`, `Set/GetShadowColor`,
+//! `Set/GetShadowOffset` — are not FontString-specific at all: in the binary each is a thin
+//! type-guard shim tail-calling one shared implementation, so they come from
+//! [`crate::script::font_block`] via one `install` at the bottom of this file, exactly as the
+//! EditBox's table gets them. The justify law likewise lives once in [`crate::justify`].
+//!
+//! What legitimately stays here is the surface a FontString alone has: the string itself
+//! (`SetText`/`SetFormattedText`/`GetText`), the measured extents, `Set/GetJustifyH`/`V`,
+//! `SetNonSpaceWrap`/`CanNonSpaceWrap`, and `SetTextHeight`.
+//!
+//! The per-property override a region has over its inherited font object is unaffected — that is
+//! the severance mask (`FontExplicit`), which the shared block writes the same way this file did.
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::{JustifyH, JustifyV, Model, Outline};
+use crate::justify;
+use crate::script::Model;
 
 /// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
 use super::{measured_wh, region_handle_of};
@@ -107,19 +118,30 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| Ok(measured_wh(lua, &this)?.1))?,
     )?;
 
-    // SetJustifyH("LEFT"|"CENTER"|"RIGHT") — a FontString's horizontal justification (XML `justifyH`).
+    // SetJustifyH("LEFT"|"CENTER"|"RIGHT") — a FontString's horizontal justification (XML
+    // `justifyH`). The token table, the whole-string match, the raise on a miss and the cross-axis
+    // clear are all [`crate::justify`]'s, shared with the `<Font>` object's identical pair
+    // so the two cannot drift apart again.
     m.set(
         "SetJustifyH",
         lua.create_function(|lua, (this, j): (Table, String)| {
             let rh = region_handle_of(lua, &this)?;
-            let jh = match j.to_ascii_uppercase().as_str() {
-                "LEFT" => JustifyH::Left,
-                "RIGHT" => JustifyH::Right,
-                _ => JustifyH::Center,
-            };
+            let parsed = justify::parse_h(&j);
+            if parsed == justify::Set::NoMatch {
+                return Err(justify::usage_h("FontString"));
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            d.justify_h = jh;
+            match parsed {
+                justify::Set::To(jh) => d.justify.set_h(jh),
+                // A cross-axis token erases the axis. `GetJustifyH()` then answers "UNKNOWN"
+                // while the glyphs draw centred — `0x44d420`'s pre-set `1`.
+                justify::Set::Clears => d.justify.clear_h(),
+                justify::Set::NoMatch => unreachable!("returned above"),
+            }
+            // Severance is UNCONDITIONAL on a successful parse — the FontString's own setter
+            // `0x79e6b0` stores the per-axis mask `+0x124` at `0x79e780`, *before* the `je`, so
+            // the erasing path severs too. Only a failed parse escapes, and that raised already.
             d.font_explicit.justify_h = true;
             Ok(())
         })?,
@@ -130,81 +152,46 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetJustifyV",
         lua.create_function(|lua, (this, j): (Table, String)| {
             let rh = region_handle_of(lua, &this)?;
-            let jv = match j.to_ascii_uppercase().as_str() {
-                "TOP" => JustifyV::Top,
-                "BOTTOM" => JustifyV::Bottom,
-                _ => JustifyV::Middle,
-            };
+            let parsed = justify::parse_v(&j);
+            if parsed == justify::Set::NoMatch {
+                return Err(justify::usage_v("FontString"));
+            }
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            d.justify_v = jv;
+            match parsed {
+                justify::Set::To(jv) => d.justify.set_v(jv),
+                // 13 corpus sites reach this arm: `SetJustifyV("CENTER")` meaning "middle".
+                justify::Set::Clears => d.justify.clear_v(),
+                justify::Set::NoMatch => unreachable!("returned above"),
+            }
             d.font_explicit.justify_v = true;
             Ok(())
         })?,
     )?;
 
-    // SetFontObject(GameFontNormal) — re-point this FontString at a Font object: its resolved paint
-    // (face/height/color/outline/shadow) becomes the region's, and the link is kept live, so a later
-    // `GameFontNormal:SetFont(…)` re-paints this region too ([`super::font`]'s module doc).
+    // GetJustifyH()/GetJustifyV() → **1 string**. Real entries on the reference's FontString table
+    // (`0x79e5f0` / `0x79e7f0`, the FontString column of wow-re's two-column accessor table) that
+    // this side had simply never grown: a FontString could set its justification and not read it
+    // back, while the `<Font>` object — the same law, transcribed separately — could do both.
     //
-    // All three argument forms the reference's own usage string names (`.rdata 0x87c5cc`:
-    // `SetFontObject(font or "font" or nil)`) — the **object**, which is what 3,180 of the corpus's
-    // 3,186 call sites pass (`Gratuity-2.0.lua:57`, every FuBar/Ace label); a **name string**, for
-    // our own shipped XML and the 6 sites that use it; and **nil**, which severs the link. A frame,
-    // a number, or an unknown name is an error — never a silent no-op (1203/1205/1211's class).
+    // An untouched FontString answers CENTER/MIDDLE, which is `RegionData`'s default *and* the
+    // client's ctor default `0x212` (`CENTER | MIDDLE | 0x200`) read through each axis mask.
+    fn justify_of(lua: &Lua, this: &Table) -> mlua::Result<justify::Justify> {
+        let rh = region_handle_of(lua, this)?;
+        let model = lua.app_data_ref::<Model>().expect("model");
+        Ok(model
+            .region_data
+            .get(&rh)
+            .map(|d| d.justify)
+            .unwrap_or_default())
+    }
     m.set(
-        "SetFontObject",
-        lua.create_function(|lua, (this, font): (Table, Value)| {
-            let name = crate::script::font::resolve("SetFontObject", &font)?;
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            // The nil form: unlink, and leave the paint standing (the reference stores a null
-            // parent; nothing re-reads and nothing is cleared).
-            let Some(name) = name else {
-                model.region_data.entry(rh).or_default().font_object = None;
-                return Ok(());
-            };
-            let Some(fo) = model.font_objects.get(&name).cloned() else {
-                return Err(mlua::Error::runtime(format!(
-                    "SetFontObject: no font object named '{name}' is registered"
-                )));
-            };
-            let d = model.region_data.entry(rh).or_default();
-            d.font_object = Some(name);
-            // The severance mask is deliberately NOT reset here. §5-verified: the real "stop
-            // inheriting this property" signal is a CLEARED bit in the inheritMask at
-            // `FONTINSTANCE+0x2c` (FontString `+0xd4`, per-axis justify at `+0x124`), cleared by
-            // each local setter and never restored — "a FontString that set its own colour stays
-            // severed even across a later SetFontObject" (wow-re
-            // `system/ui/scratch/font-object-lua-surface.md`). This corrects our first cut, which
-            // reset it.
-            crate::script::font::repaint(d, &fo);
-            Ok(())
-        })?,
+        "GetJustifyH",
+        lua.create_function(|lua, this: Table| Ok(justify_of(lua, &this)?.name_h()))?,
     )?;
-
-    // GetFontObject() → the font OBJECT this FontString last resolved (or nil).
-    //
-    // The object, not its name: `Dewdrop-2.0.lua:2181` is
-    // `button.text:SetTextColor(button.text:GetFontObject():GetTextColor())` — 65 sites across 62
-    // corpus addons that index the result immediately. A name string there raises.
     m.set(
-        "GetFontObject",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let name = {
-                let model = lua.app_data_ref::<Model>().expect("model");
-                model
-                    .region_data
-                    .get(&rh)
-                    .and_then(|d| d.font_object.clone())
-                    .filter(|n| model.font_objects.contains_key(n))
-            };
-            match name {
-                Some(n) => Ok(Value::Table(crate::script::font::wrapper(lua, &n)?)),
-                None => Ok(Value::Nil),
-            }
-        })?,
+        "GetJustifyV",
+        lua.create_function(|lua, this: Table| Ok(justify_of(lua, &this)?.name_v()))?,
     )?;
 
     // SetNonSpaceWrap(enable) / CanNonSpaceWrap() — FontString only (`0x79e9f0` / `0x79ead0`).
@@ -244,114 +231,6 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // ── shadow, on the REGION ────────────────────────────────────────────────────────────────
-    // These already existed on the font-object table; a FontString made by `CreateFontString` had
-    // none of them, and that is where the corpus calls them:
-    // `FuBar_NavigatorFu/NavigatorFu.lua:31` does
-    // `coordText:SetShadowColor(GameFontNormal:GetShadowColor())` — the GETTER on a font object,
-    // the SETTER on a fresh region — and `KLHThreatMeter/.../KTM_Gui.lua:404` is
-    // `fontstring:SetShadowColor(0,0,0,0.3)`.
-    //
-    // **`GetShadowColor` returns FOUR values, not three** (`0x79dd2f`, `mov eax,0x4` — wow-re's
-    // widget-method batch). Three is the plausible wrong answer and it silently drops the alpha
-    // that NavigatorFu is round-tripping. `GetShadowOffset` returns two, in UI units.
-    //
-    // Either half may be set before the other, so each starts from whatever is there — the same
-    // rule the font-object versions already follow.
-    m.set(
-        "SetShadowColor",
-        lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
-                let rh = region_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                let d = model.region_data.entry(rh).or_default();
-                let offset = d.font_shadow.map_or([0.0, 0.0], |s| s.offset);
-                d.font_shadow = Some(crate::script::FontShadow {
-                    offset,
-                    color: [r, g, b, a.unwrap_or(1.0)],
-                });
-                d.font_explicit.shadow = true;
-                Ok(())
-            },
-        )?,
-    )?;
-
-    m.set(
-        "GetShadowColor",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_mut::<Model>().expect("model");
-            let c = model
-                .region_data
-                .get(&rh)
-                .and_then(|d| d.font_shadow)
-                .map_or([0.0, 0.0, 0.0, 1.0], |s| s.color);
-            Ok((c[0], c[1], c[2], c[3]))
-        })?,
-    )?;
-
-    m.set(
-        "SetShadowOffset",
-        lua.create_function(|lua, (this, x, y): (Table, f32, f32)| {
-            let rh = region_handle_of(lua, &this)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model");
-            let d = model.region_data.entry(rh).or_default();
-            let color = d.font_shadow.map_or([0.0, 0.0, 0.0, 1.0], |s| s.color);
-            d.font_shadow = Some(crate::script::FontShadow {
-                offset: [x, y],
-                color,
-            });
-            d.font_explicit.shadow = true;
-            Ok(())
-        })?,
-    )?;
-
-    m.set(
-        "GetShadowOffset",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_mut::<Model>().expect("model");
-            let o = model
-                .region_data
-                .get(&rh)
-                .and_then(|d| d.font_shadow)
-                .map_or([0.0, 0.0], |s| s.offset);
-            Ok((o[0], o[1]))
-        })?,
-    )?;
-
-    // SetFont(path, height [, flags]) — the direct face/size/outline setter (the real region API and
-    // the XML `font=`/`<FontHeight>`/`outline=` join). `flags` is an OUTLINETYPE-ish string
-    // ("OUTLINE"/"THICKOUTLINE"/…"); anything else clears the outline. A nil/empty `path` keeps the
-    // current face (so a FontString with only `<FontHeight>` retains its inherited object's font).
-    // Returns true (the live API returns whether the font loaded; we always accept — face
-    // availability is the renderer's concern).
-    m.set(
-        "SetFont",
-        lua.create_function(
-            |lua, (this, path, height, flags): (Table, Option<String>, Option<f32>, Option<String>)| {
-                let rh = region_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                let d = model.region_data.entry(rh).or_default();
-                // Each argument actually supplied is an EXPLICIT set: it must survive a later
-                // mutation of the font object this region inherits (`FontExplicit`).
-                if let Some(p) = path.filter(|p| !p.is_empty()) {
-                    d.font_path = Some(p);
-                    d.font_explicit.face = true;
-                }
-                if let Some(h) = height {
-                    d.font_height = Some(h);
-                    d.font_explicit.height = true;
-                }
-                if let Some(f) = flags {
-                    d.outline = Outline::flags(&f);
-                    d.font_explicit.outline = true;
-                }
-                Ok(true)
-            },
-        )?,
-    )?;
-
     // SetTextHeight(height) — switch the FontString to the scaled-string regime (§5-verified,
     // wow-re `fontstring-overflow.md`: `0x771600` is the ONLY clearer of the one-to-one bit
     // `0x200`; the literal size then flows through UNCAPPED, magnified from the raster). Stored
@@ -371,58 +250,16 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetFont() → path, height, flags — the resolved face/size/outline (nil path if never set).
-    m.set(
-        "GetFont",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            let d = model.region_data.get(&rh);
-            let path = d.and_then(|d| d.font_path.clone());
-            let height = d.and_then(|d| d.font_height);
-            let flags = d.map(|d| d.outline).unwrap_or_default().as_str();
-            let path = match path {
-                Some(p) => Value::String(lua.create_string(&p)?),
-                None => Value::Nil,
-            };
-            Ok((path, height, flags))
-        })?,
-    )?;
-
-    // SetTextColor(r, g, b [, a]) — a FontString's text color. A different binding name for the
-    // same `+0xb8` vertex-colour slot `SetVertexColor` writes: a FontString has no texel of its own
-    // to multiply against, so its vertex colour IS the colour it draws.
-    m.set(
-        "SetTextColor",
-        lua.create_function(
-            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
-                let rh = region_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                let d = model.region_data.entry(rh).or_default();
-                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
-                d.font_explicit.color = true;
-                Ok(())
-            },
-        )?,
-    )?;
-
-    // GetTextColor() → r, g, b, a — `SetTextColor`'s missing pair, and a real binding in the same
-    // FontInstance family. 11 corpus sites read it off a FontString directly (`CustomNameplates`
-    // re-tints a level tag from the name's colour; `TipBuddy` snapshots every tooltip line), on top
-    // of the 65 that reach it through `GetFontObject()`. Never set = the white every region draws
-    // at, same convention as `GetVertexColor` (the same slot).
-    m.set(
-        "GetTextColor",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            let c = model
-                .region_data
-                .get(&rh)
-                .and_then(|d| d.vertex_color)
-                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            Ok((c[0], c[1], c[2], c[3]))
-        })?,
-    )?;
-    Ok(())
+    // ── the shared font block ───────────────────────────────────────────────────────────────
+    //
+    // `SetFontObject · GetFontObject · SetFont · GetFont · Set/GetTextColor · Set/GetShadowColor ·
+    // Set/GetShadowOffset` are **not** FontString-specific. In the binary each is a thin type-guard
+    // shim that tail-calls one shared implementation (`0x79f210` SetFont, `0x79f3b0` GetFont, …),
+    // which is what [`super::super::font_block`] models — so a FontString and an EditBox are two
+    // entry points to one routine, not two routines that happen to agree.
+    //
+    // They lived here as a hand-written second copy because `region.rs` was over the file-size
+    // budget when the block was written; that split has since landed, and `font_block`'s own doc
+    // named this collapse as the follow-on. 226 lines of duplicate go with it.
+    super::super::font_block::install(lua, m, region_handle_of, "FontString")
 }

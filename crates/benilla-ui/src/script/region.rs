@@ -22,6 +22,46 @@ pub(super) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHa
         .ok_or_else(|| mlua::Error::runtime("stale or invalid region handle"))
 }
 
+/// Apply the font parts an **XML element** supplies — `font=`, `<FontHeight>`, `outline=` — any
+/// subset of which may be absent.
+///
+/// **This is deliberately not the `SetFont` binding, and that separation is the point.** The
+/// reference applies XML font attributes in C++ (`LoadXML`), never through the Lua method, and its
+/// `SetFont` therefore *requires* both a path and a height, raising
+/// `Usage: %s:SetFont("font", fontHeight [, flags])` (`0x87c69c`) without them. Our loader used to
+/// call the binding with three `Option`s — `SetFont(nil, nil, "OUTLINE")` for an outline-only
+/// `<FontString>` — which is why that binding could not be made faithful: one name was doing two
+/// jobs, and the more lenient job won. Splitting them lets `SetFont` be the reference's `SetFont`
+/// and lets the loader keep the partial application XML actually needs.
+///
+/// Each part supplied is an **explicit** set (`FontExplicit`), so it survives a later mutation of
+/// the font object this region inherits. An empty `font=` is treated as absent — it keeps the
+/// inherited face, rather than being the binding's load-failure edge.
+pub(crate) fn apply_font_parts(
+    lua: &Lua,
+    this: &Table,
+    path: Option<String>,
+    height: Option<f32>,
+    flags: Option<String>,
+) -> mlua::Result<()> {
+    let rh = region_handle_of(lua, this)?;
+    let mut model = lua.app_data_mut::<Model>().expect("model");
+    let d = model.region_data.entry(rh).or_default();
+    if let Some(p) = path.filter(|p| !p.is_empty()) {
+        d.font_path = Some(p);
+        d.font_explicit.face = true;
+    }
+    if let Some(h) = height {
+        d.font_height = Some(h);
+        d.font_explicit.height = true;
+    }
+    if let Some(f) = flags {
+        d.outline = super::Outline::flags(&f);
+        d.font_explicit.outline = true;
+    }
+    Ok(())
+}
+
 /// Get-or-create the wrapper table for a region id (distinct metatable — the region "tag").
 pub(super) fn region_wrapper(lua: &Lua, id: u32) -> mlua::Result<Table> {
     let wrappers: Table = lua.named_registry_value(REG_WRAPPERS)?;

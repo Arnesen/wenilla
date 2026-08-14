@@ -182,7 +182,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 // Left-justified like the template's line stack — invisible while the rect hugs
                 // the measured text, load-bearing once the wrap consumer pins a region to the
                 // wrap column.
-                d.justify_h = super::JustifyH::Left;
+                d.justify.set_h(super::JustifyH::Left);
                 d.anchors = vec![match prev_left {
                     None => Anchor::new(
                         Point::TopLeft,
@@ -227,7 +227,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     d
                 };
                 d.hidden = true;
-                d.justify_h = super::JustifyH::Right;
+                d.justify.set_h(super::JustifyH::Right);
                 d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
                 model.region_data.insert(right, d);
                 model.touch_layout(); // a line row entered the layout graph (decision 0740)

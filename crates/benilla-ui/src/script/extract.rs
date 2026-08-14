@@ -250,10 +250,10 @@ impl UiScript {
                         // The object's own justify (`<NormalFont inherits=… justifyH="LEFT"/>` —
                         // how the ref left-aligns a ButtonText).
                         if let Some(j) = fo.justify_h {
-                            data.justify_h = j;
+                            data.justify.set_h(j);
                         }
                         if let Some(j) = fo.justify_v {
-                            data.justify_v = j;
+                            data.justify.set_v(j);
                         }
                     }
                     // `Button:SetFont` sits BETWEEN the two: it is a local set on the button's own
@@ -311,8 +311,10 @@ impl UiScript {
                         QuadContent::Text {
                             text: data.text,
                             color: data.vertex_color,
-                            justify_h: data.justify_h,
-                            justify_v: data.justify_v,
+                            // The gx translator's answer, not the getter's: a cleared axis draws
+                            // CENTER/MIDDLE (`0x44d420`), where `GetJustifyH` says "UNKNOWN".
+                            justify_h: data.justify.paint_h(),
+                            justify_v: data.justify.paint_v(),
                             font: data.font_path,
                             font_height: data.font_height,
                             text_height: data.text_height,

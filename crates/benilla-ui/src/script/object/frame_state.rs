@@ -409,6 +409,40 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(model.arena.is_mouse_enabled(h))
         })?,
     )?;
+    // EnableKeyboard(flag) / IsKeyboardEnabled() — `0x776f90` / `0x776ff0`, real Frame entries in
+    // wow-re's frame-API carve, beside the mouse pair above.
+    //
+    // 8 corpus addons call this and were RAISING on it (`ColorPickerPlus:258`,
+    // `Dewdrop-2.0.lua:2021-2022` — which is in ~65 addons — `AckisRecipeList/ARLFrame.lua:1650`).
+    // The flag round-trips; **key delivery is not gated on it**, exactly as the wheel's flag
+    // shipped in 1198, because the machinery it would gate does not exist here yet.
+    //
+    // Why that is the right half rather than a silent stub, which this codebase has been bitten by
+    // three times (1203/1205/1211): the majority of the corpus calls pass **false**, and for those
+    // our behaviour is already the reference's — we deliver no keys to arbitrary frames either. The
+    // `true` callers want delivery we do not do, but they did not get it before this landed; they
+    // got a raise that killed the enclosing function. And per
+    // `frame-key-script-delivery.md` §3.2 being enabled genuinely is separable from having a
+    // handler, so the flag is a real piece of the model, not a placeholder for one.
+    m.set(
+        "EnableKeyboard",
+        lua.create_function(|lua, (this, enable): (Table, bool)| {
+            let h = frame_handle_of(lua, &this)?;
+            lua.app_data_mut::<Model>()
+                .expect("model")
+                .arena
+                .set_keyboard_enabled(h, enable);
+            Ok(())
+        })?,
+    )?;
+    m.set(
+        "IsKeyboardEnabled",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            Ok(model.arena.is_keyboard_enabled(h))
+        })?,
+    )?;
     // `EnableMouseWheel(flag)` / `IsMouseWheelEnabled()` — the wheel's own gate, a separate flag
     // from `EnableMouse` in the reference and separate here (decision 1198).
     //

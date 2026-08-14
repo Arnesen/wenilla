@@ -23,6 +23,7 @@
 
 pub mod bindings_xml;
 pub mod framexml;
+pub mod justify;
 pub mod layout;
 pub mod loader;
 pub mod markup;

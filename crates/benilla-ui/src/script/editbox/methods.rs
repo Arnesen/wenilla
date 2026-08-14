@@ -251,16 +251,21 @@ fn install_font_block(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // Every font method acts on the box's implicit FontString: each binding's shim loads
     // `[this+0x324]` and hands it to the shared implementation, and that offset is
     // `EditBoxState::text_region`. Created on demand, exactly like every other text-touching path.
-    crate::script::font_block::install(lua, m, |lua, this| {
-        let h = frame_handle_of(lua, this)?;
-        super::ensure_text_region(lua, h).ok_or_else(|| mlua::Error::runtime("not an EditBox"))
-    })?;
+    crate::script::font_block::install(
+        lua,
+        m,
+        |lua, this| {
+            let h = frame_handle_of(lua, this)?;
+            super::ensure_text_region(lua, h).ok_or_else(|| mlua::Error::runtime("not an EditBox"))
+        },
+        "EditBox",
+    )?;
 
     // SetJustifyH("LEFT"|"CENTER"|"RIGHT") / SetJustifyV("TOP"|"MIDDLE"|"BOTTOM") → 0 values.
     //
-    // Two verified traps, both of which a plausible implementation gets wrong, and both of which
-    // our older FontString/Font copies of these verbs do get wrong (they coerce anything unknown to
-    // CENTER/MIDDLE — noted, not fixed here):
+    // Two verified traps, both of which a plausible implementation gets wrong. This table was the
+    // only one that got them right; the FontString and `<Font>` copies coerced anything unknown to
+    // CENTER/MIDDLE until 1237 lifted this law into [`crate::justify`], which all three now share:
     //  · an **unrecognised token RAISES** `Usage: %s:SetJustifyH("justify")` (`0x87c77c`), rather
     //    than falling back to a default;
     //  · a token from the **other axis** parses fine and then masks to nothing — `SetJustifyH("TOP")`

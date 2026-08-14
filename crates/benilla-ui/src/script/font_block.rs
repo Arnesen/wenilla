@@ -60,10 +60,13 @@
 //! the reference's `SetTextColor` and `SetShadowColor` read r, g and b with a **bare `lua_tonumber`**
 //! (a non-number silently becomes `0.0`) and carry **no usage string at all**, so they *cannot
 //! raise* — `SetTextColor()` sets opaque black. Ours take `f32`, so a missing or non-numeric channel
-//! errors instead. Alpha matches (`lua_isnumber`-gated, default 1.0). `script::region`'s and
-//! `script::font`'s copies are strict in the same way, so correcting only this one would put two
-//! answers in the codebase for one contract; it belongs with the collapse below. No corpus site is
-//! known to depend on it.
+//! errors instead. Alpha matches (`lua_isnumber`-gated, default 1.0).
+//!
+//! **The collapse below has now landed, which is what was blocking this**: the FontString and
+//! EditBox tables both reach these two verbs *here*, so the correction is a one-place change rather
+//! than three copies drifting. It is deliberately still not made, for a reason of its own: it turns
+//! a loud error into a silent opaque black, which is faithful but is a real behaviour change and
+//! belongs in its own landing with its own corpus A/B. No corpus site is known to depend on it.
 //!
 //! ## Where it lands, and why that is the mechanism rather than an approximation
 //!
@@ -89,14 +92,18 @@
 //!   own state rather than on its text region, because our EditBox draw law forces the region's
 //!   justification (see `script::editbox::methods`). They live there for that reason, not here.
 //!
-//! ## The one duplicate this leaves, named rather than left to be found
+//! ## Who installs this, and the duplicates it replaced
 //!
-//! `script::region`'s FontString table still carries its own hand-written copies of these ten. They
-//! are the same contract over the same fields and should collapse onto this module — one
-//! `font_block::install(lua, &m, region_handle_of)` — when `region.rs` is split (it is over the
-//! file-size budget, which is why that half is not done here). The collapse carries one correction
-//! with it: that copy's `SetFont` answers the **boolean `true`**, where the bytes above say the
-//! number `1` or nil.
+//! Two tables: the `EditBox`'s (`script::editbox::methods`) and the **`FontString`'s**
+//! (`script::region::text`). The FontString's used to hand-write its own copy of all ten; 1238
+//! collapsed them, deleting 226 lines and carrying the correction that copy had been hiding — its
+//! `SetFont` answered the boolean `true`, where the bytes above say the number `1` or nil.
+//!
+//! The `<Font>` object's table (`script::font`) is **not** installed from here, and that is not an
+//! oversight: it writes a [`FontObject`](super::FontObject) record rather than a
+//! [`RegionData`](super::RegionData), so it shares the *marshalling* ([`set_font_args`]) rather
+//! than the body. Its `SetFont` had drifted the other way — `Option` arguments, so `SetFont()`
+//! answered nil where `0x87c69c` raises — which is why the gate is one function now.
 
 use mlua::{Lua, Table, Value};
 
@@ -110,11 +117,55 @@ use crate::widget::RegionHandle;
 /// returning an error is how a method called on the wrong receiver reports it.
 pub(super) type ResolveRegion = fn(&Lua, &Table) -> mlua::Result<RegionHandle>;
 
+/// `SetFont(path, fontHeight [, flags])`'s shared **argument gate** — the entry of `0x79f210`,
+/// which Font `0x7a0270`, FontString `0x79d4f0` and EditBox `0x797210` all reach.
+///
+/// arg 2 must pass `lua_isstring` and arg 3 `lua_isnumber` — both of which coerce, so a numeric
+/// string is accepted for either — else `Usage: %s:SetFont("font", fontHeight [, flags])`
+/// (`.rdata 0x87c69c`). That arm is `luaL_error`, which longjmps, so it is an `Err` here and
+/// **never** a nil answer (`super::binding_abi`).
+///
+/// The returned path may be **empty**, which is the caller's *load-failure* edge rather than an
+/// argument error: it answers nil with nothing raised, because `!OmniCC/main.lua:41`'s
+/// `if not f:SetFont(saved, size) then revert end` is a font-file validity probe. The height is
+/// still applied on that edge — only the face is rejected.
+///
+/// Shared because it was not: the `<Font>` table took `Option<String>, Option<f32>` and so answered
+/// nil for `SetFont()` where the reference raises, while the FontString's copy answered the boolean
+/// `true` for everything. One gate is the only way three entry points stay one routine.
+pub(super) fn set_font_args(
+    file: &Value,
+    height: &Value,
+    widget: &str,
+) -> mlua::Result<(String, f32)> {
+    let usage = || {
+        mlua::Error::runtime(format!(
+            "Usage: <{widget}>:SetFont(\"font\", fontHeight [, flags])"
+        ))
+    };
+    let path = match file {
+        Value::String(s) => s.to_str()?.to_string(),
+        Value::Number(_) | Value::Integer(_) => as_f32(file).to_string(),
+        _ => return Err(usage()),
+    };
+    let height = match height {
+        Value::Number(_) | Value::Integer(_) => as_f32(height),
+        Value::String(s) => s.to_str()?.parse::<f32>().map_err(|_| usage())?,
+        _ => return Err(usage()),
+    };
+    Ok((path, height))
+}
+
 /// Install the ten shared font-block methods onto `m`, reading `this` through `resolve`.
 ///
 /// The caller names the subset: this installs exactly the ten the module doc tabulates, and a
 /// widget whose real table lacks one of them must not use this installer for it.
-pub(super) fn install(lua: &Lua, m: &Table, resolve: ResolveRegion) -> mlua::Result<()> {
+pub(super) fn install(
+    lua: &Lua,
+    m: &Table,
+    resolve: ResolveRegion,
+    widget: &'static str,
+) -> mlua::Result<()> {
     // ── the font object, and the live link to it ────────────────────────────────────────────
     // SetFontObject(font | "font" | nil) → 0 values. All three argument forms the reference's own
     // usage string names (`.rdata 0x87c5cc`: `Usage: %s:SetFontObject(font or "font" or nil)`).
@@ -187,21 +238,7 @@ pub(super) fn install(lua: &Lua, m: &Table, resolve: ResolveRegion) -> mlua::Res
         "SetFont",
         lua.create_function(
             move |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
-                let usage = || {
-                    mlua::Error::runtime(
-                        "Usage: <EditBox>:SetFont(\"font\", fontHeight [, flags])".to_string(),
-                    )
-                };
-                let path = match &file {
-                    Value::String(s) => s.to_str()?.to_string(),
-                    Value::Number(_) | Value::Integer(_) => as_f32(&file).to_string(),
-                    _ => return Err(usage()),
-                };
-                let height = match &height {
-                    Value::Number(_) | Value::Integer(_) => as_f32(&height),
-                    Value::String(s) => s.to_str()?.parse::<f32>().map_err(|_| usage())?,
-                    _ => return Err(usage()),
-                };
+                let (path, height) = set_font_args(&file, &height, widget)?;
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();

@@ -6,7 +6,7 @@
 //! almost nobody writes (6 corpus sites against 3,180).
 
 use super::common::script;
-use crate::script::{FontObject, JustifyH, Outline, QuadContent, UiScript};
+use crate::script::{FontObject, JustifyH, JustifyV, Outline, QuadContent, UiScript};
 
 /// Load a FrameXML fragment through the real loader, asserting it reported no errors.
 fn load(s: &UiScript, xml: &str) {
@@ -713,4 +713,269 @@ fn set_font_returns_one_or_nil() {
         1.0
     );
     assert!(s.eval::<bool>("return f:SetFont('', 12) == nil").unwrap());
+}
+
+/// The justify law is **one** table in the binary (`.rdata 0x811ad0`) and must be one
+/// transcription here: a `FontString` and a `<Font>` object have to answer identically, token for
+/// token and raise for raise.
+///
+/// They did not. Both sides were written separately from the same law and each drifted its own
+/// way — the FontString had no `GetJustifyH`/`GetJustifyV` at all (real entries `0x79e5f0` /
+/// `0x79e7f0`), the Font object silently `.trim()`ed its argument where `SStrCmpI` compares the
+/// whole string, and both quietly answered CENTER for a string the reference raises on. Every
+/// test on both sides passed throughout. This is the net that makes the next drift fail.
+#[test]
+fn both_tables_speak_one_justify_law() {
+    let s = script();
+    s.run(
+        "seam = CreateFrame('Frame', 'SeamFrame')\n\
+         fs = seam:CreateFontString()\n\
+         fo = CreateFont('SeamFont')",
+    )
+    .unwrap();
+
+    for obj in ["fs", "fo"] {
+        // The client's ctor default `0x212` = CENTER | MIDDLE | 0x200, read through each mask.
+        let h = s
+            .eval::<String>(&format!("return {obj}:GetJustifyH()"))
+            .unwrap();
+        let v = s
+            .eval::<String>(&format!("return {obj}:GetJustifyV()"))
+            .unwrap();
+        assert_eq!((obj, h.as_str()), (obj, "CENTER"));
+        assert_eq!((obj, v.as_str()), (obj, "MIDDLE"));
+
+        // Every token round trips, and the match is case-insensitive.
+        for (set, get, tokens) in [
+            ("SetJustifyH", "GetJustifyH", ["LEFT", "CENTER", "RIGHT"]),
+            ("SetJustifyV", "GetJustifyV", ["TOP", "MIDDLE", "BOTTOM"]),
+        ] {
+            for t in tokens {
+                s.run(&format!("{obj}:{set}('{}')", t.to_lowercase()))
+                    .unwrap();
+                let got = s.eval::<String>(&format!("return {obj}:{get}()")).unwrap();
+                assert_eq!(got, t, "{obj}:{set} then {get}");
+            }
+        }
+
+        // A non-token raises the reference's own usage string rather than coercing to CENTER.
+        for verb in ["SetJustifyH", "SetJustifyV"] {
+            let err = s
+                .run(&format!("{obj}:{verb}('MIDDLE_LEFT')"))
+                .expect_err("a string outside the six-entry table must raise");
+            let err = format!("{err}");
+            assert!(
+                err.contains("Usage:") && err.contains(verb),
+                "{obj}:{verb} raised {err:?}"
+            );
+        }
+
+        // Whole-string: a trailing space is a miss. The Font object used to trim it away.
+        assert!(
+            s.run(&format!("{obj}:SetJustifyH('LEFT ')")).is_err(),
+            "{obj}:SetJustifyH must not trim its argument"
+        );
+
+        // A cross-axis token matches the table, so it is accepted with no error — the one place
+        // we knowingly stop short of the law (the reference clears the axis; see `script::justify`).
+        s.run(&format!("{obj}:SetJustifyH('TOP')")).unwrap();
+        s.run(&format!("{obj}:SetJustifyV('LEFT')")).unwrap();
+    }
+}
+
+/// `SetFont` is one routine (`0x79f210`) with three entry points — Font `0x7a0270`, FontString
+/// `0x79d4f0`, EditBox `0x797210` — so all three must answer identically, and none of them did.
+///
+/// The FontString's hand-written copy answered the boolean `true` for *everything*, including the
+/// empty-path load failure that `!OmniCC/main.lua:41`'s `if not f:SetFont(saved, size)` probes;
+/// the `<Font>` object's took `Option` arguments and so answered **nil** for `SetFont()` where the
+/// reference raises `Usage: %s:SetFont("font", fontHeight [, flags])` (`0x87c69c`). A behavioural
+/// differential across both tables is what surfaced it — arity alone had matched.
+#[test]
+fn set_font_is_one_routine_on_both_tables() {
+    let s = script();
+    s.run("seam = CreateFrame('Frame', 'SetFontSeamFrame')\nfs = seam:CreateFontString()\nfo = CreateFont('SetFontSeamFont')")
+        .unwrap();
+
+    for obj in ["fs", "fo"] {
+        // Success is the NUMBER 1 — never a boolean, and never zero values.
+        let n = s
+            .eval::<f32>(&format!(
+                "return {obj}:SetFont('Fonts\\\\FRIZQT__.TTF', 12)"
+            ))
+            .unwrap();
+        assert_eq!(n, 1.0, "{obj}:SetFont success");
+        assert!(
+            s.eval::<bool>(&format!(
+                "return {obj}:SetFont('Fonts\\\\FRIZQT__.TTF', 12) == 1"
+            ))
+            .unwrap(),
+            "{obj}:SetFont must answer the number 1, not true"
+        );
+
+        // An empty path is the LOAD FAILURE edge: nil, falsey, and nothing raised.
+        assert!(
+            s.eval::<bool>(&format!("return {obj}:SetFont('', 12) == nil"))
+                .unwrap(),
+            "{obj}:SetFont('') must answer nil"
+        );
+
+        // A missing or non-string path, or a missing height, is an ARGUMENT error — it raises,
+        // which is a different thing from the nil above and used to be conflated with it.
+        for bad in ["", "'Fonts\\\\FRIZQT__.TTF'", "nil, 12", "{}, 12"] {
+            let err = s
+                .run(&format!("{obj}:SetFont({bad})"))
+                .expect_err("a bad SetFont argument must raise, not answer nil");
+            assert!(
+                format!("{err}").contains("Usage:") && format!("{err}").contains("SetFont"),
+                "{obj}:SetFont({bad}) raised {err}"
+            );
+        }
+
+        // Both `lua_isstring` and `lua_isnumber` coerce, so a numeric string is accepted for either.
+        assert!(
+            s.eval::<bool>(&format!(
+                "return {obj}:SetFont('Fonts\\\\FRIZQT__.TTF', '14') == 1"
+            ))
+            .unwrap(),
+            "{obj}:SetFont must accept a numeric string height"
+        );
+    }
+}
+
+/// A cross-axis token **erases** its axis, and the two readers then disagree — faithfully.
+///
+/// `SetJustifyH("TOP")` parses (`0x08`), contributes nothing to mask `0x07`, and raises nothing.
+/// `GetJustifyH()` afterwards answers the literal `"UNKNOWN"` (`0x6f1a00` → `.data 0x838044`),
+/// while the glyphs keep drawing **centred**: the ui→gx translator `0x44d420` is a priority ladder
+/// whose per-axis register is pre-set to `1` between the `test` and the `jcc`, so an all-clear axis
+/// exits with CENTER still in it. Reading the getter's answer into the draw path — or mapping the
+/// bitmask onto the gx enum with a `0` default — inverts the axis to LEFT.
+///
+/// Reached by 13 corpus sites (`FonzAppraiser` ×12, `Roid-Macros`) writing
+/// `SetJustifyV("CENTER")` when they mean MIDDLE.
+#[test]
+fn a_cross_axis_token_erases_the_axis_but_still_draws_centred() {
+    let mut s = script();
+    s.run(
+        "f = CreateFrame('Frame', 'ClearAxisFrame')\n\
+         f:SetWidth(200) f:SetHeight(40) f:SetPoint('CENTER')\n\
+         fs = f:CreateFontString()\n\
+         fs:SetAllPoints(f)\n\
+         fs:SetText('erased')",
+    )
+    .unwrap();
+
+    // A real token lands, so the erase below is visibly an erase and not a no-op.
+    s.run("fs:SetJustifyH('LEFT') fs:SetJustifyV('TOP')")
+        .unwrap();
+    assert_eq!(s.eval::<String>("return fs:GetJustifyH()").unwrap(), "LEFT");
+    assert_eq!(s.eval::<String>("return fs:GetJustifyV()").unwrap(), "TOP");
+
+    // The cross-axis pair: each erases the OTHER axis it was aimed at, raising nothing.
+    s.run("fs:SetJustifyH('TOP')").unwrap();
+    s.run("fs:SetJustifyV('CENTER')").unwrap();
+    assert_eq!(
+        s.eval::<String>("return fs:GetJustifyH()").unwrap(),
+        "UNKNOWN",
+        "a cleared axis reads UNKNOWN, not the value it used to hold"
+    );
+    assert_eq!(
+        s.eval::<String>("return fs:GetJustifyV()").unwrap(),
+        "UNKNOWN"
+    );
+
+    // ...and the draw path answers CENTER/MIDDLE for that same state.
+    s.resolve();
+    let (h, v) = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(ref t),
+                justify_h,
+                justify_v,
+                ..
+            } if t == "erased" => Some((justify_h, justify_v)),
+            _ => None,
+        })
+        .expect("the erased string draws");
+    assert_eq!(
+        (h, v),
+        (JustifyH::Center, JustifyV::Middle),
+        "a cleared axis draws CENTER/MIDDLE — the gx translator's pre-set 1, NOT LEFT/TOP"
+    );
+}
+
+/// The font block is a **per-table membership fact**, and wow-re's registrar carve names the six:
+/// *"Exposed on: FontString, Font object, EditBox, MessageFrame, ScrollingMessageFrame,
+/// SimpleHTML. NOT on Button."* We shipped it on two; these are the third and fourth.
+///
+/// `BigWigs/Plugins/Messages.lua:212` — `self.msgframe:SetFontObject(GameFontNormalLarge)` on a
+/// frame it has just given `SetInsertMode("TOP")` — died there every session.
+///
+/// The second assertion is the trap: a message frame's lines fall back to **LEFT** when it has no
+/// declared `<FontString>`, while a freshly created `RegionData` defaults to the FontString's own
+/// CENTER. Creating the style region on demand must not silently re-justify the frame.
+#[test]
+fn the_font_block_reaches_both_message_frame_tables() {
+    let mut s = script();
+    s.run(
+        "fo = CreateFont('MsgBlockFont')\n\
+         fo:SetFont('Fonts\\\\FRIZQT__.TTF', 14)\n\
+         mf = CreateFrame('MessageFrame', 'MsgBlockPlain')\n\
+         mf:SetWidth(300) mf:SetHeight(80) mf:SetPoint('CENTER')\n\
+         smf = CreateFrame('ScrollingMessageFrame', 'MsgBlockScroll')\n\
+         smf:SetWidth(300) smf:SetHeight(80) smf:SetPoint('TOPLEFT')",
+    )
+    .unwrap();
+
+    for obj in ["mf", "smf"] {
+        s.run(&format!("{obj}:SetFontObject(fo)")).unwrap();
+        assert_eq!(
+            s.eval::<String>(&format!("return {obj}:GetFontObject():GetName()"))
+                .unwrap(),
+            "MsgBlockFont",
+            "{obj}:GetFontObject must answer the OBJECT it was given"
+        );
+        // The shared `0x79f210` contract, same as every other table that carries it.
+        assert!(
+            s.eval::<bool>(&format!(
+                "return {obj}:SetFont('Fonts\\\\MORPHEUS.TTF', 16) == 1"
+            ))
+            .unwrap(),
+            "{obj}:SetFont answers the number 1"
+        );
+        let (_, height, _) = s
+            .eval::<(mlua::Value, f32, String)>(&format!("return {obj}:GetFont()"))
+            .unwrap();
+        assert_eq!(height, 16.0, "{obj}:GetFont reads back what SetFont wrote");
+        // The four-value getters the carve pins at 4 for every one of the six tables.
+        assert_eq!(
+            s.eval::<i64>(&format!("return select('#', {obj}:GetShadowColor())"))
+                .unwrap(),
+            4
+        );
+    }
+
+    // Styling the frame must not move its text: the lines still run flush LEFT.
+    s.run("mf:AddMessage('flush left please')").unwrap();
+    s.resolve();
+    let j = s
+        .extract()
+        .into_iter()
+        .find_map(|q| match q.content {
+            QuadContent::Text {
+                text: Some(ref t),
+                justify_h,
+                ..
+            } if t == "flush left please" => Some(justify_h),
+            _ => None,
+        })
+        .expect("the message draws");
+    assert_eq!(
+        j,
+        JustifyH::Left,
+        "creating the style region must not re-justify the frame to the FontString default"
+    );
 }

@@ -259,13 +259,13 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             {
                 let d = model.region_data.entry(lh).or_default();
                 d.hidden = true;
-                d.justify_h = crate::script::JustifyH::Left;
+                d.justify.set_h(crate::script::JustifyH::Left);
                 d.anchors = vec![anchor];
             }
             {
                 let d = model.region_data.entry(rh).or_default();
                 d.hidden = true;
-                d.justify_h = crate::script::JustifyH::Right;
+                d.justify.set_h(crate::script::JustifyH::Right);
                 d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
             }
             model.touch_layout(); // two line rows entered the layout graph (decision 0740)

@@ -480,12 +480,12 @@ pub(super) fn refresh_text_region_justify(lua: &Lua, this: &Table) -> mlua::Resu
 /// `<FontString inherits="ChatFontNormal"/>` inherits the FontString CENTER/MIDDLE defaults and
 /// an empty focused box parks its caret mid-box (the mail send tab's original sin).
 fn apply_text_region_justify(data: &mut RegionData, multi_line: bool) {
-    data.justify_h = crate::script::JustifyH::Left;
-    data.justify_v = if multi_line {
+    data.justify.set_h(crate::script::JustifyH::Left);
+    data.justify.set_v(if multi_line {
         crate::script::JustifyV::Top
     } else {
         crate::script::JustifyV::Middle
-    };
+    });
 }
 
 // ── small shared helpers ─────────────────────────────────────────────────────────────────────

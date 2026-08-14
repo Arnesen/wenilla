@@ -443,7 +443,10 @@ pub(crate) struct RegionData {
     /// non-empty ⇒ resolved in [`UiScript::resolve`], any edge the anchors leave unset inherited
     /// from the owner frame's rect.
     pub(crate) anchors: Vec<Anchor>,
-    /// FontString horizontal justification (`SetJustifyH`/XML `justifyH`); default CENTER.
+    /// `Texture:SetDesaturated(flag)` — the shader desaturation state (`0x79c1e0`, verified in
+    /// wow-re's ledger). **Stored; the renderer does not yet honour it**, which is exactly why the
+    /// binding answers "shader unsupported" — see `region.rs`'s `SetDesaturated`.
+    pub(crate) desaturated: bool,
     /// `SetNonSpaceWrap` / `CanNonSpaceWrap` — FontString only (`0x79e9f0`/`0x79ead0`, wow-re's
     /// widget-method batch). **State only here.** The real client's gx flag `0x40` feeds a
     /// mid-word wrap carry and the fit-count terminator whose one consumer is the ellipsis
@@ -452,14 +455,13 @@ pub(crate) struct RegionData {
     /// which is the honest position and is stated rather than left to be discovered.
     ///
     /// Default is ON (a no-arg `SetNonSpaceWrap()` also enables), so `None` reads as enabled.
-    /// `Texture:SetDesaturated(flag)` — the shader desaturation state (`0x79c1e0`, verified in
-    /// wow-re's ledger). **Stored; the renderer does not yet honour it**, which is exactly why the
-    /// binding answers "shader unsupported" — see `region.rs`'s `SetDesaturated`.
-    pub(crate) desaturated: bool,
     pub(crate) non_space_wrap: Option<bool>,
-    pub(crate) justify_h: JustifyH,
-    /// FontString vertical justification (`SetJustifyV`/XML `justifyV`); default MIDDLE.
-    pub(crate) justify_v: JustifyV,
+    /// FontString justification, as the client's own **dword** rather than a pair of resolved
+    /// enums — `CSimpleFontString+0x120`, bits 0–2 horizontal and 3–5 vertical, defaulting to the
+    /// ctor's `0x212` (CENTER|MIDDLE). See [`crate::justify::Justify`]: an axis can be *cleared*,
+    /// which no resolved enum can hold, and the Lua getter and the draw path then answer that
+    /// state differently (`"UNKNOWN"` vs centred) — both faithfully.
+    pub(crate) justify: crate::justify::Justify,
     /// The `<TexCoords>`/`SetTexCoord` UV mapping ([`TexCoords`]: the 4-edge crop, or the 8-arg
     /// affine quad). `None` = the full texture. Slices the quadrant/atlas art (decision 0084).
     pub(crate) tex_coords: Option<TexCoords>,

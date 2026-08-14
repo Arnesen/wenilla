@@ -365,7 +365,20 @@ fn main() {
     // `--why <name>` now reads any row back by name.
     let methods = addon_harness::method_demand(&reports);
     if !methods.is_empty() {
-        println!("\n  most-wanted missing METHODS (addons calling each as obj:Name(), no widget has it):");
+        // The header states BOTH limits, because the list read as a build queue and is not one
+        // (decision 1240). It counts addons that NAME the verb, which is neither "addons blocked
+        // by it" nor "call sites": its top three were once RegisterTabCompletion/IsModule/
+        // IsModuleActive — AceConsole-2.0's and AceAddon-2.0's own methods on their own objects,
+        // one library file replicated into 56 and 38 addons — and its fourth, EnableKeyboard, was
+        // a real absent Frame verb that was blocking none of its 8, every one of which died
+        // earlier and elsewhere.
+        println!("\n  most-wanted missing METHODS — addons that NAME each as obj:Name(), and");
+        println!("  no widget answers. NOT a blocker list and NOT a build queue:");
+        println!("    · a big number is usually ONE library file replicated (1207/1210), and");
+        println!(
+            "    · a third-party library's own method on its own object is not ours to write."
+        );
+        println!("  Open the call site before ranking it (decision 1240).");
         for (name, count) in methods.into_iter().take(16) {
             println!("    {count:>4}  {name}");
         }

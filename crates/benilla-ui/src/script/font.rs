@@ -72,7 +72,9 @@
 use mlua::{Lua, Table, Value};
 
 use super::object::publish_global;
-use super::{FontObject, FontShadow, JustifyH, JustifyV, Model, Outline, RegionData};
+use crate::justify;
+
+use super::{FontObject, FontShadow, Model, Outline, RegionData};
 
 /// The shared metatable of every font-object handle.
 const REG_FONT_META: &str = "__benilla_font_meta";
@@ -210,12 +212,12 @@ pub(crate) fn repaint(d: &mut RegionData, fo: &FontObject) {
     }
     if !ex.justify_h {
         if let Some(j) = fo.justify_h {
-            d.justify_h = j;
+            d.justify.set_h(j);
         }
     }
     if !ex.justify_v {
         if let Some(j) = fo.justify_v {
-            d.justify_v = j;
+            d.justify.set_v(j);
         }
     }
 }
@@ -335,15 +337,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFont",
         lua.create_function(
-            |lua, (this, path, height, flags): (Table, Option<String>, Option<f32>, Option<String>)| {
-                let ok = path.as_deref().is_some_and(|p| !p.is_empty());
+            |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
+                // The same gate the FontString and EditBox tables enter — one `0x79f210`, three
+                // entry points. This side used to take `Option`s, so `SetFont()` answered **nil**
+                // where the reference raises `0x87c69c`; the FontString's copy answered the boolean
+                // `true` for everything. Neither was the shared routine's contract.
+                let (path, height) = super::font_block::set_font_args(&file, &height, "Font")?;
+                let ok = !path.is_empty();
                 edit(lua, &this, |fo| {
                     if ok {
-                        fo.font = path;
+                        fo.font = Some(path);
                     }
-                    if let Some(h) = height {
-                        fo.height = Some(h);
-                    }
+                    fo.height = Some(height);
                     if let Some(f) = flags {
                         // The LUA flags spelling ("OUTLINE"/"THICKOUTLINE"), not the XML
                         // attribute's ("NORMAL"/"THICK") — this read the XML one, so every
@@ -454,13 +459,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // ── justification ───────────────────────────────────────────────────────────────────────
+    //
+    // The token table, the whole-string match, the raise on a miss and the cross-axis clear are
+    // [`crate::justify`]'s, shared with the FontString table's identical pair. This side used to
+    // `.trim()` its argument and the other did not — one law, two transcriptions, and at most one
+    // of them could be right (the bytes say no trim: `SStrCmpI` compares the whole string).
+    //
+    // `justify_h`'s `Option` here is *inheritance*, not the reference's cleared axis: `None` means
+    // "this font object does not specify justification", which is what the resolve at
+    // [`resolve_font_object`] and `extract.rs` test. A fresh object therefore reads CENTER/MIDDLE
+    // through `unwrap_or_default`, which is also the client's ctor default `0x212`.
     m.set(
         "SetJustifyH",
         lua.create_function(|lua, (this, j): (Table, String)| {
-            let jh = match j.trim().to_ascii_uppercase().as_str() {
-                "LEFT" => JustifyH::Left,
-                "RIGHT" => JustifyH::Right,
-                _ => JustifyH::Center,
+            let jh = match justify::parse_h(&j) {
+                justify::Set::To(jh) => jh,
+                justify::Set::Clears => return Ok(()),
+                justify::Set::NoMatch => return Err(justify::usage_h("Font")),
             };
             edit(lua, &this, |fo| fo.justify_h = Some(jh))
         })?,
@@ -468,20 +483,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "GetJustifyH",
         lua.create_function(|lua, this: Table| {
-            Ok(match read(lua, &this)?.justify_h.unwrap_or_default() {
-                JustifyH::Left => "LEFT",
-                JustifyH::Center => "CENTER",
-                JustifyH::Right => "RIGHT",
-            })
+            Ok(justify::name_h(
+                read(lua, &this)?.justify_h.unwrap_or_default(),
+            ))
         })?,
     )?;
     m.set(
         "SetJustifyV",
         lua.create_function(|lua, (this, j): (Table, String)| {
-            let jv = match j.trim().to_ascii_uppercase().as_str() {
-                "TOP" => JustifyV::Top,
-                "BOTTOM" => JustifyV::Bottom,
-                _ => JustifyV::Middle,
+            let jv = match justify::parse_v(&j) {
+                justify::Set::To(jv) => jv,
+                justify::Set::Clears => return Ok(()),
+                justify::Set::NoMatch => return Err(justify::usage_v("Font")),
             };
             edit(lua, &this, |fo| fo.justify_v = Some(jv))
         })?,
@@ -489,11 +502,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "GetJustifyV",
         lua.create_function(|lua, this: Table| {
-            Ok(match read(lua, &this)?.justify_v.unwrap_or_default() {
-                JustifyV::Top => "TOP",
-                JustifyV::Middle => "MIDDLE",
-                JustifyV::Bottom => "BOTTOM",
-            })
+            Ok(justify::name_v(
+                read(lua, &this)?.justify_v.unwrap_or_default(),
+            ))
         })?,
     )?;
 

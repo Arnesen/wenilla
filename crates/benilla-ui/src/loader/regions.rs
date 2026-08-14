@@ -265,7 +265,18 @@ impl Loader<'_> {
             .and_then(abs_value);
         let outline = region.attr("outline").map(str::to_string);
         if font.is_some() || height.is_some() || outline.is_some() {
-            self.call_region(wrapper, "SetFont", (font, height, outline), dbg);
+            // NOT the `SetFont` binding. XML supplies any subset of the three, while the
+            // reference's `SetFont` requires a path AND a height (raising `0x87c69c` otherwise),
+            // because the real client applies XML font attributes in C++ and never through the Lua
+            // method. Routing the loader through the binding is exactly what forced that binding to
+            // stay lenient — one name doing two jobs. This is the XML job.
+            if let Err(e) =
+                crate::script::apply_font_parts(self.lua, wrapper, font, height, outline)
+            {
+                self.report
+                    .errors
+                    .push(format!("{dbg}: region font attrs: {e}"));
+            }
         }
     }
 }

@@ -200,6 +200,30 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| with_smf(lua, &this, |smf| smf.fade_duration))?,
     )?;
 
+    // ── the shared font block ───────────────────────────────────────────────────────────────
+    //
+    // `Set/GetFontObject · Set/GetFont · Set/GetTextColor · Set/GetShadowColor ·
+    // Set/GetShadowOffset` are real entries on this class's table, not a courtesy. wow-re's
+    // registrar carve is explicit about the membership — *"Exposed on: FontString, Font object,
+    // EditBox, MessageFrame, ScrollingMessageFrame, SimpleHTML. NOT on Button"* — and names this
+    // class's own shims calling the shared implementations (`GetShadowColor 0x792240`). We shipped the block on two
+    // of the six and this is the third and fourth; SimpleHTML is a widget kind we do not have at
+    // all.
+    //
+    // Demand is observed, not counted: `BigWigs/Plugins/Messages.lua:212` is
+    // `self.msgframe:SetFontObject(GameFontNormalLarge)` on a frame it has just given
+    // `SetInsertMode("TOP")`, and BigWigs dies there every session.
+    crate::script::font_block::install(
+        lua,
+        &m,
+        |lua, this| {
+            let h = frame_handle_of(lua, this)?;
+            super::ensure_font_region(lua, h)
+                .ok_or_else(|| mlua::Error::runtime("not a ScrollingMessageFrame"))
+        },
+        "ScrollingMessageFrame",
+    )?;
+
     lua.set_named_registry_value(REG_SCROLLINGMESSAGEFRAME_METHODS, m)?;
 
     // SubmitChatInput(text) — the chat input EditBox's OnEnterPressed hands the typed line here; it

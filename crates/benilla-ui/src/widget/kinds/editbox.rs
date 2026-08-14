@@ -192,52 +192,33 @@ pub struct EditBoxState {
     pub justify: u32,
 }
 
-/// The justify enum, `.rdata 0x811ad0` — `{bits, token}`, in the reference's own table order, which
-/// is the order [`EditBoxState::justify_token`] scans (the getter returns the **first** set bit's
-/// token).
-const JUSTIFY_TOKENS: [(u32, &str); 6] = [
-    (0x01, "LEFT"),
-    (0x02, "CENTER"),
-    (0x04, "RIGHT"),
-    (0x08, "TOP"),
-    (0x10, "MIDDLE"),
-    (0x20, "BOTTOM"),
-];
-
 impl EditBoxState {
     /// The horizontal axis mask (bits 0–2) — `SetJustifyH`'s `(cur & ~7) | (parsed & 7)`.
-    pub const JUSTIFY_H_MASK: u32 = 0x07;
+    pub const JUSTIFY_H_MASK: u32 = crate::justify::H_MASK;
     /// The vertical axis mask (bits 3–5) — `SetJustifyV`'s.
-    pub const JUSTIFY_V_MASK: u32 = 0x38;
+    pub const JUSTIFY_V_MASK: u32 = crate::justify::V_MASK;
 
-    /// Parse a justify token to its bit, case-insensitively and whole-string (`0x6f1990`, a linear
-    /// `SStrCmpI` scan of all six). `None` = no match, which is what makes the caller raise
-    /// `Usage: %s:SetJustifyH("justify")` — the reference checks this one, unlike `SetTextColor`.
+    /// Parse a justify token to its bit — [`crate::justify::parse_bits`]. `None` = no match, which
+    /// is what makes the caller raise `Usage: %s:SetJustifyH("justify")`; the reference checks this
+    /// one, unlike `SetTextColor`.
     pub fn justify_bit(token: &str) -> Option<u32> {
-        JUSTIFY_TOKENS
-            .iter()
-            .find(|(_, name)| token.eq_ignore_ascii_case(name))
-            .map(|(bits, _)| *bits)
+        crate::justify::parse_bits(token)
     }
 
-    /// Replace one axis's bits with `parsed`'s, masked to that axis (`0x79fc5d`:
-    /// `(cur ^ parsed) & mask ^ cur`, i.e. `(cur & !mask) | (parsed & mask)`).
+    /// Replace one axis's bits with `parsed`'s — [`crate::justify::set_axis`].
     ///
     /// **The verified trap this reproduces:** `SetJustifyH("TOP")` *parses* (0x08) but
     /// `0x08 & 0x07 == 0`, so it **clears** justifyH and a later `GetJustifyH()` answers
     /// `"UNKNOWN"` — no error is raised. A plausible implementation that maps unknown-to-CENTER
-    /// silently answers something the client never would.
+    /// silently answers something the client never would; the FontString and `<Font>` tables both
+    /// did exactly that until this law was lifted out of here and shared with them.
     pub fn set_justify_axis(&mut self, mask: u32, parsed: u32) {
-        self.justify = (self.justify & !mask) | (parsed & mask);
+        self.justify = crate::justify::set_axis(self.justify, mask, parsed);
     }
 
-    /// The token for one axis: the **first** entry in table order whose bit is set, else the
-    /// literal `"UNKNOWN"` (`0x6f1a00`, string `.data 0x838044`).
+    /// The token for one axis — [`crate::justify::name_of`].
     pub fn justify_token(&self, mask: u32) -> &'static str {
-        JUSTIFY_TOKENS
-            .iter()
-            .find(|(bits, _)| self.justify & mask & bits != 0)
-            .map_or("UNKNOWN", |(_, name)| *name)
+        crate::justify::name_of(self.justify, mask)
     }
 }
 

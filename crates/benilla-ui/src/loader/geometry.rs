@@ -78,14 +78,11 @@ impl Loader<'_> {
         if el.attr_bool("toplevel") {
             self.call(wrapper, "SetToplevel", true, dbg);
         }
-        // Still a genuine gap — the window-behaviour surface (input arbitration, decision 0068).
-        // Flagged rather than silently dropped or faked: accepting an attribute without
-        // implementing it is strictly worse than saying so.
+        // `enableKeyboard="true"` — the XML half of the flag, which enables BOTH key kinds
+        // (`scripts-auto-enable.md` §1-2). The flag is now real and round-trips; key delivery is
+        // still not gated on it, which the method's own doc states rather than this warning.
         if el.attr_bool("enableKeyboard") {
-            self.warn_once(
-                "EnableKeyboard",
-                "`enableKeyboard` ignored: EnableKeyboard is not in the v1 object model (gap)",
-            );
+            self.call(wrapper, "EnableKeyboard", true, dbg);
         }
     }
 

@@ -60,6 +60,53 @@ pub(super) struct MessageFont {
     pub(super) justify_h: JustifyH,
 }
 
+/// The FontString region a message frame's **style** lives on — found, or created on demand.
+///
+/// Both classes draw their lines through one font instance, and [`UiScript::message_frame_font`]
+/// reads it off the frame's first `FontString` region. That region normally comes from the
+/// declared direct-child `<FontString>` (LoadXML's "special" font string — our ChatFrame has one).
+/// A frame built by `CreateFrame("MessageFrame")` has none, so the ten shared font-block verbs
+/// need somewhere to write: this is that somewhere, and it is created **only** when one of them is
+/// actually called, so a frame nobody styles never grows a region.
+///
+/// **It is seated LEFT deliberately.** A frame with no declared FontString falls back to LEFT (the
+/// chat shape) per [`MessageFont::justify_h`]'s law — but a freshly created `RegionData` defaults
+/// to the *FontString* default of CENTER. Creating the region at the default would silently
+/// re-justify a frame the moment an addon touched its font, which is a visible change nobody
+/// asked for.
+pub(super) fn ensure_font_region(
+    lua: &mlua::Lua,
+    fh: FrameHandle,
+) -> Option<crate::widget::RegionHandle> {
+    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+    let existing = model.arena.frame(fh).and_then(|frame| {
+        frame
+            .regions
+            .iter()
+            .find(|&&rh| {
+                matches!(
+                    model.arena.region(rh).map(|r| r.kind),
+                    Some(crate::widget::RegionKind::FontString)
+                )
+            })
+            .copied()
+    });
+    if existing.is_some() {
+        return existing;
+    }
+    let rh = model.arena.create_region(
+        fh,
+        crate::widget::RegionKind::FontString,
+        crate::order::DrawLayer::Overlay,
+        0,
+    )?;
+    let mut data = crate::script::RegionData::default();
+    data.justify.set_h(JustifyH::Left);
+    model.region_data.insert(rh, data);
+    model.touch_layout();
+    Some(rh)
+}
+
 impl UiScript {
     pub(super) fn message_frame_font(model: &Model, fh: FrameHandle) -> MessageFont {
         model
@@ -81,7 +128,7 @@ impl UiScript {
                         height: d.font_height,
                         shadow: d.font_shadow,
                         outline: d.outline,
-                        justify_h: d.justify_h,
+                        justify_h: d.justify.paint_h(),
                     })
             })
             .unwrap_or(MessageFont {
