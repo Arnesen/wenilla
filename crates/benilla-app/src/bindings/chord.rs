@@ -205,8 +205,10 @@ pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
         NumpadDecimal => "NUMPADDECIMAL",
         NumLock => "NUMLOCK",
         PrintScreen => "PRINTSCREEN",
-        ScrollLock => "SCROLLLOCK",
-        Pause => "PAUSE",
+        // ScrollLock and Pause are deliberately absent: the reference's namer calls their key
+        // codes (`0x210`/`0x211`) `UNKNOWN`, so they are unbindable there (wow-re
+        // `keybinding-dispatch-law.md` §2.3), and `IsValidBindingKeyString` would refuse the
+        // names anyway — arm 4's 26-name table holds neither.
         CapsLock => "CAPSLOCK",
         Minus => "-",
         Equal => "=",
@@ -346,8 +348,6 @@ fn token_key(t: &str) -> Option<BindKey> {
         "NUMPADDECIMAL" => NumpadDecimal,
         "NUMLOCK" => NumLock,
         "PRINTSCREEN" => PrintScreen,
-        "SCROLLLOCK" => ScrollLock,
-        "PAUSE" => Pause,
         "CAPSLOCK" => CapsLock,
         "-" => Minus,
         "=" => Equal,
@@ -368,6 +368,87 @@ fn token_key(t: &str) -> Option<BindKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every token this codec names is one `SetBinding` will actually take** (decision 1295).
+    /// The namer here and `IsValidBindingKeyString` in the engine table are two transcriptions of
+    /// the same reference, and nothing but this ties them together — a token we name but the
+    /// validator refuses is a key the capture seam happily offers and `SetBinding` then drops on
+    /// the floor, which is exactly what `SCROLLLOCK` and `PAUSE` were until 1295.
+    ///
+    /// The registry's default chords are covered exhaustively; `KeyCode` cannot be enumerated, so
+    /// the namer is covered by one key of every SHAPE it produces (letter, digit, F-key, numpad
+    /// digit, numpad name, arrow, the named editing/lock keys, punctuation).
+    #[test]
+    fn every_token_the_codec_names_is_one_setbinding_accepts() {
+        use benilla_ui::script::keybind::normalize_binding_key;
+        for spec in super::super::commands::SPECS {
+            for default in [spec.d1, spec.d2].into_iter().flatten() {
+                assert_eq!(
+                    normalize_binding_key(default).as_deref(),
+                    Some(default),
+                    "the default chord '{default}' ({}) is not a bindable key string",
+                    spec.name
+                );
+            }
+        }
+        for k in [
+            KeyCode::KeyW,
+            KeyCode::Digit0,
+            KeyCode::F1,
+            KeyCode::F12,
+            KeyCode::Numpad7,
+            KeyCode::NumpadAdd,
+            KeyCode::NumpadDecimal,
+            KeyCode::ArrowUp,
+            KeyCode::Space,
+            KeyCode::Enter,
+            KeyCode::Escape,
+            KeyCode::Backspace,
+            KeyCode::Tab,
+            KeyCode::Insert,
+            KeyCode::Delete,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::NumLock,
+            KeyCode::CapsLock,
+            KeyCode::PrintScreen,
+            KeyCode::Minus,
+            KeyCode::Equal,
+            KeyCode::BracketLeft,
+            KeyCode::Backslash,
+            KeyCode::Semicolon,
+            KeyCode::Quote,
+            KeyCode::Comma,
+            KeyCode::Period,
+            KeyCode::Slash,
+            KeyCode::Backquote,
+        ] {
+            let token = key_token(k).expect("named");
+            assert!(
+                normalize_binding_key(token).is_some(),
+                "{k:?} names '{token}', which SetBinding refuses"
+            );
+        }
+        for b in [
+            MouseButton::Left,
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::Forward,
+            MouseButton::Back,
+        ] {
+            let token = mouse_token(b).expect("named");
+            assert!(normalize_binding_key(token).is_some(), "{b:?} → '{token}'");
+        }
+        for token in ["MOUSEWHEELUP", "MOUSEWHEELDOWN"] {
+            assert!(normalize_binding_key(token).is_some());
+        }
+        // The other half of the same law: the reference's namer calls these two `UNKNOWN`
+        // (`0x210`/`0x211`), so we must not name them either — nothing downstream could bind them.
+        assert_eq!(key_token(KeyCode::ScrollLock), None);
+        assert_eq!(key_token(KeyCode::Pause), None);
+    }
 
     #[test]
     fn the_codec_round_trips_every_keyboard_token() {

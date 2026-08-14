@@ -126,13 +126,14 @@ pub(crate) fn glue_button_visuals(
             &mut ImageNode,
             &mut BackgroundColor,
             Has<widgets::FallbackFace>,
+            Option<&widgets::BtnTexCoords>,
         ),
         (With<GlueBtn>, Without<ArtSwap>),
     >,
     mut captions: Query<&mut TextColor, With<GlueCaption>>,
     mut hilights: Query<&mut Visibility, With<widgets::Hilight>>,
 ) {
-    for (disabled, interaction, children, mut node, mut bg, fallback) in &mut glue_btns {
+    for (disabled, interaction, children, mut node, mut bg, fallback, tc) in &mut glue_btns {
         let disabled = disabled.0;
         let pressed = !disabled && *interaction == Interaction::Pressed;
         let hovered = !disabled && *interaction != Interaction::None;
@@ -154,7 +155,7 @@ pub(crate) fn glue_button_visuals(
                 (up.clone(), Color::WHITE)
             };
             node.image = image;
-            node.rect = Some(tc_rect(*size, BUTTON_TC));
+            node.rect = Some(tc_rect(*size, tc.map(|t| t.0).unwrap_or(BUTTON_TC)));
             node.color = color;
         } else if fallback {
             bg.0 = if hovered { BTN_HOVER } else { BTN_BG };

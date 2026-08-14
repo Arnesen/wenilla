@@ -120,6 +120,14 @@ impl super::UiScript {
     pub fn take_cvar_changes(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.model_mut().cvar_changes)
     }
+
+    /// A native surface's write — [`set_from_engine`]'s public face: sets the value AND queues
+    /// the change like a Lua `SetCVar`, so the host's sync dirties the config file. The glue
+    /// AddOns screen's *Load out of date AddOns* checkbox is the caller (decision 1293): a
+    /// native widget editing a CVar is the minimap-zoom pattern, reached from outside the crate.
+    pub fn set_cvar_engine(&mut self, name: &str, value: &str) {
+        set_from_engine(&mut self.model_mut(), name, value.to_string());
+    }
 }
 
 /// An **engine-side** write: a value the engine owns moved, and the CVar table mirrors it. The

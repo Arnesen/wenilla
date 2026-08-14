@@ -192,7 +192,7 @@ fn surface_report(deep: bool, dump_path: Option<String>) {
         }
         println!(
             "    ^ read these: an unprefixed verb 1.12 lacks is what `if SomeName then` finds.\n      \
-             Most are our own UI's helpers (AddonList_*, KeyBindings_*, Options*), which are only\n      \
+             Most are our own UI's helpers (KeyBindings_*, Options*), which are only\n      \
              a naming question — but a POST-1.12 API name here is 1189's hazard exactly, because an\n      \
              addon that feature-tests it takes a branch written for a client we are not."
         );

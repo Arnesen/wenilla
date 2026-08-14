@@ -69,6 +69,22 @@ impl Toc {
             .unwrap_or_default()
     }
 
+    /// `## Interface:` **as the 1.12 client reads it** (decision 1292): the leading integer of
+    /// the value, and a manifest with no `## Interface` line (or a non-numeric one) is `0`.
+    /// Byte-verified (wow-re `addon-version-gate.md` §2.2): `Toc_Parse 0x51c9b0` stores
+    /// `SStrToInt` of the value at `[rec+0x1c]`, the record ctor leaves it `0`, and the version
+    /// gate compares that single dword — so an Era manifest's `11507, 11508` reads as `11507`,
+    /// exactly as the reference would read it. [`Toc::interface_versions`] stays for display;
+    /// the GATE runs on this.
+    pub fn interface_version(&self) -> u32 {
+        self.directive("Interface")
+            .map(|v| {
+                let digits: String = v.trim().chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
     /// A comma-separated list directive (`SavedVariables`, `OptionalDeps`, `Dependencies`, …),
     /// split and trimmed. Missing directive = empty list.
     pub fn list(&self, key: &str) -> Vec<&str> {

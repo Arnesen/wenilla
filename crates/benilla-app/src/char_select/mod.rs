@@ -122,6 +122,7 @@ impl Plugin for CharSelectPlugin {
                         dialog::drive_delete_dialog,
                         // Before the list refresh, and before `select_input` reads a click that
                         // landed on the panel rather than the screen (decision 1196).
+                        debug_select_addons,
                         addons::drive_addons_panel,
                         refresh::refresh_list,
                         refresh::refresh_banner_and_buttons,
@@ -583,6 +584,43 @@ fn debug_select_dialog(
     dialog.open_for(guid, name, level, class);
     dialog.typed.set_text(&typed);
     info!("char select: dialog instrument opened the delete confirm");
+    *done = true;
+}
+
+/// The shot instrument's AddOns dial (`WOW_CHARSELECT_ADDONS=1`): open the AddOns panel a few
+/// seconds after the screen is up, exactly as the screen's own button would — so the reference
+/// AddonList layout is exercised and capturable headlessly (pair with
+/// `WOW_CHARSELECT_SHOT_OUT`). Inert without the env; fires once.
+fn debug_select_addons(
+    roster: Res<Roster>,
+    mut panel: ResMut<addons::AddonsPanel>,
+    time: Res<Time>,
+    mut entered_at: Local<Option<f32>>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    if std::env::var("WOW_CHARSELECT_ADDONS").is_err() {
+        *done = true;
+        return;
+    }
+    let start = *entered_at.get_or_insert(time.elapsed_secs());
+    if time.elapsed_secs() - start < 4.0 {
+        return;
+    }
+    if roster.chars.is_empty() {
+        return; // roster not in yet — keep waiting
+    }
+    // The same open the AddOns button performs (`input::select_input`): realm + full roster.
+    let realm = roster
+        .realm
+        .as_ref()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "Realm".into());
+    let chars = roster.chars.iter().map(|c| c.name.clone()).collect();
+    panel.open_for(realm, chars);
+    info!("char select: addons instrument opened the AddOn List");
     *done = true;
 }
 

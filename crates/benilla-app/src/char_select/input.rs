@@ -82,7 +82,17 @@ pub(super) fn select_input(
                 // The reference plays `gsCharacterSelectionOpen`-family click here; ours reuses
                 // the create-screen open sound rather than inventing a name the client lacks.
                 sounds.write(GlueSound("gsCharacterSelectionCreateNew"));
-                panel.open_for(crate::ui_macro::identity(&roster).as_ref());
+                // The whole roster rides along so the panel's "Configure Addons For:" dropdown
+                // can fan out over every character (decision 1293). The realm resolves exactly
+                // as `ui_macro::identity`'s does — same fallback, so the enable files the panel
+                // writes stay keyed the way the world-entry walk reads them (0997, 1191 §7).
+                let realm = roster
+                    .realm
+                    .as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| "Realm".into());
+                let chars = roster.chars.iter().map(|c| c.name.clone()).collect();
+                panel.open_for(realm, chars);
             }
             SelectAction::Back => back_to_login = true,
             _ => {}

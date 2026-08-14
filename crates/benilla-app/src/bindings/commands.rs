@@ -49,7 +49,9 @@ pub(crate) struct Spec {
 }
 
 impl Spec {
-    /// Press+release semantics — the mousewheel-refusal law rides this at `SetBinding` time.
+    /// Press+release semantics — the reference's `<Binding runOnUp=…>`, whose ONE reader is
+    /// `RunCommand 0x4b7bf1`: it gates the release half and nothing else. (It used to gate a
+    /// mousewheel refusal at `SetBinding` time here; that refusal is not in the client — 1295.)
     pub(crate) fn run_on_up(&self) -> bool {
         matches!(self.kind, Kind::Held | Kind::EdgeUpDown(..))
     }
@@ -1127,9 +1129,9 @@ mod tests {
 
     /// **The registry against the real client's own two files.** Two columns of this table are
     /// pure transcription from the 1.12 install, and both are load-bearing in a way nothing else
-    /// here can see: `runOnUp` — the mousewheel-refusal law rides it, and B265 turned entirely on
-    /// whether ours matched — and every command's default chords. A hand-typed table drifts; this
-    /// reads the source of truth instead of trusting the typing.
+    /// here can see: `runOnUp` — which decides whether a wheel notch delivers a release half at
+    /// all (1295), and which B265 turned entirely on — and every command's default chords. A
+    /// hand-typed table drifts; this reads the source of truth instead of trusting the typing.
     ///
     /// `Interface\FrameXML\Bindings.xml` carries the flag, `WTF\DefaultBindings.wtf` the chords.
     /// Both are install content, read at runtime, never committed; the test skips (passes)
@@ -1183,7 +1185,7 @@ mod tests {
                 s.run_on_up(),
                 reference_run_on_up,
                 "{}: runOnUp disagrees with the install's Bindings.xml — that flag decides \
-                 whether the mousewheel may be bound to this command (B265)",
+                 whether a press of this command delivers a release half (1295)",
                 s.name
             );
             let ours: Vec<&str> = [s.d1, s.d2].into_iter().flatten().collect();

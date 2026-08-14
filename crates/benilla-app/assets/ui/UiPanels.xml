@@ -604,24 +604,13 @@
             -- The colour picker next (ColorPickerFrame.xml). The reference hooks ESC on the frame
             -- itself (`<OnKeyDown>` l.177-184, whose ESCAPE arm is `HideUIPanel(this)` +
             -- `cancelFunc(previousValues)`); this engine gives plain frames no raw key events, so
-            -- it routes through this chain exactly like the AddOns list on the next rung.
-            -- **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
+            -- it routes through this shared chain like the stack-split spinner and the world map
+            -- do. **Cancel-CLICK, not hide** — the ref's own arm restores the previous colour, and
             -- clicking the real button is how the options rung below already spells this (the ref's
             -- `OptionsFrameCancel:Click()`), so there is one cancel path, not two.
             local picker = getglobal("ColorPickerFrame")
             if picker and picker:IsVisible() then
                 ColorPickerCancelButton:Click()
-                return
-            end
-            -- The AddOns list next (decision 1197). The reference's glue twin hooks ESC directly
-            -- (`AddonList_OnKeyDown`, whose ESCAPE arm is `AddonList_OnCancel`); this engine gives
-            -- plain frames no raw key events, so it routes through this shared chain like the
-            -- stack-split spinner and the world map do. **Cancel, not hide** — ESC on that window
-            -- means "discard what I just ticked", which is the reference's own arm and the reason
-            -- the panel stages its edits at all.
-            local addons = getglobal("AddonListFrame")
-            if addons and addons:IsVisible() then
-                AddonList_OnCancel()
                 return
             end
             -- The options window next (l.1483-1484, live since decision 0950 — this rung sat

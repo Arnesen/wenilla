@@ -74,8 +74,8 @@
 
         OTHER DEVIATIONS, each forced:
         · **`<OnKeyDown>` (ref l.177-184) is not transcribed** — this engine gives plain frames no
-          raw key events (SCRIPT_KINDS has no `OnKeyDown`), the same wall AddonList.xml hit
-          (decision 1197). Its ESCAPE arm is `HideUIPanel(this) + cancelFunc(previousValues)`, i.e.
+          raw key events (SCRIPT_KINDS has no `OnKeyDown`), the same wall StackSplit.xml hit
+          (its own header note). Its ESCAPE arm is `HideUIPanel(this) + cancelFunc(previousValues)`, i.e.
           exactly what the Cancel button does, so the arm is carried in UiPanels.xml's ESC chain as
           `ColorPickerCancelButton:Click()` — the reference's own idiom for this (its game-menu
           chain cancel-clicks `OptionsFrameCancel` the same way). ESC therefore CANCELS, it does not

@@ -176,6 +176,61 @@ fn a_region_resolves_even_when_its_owner_frame_has_no_rect() {
     );
 }
 
+/// **…but a region the owner's rect is the ONLY candidate for stays unresolved with it.**
+///
+/// The other half of the law above, and the half that shipped wrong: an unpinned axis on an
+/// unpositioned owner has nothing to fall back to, so standing a zero rect in for the missing owner
+/// puts the region at the **screen origin** instead of nowhere. That is not a degenerate rect, it is
+/// a wrong position — and a template whose textures chain off each other turns it into real,
+/// visible geometry a few links down.
+///
+/// Reported as B264 (carni, 2026-08-13): opening the social pane drew a stray dropdown capsule at
+/// the bottom of the screen next to the action bar. `BenillaFriendsDropDown` carries no anchors —
+/// *exactly* as the reference's own `FriendsDropDown` does (`FriendsFrame.xml` l.598), and the
+/// reference draws nothing — so every texture of `UIDropDownMenuTemplate` hung off a phantom rect
+/// at (0,0). The shape below is that template's first two textures verbatim.
+#[test]
+fn an_unanchored_owners_region_chain_resolves_nowhere() {
+    let mut s = crate::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(
+        r#"
+        -- The dropdown host: a child frame with no anchors and no size, as declared.
+        bare = CreateFrame("Frame", "StrayHost")
+
+        -- $parentLeft: anchored to the OWNER (no relativeTo = the owner frame), which has no rect.
+        cap = bare:CreateTexture("StrayLeft", "ARTWORK")
+        cap:SetWidth(25) cap:SetHeight(64)
+        cap:SetPoint("TOPLEFT")
+
+        -- $parentMiddle: the sibling chain that turned a zero rect into 115x64 of visible capsule.
+        mid = bare:CreateTexture("StrayMiddle", "ARTWORK")
+        mid:SetWidth(115) mid:SetHeight(64)
+        mid:SetPoint("LEFT", cap, "RIGHT")
+        "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<Option<f32>>("return StrayHost:GetLeft()").unwrap(),
+        None,
+        "the premise: an unanchored frame has no rect"
+    );
+    assert_eq!(
+        s.eval::<Option<f32>>("return StrayLeft:GetLeft()").unwrap(),
+        None,
+        "a region with nothing but its unpositioned owner to derive from has no rect either — \
+         standing in a zero rect here is what put the capsule at the screen origin"
+    );
+    assert_eq!(
+        s.eval::<Option<f32>>("return StrayMiddle:GetLeft()")
+            .unwrap(),
+        None,
+        "and the chain off it stays unresolved — this is the link that was actually visible"
+    );
+}
+
 /// **Geometry answers inside the same call stack that moved it** — the seam that killed 97 addons.
 ///
 /// A handler creates a frame, anchors it, shows it and then measures it, all before any resolve

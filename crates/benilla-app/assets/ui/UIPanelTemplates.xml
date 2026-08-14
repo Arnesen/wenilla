@@ -7,7 +7,7 @@
         and the two Lua handlers are not.
 
         WHY THIS FILE EXISTS AT ALL. Every window benilla has built so far declared its own private
-        copy of these — `AddonListPanelButtonTemplate`, `BenillaTrainerPanelButtonTemplate`,
+        copy of these — `BenillaQuestPanelButtonTemplate`, `BenillaTrainerPanelButtonTemplate`,
         `BenillaMacroPanelButtonTemplate` and a dozen siblings, each the same four state textures on
         the same UI-Panel-Button art. That was fine while the only consumer was our own XML. It
         stopped being fine the day `CreateFrame`'s fourth argument started working (decision 1203):
@@ -42,11 +42,11 @@
         now, in the reference's own file for it, and GameMenuFrame.xml's private copy is gone.)
 
         AND WHAT THIS SUPERSEDES BUT DOES NOT DELETE: `UIPanelButtonTemplate` below is the shared
-        original of `AddonListPanelButtonTemplate`, `BenillaQuestPanelButtonTemplate`,
+        original of `BenillaQuestPanelButtonTemplate`,
         `BenillaCraftPanelButtonTemplate`, `BenillaQuestLogPanelButtonTemplate`,
         `BenillaFriendsPanelButtonTemplate`, `BenillaTrainerPanelButtonTemplate`,
         `BenillaMacroPanelButtonTemplate`, `BenillaTradeSkillPanelButtonTemplate` and
-        `BenillaDressUpPanelButtonTemplate` — nine copies of the same eight lines. Re-pointing those
+        `BenillaDressUpPanelButtonTemplate` — eight copies of the same eight lines. Re-pointing those
         windows at this template is a separate, mechanical pass; nothing here changes them.
     -->
 

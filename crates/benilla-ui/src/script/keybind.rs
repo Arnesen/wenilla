@@ -39,7 +39,8 @@ use super::Model;
 
 /// One host-registered command: the 1.12 name, its category header's global-string key
 /// (`BINDING_HEADER_MOVEMENT`), whether it has press+release semantics (`runOnUp` — the
-/// mousewheel-refusal law rides this), and the 1.12 default chords.
+/// release half of a press rides this — `RunCommand 0x4b7bf1`, and nothing else: it is NOT a
+/// bindability rule, see [`normalize_binding_key`]), and the 1.12 default chords.
 #[derive(Clone, Copy, Debug)]
 pub struct KeybindCommand {
     pub name: &'static str,
@@ -73,6 +74,103 @@ pub struct AddonBindingBody {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeybindRequest {
     Save(u32),
+}
+
+/// The reference's key-string gate — the whole of `SetBinding`'s refusal (decision 1295), in its
+/// two halves: the alias normalization at the head of `CBindings::SetBinding 0x4b7490`, and the
+/// validator `IsValidBindingKeyString 0x4b7890` it then calls.
+///
+/// `Some` is the string to STORE — upper-cased, because the table's hash and its bucket compare
+/// both fold case (`0x64b3f0` / `0x64a4c0`), so `"shift-w"` and `"SHIFT-W"` are one key. `None` is
+/// the refusal, and it is the *only* one the reference has: no command is ever consulted.
+///
+/// The two halves disagree about case on purpose, and that is verified, not a guess: the alias
+/// compare is case-insensitive, the validator is case-SENSITIVE at all three of its sites
+/// (`0x64a480` → `0x40de80`). So `SetBinding("mousewheelup", …)` answers nil while
+/// `SetBinding("MOUSEWHEELUP", …)` binds — and a *lookup* for either finds it.
+pub fn normalize_binding_key(key: &str) -> Option<String> {
+    // Eleven punctuation NAMES become their literal character. A WHOLE-STRING compare, so
+    // `SHIFT-LEFTBRACKET` is not normalized — and then fails the validator, where the accepted
+    // spelling `SHIFT-[` passes.
+    const ALIASES: [(&str, &str); 11] = [
+        ("LEFTBRACKET", "["),
+        ("RIGHTBRACKET", "]"),
+        ("SLASH", "/"),
+        ("BACKSLASH", "\\"),
+        ("SEMICOLON", ";"),
+        ("APOSTROPHE", "'"),
+        ("COMMA", ","),
+        ("PERIOD", "."),
+        ("TILDE", "`"),
+        ("PLUS", "="),
+        ("MINUS", "-"),
+    ];
+    let key = ALIASES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map_or(key, |(_, literal)| literal);
+    is_valid_binding_key(key).then(|| key.to_ascii_uppercase())
+}
+
+/// `IsValidBindingKeyString 0x4b7890`, arm for arm.
+fn is_valid_binding_key(key: &str) -> bool {
+    // 1. Strip `SHIFT-`/`CTRL-`/`ALT-` repeatedly — the loop restarts while any matched
+    //    (`0x4b78a0`–`0x4b78d0`), so the validator takes modifiers in ANY order and REPEATED,
+    //    unlike the fixed ALT-CTRL-SHIFT order the chord builder emits.
+    let mut rest = key;
+    while let Some(next) = ["SHIFT-", "CTRL-", "ALT-"]
+        .iter()
+        .find_map(|p| rest.strip_prefix(p))
+    {
+        rest = next;
+    }
+    // 2. One character passes (`0x41aab0` decode, `0x4b78e6`) — which is how every letter, digit
+    //    and punctuation key is bindable without being named anywhere. The empty string lands in
+    //    the same arm and passes too; `SHIFT-` alone is therefore a legal (unpressable) key.
+    if rest.chars().count() <= 1 {
+        return true;
+    }
+    // 3. `F`/`NUMPAD`/`BUTTON` (the table at `0x846c04`) followed by digits and nothing else.
+    //    `NUMPADPLUS` falls through here to arm 4, its remainder not being digits.
+    for prefix in ["F", "NUMPAD", "BUTTON"] {
+        if let Some(digits) = rest.strip_prefix(prefix) {
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    // 4. The 26 names at `0x846c20`…`0x846c84`. `SHIFT`/`CTRL`/`ALT`/`UNKNOWN` are in none of the
+    //    arms, which is why a lone modifier can never be bound — and `SCROLLLOCK`/`PAUSE` are in
+    //    none either, matching the namer that calls their key codes `UNKNOWN` (`0x210`/`0x211`).
+    const NAMES: [&str; 26] = [
+        "SPACE",
+        "NUMPADPLUS",
+        "NUMPADMINUS",
+        "NUMPADMULTIPLY",
+        "NUMPADDIVIDE",
+        "NUMPADDECIMAL",
+        "ESCAPE",
+        "ENTER",
+        "BACKSPACE",
+        "TAB",
+        "LEFT",
+        "UP",
+        "RIGHT",
+        "DOWN",
+        "INSERT",
+        "DELETE",
+        "HOME",
+        "END",
+        "PAGEUP",
+        "PAGEDOWN",
+        "NUMLOCK",
+        "CAPSLOCK",
+        "PRINTSCREEN",
+        "NUMPADEQUALS",
+        "MOUSEWHEELDOWN",
+        "MOUSEWHEELUP",
+    ];
+    NAMES.contains(&rest)
 }
 
 #[derive(Clone, Debug)]
@@ -138,40 +236,33 @@ impl KeybindState {
         self.entries.iter().filter(|e| !e.hidden)
     }
 
-    /// Strip the reference's modifier prefixes; what remains is the base token (which may itself
-    /// be `-` — `CTRL--` is Ctrl+minus, so the strip walks prefixes, never splits on `-`).
-    fn base_token(chord: &str) -> &str {
-        let mut rest = chord;
-        loop {
-            let Some(next) = ["ALT-", "CTRL-", "SHIFT-"]
-                .iter()
-                .find_map(|p| rest.strip_prefix(p))
-            else {
-                return rest;
-            };
-            rest = next;
-        }
-    }
-
     /// The reference's `SetBinding(key[, command])`: unbind `key` wherever it is, then (with a
-    /// command) append it to that command's key list. Returns `false` for the one refusal the
-    /// reference has — a mousewheel chord on a press+release (`runOnUp`) command
-    /// (`KEYBINDINGFRAME_MOUSEWHEEL_ERROR`: a wheel tick cannot be released).
+    /// command) append it to that command's key list.
+    ///
+    /// **The only thing it refuses is a key string that is not a key** (decision 1295). We used to
+    /// refuse a mousewheel chord on a press+release (`runOnUp`) command — the reading everyone
+    /// takes from `Blizzard_BindingUI`'s `if not SetBinding(…) then … KEYBINDINGFRAME_MOUSEWHEEL_
+    /// ERROR`. It is wrong: `CBindings::SetBinding 0x4b7490` never reads a command node at all
+    /// (neither the target's nor the incumbent's), and its one reachable falsey return is the
+    /// validator at `0x4b762c`. `"runOnUp"` has exactly one reader image-wide — `0x4b7bf1`, in
+    /// `RunCommand`, gating the up half. So 1.12 binds the wheel to an action button happily, and
+    /// B265 was ours. wow-re `system/ui/scratch/setbinding-refusal-law.md`.
     fn set_binding(&mut self, key: &str, command: Option<&str>) -> bool {
-        let key = key.to_ascii_uppercase();
+        let Some(key) = normalize_binding_key(key) else {
+            return false;
+        };
+        // The one divergence left here (1295): the reference stores the action string verbatim,
+        // so `SetBinding("K", "NOSUCHCOMMAND")` answers 1 there and nil here. Our table is
+        // command-centric — a key list per registered command — and has nowhere to put a binding
+        // whose command does not exist. Nothing reachable today can hit it: the window offers
+        // only registered rows, and an addon's own names register from its `Bindings.xml`.
         let cmd_idx = match command {
             Some(name) => match self.by_name.get(&name.to_ascii_uppercase()) {
                 Some(&i) => Some(i),
-                None => return false, // unknown command — refuse, the window never offers one
+                None => return false,
             },
             None => None,
         };
-        if let Some(i) = cmd_idx {
-            let wheel = matches!(Self::base_token(&key), "MOUSEWHEELUP" | "MOUSEWHEELDOWN");
-            if wheel && self.entries[i].run_on_up {
-                return false;
-            }
-        }
         for e in &mut self.entries {
             e.keys.retain(|k| k != &key);
         }
@@ -642,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn set_binding_steals_and_the_wheel_refusal_holds() {
+    fn set_binding_steals_and_refuses_only_a_key_string_that_is_not_a_key() {
         let s = script();
         let g0 = s.keybinds_generation();
         // Bind W to JUMP: stolen from MOVEFORWARD (its slot 1 empties, UP slides up), appended
@@ -666,13 +757,61 @@ mod tests {
                 .unwrap(),
             ""
         );
-        // The one refusal: a wheel chord on a press+release command (1.12's
-        // KEYBINDINGFRAME_MOUSEWHEEL_ERROR); a wheel on a click command binds fine.
+        // **The wheel binds to a press+release command** (B265, decision 1295). This assertion
+        // used to read `== nil`, on the universal misreading of `Blizzard_BindingUI`'s
+        // `if not SetBinding(…) then … KEYBINDINGFRAME_MOUSEWHEEL_ERROR`. `0x4b7490` never looks
+        // at a command node, so 1.12 takes it — and the notch runs both halves.
         assert!(s
-            .eval::<bool>(r#"return SetBinding("SHIFT-MOUSEWHEELUP", "MOVEFORWARD") == nil"#)
+            .eval::<bool>(r#"return SetBinding("SHIFT-MOUSEWHEELUP", "MOVEFORWARD") == 1"#)
             .unwrap());
         assert!(s
-            .eval::<bool>(r#"return SetBinding("SHIFT-MOUSEWHEELUP", "CAMERAZOOMIN") == 1"#)
+            .eval::<bool>(r#"return SetBinding("MOUSEWHEELDOWN", "CAMERAZOOMIN") == 1"#)
+            .unwrap());
+        // The refusal that IS there: `IsValidBindingKeyString 0x4b7890`. A lone modifier, a name
+        // in none of its four arms, and an alias that is not the whole string all fail; the
+        // pure unbind runs the same validator, so it fails on the same strings.
+        for bad in ["SHIFT", "ALT", "UNKNOWN", "SCROLLLOCK", "SHIFT-LEFTBRACKET"] {
+            assert!(
+                s.eval::<bool>(&format!(r#"return SetBinding("{bad}", "JUMP") == nil"#))
+                    .unwrap(),
+                "{bad} is not a bindable key string"
+            );
+            assert!(
+                s.eval::<bool>(&format!(r#"return SetBinding("{bad}") == nil"#))
+                    .unwrap(),
+                "{bad} fails the same validator on the pure unbind"
+            );
+        }
+        // …and the ones that pass: one character (with modifiers in any order and repeated),
+        // F/NUMPAD/BUTTON + digits, the 26 names, and a whole-string punctuation alias.
+        for good in [
+            "SHIFT-CTRL-ALT-K",
+            "CTRL-SHIFT-K",
+            "-",
+            "BUTTON5",
+            "NUMPAD7",
+            "F11",
+            "NUMPADEQUALS",
+            "PRINTSCREEN",
+        ] {
+            assert!(
+                s.eval::<bool>(&format!(r#"return SetBinding("{good}", "JUMP") == 1"#))
+                    .unwrap(),
+                "{good} is a bindable key string"
+            );
+        }
+        assert!(s
+            .eval::<bool>(r#"return SetBinding("LEFTBRACKET", "JUMP") == 1"#)
+            .unwrap());
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("[")"#).unwrap(),
+            "JUMP",
+            "the alias is normalized to its literal character before it is stored"
+        );
+        // The validator is case-SENSITIVE where the lookup behind it is not: a lower-case key
+        // string never reaches the table at all.
+        assert!(s
+            .eval::<bool>(r#"return SetBinding("shift-w", "JUMP") == nil"#)
             .unwrap());
         assert!(
             s.keybinds_generation() > g0,
@@ -793,13 +932,13 @@ mod tests {
             s.eval::<String>(r#"return GetBindingAction("H")"#).unwrap(),
             "PROBEHIDDEN"
         );
-        // And it rides the same laws: the wheel refusal reads the addon row's `runOnUp` exactly
-        // as it reads a host command's press+release class.
+        // And it rides the same laws: `runOnUp` decides whether the body runs again on the
+        // release, never whether the row may take a wheel chord (1295) — so both bind.
         assert!(s
-            .eval::<bool>(r#"return SetBinding("MOUSEWHEELUP", "PROBEHOLD") == nil"#)
+            .eval::<bool>(r#"return SetBinding("MOUSEWHEELUP", "PROBEHOLD") == 1"#)
             .unwrap());
         assert!(s
-            .eval::<bool>(r#"return SetBinding("MOUSEWHEELUP", "PROBEEDGE") == 1"#)
+            .eval::<bool>(r#"return SetBinding("MOUSEWHEELDOWN", "PROBEEDGE") == 1"#)
             .unwrap());
 
         // A second addon, declaring no header at all: its rows are its own section, named for it.

@@ -124,6 +124,13 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     // [`crate::minimap::MinimapZoom`], the widget's live index is seeded from it at UI load.
     ("minimapZoom", "3"),
     ("minimapInsideZoom", "3"),
+    // The addon version gate (decision 1292): 1.12's own `checkAddonVersion`, the *Load out of
+    // date AddOns* checkbox INVERTED. Registrar default "1" = check enforced = box unticked —
+    // byte-verified (wow-re `addon-version-gate.md` §1.1: the key appears in Config.wtf exactly
+    // while force-load is on and vanishes when it is turned off, `SaveConfig 0x63d980`'s
+    // skip-default rule). No host knob: its consumers are the load walk (via the persisted value,
+    // [`CvarPersist::addon_version_check`]) and the gate's live per-query read in the VM.
+    ("checkAddonVersion", "1"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in
@@ -152,6 +159,20 @@ pub(crate) struct CvarPersist {
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
     last_change: Option<Instant>,
+}
+
+impl CvarPersist {
+    /// The persisted `checkAddonVersion` (decision 1292) — what the addon load walk gates on.
+    /// Read from the persist state rather than the VM because the walk runs while the VM's CVar
+    /// table does not exist yet (registration is a per-VM `Update` seed, 1291); the 1291 fold
+    /// keeps this current across reloads, so it is the value the reference's live read would see.
+    /// Absent = the registrar default: check ON.
+    pub(crate) fn addon_version_check(&self) -> bool {
+        self.file
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("checkAddonVersion"))
+            .is_none_or(|(_, v)| v != "0")
+    }
 }
 
 /// How long a dirty config sits before the save fires — long enough to coalesce a slider drag,
@@ -229,6 +250,10 @@ fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
         // in range whichever path it takes.
         "minimapzoom" => knobs.minimap.outdoor = zoom_index(v),
         "minimapinsidezoom" => knobs.minimap.inside = zoom_index(v),
+        // The addon version gate (1292): no host knob — the load walk reads the persisted value
+        // and the gate reads the live table — but a KNOWN key, so a toggle dirties the config
+        // and persists (the statusBarText posture).
+        "checkaddonversion" => {}
         _ => return false,
     }
     true

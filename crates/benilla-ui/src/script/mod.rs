@@ -57,6 +57,7 @@ mod death;
 mod editbox;
 pub(crate) use editbox::adopt_text_region;
 pub(crate) mod addon;
+pub mod addon_gate;
 mod client;
 mod cvars;
 mod dressup;

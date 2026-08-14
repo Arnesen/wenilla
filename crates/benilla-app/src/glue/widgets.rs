@@ -34,6 +34,11 @@ pub(crate) struct GlueBtn;
 /// [`super::glue_button_visuals`] renders it (disabled art, gray caption, no hover).
 #[derive(Component, Default)]
 pub(crate) struct GlueDisabled(pub(crate) bool);
+/// A glue button's own authored `TexCoords` crop, where a template overrides the shared
+/// `GlueButtons.xml` region (`AddonListButtonTemplate` crops `0.025–0.535`). Read by
+/// [`super::glue_button_visuals`] in place of [`BUTTON_TC`].
+#[derive(Component, Clone, Copy)]
+pub(crate) struct BtnTexCoords(pub(crate) [f32; 4]);
 /// A glue button's caption (gold at rest, white on hover — the ref's `HighlightFont`).
 #[derive(Component)]
 pub(crate) struct GlueCaption;
@@ -113,8 +118,38 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
     font: &Handle<Font>,
     s: f32,
 ) -> Entity {
+    outlined_spans(
+        parent,
+        node,
+        wrapper_extra,
+        text_extra,
+        &[(spec.text.to_string(), spec.color)],
+        spec.size,
+        spec.wrap,
+        font,
+        s,
+    )
+}
+
+/// [`outlined_text`] over **coloured spans** — WoW's `|cAARRGGBB…|r` inline markup rendered the
+/// way the reference FontString renders it: one string, colour switching mid-run (the escape
+/// grammar is `benilla_ui::markup`, byte-verified). The real text is a span tree (Bevy's
+/// `Text` root + `TextSpan` children); the eight outline copies carry the flattened plain string,
+/// which is identical geometry because the copies only exist to be a black ring.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn outlined_spans<W: Bundle, T: Bundle>(
+    parent: &mut ChildSpawnerCommands,
+    node: Node,
+    wrapper_extra: W,
+    text_extra: T,
+    spans: &[(String, Color)],
+    size: f32,
+    wrap: bool,
+    font: &Handle<Font>,
+    s: f32,
+) -> Entity {
     let layout = TextLayout {
-        linebreak: if spec.wrap {
+        linebreak: if wrap {
             LineBreak::WordBoundary
         } else {
             LineBreak::NoWrap
@@ -123,9 +158,10 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
     };
     let tf = TextFont {
         font: font.clone(),
-        font_size: spec.size * s,
+        font_size: size * s,
         ..default()
     };
+    let flat: String = spans.iter().map(|(t, _)| t.as_str()).collect();
     let mut real = Entity::PLACEHOLDER;
     parent
         .spawn((node, wrapper_extra))
@@ -150,7 +186,7 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
                             OutlineCopy {
                                 dir: Vec2::new(dx, dy),
                             },
-                            Text::new(spec.text),
+                            Text::new(flat.clone()),
                             tf.clone(),
                             layout,
                             TextColor(Color::BLACK),
@@ -164,19 +200,24 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
                         ));
                     }
                 }
-                real = inner
-                    .spawn((
-                        Text::new(spec.text),
-                        tf,
-                        layout,
-                        TextColor(spec.color),
-                        TextShadow {
-                            offset: Vec2::splat(s),
-                            color: Color::BLACK,
-                        },
-                        text_extra,
-                    ))
-                    .id();
+                let (first, rest) = spans.split_first().expect("outlined_spans: empty spans");
+                let mut e = inner.spawn((
+                    Text::new(first.0.clone()),
+                    tf.clone(),
+                    layout,
+                    TextColor(first.1),
+                    TextShadow {
+                        offset: Vec2::splat(s),
+                        color: Color::BLACK,
+                    },
+                    text_extra,
+                ));
+                e.with_children(|spans| {
+                    for (text, color) in rest {
+                        spans.spawn((TextSpan::new(text.clone()), tf.clone(), TextColor(*color)));
+                    }
+                });
+                real = e.id();
             });
         });
     real
@@ -351,6 +392,9 @@ pub(crate) enum GlueBtnKind {
     Small,
     /// `GlueDialogButtonTemplate` (200×40) — GlueFontNormal, ButtonText CENTER (0, 2).
     Dialog,
+    /// `AddonListButtonTemplate` (160×35) — GlueFontNormal, ButtonText CENTER (0, 2), and its own
+    /// narrower art crop (TexCoords 0.025–0.535 of the `Glue-Panel-Button` sheets).
+    List,
 }
 
 impl GlueBtnKind {
@@ -359,7 +403,15 @@ impl GlueBtnKind {
         match self {
             Self::Normal => (15.0, Vec2::new(-3.0, 3.0)),
             Self::Small => (12.0, Vec2::new(0.0, 3.0)),
-            Self::Dialog => (15.0, Vec2::new(0.0, 2.0)),
+            Self::Dialog | Self::List => (15.0, Vec2::new(0.0, 2.0)),
+        }
+    }
+
+    /// The template's art crop where it overrides the shared `GlueButtons.xml` region.
+    fn tex_coords(self) -> Option<BtnTexCoords> {
+        match self {
+            Self::List => Some(BtnTexCoords([0.025, 0.535, 0.0, 0.75])),
+            _ => None,
         }
     }
 }
@@ -622,11 +674,15 @@ pub(crate) fn glue_button<A: Component>(
             ..default()
         },
     ));
+    let tc = kind.tex_coords();
+    if let Some(tc) = tc {
+        b.insert(tc);
+    }
     match &art.button_up {
         Some((up, size)) => {
             b.insert(ImageNode {
                 image: up.clone(),
-                rect: Some(tc_rect(*size, BUTTON_TC)),
+                rect: Some(tc_rect(*size, tc.map(|t| t.0).unwrap_or(BUTTON_TC))),
                 ..default()
             });
         }

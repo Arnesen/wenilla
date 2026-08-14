@@ -65,18 +65,23 @@
             Rewards / What's New / Ratings are structurally off in Era — store disabled, no
             account store, IsStandard() false, koKR only.)
           · The layout math those constants produce, precomputed here (this engine has no layout
-            frames): width 28+144+28 = 200; button tops 32/73/94/115/136/177/198/239; height
-            239+21+28 = 288. Anchored as a TOPLEFT chain so the gaps read in the XML.
+            frames) — for OUR seven rungs, the era's eight minus AddOns (next bullet): width
+            28+144+28 = 200; button tops 32/73/94/115/156/177/218; height 218+21+28 = 267.
+            Anchored as a TOPLEFT chain so the gaps read in the XML.
           · No Key Bindings rung — the era menu's own shape: 1.15 ceded the entry to the
             Settings panel, and since decision 1008 ours lives there too (the Options window's
             Keybindings category, KeyBindingsPage.xml). 0997 had carved the 1.13/1.14 seat back
             in for its standalone window; that seat left with the window.
+          · No AddOns rung — the director's call: the char-select AddOns screen
+            (`char_select::addons`, the reference's own glue-side home for this list) is the only
+            addon UI. The in-game panel 1197 put behind this rung (AddonList.xml) is retired,
+            and the rung left with it — 1.12's own ESC menu has no AddOns row either.
           · The header — Classic/Dialog/DialogTemplates.xml l.11-43 (ClassicDialogHeaderTemplate):
             the same 256x64 UI-DialogBox-Header art, text = MAINMENU_BUTTON, swapped to
             GameFontNormalMed1 (13px) by MainMenuFrameMixin:OnLoad. Both header idioms (1.12's
             TOP+12 texture / era's 39-tall frame with the art centered) seat the art within half
             a unit of each other; the 1.12 transcription is kept, the font and string are era's.
-        - **AddOns / Edit Mode / Support / Macros ship DISABLED** — nothing behind them yet
+        - **Edit Mode / Support ship DISABLED** — nothing behind them yet
           (`GameMenuButton_Pending`): the template's own `-Disabled` art + grey label, exactly
           how the era menu greys a dead entry (SetEnabled(false) → DisabledFont). Each goes live
           by deleting one `GameMenuButton_Pending` call and writing its OnClick.
@@ -96,7 +101,6 @@
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
         -- verbatim. `X = X or "..."` so a later real strings table wins, the MicroMenu.xml idiom.
         MAIN_MENU = MAIN_MENU or "Main Menu"
-        ADDONS = ADDONS or "AddOns"
         HUD_EDIT_MODE_MENU = HUD_EDIT_MODE_MENU or "Edit Mode"
         GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"
         MACROS = MACROS or "Macros"
@@ -108,9 +112,9 @@
         QUIT_NOW = QUIT_NOW or "Exit now"
         CANCEL = CANCEL or "Cancel"
 
-        -- One label setter for a button with nothing behind it yet (only Macros, since 0950 made
-        -- Options live): set the ref's text, then disable (grey label + the template's -Disabled
-        -- art). Making it live is deleting the call and writing its ref OnClick.
+        -- One label setter for a button with nothing behind it yet (Edit Mode and Support): set
+        -- the ref's text, then disable (grey label + the template's -Disabled art). Making it
+        -- live is deleting the call and writing its ref OnClick.
         function GameMenuButton_Pending(button, text)
             button:SetText(text)
             button:Disable()
@@ -205,9 +209,8 @@
 
     <Frame name="GameMenuFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
         <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
-             28-bottom padding around nine 21-unit rungs with three 20-unit section gaps (the
-             ninth rung is the 0997 Key Bindings seat). -->
-        <Size><AbsDimension x="200" y="288"/></Size>
+             28-bottom padding around our seven 21-unit rungs with three 20-unit section gaps. -->
+        <Size><AbsDimension x="200" y="267"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
@@ -231,11 +234,12 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The era ladder (header SCOPE note): Options · gap · AddOns, Edit Mode, Support,
-                 Macros · gap · Logout, Exit Game · gap · Return to Game. A TOPLEFT chain at the
-                 era layout engine's numbers — x 28, first top -32, 0 between group members, -20
-                 at each section break. Live entries wire the era OnClick intent; pending ones
-                 grey out through GameMenuButton_Pending until something exists behind them. -->
+            <!-- The era ladder minus its AddOns rung (header SCOPE notes): Options · gap ·
+                 Edit Mode, Support, Macros · gap · Logout, Exit Game · gap · Return to Game.
+                 A TOPLEFT chain at the era layout engine's numbers — x 28, first top -32, 0
+                 between group members, -20 at each section break. Live entries wire the era
+                 OnClick intent; pending ones grey out through GameMenuButton_Pending until
+                 something exists behind them. -->
 
             <!-- Options — live: the era GameMenuFrame.lua l.88 entry (ShowUIPanel(SettingsPanel)
                  there, OptionsFrame here) plus an explicit HideUIPanel first. The ref leans on
@@ -256,29 +260,9 @@
                 </Scripts>
             </Button>
 
-            <!-- Key Bindings — live (decision 0997; the carved 1.13/1.14 seat, header SCOPE
-                 note): the era menu entry's own body shape — hide the menu, show the window
-                 (whose OnHide brings the menu back, both references' law). -->
-            <Button name="GameMenuButtonAddOns" inherits="GameMenuButtonTemplate">
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
-                </Anchors>
-                <!-- LIVE since decision 1197 (AddonList.xml). The Macros entry's own body shape:
-                     hide the menu, show the window. This entry has no reference — 1.12's ESC menu
-                     has no AddOns row, its list is glue-side only — so it is a deliberate benilla
-                     addition, and AddonList.xml's header says so rather than implying otherwise. -->
-                <Scripts>
-                    <OnLoad>self:SetText(ADDONS)</OnLoad>
-                    <OnClick>
-                        PlaySound("igMainMenuOption")
-                        HideUIPanel(getglobal("GameMenuFrame"))
-                        AddonList_Toggle()
-                    </OnClick>
-                </Scripts>
-            </Button>
             <Button name="GameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonAddOns" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts><OnLoad>GameMenuButton_Pending(self, HUD_EDIT_MODE_MENU)</OnLoad></Scripts>
             </Button>

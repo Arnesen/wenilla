@@ -9,8 +9,9 @@
 //! flow — select a capsule → the host arm arms → the canonical chord lands through
 //! `KeyBindings_OnHostKey` — binds LIVE-COMMIT (every mutation queues the host persist,
 //! 1008's law; closing the window keeps everything), steals with the red 1.12 message only
-//! when the victim goes bare, refuses the wheel on press+release commands and restores the
-//! old key; the character-specific checkbox runs 1.12's set model with the era's
+//! when the victim goes bare, takes the wheel onto ANY command (1295 — the engine refuses
+//! nothing but a key string that is not a key, and that refusal restores the old key); the
+//! character-specific checkbox runs 1.12's set model with the era's
 //! confirm-on-uncheck-only; search surfaces binding matches as LIVE rows under the
 //! Keybindings redirect head; and the action bar's abbreviation law (`GetBindingText`
 //! transcribed in UIParent.xml) reads `s-2`, the ref's own Lua.
@@ -233,12 +234,31 @@ fn the_capture_flow_binds_steals_and_refuses_like_112() {
             .contains("ATTACKTARGET"),
         "the newly-bare victim is named"
     );
-    // The wheel refusal: MOVEFORWARD has press+release state — SetBinding refuses the wheel
-    // and the slot's old key is restored (1.12's KeyBindingFrame_SetBinding).
+    // **The wheel binds like any other key** (B265, decision 1295) — including onto MOVEFORWARD,
+    // which has press+release state. This block used to assert the opposite; `0x4b7490` never
+    // reads a command node, so the refusal it asserted is not in the client.
     s.run(&format!("{ROW}3Key1Button:Click()")).unwrap();
     s.run(r#"KeyBindings_OnHostKey("MOUSEWHEELUP")"#).unwrap();
     assert!(
-        s.eval::<bool>(r#"local k1 = GetBindingKey("MOVEFORWARD"); return k1 == "F""#)
+        s.eval::<bool>(r#"local k1 = GetBindingKey("MOVEFORWARD"); return k1 == "MOUSEWHEELUP""#)
+            .unwrap(),
+        "the notch takes the slot"
+    );
+    // …and the notch STEALS the wheel from the camera, whose last key it was — so the page says
+    // so in red, exactly as it would for any other stolen key. That the wheel's own default
+    // victim is a real command is half of why the old refusal read as plausible.
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyKeybindingsOutput:GetText()")
+            .unwrap(),
+        "|cffff0000CAMERAZOOMIN Function is Now Unbound!|r"
+    );
+    // The refusal that IS there is the key-string validator, and this is the page arm that
+    // reports it: a chord the engine will not take restores the slot's old key and says why
+    // (1.12's KeyBindingFrame_SetBinding, its wheel-shaped message and all).
+    s.run(&format!("{ROW}3Key1Button:Click()")).unwrap();
+    s.run(r#"KeyBindings_OnHostKey("SCROLLLOCK")"#).unwrap();
+    assert!(
+        s.eval::<bool>(r#"local k1 = GetBindingKey("MOVEFORWARD"); return k1 == "MOUSEWHEELUP""#)
             .unwrap(),
         "the refused slot restored its key"
     );
@@ -660,13 +680,14 @@ fn the_pet_lane_is_registered_under_the_action_bar_header() {
             .unwrap();
         assert_eq!(key, format!("CTRL-{}", i % 10), "{name}'s 1.12 default");
     }
-    // …and it is a runOnUp pair like the action bar's own rows, which is what makes the wheel
-    // refusal apply to it (SetBinding answers nil rather than binding MOUSEWHEELUP).
-    assert!(
+    // …and it is a runOnUp pair like the action bar's own rows — which decides that a press
+    // delivers a release half, and NOT whether the row may wear a wheel chord (1295). It takes
+    // the wheel like any other command; the notch then runs both halves of the pair.
+    assert_eq!(
         s.eval::<Option<u32>>(r#"return SetBinding("MOUSEWHEELUP", "BONUSACTIONBUTTON1")"#)
-            .unwrap()
-            .is_none(),
-        "press+release commands refuse the wheel"
+            .unwrap(),
+        Some(1),
+        "a press+release command takes the wheel — the refusal was ours, B265"
     );
 
     // Page side: search finds it and paints a live row with the capsule filled.

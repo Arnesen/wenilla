@@ -1118,6 +1118,16 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-macro seed failed: {e}");
             }
         }
+        UiFixture::Social => {
+            // Nothing to seed: the stray capsule (B264) rode the pane's *declaration*, not its
+            // contents — an empty friends list opens the same frames a full one does.
+            let Some(script) = script.as_mut() else {
+                return;
+            };
+            if let Err(e) = script.run("ToggleFriendsFrame(1)") {
+                warn!("capture: ui-social seed failed to open the pane: {e}");
+            }
+        }
         UiFixture::ChatEdit => {
             let Some(script) = script.as_mut() else {
                 return;

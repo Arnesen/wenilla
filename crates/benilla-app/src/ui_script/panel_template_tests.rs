@@ -432,7 +432,7 @@ fn the_options_check_button_resolves_its_whole_inheritance_chain() {
 /// real 1.12.1 client has, read from `reference/1.12-globals.tsv`.
 ///
 /// Scoped to these two files on purpose: the rest of `assets/ui` is full of deliberately
-/// benilla-shaped template names (`BenillaScrollBarTemplate`, `AddonListPanelButtonTemplate`,
+/// benilla-shaped template names (`BenillaScrollBarTemplate`, `BenillaMacroPanelButtonTemplate`,
 /// `OptionsRedButtonTemplate`), and a whole-tree sweep would be asserting something else. These
 /// two files make the opposite claim — *these are the reference's own names, which is why an addon
 /// can find them* — so that claim is the one worth gating. A template renamed to something

@@ -393,10 +393,20 @@ pub(crate) fn measure_text(
     let lines = parse_markup(text, [1.0, 1.0, 1.0, 1.0]);
     let family = metrics.family_for(font.path);
     let font_size = metrics.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
+    // The exact-height rescale the DRAW applies ([`drawn_k`]): everything here is computed in
+    // SNAPPED space (the size the step table is keyed by) and the draw multiplies the finished
+    // quads by `k`, so a drawn-space width enters at `/k` and the answer leaves at `×k`. Without
+    // it this reports `drawn/k` and measure and render disagree by exactly the rescale — decision
+    // 0989 left that as a named residual ("fold into `drawn_k` if a fit ever visibly breaks"), and
+    // it broke: an off-ladder request whose nearest bake sits ABOVE it measures wider than it
+    // draws, so the height-gated ellipsis eats text that fits ("Spellbook" → "Spellbo...", B209);
+    // the other sign spills past the backdrop the measure sized (B231). Identity at every baked
+    // size, so all on-ladder UI text is bit-unchanged.
+    let k = drawn_k(font.height, font_size);
     // The step-law bias ([`client_step`]): measure MUST see the same outline-biased steps the
     // render pass lays, or wrap points and measured widths drift from what's drawn.
     let step_extra = step_extra_of(font.outline);
-    let render_lines: Vec<Vec<ColorRun>> = match wrap_width {
+    let render_lines: Vec<Vec<ColorRun>> = match wrap_width.map(|w| w / k) {
         Some(w) if w > WRAP_MIN_WIDTH => lines
             .iter()
             .flat_map(|line| wrap_line(metrics, &family, font_size, step_extra, line, w))
@@ -421,7 +431,13 @@ pub(crate) fn measure_text(
     // the +2r lives only in the atlas CELL, never the block math —
     // `fontstring-vertical-placement.md`). An outlined line's ring pokes past this height by
     // design, exactly as it does in the client.
-    (max_w.ceil() + 1.0, render_lines.len() as f32 * font_size)
+    //
+    // Both leave in DRAWN space (`×k`, above) — the headroom pixel is added after, because it is
+    // a drawn-space pixel and must not itself be rescaled.
+    (
+        (max_w * k).ceil() + 1.0,
+        render_lines.len() as f32 * font_size * k,
+    )
 }
 
 /// How many display rows `text` wraps into at `wrap_width` — the message-line half of the measure
@@ -442,6 +458,9 @@ pub(crate) fn measure_wrapped_rows(
         .metrics
         .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
+    // Into snapped space for the wrap walk ([`drawn_k`] — the caller's width is drawn px, the step
+    // table is keyed by the snapped size); the row COUNT is scale-free, so nothing converts back.
+    let wrap_width = wrap_width / drawn_k(font.height, font_size);
     let rows = wrapped_rows(
         &atlas.metrics,
         &family,
@@ -500,21 +519,21 @@ pub(crate) fn ellipsize_to_fit(
         .metrics
         .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
+    // The whole fit test runs in SNAPPED space, so the box enters divided by the draw's exact-
+    // height rescale ([`drawn_k`]) — the rect is drawn px, the pitch and step table below are the
+    // snapped size, and the draw multiplies its quads by `k`. Measuring the box against unscaled
+    // glyphs is what let an off-ladder request truncate text that fits (B209; decision 0989's
+    // named residual). Identity at every baked size.
+    let k = drawn_k(font.height, font_size);
+    let (box_w, box_h) = (rect.width() / k, rect.height() / k);
     // The line pitch — identical to the emit pass's ([`layout_text_quads`]: the font em, NO
     // outline pad — the byte law, `fontstring-vertical-placement.md`), so the fit test and the
     // drawn stack agree line for line.
     // The line-count law lives in `overflow` (it is the FIT law here, not the render stack's) —
     // see `overflow::ellipsize_in_box`.
     let metrics = &atlas.metrics;
-    overflow::ellipsize_in_box(text, rect.height(), font_size, |candidate| {
-        wrapped_rows(
-            metrics,
-            &family,
-            font_size,
-            step_extra,
-            candidate,
-            rect.width(),
-        )
+    overflow::ellipsize_in_box(text, box_h, font_size, |candidate| {
+        wrapped_rows(metrics, &family, font_size, step_extra, candidate, box_w)
     })
 }
 

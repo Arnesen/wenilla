@@ -2486,7 +2486,7 @@
                                      on uncheck only), then the section list — 19 dual-mode rows under
                                      the shared faux-scroll kit, sections collapsed by default — and
                                      the 1.12 window's message line (KEY_BOUND / the red steal / the
-                                     wheel refusal) at the foot. -->
+                                     refused key string) at the foot. -->
                                 <!-- enableMouse: the page catches the wheel ITSELF on any point no
                                      child claims (hit-testing only sees mouse-enabled frames —
                                      pointer.rs; rows are plain Frames, so a spin over a row's name

@@ -99,6 +99,12 @@ pub(super) enum UiFixture {
     /// capture checks the header (left-flush, Say-white), the typed text past the live insets,
     /// and the three-piece input border.
     ChatEdit,
+    /// The social pane (`FriendsFrame`), opened through the live toggle — the instrument for B264
+    /// (decision 1298). Its `BenillaFriendsDropDown` host is declared with no anchors, exactly as
+    /// the reference's own `FriendsDropDown` is; while an unpositioned owner stood in a zero rect
+    /// for its regions, the dropdown template's texture chain drew a stray capsule at the screen
+    /// origin every time the pane opened. Needs no server state to show it.
+    Social,
     /// The era-styled Options window (decisions 0950/0951), opened through the live panel path —
     /// the look-pass instrument for the whole options arc: chrome nine-slice seams, tab plates,
     /// search-box seat, category list art, the window scale. Static (no server state touched),
@@ -925,6 +931,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::ChatEdit),
+    },
+    // The social pane, for the stray-dropdown regression (B264, decision 1298). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-social`.
+    Scenario {
+        name: "ui-social",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Social),
     },
     // The era Options window over the ground scene. Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options`.

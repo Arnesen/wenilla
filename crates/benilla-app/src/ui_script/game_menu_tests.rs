@@ -1,8 +1,9 @@
 //! The shipped `assets/ui/GameMenuFrame.xml` — the frame ESC opens (decision 0674).
 //!
-//! What these guard, in order: the ladder geometry (the ERA menu shape — 200×288, eight rungs in
-//! three 20-gapped sections, the era layout engine's own numbers precomputed in the XML's header
-//! note); the four greyed pending entries; the live buttons' wire intents and sounds;
+//! What these guard, in order: the ladder geometry (the ERA menu shape minus its AddOns rung —
+//! 200×267, seven rungs in three 20-gapped sections, the era layout engine's own numbers
+//! precomputed in the XML's header note); the greyed pending entries; the live buttons' wire
+//! intents and sounds;
 //! the ESC ladder's two new rungs (open when nothing is left to eat, close before everything
 //! else); the micro button's `clicked` toggle; the native-center rule that makes the menu take
 //! the screen (windows close on the way in, and nothing opens while it is up); and the camp/quit
@@ -50,13 +51,14 @@ fn harness() -> UiScript {
     harness_with(&[])
 }
 
-/// The eight buttons, top to bottom — the ERA ladder, its own shape again (the director's call
-/// on the 0951 review; GameMenuFrame.xml's header SCOPE note quotes the era source). 0997's
-/// carved Key Bindings seat left with its standalone window — decision 1008 folded key
-/// bindings into the Options window, where the era menu always pointed.
-const LADDER: [&str; 8] = [
+/// The seven buttons, top to bottom — the ERA ladder, its own shape (the director's call on the
+/// 0951 review; GameMenuFrame.xml's header SCOPE note quotes the era source), minus two seats:
+/// 0997's carved Key Bindings seat left with its standalone window (decision 1008 folded key
+/// bindings into the Options window, where the era menu always pointed), and the AddOns rung
+/// left with the in-game panel when the director made the char-select AddOns screen the only
+/// addon UI (it had been live since 1197).
+const LADDER: [&str; 7] = [
     "GameMenuButtonOptions",
-    "GameMenuButtonAddOns",
     "GameMenuButtonEditMode",
     "GameMenuButtonSupport",
     "GameMenuButtonMacros",
@@ -66,10 +68,10 @@ const LADDER: [&str; 8] = [
 ];
 
 /// The ladder geometry — the era layout engine's own numbers (MainMenuFrameTemplates: padding
-/// 32/28/28/28, spacing 0, AddSection gap 20): 200×288, each button 144×21 at x=28, tops at
-/// 32/73/94/115/136/177/198/239 — three sections split by the 20-unit gaps after Options,
-/// after Macros, and before Return to Game. First thing to break if the era shape is ever
-/// "tidied".
+/// 32/28/28/28, spacing 0, AddSection gap 20) over our seven rungs: 200×267, each button
+/// 144×21 at x=28, tops at 32/73/94/115/156/177/218 — three sections split by the 20-unit
+/// gaps after Options, after Macros, and before Return to Game. First thing to break if the
+/// era shape is ever "tidied".
 #[test]
 fn the_menu_has_the_era_frame_and_button_ladder() {
     let mut s = harness();
@@ -79,11 +81,11 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    assert_eq!((w, h), (200.0, 288.0), "the era frame size");
+    assert_eq!((w, h), (200.0, 267.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
-    const TOPS: [f64; 8] = [32.0, 73.0, 94.0, 115.0, 136.0, 177.0, 198.0, 239.0];
+    const TOPS: [f64; 7] = [32.0, 73.0, 94.0, 115.0, 156.0, 177.0, 218.0];
     for (name, down) in LADDER.iter().zip(TOPS) {
         let (bw, bh, btop, bleft) = s
             .eval::<(f64, f64, f64, f64)>(&format!(
@@ -112,7 +114,8 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
 /// The two entries with nothing behind them — Edit Mode, Support — are DISABLED (the pending
 /// idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry). Everything
 /// else in the ladder is live. **Macros left this list in decision 0983**, when the macro window
-/// landed behind it; **AddOns left it in 1197**, when `AddonList.xml` did.
+/// landed behind it. (AddOns had left it in 1197 and then left the ladder entirely with its
+/// panel — the char-select AddOns screen is the only addon UI.)
 #[test]
 fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     let s = harness();
@@ -127,7 +130,6 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     }
     for name in [
         "GameMenuButtonOptions",
-        "GameMenuButtonAddOns",
         "GameMenuButtonMacros",
         "GameMenuButtonLogout",
         "GameMenuButtonQuit",
@@ -139,13 +141,8 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
             "{name} is live"
         );
     }
-    // The labels read the era strings (AddOns through the ADDONS global — live now, and its
-    // label still has to come from the string rather than a literal).
-    assert_eq!(
-        s.eval::<String>("return GameMenuButtonAddOns:GetText()")
-            .unwrap(),
-        "AddOns"
-    );
+    // The labels read the era strings (Edit Mode through the HUD_EDIT_MODE_MENU global — the
+    // label has to come from the string rather than a literal).
     assert_eq!(
         s.eval::<String>("return GameMenuButtonEditMode:GetText()")
             .unwrap(),

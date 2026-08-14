@@ -25,31 +25,22 @@
 //!
 //! **Index or name, everywhere.** Every verb takes either, 1-based, because the reference's do.
 //!
-//! ## What we deliberately do not enforce: `INTERFACE_VERSION`
+//! ## The load law lives next door
 //!
-//! The reference refuses to load an addon whose `## Interface` does not match the build, unless the
-//! glue AddOn list's *Load out of date AddOns* checkbox is ticked. Enforcing that here would
-//! silently drop most of a real vanilla corpus (whose manifests say 11100, 10900, anything), so the
-//! version is reported (`GetAddOnMetadata(name, "Interface")`) and never acted on — 1191 §6.
-//!
-//! **That is a choice, not an absence, and the sentence that used to stand here had gone stale.**
-//! It read *"we have no such checkbox — decision 0465 hides the glue's AddOns button entirely …
-//! revisit when the AddOn list lands and there is somewhere to put the toggle"*. The list landed
-//! (1197: both screens, and 0465's hidden button is the one it un-hid), so the stated precondition
-//! expired and the comment went on telling every reader the question was settled. 1212's shape, in
-//! an instrument, for the fifth time this arc.
-//!
-//! What is still true and still open: the mismatch is REPORTED — the ESC-menu list shows
-//! `ADDON_INTERFACE_VERSION` beside the row and the char-select panel shows the same string — and
-//! `loadable` deliberately stays true, so `not_loadable` below has no interface arm. What is not
-//! built is the *Load out of date AddOns* toggle itself, and it needs an RE answer we do not have:
-//! how the reference couples `loadable`/`reason` when force-load is ON. Neither `AddonList.lua` nor
-//! `GlueXML` is in the wow-re extract, so that question is dispatched, not guessed.
+//! Every "can this load, and why not" answer comes from [`super::addon_gate`] — the reference's
+//! `AddOn_CanLoad 0x51e780` as one pure function (decision 1292). The RE answer 1191 §6 was
+//! missing has landed (wow-re `addon-version-gate.md`, §5-verified): the version gate is an
+//! exact `== 11200` whose refusal the `checkAddonVersion` CVar suppresses by **actively
+//! resetting** the reason — so `INTERFACE_VERSION` is now enforced here exactly as the client
+//! enforces it, with the *Load out of date AddOns* toggle as the player's escape, instead of
+//! 1191's report-but-never-act interim. The CVar is read live per query (§2.2), which is why a
+//! checkbox click needs nothing but a list repaint.
 
 use std::path::PathBuf;
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::addon_gate::{can_load, GateRow, Verdict};
 use super::Model;
 
 /// One addon, as the AddOn API sees it — the host fills this at discovery
@@ -83,8 +74,14 @@ pub struct AddOnInfo {
     pub saved_variables_per_character: Vec<String>,
     /// Enable state, from `AddOns.txt`. An addon nobody has ever disabled is enabled.
     pub enabled: bool,
+    /// `enabled` as registration found it — the last-SAVED state, which `ResetDisabledAddOns`
+    /// reverts to. Stamped by [`super::UiScript::register_addons`]; callers need not set it.
+    pub saved_enabled: bool,
     /// Has it loaded this session?
     pub loaded: bool,
+    /// `## Interface` as the client parses it (`Toc::interface_version` — the leading integer,
+    /// `0` when the line is absent). What the version gate compares (decision 1292).
+    pub interface: u32,
 }
 
 /// Resolve a Lua index-or-name argument to a position in the registry.
@@ -111,27 +108,43 @@ fn resolve(model: &Model, key: &Value) -> Option<usize> {
     .filter(|i| *i < model.addons.len())
 }
 
-/// Why this addon cannot be loaded right now, as the reference's token — or `None` when it can.
-///
-/// Dependencies are checked one level here; `LoadAddOn` recurses for the real load. `DEP_DISABLED`
-/// exists as a distinct token from `DISABLED` because the glue colours the row differently for it.
-fn not_loadable(model: &Model, i: usize) -> Option<&'static str> {
-    let a = &model.addons[i];
-    if !a.enabled {
-        return Some("DISABLED");
+/// Lower the registry into the gate's rows — ONE adapter, so every verb consults the same law
+/// ([`super::addon_gate`], decision 1292) over the same facts.
+fn gate_rows(model: &Model) -> Vec<GateRow<'_>> {
+    model
+        .addons
+        .iter()
+        .map(|a| GateRow {
+            name: &a.name,
+            enabled: a.enabled,
+            interface: a.interface,
+            load_on_demand: a.load_on_demand,
+            loaded: a.loaded,
+            dependencies: a.dependencies.iter().map(String::as_str).collect(),
+        })
+        .collect()
+}
+
+/// The live `checkAddonVersion` read — the gate's CVar half, re-read per query like the
+/// reference's (`IsAddonVersionCheckEnabled 0x51f180` inside `AddOn_CanLoad`, §2.2). An absent
+/// table (a bare test VM, or a query before the host's seed) answers the registrar default:
+/// check ON, `"1"`.
+fn version_check(model: &Model) -> bool {
+    model
+        .cvars
+        .get("checkaddonversion")
+        .is_none_or(|s| s.value != "0")
+}
+
+/// [`can_load`] over the registry, in the in-game flavour (`dl=1` — the surface these verbs
+/// are): the addon's own verdict, with the loaded short-circuit the in-game `GetAddOnInfo`
+/// applies (`0x48e390`: an already-loaded addon reports loadable/nil before the gate runs, so
+/// flipping its toggle mid-session cannot retroactively mark it unloadable).
+fn verdict(model: &Model, i: usize) -> Verdict {
+    if model.addons[i].loaded {
+        return Verdict::Loadable;
     }
-    for dep in &a.dependencies {
-        match model
-            .addons
-            .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(dep))
-        {
-            None => return Some("DEP_MISSING"),
-            Some(d) if !d.enabled => return Some("DEP_DISABLED"),
-            Some(_) => {}
-        }
-    }
-    None
+    can_load(&gate_rows(model), i, true, version_check(model))
 }
 
 /// `1`/`nil` — the client's boolean shape, which every addon tests with a bare `if`.
@@ -189,7 +202,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `loadable`. `flag` already answers in that shape.
     //
     // `url` is not lost, it moves to where the client keeps it in-game: `GetAddOnMetadata(name,
-    // "URL")`, which is how our own AddonList tooltip reads it now.
+    // "URL")`.
     g.set(
         "GetAddOnInfo",
         lua.create_function(|lua, key: Value| {
@@ -197,7 +210,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(i) = resolve(&model, &key) else {
                 return Ok(MultiValue::new());
             };
-            let reason = not_loadable(&model, i);
+            // The one arbiter (decision 1292): loaded short-circuit, then `AddOn_CanLoad` in the
+            // in-game flavour — so NOT_DEMAND_LOADED and INTERFACE_VERSION are reachable here,
+            // exactly as `0x48e390` reports them.
+            let reason = verdict(&model, i).token();
             let a = &model.addons[i];
             Ok(MultiValue::from_vec(vec![
                 lua_str(lua, &a.name)?,
@@ -205,7 +221,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 opt_str(lua, &a.notes)?,
                 flag(a.enabled),
                 flag(reason.is_none()),
-                match reason {
+                match &reason {
                     Some(r) => lua_str(lua, r)?,
                     None => Value::Nil,
                 },
@@ -270,21 +286,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `EnableAddOn(index)` and `EnableAddOn(character, index)` are both real — the glue calls the
-    // two-argument form from its per-character checkbox and the one-argument form from
-    // `AddonList_DisableOutOfDate`. We have one enable scope, so the character is accepted and
-    // ignored; the addon-facing behaviour is identical, and refusing the arity would break the
-    // callers that pass it.
+    // **One argument, index or name — the `(character, index)` form is GLUE-ONLY** (byte-carved,
+    // wow-re `addon-enable-store.md`: in-game `0x48e690`/`0x48e760` read arg1 alone and key the
+    // store on `0x5abdc0()`, the logged-in character; the two-argument shape belongs to the glue
+    // registrars `0x46d7b0`/`0x46d8a0`, and our glue screen is native — no caller exists).
+    // A numeric index out of range is a **Lua error** in the reference (`luaL_error` via
+    // `0x51df00`); an unknown NAME is where we diverge, disclosed: the reference creates a
+    // phantom enable-hash entry for the typo, we no-op — the safer direction, and `resolve`'s
+    // established semantics (1191).
     for (name, on) in [("EnableAddOn", true), ("DisableAddOn", false)] {
         g.set(
             name,
-            lua.create_function(move |lua, args: MultiValue| {
-                let key = match args.len() {
-                    0 => return Ok(()),
-                    1 => args[0].clone(),
-                    _ => args[1].clone(),
-                };
+            lua.create_function(move |lua, key: Value| {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
+                if let Value::Integer(_) | Value::Number(_) = key {
+                    if resolve(&model, &key).is_none() {
+                        return Err(mlua::Error::runtime(format!(
+                            "{}: addon index out of range",
+                            if on { "EnableAddOn" } else { "DisableAddOn" }
+                        )));
+                    }
+                }
                 if let Some(i) = resolve(&model, &key) {
                     model.addons[i].enabled = on;
                 }
@@ -293,6 +315,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         )?;
     }
 
+    // No arguments read at all (`0x48e720`/`0x48e7f0` — the loop re-evaluates the bound and the
+    // current character each iteration; ours is one pass over the same store).
     for (name, on) in [("EnableAllAddOns", true), ("DisableAllAddOns", false)] {
         g.set(
             name,
@@ -305,6 +329,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             })?,
         )?;
     }
+
+    // `ResetDisabledAddOns 0x48e830` — **revert-to-last-saved**, byte-carved (wow-re
+    // `addon-enable-store.md`): the reference destroys the current character's enable hash and
+    // reloads it from the on-disk `AddOns.txt` — so unsaved toggles of BOTH polarities revert,
+    // and a disable already on disk stays disabled. Within one session the current character's
+    // file is immutable until the shutdown tail writes it (the glue can only edit it with no
+    // session up), so the registration-time `enabled` — read from that very file — IS the
+    // last-saved state, and reverting to it is the same operation without re-reading disk.
+    g.set(
+        "ResetDisabledAddOns",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            for a in &mut model.addons {
+                a.enabled = a.saved_enabled;
+            }
+            Ok(())
+        })?,
+    )?;
 
     // loaded, reason — see `load_addon`.
     g.set(
@@ -343,7 +385,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 ///
 /// `Err` carries the reference's own reason token.
 fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
-    let (name, root, files, deps, already, enabled, lod) = {
+    let (name, root, files, deps, already) = {
         let model = lua.app_data_ref::<Model>().expect("model");
         let a = &model.addons[i];
         (
@@ -352,25 +394,27 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
             a.files.clone(),
             a.dependencies.clone(),
             a.loaded,
-            a.enabled,
-            a.load_on_demand,
         )
     };
     if already {
         return Ok(()); // the reference answers a redundant load with success, not an error
     }
-    if !enabled {
-        return Err("DISABLED".into());
-    }
-    // A non-LoadOnDemand addon that is not loaded did not load at startup, and demand-loading is
-    // exactly what it did not declare itself capable of.
-    if !lod {
-        return Err("NOT_DEMAND_LOADED".into());
+    // The one arbiter (decision 1292): the reference's own shape — `LoadAddOn 0x48e980` refuses
+    // through `AddOn_CanLoad` (via `AddOn_Load`'s step 3) and re-derives the reason from the
+    // same gate on failure. The version gate is in here now: an out-of-date addon demand-loads
+    // only under force-load, exactly as `0x48ea8c`'s carve records.
+    {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        if let refused @ Verdict::Refused { .. } = verdict(&model, i) {
+            return Err(refused.token().expect("a refusal always carries a token"));
+        }
     }
     let Some(root) = root else {
         return Err("MISSING".into()); // no addon root: a hermetic capture has nothing to load
     };
 
+    // The gate said yes, so a dependency failing HERE is a load-time failure (its files errored,
+    // it was uninstalled mid-session) — still mapped to the DEP_ mirror, applied once.
     for dep in &deps {
         let d = {
             let model = lua.app_data_ref::<Model>().expect("model");
@@ -382,17 +426,18 @@ fn load_addon(lua: &Lua, i: usize) -> Result<(), String> {
         match d {
             None => return Err("DEP_MISSING".into()),
             Some(d) => {
-                let (loaded, enabled) = {
+                let loaded = {
                     let model = lua.app_data_ref::<Model>().expect("model");
-                    (model.addons[d].loaded, model.addons[d].enabled)
+                    model.addons[d].loaded
                 };
-                if !enabled {
-                    return Err("DEP_DISABLED".into());
-                }
-                // A dependency that is not LoadOnDemand is already loaded, or disabled; either way
-                // recursing is the same answer, mapped to the DEP_ mirror of its own reason.
                 if !loaded {
-                    load_addon(lua, d).map_err(|r| format!("DEP_{r}"))?;
+                    load_addon(lua, d).map_err(|r| {
+                        if r.starts_with("DEP_") {
+                            r // §2.3: the prefix applies exactly once at any nesting depth
+                        } else {
+                            format!("DEP_{r}")
+                        }
+                    })?;
                 }
             }
         }
@@ -556,11 +601,17 @@ impl super::UiScript {
     /// engine owns the verbs).
     pub fn register_addons(
         &mut self,
-        addons: Vec<AddOnInfo>,
+        mut addons: Vec<AddOnInfo>,
         root: Option<PathBuf>,
         saved_account: Option<PathBuf>,
         saved_character: Option<PathBuf>,
     ) {
+        // The registration-time enable state IS the last-saved state (the host read it off the
+        // enable file moments ago) — snapshot it here so `ResetDisabledAddOns` has its revert
+        // point and no caller has to remember to provide one.
+        for a in &mut addons {
+            a.saved_enabled = a.enabled;
+        }
         let mut model = self.model_mut();
         model.addons = addons;
         model.addons_root = root;

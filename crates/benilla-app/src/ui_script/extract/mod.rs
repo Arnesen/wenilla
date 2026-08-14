@@ -83,6 +83,9 @@ pub(super) fn drive_script(
     // VM has no cached measures to invalidate and no measurer at all, and the re-seat below already
     // catches that on its own test (`!script.has_text_measurer()`).
     mut last_seam: Local<f32>,
+    // The atlas bake this pass last seated a measurer from (decision 1296) — the other half of the
+    // same staleness edge. `None` until an atlas exists, which is also a real edge to catch.
+    mut last_bake: Local<Option<u64>>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
     // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
@@ -124,12 +127,19 @@ pub(super) fn drive_script(
     // percent — enough that a boot-size measure fails the fullscreen fit test and the ellipsis
     // eats fitting text: the director's "Contr..." rows, reproduced by `WOW_RESIZE`). Declare the
     // staleness at the seam and let every round-trip re-answer under the new `s`.
-    let seam_moved = *last_seam != s;
+    //
+    // A **re-bake** is the same staleness by the other route: the atlas now follows the seam
+    // (decision 1296), and a fresh bake replaces the whole step table — so a cached metric answered
+    // off the old table is stale even when `s` itself did not move (a pure DPI hop, a monitor
+    // change). Watch the generation beside the seam and treat either edge identically.
+    let generation = font_atlas.as_deref().map(|a| a.generation);
+    let seam_moved = *last_seam != s || *last_bake != generation;
     if seam_moved {
         if *last_seam != 0.0 {
             script.invalidate_text_measures();
         }
         *last_seam = s;
+        *last_bake = generation;
     }
     // …and re-seat the VM's own font engine at the same edge, for the same reason: an
     // [`crate::ui_text::AtlasMeasurer`] answers only for the seam it was built under. This is what

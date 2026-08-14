@@ -596,6 +596,14 @@ impl TextMetrics {
 /// Quadrata TTF. See the module doc's v1 simplifications for why only one face/size is baked.
 #[derive(Resource)]
 pub(crate) struct UiFontAtlas {
+    /// The raster environment these cells were baked for ([`BakeEnv`]) — compared against the live
+    /// one every frame, and the atlas re-bakes when they part.
+    pub(super) env: BakeEnv,
+    /// Bumped on every re-bake. The host's measure seam watches it: an
+    /// [`crate::ui_text::AtlasMeasurer`] holds a snapshot of the step table, so a new bake must
+    /// re-seat it and drop the engine's cached metrics even when the seam itself is unchanged
+    /// (a pure DPI hop moves the table without moving `seam`).
+    pub(crate) generation: u64,
     /// Live shaper state — [`layout_text_quads`] needs `&mut FontSystem` to shape each run (kerned
     /// advances), even though the bitmap glyphs themselves are pre-baked; see the module doc's
     /// metric-fidelity seam note.
@@ -652,12 +660,81 @@ pub(crate) struct UiTextPlugin;
 
 impl Plugin for UiTextPlugin {
     fn build(&self, app: &mut App) {
-        // Runs each Update but builds the atlas exactly **once** — it needs both the patch chain
-        // (opened at `AssetSet::Open`) *and* the primary window's real `scale_factor`, which winit
-        // only reports once the OS window exists (a Startup read can still see the placeholder 1.0).
-        // Gating on the window being present + guarding on `UiFontAtlas` already existing lets the
-        // bake happen on the first frame the real scale is known, and never again.
+        // Runs each Update: the first bake needs both the patch chain (opened at `AssetSet::Open`)
+        // *and* the primary window's real `scale_factor`, which winit only reports once the OS
+        // window exists (a Startup read can still see the placeholder 1.0), so gating on the window
+        // being present lets it happen on the first frame the real scale is known. Every later
+        // frame it compares the live raster environment against the baked one and re-bakes when
+        // they part ([`BakeEnv`]).
         app.add_systems(Update, load_fonts_and_build_atlas);
+    }
+}
+
+/// The raster environment a set of glyph cells is only valid inside — the two numbers that decide
+/// what pixel size each logical size bakes at.
+///
+/// **Why the atlas must follow it.** Text draws at `unit height × seam` ([`super::drawn_px`],
+/// decisions 0582/0584) and is rasterized at `× dpi`; the bake plans its size list from the same
+/// two numbers. When they move and the bake does not, every request lands *between* baked sizes:
+/// the layout snaps to the nearest one and rescales the finished quads to the true height
+/// (`drawn_k`), so each glyph is a bitmap resampled by a non-integer factor instead of a cell
+/// drawn one texel per pixel. That is the reported washed-out text (B244) — the default window is
+/// 1600×900, so anyone who maximises moves the seam and every glyph on screen starts resampling —
+/// and, before `measure_text` learned the same rescale, it also armed the measure/render split
+/// that truncated fitting strings (B209).
+///
+/// 0582 accepted keeping the bake ("slightly soft — the same accepted policy as a monitor DPI
+/// hop"); at the ratios a real player produces it is not slight, and it is not a policy anyone
+/// opted into by maximising a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct BakeEnv {
+    /// The 768-virtual seam scale `windowH/768 × uiScale` ([`crate::ui_script::seam_scale`]).
+    pub(super) seam: f32,
+    /// The window's `scale_factor` — the physical/logical ratio the cells are rasterized at.
+    pub(super) dpi: f32,
+}
+
+impl BakeEnv {
+    /// Same raster environment? Compared with a tolerance because both terms are recomputed from
+    /// float window metrics every frame; a difference this small cannot move any baked size to a
+    /// different integer pixel.
+    fn matches(self, other: Self) -> bool {
+        (self.seam - other.seam).abs() < 1e-4 && (self.dpi - other.dpi).abs() < 1e-4
+    }
+}
+
+/// How long the raster environment must hold still before the atlas re-bakes.
+///
+/// A window drag delivers a new size every frame and a bake rasterizes the whole charset at every
+/// registry size — baking each intermediate size would rasterize hundreds of times across one
+/// drag. Waiting for the environment to settle costs a fraction of a second of the old (resampled)
+/// cells at the end of a resize, which is exactly the state we already shipped permanently.
+const REBAKE_SETTLE: f32 = 0.25;
+
+/// What the glyph cells must be baked for, read live — the window's two raster terms plus the
+/// uiScale dial, bundled because they answer one question and are read at one place.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct RasterEnv<'w, 's> {
+    /// The primary window: `scale_factor` (physical/logical) and height (the 768-virtual seam).
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    /// The uiScale dial folded into the bake scale (decision 0584); optional so a UI-less app
+    /// (no `UiScriptPlugin`) still bakes at the 768 base.
+    scale_cvar: Option<Res<'w, crate::ui_script::UiScaleCvar>>,
+    time: Res<'w, Time>,
+}
+
+impl RasterEnv<'_, '_> {
+    /// The environment to bake for, or `None` before winit has made the window — a Startup read
+    /// can still see the placeholder `scale_factor` 1.0, so the first bake waits for the real one.
+    fn probe(&self) -> Option<BakeEnv> {
+        let window = self.windows.single().ok()?;
+        Some(BakeEnv {
+            seam: crate::ui_script::seam_scale(
+                window.height(),
+                self.scale_cvar.as_deref().map_or(1.0, |c| c.0),
+            ),
+            dpi: window.scale_factor(),
+        })
     }
 }
 
@@ -671,34 +748,49 @@ fn load_fonts_and_build_atlas(
     mut commands: Commands,
     world_assets: Option<Res<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    env: RasterEnv,
     existing: Option<Res<UiFontAtlas>>,
     // The engine host (loaded at Startup, so present by this first-Update bake) — read-only, for
     // the outlined-cell census off its font-object registry. `None` (a UI-less run) just means no
     // outlined variants: the stamped-halo fallback covers.
     script: Option<bevy::prelude::NonSend<benilla_ui::script::UiScript>>,
-    // The uiScale dial folded into the bake scale (decision 0584); optional so a UI-less app
-    // (no `UiScriptPlugin`) still bakes at the 768 base.
-    scale_cvar: Option<Res<crate::ui_script::UiScaleCvar>>,
+    // Seconds the live environment has differed from the baked one — the [`REBAKE_SETTLE`] debounce.
+    mut drifted_for: Local<f32>,
 ) {
-    // Build once (this runs every Update); a later monitor hop that changes the scale is ignored.
-    if existing.is_some() {
-        return;
-    }
-    // Wait for the window so the DPI-aware bake reads the *real* scale, not winit's placeholder 1.0.
-    let Ok(window) = windows.single() else {
+    let Some(want) = env.probe() else {
         return;
     };
-    let scale = window.scale_factor();
+    let (scale, ui_scale) = (want.dpi, want.seam);
+    // Re-bake when the raster environment moves ([`BakeEnv`]) — a resize, a fullscreen toggle, a
+    // monitor hop, the uiScale slider — but only once it has held still, so a window drag doesn't
+    // rasterize the charset once per frame.
+    let generation = match existing.as_deref() {
+        Some(atlas) if atlas.env.matches(want) => {
+            *drifted_for = 0.0;
+            return;
+        }
+        Some(atlas) => {
+            *drifted_for += env.time.delta_secs();
+            if *drifted_for < REBAKE_SETTLE {
+                return;
+            }
+            atlas.generation + 1
+        }
+        None => 0,
+    };
+    *drifted_for = 0.0;
     let Some(world_assets) = world_assets else {
         // No client data open — text won't render (the missing-atlas graceful path in `ui_script`).
         // Nothing to log-throttle here: this returns before inserting, so it retries next frame until
         // the chain opens; the chain-open failure is already logged by the asset foundation.
         return;
     };
+    // Timed because this is the one cost a resize now pays, and a number nobody has is a number
+    // that gets guessed at the next time someone wonders whether the debounce is long enough.
+    let bake_started = std::time::Instant::now();
     info!(
-        "ui_text: baking glyph atlas at scale_factor {scale} (physical-resolution glyphs; a \
-         runtime monitor hop to a different scale is ignored, not rebaked)"
+        "ui_text: baking glyph atlas (generation {generation}) at scale_factor {scale}, seam \
+         {ui_scale:.4} — physical-resolution glyphs, one texel per device pixel at these sizes"
     );
 
     let mut font_system = FontSystem::new_with_fonts(std::iter::empty());
@@ -748,14 +840,6 @@ fn load_fonts_and_build_atlas(
         );
         return;
     };
-
-    // The 768-virtual scale at bake time (decision 0582, × 0584's uiScale dial): UI text draws
-    // at unit-height × s (`drawn_px`), so the census below bakes the SCALED sizes — crisp at
-    // the startup window. A runtime window-height change re-derives s per frame at the seam but
-    // keeps this bake (the snapped-nearest + exact-height rescale covers, slightly soft — the
-    // same accepted policy as a monitor DPI hop). The dial resource is absent only in a UI-less
-    // app, where the census it scales is empty anyway.
-    let ui_scale = crate::ui_script::seam_scale(window.height(), scale_cvar.map_or(1.0, |c| c.0));
 
     // The registry-size census (decision 0581): every height the shipped `Fonts.xml` font-object
     // registry declares joins its face's baked set — the hardcoded FONT_SIZES list had drifted
@@ -867,7 +951,15 @@ fn load_fonts_and_build_atlas(
         .cloned()
         .unwrap_or_else(|| FONT_SIZES.to_vec());
     let steps = build_char_steps(&mut font_system, &built.glyphs, &faces, &charset, scale);
+    info!(
+        "ui_text: glyph atlas generation {generation} baked in {:.0} ms ({}×{} texels)",
+        bake_started.elapsed().as_secs_f32() * 1000.0,
+        built.width,
+        built.height,
+    );
     commands.insert_resource(UiFontAtlas {
+        env: want,
+        generation,
         font_system,
         glyphs: built.glyphs,
         image,
@@ -1037,8 +1129,137 @@ mod outlined_cell_tests {
 }
 
 #[cfg(test)]
+mod bake_env_tests {
+    use super::*;
+
+    /// The re-bake edge, both terms. A window resize moves `seam`; a monitor hop moves `dpi`; the
+    /// tolerance exists only to absorb float recomputation, never a real change.
+    #[test]
+    fn a_moved_raster_environment_is_a_different_bake() {
+        let boot = BakeEnv {
+            seam: 1.0546875,
+            dpi: 2.0,
+        };
+        assert!(boot.matches(boot));
+        assert!(
+            boot.matches(BakeEnv {
+                seam: 1.0546875 + 1e-6,
+                ..boot
+            }),
+            "float noise in the same environment is not a re-bake"
+        );
+        // The reported case: booting 1600x900 and maximising to 1440 tall (B244).
+        assert!(
+            !boot.matches(BakeEnv {
+                seam: 1.6875,
+                ..boot
+            }),
+            "a window resize must re-bake"
+        );
+        // A retina/non-retina monitor hop at an unchanged window height — the term that moves the
+        // step table without moving the seam, which is why the measurer watches the generation.
+        assert!(
+            !boot.matches(BakeEnv { dpi: 1.0, ..boot }),
+            "a DPI hop must re-bake"
+        );
+    }
+}
+
+#[cfg(test)]
 mod metrics_tests {
     use super::*;
+
+    /// **Measure answers in DRAWN space** — the half of the rescale decision 0989 left open
+    /// ("fold into `drawn_k` if a fit ever visibly breaks") and B209 broke.
+    ///
+    /// The draw shapes at the nearest baked size and scales the finished quads by `k = req/snapped`
+    /// (`layout_text_quads_inner`'s tail, decision 0581). So the drawn width of an off-ladder
+    /// request IS `snapped_width × k`, and a measure that answers the un-rescaled number disagrees
+    /// with the render by exactly that factor. When the nearest bake sits ABOVE the request the
+    /// measure over-reports, the wrap test fires, and the height-gated ellipsis eats text that
+    /// fits — the reported "Spellbook" → "Spellbo...".
+    ///
+    /// The second assertion is the **mutation check**: with the rescale dropped, the two calls
+    /// below return the same number, which is precisely what shipped. Skips without an install.
+    #[test]
+    fn a_measure_between_bakes_answers_the_drawn_width() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = match benilla_formats::open_chain(&data) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: patch chain would not open: {e:#}");
+                return;
+            }
+        };
+        let path = CLIENT_FONTS[0];
+        let Ok(bytes) = chain.read(path) else {
+            eprintln!("skipping {path}: not in the chain");
+            return;
+        };
+        let charset = default_charset();
+        let mut font_system = FontSystem::new_with_fonts(std::iter::empty());
+        let mut swash = SwashCache::new();
+        let (id, family) = register_font(&mut font_system, bytes).expect("register");
+        // A deliberately sparse ladder, so a request can land between bakes the way every request
+        // does once the window has moved off the size the atlas was baked for.
+        let sizes = vec![10.0f32, 20.0];
+        let faces = vec![(id, family.clone(), sizes.clone())];
+        let scale = 1.0f32;
+        let built = build_atlas(
+            &mut font_system,
+            &mut swash,
+            &faces,
+            &charset,
+            1024,
+            scale,
+            &HashMap::new(),
+        );
+        let metrics = TextMetrics {
+            steps: build_char_steps(&mut font_system, &built.glyphs, &faces, &charset, scale),
+            path_to_family: HashMap::from([(path.to_ascii_lowercase(), family.clone())]),
+            default_family: family.clone(),
+            sizes: sizes.clone(),
+            sizes_by_family: HashMap::from([(family.clone(), sizes.clone())]),
+            scale,
+        };
+        let spec = |h: f32| crate::ui_text::FontSpec {
+            path: Some(path),
+            height: Some(h),
+            outline: benilla_ui::script::Outline::None,
+            paint_halo: true,
+            alpha_gradient: None,
+        };
+        // 12 snaps to the 10 bake: the draw magnifies its quads by 1.2.
+        const REQ: f32 = 12.0;
+        const SNAP: f32 = 10.0;
+        let k = REQ / SNAP;
+        assert_eq!(
+            metrics.snap_for(&family, REQ),
+            SNAP,
+            "the ladder under test"
+        );
+
+        let (drawn_w, drawn_h) =
+            crate::ui_text::measure_text(&metrics, "Spellbook", None, spec(REQ));
+        let (snap_w, snap_h) =
+            crate::ui_text::measure_text(&metrics, "Spellbook", None, spec(SNAP));
+
+        // The headroom pixel `measure_text` adds is drawn-space and is not itself rescaled, so it
+        // comes off both sides before the comparison; the tolerance is the one `ceil`.
+        assert!(
+            ((drawn_w - 1.0) - (snap_w - 1.0) * k).abs() <= 1.0,
+            "measured width must be the drawn width: got {drawn_w}, snapped {snap_w} × {k}"
+        );
+        assert!(
+            (drawn_h - snap_h * k).abs() < 1e-3,
+            "measured height must be the drawn height: got {drawn_h}, snapped {snap_h} × {k}"
+        );
+        assert!(
+            drawn_w > snap_w + 1.0,
+            "the mutation check: dropping the rescale makes these one number ({drawn_w} vs \
+             {snap_w}), which is the measure/render split that truncated fitting text"
+        );
+    }
 
     /// **The differential test: the step table must measure exactly what shaping the whole string
     /// measured**, over the real client fonts.

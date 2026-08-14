@@ -362,10 +362,6 @@ KeyBindingsPage.xml
 # (all far above); sits right before GameMenuFrame so the menu — which reaches it by
 # name at click time — stays the last, outermost layer.
 OptionsFrame.xml
-# The in-game AddOns list (decision 1197) — the ESC menu's AddOns entry. Before GameMenuFrame,
-# which reaches AddonList_Toggle by name at click time; it depends only on the AddOn API verbs
-# (1191) and defines its own templates, so it can sit anywhere after the fonts.
-AddonList.xml
 # The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
 # event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
 # everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's

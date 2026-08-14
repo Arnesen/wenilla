@@ -527,15 +527,19 @@ impl UiScript {
                 // (`CreateFrame("Frame", n, UIParent)` with no size and no SetPoint) holding a
                 // region anchored elsewhere. That is ordinary addon code — MapCoords builds three
                 // of them, and its world-map coordinate readout computed the right string every
-                // frame and was never positioned, with no error anywhere. Degenerate rather than
-                // absent: an unpositioned owner contributes a zero rect, which is what an
-                // unpositioned frame IS.
-                let owner_rect = resolved.get(&owner).copied().unwrap_or(Rect {
-                    left: 0.0,
-                    bottom: 0.0,
-                    right: 0.0,
-                    top: 0.0,
-                });
+                // frame and was never positioned, with no error anywhere.
+                //
+                // It is only the FALLBACK, though, and an owner with no rect cannot supply one: an
+                // unpinned axis on an unpositioned owner has nothing to fall back TO, and the
+                // region is unresolvable exactly as its owner is. Standing a zero rect in there
+                // instead put the region at the SCREEN ORIGIN, where a template's sibling-chained
+                // textures resolve off it into real on-screen geometry — the stray dropdown capsule
+                // at the bottom of the screen when the social pane opened (B264:
+                // `BenillaFriendsDropDown` carries no anchors, exactly as the reference's
+                // `FriendsDropDown` does, and the reference draws nothing). `None` keeps the
+                // MapCoords fix — a region its own anchors fully pin never consults this — without
+                // inventing a position for a frame that has none.
+                let owner_rect = resolved.get(&owner).copied();
                 let scale = arena.frame(owner).map(|f| f.effective_scale).unwrap_or(1.0);
                 // A FontString with no explicit height takes its host-measured wrapped size
                 // (the measure round-trip — the client's layout↔font-engine seam).
@@ -572,15 +576,33 @@ impl UiScript {
                 // the line chain (each line anchors to the previous line's resolved bottom)
                 // marched every later line out of the plate. An axis with NO pinned edge keeps
                 // the owner fallback (nothing to collapse onto).
-                let axis = |lo: Option<f32>, hi: Option<f32>, olo: f32, ohi: f32| -> (f32, f32) {
+                //
+                // `None` = this axis needs the owner and the owner has no rect (above): the region
+                // is unresolvable, like its owner.
+                let axis = |lo: Option<f32>,
+                            hi: Option<f32>,
+                            owner: Option<(f32, f32)>|
+                 -> Option<(f32, f32)> {
                     match (is_fontstring, lo, hi) {
-                        (true, Some(l), None) => (l, l),
-                        (true, None, Some(h)) => (h, h),
-                        _ => (lo.unwrap_or(olo), hi.unwrap_or(ohi)),
+                        (true, Some(l), None) => Some((l, l)),
+                        (true, None, Some(h)) => Some((h, h)),
+                        (_, Some(l), Some(h)) => Some((l, h)),
+                        _ => {
+                            let (olo, ohi) = owner?;
+                            Some((lo.unwrap_or(olo), hi.unwrap_or(ohi)))
+                        }
                     }
                 };
-                let (bottom, top) = axis(edges[0], edges[2], owner_rect.bottom, owner_rect.top);
-                let (left, right) = axis(edges[1], edges[3], owner_rect.left, owner_rect.right);
+                let vertical = axis(edges[0], edges[2], owner_rect.map(|o| (o.bottom, o.top)));
+                let horizontal = axis(edges[1], edges[3], owner_rect.map(|o| (o.left, o.right)));
+                let (Some((bottom, top)), Some((left, right))) = (vertical, horizontal) else {
+                    // Unresolvable: drop any rect it used to have, the way the frame pass does —
+                    // a region that stops resolving must stop drawing, not keep a stale position.
+                    if region_resolved.remove(&rh).is_some() {
+                        changed = true;
+                    }
+                    continue;
+                };
                 let rect = Rect::new(bottom, left, top, right);
                 // Publish into the solver as well as the model: a later region in THIS same sweep
                 // that anchors to this one must see the fresh rect (the sweep has always worked

@@ -136,6 +136,43 @@ pub(crate) struct GlueArt {
     /// center) and the Save Account Name checkbox states.
     pub(crate) blizzard_logo: Option<Handle<Image>>,
     pub(crate) checkbox: Option<CheckboxArt>,
+    /// The AddOn List screen's set (the reference `GlueXML/AddonList.xml`, read off the patch
+    /// chain): the six `HelpFrame-*` plate pieces that ARE the whole framed panel (top band, dark
+    /// inset, bottom band baked in), the `UI-DialogBox-Header` title plate, the `GlueCloseButton`
+    /// states, the `GlueDropDownMenuTemplate` arrow (`UI-ChatIcon-ScrollDown-*`), the open list's
+    /// row highlight (`UI-QuestTitleHighlight`, ADD), the tri-state's grey check
+    /// (`UI-CheckBox-Check-Disabled`), the tooltip's own border (`UI-Tooltip-Border`, edge 16 —
+    /// the in-game edge file, not `Glue-Tooltip-Border`), and the decorative scrollbar track
+    /// (`UI-Character-ScrollBar`).
+    pub(crate) help_frame: Option<HelpFrameArt>,
+    pub(crate) dialog_header: Option<(Handle<Image>, Vec2)>,
+    pub(crate) close_btn: Option<CloseBtnArt>,
+    pub(crate) dropdown_arrow_up: Option<Handle<Image>>,
+    pub(crate) dropdown_arrow_down: Option<Handle<Image>>,
+    pub(crate) quest_hilight: Option<Handle<AddUiMaterial>>,
+    pub(crate) check_disabled: Option<Handle<Image>>,
+    pub(crate) tooltip_border: Option<BackdropEdges>,
+    pub(crate) char_scrollbar: Option<(Handle<Image>, Vec2)>,
+}
+
+/// The `Interface\HelpFrame\HelpFrame-*` plate: six pieces tiling a 640×512 framed panel
+/// (TopLeft/Top 256², TopRight 128×256 across the top row; BotLeft/Bottom/BotRight below).
+pub(crate) struct HelpFrameArt {
+    pub(crate) tl: Handle<Image>,
+    pub(crate) top: Handle<Image>,
+    pub(crate) tr: Handle<Image>,
+    pub(crate) bl: Handle<Image>,
+    pub(crate) bottom: Handle<Image>,
+    pub(crate) br: Handle<Image>,
+    /// Each piece's native size, for the divider strip's texcoord sub-rects.
+    pub(crate) sizes: [Vec2; 3],
+}
+
+/// `GlueCloseButton` (GlueTemplates.xml): `UI-Panel-MinimizeButton-Up/Down/Highlight(ADD)`.
+pub(crate) struct CloseBtnArt {
+    pub(crate) up: Handle<Image>,
+    pub(crate) down: Handle<Image>,
+    pub(crate) hi: Option<Handle<AddUiMaterial>>,
 }
 
 impl GlueArt {
@@ -322,6 +359,71 @@ impl GlueArt {
                 ),
             })
         })();
+        // The AddOn List screen's set (reference `GlueXML/AddonList.xml` off the patch chain).
+        const HF: &str = "Interface\\HelpFrame\\HelpFrame-";
+        self.help_frame = (|| {
+            let tl = sized(assets, &format!("{HF}TopLeft"), images)?;
+            let top = sized(assets, &format!("{HF}Top"), images)?;
+            let tr = sized(assets, &format!("{HF}TopRight"), images)?;
+            Some(HelpFrameArt {
+                sizes: [tl.1, top.1, tr.1],
+                tl: tl.0,
+                top: top.0,
+                tr: tr.0,
+                bl: assets.sprite_texture(&format!("{HF}BotLeft"), images)?,
+                bottom: assets.sprite_texture(&format!("{HF}Bottom"), images)?,
+                br: assets.sprite_texture(&format!("{HF}BotRight"), images)?,
+            })
+        })();
+        self.dialog_header = sized(
+            assets,
+            "Interface\\DialogFrame\\UI-DialogBox-Header",
+            images,
+        );
+        self.close_btn = (|| {
+            const MB: &str = "Interface\\Buttons\\UI-Panel-MinimizeButton-";
+            Some(CloseBtnArt {
+                up: assets.sprite_texture(&format!("{MB}Up"), images)?,
+                down: assets.sprite_texture(&format!("{MB}Down"), images)?,
+                hi: add_overlay(assets, &format!("{MB}Highlight"), FULL_TC, images, add_mats),
+            })
+        })();
+        self.dropdown_arrow_up =
+            assets.sprite_texture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up", images);
+        self.dropdown_arrow_down =
+            assets.sprite_texture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down", images);
+        self.quest_hilight = add_overlay(
+            assets,
+            "Interface\\QuestFrame\\UI-QuestTitleHighlight",
+            FULL_TC,
+            images,
+            add_mats,
+        );
+        self.check_disabled =
+            assets.sprite_texture("Interface\\Buttons\\UI-CheckBox-Check-Disabled", images);
+        self.tooltip_border = super::backdrop::backdrop_edges(
+            assets,
+            "Interface\\Tooltips\\UI-Tooltip-Border",
+            images,
+        );
+        self.char_scrollbar = sized(
+            assets,
+            "Interface\\PaperDollInfoFrame\\UI-Character-ScrollBar",
+            images,
+        );
+        debug!(
+            "glue art: addonlist set — helpframe {} header {} close {} droparrow {}/{} \
+             questhl {} greycheck {} tipborder {} scrolltrack {}",
+            self.help_frame.is_some(),
+            self.dialog_header.is_some(),
+            self.close_btn.is_some(),
+            self.dropdown_arrow_up.is_some(),
+            self.dropdown_arrow_down.is_some(),
+            self.quest_hilight.is_some(),
+            self.check_disabled.is_some(),
+            self.tooltip_border.is_some(),
+            self.char_scrollbar.is_some(),
+        );
         debug!(
             "glue art: races {} classes {} gender {} factions {} banners {} hilight {} logo {} \
              arrows {}/{} button {}/{}/{}/{} tower {}/{} shadow {} label {} rotate {}/{} \

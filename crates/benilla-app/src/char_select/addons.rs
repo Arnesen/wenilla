@@ -1,100 +1,253 @@
-//! The **character-select AddOns screen** (decision 1197) — the glue half of the director's ask,
-//! and the button 1191 §5 recorded as *"not hidden; never built"*.
+//! The **character-select AddOns screen** (decisions 1197, 1293) — the one addon surface (the
+//! in-game panel was retired at the director's call, 2026-08-14; `ReloadUI` itself stays).
 //!
-//! The reference's is `Interface\GlueXML\AddonList.xml/.lua`, opened by
-//! `CharacterSelectAddonsButton`. We have that Lua (read off the patch chain) and it is the
-//! authority for **behaviour**; we do not have its XML, so the geometry here is ours, derived from
-//! the two constants the Lua does carry: `ADDON_BUTTON_HEIGHT = 16` and
-//! `MAX_ADDONS_DISPLAYED = 19` — a 19-row list at 16 px pitch, 304 px of list. Everything else is
-//! sized around that and stated as ours rather than passed off as transcribed.
+//! The reference is `Interface\GlueXML\AddonList.xml/.lua`, read off the player's own patch chain
+//! (`patch.MPQ` — 1293 located it after 1197 believed it missing), and **this screen now draws the
+//! authored layout**: the six `HelpFrame-*` plate pieces that are the whole framed panel, the
+//! `UI-DialogBox-Header` title plate, the `GlueCloseButton`, the `GlueDropDownMenuTemplate`
+//! control, the 19×(16+4) entry column, the `GlueScrollFrameTemplate` bar with the
+//! `UI-Character-ScrollBar` track, and the four-button bottom row in the reference's own order
+//! (Disable All · Enable All ··· Okay · Cancel). Geometry constants below are the authored
+//! numbers, resolved top-down into the 640×512 plate. Behaviour is **re-expressed natively** —
+//! transcribing GlueXML is forbidden, not discouraged (the contract's FrameXML rule; 1234, 1260).
 //!
 //! ## What the reference does, and what we do
 //!
-//! `AddonList_Update` per row: a tri-state checkbox, the title (`## Title` else the folder name)
-//! coloured **gold when loadable, red when enabled-but-broken, grey when disabled**, the status
-//! token (`getglobal("ADDON_"..reason)`), a URL/update button, and a security icon. Hovering a row
-//! raises `AddonTooltip` with title + notes + `ADDON_DEPENDENCIES`.
+//! `AddonList_Update` per row: a **tri-state** checkbox (`GetAddOnEnableState` → 0/1/2, the grey
+//! check drawn with `UI-CheckBox-Check-Disabled`), the title (`## Title` else the folder name)
+//! coloured **gold when loadable, red when enabled-and-broken — except `DEP_DISABLED`, which reads
+//! grey** (AddonList.lua's own exception), and the status token (`getglobal("ADDON_"..reason)`) in
+//! `GlueFontNormalSmall` 30 units right of the title box. Titles render their `|cAARRGGBB` markup
+//! as colour, exactly as every FontString does ([`title_spans`]). Hovering a row raises
+//! `AddonTooltip` (title + notes + `ADDON_DEPENDENCIES`) anchored to the row's left; hovering a
+//! MIXED checkbox raises `ENABLED_FOR_SOME`. **A row has no hover highlight and no row-click** —
+//! only the checkbox toggles (the entry template carries no `HighlightTexture` and no `OnClick`);
+//! reproducing that is also what killed the hover-respawn flashing the director reported: the
+//! spawned tree no longer changes under the cursor at all.
 //!
-//! Carried: the list, the checkbox, the three-colour title rule, the status column, the
-//! hover tooltip with notes and dependencies, scrolling, Enable All / Disable All, and
-//! Okay/Cancel with Cancel meaning *discard* (the reference's `ResetAddOns`).
-//!
-//! **Not carried, each for a stated reason:**
-//! - the **security icon** — `## Secure: 1` is Blizzard's own signature marker and nothing a
-//!   player installs carries it honestly (1191 §6 already refused to treat it as granting
-//!   anything). An icon that is always "insecure" tells nobody anything.
-//! - the **URL / update buttons** — they launch a browser. That is an outward-facing action from a
-//!   game client, and it is the director's call to make, not this screen's. `## URL` is shown in
-//!   the tooltip instead, where it is information rather than a trigger.
-//! - the **character dropdown** (`AddonCharacterDropDown`, the "All" vs per-character switch).
-//!   Ours edits the **selected** character's enable file, because that is the file the world-entry
-//!   walk will read (1191 §7). "All characters" needs a glue dropdown widget we do not have and a
-//!   fan-out write across every roster file; it is queued, not forgotten.
-//! - `SetScriptMemory` / `GetScriptMemory` — a 1.12 Lua-heap dial with no equivalent here.
+//! Carried from 1197/1293: the character dropdown ("All" + the realm roster, staging
+//! per-character), the `checkAddonVersion`-inverted force-load checkbox, Okay = `SaveAddOns`
+//! (write the per-character enable files; the next login IS the apply point), Cancel/ESC/the X =
+//! `ResetAddOns` (discard). **Not built**, per 1197's standing rejections (Script Memory
+//! reaffirmed by the director, 2026-08-14): the Script Memory dial, the URL/update launch buttons
+//! (`## URL` shows in the tooltip instead — information, not a trigger), the security icon.
 //!
 //! ## Why it reads the folder rather than the VM
 //!
 //! At character select no addon has been *loaded* — `load_third_party` is a world-entry step
 //! (1191 §2) — so `GetNumAddOns()` would answer 0. The screen asks
 //! [`crate::ui_script::addons::installed`] instead: the same discovery, the same manifest parser,
-//! the same enable file. Two views of one folder, never two folders.
+//! the same enable files. Two views of one folder, never two folders. With the dropdown that read
+//! happens **once per roster character at open** ([`AddonsPanel::open_for`]).
 
 use bevy::prelude::*;
+use bevy::ui_render::ui_material::MaterialNode;
 
-use crate::glue::art::{GlueArt, DIM, GOLD};
+use benilla_ui::markup::{tokens, TokenKind};
+use benilla_ui::script::addon_gate::{can_load, GateRow, Verdict};
+use benilla_ui::script::UiScript;
+
+use crate::glue::art::{tc_rect, GlueArt, DIM, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
-use crate::glue::widgets::{glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight};
+use crate::glue::widgets::{
+    glue_button, outlined_spans, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText, Hilight,
+};
 use crate::glue_strings::GlueStrings;
+use crate::sound::GlueSound;
 use crate::ui_script::addons::{self, InstalledAddOn};
 
 use super::wow_font;
 
-/// `MAX_ADDONS_DISPLAYED` (AddonList.lua l.2) — the reference's own row count.
+// ── The authored geometry (AddonList.xml, patch chain) — y resolved top-down in the plate ────────
+
+/// `AddonListBackground` — the 640×512 `HelpFrame-*` plate, anchored CENTER +(24, 0).
+const BG_W: f32 = 640.0;
+const BG_H: f32 = 512.0;
+const BG_CENTER_OFF_X: f32 = 24.0;
+/// `MAX_ADDONS_DISPLAYED` (AddonList.lua l.2).
 const MAX_ROWS: usize = 19;
-/// `ADDON_BUTTON_HEIGHT` (AddonList.lua l.1).
+/// `ADDON_BUTTON_HEIGHT` (l.1); each entry anchors TOP to the previous BOTTOM at (0, −4).
 const ROW_H: f32 = 16.0;
-/// Ours: the list is 19×16 = 304 tall, and the panel is that plus a title and a button row.
-const PANEL_W: f32 = 560.0;
-const PANEL_H: f32 = 420.0;
-const LIST_TOP: f32 = 56.0;
-const LIST_LEFT: f32 = 24.0;
-const CHECK: f32 = 14.0;
+const ROW_PITCH: f32 = ROW_H + 4.0;
+/// Entry 1 sits at TOPLEFT (37, −80); entries are 520 wide.
+const ROW_LEFT: f32 = 37.0;
+const ROW_TOP: f32 = 80.0;
+const ROW_W: f32 = 520.0;
+/// The entry's title FontString: LEFT (42, 0), 220 wide; the status hangs 30 right of its box.
+const TITLE_LEFT: f32 = 42.0;
+const TITLE_W: f32 = 220.0;
+const STATUS_LEFT: f32 = TITLE_LEFT + TITLE_W + 30.0;
+/// `AddonCharacterDropDown` at TOPLEFT (0, −38); its `CharacterCreate-LabelFrame` art is three
+/// 64-tall slices (25 | 115 | 25) whose top rides 17 ABOVE the 32-tall frame.
+const DROP_TOP: f32 = 38.0;
+const DROP_ART_TOP: f32 = DROP_TOP - 17.0;
+const DROP_ART_H: f32 = 64.0;
+const DROP_SLICE_W: [f32; 3] = [25.0, 115.0, 25.0];
+const DROP_W: f32 = DROP_SLICE_W[0] + DROP_SLICE_W[1] + DROP_SLICE_W[2];
+/// The slices' texcoords in the 128-wide `CharacterCreate-LabelFrame`.
+const DROP_TC: [[f32; 4]; 3] = [
+    [0.0, 0.1953125, 0.0, 1.0],
+    [0.1953125, 0.8046875, 0.0, 1.0],
+    [0.8046875, 1.0, 0.0, 1.0],
+];
+/// The open list: TOPLEFT to the dropdown frame's BOTTOMLEFT +(8, 22 up) → (8, 48) in the plate.
+const DROP_LIST_LEFT: f32 = 8.0;
+const DROP_LIST_TOP: f32 = DROP_TOP + 32.0 - 22.0;
+/// `AddonListForceLoad`: a 32² checkbox whose TOP-center sits at (+50, −42); label at LEFT +36.
+const FORCE_LEFT: f32 = BG_W / 2.0 + 50.0 - 16.0;
+const FORCE_TOP: f32 = 42.0;
+/// `AddonListScrollFrame`: TOPLEFT (49, −73), 510×390; its slider column and track hang right.
+const SCROLL_TOP: f32 = 73.0;
+const SCROLL_H: f32 = 390.0;
+const SCROLL_RIGHT: f32 = 49.0 + 510.0;
+/// The bottom row: 35 tall, 13 off the plate bottom.
+const BTN_TOP: f32 = BG_H - 13.0 - 35.0;
 
 /// A red that reads as "this is enabled and will not load" — `SetTextColor(1.0, 0.1, 0.1)`,
 /// AddonList.lua's own value.
 const BROKEN: Color = Color::srgb(1.0, 0.1, 0.1);
+/// The `AddonTooltip` backdrop tint — its `OnLoad`'s `SetBackdropColor(0.09, 0.09, 0.19)`.
+const TIP_FILL: Color = Color::srgb(0.09, 0.09, 0.19);
+/// The tooltip's authored width.
+const TIP_W: f32 = 220.0;
+
+/// One checkbox's face — the reference's `GetAddOnEnableState` values by their meaning
+/// (0 / 2 / 1 = [`Self::Off`] / [`Self::On`] / [`Self::Mixed`]). `Mixed` exists only in the
+/// All view: enabled for SOME of the characters, not all of them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BoxState {
+    Off,
+    On,
+    Mixed,
+}
+
+/// What the cursor is over, for the two tooltips: the row strip raises the `AddonTooltip` body,
+/// the checkbox raises `ENABLED_FOR_SOME` (only when its state is MIXED) — the reference splits
+/// them the same way (the entry's `OnEnter` vs the CheckButton's).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hover {
+    Row(usize),
+    Check(usize),
+}
 
 /// The screen's state. Opened by the select screen's AddOns button, driven by
 /// [`drive_addons_panel`], cleared on leaving character select.
 ///
-/// `staged` is the whole point of Okay/Cancel: edits go here, and only Okay writes the file. The
-/// reference does the same with `SaveAddOns`/`ResetAddOns` over the client's in-memory records.
-#[derive(Resource, Default)]
+/// `staged` is the whole point of Okay/Cancel: edits go here — one column per roster character —
+/// and only Okay writes the files. The reference does the same with `SaveAddOns`/`ResetAddOns`
+/// over the client's in-memory per-character records.
+#[derive(Resource)]
 pub(super) struct AddonsPanel {
     pub(super) open: bool,
     /// The installed list as read at open — never re-read while up, so a row's index is stable.
+    /// Shared **metadata**: its own `enabled` bit is the first column's read and nothing repaints
+    /// from it; the live enable state is `staged`'s.
     list: Vec<InstalledAddOn>,
-    /// The edited enable state, parallel to `list`.
-    staged: Vec<bool>,
+    /// The realm the roster belongs to — half of every enable file's key (0997's `(realm, name)`).
+    realm: String,
+    /// The roster's character names at open, the dropdown's entries after "All". Empty on a fresh
+    /// account; `staged` then holds one anonymous column so the checkboxes still work (below).
+    chars: Vec<String>,
+    /// The edited enable state: `staged[c][i]` is character `c`'s bit for `list[i]`. When `chars`
+    /// is empty this is ONE anonymous column (the folder with nobody's file — everything enabled);
+    /// it has no file behind it, so Okay writes nothing, exactly what the pre-1293 single-identity
+    /// screen did with no character.
+    staged: Vec<Vec<bool>>,
+    /// What the files said at open, column for column — Okay writes only the columns that moved
+    /// off this ([`Self::save_staged`]).
+    baseline: Vec<Vec<bool>>,
+    /// The dropdown's selection: `None` = "All", `Some(c)` = `chars[c]`. Which character's enable
+    /// state the list edits — and whose staged bits feed the gate.
+    view: Option<usize>,
+    /// The dropdown's option list is up (drawn over the list area).
+    dropdown_open: bool,
+    /// The live `checkAddonVersion` mirror ("1"/absent = check ON = the force-load box UNTICKED),
+    /// refreshed from the boot VM every frame by [`drive_addons_panel`] — the same live-per-query
+    /// read the gate's verbs make (1292 §2.2), which is why toggling the box repaints the statuses
+    /// with nothing rescanned.
+    version_check: bool,
     /// First visible row (`AddonList.offset`).
     offset: usize,
-    /// The row the cursor is over, for the tooltip.
-    hovered: Option<usize>,
+    /// The spawned tooltip, keyed by what it describes — **the only thing hover drives, and
+    /// never a repaint trigger**. The old model set `dirty` on every hover change and respawned
+    /// the whole tree, which reset the fresh entities' `Interaction` to `None`, which flipped
+    /// the hover back, which respawned again — the "border flashing" the director reported.
+    tip: Option<(Hover, Entity)>,
     root: Option<Entity>,
     spawned_s: f32,
-    /// Set while the spawned tree no longer matches `staged`/`offset`/`hovered` — one flag rather
-    /// than a diff, because a 19-row list is cheaper to respawn than to reconcile.
+    /// Set while the spawned tree no longer matches the state — one flag rather than a diff,
+    /// because a 19-row list is cheaper to respawn than to reconcile. Hover is deliberately NOT
+    /// part of this (above).
     dirty: bool,
 }
 
+impl Default for AddonsPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            list: Vec::new(),
+            realm: String::new(),
+            chars: Vec::new(),
+            staged: Vec::new(),
+            baseline: Vec::new(),
+            view: None,
+            dropdown_open: false,
+            // The registrar default: "1" = check ON (1292, byte-verified). Hand-written Default
+            // for this one field — a derived `false` would paint every out-of-date row loadable
+            // for the frame before the drive system's first CVar read corrects it.
+            version_check: true,
+            offset: 0,
+            tip: None,
+            root: None,
+            spawned_s: 0.0,
+            dirty: false,
+        }
+    }
+}
+
 impl AddonsPanel {
-    /// Open for `identity`, reading the folder fresh. The reference's `AddonList_OnShow` also
-    /// re-reads (`AddonList_Update`), so a folder that changed under us is picked up.
-    pub(super) fn open_for(&mut self, identity: Option<&(String, String)>) {
-        self.list = addons::installed(identity);
-        self.staged = self.list.iter().map(|a| a.enabled).collect();
+    /// Open for this realm's roster, reading the folder fresh — once per character, so each
+    /// staged column is that character's own enable file applied to one shared list. The
+    /// reference's `AddonList_OnShow` also re-reads (`AddonList_Update`), so a folder that
+    /// changed under us is picked up.
+    pub(super) fn open_for(&mut self, realm: String, chars: Vec<String>) {
+        self.list.clear();
+        self.staged.clear();
+        if chars.is_empty() {
+            // A fresh account: no character means no enable file to key. `None` is the "nobody's
+            // file" read (everything enabled), staged into one anonymous column so the boxes
+            // still toggle; Okay has no file to write ([`Self::save_staged`] walks `chars`).
+            self.list = addons::installed(None);
+            self.staged
+                .push(self.list.iter().map(|a| a.enabled).collect());
+        } else {
+            for (c, name) in chars.iter().enumerate() {
+                let id = (realm.clone(), name.clone());
+                let rows = addons::installed(Some(&id));
+                if c == 0 {
+                    self.staged.push(rows.iter().map(|a| a.enabled).collect());
+                    self.list = rows;
+                } else {
+                    // Same folder, same deterministic (alphabetical) discovery, read
+                    // back-to-back: every call answers the same rows in the same order, only the
+                    // `enabled` bits differ. That is what lets ONE metadata list carry N columns.
+                    debug_assert_eq!(
+                        rows.len(),
+                        self.list.len(),
+                        "installed() must be deterministic across per-character reads"
+                    );
+                    self.staged.push(rows.iter().map(|a| a.enabled).collect());
+                }
+            }
+        }
+        self.baseline = self.staged.clone();
+        self.realm = realm;
+        self.chars = chars;
+        // "All" is the reference's own default selection (AddonList.lua's dropdown initializer).
+        self.view = None;
+        self.dropdown_open = false;
         self.offset = 0;
-        self.hovered = None;
+        self.tip = None;
         self.open = true;
         self.dirty = true;
     }
@@ -102,9 +255,33 @@ impl AddonsPanel {
     pub(super) fn close(&mut self) {
         self.open = false;
         self.list.clear();
+        self.chars.clear();
         self.staged.clear();
-        self.hovered = None;
+        self.baseline.clear();
+        self.view = None;
+        self.dropdown_open = false;
+        self.tip = None;
         self.dirty = true;
+    }
+
+    /// Okay — the reference's `SaveAddOns`: write the per-character enable files, and only for
+    /// the characters whose staged column actually moved off what their file said at open (the
+    /// write is [`addons::write_enable_state`]'s merge, so an untouched character's file is not
+    /// even opened). The anonymous no-roster column has no file and writes nothing.
+    fn save_staged(&self) {
+        for (c, name) in self.chars.iter().enumerate() {
+            if self.staged.get(c) == self.baseline.get(c) {
+                continue;
+            }
+            let id = (self.realm.clone(), name.clone());
+            let states: Vec<(String, bool)> = self
+                .list
+                .iter()
+                .zip(self.staged[c].iter())
+                .map(|(a, &on)| (a.name.clone(), on))
+                .collect();
+            addons::write_enable_state(Some(&id), &states);
+        }
     }
 
     /// Are there any installed addons at all? The reference hides its button when not
@@ -122,14 +299,14 @@ impl AddonsPanel {
         *ANY.get_or_init(|| !addons::installed(None).is_empty())
     }
 
-    /// The rows currently visible, as `(index, addon, enabled)`.
-    fn visible(&self) -> impl Iterator<Item = (usize, &InstalledAddOn, bool)> {
+    /// The rows currently visible, as `(index, addon)` — enable state is the view's to answer
+    /// ([`Self::box_state`]), not the metadata's.
+    fn visible(&self) -> impl Iterator<Item = (usize, &InstalledAddOn)> {
         self.list
             .iter()
             .enumerate()
             .skip(self.offset)
             .take(MAX_ROWS)
-            .map(|(i, a)| (i, a, self.staged.get(i).copied().unwrap_or(a.enabled)))
     }
 
     /// The highest first-row index that still fills the list.
@@ -137,64 +314,253 @@ impl AddonsPanel {
         self.list.len().saturating_sub(MAX_ROWS)
     }
 
-    /// **Why a row will not load** — the string the status column shows and the colour rule keys on.
-    ///
-    /// These are the reference's status LABELS, not its tokens, because the glue side has no VM to
-    /// splice `getglobal("ADDON_"..reason)` against (1197 §3). Each is the exact value its token
-    /// carries in the shipped `GlobalStrings.lua`, and
-    /// `the_status_labels_are_the_reference_globalstrings_values` pins all four so they cannot
-    /// drift from the ESC-menu twin, which DOES go through the globals:
-    ///
-    /// | here | token | `GlobalStrings.lua` |
-    /// |---|---|---|
-    /// | `"Disabled"` | `ADDON_DISABLED` | `"Disabled"` |
-    /// | `"Dependency missing"` | `ADDON_DEP_MISSING` | `"Dependency missing"` |
-    /// | `"Dependency disabled"` | `ADDON_DEP_DISABLED` | `"Dependency disabled"` |
-    /// | `"Out of date"` | `ADDON_INTERFACE_VERSION` | `"Out of date"` |
-    ///
-    /// The last row is why this comment was rewritten: it used to name the token `INCOMPATIBLE`,
-    /// **which does not exist** — the reference has no `ADDON_INCOMPATIBLE`, and a reader who
-    /// trusted the name would have spliced a nil global. Out-of-date is reported and never enforced
-    /// (1191 §6), which is why such a row still shows gold-if-enabled: the status column says so and
-    /// the client still loads it, and those two facts must not contradict each other.
-    fn reason(&self, i: usize) -> Option<&'static str> {
-        let addon = self.list.get(i)?;
-        if !self.staged.get(i).copied().unwrap_or(addon.enabled) {
-            return Some("Disabled");
-        }
-        for dep in &addon.dependencies {
-            match self
-                .list
-                .iter()
-                .position(|a| a.name.eq_ignore_ascii_case(dep))
-            {
-                None => return Some("Dependency missing"),
-                Some(j) if !self.staged.get(j).copied().unwrap_or(true) => {
-                    return Some("Dependency disabled")
+    /// One row's checkbox state for the current view. A single character's view is plain
+    /// two-state over their column; the All view is the reference's tri-state — its
+    /// `GetAddOnEnableState(nil, i)`: enabled for all / for some (the greyed check) / for none.
+    fn box_state(&self, i: usize) -> BoxState {
+        match self.view {
+            Some(c) => {
+                if self
+                    .staged
+                    .get(c)
+                    .is_some_and(|col| col.get(i) == Some(&true))
+                {
+                    BoxState::On
+                } else {
+                    BoxState::Off
                 }
-                Some(_) => {}
+            }
+            None => {
+                let on = self
+                    .staged
+                    .iter()
+                    .filter(|col| col.get(i) == Some(&true))
+                    .count();
+                if on == 0 {
+                    BoxState::Off
+                } else if on == self.staged.len() {
+                    BoxState::On
+                } else {
+                    BoxState::Mixed
+                }
             }
         }
-        addon.out_of_date().then_some("Out of date")
     }
+
+    /// Is this addon enabled *for the current view* — the bit the gate is fed? A single character
+    /// reads their own column. The All view answers **"any staged character has it on"** — OURS
+    /// (1293): the reference feeds `AddOn_CanLoad` a NULL character there and that read's exact
+    /// semantics are un-carved, so we state the natural reading rather than guess at bytes nobody
+    /// has verified.
+    fn effective_enabled(&self, i: usize) -> bool {
+        self.box_state(i) != BoxState::Off
+    }
+
+    /// The current view lowered into the gate's adapter rows (1292): the folder's one registry
+    /// with THIS view's staged enable bits. `loaded` is `false` for every row — nothing has
+    /// loaded at the glue (`load_third_party` is a world-entry step, 1191 §2), so the loaded
+    /// short-circuit can never fire here.
+    fn gate_rows(&self) -> Vec<GateRow<'_>> {
+        self.list
+            .iter()
+            .enumerate()
+            .map(|(i, a)| GateRow {
+                name: &a.name,
+                enabled: self.effective_enabled(i),
+                interface: a.interface,
+                load_on_demand: a.load_on_demand,
+                loaded: false,
+                dependencies: a.dependencies.iter().map(String::as_str).collect(),
+            })
+            .collect()
+    }
+
+    /// **Why a row will not load** — the one arbiter's answer (1292), which the status column
+    /// splices and the title colour keys on. `demand_only=false`: this is the glue surface
+    /// (`dl=0`) — `NOT_DEMAND_LOADED` is unreachable here. `version_check` is the live CVar
+    /// mirror, re-read per query like the reference (1292 §2.2).
+    fn verdict(&self, i: usize) -> Verdict {
+        can_load(&self.gate_rows(), i, false, self.version_check)
+    }
+
+    /// AddonList.lua's title colour, verbatim in structure: gold when loadable; red when the
+    /// player has it ON and it still will not load — **unless the reason is `DEP_DISABLED`**,
+    /// which reads grey like a disabled row (the Lua's own `reason ~= "DEP_DISABLED"` guard: the
+    /// player already made that choice one row up, and red would blame the dependent); grey
+    /// otherwise. Any `|c` markup in the title overrides this base per-span, exactly as the
+    /// reference FontString renders it ([`title_spans`]).
+    fn title_colour(&self, i: usize) -> Color {
+        let verdict = self.verdict(i);
+        if verdict.loadable() {
+            GOLD
+        } else if self.effective_enabled(i) && verdict.token().as_deref() != Some("DEP_DISABLED") {
+            BROKEN
+        } else {
+            DIM
+        }
+    }
+
+    /// A checkbox click for the current view. In a single character's view it is a plain toggle
+    /// of their bit. In the All view it is the reference's CheckButton over the tri-state: a
+    /// grey (mixed) box **counts as checked**, so clicking On *or* Mixed unchecks — disable for
+    /// every character — and only a fully-unchecked box enables for all.
+    fn click_row(&mut self, i: usize) {
+        match self.view {
+            Some(c) => {
+                if let Some(slot) = self.staged.get_mut(c).and_then(|col| col.get_mut(i)) {
+                    *slot = !*slot;
+                    self.dirty = true;
+                }
+            }
+            None => {
+                let target = self.box_state(i) == BoxState::Off;
+                for col in &mut self.staged {
+                    if let Some(slot) = col.get_mut(i) {
+                        *slot = target;
+                    }
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Enable All / Disable All sweep the CURRENT VIEW: the view the player is editing is the
+    /// view the sweep edits — "All" sweeps every column, a single character's view only theirs.
+    fn set_all(&mut self, on: bool) {
+        match self.view {
+            Some(c) => {
+                if let Some(col) = self.staged.get_mut(c) {
+                    col.iter_mut().for_each(|s| *s = on);
+                }
+            }
+            None => {
+                for col in &mut self.staged {
+                    col.iter_mut().for_each(|s| *s = on);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The dropdown's current value — "All" or the viewed character's name.
+    fn view_name<'a>(&'a self, strings: &'a GlueStrings) -> &'a str {
+        match self.view {
+            None => strings.text("ALL", "All"),
+            Some(c) => self.chars.get(c).map(String::as_str).unwrap_or("?"),
+        }
+    }
+}
+
+/// The status column's text: the reference's `getglobal("ADDON_"..reason)` splice, run against
+/// the parsed GlueStrings table — the glue side loads no VM to splice in (1197 §3), but the
+/// string TABLE is loaded, so the lookup is the same one. The fallbacks are the shipped values
+/// of the same tokens, pinned by `the_status_labels_are_the_reference_globalstrings_values`
+/// (verified against the extracted 1.12 chain, GlueStrings.lua l.44-56).
+fn status_label<'a>(strings: &'a GlueStrings, token: &'a str) -> &'a str {
+    let fallback = match token {
+        "DISABLED" => "Disabled",
+        "INTERFACE_VERSION" => "Out of date",
+        "DEP_MISSING" => "Dependency missing",
+        "DEP_DISABLED" => "Dependency disabled",
+        "DEP_INTERFACE_VERSION" => "Dependency out of date",
+        // `BANNED`/`CORRUPT`/`INSECURE` gate on server signature state we do not model, and
+        // `NOT_DEMAND_LOADED` is the in-game surface's (`demand_only=false` here) — none is
+        // producible at the glue (addon_gate's module doc); the raw token is the honest fallback.
+        other => other,
+    };
+    strings.get(&format!("ADDON_{token}")).unwrap_or(fallback)
+}
+
+/// Split a title into its coloured spans — WoW's `|cAARRGGBB…|r` inline markup, decoded by the
+/// byte-verified grammar (`benilla_ui::markup`, RF-0087) instead of drawn literally. `base` is
+/// the row's own colour ([`AddonsPanel::title_colour`]); an escape overrides it until `|r`, and
+/// the escape's alpha byte is discarded exactly as the client discards it. Link escapes hide
+/// their payload and keep their visible text; `||` draws one `|`; a line break becomes a space
+/// (a title is one line).
+fn title_spans(text: &str, base: Color) -> Vec<(String, Color)> {
+    let mut spans: Vec<(String, Color)> = Vec::new();
+    let mut cur = String::new();
+    let mut colour = base;
+    for (_, tok) in tokens(text) {
+        let switch = match tok.kind {
+            TokenKind::Color(rgba) => {
+                let [r, g, b, _] = rgba.to_f32_at(1.0);
+                Some(Color::srgb(r, g, b))
+            }
+            TokenKind::ColorReset => Some(base),
+            TokenKind::EscapedPipe => {
+                cur.push('|');
+                None
+            }
+            TokenKind::LineBreak => {
+                cur.push(' ');
+                None
+            }
+            TokenKind::LinkOpen { .. } | TokenKind::LinkClose => None,
+            TokenKind::Char(c) => {
+                cur.push(c);
+                None
+            }
+        };
+        if let Some(next) = switch {
+            if !cur.is_empty() {
+                spans.push((std::mem::take(&mut cur), colour));
+            }
+            colour = next;
+        }
+    }
+    if !cur.is_empty() {
+        spans.push((cur, colour));
+    }
+    if spans.is_empty() {
+        spans.push((String::new(), base));
+    }
+    spans
+}
+
+/// Flip the *Load out of date AddOns* box: the `checkAddonVersion` CVar **inverted** (1292 §2,
+/// byte-verified — ticked = `"0"`). Written through [`UiScript::set_cvar_engine`] so it rides the
+/// change queue like a Lua `SetCVar` and the host's sync persists it (the minimap-zoom pattern) —
+/// nothing else to do: the statuses repaint from [`drive_addons_panel`]'s per-frame mirror, no
+/// rescan, because the gate re-reads the flag per query (1292 §2.2).
+fn toggle_force_load(script: &mut UiScript) {
+    let checking = script.cvar("checkAddonVersion").is_none_or(|v| v != "0");
+    script.set_cvar_engine("checkAddonVersion", if checking { "0" } else { "1" });
 }
 
 /// The panel's clickable parts.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AddonsAction {
-    /// A list row — toggles its checkbox (`AddonList_Enable`).
+    /// A row's CHECKBOX — the only thing on a row that clicks, as in the reference (the entry
+    /// template has no `OnClick`; `AddonList_Enable` hangs off the CheckButton alone).
     Row(usize),
+    /// The row strip itself: hover raises the `AddonTooltip`; a press does nothing.
+    RowHover(usize),
     EnableAll,
     DisableAll,
     Okay,
+    /// Cancel, the ESC key, and the `GlueCloseButton` X — all `AddonList_OnCancel`.
     Cancel,
     ScrollUp,
     ScrollDown,
+    /// The dropdown control — opens/closes the option list. Also carried by the open list's
+    /// full-screen backdrop, so a click that misses every option closes it (click-away).
+    DropdownToggle,
+    /// One dropdown option: `None` = "All", `Some(c)` = that roster character.
+    DropdownPick(Option<usize>),
+    /// The *Load out of date AddOns* checkbox ([`toggle_force_load`]).
+    ForceLoad,
 }
 
 /// The panel root (despawned whole on close).
 #[derive(Component)]
 struct AddonsUi;
+
+/// A panel button whose child [`Hilight`] lights on hover (the checkboxes' `UI-CheckBox-Highlight`,
+/// the close X, the dropdown arrow, the open list's `UI-QuestTitleHighlight` rows, the scroll
+/// arrows) — driven per frame by [`drive_addons_panel`] with **no respawn**, which is the point.
+#[derive(Component)]
+pub(super) struct HoverLit;
 
 /// Spawn/despawn the panel, run its flows, and repaint when anything it shows has changed.
 ///
@@ -207,18 +573,21 @@ pub(super) fn drive_addons_panel(
     art: Res<GlueArt>,
     assets: Res<AssetServer>,
     strings: Option<Res<GlueStrings>>,
-    identity: Res<crate::ui_script::AddOnIdentity>,
-    roster: Res<super::Roster>,
+    mut script: Option<NonSendMut<UiScript>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut sounds: MessageWriter<GlueSound>,
     presses: Query<(&AddonsAction, &Interaction), Changed<Interaction>>,
-    hovers: Query<(&AddonsAction, &Interaction)>,
+    hovers: Query<(Entity, &AddonsAction, &Interaction)>,
+    lit: Query<(&Interaction, &Children), With<HoverLit>>,
+    mut hilights: Query<&mut Visibility, With<Hilight>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     if !panel.open {
         if let Some(root) = panel.root.take() {
             commands.entity(root).despawn();
         }
+        panel.tip = None;
         wheel.clear();
         return;
     }
@@ -231,24 +600,34 @@ pub(super) fn drive_addons_panel(
             continue;
         }
         match *action {
-            AddonsAction::Row(i) => {
-                if let Some(slot) = panel.staged.get_mut(i) {
-                    *slot = !*slot;
-                    panel.dirty = true;
-                }
-            }
-            AddonsAction::EnableAll => {
-                panel.staged.iter_mut().for_each(|s| *s = true);
-                panel.dirty = true;
-            }
-            AddonsAction::DisableAll => {
-                panel.staged.iter_mut().for_each(|s| *s = false);
-                panel.dirty = true;
-            }
+            AddonsAction::Row(i) => panel.click_row(i),
+            AddonsAction::RowHover(_) => {}
+            AddonsAction::EnableAll => panel.set_all(true),
+            AddonsAction::DisableAll => panel.set_all(false),
             AddonsAction::Okay => close_and_save = true,
             AddonsAction::Cancel => close_and_discard = true,
             AddonsAction::ScrollUp => scroll(&mut panel, -1),
             AddonsAction::ScrollDown => scroll(&mut panel, 1),
+            AddonsAction::DropdownToggle => {
+                // The reference's dropdown button click (`ToggleDropDownMenu` +
+                // `PlaySound("igMainMenuOptionCheckBoxOn")`).
+                sounds.write(GlueSound("igMainMenuOptionCheckBoxOn"));
+                panel.dropdown_open = !panel.dropdown_open;
+                panel.dirty = true;
+            }
+            AddonsAction::DropdownPick(view) => {
+                sounds.write(GlueSound("igMainMenuOptionCheckBoxOn"));
+                panel.view = view;
+                panel.dropdown_open = false;
+                panel.dirty = true;
+            }
+            AddonsAction::ForceLoad => {
+                // No VM (a bare test world / a capture): nothing to write to and nothing the
+                // walk would read differently — the box is inert, honestly.
+                if let Some(script) = script.as_deref_mut() {
+                    toggle_force_load(script);
+                }
+            }
         }
     }
     // `AddonList_OnKeyDown`: ESCAPE cancels, ENTER accepts.
@@ -264,36 +643,28 @@ pub(super) fn drive_addons_panel(
         }
     }
 
-    // The hovered row, for the tooltip — read every frame rather than on change, because a row
-    // that scrolls out from under a stationary cursor changes what is hovered without an event.
-    let hovered = hovers.iter().find_map(|(a, i)| match (a, i) {
-        (AddonsAction::Row(r), Interaction::Hovered | Interaction::Pressed) => Some(*r),
-        _ => None,
-    });
-    if panel.hovered != hovered {
-        panel.hovered = hovered;
+    // The live `checkAddonVersion` mirror (1293 §5): read per frame like the gate's own per-query
+    // read (1292 §2.2), so the ForceLoad click above — or any other writer — repaints the
+    // statuses this same frame with nothing rescanned. Absent VM or table = the registrar
+    // default: check ON.
+    let version_check = script
+        .as_deref()
+        .and_then(|s| s.cvar("checkAddonVersion"))
+        .is_none_or(|v| v != "0");
+    if panel.version_check != version_check {
+        panel.version_check = version_check;
         panel.dirty = true;
     }
 
     if close_and_save {
-        let states: Vec<(String, bool)> = panel
-            .list
-            .iter()
-            .zip(panel.staged.iter())
-            .map(|(a, &on)| (a.name.clone(), on))
-            .collect();
-        // The identity the world-entry walk will read. `AddOnIdentity` is only filled once a
-        // character has entered the world, so at first launch the roster's own selection is the
-        // one that matters — the same resolution `load_ingame_ui_on_world_entry` performs.
-        let who = identity
-            .0
-            .clone()
-            .or_else(|| crate::ui_macro::identity(&roster));
-        addons::write_enable_state(who.as_ref(), &states);
+        // `AddonList_OnOk` / `AddonList_OnCancel` play the realm dialog's pair.
+        sounds.write(GlueSound("gsLoginChangeRealmOK"));
+        panel.save_staged();
         panel.close();
         return;
     }
     if close_and_discard {
+        sounds.write(GlueSound("gsLoginChangeRealmCancel"));
         panel.close();
         return;
     }
@@ -305,6 +676,7 @@ pub(super) fn drive_addons_panel(
         if let Some(root) = panel.root.take() {
             commands.entity(root).despawn();
         }
+        panel.tip = None;
     }
     if panel.root.is_none() {
         let empty = GlueStrings::default();
@@ -319,6 +691,67 @@ pub(super) fn drive_addons_panel(
         ));
         panel.spawned_s = s;
         panel.dirty = false;
+        // Fresh entities — hover, tooltips and highlights reconcile against them next frame.
+        return;
+    }
+
+    // ── hover: highlights + the tooltip, with the tree left alone ─────────────────────────────
+    for (interaction, children) in &lit {
+        let want = if *interaction == Interaction::None {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        for &child in children {
+            if let Ok(mut vis) = hilights.get_mut(child) {
+                if *vis != want {
+                    *vis = want;
+                }
+            }
+        }
+    }
+
+    let hover = hovers.iter().find_map(|(_, a, i)| {
+        if !matches!(i, Interaction::Hovered | Interaction::Pressed) {
+            return None;
+        }
+        match a {
+            AddonsAction::RowHover(r) => Some(Hover::Row(*r)),
+            AddonsAction::Row(r) => Some(Hover::Check(*r)),
+            _ => None,
+        }
+    });
+    // What the tooltip should say for this hover — `None` collapses "nothing hovered" and "a
+    // checkbox that is not mixed" (the reference's CheckButton only carries a tooltip then).
+    let want = match hover {
+        Some(h @ Hover::Row(_)) => Some(h),
+        Some(h @ Hover::Check(i)) if panel.box_state(i) == BoxState::Mixed => Some(h),
+        _ => None,
+    };
+    if panel.tip.map(|(h, _)| h) != want {
+        if let Some((_, e)) = panel.tip.take() {
+            commands.entity(e).despawn();
+        }
+        if let Some(h) = want {
+            let row = match h {
+                Hover::Row(i) | Hover::Check(i) => i,
+            };
+            // Anchor to the row strip — the reference's own
+            // `AddonTooltip:SetPoint("TOPRIGHT", this, "TOPLEFT", -14, 0)`.
+            let strip = hovers
+                .iter()
+                .find_map(|(e, a, _)| (*a == AddonsAction::RowHover(row)).then_some(e));
+            if let (Some(strip), Some(addon)) = (strip, panel.list.get(row)) {
+                let empty = GlueStrings::default();
+                let strings = strings.as_deref().unwrap_or(&empty);
+                let mixed = panel.box_state(row) == BoxState::Mixed;
+                let mut tip = Entity::PLACEHOLDER;
+                commands.entity(strip).with_children(|p| {
+                    tip = spawn_tooltip(p, &art, &assets, strings, addon, h, mixed, s);
+                });
+                panel.tip = Some((h, tip));
+            }
+        }
     }
 }
 
@@ -332,6 +765,72 @@ fn scroll(panel: &mut AddonsPanel, delta: i32) {
     }
 }
 
+/// One checkbox as the reference `CheckButton` draws it: the `UI-CheckBox-Up` box always (the
+/// pressed swap is [`ArtSwap`]'s), the check OVERLAID — gold (`-Check`) when on, grey
+/// (`-Check-Disabled`) when mixed (`TriStateCheckbox_SetState`'s state-1 texture) — and the ADD
+/// highlight lit on hover ([`HoverLit`]). The old face swapped the box art for the check art,
+/// which is why the director's screenshot showed floating checks with no boxes. Plain-fill
+/// fallback without art.
+fn checkbox_button<A: Component>(
+    parent: &mut ChildSpawnerCommands,
+    art: &GlueArt,
+    action: A,
+    state: BoxState,
+    node: Node,
+) {
+    let mut b = parent.spawn((action, Button, HoverLit, node));
+    match &art.checkbox {
+        Some(c) => {
+            b.insert((
+                ImageNode::new(c.up.clone()),
+                ArtSwap {
+                    up: c.up.clone(),
+                    down: c.down.clone(),
+                },
+            ));
+            b.with_children(|b| {
+                match state {
+                    BoxState::On => {
+                        b.spawn((ImageNode::new(c.checked.clone()), overlay()));
+                    }
+                    BoxState::Mixed => match &art.check_disabled {
+                        Some(grey) => {
+                            b.spawn((ImageNode::new(grey.clone()), overlay()));
+                        }
+                        None => {
+                            b.spawn((
+                                ImageNode {
+                                    color: DIM,
+                                    ..ImageNode::new(c.checked.clone())
+                                },
+                                overlay(),
+                            ));
+                        }
+                    },
+                    BoxState::Off => {}
+                }
+                if let Some(hi) = &c.hi {
+                    b.spawn((
+                        Hilight,
+                        Visibility::Hidden,
+                        MaterialNode(hi.clone()),
+                        overlay(),
+                    ));
+                }
+            });
+        }
+        None => {
+            b.insert(BackgroundColor(match state {
+                BoxState::On => GOLD,
+                // Ours: halfway between the art-less GOLD and DIM, so a mixed box still reads
+                // as its own state.
+                BoxState::Mixed => Color::srgb(0.75, 0.64, 0.25),
+                BoxState::Off => DIM,
+            }));
+        }
+    }
+}
+
 fn spawn_panel(
     commands: &mut Commands,
     art: &GlueArt,
@@ -342,12 +841,23 @@ fn spawn_panel(
 ) -> Entity {
     let px = |v: f32| Val::Px(v * s);
     let font = wow_font(assets);
-    let title = strings.text("ADDONS", "AddOns");
+    let abs = |left: f32, top: f32, w: f32, h: f32| Node {
+        position_type: PositionType::Absolute,
+        left: px(left),
+        top: px(top),
+        width: px(w),
+        height: px(h),
+        ..default()
+    };
 
     commands
         .spawn((
             AddonsUi,
             GlobalZIndex(1200), // over the select screen's 1100, like the delete dialog
+            // The reference's own full-screen BACKGROUND layer: black at 0.75 over the glue
+            // scene, which is also what keeps a stray click off the screen behind (picking
+            // follows z-order).
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.75)),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -358,48 +868,80 @@ fn spawn_panel(
         ))
         .with_children(|overlay_ui| {
             let mut boxed = overlay_ui.spawn(Node {
-                width: px(PANEL_W),
-                height: px(PANEL_H),
+                width: px(BG_W),
+                height: px(BG_H),
+                // The plate's authored CENTER offset (+24, 0).
+                left: px(BG_CENTER_OFF_X),
                 ..default()
             });
             boxed.with_children(|b| {
-                // The dialog backdrop, exactly as the delete dialog builds it.
-                if let (Some(bg), Some(border)) = (&art.dialog_bg, &art.dialog_border) {
-                    b.spawn((
-                        tiled_bg_node(bg.clone(), 32.0, s, Color::WHITE),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: px(11.0),
-                            right: px(12.0),
-                            top: px(12.0),
-                            bottom: px(11.0),
-                            ..default()
-                        },
-                    ));
-                    backdrop_border(b, border, 32.0, Color::WHITE);
-                } else {
-                    b.spawn((
-                        BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.95)),
-                        overlay(),
-                    ));
+                // ── the HelpFrame plate: six pieces tiling 640×512, frame + top band + dark
+                // inset + bottom band all baked into the art ─────────────────────────────────
+                match &art.help_frame {
+                    Some(hf) => {
+                        for (img, l, t, w, h) in [
+                            (&hf.tl, 0.0, 0.0, 256.0, 256.0),
+                            (&hf.top, 256.0, 0.0, 256.0, 256.0),
+                            (&hf.tr, 512.0, 0.0, 128.0, 256.0),
+                            (&hf.bl, 0.0, 256.0, 256.0, 256.0),
+                            (&hf.bottom, 256.0, 256.0, 256.0, 256.0),
+                            (&hf.br, 512.0, 256.0, 128.0, 256.0),
+                        ] {
+                            b.spawn((ImageNode::new(img.clone()), abs(l, t, w, h)));
+                        }
+                        // The ARTWORK divider strip under the top band: the same three top
+                        // pieces' authored sub-band (TexCoords y 0.12109375–0.234375), 29 tall
+                        // at y 50.
+                        const BAND_TC: [f32; 4] = [0.0, 1.0, 0.121_093_75, 0.234_375];
+                        for (i, (img, l, w)) in [
+                            (&hf.tl, 0.0, 256.0),
+                            (&hf.top, 256.0, 256.0),
+                            (&hf.tr, 512.0, 128.0),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            b.spawn((
+                                ImageNode {
+                                    image: img.clone(),
+                                    rect: Some(tc_rect(hf.sizes[i], BAND_TC)),
+                                    ..default()
+                                },
+                                abs(l, 50.0, w, 29.0),
+                            ));
+                        }
+                    }
+                    None => {
+                        b.spawn((
+                            BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.95)),
+                            overlay(),
+                        ));
+                    }
                 }
 
-                // Title.
+                // ── the header plate + title (`UI-DialogBox-Header` 256×64 at TOP (−12, +12),
+                // `ADDON_LIST` GlueFontNormalSmall 14 under its top) ─────────────────────────
+                if let Some((header, _)) = &art.dialog_header {
+                    b.spawn((
+                        ImageNode::new(header.clone()),
+                        abs((BG_W - 256.0) / 2.0 - 12.0, -12.0, 256.0, 64.0),
+                    ));
+                }
                 outlined_text(
                     b,
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(0.0),
-                        right: px(0.0),
-                        top: px(22.0),
+                        left: px((BG_W - 256.0) / 2.0 - 12.0),
+                        width: px(256.0),
+                        top: px(2.0),
                         justify_content: JustifyContent::Center,
                         ..default()
                     },
                     (),
                     (),
                     GlueText {
-                        text: title,
-                        size: 18.0,
+                        text: strings.text("ADDON_LIST", "AddOn List"),
+                        size: 12.0, // GlueFontNormalSmall
                         color: GOLD,
                         wrap: false,
                     },
@@ -407,144 +949,46 @@ fn spawn_panel(
                     s,
                 );
 
-                // The rows.
-                for (slot, (index, addon, enabled)) in panel.visible().enumerate() {
-                    let top = LIST_TOP + slot as f32 * ROW_H;
-                    let reason = panel.reason(index);
-                    // AddonList.lua's three-colour rule: gold when it will load, red when the
-                    // player has it ON and it still will not, grey when they turned it off.
-                    let colour = match (enabled, reason) {
-                        (true, None) => GOLD,
-                        (true, Some("Out of date")) => GOLD,
-                        (true, _) => BROKEN,
-                        (false, _) => DIM,
-                    };
-                    let mut row = b.spawn((
-                        AddonsAction::Row(index),
+                // ── the close X (`GlueCloseButton` at TOPRIGHT (−42, −3)) — Cancel ──────────
+                {
+                    let mut x = b.spawn((
+                        AddonsAction::Cancel,
                         Button,
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: px(LIST_LEFT),
-                            top: px(top),
-                            width: px(PANEL_W - LIST_LEFT * 2.0),
-                            height: px(ROW_H),
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
+                        HoverLit,
+                        abs(BG_W - 42.0 - 32.0, 3.0, 32.0, 32.0),
                     ));
-                    row.with_children(|r| {
-                        // The checkbox. The glue art's own `UI-CheckBox-*` when we have it, a
-                        // drawn box when we do not — the same fallback every glue control takes.
-                        let check = &art.checkbox;
-                        let face = match (check.as_ref(), enabled) {
-                            (Some(c), true) => Some(c.checked.clone()),
-                            (Some(c), false) => Some(c.up.clone()),
-                            (None, _) => None,
-                        };
-                        let mut cb = r.spawn(Node {
-                            position_type: PositionType::Absolute,
-                            left: px(0.0),
-                            top: px((ROW_H - CHECK) / 2.0),
-                            width: px(CHECK),
-                            height: px(CHECK),
-                            ..default()
-                        });
-                        match face {
-                            Some(image) => {
-                                cb.insert(ImageNode::new(image));
-                            }
-                            None => {
-                                cb.insert(BackgroundColor(if enabled { GOLD } else { DIM }));
-                            }
+                    if let Some(cb) = &art.close_btn {
+                        x.insert((
+                            ImageNode::new(cb.up.clone()),
+                            ArtSwap {
+                                up: cb.up.clone(),
+                                down: cb.down.clone(),
+                            },
+                        ));
+                        if let Some(hi) = &cb.hi {
+                            x.with_children(|x| {
+                                x.spawn((
+                                    Hilight,
+                                    Visibility::Hidden,
+                                    MaterialNode(hi.clone()),
+                                    overlay(),
+                                ));
+                            });
                         }
-                        // Title.
-                        outlined_text(
-                            r,
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: px(CHECK + 8.0),
-                                top: px(0.0),
-                                ..default()
-                            },
-                            (),
-                            (),
-                            GlueText {
-                                text: addon.display_title(),
-                                size: 12.0,
-                                color: colour,
-                                wrap: false,
-                            },
-                            &font,
-                            s,
-                        );
-                        // Status — the reference's `getglobal("ADDON_"..reason)` column.
-                        if let Some(reason) = reason {
+                    } else {
+                        x.with_children(|x| {
                             outlined_text(
-                                r,
+                                x,
                                 Node {
-                                    position_type: PositionType::Absolute,
-                                    right: px(0.0),
-                                    top: px(0.0),
+                                    left: px(10.0),
+                                    top: px(6.0),
                                     ..default()
                                 },
                                 (),
                                 (),
                                 GlueText {
-                                    text: reason,
-                                    size: 11.0,
-                                    color: DIM,
-                                    wrap: false,
-                                },
-                                &font,
-                                s,
-                            );
-                        }
-                        if let Some(hi) = &art.hilight {
-                            r.spawn((
-                                Hilight,
-                                Visibility::Hidden,
-                                MaterialNode(hi.clone()),
-                                overlay(),
-                            ));
-                        }
-                    });
-                }
-
-                // The scroll pair, shown only when the list is longer than the window — the
-                // reference's `GlueScrollFrame_Update` hides its bar on the same condition.
-                if panel.max_offset() > 0 {
-                    for (action, caption, top) in [
-                        (AddonsAction::ScrollUp, "-", LIST_TOP),
-                        (
-                            AddonsAction::ScrollDown,
-                            "+",
-                            LIST_TOP + (MAX_ROWS as f32 - 1.0) * ROW_H,
-                        ),
-                    ] {
-                        b.spawn((
-                            action,
-                            Button,
-                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.10)),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                right: px(6.0),
-                                top: px(top),
-                                width: px(14.0),
-                                height: px(14.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                ..default()
-                            },
-                        ))
-                        .with_children(|sb| {
-                            outlined_text(
-                                sb,
-                                Node::default(),
-                                (),
-                                (),
-                                GlueText {
-                                    text: caption,
-                                    size: 11.0,
+                                    text: "X",
+                                    size: 14.0,
                                     color: GOLD,
                                     wrap: false,
                                 },
@@ -555,199 +999,920 @@ fn spawn_panel(
                     }
                 }
 
-                // The hover tooltip: title, notes, dependencies — `AddonTooltip_Update`'s three
-                // lines, in its order.
-                if let Some(i) = panel.hovered.and_then(|i| panel.list.get(i)) {
-                    let deps = if i.dependencies.is_empty() {
-                        String::new()
-                    } else {
-                        format!("Dependencies: {}", i.dependencies.join(", "))
-                    };
-                    let body = [
-                        i.notes.clone().unwrap_or_default(),
-                        deps,
-                        i.url.clone().unwrap_or_default(),
-                    ]
-                    .into_iter()
-                    .filter(|l| !l.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                    if !body.is_empty() {
+                // ── "Configure Addons For:" + the dropdown (`AddonCharacterDropDown`,
+                // `GlueDropDownMenuTemplate`) ────────────────────────────────────────────────
+                outlined_text(
+                    b,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(20.0),
+                        top: px(DROP_TOP - 14.0),
+                        ..default()
+                    },
+                    (),
+                    (),
+                    GlueText {
+                        text: strings.text("CONFIGURE_MODS_FOR", "Configure Addons For:"),
+                        size: 12.0, // GlueFontNormalSmall
+                        color: GOLD,
+                        wrap: false,
+                    },
+                    &font,
+                    s,
+                );
+                {
+                    let mut drop = b.spawn((
+                        AddonsAction::DropdownToggle,
+                        Button,
+                        abs(0.0, DROP_ART_TOP, DROP_W, DROP_ART_H),
+                    ));
+                    drop.with_children(|d| {
+                        // The three `CharacterCreate-LabelFrame` slices (25 | 115 | 25 of the
+                        // 128-wide art) — the same sheet the create screen's dial rows use.
+                        if let Some((sheet, size)) = &art.label_frame {
+                            let mut left = 0.0;
+                            for (w, tc) in DROP_SLICE_W.iter().zip(DROP_TC) {
+                                d.spawn((
+                                    ImageNode {
+                                        image: sheet.clone(),
+                                        rect: Some(tc_rect(*size, tc)),
+                                        ..default()
+                                    },
+                                    abs(left, 0.0, *w, DROP_ART_H),
+                                ));
+                                left += w;
+                            }
+                        } else {
+                            d.spawn((
+                                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.10)),
+                                abs(10.0, 20.0, DROP_W - 20.0, 24.0),
+                            ));
+                        }
+                        // The selected value (white, `GlueFontHighlightSmall`) right-aligned
+                        // beside the arrow — the template's own text seat.
                         outlined_text(
-                            b,
+                            d,
                             Node {
                                 position_type: PositionType::Absolute,
-                                left: px(LIST_LEFT),
-                                right: px(LIST_LEFT),
-                                bottom: px(58.0),
+                                left: px(10.0),
+                                width: px(DROP_W - 43.0 - 10.0),
+                                top: px(0.0),
+                                height: px(DROP_ART_H),
+                                justify_content: JustifyContent::FlexEnd,
+                                align_items: AlignItems::Center,
                                 ..default()
                             },
                             (),
                             (),
                             GlueText {
-                                text: &body,
-                                size: 11.0,
+                                text: panel.view_name(strings),
+                                size: 12.0,
                                 color: Color::WHITE,
-                                wrap: true,
+                                wrap: false,
                             },
                             &font,
                             s,
                         );
+                        // The 24² arrow (`UI-ChatIcon-ScrollDown-*` + `UI-Common-MouseHilight`).
+                        let mut arrow = d.spawn((
+                            AddonsAction::DropdownToggle,
+                            Button,
+                            HoverLit,
+                            abs(DROP_W - 16.0 - 24.0, 18.0, 24.0, 24.0),
+                        ));
+                        match (&art.dropdown_arrow_up, &art.dropdown_arrow_down) {
+                            (Some(up), down) => {
+                                arrow.insert(ImageNode::new(up.clone()));
+                                if let Some(down) = down {
+                                    arrow.insert(ArtSwap {
+                                        up: up.clone(),
+                                        down: down.clone(),
+                                    });
+                                }
+                                if let Some(hi) = &art.mouse_hilight {
+                                    arrow.with_children(|a| {
+                                        a.spawn((
+                                            Hilight,
+                                            Visibility::Hidden,
+                                            MaterialNode(hi.clone()),
+                                            overlay(),
+                                        ));
+                                    });
+                                }
+                            }
+                            _ => {
+                                arrow.with_children(|a| {
+                                    outlined_text(
+                                        a,
+                                        Node::default(),
+                                        (),
+                                        (),
+                                        GlueText {
+                                            text: "v",
+                                            size: 12.0,
+                                            color: GOLD,
+                                            wrap: false,
+                                        },
+                                        &font,
+                                        s,
+                                    );
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // ── "Load out of date AddOns" (`AddonListForceLoad`: a 32² checkbox at TOP
+                // (+50, −42), label at LEFT +36) — the `checkAddonVersion` CVar INVERTED
+                // (ticked = "0"; 1292 §2.1: force-load actively ERASES the refusal, so ticking
+                // repaints every INTERFACE_VERSION row as plain loadable) ────────────────────
+                checkbox_button(
+                    b,
+                    art,
+                    AddonsAction::ForceLoad,
+                    if panel.version_check {
+                        BoxState::Off
+                    } else {
+                        BoxState::On
+                    },
+                    abs(FORCE_LEFT, FORCE_TOP, 32.0, 32.0),
+                );
+                outlined_text(
+                    b,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(FORCE_LEFT + 36.0),
+                        top: px(FORCE_TOP),
+                        height: px(32.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    (),
+                    (),
+                    GlueText {
+                        text: strings.text("ADDON_FORCE_LOAD", "Load out of date AddOns"),
+                        size: 12.0,
+                        color: GOLD,
+                        wrap: false,
+                    },
+                    &font,
+                    s,
+                );
+
+                // ── the rows ────────────────────────────────────────────────────────────────
+                for (slot, (index, addon)) in panel.visible().enumerate() {
+                    let top = ROW_TOP + slot as f32 * ROW_PITCH;
+                    let state = panel.box_state(index);
+                    // The one arbiter (1292): status and colour both come from the gate over
+                    // the CURRENT VIEW's staged states.
+                    let status = panel.verdict(index).token();
+                    let colour = panel.title_colour(index);
+
+                    // The row strip: tooltip hover only — no click, no highlight (the
+                    // reference entry has neither; see the module doc on the flashing).
+                    b.spawn((
+                        AddonsAction::RowHover(index),
+                        Button,
+                        abs(ROW_LEFT, top, ROW_W, ROW_H),
+                    ))
+                    .with_children(|r| {
+                        // Title — `GlueFontNormal`, 220 wide, colour markup rendered
+                        // ([`title_spans`]); clipped at the authored box so a long title
+                        // cannot run into the status column.
+                        outlined_spans(
+                            r,
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(TITLE_LEFT),
+                                width: px(TITLE_W),
+                                height: px(ROW_H),
+                                align_items: AlignItems::Center,
+                                overflow: Overflow::clip(),
+                                ..default()
+                            },
+                            (),
+                            (),
+                            &title_spans(addon.display_title(), colour),
+                            15.0, // GlueFontNormal
+                            false,
+                            &font,
+                            s,
+                        );
+                        // Status — `GlueFontNormalSmall` (gold), 30 right of the title box:
+                        // the reference's `getglobal("ADDON_"..reason)` splice.
+                        if let Some(token) = status.as_deref() {
+                            outlined_text(
+                                r,
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: px(STATUS_LEFT),
+                                    height: px(ROW_H),
+                                    align_items: AlignItems::Center,
+                                    ..default()
+                                },
+                                (),
+                                (),
+                                GlueText {
+                                    text: status_label(strings, token),
+                                    size: 12.0,
+                                    color: GOLD,
+                                    wrap: false,
+                                },
+                                &font,
+                                s,
+                            );
+                        }
+                    });
+                    // The checkbox: a 32² CheckButton at the entry's LEFT +5, spawned after
+                    // the strip so it wins the pick where they overlap.
+                    checkbox_button(
+                        b,
+                        art,
+                        AddonsAction::Row(index),
+                        state,
+                        abs(ROW_LEFT + 5.0, top + (ROW_H - 32.0) / 2.0, 32.0, 32.0),
+                    );
+                }
+
+                // ── the scrollbar, shown only when the list overflows (the reference's
+                // `GlueScrollFrame_Update` hides it on the same condition): the
+                // `UI-Character-ScrollBar` decorative track + the `GlueScrollBarTemplate`
+                // column (16² arrows, the knob riding the offset fraction) ──────────────────
+                if panel.max_offset() > 0 {
+                    if let Some((track, size)) = &art.char_scrollbar {
+                        for (l, t, w, h, tc) in [
+                            // Top 31×256 at scrollframe TOPRIGHT (−2, +5).
+                            (
+                                SCROLL_RIGHT - 2.0,
+                                SCROLL_TOP - 5.0,
+                                31.0,
+                                256.0,
+                                [0.0, 0.484_375, 0.0, 1.0],
+                            ),
+                            // Middle, spanning to the bottom piece (TexCoords y .75–1).
+                            (
+                                SCROLL_RIGHT - 2.0,
+                                SCROLL_TOP - 5.0 + 256.0,
+                                31.0,
+                                (SCROLL_TOP + SCROLL_H + 2.0 - 106.0) - (SCROLL_TOP - 5.0 + 256.0),
+                                [0.0, 0.484_375, 0.75, 1.0],
+                            ),
+                            // Bottom 31×106 at scrollframe BOTTOMRIGHT (−2, −2).
+                            (
+                                SCROLL_RIGHT - 2.0,
+                                SCROLL_TOP + SCROLL_H + 2.0 - 106.0,
+                                31.0,
+                                106.0,
+                                [0.515_625, 1.0, 0.0, 0.414_062_5],
+                            ),
+                        ] {
+                            b.spawn((
+                                ImageNode {
+                                    image: track.clone(),
+                                    rect: Some(tc_rect(*size, tc)),
+                                    ..default()
+                                },
+                                abs(l, t, w, h),
+                            ));
+                        }
+                    }
+                    // The slider column: TOPLEFT at scrollframe TOPRIGHT +(6, −16).
+                    let bar_left = SCROLL_RIGHT + 6.0;
+                    let bar_top = SCROLL_TOP + 16.0;
+                    let bar_h = SCROLL_H - 32.0;
+                    if let Some(sc) = &art.scroll {
+                        for (action, up, top) in [
+                            (AddonsAction::ScrollUp, &sc.up_btn, bar_top - 16.0),
+                            (AddonsAction::ScrollDown, &sc.down_btn, bar_top + bar_h),
+                        ] {
+                            b.spawn((
+                                action,
+                                Button,
+                                HoverLit,
+                                ImageNode {
+                                    image: up.up.clone(),
+                                    rect: Some(tc_rect(up.size, crate::glue::art::SCROLL_BTN_TC)),
+                                    ..default()
+                                },
+                                abs(bar_left, top, 16.0, 16.0),
+                            ))
+                            .with_children(|btn| {
+                                btn.spawn((
+                                    Hilight,
+                                    Visibility::Hidden,
+                                    MaterialNode(up.hi.clone()),
+                                    overlay(),
+                                ));
+                            });
+                        }
+                        let travel = bar_h - 16.0;
+                        let frac = panel.offset as f32 / panel.max_offset() as f32;
+                        b.spawn((
+                            ImageNode {
+                                image: sc.knob.0.clone(),
+                                rect: Some(tc_rect(sc.knob.1, crate::glue::art::SCROLL_BTN_TC)),
+                                ..default()
+                            },
+                            abs(bar_left, bar_top + frac * travel, 16.0, 16.0),
+                        ));
+                    } else {
+                        for (action, caption, top) in [
+                            (AddonsAction::ScrollUp, "-", bar_top - 16.0),
+                            (AddonsAction::ScrollDown, "+", bar_top + bar_h),
+                        ] {
+                            b.spawn((
+                                action,
+                                Button,
+                                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.10)),
+                                Node {
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    ..abs(bar_left, top, 16.0, 16.0)
+                                },
+                            ))
+                            .with_children(|sb| {
+                                outlined_text(
+                                    sb,
+                                    Node::default(),
+                                    (),
+                                    (),
+                                    GlueText {
+                                        text: caption,
+                                        size: 11.0,
+                                        color: GOLD,
+                                        wrap: false,
+                                    },
+                                    &font,
+                                    s,
+                                );
+                            });
+                        }
                     }
                 }
 
-                // The button row.
-                b.spawn(Node {
-                    position_type: PositionType::Absolute,
-                    left: px(24.0),
-                    right: px(24.0),
-                    bottom: px(20.0),
-                    height: px(28.0),
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|row| {
-                    for (action, caption) in [
-                        (AddonsAction::EnableAll, "Enable All"),
-                        (AddonsAction::DisableAll, "Disable All"),
-                        (AddonsAction::Cancel, "Cancel"),
-                        (AddonsAction::Okay, "Okay"),
-                    ] {
+                // ── the bottom row, the reference's own order and geometry: Disable All ·
+                // Enable All (`AddonListButtonTemplate` 160×35 from BOTTOMLEFT +16) ··· Okay ·
+                // Cancel (`GlueDialogButtonTemplate` 125×35 from BOTTOMRIGHT −46) ───────────
+                for (action, token, fallback, left, w, kind) in [
+                    (
+                        AddonsAction::DisableAll,
+                        "DISABLE_ALL_ADDONS",
+                        "Disable All",
+                        16.0,
+                        160.0,
+                        GlueBtnKind::List,
+                    ),
+                    (
+                        AddonsAction::EnableAll,
+                        "ENABLE_ALL_ADDONS",
+                        "Enable All",
+                        176.0,
+                        160.0,
+                        GlueBtnKind::List,
+                    ),
+                    (
+                        AddonsAction::Okay,
+                        "OKAY",
+                        "Okay",
+                        BG_W - 46.0 - 125.0 + 8.0 - 125.0,
+                        125.0,
+                        GlueBtnKind::Dialog,
+                    ),
+                    (
+                        AddonsAction::Cancel,
+                        "CANCEL",
+                        "Cancel",
+                        BG_W - 46.0 - 125.0,
+                        125.0,
+                        GlueBtnKind::Dialog,
+                    ),
+                ] {
+                    b.spawn(abs(left, BTN_TOP, w, 35.0)).with_children(|slot| {
                         glue_button(
-                            row,
+                            slot,
                             art,
                             &font,
                             action,
-                            caption,
-                            118.0,
-                            28.0,
-                            GlueBtnKind::Small,
+                            strings.text(token, fallback),
+                            w,
+                            35.0,
+                            kind,
                             s,
                         );
+                    });
+                }
+
+                // ── the dropdown's open list (`UIDropDownListTemplate`: the DialogBox
+                // backdrop, 16-tall rows, the gold check on the current selection, the
+                // `UI-QuestTitleHighlight` hover), plus a full-screen click-away backdrop
+                // underneath it in z ────────────────────────────────────────────────────────
+                if panel.dropdown_open {
+                    b.spawn((
+                        AddonsAction::DropdownToggle,
+                        Button,
+                        GlobalZIndex(1205),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Vw(-100.0),
+                            top: Val::Vh(-100.0),
+                            width: Val::Vw(300.0),
+                            height: Val::Vh(300.0),
+                            ..default()
+                        },
+                    ));
+                    let mut list = b.spawn((
+                        GlobalZIndex(1210),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(DROP_LIST_LEFT),
+                            top: px(DROP_LIST_TOP),
+                            flex_direction: FlexDirection::Column,
+                            padding: UiRect::new(px(5.0), px(10.0), px(15.0), px(15.0)),
+                            ..default()
+                        },
+                    ));
+                    let framed = art.dialog_bg.is_some() && art.dialog_border.is_some();
+                    if !framed {
+                        list.insert(BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.97)));
                     }
-                });
+                    list.with_children(|list| {
+                        if framed {
+                            list.spawn((
+                                tiled_bg_node(
+                                    art.dialog_bg.clone().unwrap(),
+                                    32.0,
+                                    s,
+                                    Color::WHITE,
+                                ),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: px(11.0),
+                                    right: px(12.0),
+                                    top: px(12.0),
+                                    bottom: px(11.0),
+                                    ..default()
+                                },
+                            ));
+                            backdrop_border(
+                                list,
+                                art.dialog_border.as_ref().unwrap(),
+                                32.0,
+                                Color::WHITE,
+                            );
+                        }
+                        // "All" first, then the roster in its own order — the reference's
+                        // `AddonListCharacterDropDown_Initialize` shape.
+                        for view in std::iter::once(None).chain((0..panel.chars.len()).map(Some)) {
+                            let name = match view {
+                                None => strings.text("ALL", "All"),
+                                Some(c) => panel.chars[c].as_str(),
+                            };
+                            let current = view == panel.view;
+                            let mut row = list.spawn((
+                                AddonsAction::DropdownPick(view),
+                                Button,
+                                HoverLit,
+                                Node {
+                                    height: px(ROW_H),
+                                    min_width: px(120.0),
+                                    align_items: AlignItems::Center,
+                                    ..default()
+                                },
+                            ));
+                            row.with_children(|o| {
+                                // The current selection carries the template's 24² check.
+                                if current {
+                                    if let Some(c) = &art.checkbox {
+                                        o.spawn((
+                                            ImageNode::new(c.checked.clone()),
+                                            Node {
+                                                position_type: PositionType::Absolute,
+                                                left: px(0.0),
+                                                top: px((ROW_H - 24.0) / 2.0),
+                                                width: px(24.0),
+                                                height: px(24.0),
+                                                ..default()
+                                            },
+                                        ));
+                                    }
+                                }
+                                outlined_text(
+                                    o,
+                                    Node {
+                                        left: px(27.0),
+                                        ..default()
+                                    },
+                                    (),
+                                    (),
+                                    GlueText {
+                                        text: name,
+                                        size: 12.0, // GlueFontHighlightSmall
+                                        color: Color::WHITE,
+                                        wrap: false,
+                                    },
+                                    &font,
+                                    s,
+                                );
+                                if let Some(hi) = &art.quest_hilight {
+                                    o.spawn((
+                                        Hilight,
+                                        Visibility::Hidden,
+                                        MaterialNode(hi.clone()),
+                                        overlay(),
+                                    ));
+                                }
+                            });
+                        }
+                    });
+                }
             });
         })
         .id()
+}
+
+/// The hover tooltip — the reference's `AddonTooltip` (a 220-wide `UI-Tooltip-Border` box, fill
+/// `(0.09, 0.09, 0.19)`, title + notes + `ADDON_DEPENDENCIES` in that order) anchored TOPRIGHT to
+/// the row's TOPLEFT at (−14, 0), spawned as the row strip's child so the anchor is structural.
+/// `## URL` rides as an extra line (1197: information, not a launch button). A MIXED checkbox
+/// hover shows `ENABLED_FOR_SOME` alone — the reference's GlueTooltip split, on the same box.
+#[allow(clippy::too_many_arguments)]
+fn spawn_tooltip(
+    parent: &mut ChildSpawnerCommands,
+    art: &GlueArt,
+    assets: &AssetServer,
+    strings: &GlueStrings,
+    addon: &InstalledAddOn,
+    hover: Hover,
+    mixed: bool,
+    s: f32,
+) -> Entity {
+    let px = |v: f32| Val::Px(v * s);
+    let font = wow_font(assets);
+    // (text, size, colour) per line; empties dropped below.
+    let mut lines: Vec<(String, f32, Color)> = Vec::new();
+    match hover {
+        Hover::Row(_) => {
+            lines.push((addon.display_title().to_string(), 15.0, GOLD));
+            if let Some(notes) = &addon.notes {
+                lines.push((notes.clone(), 12.0, Color::WHITE));
+            }
+            if !addon.dependencies.is_empty() {
+                lines.push((
+                    format!(
+                        "{}{}",
+                        strings.text("ADDON_DEPENDENCIES", "Dependencies: "),
+                        addon.dependencies.join(", ")
+                    ),
+                    12.0,
+                    GOLD,
+                ));
+            }
+            if let Some(url) = &addon.url {
+                lines.push((url.clone(), 12.0, Color::WHITE));
+            }
+        }
+        Hover::Check(_) => {
+            if mixed {
+                lines.push((
+                    strings
+                        .text(
+                            "ENABLED_FOR_SOME",
+                            "This addon is only enabled for some characters.",
+                        )
+                        .to_string(),
+                    12.0,
+                    Color::WHITE,
+                ));
+            }
+        }
+    }
+    let mut tip = parent.spawn((
+        GlobalZIndex(1220),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(-(TIP_W + 14.0)),
+            top: px(0.0),
+            width: px(TIP_W),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(2.0),
+            padding: UiRect::all(px(10.0)),
+            ..default()
+        },
+    ));
+    let framed = art.tooltip_bg.is_some() && art.tooltip_border.is_some();
+    if !framed {
+        tip.insert(BackgroundColor(TIP_FILL.with_alpha(0.95)));
+    }
+    tip.with_children(|t| {
+        if framed {
+            t.spawn((
+                tiled_bg_node(art.tooltip_bg.clone().unwrap(), 16.0, s, TIP_FILL),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(5.0),
+                    right: px(5.0),
+                    top: px(5.0),
+                    bottom: px(5.0),
+                    ..default()
+                },
+            ));
+            backdrop_border(t, art.tooltip_border.as_ref().unwrap(), 16.0, Color::WHITE);
+        }
+        for (text, size, colour) in &lines {
+            outlined_text(
+                t,
+                Node::default(),
+                (),
+                (),
+                GlueText {
+                    text,
+                    size: *size,
+                    color: *colour,
+                    wrap: true,
+                },
+                &font,
+                s,
+            );
+        }
+    });
+    tip.id()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn addon(name: &str, deps: &[&str], iface: &[u32]) -> InstalledAddOn {
+    fn addon(name: &str, deps: &[&str], iface: u32) -> InstalledAddOn {
         InstalledAddOn {
             name: name.into(),
             title: None,
             notes: None,
             url: None,
             dependencies: deps.iter().map(|d| (*d).to_string()).collect(),
-            interface: iface.to_vec(),
+            interface: iface,
             load_on_demand: false,
             enabled: true,
         }
     }
 
-    fn panel(list: Vec<InstalledAddOn>) -> AddonsPanel {
-        let staged = list.iter().map(|a| a.enabled).collect();
+    /// A panel over `chars` staged columns (each starting at the list's own `enabled` bits),
+    /// viewing All — the open-time default. Tests that want a single character's view set
+    /// `p.view = Some(c)` themselves.
+    fn panel_for(chars: usize, list: Vec<InstalledAddOn>) -> AddonsPanel {
+        let staged: Vec<Vec<bool>> = (0..chars.max(1))
+            .map(|_| list.iter().map(|a| a.enabled).collect())
+            .collect();
         AddonsPanel {
             open: true,
-            list,
+            realm: "TestRealm".into(),
+            chars: (0..chars).map(|c| format!("Char{c}")).collect(),
+            baseline: staged.clone(),
             staged,
+            list,
             ..Default::default()
         }
     }
 
-    /// **Every label this panel shows is the value its reference token carries**, so the glue
-    /// screen and the ESC-menu screen cannot say different things about the same addon.
+    /// The single-character convenience: one column, All view — over one column the All view IS
+    /// that column (any-on and all-on coincide), so `p.staged[0][i]` drives everything.
+    fn panel(list: Vec<InstalledAddOn>) -> AddonsPanel {
+        panel_for(1, list)
+    }
+
+    /// **Every label this panel can show is the value its reference token carries**.
     ///
-    /// The glue side has no VM to splice `getglobal("ADDON_"..reason)` against (1197 §3), so it
-    /// hardcodes the English. That is fine and it is also exactly how the two screens drift: the
-    /// twin resolves through `GlobalStrings.lua` and this one does not, so nothing but a test
-    /// connects them. The values below are quoted from the shipped 1.12 `GlobalStrings.lua`
-    /// (l.16-31, the `ADDON_*` block) — which the client itself loads at boot.
+    /// The splice is the reference's own (`getglobal("ADDON_"..reason)`), run against the parsed
+    /// GlueStrings table; what this pins is the FALLBACKS — the strings shown with no client
+    /// data — quoted from the extracted 1.12 chain (GlueStrings.lua l.44-56). An empty table
+    /// exercises exactly that path.
     ///
-    /// This test exists because the comment on [`AddonsPanel::reason`] used to name the token
-    /// `INCOMPATIBLE`, and **there is no `ADDON_INCOMPATIBLE`**; the real one is
-    /// `ADDON_INTERFACE_VERSION`. A wrong token name is invisible until somebody splices it.
+    /// This test exists because a comment here once named a token `INCOMPATIBLE`, **which does
+    /// not exist** — the real one is `ADDON_INTERFACE_VERSION`. A wrong token name is invisible
+    /// until somebody splices it.
     #[test]
     fn the_status_labels_are_the_reference_globalstrings_values() {
-        let mut p = panel(vec![
-            addon("Off", &[], &[11200]),
-            addon("Lib", &[], &[11200]),
-            addon("Needs", &["Lib"], &[11200]),
-            addon("Orphan", &["Nowhere"], &[11200]),
-            addon("Old", &[], &[11100]),
-        ]);
-        p.staged[0] = false;
-        p.staged[1] = false;
-
-        // (label, the token it must equal, the value GlobalStrings.lua gives that token)
-        for (got, token, want) in [
-            (p.reason(0), "ADDON_DISABLED", "Disabled"),
-            (p.reason(2), "ADDON_DEP_DISABLED", "Dependency disabled"),
-            (p.reason(3), "ADDON_DEP_MISSING", "Dependency missing"),
-            (p.reason(4), "ADDON_INTERFACE_VERSION", "Out of date"),
+        let strings = GlueStrings::default(); // no chain in a test — the pinned fallbacks answer
+        for (token, want) in [
+            ("DISABLED", "Disabled"),
+            ("DEP_DISABLED", "Dependency disabled"),
+            ("DEP_MISSING", "Dependency missing"),
+            ("INTERFACE_VERSION", "Out of date"),
+            ("DEP_INTERFACE_VERSION", "Dependency out of date"),
         ] {
             assert_eq!(
-                got,
-                Some(want),
-                "this label must be {token}'s value verbatim, or the ESC-menu twin — which \
-                 resolves the token through GlobalStrings — will show a different string"
+                status_label(&strings, token),
+                want,
+                "ADDON_{token}'s fallback must be the shipped value verbatim"
             );
         }
     }
 
-    /// The status column's rule, which is also the title-colour rule — the reference's own
-    /// `reason` token set, in its own precedence.
+    /// The status column's rule — THE GATE's verdict (1292): `AddOn_CanLoad`'s byte-verified
+    /// check order, consulted over the current view's staged states.
     ///
-    /// The ordering is the part worth pinning: a row the player turned OFF reads `Disabled` and
-    /// nothing else, even when its dependency is also missing. The reference does the same
-    /// (`GetAddOnInfo` reports `DISABLED` before the dependency walk runs), and the alternative
-    /// tells a player to go fix a dependency for an addon they deliberately switched off.
+    /// The ordering is the part worth pinning: a row the player turned OFF reads `DISABLED` and
+    /// nothing else, even when its dependency is also missing — the gate's check 3 precedes the
+    /// dependency loop, and the alternative tells a player to go fix a dependency for an addon
+    /// they deliberately switched off.
     #[test]
-    fn the_status_column_reports_the_references_reason_in_its_own_precedence() {
+    fn the_status_column_reports_the_gates_reason_in_the_references_precedence() {
         let mut p = panel(vec![
-            addon("Solo", &[], &[11200]),
-            addon("Lib", &[], &[11200]),
-            addon("Needs", &["Lib"], &[11200]),
-            addon("Orphan", &["Nowhere"], &[11200]),
-            addon("Old", &[], &[11100]),
-            addon("Silent", &[], &[]),
+            addon("Solo", &[], 11200),
+            addon("Lib", &[], 11200),
+            addon("Needs", &["Lib"], 11200),
+            addon("Orphan", &["Nowhere"], 11200),
+            addon("Old", &[], 11100),
+            addon("Silent", &[], 0),
         ]);
 
-        assert_eq!(p.reason(0), None, "nothing wrong: no status, gold title");
-        assert_eq!(p.reason(2), None, "its dependency is installed and enabled");
-        assert_eq!(p.reason(3), Some("Dependency missing"));
         assert_eq!(
-            p.reason(4),
-            Some("Out of date"),
-            "reported — 1191 §6 does not ENFORCE it, and the two must not contradict"
-        );
-        assert_eq!(
-            p.reason(5),
+            p.verdict(0).token(),
             None,
-            "a manifest with no `## Interface` is silent, not out of date"
+            "nothing wrong: no status, gold title"
         );
+        assert_eq!(
+            p.verdict(2).token(),
+            None,
+            "its dependency is installed and enabled"
+        );
+        assert_eq!(p.verdict(3).token().as_deref(), Some("DEP_MISSING"));
+        assert_eq!(p.verdict(4).token().as_deref(), Some("INTERFACE_VERSION"));
+        assert_eq!(
+            p.verdict(5).token().as_deref(),
+            Some("INTERFACE_VERSION"),
+            "a manifest with NO `## Interface` parses as 0 and IS out of date — the record ctor \
+             leaves [rec+0x1c]=0 and the gate compares it like any other value (decision 1292, \
+             byte-verified; supersedes 1191 §6's silent-is-current reading)"
+        );
+
+        // Force-load ERASES the refusal (1292 §2.1: reason 7 written, then reset to 0) — with
+        // the box ticked an out-of-date row is byte-indistinguishable from a current one, so the
+        // screen shows nothing there, faithfully.
+        p.version_check = false;
+        assert_eq!(p.verdict(4).token(), None);
+        assert_eq!(p.verdict(5).token(), None);
+        p.version_check = true;
 
         // Turning the library off makes its dependent unloadable, and the dependent says so.
-        p.staged[1] = false;
-        assert_eq!(p.reason(1), Some("Disabled"));
-        assert_eq!(p.reason(2), Some("Dependency disabled"));
+        p.staged[0][1] = false;
+        assert_eq!(p.verdict(1).token().as_deref(), Some("DISABLED"));
+        assert_eq!(p.verdict(2).token().as_deref(), Some("DEP_DISABLED"));
 
         // ...and a row the player turned off reports only that, even with a broken dependency.
-        p.staged[3] = false;
-        assert_eq!(p.reason(3), Some("Disabled"));
+        p.staged[0][3] = false;
+        assert_eq!(p.verdict(3).token().as_deref(), Some("DISABLED"));
     }
 
-    /// Okay/Cancel is a **staged** edit: nothing the panel does touches the enable file until
+    /// AddonList.lua's title colour, including its one exception: an enabled row that will not
+    /// load reads RED — **unless the reason is `DEP_DISABLED`**, where the Lua's own
+    /// `reason ~= "DEP_DISABLED"` guard sends it to grey (the player already made that choice
+    /// on the dependency's row; the first build here painted it red and the director's shot
+    /// showed the mismatch).
+    #[test]
+    fn the_title_colour_follows_addonlist_luas_rule_with_the_dep_disabled_exception() {
+        let mut p = panel(vec![
+            addon("Lib", &[], 11200),
+            addon("Needs", &["Lib"], 11200),
+            addon("Old", &[], 11100),
+        ]);
+        assert_eq!(p.title_colour(0), GOLD, "loadable = gold");
+        assert_eq!(p.title_colour(2), BROKEN, "enabled + out of date = red");
+
+        p.staged[0][0] = false;
+        assert_eq!(p.title_colour(0), DIM, "player-disabled = grey");
+        assert_eq!(
+            p.title_colour(1),
+            DIM,
+            "enabled but DEP_DISABLED = grey, the Lua's own exception — NOT red"
+        );
+    }
+
+    /// `|cAARRGGBB…|r` markup renders as colour, not as text — the MapCoords regression (its
+    /// `## Title` is `|cff00ff00MapCoords 0.32`, which the screen printed literally, in full).
+    /// The grammar is the byte-verified `benilla_ui::markup`; the alpha byte is discarded there,
+    /// so only rgb reaches the span colour.
+    #[test]
+    fn colour_escapes_become_spans_not_text() {
+        let base = GOLD;
+        let green = Color::srgb(0.0, 1.0, 0.0);
+
+        assert_eq!(
+            title_spans("|cff00ff00MapCoords 0.32", base),
+            vec![("MapCoords 0.32".to_string(), green)],
+            "the whole-title escape colours everything and prints nothing"
+        );
+        assert_eq!(
+            title_spans("A |cff00ff00B|r C", base),
+            vec![
+                ("A ".to_string(), base),
+                ("B".to_string(), green),
+                (" C".to_string(), base)
+            ],
+            "|r restores the row's base colour"
+        );
+        assert_eq!(
+            title_spans("pipe || pipe", base),
+            vec![("pipe | pipe".to_string(), base)],
+            "|| draws one literal pipe"
+        );
+        assert_eq!(
+            title_spans("|xnot an escape", base),
+            vec![("|xnot an escape".to_string(), base)],
+            "a | that opens nothing well-formed is an ordinary character (the grammar's \
+             fall-through arm)"
+        );
+        assert_eq!(
+            title_spans("", base),
+            vec![(String::new(), base)],
+            "an empty title still yields one span, so the text entity exists"
+        );
+    }
+
+    /// The All view's gate input is OUR carve (1293): "enabled = any staged character has it on".
+    #[test]
+    fn the_all_view_feeds_the_gate_any_character_on() {
+        let mut p = panel_for(
+            2,
+            vec![addon("Lib", &[], 11200), addon("Needs", &["Lib"], 11200)],
+        );
+        p.staged[0][0] = false; // Char0 turned Lib off; Char1 has not
+
+        assert_eq!(
+            p.verdict(0).token(),
+            None,
+            "any-on: the All view still counts Lib enabled"
+        );
+        assert_eq!(p.verdict(1).token(), None);
+
+        p.view = Some(0);
+        assert_eq!(p.verdict(0).token().as_deref(), Some("DISABLED"));
+        assert_eq!(p.verdict(1).token().as_deref(), Some("DEP_DISABLED"));
+
+        p.view = Some(1);
+        assert_eq!(p.verdict(0).token(), None, "Char1's view is untouched");
+    }
+
+    /// The All view's box is the reference's tri-state (`GetAddOnEnableState`: 0/1/2), computed
+    /// across every staged column; a single character's view is plain two-state over theirs.
+    #[test]
+    fn the_all_view_box_is_a_tri_state_over_every_character() {
+        let mut p = panel_for(3, vec![addon("A", &[], 11200)]);
+        assert_eq!(p.box_state(0), BoxState::On, "enabled for all three");
+
+        p.staged[1][0] = false;
+        assert_eq!(
+            p.box_state(0),
+            BoxState::Mixed,
+            "enabled for SOME (state 1)"
+        );
+
+        p.staged[0][0] = false;
+        p.staged[2][0] = false;
+        assert_eq!(p.box_state(0), BoxState::Off, "disabled for all");
+
+        // A single character's view never shows Mixed — it is their own bit, both ways.
+        p.view = Some(1);
+        assert_eq!(p.box_state(0), BoxState::Off);
+        p.staged[1][0] = true;
+        assert_eq!(p.box_state(0), BoxState::On);
+    }
+
+    /// An All-view click is the reference's CheckButton over the tri-state: a grey (mixed) box
+    /// COUNTS AS CHECKED, so clicking it — or a fully-checked one — unchecks (disable for every
+    /// character), and only a fully-unchecked box enables for all.
+    #[test]
+    fn an_all_view_click_follows_the_references_checkbutton() {
+        let mut p = panel_for(3, vec![addon("A", &[], 11200)]);
+        p.staged[1][0] = false; // mixed
+
+        p.click_row(0); // mixed = checked → click unchecks
+        assert!(
+            p.staged.iter().all(|col| !col[0]),
+            "mixed → disabled for ALL characters"
+        );
+
+        p.click_row(0);
+        assert!(
+            p.staged.iter().all(|col| col[0]),
+            "unchecked → enabled for ALL characters"
+        );
+
+        p.click_row(0);
+        assert!(p.staged.iter().all(|col| !col[0]), "checked → back off");
+
+        // In a single character's view the same click is a plain toggle of THEIR bit.
+        p.view = Some(2);
+        p.click_row(0);
+        assert!(p.staged[2][0] && !p.staged[0][0] && !p.staged[1][0]);
+    }
+
+    /// Okay/Cancel is a **staged** edit: nothing the panel does touches an enable file until
     /// Okay. `Cancel` is the reference's `ResetAddOns`, and `close` is what implements it.
     #[test]
     fn edits_are_staged_and_cancel_discards_them() {
-        let mut p = panel(vec![addon("A", &[], &[11200]), addon("B", &[], &[11200])]);
-        assert_eq!(p.staged, vec![true, true]);
-        p.staged[0] = false;
+        let mut p = panel(vec![addon("A", &[], 11200), addon("B", &[], 11200)]);
+        assert_eq!(p.staged, vec![vec![true, true]]);
+        p.staged[0][0] = false;
         assert!(
             p.list[0].enabled,
             "the read-in list is never mutated — only `staged` is, which is what makes Cancel free"
@@ -760,17 +1925,107 @@ mod tests {
         );
     }
 
+    /// **Okay fans out per character** (1293 — the reference's `SaveAddOns` over the dropdown's
+    /// roster): every character whose staged column moved off its open-time baseline gets their
+    /// own merge-write, and an untouched character's file is not even created. Hermetic under
+    /// `BENILLA_HOME` like the walk's own folder tests (`ui_script/addons.rs`).
+    #[test]
+    fn okay_writes_every_changed_characters_file_and_only_those() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp =
+            std::env::temp_dir().join(format!("benilla-charsel-fanout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("benilla-config");
+        for name in ["Alpha", "Beta"] {
+            let dir = home.join("AddOns").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.toc")), "## Interface: 11200\n").unwrap();
+        }
+        let _c = crate::local_state::test_env::EnvGuard::unset("WOW_CAPTURE");
+        let _h =
+            crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
+
+        let mut p = AddonsPanel::default();
+        p.open_for(
+            "TestRealm".into(),
+            vec!["Alice".into(), "Bob".into(), "Carol".into()],
+        );
+        assert!(p.view.is_none(), "the reference's default selection is All");
+        assert_eq!(p.list.len(), 2, "discovery found the two hermetic addons");
+        assert_eq!(p.staged.len(), 3, "one staged column per roster character");
+        assert_eq!(p.staged, p.baseline);
+
+        // Distinct edits: Alice loses Alpha, Bob loses Beta, Carol touches nothing.
+        p.staged[0][0] = false;
+        p.staged[1][1] = false;
+        p.save_staged();
+
+        // Read back through the same folder view the world-entry walk uses — the two views of
+        // one folder that 1197 §3 demands can never disagree.
+        let alice = ("TestRealm".to_string(), "Alice".to_string());
+        let bob = ("TestRealm".to_string(), "Bob".to_string());
+        let carol = ("TestRealm".to_string(), "Carol".to_string());
+        let read = |id: &(String, String)| -> Vec<bool> {
+            addons::installed(Some(id))
+                .iter()
+                .map(|a| a.enabled)
+                .collect()
+        };
+        assert_eq!(
+            read(&alice),
+            vec![false, true],
+            "Alice's file carries HER edit"
+        );
+        assert_eq!(read(&bob), vec![true, false], "Bob's carries HIS");
+        assert!(
+            !addons::enable_state_path(Some(&carol)).unwrap().exists(),
+            "an unchanged column writes no file — only the diffs against the open-time baseline"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The force-load box IS the `checkAddonVersion` CVar inverted, and a toggle goes through
+    /// the engine write ([`UiScript::set_cvar_engine`]) so it rides the change queue — that is
+    /// the whole persistence story (the host's sync drains the queue and dirties the config);
+    /// the panel itself only repaints from its per-frame mirror, rescanning nothing (1292 §2.2).
+    #[test]
+    fn the_force_load_box_flips_the_cvar_through_the_engine_queue() {
+        let mut script = UiScript::new().unwrap();
+        script.register_cvars([("checkAddonVersion", "1")]);
+
+        toggle_force_load(&mut script);
+        assert_eq!(
+            script.take_cvar_changes(),
+            vec![("checkAddonVersion".to_string(), "0".to_string())],
+            "tick: check ON (\"1\") flips to \"0\" — box ticked = version gate open"
+        );
+        assert_eq!(script.cvar("checkAddonVersion").as_deref(), Some("0"));
+
+        toggle_force_load(&mut script);
+        assert_eq!(
+            script.take_cvar_changes(),
+            vec![("checkAddonVersion".to_string(), "1".to_string())],
+            "untick: back to the registrar default, and the queue carries it again"
+        );
+    }
+
     /// Scrolling clamps at both ends and never moves a list that fits.
     #[test]
     fn the_offset_clamps_to_the_list() {
-        let mut short = panel((0..5).map(|i| addon(&format!("A{i}"), &[], &[])).collect());
+        let mut short = panel(
+            (0..5)
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
+                .collect(),
+        );
         assert_eq!(short.max_offset(), 0);
         scroll(&mut short, 1);
         assert_eq!(short.offset, 0, "a list that fits does not scroll");
 
         let mut long = panel(
             (0..MAX_ROWS + 4)
-                .map(|i| addon(&format!("A{i}"), &[], &[]))
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
                 .collect(),
         );
         assert_eq!(long.max_offset(), 4);

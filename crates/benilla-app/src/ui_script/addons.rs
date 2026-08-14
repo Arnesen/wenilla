@@ -382,7 +382,11 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc) -> benilla_ui::script::AddOnI
             .map(str::to_owned)
             .collect(),
         enabled: true, // an addon nobody has disabled is enabled; the file below overrides
+        saved_enabled: true, // re-stamped from `enabled` at registration — see `register_addons`
         loaded: false,
+        // The version gate's dword (decision 1292) — the client's own parse: leading integer,
+        // 0 when the manifest is silent (and 0 is out of date, not "unknown").
+        interface: toc.interface_version(),
     }
 }
 
@@ -442,11 +446,14 @@ pub(crate) struct InstalledAddOn {
     pub(crate) notes: Option<String>,
     pub(crate) url: Option<String>,
     pub(crate) dependencies: Vec<String>,
-    /// `## Interface`, as written — the out-of-date check, reported and not enforced (1191 §6).
-    pub(crate) interface: Vec<u32>,
+    /// `## Interface` as the version gate reads it (decision 1292): the leading integer, `0`
+    /// when absent — and now ENFORCED by the load walk when `checkAddonVersion` is on,
+    /// superseding 1191 §6's report-only interim (the RE answer it was waiting for landed:
+    /// wow-re `addon-version-gate.md`).
+    pub(crate) interface: u32,
     /// `## LoadOnDemand: 1` — shown as a status hint rather than a checkbox state, because a
     /// LoadOnDemand addon is not "off", it is waiting for a `LoadAddOn` call (1191 §6).
-    #[allow(dead_code)] // read by the in-game AddOns panel's status column (decision 1197)
+    /// Read by the char-select AddOns screen's rows (`char_select::addons`).
     pub(crate) load_on_demand: bool,
     /// From this character's enable file; an addon the file never mentions is **enabled** (1191 §7).
     pub(crate) enabled: bool,
@@ -455,20 +462,14 @@ pub(crate) struct InstalledAddOn {
 impl InstalledAddOn {
     /// The list's display name — `## Title` when it has one, else the folder name. The reference's
     /// own `if (title) … else name` (`AddonList_Update`).
+    ///
+    /// (An `out_of_date()` convenience lived here too until 1293 moved the glue screen onto the
+    /// gate — the version compare has exactly one home now, `addon_gate::can_load`'s check 6,
+    /// and a screen-side copy is the per-asker drift 1292 §Rejected names.)
     pub(crate) fn display_title(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.name)
     }
-
-    /// Is this addon's `## Interface` the one we implement? Reported, never enforced — 1191 §6
-    /// chose that deliberately, and the corpus says enforcing would silently drop one addon in
-    /// eight. A manifest declaring no `## Interface` at all is not out of date; it is silent.
-    pub(crate) fn out_of_date(&self) -> bool {
-        !self.interface.is_empty() && !self.interface.contains(&INTERFACE_VERSION)
-    }
 }
-
-/// The `## Interface` benilla implements — 1.12.1.
-const INTERFACE_VERSION: u32 = 11200;
 
 /// Every installed addon, in load order, with `character`'s enable state applied.
 ///
@@ -490,7 +491,7 @@ pub(crate) fn installed(identity: Option<&(String, String)>) -> Vec<InstalledAdd
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            interface: addon.toc.interface_versions(),
+            interface: addon.toc.interface_version(),
             load_on_demand: addon.toc.load_on_demand(),
             name: addon.name,
         })
@@ -614,6 +615,7 @@ const SAVED_HEADER: &str = "\
 pub(super) fn load_third_party(
     script: &mut UiScript,
     identity: Option<&(String, String)>,
+    version_check: bool,
 ) -> Vec<String> {
     let addons = discover();
     // Register the AddOn API's view even when the list is empty: `GetNumAddOns()` must answer 0
@@ -655,6 +657,7 @@ pub(super) fn load_third_party(
     );
     let mut state = Walk {
         disabled: disabled_names,
+        version_check,
         ..Walk::default()
     };
     for addon in &addons {
@@ -688,6 +691,12 @@ struct Walk {
     /// happened first, and an empty set means "everything enabled" — which is exactly what an
     /// absent enable-state file means too.
     disabled: HashSet<String>,
+    /// The `checkAddonVersion` gate (decision 1292), resolved by the caller from the persisted
+    /// CVar — passed in for the same explicitness reason as `disabled`. When on, an addon whose
+    /// `## Interface` is not exactly the client's is skipped like a disabled one (the
+    /// reference's `AddOn_CanLoad` check 6, before the dependency loop), and a dependent gets
+    /// `Err` — its `DEP_INTERFACE_VERSION`.
+    version_check: bool,
 }
 
 impl Walk {
@@ -726,6 +735,24 @@ impl Walk {
         // `DEP_DISABLED`: an addon whose hard dependency the player turned off cannot load either.
         if self.disabled.contains(&key.to_ascii_lowercase()) {
             info!("ui_script: {key} is disabled — not loaded");
+            self.failed.insert(addon.name.clone());
+            return Err(());
+        }
+        // **The version gate** (decision 1292; `AddOn_CanLoad` check 6, in the checks' own order —
+        // after the enable state, before the dependency loop). Exact `==` against the client's
+        // build; a missing `## Interface` parses as 0 and is out of date. Not a `failures` entry
+        // for the same reason disabled is not: the state is the player's to see on the AddOns
+        // screens (`ADDON_INTERFACE_VERSION`), and the *Load out of date AddOns* checkbox — the
+        // `checkAddonVersion` CVar this flag carries — is the reference's own escape.
+        if self.version_check
+            && addon.toc.interface_version() != benilla_ui::script::addon_gate::CLIENT_INTERFACE
+        {
+            info!(
+                "ui_script: {key} is out of date (## Interface: {}, client {}) — not loaded \
+                 (the AddOns screen's 'Load out of date AddOns' loads it anyway)",
+                addon.toc.interface_version(),
+                benilla_ui::script::addon_gate::CLIENT_INTERFACE
+            );
             self.failed.insert(addon.name.clone());
             return Err(());
         }
@@ -1310,7 +1337,7 @@ mod tests {
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
         script.run("EventLog = {}").unwrap();
-        let failures = load_third_party(&mut script, None);
+        let failures = load_third_party(&mut script, None, true);
         assert!(failures.is_empty(), "load errors: {failures:?}");
         crate::ui_script::finish_ui_load(&mut script);
 
@@ -1344,6 +1371,79 @@ mod tests {
         let guard =
             crate::local_state::test_env::EnvGuard::set("BENILLA_HOME", home.to_str().unwrap());
         (home, guard)
+    }
+
+    /// **The version gate holds the startup walk, and force-load opens it** (decision 1292):
+    /// the byte-verified `AddOn_CanLoad` check 6 — exact `==`, missing `## Interface` = 0 = out
+    /// of date, a dependent of a gated addon blocked like a dependent of a disabled one — and
+    /// the `checkAddonVersion` flag (the *Load out of date AddOns* checkbox inverted) loading
+    /// the very same folder in full.
+    #[test]
+    fn the_version_gate_holds_the_walk_and_force_load_opens_it() {
+        let _l = crate::local_state::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (home, _guard) = hermetic_root("version-gate");
+        write_addon(
+            &home,
+            "Fresh",
+            "## Interface: 11200\nmain.lua\n",
+            &[("main.lua", "FreshRan = true\n")],
+        );
+        write_addon(
+            &home,
+            "Old",
+            "## Interface: 11100\nmain.lua\n",
+            &[("main.lua", "OldRan = true\n")],
+        );
+        write_addon(
+            &home,
+            "Silent",
+            "main.lua\n", // no ## Interface at all — parses as 0, out of date (not "unknown")
+            &[("main.lua", "SilentRan = true\n")],
+        );
+        write_addon(
+            &home,
+            "NeedsOld",
+            "## Interface: 11200\n## Dependencies: Old\nmain.lua\n",
+            &[("main.lua", "NeedsOldRan = true\n")],
+        );
+
+        let mut script = UiScript::new().unwrap();
+        let failures = load_third_party(&mut script, None, true);
+        assert!(
+            failures.iter().any(|f| f.contains("NeedsOld")),
+            "the gated dependency is the dependent's failure: {failures:?}"
+        );
+        assert_eq!(
+            script.eval::<bool>("return FreshRan == true").ok(),
+            Some(true)
+        );
+        assert_eq!(
+            script
+                .eval::<bool>("return OldRan == nil and SilentRan == nil")
+                .ok(),
+            Some(true),
+            "out-of-date and interface-less addons are held by the gate"
+        );
+        assert_eq!(
+            script.eval::<bool>("return NeedsOldRan == nil").ok(),
+            Some(true),
+            "…and so is their dependent (DEP_INTERFACE_VERSION territory)"
+        );
+
+        // Force-load: the same folder, the checkbox's other state — everything loads.
+        let mut open = UiScript::new().unwrap();
+        let failures = load_third_party(&mut open, None, false);
+        assert!(failures.is_empty(), "force-load load errors: {failures:?}");
+        assert_eq!(
+            open.eval::<bool>(
+                "return OldRan == true and SilentRan == true and NeedsOldRan == true"
+            )
+            .ok(),
+            Some(true),
+            "'Load out of date AddOns' loads the very same folder in full"
+        );
     }
 
     fn write_addon(home: &Path, name: &str, toc: &str, files: &[(&str, &str)]) {
@@ -1408,7 +1508,7 @@ mod tests {
         );
 
         let mut script = UiScript::new().unwrap();
-        let failures = load_third_party(&mut script, None);
+        let failures = load_third_party(&mut script, None, true);
         assert!(failures.is_empty(), "load errors: {failures:?}");
 
         // Discovery saw it at all — the `.toc` decoded rather than read as absent.
@@ -1508,7 +1608,7 @@ mod tests {
             &[],
         );
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, None);
+        let _ = load_third_party(&mut script, None, true);
 
         assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
         assert_eq!(
@@ -1605,7 +1705,7 @@ mod tests {
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
-        let failures = load_third_party(&mut script, Some(&id));
+        let failures = load_third_party(&mut script, Some(&id), true);
 
         assert!(
             failures.is_empty(),
@@ -1663,7 +1763,7 @@ mod tests {
         );
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, None);
+        let _ = load_third_party(&mut script, None, true);
 
         // Discovered and described, but NOT run.
         assert_eq!(script.eval::<i64>("return GetNumAddOns()").ok(), Some(1));
@@ -1745,7 +1845,7 @@ mod tests {
 
         let mut script = UiScript::new().unwrap();
         let id = ("Realm".to_string(), "Char".to_string());
-        let _ = load_third_party(&mut script, Some(&id));
+        let _ = load_third_party(&mut script, Some(&id), true);
 
         for (call, want) in [
             ("LoadAddOn('NoSuchAddon')", "MISSING"),
@@ -1786,7 +1886,7 @@ mod tests {
         let id = ("Realm".to_string(), "Char".to_string());
 
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, Some(&id));
+        let _ = load_third_party(&mut script, Some(&id), true);
         script.run("DisableAddOn('Drop')").unwrap();
         save_enable_state(&script, Some(&id));
 
@@ -1798,7 +1898,7 @@ mod tests {
 
         // A fresh session reads it back and the addon stays off.
         let mut next = UiScript::new().unwrap();
-        let _ = load_third_party(&mut next, Some(&id));
+        let _ = load_third_party(&mut next, Some(&id), true);
         assert_eq!(
             next.eval::<bool>("return DropRan == nil").ok(),
             Some(true),
@@ -1849,7 +1949,7 @@ mod tests {
         // ── session one: defaults, then the addon changes them ──
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let failures = load_third_party(&mut script, Some(&id));
+        let failures = load_third_party(&mut script, Some(&id), true);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(
             script.eval::<i64>("return KeeperSawAtEvent").ok(),
@@ -1864,7 +1964,7 @@ mod tests {
         // ── session two: a fresh VM reads them back ──
         let mut next = UiScript::new().unwrap();
         next.set_screen_size(1024.0, 768.0);
-        let failures = load_third_party(&mut next, Some(&id));
+        let failures = load_third_party(&mut next, Some(&id), true);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(
             next.eval::<i64>("return KeeperDB.count").ok(),
@@ -1912,7 +2012,7 @@ mod tests {
         );
         let id = ("Realm".to_string(), "Char".to_string());
         let mut script = UiScript::new().unwrap();
-        let _ = load_third_party(&mut script, Some(&id));
+        let _ = load_third_party(&mut script, Some(&id), true);
         script
             .run("GramDB = { ['on'] = true, ['n'] = 2, ['s'] = 'a\\\"b', ['t'] = { 1 } } GramChar = 5")
             .unwrap();
@@ -1974,7 +2074,7 @@ mod tests {
         let id = ("Realm".to_string(), "Char".to_string());
         let mut script = UiScript::new().unwrap();
         script.set_screen_size(1024.0, 768.0);
-        let _ = load_third_party(&mut script, Some(&id));
+        let _ = load_third_party(&mut script, Some(&id), true);
         crate::ui_script::shutdown_ui_state(&mut script, Some(&id));
 
         let written = std::fs::read_to_string(home.join("saved/Last.lua")).unwrap();

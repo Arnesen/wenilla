@@ -30,9 +30,10 @@
           mouse-3/4/5 press binds IMMEDIATELY (the host capture seam hands the canonical
           ALT-CTRL-SHIFT chord to KeyBindings_OnHostKey); a stolen key names its victim in red
           (KEY_UNBOUND_ERROR) only when the victim goes bare; left/right clicks select/deselect,
-          never bind; lone modifiers are ignored; the wheel binds click-commands but refuses
-          press+release ones (SetBinding returns nil → KEYBINDINGFRAME_MOUSEWHEEL_ERROR, old key
-          restored); ESC while armed BINDS Escape (1.12's OnKeyDown has no ESCAPE filter — the
+          never bind; lone modifiers are ignored; the wheel binds like any other key, to ANY
+          command (decision 1295 — SetBinding refuses nothing but a key string that is not a key,
+          and the KEYBINDINGFRAME_MOUSEWHEEL_ERROR arm below is that refusal's message, not a
+          wheel rule); ESC while armed BINDS Escape (1.12's OnKeyDown has no ESCAPE filter — the
           era's ESC-cancels law is the one era behavior NOT taken, recorded in 1008; the Unbind
           Key button is the clearing affordance). ESC with nothing armed never reaches any of
           this: the ladder is the TOGGLEGAMEMENU binding, and the armed seam swallows the press.
@@ -444,8 +445,11 @@
             KeyBindings_RepaintVisible()
         end
 
-        -- 1.12 KeyBindingFrame_SetBinding: a refused bind (the wheel on a press+release
-        -- command) restores the slot's old key and says why.
+        -- 1.12 KeyBindingFrame_SetBinding, kept verbatim: a refused bind restores the slot's old
+        -- key and says why. The reference wrote this arm with the wheel in mind and named its
+        -- string for it, but the engine refuses only a key string that is not a key
+        -- (decision 1295), so this fires for a chord the capture seam could not name — never for
+        -- a wheel notch. The message stays 1.12's; ours is not the place to correct Blizzard.
         function KeyBindings_SetOrRestore(key, command, oldKey)
             if not SetBinding(key, command) then
                 if oldKey then SetBinding(oldKey, command) end
