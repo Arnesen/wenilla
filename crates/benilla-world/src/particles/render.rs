@@ -225,6 +225,9 @@ impl SpecializedRenderPipeline for EffectPipeline {
             ),
             EffectBlend::Alpha => (Some(BlendState::ALPHA_BLENDING), false, "BLEND_ALPHA"),
             EffectBlend::Opaque => (None, true, "BLEND_OPAQUE"),
+            // EGxBlend 1: the same pipeline state as Opaque — the alpha TEST is the whole
+            // difference, and it lives in the fragment shader (wgpu has no `glAlphaFunc`).
+            EffectBlend::AlphaKey => (None, true, "BLEND_ALPHAKEY"),
             EffectBlend::Multiply => (
                 Some(BlendState {
                     color: BlendComponent {

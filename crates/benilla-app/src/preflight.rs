@@ -91,6 +91,16 @@ const GM_FACTION_TEMPLATE: u32 = 35;
 /// and a coordinate triple do not tell a reader at a glance that this character is nowhere useful.
 const ZONE_WAIT_SECS: f32 = 4.0;
 
+/// How long we let an in-flight `.gm off` settle before banner-ing the GM flag anyway.
+///
+/// `WOW_GM=off` is a **round trip** and it loses the race with the descriptor: the shield sends
+/// `.gm off` at world entry and the server's answer lands ~0.9 s later, while the self descriptor
+/// is here in ~0.3 s. Without this grace the banner shouts "GM MODE IS ON — any damage or drowning
+/// reading taken now is wrong" at precisely the run that asked for GM off, which reads as *discard
+/// this measurement* and is exactly backwards (a 2026-08-13 lava probe hit it). Wait, then report
+/// what actually held — a `.gm off` that never lands is still warned about, one grace later.
+const GM_OFF_WAIT_SECS: f32 = 3.0;
+
 /// The hard backstop: report whatever we have this long after world entry. Only reached when
 /// something is badly wrong with the stream, and reporting late beats never reporting.
 const DESCRIPTOR_WAIT_SECS: f32 = 8.0;
@@ -186,6 +196,16 @@ fn report_session(
     if zone.is_none() && time.elapsed_secs() - armed_at < ZONE_WAIT_SECS {
         return; // the tile under us hasn't streamed yet — give the zone name its grace
     }
+    // The other in-flight state the banner would otherwise misreport: a requested `.gm off` that
+    // the server has not answered yet (see [`GM_OFF_WAIT_SECS`]).
+    if hold_for_gm_off(
+        store.0.player_flags() & PLAYER_FLAGS_GM != 0,
+        crate::probe_shield::wants_gm_off(),
+        shield.report(),
+        time.elapsed_secs() - armed_at,
+    ) {
+        return;
+    }
     state.armed_at = None;
 
     let name = self_guid
@@ -226,6 +246,20 @@ fn report_session(
     for line in findings(&store.0, shield.report()) {
         warn!("preflight: {line}");
     }
+}
+
+/// Whether to hold the banner for a `.gm off` that has gone out but not been answered
+/// ([`GM_OFF_WAIT_SECS`] is the why). Pure, so the race it guards is testable without an app.
+///
+/// All four clauses matter. Only a run that *asked* for GM off waits; only a body the shield
+/// actually commands (`probe<N>`) can have a `.gm off` in flight at all — on the director's own
+/// account `WOW_GM` is inert (0677), so waiting there would just delay a true warning; and the
+/// grace expires, so a `.gm off` that never lands is still reported, one grace later.
+fn hold_for_gm_off(gm_flag_set: bool, wants_off: bool, shield: ShieldReport, waited: f32) -> bool {
+    gm_flag_set
+        && wants_off
+        && matches!(shield, ShieldReport::Arming | ShieldReport::Armed)
+        && waited < GM_OFF_WAIT_SECS
 }
 
 /// Everything about this avatar that will quietly invalidate a session's work, worst first. Pure
@@ -345,6 +379,34 @@ mod tests {
     const MAXHEALTH: u16 = 28;
     const UNIT_FLAGS: u16 = 46;
     const PLAYER_FLAGS: u16 = 190;
+
+    /// The banner must not accuse a `WOW_GM=off` run of measuring through GM mode while the
+    /// `.gm off` it just sent is still in flight — the race [`GM_OFF_WAIT_SECS`] exists for, and
+    /// the one a lava probe walked into on 2026-08-13.
+    #[test]
+    fn the_banner_waits_out_a_gm_off_round_trip_but_not_forever() {
+        // The race itself: flag still set, we asked for off, shield is ours, answer not back yet.
+        assert!(hold_for_gm_off(true, true, ShieldReport::Arming, 0.4));
+        assert!(hold_for_gm_off(true, true, ShieldReport::Armed, 0.4));
+
+        // …but the grace expires, so a `.gm off` that never lands is still reported.
+        assert!(!hold_for_gm_off(
+            true,
+            true,
+            ShieldReport::Armed,
+            GM_OFF_WAIT_SECS + 0.1
+        ));
+
+        // Nothing else ever waits. GM mode is the DEFAULT (0679): a run that did not ask for it off
+        // must be warned immediately, not three seconds late…
+        assert!(!hold_for_gm_off(true, false, ShieldReport::Armed, 0.4));
+        // …a body the shield does not command (the director's own account) can have no `.gm off`
+        // in flight at all, so waiting there would only delay a true warning (0677)…
+        assert!(!hold_for_gm_off(true, true, ShieldReport::NotOurs, 0.4));
+        assert!(!hold_for_gm_off(true, true, ShieldReport::Disabled, 0.4));
+        // …and with the flag already clear there is nothing to wait for.
+        assert!(!hold_for_gm_off(false, true, ShieldReport::Armed, 0.4));
+    }
 
     #[test]
     fn a_healthy_avatar_reports_nothing() {

@@ -61,6 +61,25 @@ pub struct WorldUnit {
     /// component defaulted it to zero and the water-foam fixture caught it: 91 k pixels of wrong
     /// ripple, in a lane none of the six scenery captures covers.
     pub height: f32,
+    /// The box the world may **cull this body by**, in model space — or `None` for a body the world
+    /// must not decide.
+    ///
+    /// The third of this component's size facts, beside [`scale`](Self::scale) and
+    /// [`height`](Self::height), and here for the same reason they are: one place answers "how big
+    /// is this body", and a second component for the culling half is the drift that ends with two
+    /// extents disagreeing.
+    ///
+    /// It exists because standing in a sealed WMO room the reference never *submits* an outdoor
+    /// object at all (`crate::exterior_cull`, decision 1270) — so the cull needs one whole-object
+    /// AABB per body, on its root, which is the reference's own granularity. The game supplies the
+    /// armed idle's authored CAaBox (decision 0637 — a skinned body's bind-pose box is not where it
+    /// draws), unscaled: the root transform already carries the display scale.
+    ///
+    /// `None` says **don't decide**, and it is a real answer, not an absence — a body whose display
+    /// has not resolved, and a transport, whose root `Visibility` its own tick owns every frame
+    /// (a second writer there is precisely the fight decision 0025 forbids). Either way the body
+    /// keeps drawing, which is what it did before this field existed.
+    pub bound: Option<bevy::camera::primitives::Aabb>,
 }
 
 /// …and this one is the **viewer's own** body. A marker rather than a bool on [`WorldUnit`]

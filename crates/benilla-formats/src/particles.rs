@@ -54,15 +54,37 @@ pub enum ParticleShape {
 }
 
 /// How a particle batch blends (file `blendingType` @ +0x28 = the M2/EGxBlend enum). Additive is the
-/// flame/glow case (the campfire is `4`); the rest fold to alpha for now (mod/mod2x are rare for the
-/// props we render and will get their own path when a model needs them).
+/// flame/glow case (the campfire is `4`); mod/mod2x still fold to alpha (rare for the props we
+/// render, and they will get their own path when a model needs them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParticleBlend {
     /// `3` NoAlphaAdd / `4` Add — `(SRC_ALPHA, ONE)`. Flames, glows, embers. No depth write/sort.
     Add,
     /// `2` Alpha — `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`. Smoke.
     Alpha,
-    /// `0` Opaque / `1` AlphaKey — rare for particles.
+    /// `1` AlphaKey — blending **OFF**, depth-write ON, and the fixed-function **alpha test**
+    /// `GEQUAL 224/255` carving the texture's silhouette out of the quad. The chip/debris family:
+    /// solid little rocks, bone shards, ice splinters, each authored as a shape on a
+    /// fully-transparent field.
+    ///
+    /// Every step is byte-verified in wow-re (see [`ParticleBlend::Opaque`] for the shared half):
+    /// the emitter's own blend field decides its list at `0x7085db` (`cmp word[rec+0x28],1; ja` —
+    /// mode ≤ 1 **and** instance alpha ≥ 0.99999 lands in the `+0x4c` **opaque** list, i.e. pass 0,
+    /// `part-flush-emitter-depth.md` §1), pass 0 takes promotion-table row 0
+    /// `0x811fe0 = {0,1,2,10,3,4,5}` so mode 1 stays **EGxBlend 1**
+    /// (`m2-blend-promotion-zfill.md` §1), EGxBlend 0/1 → `glDisable(GL_BLEND)`
+    /// (`0x59d563`, `egxrs-depth-blend-states.md`), and `0x70c256` sets the ref from the RAW mode —
+    /// `round(instanceAlpha × 224.0)`, `[0x812034] = 224.0f` — never from the pass
+    /// (`m2-blend-promotion-zfill.md` §2). Depth-write stays ON because the synthetic material only
+    /// sets its z-write-off bit for `blendMode > 1` (`0x70d8f1`, `part-scene-multipliers.md` §0).
+    ///
+    /// Folding this into `Opaque` — no discard at all — paints the transparent field solid: the
+    /// Lesser Rock Elemental's debris (`PARTROCK.BLP`, 31 % of its texels at α = 0) came out as
+    /// flat pale squares instead of tumbling chips.
+    AlphaKey,
+    /// `0` Opaque — blending OFF, depth-write ON, and **no** alpha test (`0x70c237`'s mode-0 arm
+    /// sets ref 0, which `0x59d5b9` turns into `glDisable(GL_ALPHA_TEST)`). Genuinely rare for
+    /// particles; the fallback for an out-of-range blend byte too.
     Opaque,
 }
 
@@ -611,6 +633,7 @@ fn blend_of(v: u8) -> ParticleBlend {
     match v {
         3 | 4 => ParticleBlend::Add,
         2 | 5 | 6 => ParticleBlend::Alpha, // 5/6 (mod/mod2x) fold to alpha until a model needs them
+        1 => ParticleBlend::AlphaKey,
         _ => ParticleBlend::Opaque,
     }
 }

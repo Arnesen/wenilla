@@ -45,7 +45,11 @@ pub(crate) struct LiquidAssets {
 /// scene block. (VERIFIED wow-re `fog-env-state` §5's complete 6-site submit census +
 /// `liquid-render-state-sided` §5; decision 0691's open lane, now closed.)
 ///
-/// The two variants share one decoded frame array — only the tiny uniform differs — so the extra
+/// The third lane is the **lava/slime UV scroll** — see [`scrolls`]. It is a per-*nibble*, per-*path*
+/// property that [`LiquidKind`] deliberately collapses (2 and 6 are both `Magma`), so it cannot be
+/// derived from the kind and has to key the material.
+///
+/// The variants share one decoded frame array — only the tiny uniform differs — so the extra
 /// materials cost a handful of bytes, not a second copy of 30 × 256² textures.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct LiquidKey {
@@ -53,22 +57,65 @@ struct LiquidKey {
     /// This surface belongs to a WMO **interior** group (`MOGI & 0x48 == 0` — the same test
     /// `wow_model.wgsl` fogs its interior lanes by, which is what keeps the two in step).
     interior: bool,
+    /// This surface takes the animated stage-0 texture matrix ([`scrolls`]).
+    scroll: bool,
+}
+
+/// **Texture repeats per second** the reference slides a scrolling liquid sheet along **v** —
+/// `[0x801620]` = 0.1 (VERIFIED wow-re `liquid-uv-scroll-law.md`, six-agent §5).
+const SCROLL_REPEATS_PER_SEC: f32 = 0.1;
+
+/// The scroll's wrap period in seconds — the `fmod` divisor `[0x80e5a0]` = 10.0. With
+/// [`SCROLL_REPEATS_PER_SEC`] that makes the offset a **sawtooth over exactly one repeat**, so the
+/// wrap is invisible on a `REPEAT`-sampled texture and the phase never grows without bound.
+const SCROLL_PERIOD_SECS: f32 = 10.0;
+
+/// Does this surface take the reference's animated stage-0 texture matrix — the lava/slime scroll?
+///
+/// **Only WMO MLIQ surfaces whose type nibble is 6 or 7** (VERIFIED wow-re `liquid-uv-scroll-law.md`:
+/// the WMO magma/slime kernel `0x6b68f0` gates on `and esi,0xc; cmp esi,4` over the `0x6ba970`
+/// nibble, and builds a matrix that is identity except element 13 = the v-translate). Three
+/// consequences that are easy to get wrong, all of them load-bearing:
+///
+/// * **Nibbles 2 and 3 do NOT scroll**, though they reach the same kernel and draw the same
+///   `lava.blp`/`slime.blp`. In the shipped data that is the difference between Blackrock's lava
+///   (nibble 6, scrolls) and the **Ironforge Great Forge's** (nibble 2, static) — the same texture,
+///   two behaviours, and the reason "lava scrolls" is not a statement you can make about lava.
+/// * **ADT liquid never scrolls, magma included** — the open-world Searing Gorge / Burning Steppes
+///   lava is nibble 6 too, but its queue is a *different* kernel (`0x68dca0`) which pushes a
+///   byte-exact identity with element 13 hard-zeroed at `0x68dda1`. So the gate is the nibble AND
+///   the path; a nibble-only test would slide every lava pool in the open world.
+/// * The phase is driven off the reference's uptime clock, so only its **rate and period** are
+///   reproducible — never its absolute value. We drive ours off the same wall clock the frame
+///   cycler uses.
+fn scrolls(nibble: u8) -> bool {
+    matches!(nibble, 6 | 7)
 }
 
 struct LiquidEntry {
     material: Handle<LiquidMaterial>,
     frame_count: u32,
+    /// Mirrors [`LiquidKey::scroll`], so the cycler can drive the v-offset without re-deriving the
+    /// key it is already iterating the values of.
+    scroll: bool,
 }
 
 impl LiquidAssets {
-    /// The shared material for a liquid kind on a given fog block, if its frames loaded.
+    /// The shared material for a liquid kind on a given fog block, scrolling or not, if its frames
+    /// loaded. `scroll` is [`scrolls`]'s verdict; a `true` for a kind that has no scrolling variant
+    /// simply misses, which is the same "no material" path a failed frame load takes.
     pub(crate) fn material(
         &self,
         kind: LiquidKind,
         interior: bool,
+        scroll: bool,
     ) -> Option<Handle<LiquidMaterial>> {
         self.materials
-            .get(&LiquidKey { kind, interior })
+            .get(&LiquidKey {
+                kind,
+                interior,
+                scroll,
+            })
             .map(|e| e.material.clone())
     }
 }
@@ -131,7 +178,13 @@ pub(crate) fn spawn_liquids<'a>(
     for lq in liquids {
         // ADT liquid always takes the SCENE fog: the ADT liquid passes submit no fog block of their
         // own, so they draw under the once-a-frame scene submit (wow-re `fog-env-state` §5).
-        let Some(material) = liquid.material(lq.kind, false) else {
+        //
+        // And it NEVER scrolls — `scroll: false` here is not a default, it is the finding. Shipped
+        // ADT magma is nibble 6 throughout, the very nibble that scrolls on the WMO path, but the
+        // ADT queue is a different kernel that hard-zeroes the v-translate ([`scrolls`]). Deriving
+        // the flag from `lq.sound_nibble` here — the obvious-looking thing — would slide every
+        // Searing Gorge and Burning Steppes lava pool in the game.
+        let Some(material) = liquid.material(lq.kind, false, false) else {
             continue; // this kind's frames failed to load (warned at setup)
         };
         // The world-space liquid grid (MCLQ positions are already absolute WoW, so the IDENTITY
@@ -230,9 +283,21 @@ pub(crate) fn spawn_wmo_liquids<'a>(
         // `interior` picks the fog block, not the look: an interior group's pool is drawn by the WMO
         // liquid pass, which re-submits the smoothed interior fog under the same `[0xca7f00]` gate as
         // the WMO geometry pass — so the pool fogs exactly like the walls around it (see [`LiquidKey`]).
-        let Some(material) = liquid.material(lq.kind, interior) else {
+        // This is the ONE path that can scroll, and the nibble — not the kind — is what decides it:
+        // Blackrock's lava (6) creeps, the Ironforge Great Forge's (2) does not, and both are
+        // `LiquidKind::Magma` drawing the same sheet ([`scrolls`]).
+        let scroll = scrolls(lq.sound_nibble);
+        let Some(material) = liquid.material(lq.kind, interior, scroll) else {
             continue; // this kind's frames failed to load (warned at setup)
         };
+        if scroll {
+            // Rare (only nibble 6/7 pools reach it) and the only outside view of a decision that is
+            // otherwise invisible until you stand over the pool and watch it for ten seconds.
+            debug!(
+                "liquid: {:?} nibble {} takes the scroll lane",
+                lq.kind, lq.sound_nibble
+            );
+        }
         let surface = commands
             .spawn((
                 Mesh3d(meshes.add(liquid_bevy_mesh(lq))),
@@ -275,9 +340,12 @@ const FRAME_SETS: &[(LiquidKind, &str, &str, u32)] = &[
     (LiquidKind::Still, "river", "lake_a", 30),
     (LiquidKind::Rapids, "river", "fast_a", 16),
     (LiquidKind::Ocean, "ocean", "ocean_h", 30),
-    // WMO-liquid-only kinds (magma/slime carry no MCLQ data). Opaque + unlit + fogged: the animated
-    // texture IS the body colour, there being no vertex colour or depth LUT to modulate it by
-    // (VERIFIED wow-re `liquid-render-state-sided` §5).
+    // The fullbright kinds: opaque + unlit + fogged, the animated texture IS the body colour, there
+    // being no vertex colour or depth LUT to modulate it by (VERIFIED wow-re
+    // `liquid-render-state-sided` §5). **Magma reaches here from BOTH liquid systems** — the WMO
+    // MLIQ pools *and* the ADT MCLQ magma queue (B21: the 128 open-world lava chunks, Burning
+    // Steppes/Searing Gorge/Un'Goro); only slime is WMO-only, the reference having no ADT queue for
+    // it at all. See [`benilla_formats::LiquidKind`].
     (LiquidKind::Magma, "lava", "lava", 30),
     (LiquidKind::Slime, "slime", "slime", 30),
 ];
@@ -324,11 +392,24 @@ pub(super) fn setup_liquid(
         } else {
             AlphaMode::Blend
         };
-        // Two materials per kind — one per FOG BLOCK (see [`LiquidKey`]) — sharing the one decoded
-        // frame array (`frames` is a handle; the clone is a refcount, not a second 30 × 256² decode).
-        // Every other input is identical, so this is the whole cost of letting an interior room's pool
-        // fog like the room instead of like the sky outside it.
-        for interior in [false, true] {
+        // One material per (FOG BLOCK × SCROLL) combination the kind can actually take (see
+        // [`LiquidKey`]), all sharing the one decoded frame array (`frames` is a handle; the clone is
+        // a refcount, not a second 30 × 256² decode). Every other input is identical, so this is the
+        // whole cost of letting an interior room's pool fog like the room instead of like the sky
+        // outside it — and of letting Blackrock's lava creep while Ironforge's sits still.
+        //
+        // The scroll variant exists only for the fullbright kinds: [`scrolls`] can only ever answer
+        // true for nibbles 6/7, which map to `Magma`/`Slime` and nothing else, so building one for
+        // water would be a material nothing can ever look up.
+        let scroll_lanes: &[bool] = if kind.is_fullbright() {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for (interior, &scroll) in [false, true]
+            .into_iter()
+            .flat_map(|i| scroll_lanes.iter().map(move |s| (i, s)))
+        {
             let material = materials.add(ExtendedMaterial {
                 base: StandardMaterial {
                     // We do our own (WoW) lighting in the shader.
@@ -359,24 +440,34 @@ pub(super) fn setup_liquid(
                         if interior { 1.0 } else { 0.0 },
                         WATER_SHININESS,
                     ),
-                    // x = frame 0 (index driven by `animate_liquid`); y = frame count; zw unused.
+                    // x = frame 0 (index driven by `animate_liquid`); y = frame count; z = the
+                    // v-scroll offset in texture repeats (also `animate_liquid`'s, and left at 0
+                    // forever on a non-scrolling material); w unused.
                     anim: Vec4::new(0.0, frame_count as f32, 0.0, 0.0),
                     light_buf: world_assets.shared_light.clone(),
                 },
             });
             assets.materials.insert(
-                LiquidKey { kind, interior },
+                LiquidKey {
+                    kind,
+                    interior,
+                    scroll,
+                },
                 LiquidEntry {
                     material,
                     frame_count,
+                    scroll,
                 },
             );
         }
     }
-    // Frame SETS, not materials — each set backs both fog-block variants.
+    // Frame SETS, not materials — a set backs every fog-block/scroll variant of its kind.
     info!(
         "liquid: loaded {} water frame set(s)",
-        assets.materials.len() / 2
+        FRAME_SETS
+            .iter()
+            .filter(|(k, ..)| assets.material(*k, false, false).is_some())
+            .count()
     );
     commands.insert_resource(assets);
 }
@@ -419,10 +510,17 @@ fn load_frame_array(
 }
 
 /// Advance every liquid material's frame index at [`ANIM_FPS`] off Bevy **real** `Time` (wall-clock,
-/// mirroring the reference's `GetTickCount`-driven cycler — NOT the day/night game clock). Writes
-/// only on the [`ANIM_FPS`] tick edge: `Assets::get_mut` alone marks the asset Modified and feeds
-/// the respecialization pipeline (the mark-changed scan + `Changed<Mesh3d>` sweeps) every frame —
-/// the 0353 demand-price law; between ticks the frame index cannot have changed.
+/// mirroring the reference's `GetTickCount`-driven cycler — NOT the day/night game clock), and the
+/// **v-scroll offset** on the materials that take one ([`scrolls`]). Writes only on the
+/// [`ANIM_FPS`] tick edge: `Assets::get_mut` alone marks the asset Modified and feeds the
+/// respecialization pipeline (the mark-changed scan + `Changed<Mesh3d>` sweeps) every frame — the
+/// 0353 demand-price law; between ticks the frame index cannot have changed.
+///
+/// The scroll rides the same 24 Hz edge rather than getting its own per-frame write. It is a
+/// continuous quantity, so that quantises it — but to 1/24 s, i.e. **1/240th of a repeat** per step
+/// on a 10 s sawtooth, which is far below what a 256² sheet can show, and it keeps the material
+/// upload budget exactly where 0353 put it. (The reference is quantised too, just differently: it
+/// rebuilds the matrix per draw off a millisecond clock.)
 pub(super) fn animate_liquid(
     time: Res<Time>,
     liquid: Option<Res<LiquidAssets>>,
@@ -453,17 +551,75 @@ pub(super) fn animate_liquid(
         return;
     }
     *last_ticks = Some(ticks);
+    // The scroll's sawtooth, off the SAME quantised clock as the frame index so the two can never
+    // disagree about what time it is: `fmod(t, 10) · 0.1` ∈ [0, 1) repeats. Pinned to 0 in a
+    // deterministic run for exactly the reason the frame index is (0600).
+    let scroll = if crate::dev_state::deterministic_run() {
+        0.0
+    } else {
+        (ticks as f32 / ANIM_FPS) % SCROLL_PERIOD_SECS * SCROLL_REPEATS_PER_SEC
+    };
     for entry in liquid.materials.values() {
         // Gated per entry: a single-frame liquid (`frame_count` 1) never changes index, and the
         // shared cache holds every kind ever built — re-marking them all Modified on each tick
         // edge re-uploaded ~10 materials/frame on maps with no water at all.
         let frame = (ticks % entry.frame_count.max(1)) as f32;
+        let offset = if entry.scroll { scroll } else { 0.0 };
         benilla_assets::write_gated(
             &mut materials,
             &entry.material,
-            |m| m.extension.anim.x != frame,
-            |m| m.extension.anim.x = frame,
+            |m| m.extension.anim.x != frame || m.extension.anim.z != offset,
+            |m| {
+                m.extension.anim.x = frame;
+                m.extension.anim.z = offset;
+            },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scroll gate, nibble by nibble — every trap in [`scrolls`] as an assertion.
+    ///
+    /// The failure this guards is not "lava doesn't move"; it is lava moving in the **wrong
+    /// places**, which is far harder to see and impossible to unsee once shipped.
+    #[test]
+    fn only_nibbles_six_and_seven_scroll() {
+        // The two that do: Blackrock's lava and Stratholme's slime.
+        assert!(scrolls(6), "magma variant 6 takes the animated matrix");
+        assert!(scrolls(7), "slime variant 7 takes the animated matrix");
+
+        // The two that reach the SAME kernel and draw the SAME sheet, and still do not scroll —
+        // the Ironforge Great Forge (2) and the Stratholme raid / Ahn'Qiraj slime (3).
+        assert!(!scrolls(2), "the Great Forge's lava is static");
+        assert!(!scrolls(3), "nibble-3 slime is static");
+
+        // The near-miss that a `nibble & 0xc == 4` test would wrongly admit: 4 satisfies it, but it
+        // is a *river* variant that never reaches the magma/slime kernel at all.
+        assert!(!scrolls(4), "nibble 4 is lake_a, not a hazard liquid");
+
+        // Everything else in the table, including the hole nibble.
+        for n in [0u8, 1, 5, 8, 0xf] {
+            assert!(!scrolls(n), "nibble {n} must not scroll");
+        }
+    }
+
+    /// A scrolling material exists for the fullbright kinds and **only** for them — a scroll lane
+    /// built for water would be a material no lookup can ever reach ([`setup_liquid`]).
+    #[test]
+    fn only_fullbright_kinds_can_take_a_scroll_lane() {
+        for &(kind, ..) in FRAME_SETS {
+            let wants_lane = kind.is_fullbright();
+            assert_eq!(
+                wants_lane,
+                [2u8, 3, 6, 7]
+                    .iter()
+                    .any(|&n| scrolls(n) && LiquidKind::from_nibble(n) == Some(kind)),
+                "{kind:?}: scroll lane and the nibbles that can ask for one must agree"
+            );
+        }
     }
 }
 
@@ -471,7 +627,103 @@ pub(super) fn animate_liquid(
 /// isn't present (the repo never carries Blizzard data).
 #[cfg(test)]
 mod real_data {
+    use super::LiquidKind;
     use benilla_formats::{parse_wmo_root, wmo_group_liquid_mesh};
+    use std::collections::HashMap;
+
+    /// **Which of the shipped hazard pools actually scroll** — [`super::scrolls`] against the real
+    /// data, so the gate is pinned to content rather than to a reading of the binary.
+    ///
+    /// The whole reason this needs a test: "does lava scroll?" has no answer, only a per-pool one.
+    /// The nibble is authored per WMO group, `LiquidKind` collapses it (2 and 6 are both `Magma`,
+    /// drawing the same `lava.blp`), and the two behaviours sit **inside one building** — so a gate
+    /// that quietly regressed to "all magma" or "no magma" would look plausible everywhere and be
+    /// wrong nearly everywhere. These counts are the shipped 1.12.1 numbers, measured:
+    ///
+    /// * **Ironforge is the two-sided case, and it is why the director's report needed a location.**
+    ///   Eleven magma groups: **9 at nibble 2 (static)** and **2 at nibble 6 (scrolling)**, plus 2
+    ///   still-water groups. Lava that moves and lava that does not, in the same forge.
+    /// * **Blackrock Mountain — the pin behind `blackrock_lava_is_below_the_feet_not_above_it`** —
+    ///   is nibble 6 throughout, in the outer mountain and both instance WMOs. All of it creeps.
+    /// * **Slime splits the same way**: Undercity's 38 canals are nibble 3 and stand still;
+    ///   Stratholme's are nibble 7 and flow.
+    #[test]
+    fn only_the_nibble_six_and_seven_pools_scroll_in_the_shipped_data() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        // Every liquid-bearing group of a WMO, as `(nibble, kind)` → count.
+        let mut census = |root_path: &str| -> HashMap<(u8, LiquidKind), usize> {
+            let bytes = chain.read_file(root_path).expect("root readable");
+            let root = parse_wmo_root(&bytes).expect("parse root");
+            let stem = root_path
+                .strip_suffix(".wmo")
+                .unwrap_or(root_path)
+                .to_string();
+            let mut tally = HashMap::new();
+            for gi in 0..root.group_count() as usize {
+                let Ok(gb) = chain.read_file(&format!("{stem}_{gi:03}.wmo")) else {
+                    continue;
+                };
+                if let Some(m) = wmo_group_liquid_mesh(&gb) {
+                    *tally.entry((m.sound_nibble, m.kind)).or_default() += 1;
+                }
+            }
+            tally
+        };
+
+        let ironforge = census("world\\wmo\\khazmodan\\cities\\ironforge\\ironforge.wmo");
+        assert_eq!(
+            ironforge,
+            HashMap::from([
+                ((2, LiquidKind::Magma), 9),
+                ((4, LiquidKind::Still), 2),
+                ((6, LiquidKind::Magma), 2),
+            ]),
+            "Ironforge's liquid census moved",
+        );
+
+        let blackrock = census("world\\wmo\\dungeon\\az_blackrock\\blackrock.wmo");
+        assert_eq!(
+            blackrock,
+            HashMap::from([((6, LiquidKind::Magma), 2)]),
+            "Blackrock Mountain's lava — the `.go xyz -7531.21 -1123.64 172.58` pin — is all nibble 6",
+        );
+
+        let undercity = census("world\\wmo\\lorderon\\undercity\\undercity.wmo");
+        assert_eq!(
+            undercity,
+            HashMap::from([((3, LiquidKind::Slime), 38)]),
+            "Undercity's slime is nibble 3 throughout",
+        );
+
+        let stratholme = census("world\\wmo\\dungeon\\ld_stratholme\\stratholme.wmo");
+        assert_eq!(
+            stratholme,
+            HashMap::from([((7, LiquidKind::Slime), 3)]),
+            "Stratholme's slime is nibble 7 throughout",
+        );
+
+        // And the gate's verdict over all of it — the same sheet, two behaviours.
+        assert_eq!(
+            ironforge
+                .iter()
+                .filter(|((n, _), _)| super::scrolls(*n))
+                .map(|(_, c)| c)
+                .sum::<usize>(),
+            2,
+            "exactly 2 of Ironforge's 11 magma pools scroll",
+        );
+        for (label, tally) in [("blackrock", &blackrock), ("stratholme", &stratholme)] {
+            assert!(
+                tally.keys().all(|(n, _)| super::scrolls(*n)),
+                "{label}: every pool scrolls",
+            );
+        }
+        assert!(
+            undercity.keys().all(|(n, _)| !super::scrolls(*n)),
+            "Undercity's slime stands still",
+        );
+    }
 
     /// **Which fog block each liquid-bearing WMO group takes**, against the real client files.
     ///

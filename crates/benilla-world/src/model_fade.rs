@@ -1378,6 +1378,7 @@ mod inversion_tests {
             wades: true,
             scale: 1.0,
             height: 2.0,
+            bound: None,
         }
     }
 }

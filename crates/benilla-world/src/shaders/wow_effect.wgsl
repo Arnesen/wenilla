@@ -14,6 +14,8 @@
 // - BLEND_ALPHA:    straight (rgb, α) under standard alpha blending.
 // - BLEND_OPAQUE:   (rgb, 1) with blending off — the alpha-ignoring shape the material path's
 //   AlphaMode::Opaque produced.
+// - BLEND_ALPHAKEY: BLEND_OPAQUE's output behind the fixed-function ALPHA TEST — `discard` below
+//   224/255. wgpu has no `glAlphaFunc`, so the reference's EGxRs id 0x08 lands here.
 // - BLEND_MULTIPLY: premultiplied (rgb·α, α) under (Dst, 1−srcα) — `dst·lerp(1, rgb, α)`, the
 //   blob shadow's modulate-with-fade (and ModelBlend::Mod at α = 1).
 // - BLEND_MOD2X:    (rgb, 1) under (Dst, Src) = `2·src·dst` — rain's state; reads no alpha.
@@ -132,6 +134,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // The gamma-space product — texture bytes × raw authored vertex colour, exactly what the
     // reference multiplies.
     let c = textureSample(effect_texture, effect_sampler, in.uv) * in.color;
+#ifdef BLEND_ALPHAKEY
+    // THE FIXED-FUNCTION ALPHA TEST (EGxRs id 0x08 — `glAlphaFunc(GL_GEQUAL, ref/255)` +
+    // `glEnable(GL_ALPHA_TEST)`). `0x70c256` computes the ref from the RAW blend mode, so an
+    // AlphaKey emitter keeps `round(instanceAlpha × 224.0)` — 224 at full alpha — and `c.a` here
+    // is exactly the reference's fragment alpha: texture α × the over-life track α, GL_MODULATE.
+    // GEQUAL, so the test PASSES at the ref: discard strictly below it.
+    //
+    // Without it the debris family's transparent field paints solid — the Lesser Rock Elemental's
+    // chips drew as pale squares, PARTROCK.BLP's α = 0 surround at full opacity.
+    if (c.a < 224.0 / 255.0) {
+        discard;
+    }
+#endif
     var rgb = c.rgb;
 #ifdef EFFECT_LIT
     // SCENE LIGHTING (EGxRs id 0x0e), for the emitters that ask for it. A particle emitter owns
@@ -194,6 +209,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef BLEND_OPAQUE
     return vec4<f32>(rgb, 1.0);
 #else
+#ifdef BLEND_ALPHAKEY
+    // Blending is off (EGxBlend 1 → `glDisable(GL_BLEND)`); the surviving fragments are solid.
+    return vec4<f32>(rgb, 1.0);
+#else
 #ifdef BLEND_MULTIPLY
     // The modulate family: premultiplied for bevy's Multiply state — `dst·lerp(1, rgb, α)`
     // (the blob shadow's fade-riding darken; `ModelBlend::Mod` at α = 1).
@@ -204,6 +223,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 #else
     return vec4<f32>(rgb, c.a);
+#endif
 #endif
 #endif
 #endif

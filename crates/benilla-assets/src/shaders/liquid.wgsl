@@ -49,7 +49,10 @@
 struct LiquidParams {
     // x = fullbright (magma/slime); y = ocean swatch; z = interior fog; w = sun-sheen shininess.
     kind: vec4<f32>,
-    anim: vec4<f32>,          // x = current frame index; y = frame count; zw unused
+    // x = current frame index; y = frame count; z = the v-scroll offset in texture repeats
+    // (nibble-6/7 WMO magma/slime only — the reference's animated stage-0 texture matrix; see
+    // `liquid/surface.rs`'s `scrolls`, and `apply_scroll` below); w unused.
+    anim: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -98,6 +101,21 @@ fn sun_sheen(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     let ndoth = max(dot(n, half_v), 0.0);
     // Shininess is WATER's own (`w.kind.w`), not the shared row-3 terrain exponent.
     return wow_light.light_spec.rgb * pow(ndoth, max(w.kind.w, 1.0));
+}
+
+// The lava/slime **surface scroll**: the reference's animated stage-0 texture matrix, which for
+// liquid-type nibbles 6 and 7 is the identity with element 13 — the **v translate** — set to
+// `fmod(uptime_s, 10.0) · 0.1` (VERIFIED wow-re `liquid-uv-scroll-law.md`, six-agent §5, matrix
+// built at `0x6b68f0` and pushed at stage 0 by `0x6b6ae3`). A texture matrix times `(s, t, 0, 1)`
+// with only element 13 non-identity is exactly `t += phase`, so the whole mechanism is this add —
+// no matrix, no second sampler, no cost on the paths that do not scroll (`anim.z` is a hard 0
+// there, which the CPU side guarantees rather than the shader branching on it).
+//
+// A full repeat every 10 s, so `REPEAT` wrapping makes the sawtooth's reset invisible. Only the
+// rate and the period are reproducible — the reference's phase comes off `GetTickCount`, i.e. the
+// machine's uptime, so its absolute value is not a thing to match.
+fn apply_scroll(uv: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(uv.x, uv.y + w.anim.z);
 }
 
 // Distance fog — planar eye-Z, GL_LINEAR, gamma space (mirrors terrain.wgsl). Applied to EVERY liquid
@@ -165,7 +183,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
 
     // Animated frame. For water/ocean this is the DETAIL ripple (RGB ≈ near-black, ALPHA = ripple);
     // for magma/slime it is the OPAQUE BODY texture.
-    let detail = textureSample(frames, frames_samp, in.uv, i32(round(w.anim.x)));
+    let detail = textureSample(frames, frames_samp, apply_scroll(in.uv), i32(round(w.anim.x)));
 
     // Magma / slime (kind.x > 0.5): the animated texture IS the opaque body colour — no depth swatch
     // (the ADT liquid vertex format carries no colour element at all, and the WMO one is a hard

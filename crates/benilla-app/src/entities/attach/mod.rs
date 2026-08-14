@@ -644,6 +644,15 @@ pub(super) fn attach_entity_visuals(
                     bevy::camera::primitives::Aabb::from_min_max(clip.bounds_min, clip.bounds_max)
                 })
             });
+            // …and the same box is this body's **election bound** (decision 1270): standing in a
+            // sealed WMO room the reference never submits an outdoor object at all, so the cull
+            // needs one whole-object AABB per body, on its root. Recorded here and restated onto
+            // `WorldUnit::bound` by `publish_world_units` — the one reconciler that answers every
+            // "what is this body to the world" question, exactly as it already does for the
+            // collision height. A body with no authored idle box records none and keeps drawing.
+            if let Some(aabb) = idle_aabb {
+                commands.entity(entity).insert(super::ModelBound(aabb));
+            }
             // Everything one part's spawn reads from this unit, gathered once (`attach::dress`) —
             // the same context the gear-change **re-dress** feeds `spawn_part`, so a body built at
             // stream-in and a geoset that appears when a belt is swapped are dressed by one law.

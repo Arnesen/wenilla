@@ -457,3 +457,40 @@ fn barrel_explode_emitters_are_off_at_rest_and_fire_in_their_clips() {
         .any(|e| (0..100).any(|k| e.timing.emitting(Some(3), k as f32 * 0.01, 0.0)));
     assert!(destroy_fires, "the Destroy clip plays the explosion");
 }
+
+/// The debris family's blend: file `blendingType` **1 is AlphaKey**, not Opaque — the fold that
+/// painted the Lesser Rock Elemental's rock chips as flat pale squares.
+///
+/// Pinned on the elemental because it is the one CREATURE in the corpus that authors mode 1 (a
+/// `partcensus` sweep finds 26 such emitters in 8 models, the other 7 all `Spells\`). The
+/// distinction is load-bearing: mode 1 draws with blending OFF but under `glAlphaFunc(GEQUAL,
+/// 224/255)`, which carves `PARTROCK.BLP`'s silhouette out of the quad; mode 0 has no alpha test
+/// at all, and nothing in 1.12.1 authors it.
+#[test]
+fn earth_elemental_debris_is_alphakey_not_opaque() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let bytes = chain
+        .read_file("Creature\\ElementalEarth\\ElementalEarth.m2")
+        .expect("read ElementalEarth.m2");
+
+    let emitters = parse_m2_particle_emitters(&bytes).expect("parse emitters");
+    assert_eq!(emitters.len(), 13, "the elemental authors 13 emitters");
+
+    // Emitters 3 and 12 are the rock chips; 11 is the third PARTROCK emitter, authored mode 2.
+    let rock = |e: &benilla_formats::ParticleEmitterDef| {
+        e.texture
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("CREATURE\\ELEMENTALEARTH\\PARTROCK.BLP"))
+    };
+    assert!(rock(&emitters[3]) && rock(&emitters[11]) && rock(&emitters[12]));
+    assert_eq!(emitters[3].blend, ParticleBlend::AlphaKey);
+    assert_eq!(emitters[12].blend, ParticleBlend::AlphaKey);
+    assert_eq!(emitters[11].blend, ParticleBlend::Alpha);
+
+    // Nothing on this model — nor anywhere in the shipped corpus — is mode 0.
+    assert!(
+        !emitters.iter().any(|e| e.blend == ParticleBlend::Opaque),
+        "no emitter here folds to Opaque"
+    );
+}

@@ -173,7 +173,10 @@ fn is_probe_account(user: &str) -> bool {
 /// factions, hostility, colours, threat, damage or timers. An explicit ask always beats the
 /// default, and the rig's token is an explicit ask: two modules must not send `.gm` at each other,
 /// so the one with the spec in front of it wins (0651's rig owns its own `gm:` step).
-fn wants_gm_off() -> bool {
+///
+/// [`crate::preflight`] reads it too — the banner has to know a `.gm off` is on its way out before
+/// it accuses the run of measuring through GM mode.
+pub(crate) fn wants_gm_off() -> bool {
     std::env::var("WOW_GM").is_ok_and(|v| v.eq_ignore_ascii_case("off"))
         || std::env::var("WOW_RIG").is_ok_and(|spec| rig_asks_for_gm_off(&spec))
 }

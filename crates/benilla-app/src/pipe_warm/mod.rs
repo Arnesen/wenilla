@@ -527,7 +527,7 @@ fn despawn_rigs(commands: &mut Commands, rigs: &Query<(Entity, Option<&ChildOf>)
 /// `MaterialPlugin` one, so no menagerie *entity* can reach it: its pipelines exist only when a
 /// draw record sits in the shared stream at queue time. So while the pass runs, this pushes one
 /// degenerate draw per reachable [`EffectPipelineKey`] — the full blend × raster-bias cross
-/// ({Add, Alpha, Opaque, Multiply, Mod2x} × {0, ground-decal, blob-shadow}; the key's own doc
+/// ({Add, Alpha, Opaque, AlphaKey, Multiply, Mod2x} × {0, ground-decal, blob-shadow}; the key's own doc
 /// pins the closed bias set) — through the PRODUCTION stream (`EffectQuads` → extract → queue →
 /// specialize), once per view class: the world camera (samples=N) and the twin booth (samples=1).
 /// The queue path specializes per matching view regardless of coverage, so a 4-vertex sliver at
@@ -568,6 +568,7 @@ fn warm_effect_lane(
             EffectBlend::Add,
             EffectBlend::Alpha,
             EffectBlend::Opaque,
+            EffectBlend::AlphaKey,
             EffectBlend::Multiply,
             EffectBlend::Mod2x,
         ] {

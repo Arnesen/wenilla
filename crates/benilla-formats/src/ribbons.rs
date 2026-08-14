@@ -109,6 +109,10 @@ pub struct RibbonEmitterDef {
     /// Blend mode from `materialIndices[0]` → the M2 render-flags entry's blend u16 (the same
     /// EGxBlend folding as particle/batch blends).
     pub blend: ParticleBlend,
+    /// The RAW authored blend u16 behind [`Self::blend`] (`None` when the material index does not
+    /// resolve). The fold is lossy, so a census cannot say *which* mode a folded ribbon authored
+    /// without it — and re-walking the material array downstream is how the two readings drift.
+    pub blend_mode: Option<u16>,
     /// Trail tint (colorTrack, RGB 0..1, keyed on the clip clock; constant white when unkeyed).
     pub color: ValueTrack<[f32; 3]>,
     /// Trail opacity (alphaTrack, fixed16/32767, keyed — the slash's fade-out; constant 1.0 when
@@ -280,18 +284,29 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
                 .and_then(|ti| textures.get(ti).cloned().flatten())
         };
         // materialIndices[0] → render-flags entry → blend u16.
-        let blend = {
+        let blend_mode = {
             let n = le_u32(bytes, e + 0x1c);
             let ofs = le_u32(bytes, e + 0x20) as usize;
-            let mat = (n > 0 && ofs + 2 <= bytes.len())
+            (n > 0 && ofs + 2 <= bytes.len())
                 .then(|| le_u16(bytes, ofs) as usize)
-                .filter(|&m| m < rf_count && rf_base + m * 4 + 4 <= bytes.len());
-            match mat.map(|m| le_u16(bytes, rf_base + m * 4 + 2)) {
-                Some(3 | 4) => ParticleBlend::Add,
-                Some(2) => ParticleBlend::Alpha,
-                Some(_) => ParticleBlend::Opaque,
-                None => ParticleBlend::Add, // unresolved material: trails are near-always additive
-            }
+                .filter(|&m| m < rf_count && rf_base + m * 4 + 4 <= bytes.len())
+                .map(|m| le_u16(bytes, rf_base + m * 4 + 2))
+        };
+        // The fold, MEASURED against the corpus by `benilla-extract ribbonscan` (176 models, 590
+        // ribbons): Add(4) 527 · Alpha(2) 51 · Mod2x(6) 12. Nothing authors 0, 1 or 5, so the
+        // AlphaKey arm below is the law rather than a live case — but it is the law, and the
+        // particle side proved what folding it into `Opaque` costs.
+        //
+        // KNOWN GAP, deliberately not fixed here: those 12 Mod2x ribbons fall into `Opaque` and
+        // render with no blend at all, while a Mod2x PARTICLE folds the other way (to `Alpha`).
+        // `ParticleBlend` cannot express Mod/Mod2x, so straightening it means widening that enum
+        // and re-verifying both lanes — its own change, not a rider on the AlphaKey fix.
+        let blend = match blend_mode {
+            Some(3 | 4) => ParticleBlend::Add,
+            Some(2) => ParticleBlend::Alpha,
+            Some(1) => ParticleBlend::AlphaKey,
+            Some(_) => ParticleBlend::Opaque,
+            None => ParticleBlend::Add, // unresolved material: trails are near-always additive
         };
         out.push(RibbonEmitterDef {
             bone: le_u16(bytes, e + 0x04),
@@ -302,6 +317,7 @@ pub fn parse_m2_ribbon_emitters(bytes: &[u8]) -> Result<Vec<RibbonEmitterDef>> {
             ],
             texture,
             blend,
+            blend_mode,
             color: track_keys_with(bytes, e + 0x24, [1.0; 3], band, 12, |b, o| {
                 [le_f32(b, o), le_f32(b, o + 4), le_f32(b, o + 8)]
             }),

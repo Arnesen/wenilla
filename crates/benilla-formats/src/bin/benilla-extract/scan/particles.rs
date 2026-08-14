@@ -23,6 +23,7 @@ use crate::model_key;
 pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
     let names = super::m2_names(chain, None)?;
     let (mut scanned, mut hits, mut gated, mut mid_seq) = (0u32, 0u32, 0u32, 0u32);
+    let mut blends: BTreeMap<String, u32> = BTreeMap::new();
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -54,6 +55,18 @@ pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
             per.sort();
             notes.push(format!("    r{i}  {}", per.join("  ")));
         }
+        // The BLEND census beside the gate one. A ribbon takes its blend from a real M2 material
+        // (`materialIndices[0]` → render-flags `blend`), so unlike a particle emitter it can in
+        // principle author any mode — and the two the parse folds (`Opaque`, covering file modes
+        // 0/1/5/6) render with no alpha test at all, which is exactly what painted the particle
+        // side's AlphaKey debris as solid squares. Tallied here so the fold stays a MEASURED
+        // approximation instead of an assumed-empty one.
+        for d in &defs {
+            let raw = d.blend_mode.map_or("?".into(), |m| m.to_string());
+            *blends
+                .entry(format!("{:?}({raw})", d.blend))
+                .or_insert(0u32) += 1;
+        }
         gated += u32::from(any_gate);
         mid_seq += u32::from(any_mid);
         let tag = match (any_gate, any_mid) {
@@ -66,10 +79,12 @@ pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
             println!("{line}");
         }
     }
+    let blend_tally: Vec<String> = blends.iter().map(|(b, n)| format!("{b} {n}")).collect();
     eprintln!(
         "{scanned} models scanned, {hits} with ribbons — {gated} carry an enable gate, \
          {mid_seq} of those key it MID-SEQUENCE (a band-start-only read misses their whole \
-         ON window)"
+         ON window).  Blends: {}",
+        blend_tally.join(" · ")
     );
     Ok(())
 }
@@ -305,6 +320,7 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             match d.blend {
                 benilla_formats::ParticleBlend::Add => hit("blend:add"),
                 benilla_formats::ParticleBlend::Alpha => hit("blend:alpha"),
+                benilla_formats::ParticleBlend::AlphaKey => hit("blend:alphakey"),
                 benilla_formats::ParticleBlend::Opaque => hit("blend:opaque"),
             }
             // The raw blend byte disambiguates what the parsed enum folds: 5 = Mod, 6 = Mod2x.

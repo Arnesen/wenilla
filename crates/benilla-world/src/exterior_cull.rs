@@ -24,10 +24,30 @@
 //! liquid layers (`0x683ab0`) and the far band (`0x683040`) — and each drain unlinks what it walks. So
 //! "no window" really does mean "no exterior content", with no second path to leak through.
 //!
-//! **Units are exempt and must stay exempt.** A CGUnit rides ClntObjMgr → `0x481540` → `0x607da0` →
-//! `0x710b90` into the M2Scene worklist, drained unconditionally at `0x483460`+`0x48368a`; that
-//! function contains zero references to `[0xc7b748]`/`[0xcbe320]`. The reference submits outdoor mobs
-//! from a sealed room and lets the building's own geometry z-reject them.
+//! ## Bodies ride the same walk — the correction 0774 needed (decision 1270)
+//!
+//! 0774 read this lane one stage too late and wrote the opposite: *"units are exempt and must stay
+//! exempt … the reference submits outdoor mobs from a sealed room and lets the building's own
+//! geometry z-reject them."* The **drain** fact it checked is true — `0x483460`/`0x48368a` walk the
+//! M2Scene worklist with zero references to `[0xc7b748]`/`[0xcbe320]` — but the decision is taken
+//! *before* the worklist, in the driver that does read them.
+//!
+//! Every frame `0x683dd0` (sole caller `0x6812c5`, inside `0x681070`) elects each scene object into
+//! one of two passes: `[record+0xb4]` is `0x481540` and nothing else (that dword occurs once
+//! image-wide, at `0x613ece`), and `CGObject::ShouldRender` is literally `0x6146c6: and eax,1`.
+//! Pass 2 takes `0x48161f je` → `0x48174e call 0x710c50`, which writes `[model+0x50] = 0`: the model
+//! never enters `[scene+0x24]`, the only list the draw loop `0x707680`/`0x707882` walks — and walk 2
+//! also skips `0x710b90`, so a pass-2 object is neither drawn nor ticked.
+//!
+//! **List A's only outdoor producer is `0x683340`, whose only caller is `0x682fe2` — inside
+//! `0x682fa0`**, the per-window exterior walk above. A sealed room never runs it, so `0x680390`
+//! sweeps every outdoor object in the world into pass 2. Nothing is submitted, so there is nothing
+//! for the building's geometry to z-reject: 0774's second claim fails in both halves. An object
+//! standing in a WMO group rides the sibling `0x6834e0` instead, which is why a creature in the
+//! camera's own room still draws.
+//!
+//! So a body is exterior scene exactly when it is not in a WMO room, and the windows gate it like
+//! the ground it stands on — [`WorldUnit::bound`].
 //!
 //! ## The clip geometry
 //!
@@ -49,9 +69,10 @@
 //!
 //! ## What is gated so far, and what is knowingly not
 //!
-//! **Gated:** ADT terrain (`0x683bf0`), ADT doodad placements (`0x683700`) and the WDL far band
-//! (`0x683040`) — the buckets that produce the reported symptom, and the ones whose entities have no
-//! other `Visibility` writer, so this is their sole authority (decision 0025).
+//! **Gated:** ADT terrain (`0x683bf0`), ADT doodad placements (`0x683700`), the WDL far band
+//! (`0x683040`) and now the net **bodies** on `0x683340` ([`WorldUnit::bound`]) — the buckets that produce
+//! the reported symptoms, and the ones whose entities have no other `Visibility` writer, so this is
+//! their sole authority (decision 0025).
 //!
 //! **The unit is the drawn object, and for terrain that is the 33.333 yd MCNK cell, not the 533 yd
 //! tile** (decision 0780). This is a property of the *spawner*, not of anything here — but the cull is
@@ -70,6 +91,7 @@
 //! no root entity in our graph, so we tag and test each **submesh**. Their union is the object, so the
 //! only divergence is at a doorway's edge — a submesh entirely outside the window is dropped where the
 //! reference would draw the doodad whole. Visible only as a partially-clipped prop in a doorway.
+//! A body does not take that deviation: it has a root, so it is tested once, whole ([`ElectedBody`]).
 
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::visibility::VisibilitySystems;
@@ -87,9 +109,11 @@ const MIN_WINDOW_NDC: f32 = 0.02;
 /// liquid. Tag the object that is *drawn*: this is tested per entity, so tagging a container whose box
 /// spans far more than any one draw admits the lot (decision 0780).
 ///
-/// **Never on units, players, or anything parented to a WMO group**: the former are exempt by the
-/// carved law above, and the latter are already culled by the portal PVS
-/// ([`crate::wmo_portal::WmoGroupVis`]) — double-gating them would blank building interiors.
+/// **Never on anything parented to a WMO group** — those are already culled by the portal PVS
+/// ([`crate::wmo_portal::WmoGroupVis`]), and double-gating them would blank building interiors.
+/// **Never on a net body either**, but for the opposite reason to the one this line used to give:
+/// a body IS elected (see the module header), it is simply elected once at its **root** off
+/// [`WorldUnit::bound`], rather than per submesh.
 #[derive(Component)]
 pub struct ExteriorScene;
 
@@ -115,6 +139,13 @@ pub struct ExteriorCullVerdict {
     /// Non-zero is not automatically a defect (a tagged non-drawing entity has no bound and draws
     /// nothing), but it is the one number that says how much of the scene the cull is not deciding.
     pub(crate) unbounded: usize,
+    /// Net bodies the election reached ([`WorldUnit::bound`] set), and how many the windows
+    /// rejected — counted apart from
+    /// `tested`/`hidden` because they answer a different question. The world buckets are a
+    /// *residency* count in the tens of thousands; bodies are the server's visibility stream, a
+    /// couple of dozen. Summed together, a body leg that reaches nothing at all would be invisible.
+    pub(crate) bodies: usize,
+    pub(crate) bodies_hidden: usize,
 }
 
 pub(crate) struct ExteriorCullPlugin;
@@ -244,18 +275,46 @@ type UnownedSceneFilter = (
     With<ExteriorScene>,
     Without<crate::model_render::ModelPart>,
     Without<crate::wmo_portal::WmoGroupVis>,
+    // …and disjoint from the body leg below, which also writes `Visibility`. The two audiences
+    // never overlap by construction (a body is elected at its root, which is not scene content),
+    // but Bevy needs that **proved**, not intended: without this the system panics B0001 at the
+    // first run. Stating it here rather than in the body query keeps the exclusion next to the
+    // `ModelPart`/`WmoGroupVis` ones, which are the same kind of claim.
+    Without<crate::world_unit::WorldUnit>,
+);
+
+/// What the body leg reads per net body — one whole-object test on its root, which is the
+/// reference's own granularity (`0x682f40`), and which takes the whole visual with it: body
+/// geosets, worn gear under their joints, the mount and its rider (`mount::spawn_mount_child`
+/// parents the mount to its host), and the entity-lane billboard cards, which are world roots that
+/// mirror their owner's `InheritedVisibility` ([`crate::billboard::face_billboards`]). None of that
+/// composes from a per-submesh tag.
+///
+/// [`crate::wmo_portal::UnitWmoRoom`] is the reference's own fork between its two producers: a room
+/// claim means the object rides `0x6834e0` with its building, no claim means it rides `0x683340`
+/// inside the window walk. `Option` because a body that spawned this frame may not have been rayed
+/// yet, and an unknown room is a **timing gap, not a verdict** — the same law the missing-`Aabb`
+/// arm above takes, and for the same reason: deciding on absent information flickers the world.
+type ElectedBody = (
+    &'static GlobalTransform,
+    &'static crate::world_unit::WorldUnit,
+    Option<&'static crate::wmo_portal::UnitWmoRoom>,
+    &'static mut Visibility,
 );
 
 /// Hide every [`ExteriorScene`] object that no window admits — **only those with no other
 /// `Visibility` owner**. A model submesh (`ModelPart`) and a WMO group piece (`WmoGroupVis`) are
 /// written by [`crate::debug_panel`]'s model-visibility authority, which composes the toggles, the
 /// far-clip wall, the distance fade and the portal PVS; a second writer here does not "also cull"
-/// them, it *overwrites* all of that every frame (decision 0784). So this system now owns exactly
-/// what it is the sole authority for: terrain cells and the WDL far band.
+/// them, it *overwrites* all of that every frame (decision 0784). So this system owns exactly what
+/// it is the sole authority for: terrain cells, the WDL far band, and — in the second query below,
+/// a different audience under the same law rather than a second system — the elected net bodies
+/// ([`ElectedBody`], decision 1270), whose roots nothing else writes.
 fn apply_exterior_cull(
     windows: Res<ExteriorWindows>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
     mut scene: Query<UnownedScene, UnownedSceneFilter>,
+    mut bodies: Query<ElectedBody>,
     mut verdict: ResMut<ExteriorCullVerdict>,
 ) {
     let set = |vis: &mut Visibility, target: Visibility| {
@@ -279,6 +338,28 @@ fn apply_exterior_cull(
             },
         );
     }
+    // The body leg: one whole-object test per net body (see [`ElectedBody`]), serial because the
+    // audience is the server's visibility stream — dozens, not the tens of thousands above.
+    let (mut body_n, mut body_hidden) = (0usize, 0usize);
+    for (gt, body, room, mut vis) in &mut bodies {
+        let Some(bound) = body.bound.as_ref() else {
+            continue; // the game says this body is not ours to decide — `WorldUnit::bound`
+        };
+        body_n += 1;
+        // In a WMO room ⇒ its building's own walk submits it, not the exterior one. No claim yet ⇒
+        // not decided. Either way the gate stands down and the body keeps drawing.
+        let exempt = room.is_none_or(|r| r.room().is_some());
+        let admitted = exempt || gate.admits(gt, Some(bound));
+        body_hidden += usize::from(!admitted);
+        set(
+            &mut vis,
+            if admitted {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            },
+        );
+    }
     *verdict = ExteriorCullVerdict {
         windows: match &*windows {
             ExteriorWindows::Unrestricted => None,
@@ -288,6 +369,8 @@ fn apply_exterior_cull(
         tested,
         hidden,
         unbounded,
+        bodies: body_n,
+        bodies_hidden: body_hidden,
     };
 }
 
@@ -385,5 +468,139 @@ mod tests {
         assert!(
             window_frustum([0.0, -1.0, MIN_WINDOW_NDC + 0.001, 1.0], &clip_from_world()).is_some()
         );
+    }
+
+    /// One `apply_exterior_cull` run over a scene built by the caller, returning each body's
+    /// verdict in spawn order plus the counters.
+    fn run_bodies(
+        windows: ExteriorWindows,
+        bodies: &[(Vec3, Option<crate::wmo_portal::UnitWmoRoom>)],
+    ) -> (Vec<Visibility>, ExteriorCullVerdict) {
+        let mut app = App::new();
+        app.init_resource::<ExteriorCullVerdict>()
+            .insert_resource(windows)
+            .add_systems(Update, apply_exterior_cull);
+        // The same camera the pure-frustum tests use: origin, down −Z, 90° fov.
+        app.world_mut().spawn((
+            WorldCamera,
+            GlobalTransform::IDENTITY,
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_2,
+                aspect_ratio: 1.0,
+                near: 0.1,
+                far: 1000.0,
+                ..default()
+            }),
+        ));
+        let ids: Vec<Entity> = bodies
+            .iter()
+            .map(|(at, room)| {
+                // A yard-ish box on the body's own origin — a creature's authored idle CAaBox.
+                let mut e = app.world_mut().spawn((
+                    GlobalTransform::from_translation(*at),
+                    crate::world_unit::WorldUnit {
+                        wades: true,
+                        scale: 1.0,
+                        height: 2.0,
+                        bound: Some(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5))),
+                    },
+                    Visibility::Inherited,
+                ));
+                if let Some(room) = *room {
+                    e.insert(room);
+                }
+                e.id()
+            })
+            .collect();
+        app.update();
+        let vis = ids
+            .iter()
+            .map(|e| *app.world().entity(*e).get::<Visibility>().unwrap())
+            .collect();
+        (vis, *app.world().resource::<ExteriorCullVerdict>())
+    }
+
+    /// The three states a body's room claim can be in — kept distinct because the middle and the
+    /// last decide opposite ways and are one `Option` layer apart.
+    fn outdoors() -> Option<crate::wmo_portal::UnitWmoRoom> {
+        Some(crate::wmo_portal::UnitWmoRoom::default()) // rayed, hit nothing
+    }
+    fn in_a_room() -> Option<crate::wmo_portal::UnitWmoRoom> {
+        // The room's *identity* is nothing to this system — only whether there is one.
+        Some(crate::wmo_portal::UnitWmoRoom::claimed(
+            crate::wmo_portal::WmoRoom {
+                instance: Entity::from_raw_u32(1).expect("a valid entity id"),
+                group: 0,
+            },
+        ))
+    }
+    const NOT_RAYED_YET: Option<crate::wmo_portal::UnitWmoRoom> = None;
+
+    /// **The Caverns of Time report, as a test** (decision 1270). Sealed room ⇒ no windows ⇒ the
+    /// exterior walk never runs, so an outdoor body is not submitted at all — while a body standing
+    /// in a WMO room rides the sibling producer `0x6834e0` and still draws. Both bodies sit at the
+    /// same spot dead ahead of the camera: the *only* thing separating them is the room claim,
+    /// which is the reference's own fork between its two producers.
+    #[test]
+    fn a_sealed_room_hides_the_outdoor_body_and_keeps_the_one_in_a_room() {
+        let ahead = Vec3::new(0.0, 0.0, -50.0);
+        let (vis, verdict) = run_bodies(
+            ExteriorWindows::Windows(Vec::new()),
+            &[(ahead, outdoors()), (ahead, in_a_room())],
+        );
+        assert_eq!(
+            vis,
+            vec![Visibility::Hidden, Visibility::Inherited],
+            "outdoors is elected to pass 2; a body in a room is submitted with its building"
+        );
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 1));
+    }
+
+    /// A body whose room has not been rayed yet is **not decided** — an unknown room is a timing
+    /// gap, not a verdict, the same law the missing-`Aabb` arm takes. Asserted in the sealed room,
+    /// which is the only state where the two answers differ.
+    #[test]
+    fn an_unrayed_body_is_not_decided() {
+        let (vis, _) = run_bodies(
+            ExteriorWindows::Windows(Vec::new()),
+            &[(Vec3::new(0.0, 0.0, -50.0), NOT_RAYED_YET)],
+        );
+        assert_eq!(vis, vec![Visibility::Inherited]);
+    }
+
+    /// Outdoors the driver takes its `{0,0,1,1}` leg and every body is submitted as before — the
+    /// arm that must never narrow, since it is the state the client spends most of its life in.
+    #[test]
+    fn outdoors_every_body_is_submitted() {
+        let (vis, verdict) = run_bodies(
+            ExteriorWindows::Unrestricted,
+            &[
+                (Vec3::new(0.0, 0.0, -50.0), outdoors()),
+                // Behind the camera, and still submitted: `Unrestricted` is a stand-down, not a
+                // frustum test. Bevy's own cull is what drops this one, one system later.
+                (Vec3::new(0.0, 0.0, 50.0), outdoors()),
+            ],
+        );
+        assert_eq!(vis, vec![Visibility::Inherited; 2]);
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 0));
+    }
+
+    /// A doorway on the right admits the body on the right and rejects the one on the left — the
+    /// same law as the terrain test above, now on a whole object rather than a chunk of ground.
+    #[test]
+    fn a_doorway_admits_only_its_own_side() {
+        let (vis, verdict) = run_bodies(
+            ExteriorWindows::Windows(vec![[0.1, -1.0, 1.0, 1.0]]),
+            &[
+                (Vec3::new(40.0, 0.0, -50.0), outdoors()),
+                (Vec3::new(-40.0, 0.0, -50.0), outdoors()),
+            ],
+        );
+        assert_eq!(
+            vis,
+            vec![Visibility::Inherited, Visibility::Hidden],
+            "the window is on the right"
+        );
+        assert_eq!((verdict.bodies, verdict.bodies_hidden), (2, 1));
     }
 }

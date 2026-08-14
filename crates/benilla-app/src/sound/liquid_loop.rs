@@ -107,6 +107,14 @@ fn drive_liquid_loops(
     let (Some(water_sounds), Some(mut kits), Some(assets)) = (water_sounds, kits, assets) else {
         return;
     };
+    // Running silent — no audio device (`WOW_NOSOUND=1`, CI, an unattended probe). A loop that
+    // fails to start is never *held*, so this system re-attempts it every frame and every attempt
+    // warns: a 75 s lava probe logged 3975 identical `no audio device` lines, 89% of the file, and
+    // paid a failed kit resolve per frame for them. The device is a startup fact that nothing here
+    // can recover, and `sound::plugin` already warns about it once (see [`SoundOutput`]).
+    if out.mixer.is_none() {
+        return;
+    }
 
     // The submerge HARD stop (no fade) + the resurface instant-restart edge.
     if world.submersion().is_water() {

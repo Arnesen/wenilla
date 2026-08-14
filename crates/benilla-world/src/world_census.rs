@@ -117,6 +117,10 @@ pub struct CullTerms {
     pub tested: usize,
     pub hidden: usize,
     pub unbounded: usize,
+    /// The body leg, kept apart from `tested`/`hidden` — see the verdict's own note for why summing
+    /// a two-dozen audience into a tens-of-thousands one erases it.
+    pub bodies: usize,
+    pub bodies_hidden: usize,
 }
 
 impl WorldCensus<'_, '_> {
@@ -244,6 +248,8 @@ impl WorldCensus<'_, '_> {
                 tested: v.tested,
                 hidden: v.hidden,
                 unbounded: v.unbounded,
+                bodies: v.bodies,
+                bodies_hidden: v.bodies_hidden,
             }),
             mats: self.mats.len(),
             meshes: self.meshes.len(),

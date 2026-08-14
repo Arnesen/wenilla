@@ -54,31 +54,42 @@ pub(crate) fn footfall_side(ident: &[u8; 4]) -> Option<u8> {
     .then_some(ident[2])
 }
 
-/// How far (seconds) into a just-switched clip the playhead may be for [`fire_anim_events`] to
-/// count it as *watched from the start* and fire its head window (`t = 0` keyframes included).
-/// Comfortably above a frame (even a hitchy one), comfortably below the corpse settle's
-/// `seek_to(duration)` (every Death clip is > 1 s).
+/// How far (seconds) into a just-armed clip the playhead may have been *at the arm* for
+/// [`advance_track`] to open the next frame's window at the clip's head (`t = 0` keyframes
+/// included). Comfortably above a frame (even a hitchy one), comfortably below the corpse
+/// settle's `seek_to(duration)` (every Death clip is > 1 s).
 const FRESH_CLIP_HEAD: f32 = 0.25;
+
+/// One scanned track's memory: the graph node playing, the seek last seen on it, and whether that
+/// seek is an **arm stamp** — the frame the clip was armed, which fires nothing (see
+/// [`advance_track`]).
+#[derive(Clone, Copy)]
+pub(crate) struct TrackSeek {
+    node: AnimationNodeIndex,
+    seek: f32,
+    armed: bool,
+}
+
+/// A scanner's per-entity track memory — the `Local` every [`advance_track`] caller owns.
+pub(crate) type TrackMemory = bevy::ecs::entity::EntityHashMap<TrackSeek>;
 
 /// Fire the event keyframes the current clip crossed since last frame. Runs after
 /// [`super::driver::drive_animations`] so the clip/seek state is this frame's. Per unit we
-/// remember `(anim_id, seek_time)`; a loop wrap fires the tail `(prev, duration]` then the head
-/// `[0, cur]`.
+/// remember the playing node and its seek ([`TrackSeek`]); a loop wrap fires the tail
+/// `(prev, duration]` then the head `[0, cur]` — a `t = 0` key really does re-fire on every wrap,
+/// in the reference too (wow-re `m2-event-track-walker.md` §2), which is why a held turn-in-place
+/// lays a footprint pair twice a second there as well.
 ///
-/// Arming: **first sight of a unit arms silently** (it streamed in mid-clip — never back-fire a
-/// window we didn't watch). A **clip change on a tracked unit fires the head window `[0, cur]`**
-/// when the playhead is near the start ([`FRESH_CLIP_HEAD`]) — we watched this clip begin, and
-/// keyframes at exactly `t = 0` are real (the emote voices: EmoteLaugh/Cry/Chicken carry their
-/// `$CSD` at `0.000`, probe-verified — the old arm-only rule silenced /laugh while mid-clip
-/// /applaud clapped). A clip change that *starts* deep in the timeline (the corpse settle's
-/// `seek_to(duration)`) stays silent — that window wasn't played.
+/// Arming is [`advance_track`]'s: an arm frame fires nothing, the frame after it opens the clip's
+/// head window (so `t = 0` keyframes are real), and a clip that doesn't survive its arm frame
+/// fires nothing at all — the reference's own walker rule, byte-cited there.
 pub(super) fn fire_anim_events(
     units: Query<(Entity, &ModelAnimations, &AnimationPlayer, &AnimDriver)>,
-    mut last: Local<bevy::ecs::entity::EntityHashMap<(AnimationNodeIndex, f32)>>,
-    // The **masked overlay** track's own `(node, seek)` memory (decision 0087): a swing/emote routed to
-    // the SpineLow overlay plays *beside* the base, so its events (a swing's `$CSS`, an emote's `$CSD`)
+    mut last: Local<TrackMemory>,
+    // The **masked overlay** track's own memory (decision 0087): a swing/emote routed to the
+    // SpineLow overlay plays *beside* the base, so its events (a swing's `$CSS`, an emote's `$CSD`)
     // are scanned on their own node — the base scan above never sees them.
-    mut last_overlay: Local<bevy::ecs::entity::EntityHashMap<(AnimationNodeIndex, f32)>>,
+    mut last_overlay: Local<TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
     anim_data: Option<Res<AnimData>>,
 ) {
@@ -105,8 +116,9 @@ pub(super) fn fire_anim_events(
         }
         // Masked overlay track: events fire from whichever track plays the clip. The overlay knows
         // its exact node — match it back to its clip (a variation's `upper_node`, decision 0114).
-        // A freshly-started overlay (seek ≈ 0) fires its head window via [`advance_track`], so an
-        // emote's `t = 0` `$CSD` voice still rings; a swing's mid-clip `$CSS` fires as normal.
+        // A freshly-started overlay fires its head window one frame after the arm via
+        // [`advance_track`], so an emote's `t = 0` `$CSD` voice still rings; a swing's mid-clip
+        // `$CSS` fires as normal.
         if let Some(ov) = drv.overlay {
             let id = resolved_id(anims, ov.id, catalog);
             let clip = anims
@@ -126,25 +138,48 @@ pub(super) fn fire_anim_events(
     }
 }
 
-/// Advance a per-track `(node, seek)` memory and return the `prev` seek to scan events from, or `None`
-/// to only arm this frame. Keyed by the playing **graph node** (not the semantic id): two variations
-/// of the same id are different timelines with different event tracks (decision 0114), and a node
-/// switch is a clip change like any other. **First sight of a unit arms silently** (it may have
-/// streamed in mid-clip — never back-fire a window we didn't watch). A **clip change caught near the
-/// start** ([`FRESH_CLIP_HEAD`]) returns `-1.0` so the head window `[0, cur]` fires — we watched this
-/// clip begin, and `t = 0` keyframes are real (the emote voices carry `$CSD` at `0.000`). A clip
-/// change that *starts* deep in its timeline (the corpse settle's `seek_to(duration)`) stays silent.
+/// Advance a per-track memory and return the `prev` seek to scan events from, or `None` to only
+/// arm this frame. Keyed by the playing **graph node** (not the semantic id): two variations of
+/// the same id are different timelines with different event tracks (decision 0114), and a node
+/// switch is a clip change like any other.
+///
+/// **The arm frame fires nothing** — the reference's own rule, and the reason this is not simply
+/// "fire the head window when you see a new clip" (decision 1273). The client's animation arm
+/// `0x7121a0` bakes the block's window start `+0xa8 = now` (`0x712758`), so on that frame the
+/// walker computes `prev == cur` and `0x719518 jae` abandons the block before reading a single
+/// key. The window only opens on the **next** frame, and it opens at the arm stamp — local
+/// `t = 0` — with the fire test `prevL <= t < curL` (`0x7196d5`–`0x7196d9`), so `t = 0` keyframes
+/// are real (the emote voices carry `$CSD` at `0.000`) but only for a clip that is **still armed a
+/// frame later**. A clip armed and abandoned inside one frame fires nothing at all, which is what
+/// keeps a flickering Shuffle↔Stand churn silent in the reference — and is exactly what our
+/// fire-on-the-arm-frame rule turned into a footprint carpet under a stuttering mouse-turn.
+///
+/// So: a clip change (and first sight of a unit — it may have streamed in mid-clip) records the
+/// arm and returns `None`; the frame after an arm returns `-1.0`, opening the head window
+/// `[0, cur]`. An arm that *starts* deep in its timeline (the corpse settle's `seek_to(duration)`,
+/// past [`FRESH_CLIP_HEAD`]) opens at its own stamp instead, so a settled corpse never replays its
+/// collapse's keys.
 pub(crate) fn advance_track(
-    last: &mut bevy::ecs::entity::EntityHashMap<(AnimationNodeIndex, f32)>,
+    last: &mut TrackMemory,
     entity: Entity,
     node: AnimationNodeIndex,
     cur: f32,
 ) -> Option<f32> {
-    match last.insert(entity, (node, cur)) {
-        Some((pnode, p)) if pnode == node => Some(p),
-        Some(_) if cur <= FRESH_CLIP_HEAD => Some(-1.0),
-        _ => None,
-    }
+    let was = last.get(&entity).copied().filter(|t| t.node == node);
+    last.insert(
+        entity,
+        TrackSeek {
+            node,
+            seek: cur,
+            armed: was.is_none(),
+        },
+    );
+    let was = was?; // the arm frame itself: recorded, scanned never
+    Some(if was.armed && was.seek <= FRESH_CLIP_HEAD {
+        -1.0
+    } else {
+        was.seek
+    })
 }
 
 /// Fire the event keyframes `clip` crossed on `(prev, cur]`. A loop wrap (`cur < prev`) fires the
@@ -211,5 +246,142 @@ mod tests {
 
     fn lossy(t: &[u8; 4]) -> String {
         String::from_utf8_lossy(t).into_owned()
+    }
+
+    fn track() -> (TrackMemory, Entity, AnimationNodeIndex, AnimationNodeIndex) {
+        (
+            TrackMemory::default(),
+            Entity::from_raw_u32(1).expect("valid entity id"),
+            AnimationNodeIndex::new(7),  // ShuffleLeft, say
+            AnimationNodeIndex::new(11), // Stand
+        )
+    }
+
+    /// **The arm frame scans nothing, and the frame after it opens the clip's head.** The
+    /// reference's arm (`0x7121a0`) stamps the block's window start at `now`, so the walker's
+    /// `prev == cur` abandons the block that frame (`0x719518`); the next frame's window opens at
+    /// that stamp — local `t = 0`, lower-inclusive — which is what makes an emote's `t = 0.000`
+    /// `$CSD` real without making it fire a frame early.
+    #[test]
+    fn an_arm_frame_is_silent_and_the_next_frame_opens_the_head() {
+        let (mut last, unit, shuffle, _) = track();
+        assert_eq!(
+            advance_track(&mut last, unit, shuffle, 0.0),
+            None,
+            "the arm frame itself scans nothing"
+        );
+        assert_eq!(
+            advance_track(&mut last, unit, shuffle, 0.016),
+            Some(-1.0),
+            "the frame after the arm opens the head window [0, cur]"
+        );
+        assert_eq!(
+            advance_track(&mut last, unit, shuffle, 0.032),
+            Some(0.016),
+            "…and steady frames scan (prev, cur] as before"
+        );
+    }
+
+    /// **A clip armed and abandoned inside one frame fires nothing** — the report this rule was
+    /// written for (decision 1273). A stuttering mouse-turn flickers the gait Shuffle↔Stand at
+    /// input cadence, and HumanMale's ShuffleLeft keys `$SL0`+`$SR0` at `t = 0.000`: firing on the
+    /// arm frame laid a footprint pair per flicker, where the reference lays none.
+    #[test]
+    fn a_clip_armed_for_one_frame_never_fires() {
+        let (mut last, unit, shuffle, stand) = track();
+        for _ in 0..8 {
+            assert_eq!(advance_track(&mut last, unit, shuffle, 0.0), None);
+            assert_eq!(advance_track(&mut last, unit, stand, 0.0), None);
+        }
+    }
+
+    /// An arm that *starts* deep in its timeline — the corpse settle's `seek_to(duration)` —
+    /// opens at its own stamp, never at the head: a body that streamed in dead must not replay
+    /// the collapse's `$DTH` keys.
+    #[test]
+    fn an_arm_deep_in_the_timeline_never_opens_the_head() {
+        let (mut last, unit, death, _) = track();
+        assert_eq!(advance_track(&mut last, unit, death, 2.0), None);
+        assert_eq!(
+            advance_track(&mut last, unit, death, 2.0),
+            Some(2.0),
+            "the window opens at the settle stamp — (2.0, 2.0] is empty"
+        );
+    }
+
+    /// The turn-in-place cadence, which this change deliberately leaves alone: HumanMale's
+    /// ShuffleLeft (anim 11) is a **0.500 s loop** whose only keys are `$SL0` and `$SR0`, both at
+    /// `t = 0.000`, and the reference re-fires a `t = 0` key on **every wrap** (wow-re
+    /// `m2-event-track-walker.md` §2, byte-traced) — so a held turn lays a print pair twice a
+    /// second in the real client too.
+    #[test]
+    fn a_loop_wrap_refires_the_head_keys() {
+        let clip = shuffle_clip();
+        assert_eq!(fired(&clip, -1.0, 0.016), vec![*b"$SL0", *b"$SR0"], "head");
+        assert!(
+            fired(&clip, 0.016, 0.4).is_empty(),
+            "mid-lap: nothing keyed"
+        );
+        assert_eq!(
+            fired(&clip, 0.48, 0.01),
+            vec![*b"$SL0", *b"$SR0"],
+            "the wrap fires the tail (empty here) then the head — both feet again"
+        );
+    }
+
+    /// HumanMale ShuffleLeft's real shape (`benilla-extract m2events`): 0.500 s, looping, keys
+    /// `$SL0` and `$SR0` both at 0.000.
+    fn shuffle_clip() -> AnimClip {
+        AnimClip {
+            anim_id: 11,
+            seq_index: 38,
+            node: AnimationNodeIndex::new(7),
+            looping: true,
+            duration: 0.5,
+            move_speed: 0.0,
+            blend_time: 0.15,
+            bounds_center: bevy::prelude::Vec3::ZERO,
+            bounds_radius: 0.0,
+            bounds_min: bevy::prelude::Vec3::ZERO,
+            bounds_max: bevy::prelude::Vec3::ZERO,
+            events: vec![
+                benilla_formats::AnimEvent {
+                    time: 0.0,
+                    ident: *b"$SL0",
+                    data: 0,
+                },
+                benilla_formats::AnimEvent {
+                    time: 0.0,
+                    ident: *b"$SR0",
+                    data: 0,
+                },
+            ]
+            .into(),
+            arm_nodes: None,
+            upper_node: None,
+            frequency: 0,
+            replay: (0, 0),
+            poses_bones: true,
+        }
+    }
+
+    /// The idents [`scan_events`] fires over one `(prev, cur]` window, in order.
+    fn fired(clip: &AnimClip, prev: f32, cur: f32) -> Vec<[u8; 4]> {
+        use bevy::ecs::system::RunSystemOnce;
+        #[derive(bevy::prelude::Resource)]
+        struct Window(AnimClip, f32, f32);
+        let mut world = bevy::prelude::World::new();
+        world.init_resource::<bevy::ecs::message::Messages<AnimSoundEvent>>();
+        world.insert_resource(Window(clip.clone(), prev, cur));
+        world
+            .run_system_once(
+                |win: bevy::prelude::Res<Window>, mut out: MessageWriter<_>| {
+                    let unit = Entity::from_raw_u32(1).expect("valid entity id");
+                    scan_events(&win.0, unit, win.1, win.2, &mut out);
+                },
+            )
+            .expect("run_system_once");
+        let mut msgs = world.resource_mut::<bevy::ecs::message::Messages<AnimSoundEvent>>();
+        msgs.drain().map(|m| m.ident).collect()
     }
 }

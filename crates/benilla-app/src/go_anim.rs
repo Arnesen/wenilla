@@ -680,13 +680,12 @@ fn drive_go_collision(
 /// The playing clip is found as the creature scanner finds a variation track: of the clips with
 /// a live [`AnimationPlayer`] play, the smallest seek is the newest arm (a cross-fade's fading
 /// source is older by construction). The shared [`advance_track`]/[`scan_events`] helpers give
-/// the same arming rules — first sight silent, a watched clip-start fires its `t = 0` head, a
-/// loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never fires.
+/// the same arming rules — an arm frame fires nothing, the frame after it fires the clip's `t = 0`
+/// head, a loop wrap fires tail-then-head — and a frozen rate-0 leg never advances, so it never
+/// fires.
 fn fire_go_anim_events(
     gos: Query<(Entity, &ModelAnimations, &AnimationPlayer), With<GoAnim>>,
-    mut last: Local<
-        bevy::ecs::entity::EntityHashMap<(bevy::animation::graph::AnimationNodeIndex, f32)>,
-    >,
+    mut last: Local<crate::creature_anim::TrackMemory>,
     mut out: MessageWriter<AnimSoundEvent>,
 ) {
     for (entity, anims, player) in &gos {

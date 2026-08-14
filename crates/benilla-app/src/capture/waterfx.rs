@@ -133,6 +133,9 @@ pub(crate) fn spawn(
             wades: true,
             scale: 1.0,
             height: crate::entities::CollisionHeight::default().0,
+            // The fixture is a foam rig, not a scene body: it has no model box and the capture is
+            // outdoors, where the exterior cull stands down anyway. `None` = don't decide.
+            bound: None,
         },
         crate::entities::VisualAttached,
         Transform::from_translation(wow_to_bevy([start_x, cy, surf - view.depth])),

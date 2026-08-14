@@ -413,6 +413,28 @@ fn scope_entity_art(
     scope.apply(&mut composites.0, benilla_world::art_scope::ArtSlot::Skins);
 }
 
+/// **The armed idle's authored CAaBox for a built body**, model space — recorded by
+/// [`attach_entity_visuals`] where the display model is read, and restated onto
+/// [`WorldUnit::bound`](benilla_world::world_unit::WorldUnit::bound) by [`publish_world_units`].
+///
+/// Split from the field it feeds for the same reason `CollisionHeight` is: the attach knows the
+/// number, the reconciler owns the component, and one writer per component is decision 0025. Absent
+/// until a body's model resolves — and on a body that never gets one, absent for good.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct ModelBound(pub(crate) bevy::camera::primitives::Aabb);
+
+/// Everything [`publish_world_units`] reads to restate one body: its wire record, the two
+/// game-side components whose numbers it folds in, whether its `Visibility` is the transport
+/// tick's, and what it currently says.
+type WireBody = (
+    Entity,
+    &'static NetEntity,
+    Option<&'static collision_height::CollisionHeight>,
+    Option<&'static ModelBound>,
+    Has<crate::transport::TransportAnchor>,
+    Option<&'static benilla_world::world_unit::WorldUnit>,
+);
+
 /// **Restate every wire body as a [`WorldUnit`](benilla_world::world_unit::WorldUnit)** — the game's half
 /// of the unit inversion (see that module).
 ///
@@ -423,19 +445,14 @@ fn scope_entity_art(
 /// visible to the world this frame.
 fn publish_world_units(
     mut commands: Commands,
-    bodies: Query<(
-        Entity,
-        &NetEntity,
-        Option<&collision_height::CollisionHeight>,
-        Option<&benilla_world::world_unit::WorldUnit>,
-    )>,
+    bodies: Query<WireBody>,
     viewers: Query<(
         Entity,
         Has<crate::net::SelfPlayer>,
         Has<benilla_world::world_unit::ViewerUnit>,
     )>,
 ) {
-    for (entity, net, height, current) in &bodies {
+    for (entity, net, height, bound, anchored, current) in &bodies {
         let want = benilla_world::world_unit::WorldUnit {
             // The wire kind is answered HERE and never handed over (1177): the engine asks "does
             // this body displace water", and translating its own vocabulary into that answer is
@@ -448,11 +465,21 @@ fn publish_world_units(
             // swims on dry land". A body whose display has not resolved yet must read as a
             // default-sized body, which is what the foam site did before this component existed.
             height: height.copied().unwrap_or_default().0,
+            // The box the exterior cull may elect this body by (decision 1270). **A transport
+            // answers `None` on purpose**: `transport::tick_transports` writes that root's
+            // `Visibility` every frame off its own timetable, and a second writer there is the
+            // fight decision 0025 exists to prevent — so the world is told not to decide, rather
+            // than told a box and left to race. Every other body offers its model's box, once it
+            // has one.
+            bound: (!anchored).then_some(bound).flatten().map(|b| b.0),
         };
         // Only write on a real change: the component is change-detected downstream, and a
         // per-frame rewrite would mark every body dirty for every reader every frame.
         let same = current.is_some_and(|c| {
-            c.wades == want.wades && c.scale == want.scale && c.height == want.height
+            c.wades == want.wades
+                && c.scale == want.scale
+                && c.height == want.height
+                && c.bound == want.bound
         });
         if !same {
             commands.entity(entity).insert(want);

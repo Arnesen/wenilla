@@ -154,6 +154,10 @@ fn feed_mirror_timers(
             ),
             MirrorTimerEdge::Stop { .. } => ("MIRROR_TIMER_STOP", vec![name]),
         };
+        // One line per edge. The bars live inside the script VM, so from outside it a mirror
+        // timer is otherwise unobservable — and "did the server start a breath timer *here*?" is
+        // the first question of any drowning / fatigue / liquid-hazard probe.
+        debug!("net: mirror timer {event} {edge:?}");
         script.fire_event(event, args);
     }
 }

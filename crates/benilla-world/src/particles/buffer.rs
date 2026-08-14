@@ -51,7 +51,7 @@ pub struct EffectVertex {
 }
 
 /// The lane's blend variants (0733 §4) — a superset of the file-format enums it serves:
-/// [`ParticleBlend`]'s three, plus the multiplicative pair the decal family and rain need.
+/// [`ParticleBlend`]'s four, plus the multiplicative pair the decal family and rain need.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum EffectBlend {
     /// `(SRC_ALPHA, ONE)` via premultiplied-alpha + the shader's gamma `rgb·a` fold (0160/0161).
@@ -60,6 +60,11 @@ pub enum EffectBlend {
     Alpha,
     /// No blend, depth-write ON — drawn in the transparent bracket at the owner rung (0719).
     Opaque,
+    /// [`EffectBlend::Opaque`]'s state plus the fixed-function **alpha test** — the fragment is
+    /// discarded below `224/255` ([`benilla_assets`]'s `VANILLA_ALPHA_KEY_REF`, the same ref the
+    /// mesh path's cutouts take). EGxBlend 1, the debris/chip family; the byte chain that pins
+    /// blend-off + z-write-on + that ref is on [`ParticleBlend::AlphaKey`].
+    AlphaKey,
     /// `dst · lerp(1, src, α)` — bevy's `AlphaMode::Multiply` state (`(Dst, 1−srcα)` + shader
     /// premultiply, bevy_pbr mesh.rs:2486): the blob shadow's `GL_DST_COLOR/GL_ZERO`-with-fade,
     /// and `ModelBlend::Mod` (0528) at α = 1.
@@ -73,6 +78,7 @@ impl From<ParticleBlend> for EffectBlend {
         match blend {
             ParticleBlend::Add => EffectBlend::Add,
             ParticleBlend::Alpha => EffectBlend::Alpha,
+            ParticleBlend::AlphaKey => EffectBlend::AlphaKey,
             ParticleBlend::Opaque => EffectBlend::Opaque,
         }
     }
@@ -80,9 +86,11 @@ impl From<ParticleBlend> for EffectBlend {
 
 impl EffectBlend {
     /// The ground-fx mapping from a part's authored blend — `model_render.rs`'s law with the
-    /// lane's two named approximations: `AlphaTest` folds to `Alpha` (no Mask variant here; the
-    /// groundscan census says flat `Spells\` quads are blend batches), and the part renders unlit
-    /// (spell fx are; a lit ground quad would differ — none observed).
+    /// lane's two named approximations: `AlphaTest` folds to `Alpha` (**deliberately not**
+    /// [`EffectBlend::AlphaKey`], which the particle side now takes — the groundscan census says
+    /// flat `Spells\` quads are blend batches, and a cutout ref on a soft-edged decal would bite
+    /// its fade), and the part renders unlit (spell fx are; a lit ground quad would differ — none
+    /// observed).
     ///
     /// `additive` is a SECOND, non-optional input because [`ModelBlend`] cannot express additive:
     /// M2 blend modes 3/4 fold into its `Blend` variant (see its own doc, "Alpha-blended /

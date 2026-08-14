@@ -21,13 +21,29 @@ const MLIQ_CELL_STEP: f32 = f32::from_bits(0x4085_5555);
 /// ≈ 16.67 yd. We anchor each vertex's UV to its **model-space position** over this period so the
 /// texture is one continuous field across all of a WMO's MLIQ surfaces — no per-surface seam.
 ///
-/// VERIFIED mechanism (wow-re `rf-mliq-liquid-uv-texgen.md`): the reference's per-vertex `st` DOES
-/// reset per surface (raw `(i, j)`) — seamlessness comes from a shared **world-anchored** `GL_TEXTURE`
-/// matrix that translates by the liquid batch's common bbox-min origin. Anchoring off a shared origin
-/// is the fix; model space is our equivalent realization (identical within a single WMO placement,
-/// which Stormwind is). DEFERRED to the exact form (a world-space texture matrix): the matrix's scale
-/// — the true yards-per-repeat — is still INFERRED upstream (`[owner+0x94]`, unlocated), so `4·STEP`
-/// stands as the size that preserves the prior ripple; fold the verified scale in when it lands.
+/// **The mechanism this was built on has since been REFUTED, and the number is now known to be 4×
+/// too large** (wow-re `liquid-uv-scroll-law.md`, a six-agent §5 that supersedes
+/// `rf-mliq-liquid-uv-texgen.md`). That earlier note claimed the reference reaches seamlessness with
+/// a world-anchored `GL_TEXTURE` matrix pushed at transform index 8. It does not: index 8 is the
+/// **world/modelview** transform (`0x59ca60`'s first block feeds slots 10 and 8 to `0x5a0090` →
+/// `glMatrixMode(GL_MODELVIEW)`; only 0–7 are texture stages), and the water arms push no texture
+/// matrix at all — the sole `0x58b210` call in `[0x6b6000,0x6b7000)` is the magma/slime scroll.
+///
+/// What the reference actually does is simpler: `0x6b6630` writes `u = (float)i`, `v = (float)j`,
+/// the **raw integer tile indices**, from loop counters that both start at a literal 0. One repeat
+/// per grid cell means every surface boundary lands on an exact repeat boundary, so a neighbour
+/// restarting at 0 is invisible — the seam-free look is the *scale*, not a matrix. Our `¼` is a
+/// quarter of that, i.e. our WMO water texture is four times too big, and the model-space anchoring
+/// is machinery we do not need.
+///
+/// **NOT changed here on purpose.** Correcting it is a 4× visual change to every WMO water surface
+/// in the game (Stormwind's canals and fountains, every dungeon pool) and the look is the director's
+/// call, not a byte-fidelity autopilot's (`method.md` §9 / the contract §7). Decision 1271 carries the
+/// evidence and the proposal; this constant stands until they have looked at the A/B.
+///
+/// Magma/slime have a *separate* correction pending in the same record: the reference reads their
+/// `st` from the MLIQ vertex's authored `int16` pair × `1/256` (`movsx`, `0x6b6993`), which we do not
+/// parse at all and generate over this period instead.
 const MLIQ_UV_PERIOD: f32 = 4.0 * MLIQ_CELL_STEP;
 
 /// The swatch-coord `V` fed to every WMO **water/ocean** vertex. WMO liquid verts carry flow bytes,

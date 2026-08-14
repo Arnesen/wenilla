@@ -280,8 +280,13 @@ pub(super) fn apply_model_visibility(
 ///
 /// - **`vis=Hidden`** — [`apply_model_visibility`] above said no: a toggle, the far-clip wall, a
 ///   fully-faded doodad, an `A ≤ 0` material track, the portal PVS or the exterior window gate.
-/// - **`vis=Inherited view=false`** — *we* admitted it and **Bevy's frustum cull** dropped it,
-///   which means the entity's `Aabb` does not describe what it draws.
+/// - **`vis=Inherited inh=false`** — *this* part said yes and an **ancestor** said no. For a body
+///   part that is the exterior-scene election (decision 1270), which is decided once on the net
+///   root and inherits down; it is also how a transport hides its deck. Without this field the
+///   line was indistinguishable from the frustum case below — the election arrived after the
+///   trace did, and a body vanishing for the right reason would have read as a bound bug.
+/// - **`vis=Inherited inh=true view=false`** — everything of ours admitted it and **Bevy's frustum
+///   cull** dropped it, which means the entity's `Aabb` does not describe what it draws.
 ///
 /// That second line is the whole of decisions 1259 and 1261 — an animated placement whose bound was
 /// its bind pose, and then the same bound silently recomputed at the twin swap — and both were
@@ -324,6 +329,7 @@ type TracedModels<'w, 's> = Query<
         &'static crate::interact::WorldObject,
         &'static GlobalTransform,
         &'static Visibility,
+        &'static InheritedVisibility,
         &'static ViewVisibility,
         Option<&'static Aabb>,
     ),
@@ -348,7 +354,7 @@ pub(super) fn trace_model_visibility(
     let (cam_pos, cam_fwd) = cam_t.map_or((Vec3::ZERO, Vec3::Z), |t| {
         (t.translation(), Vec3::from(t.forward()))
     });
-    for (e, object, xf, vis, view, aabb) in &q {
+    for (e, object, xf, vis, inherited, view, aabb) in &q {
         if !object.label.to_ascii_lowercase().contains(&trace.needle) {
             continue;
         }
@@ -364,10 +370,12 @@ pub(super) fn trace_model_visibility(
         };
         let depth = (centre - cam_pos).dot(cam_fwd);
         println!(
-            "VIS_TRACE {e} {label} vis={vis:?} view={view} origin=[{ox:.1},{oy:.1},{oz:.1}] \
+            "VIS_TRACE {e} {label} vis={vis:?} inh={inh} view={view} \
+             origin=[{ox:.1},{oy:.1},{oz:.1}] \
              bound=[{cx:.1},{cy:.1},{cz:.1}] r={radius:.1} depth={depth:.1} \
              cam=[{px:.1},{py:.1},{pz:.1}]",
             label = object.label,
+            inh = inherited.get(),
             view = view.get(),
             ox = xf.translation().x,
             oy = xf.translation().y,
