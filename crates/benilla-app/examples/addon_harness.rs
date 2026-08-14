@@ -68,15 +68,180 @@ fn render_frames(frames: &[String]) -> String {
     format!("{},+{} more", frames[..cap].join(","), frames.len() - cap)
 }
 
+/// Our `_G` against the captured 1.12 `_G` — decision 1189's diff, re-runnable.
+///
+/// 1189 did this once, by hand, and its finding was that **a superset is not free**: 1.12 addons
+/// branch on presence (`if SomeName then`), so a name we publish that the reference does not have
+/// can route an addon down a path the real client never takes. That makes BOTH directions of this
+/// diff interesting, and the extra-names side the one nothing else in this harness can see — every
+/// other ranking here is demand-driven, so it can only ever report what an addon *asked* for.
+///
+/// The reference side is `reference/1.12-globals.tsv`, itself generated from wow-re's live capture.
+/// `lod` rows are the twelve LoadOnDemand `Blizzard_*` addons' names, unioned in by 1200 because a
+/// live dump misses them unless the player opened those windows; they are counted separately rather
+/// than silently folded in, since "absent from us" means something different for a window nobody
+/// opened.
+fn surface_report(deep: bool, dump_path: Option<String>) {
+    let tsv = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../reference/1.12-globals.tsv"
+    );
+    let Ok(text) = std::fs::read_to_string(tsv) else {
+        eprintln!("cannot read the reference surface at {tsv}");
+        std::process::exit(1);
+    };
+
+    let mut reference: std::collections::BTreeMap<String, String> = Default::default();
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let mut f = line.split('\t');
+        if let (Some(name), Some(kind)) = (f.next(), f.next()) {
+            if !name.is_empty() {
+                reference.insert(name.to_string(), kind.to_string());
+            }
+        }
+    }
+
+    let ours: std::collections::BTreeMap<String, String> =
+        addon_harness::surface().into_iter().collect();
+
+    // `--surface-dump <file>` writes our raw `_G` as `name<TAB>type`, the same shape the reference
+    // TSV has, so the two can be joined by anything. The printed report answers the questions I
+    // thought to ask; a sweep two sessions from now will have different ones, and re-deriving our
+    // side by scraping a human-readable report is exactly how a measurement quietly goes wrong.
+    if let Some(path) = dump_path {
+        let body: String = ours
+            .iter()
+            .map(|(n, k)| format!("{n}\t{k}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        match std::fs::write(&path, format!("# our _G — {} names\n{body}", ours.len())) {
+            Ok(()) => println!("  wrote {} names to {path}", ours.len()),
+            Err(e) => eprintln!("  could not write {path}: {e}"),
+        }
+    }
+
+    println!("\n  SURFACE DIFF — our _G vs the captured 1.12 _G (decision 1189)");
+    println!("  FrameXML digest : {}", addon_harness::framexml_digest());
+    println!("  reference names : {}", reference.len());
+    println!("  ours            : {}", ours.len());
+
+    // Absent from us, by the reference's own type — a function we lack is a different problem from
+    // a string we lack, and `lod` is a third thing again.
+    let mut missing_by_kind: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (name, kind) in &reference {
+        if !ours.contains_key(name) {
+            missing_by_kind
+                .entry(kind.as_str())
+                .or_default()
+                .push(name.as_str());
+        }
+    }
+    println!("\n  ABSENT FROM US, by the reference's type:");
+    for (kind, names) in &missing_by_kind {
+        println!("    {:<10} {}", kind, names.len());
+    }
+
+    // The direction 1189 cared about and nothing else here can see.
+    //
+    // **Split by OUR type, because the total on its own misleads.** Most of these are `table` — the
+    // frame and region names our own FrameXML publishes, which differ from Blizzard's simply
+    // because our XML is our own reimplementation and names its pieces itself. That is not the
+    // hazard 1189 described. The hazard is a **function**: `if SomeApiName then` is how a 1.12
+    // addon feature-tests, and a verb we publish that the client never had can route it down a path
+    // the real client never takes. So the function row is the one to read first, and the one a
+    // future landing should be able to drive to zero.
+    let extra: Vec<(&str, &str)> = ours
+        .iter()
+        .filter(|(n, _)| !reference.contains_key(n.as_str()))
+        .map(|(n, k)| (n.as_str(), k.as_str()))
+        .collect();
+    let mut extra_by_kind: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (name, kind) in &extra {
+        extra_by_kind.entry(kind).or_default().push(name);
+    }
+    println!(
+        "\n  PUBLISHED BY US, ABSENT FROM 1.12 ({}) — a superset is not free (1189):",
+        extra.len()
+    );
+    for (kind, names) in &extra_by_kind {
+        let note = match *kind {
+            "function" => "  <- the ones an addon feature-tests; read these first",
+            "table" => "  <- mostly our own FrameXML's frame/region names",
+            _ => "",
+        };
+        println!("    {:<10} {}{}", kind, names.len(), note);
+    }
+    // Functions in full even without --deep: it is the row that matters and it has to be readable.
+    //
+    // Split again on the `Benilla` prefix, which is the difference between a name that CAN collide
+    // with an addon's expectations and one that cannot. Nothing in the 1.12 corpus feature-tests
+    // `BenillaBagSlot_OnClick`; our own namespace is safe by construction, and leaving 443 of those
+    // in the list would bury the ones that are not.
+    if let Some(fns) = extra_by_kind.get("function") {
+        let (ours_ns, unprefixed): (Vec<&&str>, Vec<&&str>) = fns
+            .iter()
+            .partition(|n| n.starts_with("Benilla") || n.starts_with("BENILLA"));
+        println!(
+            "\n  ...of those functions: {} are Benilla*-namespaced (cannot collide), {} are NOT:",
+            ours_ns.len(),
+            unprefixed.len()
+        );
+        for chunk in unprefixed.chunks(4) {
+            let row: Vec<&str> = chunk.iter().map(|s| **s).collect();
+            println!("      {}", row.join("  "));
+        }
+        println!(
+            "    ^ read these: an unprefixed verb 1.12 lacks is what `if SomeName then` finds.\n      \
+             Most are our own UI's helpers (AddonList_*, KeyBindings_*, Options*), which are only\n      \
+             a naming question — but a POST-1.12 API name here is 1189's hazard exactly, because an\n      \
+             addon that feature-tests it takes a branch written for a client we are not."
+        );
+    }
+    if deep {
+        for (kind, names) in &extra_by_kind {
+            if *kind == "function" {
+                continue;
+            }
+            println!("\n  ...EXTRA {} ({}):", kind, names.len());
+            for chunk in names.chunks(4) {
+                println!("      {}", chunk.join("  "));
+            }
+        }
+    }
+
+    if deep {
+        for (kind, names) in &missing_by_kind {
+            println!("\n  ABSENT FROM US — {} ({}):", kind, names.len());
+            for chunk in names.chunks(4) {
+                println!("      {}", chunk.join("  "));
+            }
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(root) = args.next() else {
         eprintln!(
-            "usage: addon_harness <folder of addons> [--verbose] [--why <blocker substring>]"
+            "usage: addon_harness <folder of addons> [--verbose] [--why <blocker substring>]\n   \
+             or: addon_harness --surface   (our _G vs the captured 1.12 surface; takes no corpus)"
         );
         std::process::exit(2);
     };
     let rest: Vec<String> = args.collect();
+
+    // `--surface` — decision 1189's comparison, made re-runnable. It needs no corpus, so it is
+    // handled before the root is used for anything.
+    if root == "--surface" || rest.iter().any(|a| a == "--surface") {
+        let dump_path = rest
+            .iter()
+            .position(|a| a == "--surface-dump")
+            .and_then(|i| rest.get(i + 1))
+            .cloned();
+        surface_report(rest.iter().any(|a| a == "--deep"), dump_path);
+        return;
+    }
+
     let verbose = rest.iter().any(|a| a == "--verbose");
     // `--why <substring>` — the addons behind one row, with their verbatim errors. The
     // ranked table collapses quoted names by design (1193); this is the read-back, and two of this

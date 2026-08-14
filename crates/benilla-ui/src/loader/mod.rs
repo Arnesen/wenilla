@@ -209,9 +209,16 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
     {
         let model = loader.model();
         let templates = model.framexml_templates.borrow();
-        for name in template.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        // One name, verbatim, folded — the same law `framexml::expand` resolves under, kept in
+        // step so this diagnostic cannot disagree with the resolution it describes.
+        for name in [template].into_iter().filter(|s| !s.is_empty()) {
             // A name that is missing entirely is `expand`'s warning to give, just below.
-            let Some(el) = templates.get(name) else {
+            let Some(el) = templates.get(name).or_else(|| {
+                templates
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v)
+            }) else {
                 continue;
             };
             any_resolved = true;

@@ -309,7 +309,17 @@
         inside ref l.292's `<Anchor point="TOPLEFT">d` (a typo in Blizzard's own shipped file — not
         transcribed).
     -->
-    <Frame name="BenillaGroupLootFrameTemplate" frameStrata="DIALOG" hidden="true" virtual="true">
+    <!--
+        THE REFERENCE'S OWN NAME, deliberately un-prefixed (decision 1254).
+
+        This was `BenillaGroupLootFrameTemplate`. The `Benilla` prefix marks things WE invented, so
+        that nothing we made up can collide with a name an addon expects; this template is the
+        opposite of that — a line-by-line transcription of 1.12's `GroupLootFrameTemplate`, and
+        addons inherit it BY THAT NAME. Bongos_RollBar builds its four roll frames with
+        `CreateFrame("Frame", "BRollBarFrame"..i, bar, "GroupLootFrameTemplate")`, which resolves on
+        the real client and missed here for no reason but our prefix.
+    -->
+    <Frame name="GroupLootFrameTemplate" frameStrata="DIALOG" hidden="true" virtual="true">
         <Size><AbsDimension x="243" y="84"/></Size>
         <Layers>
             <Layer level="ARTWORK">
@@ -476,26 +486,26 @@
 
     <!-- The four instances (ref l.498-533): frame 1 at the ref's own hardcoded BOTTOM+60; each next
          frame stacks on the previous one's TOP+15. -->
-    <Frame name="GroupLootFrame1" inherits="BenillaGroupLootFrameTemplate" id="1">
+    <Frame name="GroupLootFrame1" inherits="GroupLootFrameTemplate" id="1">
         <Anchors>
             <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="60"/></Offset></Anchor>
         </Anchors>
     </Frame>
-    <Frame name="GroupLootFrame2" inherits="BenillaGroupLootFrameTemplate" id="2">
+    <Frame name="GroupLootFrame2" inherits="GroupLootFrameTemplate" id="2">
         <Anchors>
             <Anchor point="BOTTOM" relativeTo="GroupLootFrame1" relativePoint="TOP">
                 <Offset><AbsDimension x="0" y="15"/></Offset>
             </Anchor>
         </Anchors>
     </Frame>
-    <Frame name="GroupLootFrame3" inherits="BenillaGroupLootFrameTemplate" id="3">
+    <Frame name="GroupLootFrame3" inherits="GroupLootFrameTemplate" id="3">
         <Anchors>
             <Anchor point="BOTTOM" relativeTo="GroupLootFrame2" relativePoint="TOP">
                 <Offset><AbsDimension x="0" y="15"/></Offset>
             </Anchor>
         </Anchors>
     </Frame>
-    <Frame name="GroupLootFrame4" inherits="BenillaGroupLootFrameTemplate" id="4">
+    <Frame name="GroupLootFrame4" inherits="GroupLootFrameTemplate" id="4">
         <Anchors>
             <Anchor point="BOTTOM" relativeTo="GroupLootFrame3" relativePoint="TOP">
                 <Offset><AbsDimension x="0" y="15"/></Offset>

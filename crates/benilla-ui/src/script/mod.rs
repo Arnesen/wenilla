@@ -989,11 +989,17 @@ impl UiScript {
     ///
     /// A pure query on the VM's live registry, for the corpus harness: an addon naming a template
     /// we have not transcribed gets a bare frame and **no load error**, so nothing else can see it.
+    /// **Folded**, because the resolution it reports on is folded. An exact `contains_key` made this
+    /// census disagree with the loader the moment `inherits=` became case-insensitive: it went on
+    /// listing `UIDropdownMenuTemplate`, `CT_RaCheckButtonTemplate` and `MSBTColorSwatchTemplate` as
+    /// missing while the loader was resolving all three. An instrument that reports a gap the code
+    /// does not have is worse than no instrument — it is a build queue pointing at finished work
+    /// (1242/1246, and 1251 §3's rule that a source-derived answer be checked against the runtime
+    /// artefact).
     pub fn has_framexml_template(&self, name: &str) -> bool {
-        self.model_ref()
-            .framexml_templates
-            .borrow()
-            .contains_key(name)
+        let model = self.model_ref();
+        let templates = model.framexml_templates.borrow();
+        templates.contains_key(name) || templates.keys().any(|k| k.eq_ignore_ascii_case(name))
     }
 
     /// Is `name` a registered FONT object — the *other* thing an `inherits=` may legally name?

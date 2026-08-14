@@ -919,3 +919,42 @@ fn an_unrecognised_unit_token_raises_and_a_recognised_empty_one_does_not() {
     assert!(s.run(r#"UnitIsUnit("bogus", "player")"#).is_err());
     assert!(s.run(r#"UnitIsUnit("player", "party3")"#).is_ok());
 }
+
+/// **A multibyte unit token must not take the client down.**
+///
+/// The prefix test used to slice the token as a `&str` — `token[..p.len()]` — which PANICS when the
+/// token is multibyte UTF-8 and the prefix length lands mid-character ("byte index N is not a char
+/// boundary"). Any addon passing a non-ASCII token would have crashed the process rather than
+/// getting the `Unknown unit name` raise the client gives.
+///
+/// The client compares with `_strnicmp` over BYTES and folds ASCII only, so byte comparison is both
+/// the safe form and the faithful one — a token whose bytes differ above 0x7F is simply not one of
+/// the nine prefixes.
+#[test]
+fn a_multibyte_unit_token_raises_rather_than_panicking() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit("player", Some(player()));
+
+    // Each of these has a multibyte character positioned so that a byte-index slice at one of the
+    // prefix lengths (3 for `pet`, 4 for `raid`, 5 for `party`, 6 for `player`/`target`) would land
+    // inside it.
+    for token in ["pé", "раid", "playér", "targét", "мышь", "日本語のトークン"] {
+        let err = s
+            .run(&format!(r#"UnitName("{token}")"#))
+            .expect_err("a non-ASCII token matches no prefix, so it raises")
+            .to_string();
+        assert!(
+            err.contains("Unknown unit name"),
+            "it must RAISE, not panic and not answer: {err}"
+        );
+    }
+    // …and an ASCII token that merely shares a prefix's leading bytes still behaves.
+    assert!(s
+        .eval::<Option<String>>(r#"return UnitName("playerfoo")"#)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        s.eval::<String>(r#"return UnitName("player")"#).unwrap(),
+        "Benilla"
+    );
+}

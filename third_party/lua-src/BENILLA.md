@@ -35,15 +35,21 @@ downgrade, and it is the entire reason this is a one-hunk fork rather than a ven
 
 ## The delta, and the command that proves it
 
-**Current state: no source hunk yet.** The `lua-5.1.5/` tree here is byte-identical to upstream's,
-and `src/lib.rs` differs only by having Lua 5.2/5.3/5.4/5.5 stripped from the `Version` enum (with
-their source trees deleted) — benilla builds 5.1 and only 5.1, and a fork that still *offered* the
-other four would answer a request for one with a missing directory at build time instead of a
-compile error.
+**Current state: two hunks, in two files.** `src/lib.rs` additionally differs by having Lua
+5.2/5.3/5.4/5.5 stripped from the `Version` enum (with their source trees deleted) — benilla builds
+5.1 and only 5.1, and a fork that still *offered* the other four would answer a request for one with
+a missing directory at build time instead of a compile error.
 
-This ordering is deliberate: the build pipeline is proven transparent **before** any behavioural
-payload goes into it, so that when the suite moves, the patch is the only thing that could have
-moved it. Landed inert, with all tests passing, exactly so that claim is checkable.
+| file | hunk | why | record |
+|---|---|---|---|
+| `lvm.c` | 5.0's `OP_TFORPREP` table→`next` substitution, folded into the top of `OP_TFORLOOP` | `for k, v in someTable do` raised "attempt to call a table value"; it was the first session-start error for **60** corpus addons | 1215 |
+| `luaconf.h` | `LUA_COMPAT_LSTR` `1` → `2` | 5.1 kept 5.0's nesting machinery and put an advisory error in front of it; two corpus addons died on "nesting of `[[...]]` is deprecated" | — |
+
+The ordering was deliberate and it held: the fork landed **inert**, byte-identical to upstream, so
+the build pipeline was proven transparent *before* any behavioural payload went into it — and when
+the suite then moved, the patch was the only thing that could have moved it. Both hunks are measured
+against the 218-addon corpus rather than argued: the long-string one alone took loaded 134 → 139 and
+survivors 99 → 104.
 
 To verify the Lua sources against upstream at any time:
 
@@ -53,17 +59,20 @@ diff -r third_party/lua-src/lua-5.1.5 \
   ~/.cargo/registry/src/*/lua-src-550.0.0/lua-5.1.5
 ```
 
-Today that prints nothing. When the payload lands it must print **exactly** the hunk described in
-decision 1215 and nothing else — if it ever prints more, something crept in.
+That must print **exactly** the two hunks in the table above and nothing else. If it ever prints
+more, something crept in.
 
 ## Status of the payload
 
-Blocked, deliberately, on a reverse-engineering answer from the sibling repo `wow-5875-re`: what the
-**real 1.12.1 client's own Lua** does when a generic-for's generator is a table. Stock Lua 5.0 is
-corroboration, not the authority — the client links 5.0 but may be modified.
+**Landed.** The reverse-engineering answer this was deliberately blocked on came back from
+`wow-5875-re` (`system/ui/scratch/lua-generic-for.md`) and is what the `lvm.c` comment cites, detail
+by detail: a **bare type-tag** test that never consults a metatable (so a table carrying `__call`
+still gets `next`), the **global** `next` read raw and fetched fresh at every loop entry (so an addon
+assigning `next = myfn` changes every later generic-for in the session), and userdata *not*
+substituted.
 
-Checking stock 5.0 already corrected two assumptions the project had written down (it substitutes in
-`OP_TFORPREP`, an opcode 5.1 deleted, *not* in `OP_TFORLOOP`; and the test is a bare `ttistable`
-with **no** `__call` check, using the **global** `next` — so an addon that overwrites `next` changes
-loop behaviour). Two corrections from checking one step out is the reason for checking the next one
-before writing C.
+Waiting was the right call twice over. Checking stock 5.0 first corrected two assumptions the
+project had already written down — the substitution happens in `OP_TFORPREP`, an opcode 5.1 deleted,
+*not* in `OP_TFORLOOP`; and the test is a bare `ttistable` with no `__call` check. Stock 5.0 was
+corroboration, never the authority: the client links 5.0 but may be modified, and only the byte-read
+of the client settles what it actually does.

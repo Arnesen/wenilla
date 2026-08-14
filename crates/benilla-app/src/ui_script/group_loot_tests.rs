@@ -594,3 +594,52 @@ fn ctrl_and_shift_on_the_roll_icon_preview_and_post_its_link() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The roll-frame template is published under **the reference's own name**, and an addon that
+/// inherits it finds the parts it reaches for (decision 1254).
+///
+/// It shipped as `BenillaGroupLootFrameTemplate`. The `Benilla` prefix exists so a name WE invented
+/// cannot collide with one an addon expects — and this template is the opposite of an invention: a
+/// line-by-line transcription of 1.12's own `GroupLootFrameTemplate`, which addons inherit *by that
+/// name*. `Bongos_RollBar/bar.lua:90` builds its four roll frames with
+/// `CreateFrame("Frame", "BRollBarFrame"..i, bar, "GroupLootFrameTemplate")`; that resolves on the
+/// real client and missed here for no reason but our prefix.
+///
+/// The child names are the actual contract, so they are what this asserts. `bar.lua` reaches for
+/// `<name>IconFrameIcon`, `<name>Name`, `<name>Corner`, `<name>Decoration` and `<name>Timer` — and
+/// `IconFrameIcon` is the one a flat template would get wrong, because it requires the icon texture
+/// to be nested inside the `IconFrame` **button**, not hung off the template root.
+#[test]
+fn the_roll_template_carries_the_reference_name_and_the_parts_addons_reach_for() {
+    let s = setup();
+    load_xml(&s, "GroupLootFrame.xml");
+
+    // The reference's name resolves — and, since 1253, a miss would RAISE rather than hand back a
+    // bare frame, so this call failing is this test failing.
+    s.run(r#"Probe = CreateFrame("Frame", "ProbeRoll", nil, "GroupLootFrameTemplate")"#)
+        .expect("the reference-named template must resolve");
+
+    for part in [
+        "IconFrame",
+        "IconFrameIcon",
+        "Name",
+        "Corner",
+        "Decoration",
+        "Timer",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!(r#"return getglobal("ProbeRoll{part}") ~= nil"#))
+                .unwrap(),
+            "an addon inheriting the template must find ProbeRoll{part}"
+        );
+    }
+
+    // The timer is a StatusBar, not a plain frame: `bar.lua:33` calls SetMinMaxValues on it.
+    s.run(r#"ProbeRollTimer:SetMinMaxValues(0, 60000)"#)
+        .expect("the timer must answer StatusBar verbs");
+
+    // And the old private name is gone, so nothing can quietly depend on it again.
+    assert!(s
+        .eval::<bool>(r#"return getglobal("BenillaGroupLootFrameTemplate") == nil"#)
+        .unwrap());
+}

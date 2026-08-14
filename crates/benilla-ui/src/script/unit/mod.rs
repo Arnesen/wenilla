@@ -416,7 +416,15 @@ pub(crate) fn token_recognised(token: &str) -> bool {
     token.eq_ignore_ascii_case("npc")
         || UNIT_TOKEN_PREFIXES
             .iter()
-            .any(|p| token.len() >= p.len() && token[..p.len()].eq_ignore_ascii_case(p))
+            // BYTES, not a string slice. `token[..p.len()]` panics when the token is multibyte
+            // UTF-8 and the prefix length lands mid-character ("byte index N is not a char
+            // boundary") — an addon passing a non-ASCII token would take the client down. The
+            // client's own compare is `_strnicmp` over bytes with an ASCII-only fold, so byte
+            // comparison is both the safe form and the faithful one.
+            .any(|p| {
+                token.len() >= p.len()
+                    && token.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+            })
 }
 
 /// The gate every `Unit*` binding puts an addon-supplied token through.

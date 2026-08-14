@@ -1130,11 +1130,19 @@ fn a_sticky_whose_group_is_gone_opens_as_say() {
 /// branch on either way.
 #[test]
 fn an_inbound_addon_line_splits_on_the_first_tab_only() {
-    const PARTY: u8 = 0x01;
-    const RAID: u8 = 0x03;
-    const GUILD: u8 = 0x04;
-    const BATTLEGROUND: u8 = 0x18;
-    const SAY: u8 = 0x00;
+    // **Imported, not hand-copied.** These read `0x03`/`0x04`/`0x18` for RAID/GUILD/BATTLEGROUND,
+    // which are all wrong — and because the test carried the SAME wrong bytes as the code under
+    // test, it agreed with the defect instead of catching it. A test that restates the value it is
+    // checking cannot fail on that value; taking it from the protocol crate is what makes it a
+    // check rather than an echo.
+    use benilla_protocol::messages as m;
+    let party = m::CHAT_TYPE_PARTY as u8;
+    let raid = m::CHAT_TYPE_RAID as u8;
+    let guild = m::CHAT_TYPE_GUILD as u8;
+    let battleground = m::CHAT_TYPE_BATTLEGROUND as u8;
+    let say = m::CHAT_TYPE_SAY as u8;
+    #[allow(non_snake_case)]
+    let (PARTY, RAID, GUILD, BATTLEGROUND, SAY) = (party, raid, guild, battleground, say);
 
     let mut log = super::feed::ChatLog::default();
     // The ordinary shape.

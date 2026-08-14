@@ -979,3 +979,53 @@ fn the_font_block_reaches_both_message_frame_tables() {
         "creating the style region must not re-justify the frame to the FontString default"
     );
 }
+
+/// `CreateFontString`'s **third argument** applies a font object — the argument we accepted and
+/// then dropped on the floor (decision 1255).
+///
+/// 49 corpus call sites across 5 distinct addons pass one, and every one names a font object:
+/// AckisRecipeList (28), CustomNameplates (10), _LazyPig (6), LibAboutPanel (4), ColorPickerPlus.
+/// Five separate addons, so this is not one library file replicated. Ignoring it was 1203's class —
+/// the addon asks for a font, the call succeeds, and the text comes out in the default with no
+/// failure anywhere to point at.
+///
+/// The **order** is the part a reimplementation loses: the font-object registry is tried FIRST and
+/// the template registry only on a font miss (`0x773d39` then `0x773d47`). A template-first
+/// resolver would miss all 49 of these, because `inherits=` is one argument over two namespaces.
+#[test]
+fn create_font_string_applies_the_font_object_named_by_its_third_argument() {
+    let s = script();
+    load(
+        &s,
+        r#"<Ui>
+             <Font name="GameFontNormalSmall" font="Fonts\FRIZQT__.TTF">
+               <FontHeight><AbsValue val="12"/></FontHeight>
+               <Color r="1" g="0.82" b="0"/>
+             </Font>
+             <Frame name="Host"/>
+           </Ui>"#,
+    );
+
+    // Exactly `_LazyPig/LazyPigMenu.lua:88`'s line.
+    s.run(r#"FS = Host:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")"#)
+        .expect("the font-object form must be accepted");
+    let (face, height, _flags) = s
+        .eval::<(String, f32, String)>("return FS:GetFont()")
+        .expect("the region must carry the font object's face and height");
+    assert_eq!(face, "Fonts\\FRIZQT__.TTF");
+    assert_eq!(height, 12.0);
+
+    // A name in NEITHER registry raises — the same contract 1253 set for CreateFrame, and the same
+    // bytes (`luaL_error`, which never returns).
+    let err = s
+        .run(r#"Bad = Host:CreateFontString(nil, "ARTWORK", "NoSuchFontOrTemplate")"#)
+        .expect_err("a name in neither registry must raise");
+    assert!(
+        err.to_string().contains("NoSuchFontOrTemplate"),
+        "the raise must name what was looked up: {err}"
+    );
+
+    // Texture takes the same argument through the same resolver (1 real corpus site).
+    s.run(r#"TX = Host:CreateTexture(nil, "OVERLAY")"#)
+        .expect("the two-argument form still works");
+}

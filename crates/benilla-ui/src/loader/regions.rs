@@ -270,16 +270,18 @@ impl Loader<'_> {
         let model = self.model();
         let fonts = model.framexml_fonts.borrow();
         let templates = model.framexml_templates.borrow();
-        for entry in inherits.split(',').map(str::trim) {
+        // One name, not a comma list — 1.12's lookup has no splitter, and supporting one is a
+        // superset of it. Folded on the probe, like the resolution itself.
+        for entry in [inherits] {
             let mut name = entry.to_string();
             for _ in 0..MAX_HOPS {
-                if fonts.contains_key(&name) {
+                if fonts.contains_key(&name) || fonts.keys().any(|k| k.eq_ignore_ascii_case(&name))
+                {
                     return Some(name);
                 }
                 let Some(next) = templates
                     .get(&name)
                     .and_then(|t| t.attr("inherits"))
-                    .and_then(|i| i.split(',').map(str::trim).next())
                     .map(str::to_string)
                 else {
                     break;

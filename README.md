@@ -71,6 +71,10 @@ Early inspiration and file format guidance came from the
 [warcraft-rs](https://github.com/wowemulation-dev/warcraft-rs) in particular.
 
 benilla is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
-It contains no Blizzard code or assets, and you provide your own legally obtained 1.12.1 client
-for game data. World of Warcraft is a trademark of Blizzard Entertainment, Inc. Licensed under
-[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+It ships **no Blizzard game data** — no art, models, sounds, maps or MPQ contents — and you provide
+your own legally obtained 1.12.1 client for all of it. Parts of the interface layer under
+`crates/benilla-app/assets/ui/` are **transcribed from the client's own FrameXML** (its Lua and XML),
+cited in place with the reference file and line range; that is Blizzard's authorship, not ours, and
+it is not covered by the licence below. World of Warcraft is a trademark of Blizzard Entertainment,
+Inc. Our own code is licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your
+option.

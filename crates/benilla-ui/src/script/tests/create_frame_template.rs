@@ -146,11 +146,17 @@ fn a_nested_frames_child_is_named_against_the_caller() {
     assert!(s.take_warnings().is_empty());
 }
 
-/// `inherits="A, B"` is a LIST, and the runtime path resolves it through the very same
-/// [`crate::framexml::expand`] the XML path uses — including chains, splice order and the cycle
-/// guard, none of which is written twice.
+/// The template argument is **one name**, on this path exactly as on the XML one — and a chain
+/// through a single name still resolves.
+///
+/// This asserted the opposite until the registry lookup was carved. `"TemplA, TemplB"` is not a
+/// list, it is a literal name nothing declared: 1.12's `CreateFrame` reaches the same `0x6ee6f0`
+/// the XML loader does (call site `0x7061dd`) with the string Lua handed it, and the loader has no
+/// splitter anywhere — comma lists are a **later**-client feature. Corroborated by the corpus:
+/// 6842 `inherits=` across 282 vanilla XML files contain **zero** comma lists, while the modern
+/// Blizzard UI source is full of them.
 #[test]
-fn an_inherits_list_picks_up_every_template_in_it() {
+fn a_comma_list_is_one_name_and_a_single_name_still_chains() {
     let mut s = script();
     register(
         &s,
@@ -168,60 +174,116 @@ fn an_inherits_list_picks_up_every_template_in_it() {
              </Frame>
            </Ui>"#,
     );
-    s.run(r#"Both = CreateFrame("Frame", "Both", nil, "TemplA, TemplB")"#)
-        .unwrap();
 
-    // From A (itself inheriting TemplRoot — the chain resolves).
+    // A single name still walks its whole chain. This is what keeps the narrowing honest: it
+    // removes the list, not the inheritance.
+    s.run(r#"One = CreateFrame("Frame", "One", nil, "TemplA")"#)
+        .unwrap();
     assert_eq!(
-        s.eval::<(f32, f32)>("return Both:GetWidth(), Both:GetHeight()")
+        s.eval::<(f32, f32)>("return One:GetWidth(), One:GetHeight()")
             .unwrap(),
         (50.0, 60.0)
     );
-    assert_eq!(s.eval::<f32>("return Both:GetAlpha()").unwrap(), 0.25);
-    // From B.
-    assert!(s
-        .eval::<bool>(r#"return getglobal("BothBTex") ~= nil"#)
-        .unwrap());
+    assert_eq!(s.eval::<f32>("return One:GetAlpha()").unwrap(), 0.25);
+    assert!(s.take_errors().is_empty());
+    assert!(s.take_warnings().is_empty());
+
+    // The comma form is one literal name, nothing declared it, so it RAISES — naming the whole
+    // unsplit string, which is the proof it was never split.
+    let err = s
+        .run(r#"Both = CreateFrame("Frame", "Both", nil, "TemplA, TemplB")"#)
+        .expect_err("a comma list is one name, and it misses");
+    let text = err.to_string();
+    assert!(
+        text.contains("TemplA, TemplB"),
+        "the miss must name the literal it looked up, unsplit: {text}"
+    );
+    assert!(
+        s.eval::<bool>(r#"return getglobal("Both") == nil"#)
+            .unwrap(),
+        "a missed template must leave no frame behind"
+    );
+}
+
+/// The case fold, with the four names the corpus actually mis-cases.
+///
+/// The compare is `SStrCmpI` → `_strnicmp`, and the trap that decides it is the bucket hash:
+/// `SStrHash 0x64b3f0` uppercases before mixing, so a mis-cased name lands in the same bucket and
+/// the stored-hash pre-check passes rather than short-circuiting. ASCII-only, like every other fold
+/// in this engine.
+#[test]
+fn a_template_name_is_matched_case_insensitively() {
+    let mut s = script();
+    register(
+        &s,
+        r#"<Ui>
+             <Frame name="CT_RACheckButtonTemplate" virtual="true" alpha="0.25">
+               <Size><AbsDimension x="50" y="60"/></Size>
+             </Frame>
+           </Ui>"#,
+    );
+    // Exactly the shape `CT_RaidAssist/CT_RAOptions.xml` ships: `RA` written `Ra`.
+    s.run(r#"Cased = CreateFrame("Frame", "Cased", nil, "CT_RaCheckButtonTemplate")"#)
+        .unwrap();
+    assert_eq!(
+        s.eval::<(f32, f32)>("return Cased:GetWidth(), Cased:GetHeight()")
+            .unwrap(),
+        (50.0, 60.0)
+    );
     assert!(s.take_errors().is_empty());
     assert!(s.take_warnings().is_empty());
 }
 
-/// An unusable template name never takes the frame with it — the reference creates the frame
-/// anyway, and an addon's next line already assumes it did. Both flavours of "unusable" are here:
-/// a name nothing declared, and a name declared **without `virtual="true"`** (only virtual
-/// elements are ever registered as templates, so from the registry's side the two look alike).
+/// An unresolvable template name **raises, and creates nothing**.
+///
+/// This test asserted the exact opposite — *"the reference creates the frame anyway, and an addon's
+/// next line already assumes it did"* — until the bytes were read. `0x7061dd` looks the name up and
+/// on NULL falls into `luaL_error(L, "CreateFrame(): Couldn't find inherited node \"%s\"")`, which
+/// **never returns**: `luaG_errormsg` and `luaD_throw` contain no `ret` between them and end in
+/// `longjmp`, so the `xor eax,eax; ret` that follows the call is dead code. (That trailing `ret` is
+/// a fact about `luaL_error`'s `int` return type in C, not about reachability — which is exactly
+/// how the old claim was arrived at.)
+///
+/// Both flavours of "unusable" raise, because the registry only ever holds `virtual="true"`
+/// elements, so a name declared without it misses the lookup identically to a name nothing declared.
+///
+/// The ordering is asserted too: the miss precedes construction and name publication (`0x706208` /
+/// `0x70622d`), so nothing partial is left behind — no frame, and no global.
 #[test]
-fn an_unusable_template_still_returns_a_usable_frame_and_says_so() {
-    let mut s = script();
+fn an_unresolvable_template_raises_and_creates_nothing() {
+    let s = script();
     register(&s, r#"<Ui><Frame name="PlainFrame"/></Ui>"#);
 
     for (frame, template) in [("Orphan", "NoSuchTemplate"), ("Plainer", "PlainFrame")] {
-        s.run(&format!(
-            r#"{frame} = CreateFrame("Button", "{frame}", nil, "{template}")
-               {frame}:SetWidth(5)
-               {frame}:Show()"#
-        ))
-        .unwrap_or_else(|e| panic!("{frame} must be usable: {e}"));
-        assert_eq!(
-            s.eval::<String>(&format!("return {frame}:GetName()"))
-                .unwrap(),
-            frame
-        );
-        assert_eq!(
-            s.eval::<f32>(&format!("return {frame}:GetWidth()"))
-                .unwrap(),
-            5.0
+        let err = s
+            .run(&format!(
+                r#"{frame} = CreateFrame("Button", "{frame}", nil, "{template}")"#
+            ))
+            .expect_err("an unresolvable template must raise");
+        let text = err.to_string();
+        assert!(
+            text.contains("Couldn't find inherited node") && text.contains(template),
+            "the raise must carry the reference's message and the name: {text}"
         );
 
-        let warnings = s.take_warnings();
+        // Nothing partial: no global published, and the name never reached the arena.
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains(template) && w.contains(frame)),
-            "a warning must name both the template and the frame it was asked for: {warnings:?}"
+            s.eval::<bool>(&format!(r#"return getglobal("{frame}") == nil"#))
+                .unwrap(),
+            "{frame} was published despite the miss"
         );
-        assert!(s.take_errors().is_empty(), "a bad template is not an error");
     }
+
+    // And it is ordinary Lua propagation — `pcall` catches it, which is what keeps one bad
+    // CreateFrame inside a handler from taking the client down (the widget dispatcher runs every
+    // handler under `lua_pcall`).
+    assert!(
+        !s.eval::<bool>(
+            r#"return (pcall(CreateFrame, "Button", "Caught", nil, "NoSuchTemplate"))"#
+        )
+        .unwrap(),
+        "the raise must be pcall-catchable"
+    );
 }
 
 /// The two shape mismatches, neither of which may panic or drop the frame.

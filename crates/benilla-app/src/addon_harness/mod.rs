@@ -528,8 +528,6 @@ fn survey_one(
         .union(&wants.tested_methods)
         .cloned()
         .collect();
-    eprintln!("INSTRMEASURE\t{name}\t{}", script.instructions_used());
-    eprintln!("INSTRM	{name}	{}", script.instructions_used());
     let oracle = widget_method_kinds(&script, &asked);
     let missing_methods = unresolved_from(&oracle, &wants.wanted_methods);
     let optional_methods = unresolved_from(&oracle, &wants.tested_methods);
@@ -1081,22 +1079,48 @@ fn missing_templates(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> V
             let Some(close) = rest[open..].find(')') else {
                 continue;
             };
-            let Some(fourth) = rest[open + 1..open + close].split(',').nth(3) else {
+            // Split the ARGUMENT LIST at depth 0 only. A plain `split(',')` cuts inside nested
+            // calls and strings, and it produced a phantom: AceGUI's
+            //
+            //     CreateFrame("ScrollFrame", format("%s@%s@%s", Type, "ScrollFrame", …), backdrop, …)
+            //
+            // has its 4th comma-separated chunk INSIDE `format(...)`, so the census reported a
+            // missing template literally named `ScrollFrame` — which is a frame KIND, not a
+            // template, and named nothing that was ever missing. One of four rows in that table was
+            // fiction (1210/1218/1227, the fourth time a ranking here has opened with one).
+            let args = &rest[open + 1..open + close];
+            let mut depth = 0i32;
+            let mut quote: Option<char> = None;
+            let mut fields: Vec<&str> = Vec::new();
+            let mut start = 0usize;
+            for (bi, c) in args.char_indices() {
+                match (quote, c) {
+                    (Some(q), c) if c == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, '"' | '\'') => quote = Some(c),
+                    (None, '(' | '[' | '{') => depth += 1,
+                    (None, ')' | ']' | '}') => depth -= 1,
+                    (None, ',') if depth == 0 => {
+                        fields.push(&args[start..bi]);
+                        start = bi + 1;
+                    }
+                    _ => {}
+                }
+            }
+            fields.push(&args[start..]);
+            let Some(fourth) = fields.get(3) else {
                 continue;
             };
             let f = fourth.trim();
-            // A quoted literal, either quote style. `inherits` is a comma-separated LIST in
-            // FrameXML and `CreateFrame` takes the same shape, so split it.
+            // A quoted literal, either quote style, taken WHOLE. This used to split the literal on
+            // commas, on the belief that the fourth argument is a list; it is not — 1.12 looks up
+            // the string it was handed, once.
             let lit = f
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
                 .or_else(|| f.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
-            if let Some(lit) = lit {
-                wanted.extend(
-                    lit.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()),
-                );
+            if let Some(lit) = lit.filter(|s| !s.is_empty()) {
+                wanted.insert(lit.to_string());
             }
         }
     }
@@ -1137,10 +1161,13 @@ fn missing_inherits(script: &UiScript, root: &Path, name: &str, toc: &Toc) -> Ve
             let Some(end) = rest[1..].find(quote) else {
                 continue;
             };
+            // ONE name, verbatim — the attribute value is what the loader looks up, commas and
+            // spaces included. Splitting here made the census ask about names the loader never
+            // asks for: a comma list would be reported as two missing templates when the real
+            // lookup misses once, on the whole string.
             wanted.extend(
-                rest[1..1 + end]
-                    .split(',')
-                    .map(|s| s.trim().to_string())
+                [rest[1..1 + end].to_string()]
+                    .into_iter()
                     .filter(|s| !s.is_empty()),
             );
         }
@@ -1184,6 +1211,52 @@ fn source_files(root: &Path, name: &str, toc: &Toc) -> Vec<String> {
 /// edit by anything sharing the checkout moves the headline with no rebuild and no announcement.
 pub fn framexml_digest() -> String {
     crate::ui_script::framexml_digest()
+}
+
+/// Every name our VM publishes into `_G`, with its Lua type — **no addons loaded**.
+///
+/// The other half of decision 1189's diff. 1189 established that the authoritative 1.12 surface is
+/// already captured (the running client's in-world `_G`, 19,572 entries, vendored here as
+/// `reference/1.12-globals.tsv`) and compared our table against it *once*, by hand. Nothing has
+/// re-run it since, so the comparison has been drifting ever since — which is the failure mode this
+/// project keeps writing records about: a measurement taken once and then cited as though it were
+/// current.
+///
+/// Deliberately addon-free. The question is what OUR interface publishes, and an addon's own globals
+/// would inflate both directions of the diff with names that belong to nobody but that addon.
+///
+/// The dump runs in Lua rather than reaching into the registry from Rust, because `_G` is the thing
+/// an addon actually sees — the same reasoning that made the reference side a live capture instead
+/// of the binary's registration table.
+pub fn surface() -> Vec<(String, String)> {
+    let Ok(mut script) = UiScript::new() else {
+        return Vec::new();
+    };
+    script.set_instruction_budget(ADDON_INSTRUCTION_BUDGET);
+    script.set_screen_size(1024.0, 768.0);
+    script.register_addons(Vec::new(), None, None, None);
+    seat_a_session(&mut script);
+    let _ = crate::ui_script::load_default_ui(&script);
+
+    let dump: String = script
+        .eval(
+            r#"
+            local out = {}
+            for k, v in pairs(_G) do
+              if type(k) == "string" then
+                out[table.getn(out) + 1] = k .. "\t" .. type(v)
+              end
+            end
+            table.sort(out)
+            return table.concat(out, "\n")
+        "#,
+        )
+        .unwrap_or_default();
+
+    dump.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .collect()
 }
 
 /// The real `GlobalStrings.lua`, read once off the install's patch chain.

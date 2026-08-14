@@ -164,12 +164,26 @@ impl ChatLog {
             Some(i) => (text[..i].to_string(), text[i + 1..].to_string()),
             None => (text.to_string(), String::new()),
         };
-        let distribution = match chat_type {
-            0x01 => "PARTY",
-            0x03 => "RAID",
-            0x04 => "GUILD",
-            0x18 => "BATTLEGROUND",
-            _ => "UNKNOWN",
+        // **The protocol constants, not hand-copied bytes.** Three of the four literals here were
+        // WRONG: RAID is `0x2` and this said `0x03`, GUILD is `0x3` and this said `0x04`, and
+        // BATTLEGROUND is `0x5C` and this said `0x18`. The visible effect was not a dropped
+        // message but a MISLABELLED one — a real guild addon message arrived at
+        // `CHAT_MSG_ADDON` as `"RAID"`, while real raid and battleground traffic fell to
+        // `"UNKNOWN"` — so an addon branching on the distribution acted on the wrong lane.
+        //
+        // The outbound half (`net::addon_wire_chat_type`) always used the named constants and its
+        // own doc calls itself "the one place a distribution becomes a wire byte". It was not: this
+        // was the other one, and it disagreed. Both ends now read the same symbols, so they cannot
+        // drift apart again.
+        let distribution = {
+            use benilla_protocol::messages as m;
+            match u32::from(chat_type) {
+                m::CHAT_TYPE_PARTY => "PARTY",
+                m::CHAT_TYPE_RAID => "RAID",
+                m::CHAT_TYPE_GUILD => "GUILD",
+                m::CHAT_TYPE_BATTLEGROUND => "BATTLEGROUND",
+                _ => "UNKNOWN",
+            }
         }
         .to_string();
         self.pending.push(Pending::Addon {

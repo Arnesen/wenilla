@@ -598,7 +598,10 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
     s.run(r#"Raiser = CreateFrame("EditBox", "RaiserBox")"#)
         .unwrap();
     for name in [
-        // No keyboard index / `EnableKeyboard` yet (wow-re `scripts-auto-enable.md` kinds 0/1).
+        // The FLAG exists (`EnableKeyboard`/`IsKeyboardEnabled`, 1252); what is still absent is the
+        // keyboard INDEX and the strata walk that would deliver a key to a frame carrying it, so
+        // these three stay unfired (wow-re `scripts-auto-enable.md` kinds 0/1). Being enabled is
+        // not being a handler — the carve is explicit that the two are separable.
         "OnKeyDown",
         "OnKeyUp",
         "OnChar",

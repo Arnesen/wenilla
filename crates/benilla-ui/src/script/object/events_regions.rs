@@ -134,11 +134,26 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // Regions
+    // `CreateTexture(name, layer, inheritsFrom)` — the third argument accepted for the same reason
+    // and with the same resolver, though the demand is a rounding error beside FontString's: of
+    // 1329 corpus call sites exactly TWO pass a third argument, and one of those passes `nil`
+    // (CustomNameplates:437, a four-argument later-client form). Accepted rather than skipped
+    // because dropping it silently is the very class this fixes, and one real site is still a site.
     m.set(
         "CreateTexture",
         lua.create_function(
-            |lua, (this, name, layer): (Table, Option<String>, Option<String>)| {
-                create_region(lua, &this, RegionKind::Texture, name, layer)
+            |lua,
+             (this, name, layer, inherits): (
+                Table,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )| {
+                let wrapper = create_region(lua, &this, RegionKind::Texture, name, layer)?;
+                if let Some(from) = inherits.as_deref().filter(|s| !s.is_empty()) {
+                    apply_region_inherits(lua, &wrapper, from)?;
+                }
+                Ok(wrapper)
             },
         )?,
     )?;
@@ -222,11 +237,36 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
+    // The THIRD argument is `inheritsFrom`, and we were dropping it on the floor.
+    //
+    // 49 corpus call sites across 5 distinct addons pass one — AckisRecipeList (28),
+    // CustomNameplates (10), _LazyPig (6), LibAboutPanel (4), ColorPickerPlus (1) — and **every one
+    // of them names a FONT OBJECT**: GameFontNormalSmall (15), GameFontNormal (11),
+    // GameFontHighlightSmall (10), GameFontHighlight (9), GameFontNormalLarge (3), GameFontDisable.
+    // Five separate addons, so this is not one library file replicated (1207 checked, not assumed).
+    // Ignoring it is 1203's class exactly: the addon asks for a font, we accept the call, and the
+    // string comes out in whatever the default is with no failure anywhere.
+    //
+    // The resolution order is carved (`0x773c30`): the FONT-object registry FIRST (`0x773d39`,
+    // create=0), and only on a font miss the template registry (`0x773d47`). This routes through
+    // the `SetFontObject` binding rather than reaching into the model, which is the same call the
+    // XML `<FontString inherits=>` path makes — one implementation of "apply a font object", not
+    // two that can drift.
     m.set(
         "CreateFontString",
         lua.create_function(
-            |lua, (this, name, layer): (Table, Option<String>, Option<String>)| {
-                create_region(lua, &this, RegionKind::FontString, name, layer)
+            |lua,
+             (this, name, layer, inherits): (
+                Table,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )| {
+                let wrapper = create_region(lua, &this, RegionKind::FontString, name, layer)?;
+                if let Some(from) = inherits.as_deref().filter(|s| !s.is_empty()) {
+                    apply_region_inherits(lua, &wrapper, from)?;
+                }
+                Ok(wrapper)
             },
         )?,
     )?;
@@ -346,6 +386,44 @@ fn get_script(lua: &Lua, this: &Table, name: &str) -> mlua::Result<Value> {
         Value::Table(t) => t.get::<Value>(kind),
         _ => Ok(Value::Nil),
     }
+}
+
+/// `CreateTexture`/`CreateFontString`'s third argument — `inheritsFrom` — in the carved order.
+///
+/// **Font-object registry first, template registry second** (`0x773d39` then `0x773d47`). That
+/// order is not cosmetic: `inherits=` is one attribute over two namespaces, and every corpus caller
+/// of this argument names a font object, so a template-first resolver would miss all 49 of them.
+///
+/// A name in NEITHER registry raises, which is the same contract 1253 established for `CreateFrame`
+/// and the same bytes (`luaL_error`, `0x87957c` / `0x879544`, which never returns).
+///
+/// A name that IS a registered template but not a font object is a deliberate gap rather than a
+/// silent one: the lookup succeeded, so the reference would not raise, and re-interpreting a
+/// template node onto an existing region is a different mechanism from applying a font object. It
+/// warns and leaves the region usable — the distinction 1253 drew between *the lookup missing* and
+/// *the result being unusable*. Zero corpus callers reach it.
+fn apply_region_inherits(lua: &Lua, wrapper: &Table, from: &str) -> mlua::Result<()> {
+    use mlua::ObjectLike;
+    // The font object is applied through the binding the XML path uses, so there is one
+    // implementation of "apply a font object" rather than two that can drift apart.
+    if wrapper.call_method::<()>("SetFontObject", from).is_ok() {
+        return Ok(());
+    }
+    let is_template = {
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let templates = model.framexml_templates.borrow();
+        templates.contains_key(from) || templates.keys().any(|k| k.eq_ignore_ascii_case(from))
+    };
+    if is_template {
+        let mut model = lua.app_data_mut::<Model>().expect("model");
+        model.warnings.push(format!(
+            "CreateTexture/CreateFontString: '{from}' is a registered TEMPLATE, not a font object;              the region is created but the template's content is not applied (no corpus caller              does this)"
+        ));
+        return Ok(());
+    }
+    Err(mlua::Error::runtime(format!(
+        "Couldn't find inherited node \"{from}\""
+    )))
 }
 
 fn create_region(

@@ -328,15 +328,40 @@ fn expand_inner(
         return element.clone();
     };
 
+    // ── ONE name, matched case-INSENSITIVELY (wow-re, template-name lookup) ────────────────────
+    //
+    // **No comma splitting.** 1.12's registry lookup `0x6ee6f0` has no splitter at all:
+    // `inherits="A, B"` is ONE literal name, misses, and applies neither template. Supporting the
+    // list is what LATER clients do, so splitting here made us a superset of 1.12 (1189). Nothing
+    // uses it — 0 comma lists in our own assets, 0 across the 218-addon corpus, and 0 in stock
+    // Blizzard XML's 249 distinct `inherits=` values.
+    //
+    // **Case-insensitive.** The compare is `SStrCmpI` → `_strnicmp` at `0x6ee747`, and the trap
+    // that decides it is the BUCKET HASH: `SStrHash 0x64b3f0` uppercases before mixing, so a
+    // mis-cased name lands in the same bucket and the stored-hash pre-check passes rather than
+    // short-circuiting. `Recap`'s `inherits="UIDropdownMenuTemplate"` (lowercase d) resolves on the
+    // real client. ASCII-only, like every other fold in this engine — bytes >= 0x80 are untouched.
+    //
+    // The fold is done as a scan on miss rather than by re-keying the view, because this same
+    // function resolves the FONT registry too and both are name→element maps of the same shape.
+    // Verbatim — not trimmed. `GetAttribute 0x6f2cf0` returns the parsed value as expat stored it
+    // (`SStrDup`, no trim, no fold), and the empty test is a single `cmp [esi],0` on the first
+    // byte: `inherits=""` is a silent skip, `inherits=" "` is a lookup that misses.
     let mut base: Option<Element> = None;
-    for name in inherits.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for name in [inherits].into_iter().filter(|s| !s.is_empty()) {
         if !active.insert(name.to_string()) {
             warnings.push(format!(
                 "inheritance cycle detected at template '{name}'; skipping this reference"
             ));
             continue;
         }
-        let Some(template) = templates.get(name) else {
+        let hit = templates.get(name).copied().or_else(|| {
+            templates
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        });
+        let Some(template) = hit else {
             warnings.push(format!(
                 "unknown template '{name}' referenced by inherits; skipping"
             ));
@@ -566,8 +591,19 @@ print(x)</Script>
         assert!(doc.warnings.is_empty());
     }
 
+    /// `inherits="A, B"` is **one name**, not a list — and it misses.
+    ///
+    /// This test used to assert the opposite (that both templates merged, children concatenated in
+    /// order). That was a superset of 1.12 borrowed from later clients: the carve found no splitter
+    /// anywhere in the loader — all 8 call sites hand `0x6ee6f0` the pointer `GetAttribute`
+    /// returned, one or two instructions later, and no comma is examined in `0x6ed000–0x6f6000` at
+    /// all. So the lookup runs **once**, for the literal name `"A, B"`, misses, warns at
+    /// severity 1, and the element loads with **neither** template applied.
+    ///
+    /// Whitespace is never trimmed either, which is why the second half asserts `" A "` misses a
+    /// template that genuinely exists.
     #[test]
-    fn multi_inherits_merges_attrs_override_and_children_concat_in_order() {
+    fn a_comma_list_is_one_literal_name_that_misses_and_applies_neither_template() {
         let doc = parse(
             r#"<Ui>
                 <Frame name="A" virtual="true">
@@ -579,6 +615,7 @@ print(x)</Script>
                 <Frame name="Inst" inherits="A, B" alpha="1.0">
                     <Layers><Layer level="ARTWORK"><Texture name="FromInst"/></Layer></Layers>
                 </Frame>
+                <Frame name="Padded" inherits=" A "/>
             </Ui>"#,
         )
         .unwrap();
@@ -588,20 +625,33 @@ print(x)</Script>
         };
         let mut warnings = Vec::new();
         let expanded = expand(inst, &templates, &mut warnings);
-        assert!(warnings.is_empty());
 
-        // Instance's own `alpha` overrides B's (which would otherwise have overridden A's absence).
+        // Warned, naming the whole unsplit string — not split, not silently ignored.
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("A, B"),
+            "the warning must name the literal it looked up: {warnings:?}"
+        );
+
+        // The element still loads, with all of its OWN content and none of the templates'.
         assert_eq!(expanded.attr("alpha"), Some("1.0"));
-
-        // Children: A's <Layers> first, then B's <Layers>, then the instance's own <Layers> —
-        // inherited-first, instance-own-last (rf24-framexml-loader.md splice order).
-        assert_eq!(expanded.children.len(), 3);
+        assert_eq!(expanded.children.len(), 1);
         fn texture_name(el: &Element) -> &str {
             el.children[0].children[0].attr("name").unwrap()
         }
-        assert_eq!(texture_name(&expanded.children[0]), "FromA");
-        assert_eq!(texture_name(&expanded.children[1]), "FromB");
-        assert_eq!(texture_name(&expanded.children[2]), "FromInst");
+        assert_eq!(texture_name(&expanded.children[0]), "FromInst");
+
+        // And a padded name misses a template that exists — the value is used verbatim.
+        let TopLevel::Instance(padded) = &doc.items[3] else {
+            panic!("expected instance")
+        };
+        let mut w2 = Vec::new();
+        let expanded = expand(padded, &templates, &mut w2);
+        assert_eq!(w2.len(), 1, "{w2:?}");
+        assert!(
+            expanded.children.is_empty(),
+            "picked up A despite the spaces"
+        );
     }
 
     #[test]
