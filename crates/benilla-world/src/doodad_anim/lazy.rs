@@ -447,3 +447,88 @@ mod tests {
         assert_eq!(app.world().resource::<RigPalettes>().occupancy().0, 0);
     }
 }
+
+/// The Bevy contract this lane's `Aabb` depends on (decision 1261), pinned against the real
+/// `calculate_bounds` system rather than a reading of it.
+///
+/// `promote_lazy_rig`/`demote_lazy_rig` write `Mesh3d`. Bevy's `calculate_bounds` runs two
+/// queries — an inserting one filtered `Without<Aabb>`, and an **updating** one filtered
+/// `Or<(AssetChanged<Mesh3d>, Changed<Mesh3d>)>` that overwrites a bound the app authored. So the
+/// authored all-animation bound decision 1259 puts on an animated placement survives exactly as
+/// long as nothing swaps that placement's mesh — i.e. until its first draw-gate wake, at which
+/// point it was silently recomputed from the skinned twin's bind-pose geometry and the birds
+/// resumed blinking. `NoAutoAabb` (which both queries exclude) is the fix; this is the guard that
+/// a Bevy upgrade cannot quietly take it back.
+#[cfg(test)]
+mod bound_survives_the_twin_swap {
+    use super::*;
+    use bevy::camera::primitives::Aabb;
+    use bevy::camera::visibility::NoAutoAabb;
+
+    /// A 1 yd cube — what the skinned twin's bind-pose geometry computes to.
+    fn tiny_mesh() -> Mesh {
+        Mesh::from(bevy::math::primitives::Cuboid::new(1.0, 1.0, 1.0))
+    }
+
+    /// The authored all-animation bound: a bird's 67 yd circuit around that 1 yd body.
+    fn authored() -> Aabb {
+        Aabb::from_min_max(Vec3::new(-4.2, 8.8, -30.5), Vec3::new(13.6, 16.0, 36.6))
+    }
+
+    /// `(app, entity)` with Bevy's own bounds system on the schedule and the authored bound in
+    /// place, mid-swap: `Mesh3d` has just been rewritten the way `promote_lazy_rig` rewrites it.
+    fn swapped(guard: bool) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((bevy::MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<Mesh>();
+        app.add_systems(Update, bevy::camera::visibility::calculate_bounds);
+        let stat = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(tiny_mesh());
+        let skinned = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(tiny_mesh());
+        let e = app.world_mut().spawn((Mesh3d(stat), authored())).id();
+        if guard {
+            app.world_mut().entity_mut(e).insert(NoAutoAabb);
+        }
+        app.update();
+        // The swap the lazy rig performs at the placement's first wake.
+        app.world_mut().entity_mut(e).get_mut::<Mesh3d>().unwrap().0 = skinned;
+        app.update();
+        (app, e)
+    }
+
+    fn bound(app: &App, e: Entity) -> Aabb {
+        *app.world().entity(e).get::<Aabb>().expect("a bound")
+    }
+
+    /// The bug: unguarded, the twin swap hands the authored bound back to `compute_aabb`.
+    #[test]
+    fn an_unguarded_bound_is_clobbered_by_the_mesh_swap() {
+        let (app, e) = swapped(false);
+        let b = bound(&app, e);
+        assert!(
+            b.half_extents.max_element() < 1.0,
+            "expected the 1 yd cube's own bound, got half-extents {:?} — if this now keeps the \
+             authored box, Bevy changed `calculate_bounds` and `NoAutoAabb` may be unnecessary",
+            b.half_extents
+        );
+    }
+
+    /// The fix: guarded, the authored bound is still the authored bound after the swap.
+    #[test]
+    fn a_guarded_bound_survives_the_mesh_swap() {
+        let (app, e) = swapped(true);
+        let b = bound(&app, e);
+        assert!(
+            (Vec3::from(b.min()) - Vec3::from(authored().min())).length() < 1e-3
+                && (Vec3::from(b.max()) - Vec3::from(authored().max())).length() < 1e-3,
+            "the authored all-animation bound must survive the promote, got {:?}..{:?}",
+            b.min(),
+            b.max()
+        );
+    }
+}

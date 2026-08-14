@@ -507,3 +507,110 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+/// Sweep every `.m2` (under `prefix`, if given) and measure how far its authored header bounding
+/// box — the model's **all-animation** vertex extent, and the box the reference derives its doodad
+/// cull sphere from — reaches past its **bind-pose** vertex extent.
+///
+/// The population instrument for decision 1259. A placed model's submesh entity keeps its transform
+/// at the placement origin while the joint palette moves its vertices, so a bind-pose mesh bound
+/// stops describing what is drawn the moment the model animates: cull with it and the object blinks
+/// out while its geometry is still on screen. `SLACK` is how many yards the authored box reaches
+/// past the bind-pose box on its worst face — for the ambient critters (birds, bats, butterflies,
+/// wasps) that is tens of yards against a sub-yard body, which is the whole bug.
+///
+/// `SHORT` is the same measure with the signs reversed: yards of bind-pose geometry sticking out of
+/// the *authored* box. It is not zero in the shipped corpus, which is why the fix unions the two
+/// boxes instead of swapping one for the other — the reference never trips over it because it tests
+/// the box's circumsphere, which swallows the overhang.
+///
+/// `ANIM` marks the models the widened bound actually applies to: any bone track with more than one
+/// key, or any global-sequence bone channel. A static model keeps its tighter per-batch bound.
+pub fn animboundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    // (slack, short, animates, bind-pose half-diagonal, name)
+    let mut rows: Vec<(f32, f32, bool, f32, String)> = Vec::new();
+    let mut scanned = 0u32;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let Ok(bounds) = benilla_formats::parse_m2_bounds(&bytes) else {
+            continue;
+        };
+        let Ok(fmt) = benilla_m2::parse_m2(&mut std::io::Cursor::new(bytes.as_slice())) else {
+            continue;
+        };
+        let verts = &fmt.model().vertices;
+        if verts.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for v in verts {
+            for (a, c) in [v.position.x, v.position.y, v.position.z]
+                .into_iter()
+                .enumerate()
+            {
+                lo[a] = lo[a].min(c);
+                hi[a] = hi[a].max(c);
+            }
+        }
+        let (mut slack, mut short) = (0.0f32, 0.0f32);
+        for a in 0..3 {
+            slack = slack
+                .max(lo[a] - bounds.bbox_min[a])
+                .max(bounds.bbox_max[a] - hi[a]);
+            short = short
+                .max(bounds.bbox_min[a] - lo[a])
+                .max(hi[a] - bounds.bbox_max[a]);
+        }
+        let half_diag =
+            ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt()
+                * 0.5;
+        // "Animates" the way `doodad_anim::classify` means it: geometry that MOVES relative to the
+        // placement transform — a keyed bone track, or a free-running global-sequence channel.
+        let keyed = benilla_formats::parse_m2_animations(&bytes)
+            .iter()
+            .any(|a| {
+                a.bones
+                    .iter()
+                    .any(|b| b.translation.len() > 1 || b.rotation.len() > 1 || b.scale.len() > 1)
+            });
+        let gseq = !benilla_formats::parse_m2_global_sequence_bones(&bytes).is_empty();
+        rows.push((slack, short, keyed || gseq, half_diag, name));
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let over = |t: f32| rows.iter().filter(|r| r.0 > t && r.2).count();
+    println!("{scanned} models with geometry");
+    println!(
+        "  animated:                        {}",
+        rows.iter().filter(|r| r.2).count()
+    );
+    for t in [1.0f32, 5.0, 10.0, 20.0] {
+        println!("  animated with SLACK > {t:>5.1} yd:  {}", over(t));
+    }
+    println!(
+        "  models whose authored box does NOT contain their bind pose: {}",
+        rows.iter().filter(|r| r.1 > 0.01).count()
+    );
+    println!();
+    println!(
+        "{:>9}  {:>8}  {:>9}  {:>4}  MODEL",
+        "SLACK", "SHORT", "BIND-R", "ANIM"
+    );
+    // The class the bug is about: the authored box dwarfs the body, so the animation carries the
+    // model clean out of any bind-pose bound. Ranked by that ratio, not by raw slack — a 200 yd
+    // waterfall with 200 yd of slack is never culled either way.
+    let mut ranked: Vec<&(f32, f32, bool, f32, String)> =
+        rows.iter().filter(|r| r.2 && r.0 > 1.0).collect();
+    ranked.sort_by(|a, b| (b.0 / b.3.max(0.05)).total_cmp(&(a.0 / a.3.max(0.05))));
+    for (slack, short, _, half_diag, name) in ranked.iter().take(40) {
+        println!(
+            "{slack:9.2}  {short:8.2}  {half_diag:9.2}  {:>4}  {name}",
+            "yes"
+        );
+    }
+    Ok(())
+}

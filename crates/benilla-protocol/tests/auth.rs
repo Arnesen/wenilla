@@ -8,6 +8,13 @@ use benilla_protocol::auth;
 
 const N: [u8; 32] = benilla_srp::LARGE_SAFE_PRIME_LITTLE_ENDIAN;
 
+/// The `crc_salt` a real mangos-family realmd sends (its fixed `VersionChallenge`). The fixture uses
+/// the live bytes rather than zeros, so the reader meets what it actually meets — and so the `got
+/// 0xba` in the proof-read comment below names a real byte of this array.
+const CRC_SALT: [u8; 16] = [
+    0xba, 0xa3, 0x1e, 0x99, 0xa0, 0x0b, 0x21, 0x57, 0xfc, 0x37, 0x3f, 0xb3, 0x69, 0xcd, 0xd2, 0xf1,
+];
+
 /// A successful `CMD_AUTH_LOGON_CHALLENGE_Server` body, including the `crc_salt` + `security_flag`
 /// tail that must be consumed.
 fn challenge_packet(server_public_key: &[u8; 32], salt: &[u8; 32]) -> Vec<u8> {
@@ -18,7 +25,7 @@ fn challenge_packet(server_public_key: &[u8; 32], salt: &[u8; 32]) -> Vec<u8> {
     p.push(32); // large-safe-prime length
     p.extend_from_slice(&N);
     p.extend_from_slice(salt);
-    p.extend_from_slice(&[0u8; 16]); // crc_salt
+    p.extend_from_slice(&CRC_SALT);
     p.push(0); // security_flag = None
     p
 }
@@ -72,6 +79,7 @@ fn logon_read_sequence_stays_aligned() {
     assert_eq!(reply.generator, 7);
     assert_eq!(reply.large_safe_prime, N);
     assert_eq!(reply.salt, salt);
+    assert_eq!(reply.crc_salt, CRC_SALT); // the proof's `crc_hash` is computed from this
 
     // 2. Proof — this is exactly where a challenge-reply under-read used to surface (`got 0xba`).
     let proof =

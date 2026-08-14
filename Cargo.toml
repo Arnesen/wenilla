@@ -16,6 +16,7 @@ authors = ["sam <samuv.eth@gmail.com>"]
 anyhow = "1.0.102"
 bevy = "0.18.1"
 clap = { version = "4.6.1", features = ["derive"] }
+sha1 = "0.10.6"
 
 # The WoW format + protocol stack is fully in-repo (decision 0021), so there are no warcraft-rs /
 # wow_messages crates (or forks of them) anywhere in the tree. That is still true and is why this

@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 
 use anyhow::{bail, Result};
+use sha1::{Digest, Sha1};
 
 use crate::wire::{read_array, read_cstring, read_f32_le, read_u16_le, read_u32_le, read_u8};
 use crate::RealmInfo;
@@ -66,6 +67,9 @@ pub struct ChallengeReply {
     pub generator: u8,
     pub large_safe_prime: [u8; 32],
     pub salt: [u8; 32],
+    /// The 16-byte version challenge the client answers with `crc_hash` — see [`version_proof`].
+    /// Not an SRP6 input; it seeds the client's binary-integrity digest.
+    pub crc_salt: [u8; 16],
 }
 
 /// Send `CMD_AUTH_LOGON_CHALLENGE_Client`. `account_name` must already be uppercased (it is what the
@@ -126,9 +130,10 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
         .map_err(|_| anyhow::anyhow!("large safe prime was {prime_len} bytes, expected 32"))?;
     let salt = read_array::<32>(r)?;
     // Consume the rest of the packet so the stream stays aligned for the next message — login packets
-    // are NOT length-framed, so leftover bytes desync the very next read. crc_salt[16] + security_flag
-    // (+ the PIN block if set) are unused for the SRP6 calculation but must still be read off.
-    let _crc_salt = read_array::<16>(r)?;
+    // are NOT length-framed, so leftover bytes desync the very next read. crc_salt[16] feeds the
+    // integrity proof (not SRP6); security_flag (+ the PIN block if set) is unused but must still be
+    // read off.
+    let crc_salt = read_array::<16>(r)?;
     let security_flag = read_u8(r)?;
     if security_flag & 0x01 != 0 {
         // PIN: pin_grid_seed (u32) + pin_salt[16]. (vmangos sends security_flag = 0; handled anyway.)
@@ -140,21 +145,94 @@ pub fn read_challenge_reply(r: &mut impl Read) -> Result<ChallengeReply> {
         generator,
         large_safe_prime,
         salt,
+        crc_salt,
     })
 }
 
-/// Send `CMD_AUTH_LOGON_PROOF_Client`. `crc_hash` is the client-binary checksum (vmangos accepts
-/// zeros); no telemetry keys, no security flag.
+// --- the version (client-integrity) proof ---------------------------------------------------------
+//
+// The proof packet's `crc_hash` answers the challenge's `crc_salt`: the real client scans its own
+// binaries under that salt into a 20-byte digest `H`, and sends `SHA1(A ‖ H)`. realmd recomputes the
+// same expression from a stored `H` and rejects a mismatch as a *modified client*
+// (vmangos `AuthSocket::VerifyVersion`, cmangos ditto — byte-identical implementations). We sent
+// twenty zeros here for the project's whole life, which is invisible until a server turns the check
+// on: `StrictVersionCheck = 1` then answers a correct password with `WOW_FAIL_VERSION_INVALID` (0x09,
+// our login screen's "Wrong client version") — B241. Note vmangos's own shipped
+// `realmd.conf.example` sets 1, so this is a *default* on a fresh repack, not exotic hardening.
+
+/// The 16-byte `crc_salt` every mangos-family realmd sends — a **constant, not a nonce** (vmangos
+/// `realmd/AuthSocket.cpp:65` and cmangos `realmd/AuthSocket.cpp:187`, two independent copies of the
+/// same bytes). The whole scheme rests on that: because every server issues the same challenge, the
+/// client's answer is a per-build constant a server can store without owning the client.
+const MANGOS_VERSION_CHALLENGE: [u8; 16] = [
+    0xba, 0xa3, 0x1e, 0x99, 0xa0, 0x0b, 0x21, 0x57, 0xfc, 0x37, 0x3f, 0xb3, 0x69, 0xcd, 0xd2, 0xf1,
+];
+
+/// `H` for build 5875 under [`MANGOS_VERSION_CHALLENGE`], Windows client. Cross-checked between two
+/// independent emulator lineages: vmangos ships it as DB data (`sql/migrations/20221117065844_logon.sql`,
+/// `allowed_clients` row `1,12,1,'',5875,'Win','x86'`), cmangos as a hardcoded table
+/// (`realmd/RealmList.cpp`, `ExpectedRealmdClientBuilds`) — byte-identical.
+const INTEGRITY_HASH_5875_WINDOWS: [u8; 20] = [
+    0x95, 0xed, 0xb2, 0x7c, 0x78, 0x23, 0xb3, 0x63, 0xcb, 0xdd, 0xab, 0x56, 0xa3, 0x92, 0xe7, 0xcb,
+    0x73, 0xfc, 0xca, 0x20,
+];
+
+/// `H` for build 5875 under [`MANGOS_VERSION_CHALLENGE`], Mac client — same two sources, and the one
+/// we must answer with on macOS, where [`client_os`] says `OSX` (vmangos keys its lookup on the os
+/// field, cmangos picks `MacHash` off the same field).
+const INTEGRITY_HASH_5875_MACOS: [u8; 20] = [
+    0x8d, 0x17, 0x3c, 0xc3, 0x81, 0x96, 0x1e, 0xeb, 0xab, 0xf3, 0x36, 0xf5, 0xe6, 0x67, 0x5b, 0x10,
+    0x1b, 0xb5, 0x13, 0xe5,
+];
+
+/// The 20-byte integrity digest to answer `crc_salt` with, or `None` when we have no answer for that
+/// salt.
+///
+/// We hold `H` only for the one salt above, so a server that issues a *different* one gets zeros
+/// rather than a stale constant. That is not defensive padding: replaying a constant computed for
+/// another challenge is exactly the tell a randomised challenge would be looking for, and it cannot
+/// pass anyway. (No server in the mangos family randomises it — a per-connection salt would make
+/// their own stored hashes useless — so this branch is the honest answer to a hypothetical, and free.)
+fn integrity_hash(crc_salt: &[u8; 16]) -> Option<[u8; 20]> {
+    if *crc_salt != MANGOS_VERSION_CHALLENGE {
+        return None;
+    }
+    Some(if client_os() == OS_MACOS {
+        INTEGRITY_HASH_5875_MACOS
+    } else {
+        INTEGRITY_HASH_5875_WINDOWS
+    })
+}
+
+/// The proof packet's `crc_hash`: `SHA1(A ‖ H)` over the wire bytes of `A` (realmd hashes `lp->A`
+/// as received, so this is the same 32 bytes we put in the packet). Twenty zeros when we have no
+/// `H` for this salt — the pre-B241 behaviour, which a non-strict server ignores.
+pub fn version_proof(crc_salt: &[u8; 16], client_public_key: &[u8; 32]) -> [u8; 20] {
+    match integrity_hash(crc_salt) {
+        Some(h) => {
+            let mut sha = Sha1::new();
+            sha.update(client_public_key);
+            sha.update(h);
+            sha.finalize().into()
+        }
+        None => [0u8; 20],
+    }
+}
+
+/// Send `CMD_AUTH_LOGON_PROOF_Client`. `crc_salt` is the challenge's — the packet's `crc_hash` is
+/// computed here ([`version_proof`]) rather than passed in, so no caller can forget it. No telemetry
+/// keys, no security flag.
 pub fn write_logon_proof(
     w: &mut impl Write,
     client_public_key: &[u8; 32],
     client_proof: &[u8; 20],
+    crc_salt: &[u8; 16],
 ) -> std::io::Result<()> {
     let mut packet = Vec::with_capacity(1 + 32 + 20 + 20 + 1 + 1);
     packet.push(CMD_AUTH_LOGON_PROOF);
     packet.extend_from_slice(client_public_key);
     packet.extend_from_slice(client_proof);
-    packet.extend_from_slice(&[0u8; 20]); // crc_hash
+    packet.extend_from_slice(&version_proof(crc_salt, client_public_key));
     packet.push(0); // number_of_telemetry_keys
     packet.push(0); // security_flag = None
     w.write_all(&packet)
@@ -241,5 +319,56 @@ mod tests {
         } else {
             assert_eq!(client_os(), OS_WINDOWS);
         }
+    }
+
+    /// An arbitrary but fixed `A` for the version-proof vectors below.
+    fn test_public_key() -> [u8; 32] {
+        std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(9))
+    }
+
+    /// Known answers, computed *outside* this crate (Python `hashlib`) from realmd's own expression
+    /// `SHA1(A ‖ H)` and the emulator-sourced `H`. A regression here means either constant moved or
+    /// the hash grew an extra input — both of which read as "modified client" to a strict server and
+    /// are otherwise invisible until someone tries to log in.
+    #[test]
+    fn version_proof_matches_the_realmd_expression() {
+        let expected = if cfg!(target_os = "macos") {
+            "dccd0e67946fae221451513b1a59724090ff6096"
+        } else {
+            "9b95cd41edd719fddf237294b8aca17010e71703"
+        };
+        let got = version_proof(&MANGOS_VERSION_CHALLENGE, &test_public_key());
+        assert_eq!(
+            got.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            expected
+        );
+    }
+
+    /// A salt we hold no `H` for is answered with zeros, not with the constant for another salt.
+    #[test]
+    fn an_unknown_version_challenge_is_answered_with_zeros() {
+        let mut salt = MANGOS_VERSION_CHALLENGE;
+        salt[0] ^= 0xff;
+        assert_eq!(version_proof(&salt, &test_public_key()), [0u8; 20]);
+    }
+
+    /// The proof packet carries the answer at the offset realmd reads it from: `opcode · A[32] ·
+    /// M1[20] · crc_hash[20] · num_keys · security_flag`, 75 bytes total.
+    #[test]
+    fn the_proof_packet_carries_the_version_proof() {
+        let a = test_public_key();
+        let m1: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(4));
+        let mut packet = Vec::new();
+        write_logon_proof(&mut packet, &a, &m1, &MANGOS_VERSION_CHALLENGE).unwrap();
+
+        assert_eq!(packet.len(), 1 + 32 + 20 + 20 + 1 + 1);
+        assert_eq!(packet[0], CMD_AUTH_LOGON_PROOF);
+        assert_eq!(&packet[1..33], &a);
+        assert_eq!(&packet[33..53], &m1);
+        assert_eq!(
+            &packet[53..73],
+            &version_proof(&MANGOS_VERSION_CHALLENGE, &a)
+        );
+        assert_eq!(&packet[73..], &[0, 0]);
     }
 }

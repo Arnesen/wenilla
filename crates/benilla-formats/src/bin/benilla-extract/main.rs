@@ -212,6 +212,19 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and measure how far its authored header
+    /// bounding box — the model's **all-animation** vertex extent, and the box the reference
+    /// derives its doodad cull sphere from (`rec+0x5c`/`rec+0x68`) — reaches past its **bind-pose**
+    /// vertex extent. The population instrument for decision 1259: an animated placement's submesh
+    /// keeps its transform at the placement origin while the joint palette moves its vertices, so a
+    /// bind-pose bound culls an object whose geometry is still on screen. The ambient critters are
+    /// the extreme — `World\critter\birds\Bird01.m2` authors a 67 yd box around a 1.2 yd body,
+    /// because its root bone flies it 64 yd along a circuit. Also reports the reverse (`SHORT`:
+    /// bind-pose geometry OUTSIDE the authored box), which is why the fix unions the two boxes.
+    Animboundscan {
+        /// Internal-path prefix filter (e.g. `world\critter`), case-insensitive; all if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and census the geometry a
     /// **non-character** spawn draws that the reference may not: MULTI-GEOSET models (more than
     /// one `skinSectionId` — only the character compositor selects among them, so every other
@@ -658,6 +671,7 @@ fn main() -> Result<()> {
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
         Command::Bbfacescan { prefix } => scan::bbfacescan(&mut chain, prefix.as_deref())?,
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
+        Command::Animboundscan { prefix } => scan::animboundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
         Command::Fxlifescan { prefix } => scan::fxlifescan(&mut chain, prefix.as_deref())?,

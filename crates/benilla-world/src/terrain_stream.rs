@@ -55,7 +55,7 @@ pub use spawn::prop_light::{fold_interior_probe, PropLobeLight};
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
 pub use collider::{build_collider_task, placement_collider_data, PendingCollider};
-pub use spawn::{m2_fade, point_light, spawn_model_entities};
+pub use spawn::{m2_anim_bound, m2_fade, point_light, spawn_model_entities};
 // The position queries + area authority (their home is `queries`; paths stay `terrain_stream::X`).
 use queries::update_current_area;
 pub use queries::{

@@ -60,8 +60,8 @@ use benilla_world::lighting::{PropProbeSlot, PropProbes};
 use benilla_world::model_render::ShadeSel;
 use benilla_world::particles;
 use benilla_world::terrain_stream::{
-    build_collider_task, fold_interior_probe, m2_fade, placement_collider_data, point_light,
-    spawn_model_entities, PendingCollider, PropLobeLight,
+    build_collider_task, fold_interior_probe, m2_anim_bound, m2_fade, placement_collider_data,
+    point_light, spawn_model_entities, PendingCollider, PropLobeLight,
 };
 
 use super::{GameObjects, ModelHandle, VisualAttached};
@@ -228,6 +228,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 anchor
             });
             let (radius, center) = m2_fade(&m.bounds, prop.local.scale.x);
+            let anim_bound = m2_anim_bound(&m.bounds);
             // The interior lane (0474): fold the cabin prop's committed light ONCE, composed
             // through the host's current pose. Exact on a mover — see the module doc's
             // invariance argument.
@@ -273,6 +274,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 interior_slot,
                 radius,
                 center,
+                anim_bound,
                 Some((m, now)),
                 &mut uv_reg,
                 &mut tint_reg,

@@ -6,6 +6,8 @@
 
 use benilla_assets::{M2Model, ModelSubmesh};
 use benilla_formats::ModelBlend;
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::NoAutoAabb;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
@@ -73,6 +75,12 @@ pub fn spawn_model_entities(
     interior_slot: Option<u16>,
     radius: f32,
     local_center: Vec3,
+    // The model's authored **all-animation** bound in Bevy model-local space
+    // ([`super::m2_anim_bound`]) — what an ANIMATED placement's submeshes are culled with instead of
+    // their bind-pose mesh bound, which the joint palette has left behind (decision 1259). `None` for
+    // WMO group geometry (no M2 header) and for a model with no authored box; a static placement
+    // ignores it and keeps the tighter per-batch bound.
+    anim_bound: Option<Aabb>,
     // `Some((model, now))` for an M2 placement: the doodad-animation gate (decision 0130) — an
     // animated model spawns joints + the skinned twins; `now` is the clock origin. `None` for WMO
     // group geometry.
@@ -300,9 +308,11 @@ pub fn spawn_model_entities(
             ));
             // The build-time Aabb, inserted explicitly: the static form is `RENDER_WORLD`-only,
             // so Bevy's `calculate_bounds` can race extraction — and the exterior cull fails
-            // OPEN on a missing bound (0832's rule, extended to the model lane).
+            // OPEN on a missing bound (0832's rule, extended to the model lane). `NoAutoAabb`
+            // says the bound is OURS: see the ordinary-part insert below for what derives it
+            // otherwise, and what that cost.
             if let Some(aabb) = stat_aabb {
-                card_entity.insert(*aabb);
+                card_entity.insert((*aabb, NoAutoAabb));
             }
             (card_entity.id(), Vec3::ZERO)
         } else {
@@ -329,10 +339,28 @@ pub fn spawn_model_entities(
                 mesh_tag,
             ));
             // Every part now spawns static, so every part carries the build-time Aabb (the
-            // RENDER_WORLD rule above). It stays through a promote: the skinned twin shares the
-            // bind-pose geometry, so the bound is the same one `calculate_bounds` used to derive.
-            if let Some(aabb) = stat_aabb {
-                part_entity.insert(*aabb);
+            // RENDER_WORLD rule above).
+            //
+            // For an ANIMATED placement that bind-pose bound is a lie, because the joints move the
+            // vertices while this entity's transform stays at the placement origin. Widen to the
+            // model's authored all-animation box (decision 1259) — the union, never the replacement,
+            // so the 152 corpus models whose authored box does not fully contain their own bind pose
+            // still bound their geometry. A billboard card is exempt: its entity transform FOLLOWS
+            // its joint every frame, so its own small bound travels with what it draws.
+            //
+            // **`NoAutoAabb` is what makes that bound survive** (decision 1261). Bevy's
+            // `calculate_bounds` runs TWO queries: one that inserts a bound where there is none,
+            // and one that **overwrites an existing bound** on `Changed<Mesh3d>`. The lazy rig
+            // swaps `Mesh3d` static → skinned at this placement's first draw-gate wake
+            // (`doodad_anim::lazy`), and the skinned twin shares the BIND-POSE geometry — so the
+            // second query recomputed the very box 1259 had just widened, and the birds went back
+            // to blinking a second after they streamed in. The bound here is authored, not derived;
+            // this component is how that is said.
+            if let Some(aabb) = cull_bound(
+                stat_aabb.as_ref(),
+                skin.is_some().then_some(anim_bound).flatten(),
+            ) {
+                part_entity.insert((aabb, NoAutoAabb));
             }
             if let Some(sm) = skinned_mesh {
                 part_entity.insert(crate::doodad_anim::SkinnedTwin {
@@ -425,4 +453,74 @@ pub fn spawn_model_entities(
         skin.zip(rig_root)
             .map(|((joints, _), root)| PlacementHost { joints, root, arm }),
     )
+}
+
+/// The `Aabb` a placed submesh is culled with: its build-time bind-pose bound, widened by the
+/// model's authored all-animation box when this placement animates (decision 1259).
+///
+/// It is a **union**, not a swap, for one measured reason: 152 of the 9315 M2s that carry geometry
+/// author a header box that does not fully contain their own bind-pose vertices (worst case
+/// `Spells\Teleport.m2`, 19.9 yd short). The reference never notices — it tests the box's
+/// *circumsphere*, which swallows the shortfall — so a bare swap would be the one way this change
+/// could cull geometry the reference draws.
+fn cull_bound(stat: Option<&Aabb>, anim: Option<Aabb>) -> Option<Aabb> {
+    match (stat, anim) {
+        (Some(s), Some(a)) => Some(Aabb::from_min_max(
+            Vec3::from(s.min().min(a.min())),
+            Vec3::from(s.max().max(a.max())),
+        )),
+        (Some(s), None) => Some(*s),
+        (None, a) => a,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug's own numbers (`benilla-extract animboundscan`, `World\critter\birds\Bird01.m2`):
+    /// a 1.2 × 1.8 × 0.23 yd bind-pose box, and an authored all-animation box 67 × 18 × 7 yd that
+    /// reaches ~37 yd past it. Culled by the bind pose, the bird is dropped while its drawn
+    /// geometry is still on screen.
+    #[test]
+    fn an_animated_placements_bound_covers_the_whole_flight_path() {
+        // Bevy-space conversions of Bird01's two boxes (WoW (x,y,z) -> Bevy (-y, z, -x)).
+        let bind = Aabb::from_min_max(
+            Vec3::new(-0.863, 9.359, -3.536),
+            Vec3::new(0.915, 9.586, -2.366),
+        );
+        let authored = Aabb::from_min_max(
+            Vec3::new(-4.219, 8.816, -30.547),
+            Vec3::new(13.571, 16.019, 36.605),
+        );
+        let widened = cull_bound(Some(&bind), Some(authored)).expect("a bound");
+        // Every corner of the authored box is inside the widened bound. `Aabb` stores
+        // centre/half-extents, so the reconstructed corners carry a float epsilon — hence the
+        // tolerance, which is ~7 orders of magnitude below anything a cull can see.
+        const EPS: f32 = 1e-4;
+        assert!((widened.min() - EPS).cmple(authored.min()).all());
+        assert!((widened.max() + EPS).cmpge(authored.max()).all());
+        // …and the bind-pose bound alone was ~37 yd short of it along the flight axis.
+        assert!(authored.max().z - bind.max().z > 36.0);
+    }
+
+    /// The union arm, not a swap: an authored box that fails to contain the bind pose (152 corpus
+    /// models do) must not shrink the bound.
+    #[test]
+    fn a_short_authored_box_never_shrinks_the_bound() {
+        let bind = Aabb::from_min_max(Vec3::splat(-5.0), Vec3::splat(5.0));
+        let authored = Aabb::from_min_max(Vec3::new(-40.0, -1.0, -1.0), Vec3::new(40.0, 1.0, 1.0));
+        let b = cull_bound(Some(&bind), Some(authored)).expect("a bound");
+        assert!(Vec3::from(b.min()).abs_diff_eq(Vec3::new(-40.0, -5.0, -5.0), 1e-4));
+        assert!(Vec3::from(b.max()).abs_diff_eq(Vec3::new(40.0, 5.0, 5.0), 1e-4));
+    }
+
+    /// A static placement is untouched — it keeps the tighter per-batch bind-pose bound.
+    #[test]
+    fn a_static_placement_keeps_its_per_batch_bound() {
+        let bind = Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let b = cull_bound(Some(&bind), None).expect("a bound");
+        assert!(Vec3::from(b.min()).abs_diff_eq(Vec3::splat(-1.0), 1e-4));
+        assert!(Vec3::from(b.max()).abs_diff_eq(Vec3::splat(1.0), 1e-4));
+    }
 }

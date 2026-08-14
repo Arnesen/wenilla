@@ -271,3 +271,113 @@ pub(super) fn apply_model_visibility(
         }
     }
 }
+
+/// `WOW_VIS_TRACE=<label-substring>` — **watch one model's placements decide, frame by frame.**
+///
+/// The `VIS_CENSUS` line counts what is drawn; it cannot answer "that thing vanished when I turned
+/// — who dropped it?". Two different systems can hide a model submesh and they fail in opposite
+/// directions:
+///
+/// - **`vis=Hidden`** — [`apply_model_visibility`] above said no: a toggle, the far-clip wall, a
+///   fully-faded doodad, an `A ≤ 0` material track, the portal PVS or the exterior window gate.
+/// - **`vis=Inherited view=false`** — *we* admitted it and **Bevy's frustum cull** dropped it,
+///   which means the entity's `Aabb` does not describe what it draws.
+///
+/// That second line is the whole of decisions 1259 and 1261 — an animated placement whose bound was
+/// its bind pose, and then the same bound silently recomputed at the twin swap — and both were
+/// diagnosed by reading code because nothing could be asked. `bound=` is printed in **world space**
+/// beside the camera, so "the box is nowhere near the bird" is visible directly rather than inferred.
+///
+/// Off (the env var unset) this system is one `Option` check per frame and no query iteration.
+/// Throttled to [`VIS_TRACE_HZ`]; matching is a case-insensitive substring of the `WorldObject`
+/// label (a model path), so `WOW_VIS_TRACE=bird01` follows every bird in residency.
+#[derive(Resource)]
+pub struct VisTrace {
+    needle: String,
+    next_at: f32,
+}
+
+/// Trace lines per second — enough to watch a verdict flip under a camera swing, sparse enough that
+/// a dozen placements don't bury the log.
+const VIS_TRACE_HZ: f32 = 4.0;
+
+impl VisTrace {
+    /// `None` unless `WOW_VIS_TRACE` names a substring — the whole cost of the instrument when off.
+    pub(crate) fn from_env() -> Option<Self> {
+        std::env::var("WOW_VIS_TRACE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|needle| Self {
+                needle: needle.to_ascii_lowercase(),
+                next_at: 0.0,
+            })
+    }
+}
+
+/// What the trace reads per submesh: its identity, where it is, both verdicts, and the bound the
+/// second of them tested.
+type TracedModels<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static crate::interact::WorldObject,
+        &'static GlobalTransform,
+        &'static Visibility,
+        &'static ViewVisibility,
+        Option<&'static Aabb>,
+    ),
+>;
+
+/// The trace's printer — see [`VisTrace`]. Runs after the authority so `vis` is this frame's
+/// verdict, and reads `ViewVisibility` (last frame's frustum result, which is the freshest a
+/// same-frame reader can have) to separate our gates from the cull.
+pub(super) fn trace_model_visibility(
+    time: Res<Time>,
+    trace: Option<ResMut<VisTrace>>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    q: TracedModels,
+) {
+    let Some(mut trace) = trace else { return };
+    let now = time.elapsed_secs();
+    if now < trace.next_at {
+        return;
+    }
+    trace.next_at = now + 1.0 / VIS_TRACE_HZ;
+    let cam_t = cam.iter().next();
+    let (cam_pos, cam_fwd) = cam_t.map_or((Vec3::ZERO, Vec3::Z), |t| {
+        (t.translation(), Vec3::from(t.forward()))
+    });
+    for (e, object, xf, vis, view, aabb) in &q {
+        if !object.label.to_ascii_lowercase().contains(&trace.needle) {
+            continue;
+        }
+        // World-space bound: the entity transform applied to the local box, which is exactly what
+        // Bevy's cull tests — so a bound that has parted company with the geometry shows up here as
+        // a centre nowhere near what the eye sees.
+        let (centre, radius) = match aabb {
+            Some(a) => (
+                xf.transform_point(Vec3::from(a.center)),
+                Vec3::from(a.half_extents).length() * xf.affine().matrix3.x_axis.length(),
+            ),
+            None => (xf.translation(), f32::NAN),
+        };
+        let depth = (centre - cam_pos).dot(cam_fwd);
+        println!(
+            "VIS_TRACE {e} {label} vis={vis:?} view={view} origin=[{ox:.1},{oy:.1},{oz:.1}] \
+             bound=[{cx:.1},{cy:.1},{cz:.1}] r={radius:.1} depth={depth:.1} \
+             cam=[{px:.1},{py:.1},{pz:.1}]",
+            label = object.label,
+            view = view.get(),
+            ox = xf.translation().x,
+            oy = xf.translation().y,
+            oz = xf.translation().z,
+            cx = centre.x,
+            cy = centre.y,
+            cz = centre.z,
+            px = cam_pos.x,
+            py = cam_pos.y,
+            pz = cam_pos.z,
+        );
+    }
+}

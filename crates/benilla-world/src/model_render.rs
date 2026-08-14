@@ -976,6 +976,16 @@ pub fn plugin(app: &mut App) {
             .after(crate::wmo_portal::WmoPvsSet)
             .in_set(ModelVisSet),
     );
+    // `WOW_VIS_TRACE=<label>`: watch one model's placements decide (see `visibility::VisTrace`).
+    // The resource is absent unless the env var names something, and the system's first line is
+    // the `None` check — so an ordinary run pays one `Option` read per frame.
+    if let Some(trace) = visibility::VisTrace::from_env() {
+        app.insert_resource(trace);
+    }
+    app.add_systems(
+        Update,
+        visibility::trace_model_visibility.after(ModelVisSet),
+    );
     // The material dedup cache and its two evictors — the soft one (distance, decision 0785) and
     // the hard one (a cross-map transition, decision 0729). Both used to live in `entities`, which
     // owned the cache because the entity spawner was the first lane to want one; the glue booth

@@ -128,6 +128,7 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
         &mut stream,
         challenge.client_public_key(),
         challenge.client_proof(),
+        &reply.crc_salt,
     )
     .context("sending logon proof")?;
 

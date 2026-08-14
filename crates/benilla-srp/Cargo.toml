@@ -7,5 +7,5 @@ description = "WoW 1.12.1 (build 5875) SRP6 client + vanilla world-header crypto
 
 [dependencies]
 num-bigint = "0.4.6"
-sha1 = "0.10.6"
+sha1.workspace = true
 rand = "0.8.6"

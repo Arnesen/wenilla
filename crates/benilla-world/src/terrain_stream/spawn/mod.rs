@@ -17,6 +17,7 @@ use std::time::Instant;
 use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
 use benilla_assets::{AdtTile, DoodadBase, M2Model, WmoModel};
 use benilla_formats::{world_to_tile, M2Bounds};
+use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 
 use crate::collision::{camera_layers, walk_layers, GroundDecalSurface, PickOccluder};
@@ -152,6 +153,7 @@ pub(super) fn spawn_loaded_placements(
                             ShadeResolve::Pending => continue,
                         };
                     let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
+                    let anim_bound = m2_anim_bound(&m.bounds);
                     let (mut ents, host) = spawn_model_entities(
                         &mut commands,
                         mat_cache,
@@ -168,6 +170,7 @@ pub(super) fn spawn_loaded_placements(
                         None, // map doodad: exterior sky lighting (no interior probe)
                         radius,
                         center,
+                        anim_bound,
                         Some((m, now)),
                         &mut uv_reg,
                         &mut tint_reg,
@@ -270,6 +273,7 @@ pub(super) fn spawn_loaded_placements(
                         None, // WMO groups carry their own per-submesh interior flag + batch class
                         f32::INFINITY,
                         Vec3::ZERO,
+                        None, // …and no authored M2 box: group geometry never animates
                         None, // WMO group geometry is not an M2 — its doodad props animate below
                         &mut uv_reg,
                         &mut tint_reg,
@@ -509,6 +513,7 @@ pub(super) fn spawn_loaded_placements(
                 }
             };
             let (radius, center) = m2_fade(&m.bounds, d.transform.scale.x);
+            let anim_bound = m2_anim_bound(&m.bounds);
             // An interior prop's committed light, folded ONCE into its SH probe (the reference folds
             // at doodad create + per-frame light commit; everything here is static, so once): the
             // MODD-colour ambient + the diffuse lobe on the fixed interior axis + the owning group's
@@ -552,6 +557,7 @@ pub(super) fn spawn_loaded_placements(
                 interior_slot, // interior props light off their folded probe, not the sky
                 radius,
                 center,
+                anim_bound,
                 Some((m, now)),
                 &mut uv_reg,
                 &mut tint_reg,
@@ -755,6 +761,35 @@ fn tag_world_object(
     for &e in ents {
         commands.entity(e).insert(object.clone());
     }
+}
+
+/// The **animated cull bound** for an M2 placement: the model's authored header bounding box
+/// (`M2Header.bounding_box_min/max`), in Bevy model-local space. `None` when the model carries no
+/// authored bounds.
+///
+/// This box is the model's **all-animation vertex extent**, not its bind pose — which is exactly why
+/// it is the bound an *animated* placement must be culled with. A bind-pose mesh bound is the extent
+/// of geometry the entity transform no longer describes: the joint palette moves the vertices while
+/// the entity stays parked at the placement origin, so the cull tests an empty box. `World\critter\
+/// birds\Bird01.m2` is the extreme: a 1.2 × 1.8 × 0.23 yd bind-pose box, and a root-bone translation
+/// track that flies the bird 64 yd along X and 17 yd along Y away from it. Culled by the bind pose,
+/// the bird blinks out whenever that 1-yd box leaves the frustum while the bird itself is still on
+/// screen — the director's "birds in the sky often dis/appear based on the cam angle" (decision 1259).
+///
+/// The reference tests one volume per doodad *object* and derives it from these same header fields:
+/// `0x683700` calls `0x682ef0(ecx = &[rec+0x5c] centre, [rec+0x68] radius)` → `0x686b80`, a 6-plane
+/// frustum **sphere** test, where `rec+0x5c` is the transformed `(min+max)/2` and `rec+0x68` is
+/// `bounding_sphere_radius × scale` (wow-5875-re `terrain/scratch/doodad-emitter-drawset-gate.md`
+/// §1c/§2a, VERIFIED; the same two fields [`m2_fade`] already reads). We keep the **box** rather than
+/// its circumsphere: it bounds the same geometry more tightly, and Bevy's cull is an OBB test anyway.
+pub fn m2_anim_bound(bounds: &Option<M2Bounds>) -> Option<Aabb> {
+    let b = bounds.as_ref()?;
+    // The basis swap permutes and negates axes, so min/max have to be re-derived, not mapped.
+    let (a, c) = (wow_to_bevy(b.bbox_min), wow_to_bevy(b.bbox_max));
+    let (lo, hi) = (a.min(c), a.max(c));
+    // A model that authors a degenerate (all-zero) box would otherwise pin every submesh of an
+    // animated placement to a point at the origin — strictly worse than the bind pose it replaces.
+    (hi.cmpgt(lo).any()).then(|| Aabb::from_min_max(lo, hi))
 }
 
 /// The distance-fade size for an M2: world radius = authored bounding-sphere radius × placement scale;
