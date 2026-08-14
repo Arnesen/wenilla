@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
-use crate::net::{ActiveMover, ClientCommand, NetCommands, TeleportMessage, WorldportMessage};
+use crate::net::{ClientCommand, Embodied, NetCommands, TeleportMessage, WorldportMessage};
 use crate::ui_script::InspectMode;
 use crate::ui_script::PointerOverUi;
 use benilla_assets::AssetSet;
@@ -36,7 +36,7 @@ mod world_focus;
 // own `pub(super)` fields instead of widening them for a module outside.
 mod camera_saved;
 mod drunk;
-// Which single unit the client embodies (decision 1277) — the `ActiveMover` marker's owner.
+// Which single unit the client embodies (decision 1277) — the `Embodied` marker's owner.
 mod embody;
 mod follow;
 
@@ -254,7 +254,7 @@ impl Plugin for PlayerPlugin {
             // reads the marker — the controller, and the collision-height mirror below.
             .add_systems(
                 Update,
-                embody::maintain_active_mover
+                embody::maintain_embodiment
                     .in_set(WorldStage::Input)
                     .before(control)
                     .before(mirror_mover_collision_height),
@@ -309,7 +309,7 @@ impl Plugin for PlayerPlugin {
 /// body in our hands.
 fn mirror_mover_collision_height(
     mut player: ResMut<Player>,
-    mover: Query<&crate::entities::CollisionHeight, With<ActiveMover>>,
+    mover: Query<&crate::entities::CollisionHeight, With<Embodied>>,
 ) {
     if let Ok(&h) = mover.single() {
         if player.collision_height != h {
@@ -420,7 +420,7 @@ fn control(
             // (the ref's three `GetWeapon(0/1/2)` calls before the state walk, below).
             Option<&crate::creature_anim::Wielded>,
         ),
-        (With<ActiveMover>, Without<FlyCam>),
+        (With<Embodied>, Without<FlyCam>),
     >,
     window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     // Clicks go out here — left for the target picker, right for the context action (attack) — and
@@ -448,7 +448,7 @@ fn control(
             (&Transform, &crate::net::Guid),
             (
                 With<crate::transport::Transport>,
-                Without<ActiveMover>,
+                Without<Embodied>,
                 Without<FlyCam>,
             ),
         >,
@@ -679,32 +679,51 @@ fn control(
         // the `sample_splines` transform and set the run animation; here we only carry the
         // follow-camera onto the moving avatar. Input, physics, and the outbound movement stream all
         // yield until the ride ends (where `drive_self_ride` acks `CMSG_MOVE_SPLINE_DONE` and resumes).
-        // Control revoked (B211): somebody is mind-controlling us. Same shape as the ride guard —
-        // camera keeps seating, input and physics and the wire all yield — and for the same reason:
-        // the body is not ours to drive this frame. It is NOT the free-fly branch below, which would
-        // fly the camera off the body; and it is not root, which leaves turning live. Nothing else
-        // will stop us: the server neither roots the victim nor validates their movement, so this
-        // gate IS the immobility (see `Player::control_lost`).
+        // **The three ways of not driving**, and they share every line of their answer: the camera
+        // keeps seating on the body, input and physics and the outbound stream all yield.
         //
-        // The park below flushes one `MSG_MOVE_STOP`, which matters — we may have been mid-run at
-        // the moment control was taken, and the server would otherwise keep extrapolating that run
-        // for every observer.
+        // - `server_riding` — a server-authored spline (Charge/knockback/taxi/a flee path) owns the
+        //   avatar. `drive_self_ride`, ordered just before us, has already mirrored the sampled
+        //   transform into `Player`, so there is nothing to sync and nothing to park: it is
+        //   reporting FORWARD on the wire on purpose.
+        // - `control_lost` (B211) — somebody else is driving our body, or the body in our hands has
+        //   been feared out of our control. It is NOT the free-fly branch below, which would fly
+        //   the camera off the body; and it is not root, which leaves turning live. Nothing else
+        //   will stop us: the server neither roots the victim nor validates their movement, so this
+        //   gate IS the immobility (see `Player::control_lost`).
+        // - [`Player::reseat`] — the window between mover guids where what we intend to drive and
+        //   what carries `Embodied` have not yet met: the frame a grant lands, and every frame
+        //   after it while the claimed unit has not streamed in. Driving during that window writes
+        //   one body's pose onto another, because outbound moves carry no guid of their own.
+        //   `apply_server_moves` above closes it the moment a pose is there to adopt, so this is
+        //   normally a single frame.
         //
-        // The same gate serves the other way of holding no reins: [`Player::reseat`], the window
-        // between mover guids where what we intend to drive and what carries `ActiveMover` have
-        // not yet met — the frame a grant lands, and every frame after it while the claimed unit
-        // has not streamed in. Driving during that window writes one body's pose onto another,
-        // because outbound moves carry no guid of their own. `apply_server_moves` above closes the
-        // window the moment a pose is there to adopt, so this is normally a single frame.
-        //
-        // Note this branch is deliberately NOT "we are possessing": once the marker has caught up,
-        // possession runs the *ordinary* controlled path below, on the creature (decision 1277).
-        if player.control_lost || player.reseat {
+        // Note the middle one is deliberately NOT "we are possessing": once the marker has caught
+        // up, possession runs the *ordinary* controlled path below, on the creature (decision 1277).
+        if player.server_riding || player.control_lost || player.reseat {
+            // Whoever is moving the body, its transform is the truth and `Player` follows it
+            // (decision 1281). Skipping this is what stranded the camera during a fear: the body
+            // ran off on its spline while the orbit stayed at the pose the controller last wrote,
+            // which reads as the view detaching into free flight (director, 2026-08-13). A
+            // `reseat` window is excluded — there the resource still describes the body we are
+            // letting go of, and `apply_server_moves` owns the adoption.
+            if player.control_lost && !player.reseat {
+                if let Ok((_, t, ..)) = body.single() {
+                    let yaw = server_ride::yaw_of(t.rotation);
+                    player.pos = t.translation;
+                    player.face_yaw = yaw;
+                    player.model_yaw = yaw;
+                }
+            }
             let pivot_h = body
                 .single()
                 .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
                 .unwrap_or(CAM_PIVOT_FALLBACK);
             let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
+            // Far sight outlives all three, so it has to be honoured here too — Sentry Totem
+            // carries no interrupt flags at all, which means you can board a taxi with your view
+            // still on the totem. Same substitution as the main path below; skipping it would read
+            // as far sight mysteriously dropping the moment a spline takes the body.
             let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
                 Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
                 None => (player.pos, head, pivot_h),
@@ -721,35 +740,11 @@ fn control(
                 &collide,
                 cam_probe,
             );
-            movement_net::park_mover(&net.0 .0, &mut player);
-            return;
-        }
-        if player.server_riding {
-            let pivot_h = body
-                .single()
-                .map(|(_, t, _, pivot, ..)| head_height(pivot, t.scale.x))
-                .unwrap_or(CAM_PIVOT_FALLBACK);
-            let head = player.pos + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS);
-            // Far sight outlives a ride, so it has to be honoured here too — Sentry Totem carries
-            // no interrupt flags at all, which means you can board a taxi with your view still on
-            // the totem. Same substitution as the main path below; skipping it would read as far
-            // sight mysteriously dropping the moment a spline takes the body.
-            let (orbit_pos, sweep_from, orbit_pivot) = match view_subject.remote {
-                Some(v) => (v.feet, v.sweep_origin(), v.pivot_height),
-                None => (player.pos, head, pivot_h),
-            };
-            seat_camera(
-                dt,
-                0.0,
-                orbit_pos,
-                sweep_from,
-                orbit_pivot,
-                &mut rig,
-                &mut cam,
-                &mut cam_t,
-                &collide,
-                cam_probe,
-            );
+            // Flush a stale run once, so observers stop extrapolating it — but never under a ride,
+            // whose FORWARD report is deliberate and would be cancelled every frame.
+            if !player.server_riding {
+                movement_net::park_mover(&net.0 .0, &mut player);
+            }
             return;
         }
         // ── Autorun ── TOGGLEAUTORUN through the binding table (0997; 1.12 defaults NUMLOCK +
@@ -1692,9 +1687,21 @@ fn control(
         // toggling autorun on with W already held raises no new direction bit (VERIFIED wire-silence),
         // yet the reference still cancels. (0445's row says "YES" unqualified; wow-re RF-0079 §5
         // corrects it to the ON edge.)
-        if move_flags_now & move_flags::ANY_MOVE & !player.move_flags != 0
-            || jumped
-            || autorun_armed
+        //
+        // **And it is a fact about our own character, not about whatever we are steering**
+        // (decision 1281). The whole point of Mind Control is walking the victim around while the
+        // channel holds, and the interrupt this feeds is the *caster's*: vmangos breaks a channel on
+        // `m_caster`'s own position moving (`Spell::update`), and a possessed creature's steps never
+        // touch it. Without this gate the first movement key after a Mind Control shipped
+        // `CMSG_CANCEL_CHANNELLING` for our own channel 23 ms later, ending the possession — and
+        // since the reins then came home mid-keypress, the still-held key ran our own character,
+        // which reads exactly like "moving my character cancelled the spell" (director, 2026-08-13;
+        // reproduced live, `WOW_CAST_TRACE`).
+        let steering_ourselves = player.foreign_mover.is_none();
+        if steering_ourselves
+            && (move_flags_now & move_flags::ANY_MOVE & !player.move_flags != 0
+                || jumped
+                || autorun_armed)
         {
             net.7 .0 = true;
         }

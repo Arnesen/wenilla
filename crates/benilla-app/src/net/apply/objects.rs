@@ -16,7 +16,7 @@ use benilla_world::model_fade::DespawnFade;
 
 use super::super::motion::{
     create_spline, monster_move_spline, pose_transform, resolve_facing, trace_create_spline,
-    trace_move_snap, write_pose,
+    trace_move_snap, write_pose, SplineStopped,
 };
 use super::super::{
     Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, RemoteMotion, SelfGuid,
@@ -473,11 +473,15 @@ pub(super) fn monster_move(
         match monster_move_spline(path, spline_id, stop, duration_ms, flying) {
             // A moving path: sample_splines drives the transform along every waypoint.
             Some(spline) => {
-                commands.entity(e).insert(spline);
+                commands.entity(e).insert(spline).remove::<SplineStopped>();
             }
-            // Stop/clear: freeze where the last sample left it (≈ the endpoint).
+            // Stop/clear: freeze where the last sample left it (≈ the endpoint) — and keep the id,
+            // which the server is waiting to hear back for a player-driven unit (decision 1281).
             None => {
-                commands.entity(e).remove::<Spline>();
+                commands
+                    .entity(e)
+                    .remove::<Spline>()
+                    .insert(SplineStopped(spline_id));
             }
         }
     }

@@ -75,7 +75,7 @@ pub(in crate::net) fn resolve_facing(
 /// stationary meleeing mob squares up on its victim even though the server sends **no** facing for it
 /// (vmangos `SetInFront` is server-only; verified by a live sniff — no `MONSTER_MOVE` arrives when you
 /// attack a standing mob). A moving unit (a [`Spline`]) faces its travel direction instead; a remote
-/// player ([`RemoteMotion`]) and the body we drive ([`ActiveMover`]) own their facing — all excluded. The
+/// player ([`RemoteMotion`]) and the body we steer ([`ActiveMover`]) own their facing — all excluded. The
 /// turn is capped per frame at [`FACE_TARGET_TURN_RATE`], toward the horizontal bearing to the target.
 #[allow(clippy::type_complexity)]
 pub(in crate::net) fn face_target(

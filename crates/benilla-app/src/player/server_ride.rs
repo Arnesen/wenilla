@@ -25,7 +25,7 @@ use benilla_assets::coords::bevy_to_wow;
 use bevy::prelude::*;
 
 use crate::creature_anim::{move_flags, BodyTwist, MovementState};
-use crate::net::{ActiveMover, ClientCommand, NetCommands, Spline};
+use crate::net::{ClientCommand, Embodied, NetCommands, Spline, SplineStopped};
 
 use super::Player;
 
@@ -51,10 +51,11 @@ pub(super) fn drive_self_ride(
             Entity,
             &Transform,
             Option<&Spline>,
+            Option<&SplineStopped>,
             Option<&mut MovementState>,
             Option<&mut BodyTwist>,
         ),
-        With<ActiveMover>,
+        With<Embodied>,
     >,
 ) {
     // Only while we hold control (post-login). A free-fly detach (`F`) abandons any ride rather than
@@ -63,7 +64,7 @@ pub(super) fn drive_self_ride(
         player.server_riding = false;
         return;
     }
-    let Ok((entity, transform, spline, motion, twist)) = q.single_mut() else {
+    let Ok((entity, transform, spline, stopped, motion, twist)) = q.single_mut() else {
         return;
     };
     // A teleport landed since last frame: the server relocated us, voiding any in-progress ride
@@ -76,6 +77,9 @@ pub(super) fn drive_self_ride(
     if std::mem::take(&mut player.ride_abort) {
         if spline.is_some() {
             commands.entity(entity).remove::<Spline>();
+        }
+        if stopped.is_some() {
+            commands.entity(entity).remove::<SplineStopped>();
         }
         if player.server_riding {
             player.server_riding = false;
@@ -140,11 +144,33 @@ pub(super) fn drive_self_ride(
             // strafe-engaged charge sliding sideways out of its landing.
             player.vel_y = 0.0;
             player.horiz_vel = Vec3::ZERO;
+            // **Whose id?** The one the server is actually waiting on. A ride that ran to its own
+            // end leaves the path's id as the newest, but a ride the server *cut short* was cut by
+            // launching a fresh stop spline, and vmangos checks the ack against that newest id
+            // (`HandleMoveSplineDone`) — so an interrupted flee or charge acked with the path's id
+            // is silently rejected, and every movement packet after it is dropped (decision 1281).
+            let spline_id = stopped.map_or(player.ride_spline_id, |s| s.0);
+            if stopped.is_some() {
+                commands.entity(entity).remove::<SplineStopped>();
+            }
             let _ = net.0.send(ClientCommand::MoveSplineDone {
                 flags: 0,
                 pos: bevy_to_wow(player.pos),
                 orientation: player.face_yaw,
-                spline_id: player.ride_spline_id,
+                spline_id,
+            });
+        }
+        // A stop with no ride behind it — the server halting a body it was already holding still
+        // (the fear that ends between flee paths, the possession's opening `StopMoving`). It arms
+        // the same wait and owes the same answer.
+        None if stopped.is_some() => {
+            let id = stopped.expect("checked above").0;
+            commands.entity(entity).remove::<SplineStopped>();
+            let _ = net.0.send(ClientCommand::MoveSplineDone {
+                flags: 0,
+                pos: bevy_to_wow(transform.translation),
+                orientation: yaw_of(transform.rotation),
+                spline_id: id,
             });
         }
         None => {}
@@ -186,7 +212,7 @@ mod tests {
                     grounded: true,
                 },
                 twist,
-                ActiveMover,
+                Embodied,
             ))
             .id();
         (app, entity, rx)

@@ -448,7 +448,7 @@ fn publish_world_units(
     bodies: Query<WireBody>,
     viewers: Query<(
         Entity,
-        Has<crate::net::ActiveMover>,
+        Has<crate::net::Embodied>,
         Has<benilla_world::world_unit::ViewerUnit>,
     )>,
 ) {
@@ -1117,7 +1117,7 @@ mod world_unit_tests {
             .world_mut()
             .spawn((
                 net(EntityKind::Player, 1.0),
-                crate::net::ActiveMover,
+                crate::net::Embodied,
                 collision_height::CollisionHeight(2.5),
             ))
             .id();
@@ -1164,14 +1164,14 @@ mod world_unit_tests {
         );
     }
 
-    /// The viewer marker is reconciled, not stamped once: a `/logout` takes `ActiveMover` away and
+    /// The viewer marker is reconciled, not stamped once: a `/logout` takes `Embodied` away and
     /// the marker has to go with it, or the next character is feathered as someone else's avatar.
     #[test]
     fn the_viewer_marker_follows_self_player_off_as_well_as_on() {
         let mut app = App::new();
         let me = app
             .world_mut()
-            .spawn((net(EntityKind::Player, 1.0), crate::net::ActiveMover))
+            .spawn((net(EntityKind::Player, 1.0), crate::net::Embodied))
             .id();
         app.world_mut()
             .run_system_once(publish_world_units)
@@ -1183,7 +1183,7 @@ mod world_unit_tests {
 
         app.world_mut()
             .entity_mut(me)
-            .remove::<crate::net::ActiveMover>();
+            .remove::<crate::net::Embodied>();
         app.world_mut()
             .run_system_once(publish_world_units)
             .expect("reconciler runs");

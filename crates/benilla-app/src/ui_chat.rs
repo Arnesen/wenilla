@@ -96,10 +96,23 @@ impl Plugin for UiChatPlugin {
             )
             // The zone-channel auto-join (0288 P6): the client half of a handshake vmangos
             // deliberately leaves to us. In-world only, and it early-outs on an unchanged zone.
+            //
+            // Both session-end edges clear its state (1284): leaving the world at all, and a socket
+            // drop that stays in-world for the reconnect. The disconnect twin is chained BEFORE the
+            // walk so a drop and a walk landing on the same frame cannot re-diff against membership
+            // the drop just invalidated.
             .add_systems(
                 Update,
-                channels::auto_join_zone_channels
-                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                (
+                    channels::end_session_channels_on_disconnect,
+                    channels::auto_join_zone_channels
+                        .run_if(in_state(crate::char_select::ClientState::InWorld)),
+                )
+                    .chain(),
+            )
+            .add_systems(
+                OnExit(crate::char_select::ClientState::InWorld),
+                channels::end_session_channels,
             );
     }
 }

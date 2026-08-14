@@ -40,7 +40,9 @@ use motion::{
     drain_pending_moves, extrapolate_remote_units, face_target, ground_clamp_creatures,
     mark_swimming_creatures, sample_splines,
 };
-pub(crate) use motion::{jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline};
+pub(crate) use motion::{
+    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+};
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {
@@ -184,27 +186,52 @@ pub(crate) struct ObjectStore(pub(crate) ObjectFields);
 
 /// Marks our own player's streamed entity (guid == [`SelfGuid`]). This is **identity** — "my
 /// character", the thing whose bags, auras, quest log and paper doll are mine. It is deliberately
-/// *not* "the thing I steer": that is [`ActiveMover`], which normally sits on the same entity and
+/// *not* "the thing I steer": that is [`Embodied`], which normally sits on the same entity and
 /// leaves it while you drive something else.
 #[derive(Component)]
 pub(crate) struct SelfPlayer;
 
-/// **The one unit this client simulates locally and streams to the server** — the reference's
-/// active-mover global (`ds:0xc4da98`/`0xc4da9c`, written only by `SetActiveMover 0x6006e0`), as a
-/// marker on the entity that global names.
+/// **The body this client is attached to** — where the camera is, whose feet make the footsteps,
+/// whose height the water lines are measured against, whose server-authored spline is ours to ride.
+/// The reference's **camera anchor** (`camera+0x88`), which has exactly three writers — the
+/// constructor and `SetTarget 0x50d0f0`'s two legs — and is *not* touched by a control update
+/// (wow-re `control-loss-and-restore.md` §3).
 ///
 /// Normally our own body, so it rides alongside [`SelfPlayer`]. While we hold somebody else's reins
 /// — mind-controlling a creature, an Eye of Kilrogg — it moves to *that* entity and our own body
-/// keeps none of it. The two are separate stores in the reference and separate markers here, for
-/// the reason decision 0092 separates the camera eye from the active-player character: possession
-/// moves what you *drive* without moving who you *are*.
+/// keeps none of it, exactly as `GetCamera().SetView(target)` moves the anchor at possession. That
+/// is decision 0092's separation carried one step further: possession moves what you *inhabit*
+/// without moving who you *are*.
+///
+/// **Attached is not the same as allowed to move**, and the second is [`ActiveMover`]'s job, not
+/// this marker's (decision 1281). A feared player is still attached to their own body — the
+/// reference keeps the anchor on it and keeps following it, merely smoothed — while the server, not
+/// their input, says where it goes.
 ///
 /// Exactly one entity carries it, and possibly none — a claimed mover whose object has not streamed
 /// in yet is nobody, never a silent fallback to our own body. That distinction is load-bearing:
 /// outbound `MSG_MOVE_*` carry no guid, so driving our body under a claimed creature's mover writes
-/// our pose onto the creature. [`crate::player`] owns the marker's placement; everything that
-/// simulates, animates from input, or streams a body reads `With<ActiveMover>`, and everything that
-/// replays *server* motion reads `Without<ActiveMover>`.
+/// our pose onto the creature. [`crate::player`] owns the placement.
+#[derive(Component)]
+pub(crate) struct Embodied;
+
+/// **The one unit this client authors motion for** — the reference's active-mover global
+/// (`ds:0xc4da98`/`0xc4da9c`, written only by `SetActiveMover 0x6006e0`), as a marker on the entity
+/// that global names.
+///
+/// [`Embodied`] narrowed to the frames the body is ours to move. The narrowing is the reference's
+/// own: `0x5fa600` **zeroes the mover globals** when a control update forbids the unit they name,
+/// and with them zero the input applier (`0x514640` skips the whole tick when the mover does not
+/// resolve) and every plain movement report — `0x600860`'s mover check kills the lot, heartbeat
+/// included (wow-re `control-loss-and-restore.md` §2/§6). There is no separate "may not move" flag
+/// in the movement path; the zeroed global *is* the immobility.
+///
+/// Here it also answers the ECS's version of that question — *may the ordinary server-replay path
+/// move this unit?* A body we are attached to but may not move must answer **yes**, which is how a
+/// mind-controlled player sees their own character walk where their captor drives it. A body we are
+/// driving must answer **no**, or the server's echo of our own movement fights the controller. So
+/// the replay lanes filter `Without<ActiveMover>`, not `Without<Embodied>`: the two differ only
+/// while control is lost, which is precisely the window where the difference is the whole point.
 #[derive(Component)]
 pub(crate) struct ActiveMover;
 

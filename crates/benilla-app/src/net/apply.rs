@@ -1419,9 +1419,10 @@ pub(super) fn tag_self_player(
     };
     for (entity, guid) in &untagged {
         if guid.0 == me {
-            commands
-                .entity(entity)
-                .insert((SelfPlayer, crate::creature_anim::MovementState::default()));
+            // Identity only. The controller-fed [`crate::creature_anim::MovementState`] used to
+            // ride along here, but it belongs to whichever body we are *steering*, which is not
+            // always this one — `player::embody` owns it now (decision 1281).
+            commands.entity(entity).insert(SelfPlayer);
         }
     }
 }

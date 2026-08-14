@@ -403,6 +403,10 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
     let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
     let pos = bevy_to_wow(player.pos);
     player.last_pos = pos; // the park is a position report too (decision 0907's reconcile)
+                           // Traced like every other outbound move: the park is a real `MSG_MOVE_STOP` on the wire, and
+                           // leaving it off `snd` made the trace lie by omission at exactly the edges it was wanted for —
+                           // the handover, the free-fly detach, the moment control is taken (decision 1281).
+    super::move_trace::sent(MoveKind::Stop, 0, facing, pos);
     let _ = sender.send(ClientCommand::Move {
         kind: MoveKind::Stop,
         flags: 0,

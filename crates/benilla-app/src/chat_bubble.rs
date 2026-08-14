@@ -61,7 +61,7 @@ use benilla_ui::script::{pieces, Backdrop, Insets};
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
-use crate::net::{ActiveMover, Guid, NetEntity, SelfGuid};
+use crate::net::{Embodied, Guid, NetEntity, SelfGuid};
 use crate::ui_chat::{default_color, ChatEventKind};
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
@@ -300,7 +300,7 @@ fn drive_bubbles(
     vplates: Res<VPlates>,
     self_guid: Res<SelfGuid>,
     units: Query<(Entity, &Guid, &Transform), With<NetEntity>>,
-    self_q: Query<&Transform, With<ActiveMover>>,
+    self_q: Query<&Transform, With<Embodied>>,
     camera: Query<(&Camera, &Transform), With<WorldCamera>>,
     mut atlas: Option<ResMut<UiFontAtlas>>,
     mut quads: ResMut<UiQuads>,

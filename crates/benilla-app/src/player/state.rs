@@ -512,7 +512,7 @@ pub(crate) struct Player {
     /// mover would teleport that creature onto us. Suppressing our body is also simply what
     /// possession looks like: your own character stands still while you drive the other thing.
     ///
-    /// While this holds, [`crate::net::ActiveMover`] sits on that unit's entity — or on nothing at
+    /// While this holds, [`crate::net::Embodied`] sits on that unit's entity — or on nothing at
     /// all until it streams — and the controller drives *it*. Our own body then simulates nothing,
     /// animates from nothing, and sends nothing, which is both the fix and what possession looks
     /// like from the outside (decision 1277).
@@ -521,7 +521,7 @@ pub(crate) struct Player {
     /// until we have adopted its pose.
     ///
     /// Set when the mover guid changes (the control handshake in [`super::wire_in`], and
-    /// [`super::embody::maintain_active_mover`] when the marker follows it); cleared at the same
+    /// [`super::embody::maintain_embodiment`] when the marker follows it); cleared at the same
     /// take-control edge that seizes our own body on login, once a streamed pose is actually there
     /// to seize. Both halves matter:
     ///
@@ -670,7 +670,7 @@ pub(crate) struct Player {
     /// The **swim pitch** (radians, +up) — the client's persistent per-unit pitch (`CMovement+0x20`,
     /// the swim §5's TU-B): **held** when unsteered (an idle floater keeps its pitch — never
     /// auto-leveled; the only zeroing writer `0x7c6e80` fires from stop-swim/teleport, not mouse
-    /// release). Steered by mouselook as a **DIRECT set** of the camera aim pitch, clamped
+    /// release). ActiveMover by mouselook as a **DIRECT set** of the camera aim pitch, clamped
     /// [`MOUSELOOK_PITCH_CLAMP`] (±89°) — **VERIFIED** (the camera-pitch §5, wow-re
     /// `swim-camera-pitch.md`, decision 0492, refuting the earlier no-camera-coupling census):
     /// the ref's mouse-move event chain lands in `SetPitch 0x7c6f70`, an unconditional store

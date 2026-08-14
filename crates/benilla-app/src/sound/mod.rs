@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 
-use crate::net::ActiveMover;
+use crate::net::Embodied;
 use crate::player::{head_height, CameraPivot, Player};
 use benilla_world::schedule::WorldStage;
 use benilla_world::view::WorldCamera;
@@ -269,8 +269,8 @@ fn update_audio_listener(
     mut listener: ResMut<AudioListener>,
     mut out: NonSendMut<SoundOutput>,
     player: Res<Player>,
-    self_av: Query<(&Transform, Option<&CameraPivot>), With<ActiveMover>>,
-    cam: Query<&Transform, (With<WorldCamera>, Without<ActiveMover>)>,
+    self_av: Query<(&Transform, Option<&CameraPivot>), With<Embodied>>,
+    cam: Query<&Transform, (With<WorldCamera>, Without<Embodied>)>,
 ) {
     // At-character (the default). `player.pos` is the feet; the head offset is the shared
     // model-derived pivot height, and the facing is the aim yaw about world-up (world +Y).

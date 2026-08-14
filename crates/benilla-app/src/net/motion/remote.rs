@@ -376,7 +376,7 @@ pub(in crate::net) fn drain_pending_moves(
 /// *smoothly* between the sparse relay packets instead of snapping at the ~2 Hz heartbeat rate. The
 /// horizontal velocity is derived from the live `moveFlags` in the mover's facing frame at its run /
 /// run-back / swim speed; the `TURN_*` flags rotate the facing at `turn_rate`. A creature [`Spline`]
-/// (server-authored path) and the body we drive ([`ActiveMover`]) are excluded — they have their own
+/// (server-authored path) and the body we are steering ([`ActiveMover`]) are excluded — they have their own
 /// motion source.
 ///
 /// **The step is then resolved against the world** ([`crate::player::mover::grounded_step`], decision

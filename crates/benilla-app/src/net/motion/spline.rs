@@ -33,6 +33,21 @@ pub(crate) struct Spline {
     pub(crate) grounded: bool,
 }
 
+/// **A spline the server ended by decree**, carrying the id the acknowledgement owes (decision
+/// 1281). `SMSG_MONSTER_MOVE`'s stop form has no path to walk, so it leaves no [`Spline`] behind —
+/// but it is a spline launch like any other on the server side, with its own fresh id, and vmangos
+/// arms `HasPendingSplineDone` for it whenever the unit is a player or a player's possessed
+/// creature (`MoveSplineInit::Launch`, and `Unit::StopMoving` says so in as many words: *"Will
+/// trigger CMSG_MOVE_SPLINE_DONE from client"*).
+///
+/// Until that acknowledgement lands — carrying **this** id, not the interrupted path's —
+/// `HandleMovementOpcodes` drops every movement packet the client sends for that unit. So an
+/// interrupted flee, charge or knockback needs the id kept, not discarded with the path.
+/// [`crate::player::server_ride`] consumes it for the body in our hands; on anything else it is
+/// inert bookkeeping, replaced by the next stop and cleared by the next real path.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct SplineStopped(pub(crate) u32);
+
 impl Spline {
     /// Average ground speed of the path in yards/second (total length ÷ duration) — what the creature
     /// animation selector ([`crate::creature_anim`]) reads to choose Walk vs Run.

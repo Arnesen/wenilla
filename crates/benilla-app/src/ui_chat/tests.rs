@@ -2,7 +2,7 @@ use crate::net::ChatKind;
 
 use super::event::{default_color, ChatEvent, ChatEventKind as K};
 use super::frames::compose;
-use super::input::{emote_send_eligible, ParsedChat};
+use super::input::{emote_send_eligible, emote_target, ParsedChat};
 
 /// A player-line event (the wire bridge's output shape) — sender resolved, optional flag.
 fn ev(kind: K, text: &str, sender: &str) -> ChatEvent {
@@ -118,6 +118,45 @@ fn text_emote_lines_are_verbatim_and_never_wear_the_senders_name() {
     assert!(compose(&ev(K::Say, "hi", "Bob"), K::Say)
         .unwrap()
         .contains("[Bob]"));
+}
+
+/// **A self-target goes out as guid 0** — `DoEmote`'s last act before it builds the packet
+/// (`0x5ef611`), and the reason vanilla has no self-emote sentence (decision 1282, correcting
+/// 1274's claim that you would read "You wave at ⟨YourName⟩.").
+///
+/// Without this the server echoes your own name back as the emote's target and the *whole zone*
+/// reads "Sam waves at Sam." — so the control below (a selection that is someone else survives
+/// intact) is what makes this a gate and not a mute button.
+#[test]
+fn emoting_at_your_own_selection_sends_an_untargeted_emote() {
+    use crate::target::Selection;
+    use bevy::prelude::Entity;
+
+    let me = Entity::from_raw_u32(7).unwrap();
+    let them = Entity::from_raw_u32(9).unwrap();
+
+    // Myself selected: the guid is dropped on the floor, exactly as `mov [ebp+0xc],ebx` does.
+    let sel = Selection {
+        target: Some(me),
+        guid: Some(0xdead_beef),
+    };
+    assert_eq!(emote_target(&sel, Some(me)), 0);
+
+    // The control — someone else selected: the guid goes out untouched.
+    let sel = Selection {
+        target: Some(them),
+        guid: Some(0xdead_beef),
+    };
+    assert_eq!(emote_target(&sel, Some(me)), 0xdead_beef);
+
+    // No selection at all is already untargeted, and a not-yet-streamed self entity must not make
+    // an empty selection look like a self-target (the `me.is_some()` guard).
+    assert_eq!(emote_target(&Selection::default(), Some(me)), 0);
+    let sel = Selection {
+        target: Some(them),
+        guid: Some(0xdead_beef),
+    };
+    assert_eq!(emote_target(&sel, None), 0xdead_beef);
 }
 
 /// The receive half of B156 on the real tables (decision 1274): the five reachable sentence forms,

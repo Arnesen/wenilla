@@ -9,21 +9,26 @@
 //! player" (`ds:0xb41414`), which is invariant under both far sight and possession (VERIFIED,
 //! wow-re `object-layer/scratch/farsight-and-client-control.md` §9).
 //!
-//! So benilla splits the *marker*, not the identity. [`SelfPlayer`] keeps meaning **my character**
-//! — bags, auras, quest log, paper doll, the name over the head — and never moves.
-//! [`ActiveMover`] means **the body in my hands**, and moves. Of ~150 `SelfPlayer` query sites the
-//! large majority are the first kind and are untouched by possession; the ones that changed are
+//! So benilla splits the *markers*, not the identity. [`SelfPlayer`] keeps meaning **my character**
+//! — bags, auras, quest log, paper doll, the name over the head — and never moves. [`Embodied`]
+//! means **the body I am attached to** (the reference's camera anchor, `camera+0x88`) and
+//! [`ActiveMover`] means **the body I may move** (those mover globals). Of ~150 `SelfPlayer` query
+//! sites the large majority are identity and are untouched by possession; the ones that changed are
 //! exactly those that simulate, animate from input, render the body the camera is inside, or
 //! stream it.
 //!
 //! Three properties of the placement carry the weight:
 //!
-//! - **Forbidden is nobody too.** A body we are told we may not move — ours under a Mind Control,
-//!   or a possessed creature the moment it is feared — leaves the marker unplaced, mirroring the
-//!   reference's own zeroing of the mover global. That is what lets the *server* drive it: the
-//!   ordinary relayed-motion path skips whatever carries this marker, so a body that keeps it while
-//!   the controller refuses to drive it is driven by nobody at all, and stands frozen while the
-//!   server runs it around in front of everybody else.
+//! - **Attached is not allowed to move** (decision 1281). A control update that forbids a body does
+//!   not detach us from it: [`Embodied`] stays and only [`ActiveMover`] comes off. That is the
+//!   reference's own shape — `0x5fa600` zeroes the mover globals and never touches the camera
+//!   anchor, so the camera goes on following your feared body, merely smoothed (wow-re
+//!   `object-layer/scratch/control-loss-and-restore.md` §2/§3). Collapsing the two cost more than
+//!   the camera: the self-spline ride hangs off attachment, and with it the
+//!   `CMSG_MOVE_SPLINE_DONE` vmangos arms a wait for at every spline launch for a
+//!   player-or-player-possessed unit (`MoveSplineInit::Launch`), dropping **every** movement packet
+//!   until it arrives (`HandleMovementOpcodes`). A client that detaches while feared is frozen
+//!   server-side long after the fear ends.
 //! - **Unresolvable is nobody, never a fallback.** A claimed grant whose object has not streamed in
 //!   leaves the marker unplaced, because the alternative — quietly leaving it on our own body —
 //!   drives our body under the creature's mover, and outbound `MSG_MOVE_*` carry no guid: the
@@ -38,47 +43,45 @@ use bevy::prelude::*;
 use super::follow::FollowState;
 use super::state::Player;
 use crate::creature_anim::MovementState;
-use crate::net::{ActiveMover, GuidIndex, RemoteMotion, SelfGuid, SelfPlayer};
+use crate::net::{ActiveMover, Embodied, GuidIndex, RemoteMotion, SelfGuid, SelfPlayer};
 
-/// Keep [`ActiveMover`] on the one body we drive: the possessed unit while we hold its reins, our
-/// own otherwise, and nobody at all while neither is streamed.
+/// Keep [`Embodied`] on the one body we are attached to — the possessed unit while we hold its
+/// reins, our own otherwise, and nobody at all while neither is streamed — and [`ActiveMover`] on
+/// it for as long as that body is also ours to move.
 ///
-/// Runs before the controller, which reads the marker to decide what — if anything — it is driving.
-pub(super) fn maintain_active_mover(
+/// Runs before the controller, which reads both to decide what — if anything — it is driving.
+// A Bevy system's parameter list, not an argument list.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn maintain_embodiment(
     mut commands: Commands,
     mut player: ResMut<Player>,
     mut follow: ResMut<FollowState>,
     guids: (Res<SelfGuid>, Res<GuidIndex>),
     self_body: Query<Entity, With<SelfPlayer>>,
-    tagged: Query<Entity, With<ActiveMover>>,
-    mut driving: Local<Option<u64>>,
+    attached: Query<Entity, With<Embodied>>,
+    steering: Query<Entity, With<ActiveMover>>,
+    mut held: Local<Option<u64>>,
 ) {
     let (self_guid, index) = (&guids.0, &guids.1);
-    // Who we mean to drive, and which entity that is. Three answers, not two:
+    // Which body we are attached to, and which entity that is. Two answers:
     //
-    // - **Forbidden to move it** ([`Player::control_lost`]) — nobody. This is the reference's own
-    //   rule rather than an optimisation: `0x5fa600` *zeroes the mover global* for the named unit,
-    //   and the consequence is the whole point. A mind-controlled player's body stops being locally
-    //   simulated and falls back to the ordinary relayed-motion path, so it visibly walks where its
-    //   captor drives it instead of standing frozen while the server runs it around. The same for a
-    //   possessed creature that has just been feared: the server's flee path drives it, and we watch
-    //   through a camera that is still on it.
     // - **A claimed foreign mover** answers by itself: either its object is streamed and it is the
-    //   mover, or nothing is.
+    //   body we inhabit, or nothing is.
     // - Otherwise our own body.
-    let want_guid = if player.control_lost {
-        None
-    } else {
-        player.foreign_mover.or(self_guid.0)
-    };
-    let want = match (player.control_lost, player.foreign_mover) {
-        (true, _) => None,
-        (false, Some(guid)) => index.0.get(&guid).copied(),
-        (false, None) => self_body.iter().next(),
+    //
+    // Being *forbidden to move it* is deliberately not a third answer (decision 1281). It is the
+    // narrow [`ActiveMover`] marker below that comes off, and `control`'s own gate that stops
+    // driving; detaching outright was decision 1279's mistake, and it took the camera, the
+    // collision height and — the expensive one — the self-spline ride and its mandatory
+    // `CMSG_MOVE_SPLINE_DONE` with it.
+    let want_guid = player.foreign_mover.or(self_guid.0);
+    let want = match player.foreign_mover {
+        Some(guid) => index.0.get(&guid).copied(),
+        None => self_body.iter().next(),
     };
 
-    if *driving != want_guid {
-        *driving = want_guid;
+    if *held != want_guid {
+        *held = want_guid;
         if want_guid.is_some() {
             // Whatever pose and momentum `Player` holds describe the body we just let go of, so the
             // controller has to adopt the new one's before it drives anything. It also drives
@@ -92,35 +95,40 @@ pub(super) fn maintain_active_mover(
         }
     }
 
-    let held = tagged.iter().next();
-    if held == want {
+    // The narrow half: whether that body is ours to move *this frame*. It changes on its own edges —
+    // a fear lands and lifts without the reins ever changing hands — so it is maintained beside the
+    // hand-over below, not inside it.
+    let steer = want.filter(|_| !player.control_lost);
+    for e in &steering {
+        if Some(e) != steer {
+            // [`MovementState`] rides with it, because it is `unify`'s **top-precedence** leg: a
+            // body that keeps one while nothing is writing it animates from the last view we drove
+            // it with, whatever the server is actually doing to it. Dropping it hands the animation
+            // to the same source that now owns the motion — the relayed stream, or the spline the
+            // server is flee-pathing it along.
+            commands.entity(e).remove::<(ActiveMover, MovementState)>();
+        }
+    }
+    if let Some(e) = steer {
+        if !steering.contains(e) {
+            commands
+                .entity(e)
+                .insert((ActiveMover, MovementState::default()));
+        }
+    }
+
+    if attached.iter().next() == want {
         return;
     }
-    for e in &tagged {
-        commands.entity(e).remove::<ActiveMover>();
-        // Hand the unit back to the ordinary remote path. [`MovementState`] is `unify`'s
-        // *top-precedence* leg, so one left behind would freeze the creature's animation on the
-        // last view we drove it with and shadow the relayed `MSG_MOVE_*` stream forever. Our own
-        // body keeps its own — `net::apply::tag_self_player` owns that one and never re-inserts it.
-        if !self_body.contains(e) {
-            commands.entity(e).remove::<MovementState>();
-        }
+    for e in &attached {
+        commands.entity(e).remove::<Embodied>();
     }
     if let Some(e) = want {
         // Drop whatever server-replay state the unit carried at the instant we took it. While we
         // drive it the server sends us no relays for it (vmangos excludes the mover's own session
         // from the broadcast), so nothing accumulates — but a move already queued for a future
         // apply would otherwise fire after we let go and yank the unit back to a pose it left.
-        commands
-            .entity(e)
-            .insert(ActiveMover)
-            .remove::<RemoteMotion>();
-        // A creature carries no controller-fed movement view — only our own avatar is given one,
-        // beside its `SelfPlayer` tag. Without it the possessed unit would walk with its idle
-        // animation playing: `control` writes this component, and `unify` reads it first.
-        if !self_body.contains(e) {
-            commands.entity(e).insert(MovementState::default());
-        }
+        commands.entity(e).insert(Embodied).remove::<RemoteMotion>();
     }
 }
 
@@ -135,7 +143,7 @@ mod tests {
             .init_resource::<FollowState>()
             .init_resource::<SelfGuid>()
             .init_resource::<GuidIndex>()
-            .add_systems(Update, maintain_active_mover);
+            .add_systems(Update, maintain_embodiment);
         let me = app.world_mut().spawn(SelfPlayer).id();
         app.world_mut().resource_mut::<SelfGuid>().0 = Some(0xAA);
         app.world_mut()
@@ -146,6 +154,11 @@ mod tests {
     }
 
     fn mover(app: &mut App) -> Option<Entity> {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Embodied>>();
+        q.iter(app.world()).next()
+    }
+
+    fn steered(app: &mut App) -> Option<Entity> {
         let mut q = app
             .world_mut()
             .query_filtered::<Entity, With<ActiveMover>>();
@@ -222,17 +235,16 @@ mod tests {
         );
     }
 
-    /// The one component this system must never take away. `tag_self_player` inserts our body's
-    /// [`MovementState`] beside the `SelfPlayer` tag and never inserts it again, so stripping it
-    /// here — as the creature leg does — would leave our own avatar animation-dead for the rest of
-    /// the session, and only after a possession.
+    /// The controller-fed [`MovementState`] follows the reins — including all the way home. It is
+    /// `unify`'s top-precedence leg, so whoever holds it decides what the body looks like it is
+    /// doing; leaving one on a body we have let go of freezes its animation on the last view we
+    /// drove it with, and failing to give it back leaves our own avatar animation-dead for the rest
+    /// of the session, and only ever after a possession.
     #[test]
-    fn our_own_body_never_loses_its_movement_view_to_a_possession() {
+    fn our_own_body_gets_its_movement_view_back_when_the_reins_come_home() {
         let (mut app, me) = harness();
-        app.world_mut()
-            .entity_mut(me)
-            .insert(MovementState::default());
         app.update();
+        assert!(app.world().entity(me).contains::<MovementState>());
 
         app.world_mut().resource_mut::<Player>().foreign_mover = Some(0xBB);
         let boar = app.world_mut().spawn(replaying()).id();
@@ -241,13 +253,21 @@ mod tests {
             .0
             .insert(0xBB, boar);
         app.update();
+        assert!(
+            !app.world().entity(me).contains::<MovementState>(),
+            "while we are driving the boar, nothing is writing our own body's view — a stale one \
+             would shadow whatever the server is doing to it"
+        );
+        assert!(app.world().entity(boar).contains::<MovementState>());
+
         app.world_mut().resource_mut::<Player>().foreign_mover = None;
         app.update();
-
         assert!(
             app.world().entity(me).contains::<MovementState>(),
-            "our own body's movement view is `tag_self_player`'s to own, never this system's"
+            "and it comes back with the reins — without this our own avatar is animation-dead for \
+             the rest of the session, and only ever after a possession"
         );
+        assert!(!app.world().entity(boar).contains::<MovementState>());
     }
 
     /// A cross-map worldport despawns and re-streams our own body under a fresh entity while we
@@ -278,27 +298,36 @@ mod tests {
              discard the worldport's own snap and re-run the settle"
         );
     }
-    /// Being forbidden to move a body hands it back to the *server's* motion, and that is visible:
-    /// a mind-controlled player must be seen walking where their captor drives them. The marker
-    /// staying on our own body is what would freeze it — `control` refuses to drive it, and the
-    /// remote-replay path skips whatever carries the marker, so it would be driven by nobody at all.
+    /// **Forbidden to move it is not letting go of it** (decision 1281) — the split the two markers
+    /// exist for. Being feared hands the body's *motion* to the server, which is visible and must
+    /// be: a mind-controlled player is seen walking where their captor drives them. But it does not
+    /// hand back the body, and letting go was expensive in a way nothing on screen showed — the
+    /// self-spline ride goes with it, and with the ride the `CMSG_MOVE_SPLINE_DONE` the server
+    /// blocks every later movement packet on.
     #[test]
-    fn a_body_we_may_not_move_is_driven_by_nobody_so_the_server_can_drive_it() {
+    fn a_body_we_may_not_move_stays_in_our_hands_and_only_stops_being_steered() {
         let (mut app, me) = harness();
         app.update();
         assert_eq!(mover(&mut app), Some(me));
+        assert_eq!(steered(&mut app), Some(me));
 
-        // Mind-controlled: the server named us with allowMove = 0.
+        // Feared, or mind-controlled: the server named us with allowMove = 0.
         app.world_mut().resource_mut::<Player>().control_lost = true;
         app.update();
         assert_eq!(
             mover(&mut app),
+            Some(me),
+            "still our body — the camera, the collision height and the spline ride all hang off \
+             this marker, and a client that drops it goes blind while feared"
+        );
+        assert_eq!(
+            steered(&mut app),
             None,
-            "the reins are nobody's — our body rejoins the relayed-motion path and walks where it \
-             is driven, instead of standing frozen while the server runs it around"
+            "but not ours to move: the replay lanes read THIS marker, so the body walks where the \
+             server drives it instead of standing frozen"
         );
 
-        // And a possessed creature we have just been forbidden to move behaves the same way.
+        // A possessed creature that has just been feared out of our control behaves the same way.
         app.world_mut().resource_mut::<Player>().foreign_mover = Some(0xBB);
         let boar = app.world_mut().spawn(replaying()).id();
         app.world_mut()
@@ -306,18 +335,12 @@ mod tests {
             .0
             .insert(0xBB, boar);
         app.update();
-        assert_eq!(mover(&mut app), None, "held, but not ours to move");
+        assert_eq!(mover(&mut app), Some(boar), "held, but not ours to move");
+        assert_eq!(steered(&mut app), None);
 
-        // Control back: the marker returns, and the body under us is re-adopted — it moved while
-        // the server had it.
-        app.world_mut().resource_mut::<Player>().reseat = false;
+        // Control back.
         app.world_mut().resource_mut::<Player>().control_lost = false;
         app.update();
-        assert_eq!(mover(&mut app), Some(boar));
-        assert!(
-            app.world().resource::<Player>().reseat,
-            "the creature ran under the server's fear path; carrying our stale pose onto it would \
-             snap it back to wherever we last drove it"
-        );
+        assert_eq!(steered(&mut app), Some(boar));
     }
 }

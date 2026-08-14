@@ -299,6 +299,10 @@ pub(crate) fn drive_nameplates(
         &Transform,
         Option<&ObjectStore>,
         Has<SelfPlayer>,
+        // Whether the body is drawn at all — the ShouldShowName gate's unwritten first term
+        // (decision 1277). A body the exterior-scene election sent to pass 2 never enters the
+        // reference's scene, so there is nothing over which to float a name.
+        Option<&InheritedVisibility>,
     )>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     // The show-gate inputs (one tuple param — Bevy's 16-param ceiling).
@@ -383,7 +387,15 @@ pub(crate) fn drive_nameplates(
     // The billboard facing: screen-aligned (the camera's own rotation), this frame's camera.
     let facing = cam_tf.rotation;
     let mut seen: Vec<Entity> = Vec::new();
-    for (entity, net, guid, tf, store, is_self) in &units {
+    for (entity, net, guid, tf, store, is_self, drawn) in &units {
+        // **A name needs a body to float over.** The director, inside Caverns of Time: the Tanaris
+        // mobs 222 yd overhead had correctly stopped drawing, and their names went on hanging in
+        // the rock — this lane walks every net entity with a `Guid` and never asked whether the
+        // unit was in the scene. Ahead of the whole ShouldShowName ladder below, because it is not
+        // one of that gate's terms: it is the precondition for asking at all.
+        if !drawn.is_none_or(|v| v.get()) {
+            continue;
+        }
         // The ShouldShowName gate, in the client's own order (own-unit answers its cvar BEFORE
         // the rescue; everyone else: the current-TARGET bypass — `[0xb4e2d8]` is the selection,
         // not the mouseover — then the kind cvar). A unit carrying a V-key nameplate never also

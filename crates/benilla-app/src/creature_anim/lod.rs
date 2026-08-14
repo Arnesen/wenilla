@@ -53,7 +53,7 @@ use bevy::prelude::*;
 use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalRef};
 
 use crate::entities::mount::MountBody;
-use crate::net::ActiveMover;
+use crate::net::Embodied;
 use crate::target::SelectionRadius;
 use benilla_world::view::WorldCamera;
 use benilla_world::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
@@ -90,7 +90,7 @@ pub(super) fn gate_rig_animation(
             &GlobalTransform,
             Option<&SelectionRadius>,
             Has<AnimParked>,
-            Has<ActiveMover>,
+            Has<Embodied>,
             Option<&MountBody>,
             Option<&UnitWmoRoom>,
         ),
@@ -104,7 +104,7 @@ pub(super) fn gate_rig_animation(
         // `RigPose`), so this query can never park the character pane.
         With<RigPose>,
     >,
-    self_hosts: Query<Has<ActiveMover>>,
+    self_hosts: Query<Has<Embodied>>,
     instances: Query<&WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
     mut out_since: Local<EntityHashMap<f32>>,
@@ -616,7 +616,7 @@ mod tests {
         let mut app = app();
         spawn_camera(&mut app);
         let (behind, behind_joint) = spawn_rig(&mut app, Vec3::Z * 50.0);
-        app.world_mut().entity_mut(behind).insert(ActiveMover);
+        app.world_mut().entity_mut(behind).insert(Embodied);
         advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
         assert!(
             !app.world().entity(behind).contains::<AnimParked>(),

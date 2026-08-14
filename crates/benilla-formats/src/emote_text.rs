@@ -67,11 +67,15 @@ pub struct EmoteTextCatalog {
 
 /// The facts `0x49b200` branches on, in the composer's own terms.
 ///
-/// **The self-target edge is real and it is the reference's**: `target_is_you` is only ever tested
-/// when you are *not* the performer (the guid compare at `0x49b2c8` jumps past it), so emoting at
-/// yourself takes the "you are the performer, the target is someone else" leg and renders
-/// **"You wave at ⟨YourName⟩."** — vanilla has no reflexive form. [`EmoteTextCatalog::compose`]
-/// reproduces that by deriving both facts here rather than trusting a caller to pre-clear one.
+/// **`target_is_you` is only tested when you are not the performer** — the guid compare at
+/// `0x49b2c8` jumps past it — so [`EmoteTextCatalog::compose`] derives both facts here rather than
+/// trusting a caller to pre-clear one.
+///
+/// That branch order once looked like it meant "a self-emote renders *You wave at ⟨YourName⟩.*",
+/// and decision 1274 said so. **It does not** (corrected by 1282): the sending client zeroes a
+/// self-target before the packet is built (`DoEmote 0x5ef611`), so `target` arrives EMPTY for that
+/// action and the untargeted column wins — "You wave.". Vanilla has no reflexive form *and* no
+/// self-named one; the case simply never reaches this struct.
 #[derive(Debug, Clone, Copy)]
 pub struct EmoteLine<'a> {
     /// The performer's resolved name — the `%s` the reference fills from the `NameCache` record
@@ -310,10 +314,18 @@ mod tests {
         assert_eq!(cat.compose(WAVE, &mine, 0).as_deref(), Some("You wave."));
     }
 
-    /// The self-target edge (`0x49b2c8` jumps past the target compare): emoting at yourself is
-    /// **not** reflexive — you get your own name in the target slot.
+    /// **The composer has no self-target case, because it can never be handed one** — and this
+    /// test exists to record that, since the shape of the code invites the opposite conclusion
+    /// (decision 1282, correcting 1274).
+    ///
+    /// The branch order is real: `0x49b2c8` matching the performer jumps past the target compare,
+    /// so if a self-emote *did* arrive with your own name in the target slot, this is what it
+    /// would render. It never arrives. The **send** side zeroes a self-target before the packet
+    /// exists (`DoEmote 0x5ef611`), so the server echoes an empty name and the untargeted column
+    /// wins — "You wave.", asserted just above. Reading this arm as "what a self-emote does" is
+    /// exactly the mistake 1274 made.
     #[test]
-    fn emoting_at_yourself_takes_the_performer_leg_and_names_you() {
+    fn the_self_named_target_form_is_unreachable_from_the_wire() {
         let data = crate::wow_data_or_skip!();
         let mut chain = Chain::open(&data).expect("open patch chain");
         let cat = load_emote_text_catalog(&mut chain).expect("load");
@@ -325,6 +337,13 @@ mod tests {
             cat.compose(WAVE, &me, 0).as_deref(),
             Some("You wave at Me.")
         );
+        // What the wire actually delivers for that same action — an EMPTY target — and therefore
+        // what a player really reads.
+        let me = EmoteLine {
+            performer_is_you: true,
+            ..line("Me", "", "Me")
+        };
+        assert_eq!(cat.compose(WAVE, &me, 0).as_deref(), Some("You wave."));
     }
 
     /// The gender rung: WAVE has no female column, so `8|ctx` misses and rung 2 (`ctx` alone)

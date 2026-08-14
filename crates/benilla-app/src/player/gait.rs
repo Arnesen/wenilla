@@ -33,6 +33,11 @@ use super::{Player, STATIONARY_CHASE_RATE};
 /// MOUSE turn shuffles once the body steps (no key flag involved). A deck turning under the rider
 /// carries `model_yaw` rigidly at the ride block, so it never registers as a body step here —
 /// the shuffle (and its keyframed step sounds) only ever sees real turns (decision 0458/0466).
+// The eighth parameter arrived with the possessed mover's own turn rate (1278) and clippy's
+// default bound is seven. These are one frame of mover state, each read from a different one of
+// the caller's queries — bundling them into a struct would name nothing the call site does not
+// already say, and the gate is `-D warnings`, so the honest move is to say why, here.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_body_heading(
     player: &mut Player,
     move_flags_now: u32,

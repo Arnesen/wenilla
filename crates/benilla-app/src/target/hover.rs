@@ -98,7 +98,12 @@ pub(super) fn update_hover(
     // pick outranks everything in the halo retry, so the hover doesn't strobe between two units).
     mut last_pick: Local<Option<Entity>>,
     // Unit roots: pose + scale, the playing animation (for its bounds sphere), the descriptor store
-    // (alive-vs-dead sets the pass-2 priority), and the part children.
+    // (alive-vs-dead sets the pass-2 priority), the part children — and whether the body is drawn
+    // at all. **You cannot click what is not in the scene** (decision 1277): a body the
+    // exterior-scene election sent to pass 2 never reaches the reference's draw list, so it takes
+    // no mouseover, no sword cursor and no click. This lane used to ray-test every unit root with a
+    // `Guid` and never ask, which is how the director could still target Tanaris mobs through a
+    // sealed cavern ceiling after their models had correctly stopped drawing.
     roots: Query<
         (
             Entity,
@@ -109,6 +114,7 @@ pub(super) fn update_hover(
             Option<&ObjectStore>,
             Option<&Children>,
             Option<&crate::entities::mount::MountChild>,
+            Option<&InheritedVisibility>,
         ),
         (With<Guid>, Without<SelfPlayer>),
     >,
@@ -119,7 +125,13 @@ pub(super) fn update_hover(
     parts: Query<(&Mesh3d, &benilla_world::rig_palette::RigPart)>,
     // Fallback path: a unit's pickable mesh children — `WorldObject` kind, model-local `Aabb`, world
     // transform, and the link to the streamed parent (whose `Guid` we resolve the hit to).
-    meshes: Query<(&ChildOf, &Aabb, &GlobalTransform, &WorldObject)>,
+    meshes: Query<(
+        &ChildOf,
+        &Aabb,
+        &GlobalTransform,
+        &WorldObject,
+        Option<&InheritedVisibility>,
+    )>,
     units: Query<&Guid, Without<SelfPlayer>>,
 ) {
     hovered.target = None;
@@ -160,8 +172,15 @@ pub(super) fn update_hover(
     // Units the faithful path *owns* (they have skinned parts): excluded from the AABB fallback
     // even when the broad phase rejects them — the reference wouldn't click them there either.
     let mut faithful: HashSet<Entity> = HashSet::new();
-    for (entity, gt, net, anims, drv, store, children, mount_child) in &roots {
+    for (entity, gt, net, anims, drv, store, children, mount_child, drawn) in &roots {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+            continue;
+        }
+        // Not drawn ⇒ not clickable (see the query's note). Deliberately BEFORE `faithful.insert`
+        // below, so an undrawn unit is not claimed by the faithful path either — otherwise it
+        // would merely be excluded from the AABB fallback and stay unpickable by accident rather
+        // than by rule.
+        if !drawn.is_none_or(|v| v.get()) {
             continue;
         }
         let Some(children) = children else { continue };
@@ -246,8 +265,12 @@ pub(super) fn update_hover(
     // ── Fallback for skinless units only: the model-bounds box test (pre-RE interim) ────────────
     // A unit's parts are separate meshes; testing each and keeping the closest parent is equivalent
     // to testing the union. `dir` is normalized, so `t` is a world distance like the hits above.
-    for (child_of, aabb, gt, obj) in &meshes {
+    for (child_of, aabb, gt, obj, drawn) in &meshes {
         if obj.kind != ModelKind::Creature {
+            continue;
+        }
+        // …and the same rule on the skinless fallback: a part inherits its root's pass-2 verdict.
+        if !drawn.is_none_or(|v| v.get()) {
             continue;
         }
         let parent = child_of.parent();

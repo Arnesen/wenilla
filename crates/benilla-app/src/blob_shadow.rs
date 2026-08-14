@@ -50,7 +50,7 @@ use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
 use crate::creature_anim::AnimData;
-use crate::net::{ActiveMover, NetEntity};
+use crate::net::{Embodied, NetEntity};
 use crate::player::CameraControl;
 use benilla_world::decal::{DecalFrame, WorldDecal};
 use benilla_world::model_fade::{fade_alpha, RenderFade};
@@ -184,8 +184,12 @@ fn update_shadows(
         (
             &Transform,
             &ModelAnimations,
-            Has<ActiveMover>,
+            Has<Embodied>,
             Option<&crate::entities::mount::MountChild>,
+            // …and whether the owner is drawn at all. A body the exterior-scene election sent to
+            // pass 2 is not in the reference's scene, so it casts nothing (decision 1277). The
+            // election writes the ROOT's `Visibility`; this is that verdict after propagation.
+            Option<&InheritedVisibility>,
         ),
         Without<BlobShadow>,
     >,
@@ -209,6 +213,10 @@ fn update_shadows(
     }
     let (mut n_total, mut n_shown, mut n_no_owner, mut n_no_clip, mut n_degen, mut n_no_ground) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // Counted apart from `n_no_owner`: a body the exterior election sent to pass 2 HAS an owner,
+    // and folding the two would make the census answer "why did it hide" with a lie. This is the
+    // instrument's whole job (decision 1283).
+    let mut n_undrawn = 0u32;
     let mut root_fade: EntityHashMap<f32> = EntityHashMap::default();
     for (part, fade) in &fades {
         let alpha = fade_alpha(fade.from, fade.to, (now - fade.started) / fade.duration);
@@ -222,12 +230,23 @@ fn update_shadows(
     let surface_count = decals.receiver_count();
     for (shadow, mut key, mut verts) in &mut shadows {
         n_total += 1;
-        let Ok((unit, anims, is_self, mount_child)) = owners.get(shadow.owner) else {
+        let Ok((unit, anims, is_self, mount_child, drawn)) = owners.get(shadow.owner) else {
             // sync_shadows despawns next frame; keep it cleared meanwhile.
             hide(&mut key, &mut verts);
             n_no_owner += 1;
             continue;
         };
+        // An owner that is not drawn casts nothing. The director's report from inside Caverns of
+        // Time (decision 1277): the exterior election had correctly stopped drawing the Tanaris
+        // mobs overhead, and their shadows carried on being projected onto the cavern floor,
+        // because this lane keys off the unit's `Transform` and never asked whether the unit was
+        // in the scene. The census counts it separately, so "why is there a shadow with no
+        // creature" is answerable from the log rather than from a debugger.
+        if !drawn.is_none_or(|v| v.get()) {
+            hide(&mut key, &mut verts);
+            n_undrawn += 1;
+            continue;
+        }
         // Mounted: the box and the extra scale column come from the mount child (the
         // `mount_anims` doc above); until its model lands, the rider's own box carries the frame.
         let (anims, extra_scale) = match mount_child.and_then(|mc| mount_anims.get(mc.0).ok()) {
@@ -436,9 +455,9 @@ fn update_shadows(
             })
         });
         debug!(
-            "blob shadows: {n_total} ({n_shown} shown, {n_no_owner} ownerless, {n_no_clip} \
-             no-clip, {n_degen} degenerate, {n_no_ground} no-ground; {surface_count} surfaces; \
-             texture {tex})"
+            "blob shadows: {n_total} ({n_shown} shown, {n_no_owner} ownerless, {n_undrawn} \
+             undrawn, {n_no_clip} no-clip, {n_degen} degenerate, {n_no_ground} no-ground; \
+             {surface_count} surfaces; texture {tex})"
         );
     }
 }

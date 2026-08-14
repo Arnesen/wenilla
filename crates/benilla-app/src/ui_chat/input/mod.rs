@@ -89,6 +89,36 @@ fn target_player_name(
     names.resolve(guid, commands).map(str::to_string)
 }
 
+/// The target guid a `CMSG_TEXT_EMOTE` carries — the current selection, **except that emoting at
+/// yourself goes out untargeted** (decision 1282).
+///
+/// That exception is `DoEmote`'s last act before it builds the packet, VERIFIED at `0x5ef611`:
+///
+/// ```text
+/// 5ef611: mov eax,[edi+8]     ; &ownGuid
+/// 5ef614: mov ecx,[ebp+0xc]   ; the target guid low  ... cmp / jne past
+/// 5ef61e: cmp edx,[eax+4]     ; ... and high         ... cmp / jne past
+/// 5ef623: mov [ebp+0xc],ebx   ; ebx = 0 (xor at 0x5ef56b, never reloaded)
+/// 5ef626: mov [ebp+0x10],ebx  ; -> the packet's target guid is ZERO
+/// ```
+///
+/// **This is why vanilla has no self-emote sentence.** 1274 read the receive-side composer
+/// correctly and then asserted an outcome — "You wave at ⟨YourName⟩." — from an input this gate
+/// makes unreachable: the server never echoes your own name back as the target, so the untargeted
+/// column is what you *and* everyone in range read ("You wave." / "Sam waves."). Without the gate
+/// we would emit "Sam waves at Sam." to the whole zone.
+///
+/// Compared by **entity** rather than guid, which is the same predicate and costs no 17th system
+/// param: `SelfPlayer` marks the entity whose guid *is* `SelfGuid` (`net.rs`), and [`Selection`]'s
+/// only writer (`target::scan`) sets `target` and `guid` together from one streamed entity — so
+/// "the selection is my entity" and "the selection is my guid" cannot disagree.
+pub(super) fn emote_target(selection: &Selection, me: Option<Entity>) -> u64 {
+    match selection.guid {
+        Some(guid) if !(me.is_some() && selection.target == me) => guid,
+        _ => 0,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// The client-local diagnostics' inputs, as one [`SystemParam`] — [`drain_chat_input`] is at the
 /// 16-parameter ceiling, and a named struct beats a nested tuple nobody can read.
@@ -640,7 +670,10 @@ pub(super) fn drain_chat_input(
                         .stand
                         .write(crate::player::StandStateRequest { state: state as u8 });
                 }
-                let target = selection.guid.unwrap_or(0);
+                let target = emote_target(
+                    &selection,
+                    self_player.single().ok().map(|(entity, _, _)| entity),
+                );
                 match commands
                     .0
                     .send(ClientCommand::TextEmote { text_id, target })

@@ -12,7 +12,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 
 use avian3d::prelude::*;
 
-use crate::net::ActiveMover;
+use crate::net::Embodied;
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use benilla_world::model_fade::{
@@ -334,7 +334,7 @@ impl FlyCam {
 /// The per-model camera-pivot height in **model-local yards, pre-scale** — `attach17.z + 0.0972` (M2
 /// attachment id 17) for a character, else `0.9 × vertex-box Z-extent`; the reference's camera-target
 /// height (`0x50cbc0`, wow-re `follow-camera`). Stamped on every modeled unit at attach
-/// ([`crate::entities`]); `control` reads it off the [`ActiveMover`], multiplies that body's live scale,
+/// ([`crate::entities`]); `control` reads it off the [`Embodied`], multiplies that body's live scale,
 /// and floors at [`CAM_PIVOT_FLOOR`] to get the world pivot the third-person camera looks at (and the
 /// first-person eye). `0.0` for a bounds-less display (→ floor).
 #[derive(Component, Clone, Copy)]
@@ -680,7 +680,7 @@ pub(super) fn seat_camera(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
-    self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<ActiveMover>>,
+    self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<Embodied>>,
     children_of: Query<&Children>,
     mut parts: Query<
         (
@@ -1061,7 +1061,7 @@ mod tests {
         app.add_systems(Update, apply_self_model_fade);
 
         // The avatar: root -> joint (the eye-glow bone). Its card follows the joint.
-        let avatar = app.world_mut().spawn(ActiveMover).id();
+        let avatar = app.world_mut().spawn(Embodied).id();
         let joint = app.world_mut().spawn(Transform::default()).id();
         app.world_mut().entity_mut(avatar).add_child(joint);
         let eye_glow = app

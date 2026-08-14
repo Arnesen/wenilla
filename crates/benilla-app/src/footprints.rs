@@ -49,7 +49,7 @@ use bevy::prelude::*;
 
 use crate::creature_anim::{footfall_side, move_flags, AnimSoundEvent, MovementState};
 use crate::entities::{BoneAttach, Creatures};
-use crate::net::{ActiveMover, NetEntity, ObjectStore};
+use crate::net::{Embodied, NetEntity, ObjectStore};
 use crate::sound::footsteps::Footsteps;
 use benilla_assets::{AssetSet, LockRecover, WorldAssets};
 use benilla_world::decal::{DecalFrame, WorldDecal};
@@ -149,7 +149,7 @@ fn load_ink(
 
 /// The spawner's ROOT-unit reads (see [`spawn_footprints`]'s `roots` param).
 type RootState = (
-    Has<ActiveMover>,
+    Has<Embodied>,
     Option<&'static NetEntity>,
     Option<&'static ObjectStore>,
     Option<&'static MovementState>,
@@ -169,7 +169,7 @@ fn spawn_footprints(
     // rider's SCALE_X — RE-corrected), and the state gates all read the root.
     parents: Query<&ChildOf>,
     roots: Query<RootState>,
-    self_pos: Query<&Transform, With<ActiveMover>>,
+    self_pos: Query<&Transform, With<Embodied>>,
     joints: Query<&GlobalTransform>,
     footsteps: Option<Res<Footsteps>>,
     creatures: Option<Res<Creatures>>,
