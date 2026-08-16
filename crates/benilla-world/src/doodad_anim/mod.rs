@@ -39,7 +39,9 @@ mod lazy;
 mod mat_anim;
 pub(crate) use lazy::{LazyRig, SkinnedTwin};
 use mat_anim::tick_anim_materials;
-pub use mat_anim::{playing_seq, sample_mat_anim, MatAnim, TintAnimMaterials, UvAnimMaterials};
+pub use mat_anim::{
+    playing_seq, sample_mat_anim, AnimMatPart, MatAnim, TintAnimMaterials, UvAnimMaterials,
+};
 
 /// The client's single global `rand()` stream — the MSVC LCG at `0x7400e5`, returning `[0, 32767]`
 /// (wow-re `doodad-anim-host.md` §5, decision 0768). Every doodad's variation roll draws from **one**

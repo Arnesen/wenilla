@@ -684,6 +684,16 @@ impl FarSideTwins {
     ) -> Option<&Handle<WowModelMaterial>> {
         self.to_far.get(&near.id())
     }
+
+    /// The near identity of a far twin, if `id` is one — the mat-anim draw scan asks, because
+    /// its registry keys are always near ids while a far-classified instance carries the twin's
+    /// (1375).
+    pub(crate) fn near_of(
+        &self,
+        id: AssetId<WowModelMaterial>,
+    ) -> Option<AssetId<WowModelMaterial>> {
+        self.to_near.get(&id).map(bevy::asset::Handle::id)
+    }
 }
 
 /// The far-axis compose every material-handle OWNER applies at its own write site: the handle it

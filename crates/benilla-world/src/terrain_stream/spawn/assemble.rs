@@ -263,13 +263,16 @@ pub fn spawn_model_entities(
         };
         // Register both variants' materials for the per-frame UV scroll (idempotent per material —
         // every instance of the batch lands on the same deduped handle).
-        if let Some(anim) = &sub.uv_anim {
+        // A period-0 loop is a constant the material seed already wrote (`sample(0.0)` IS its
+        // forever value) — registering it would buy a per-frame re-write of the same number
+        // (1375), so only a real loop enters the registry.
+        if let Some(anim) = sub.uv_anim.as_ref().filter(|a| a.period > 0.0) {
             uv_reg.0.entry(cutout.id()).or_insert_with(|| anim.clone());
             uv_reg.0.entry(blend.id()).or_insert_with(|| anim.clone());
         }
         // …and for the per-frame tint re-sample (the animated M2Color RGB, same shared clock —
         // the same invisible seq-band phase divergence as the UV scroll, recorded there).
-        if let Some(anim) = &sub.rgb_anim {
+        if let Some(anim) = sub.rgb_anim.as_ref().filter(|a| a.period > 0.0) {
             tint_reg
                 .0
                 .entry(cutout.id())
@@ -398,6 +401,16 @@ pub fn spawn_model_entities(
         // same way since the 0355 re-lane gave the probe-slot payload its own alpha field (bits
         // 0..=15) — the 0130-era "partial alpha can't show on the colour payload" deferral is
         // collected (bug B30: the Undercity lightshaft's authored 0.10/0.05 dimming).
+        // The scan marker (1375), same predicate as the registration above — so a marked row
+        // always has a registry key to match, and `tick_anim_materials` never has to visit an
+        // unmarked one.
+        if sub.uv_anim.as_ref().is_some_and(|a| a.period > 0.0)
+            || sub.rgb_anim.as_ref().is_some_and(|a| a.period > 0.0)
+        {
+            commands
+                .entity(entity)
+                .insert(crate::doodad_anim::AnimMatPart);
+        }
         if let Some(anim) = &sub.alpha_anim {
             commands
                 .entity(entity)

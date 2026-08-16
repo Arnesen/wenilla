@@ -277,6 +277,7 @@ fn apply_roster_policy(
     // (decision 1174's always-present run fact) — absent in every ordinary run, which is the
     // player answer and the one this screen was written for.
     rig: Option<Res<crate::run_mode::RigCharacter>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     if !roster.env_read {
         roster.env_read = true;
@@ -357,7 +358,18 @@ fn apply_roster_policy(
                     info!("char select: WOW_CHAR={name} — fast path");
                     send_pick(&mut roster, &pick, guid);
                 }
-                None => warn!("char select: WOW_CHAR={name} not on this account — showing roster"),
+                None => {
+                    warn!("char select: WOW_CHAR={name} not on this account — showing roster");
+                    // A harness run (env creds, no smoke) can never pick a different row itself —
+                    // parked here it burns its whole wall-clock. Same marker the login arm uses,
+                    // same greppable verdict for leg.sh.
+                    if crate::run_mode::unattended_login()
+                        && std::env::var_os("WOW_LOGIN_SMOKE").is_none()
+                    {
+                        error!("login: FATAL — WOW_CHAR={name} is not on this account; exiting");
+                        exit.write(AppExit::error());
+                    }
+                }
             }
         }
     }

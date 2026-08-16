@@ -861,6 +861,23 @@ fn drive_capture(
                     watch.stable,
                 );
             }
+            // The emptiness tripwire (1373): stability proves the image stopped changing, not
+            // that it contains anything — a lane that renders nothing is perfectly stable, and
+            // the 1371 black era sailed through this gate without a word. The bytes are already
+            // in hand; color channels only, since alpha is opaque even on a black frame.
+            if watch.stable >= stable_frames() || capped {
+                if let Some(px) = watch.prev.as_deref() {
+                    if px
+                        .chunks_exact(4)
+                        .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
+                    {
+                        error!(
+                            "capture: settled image is EMPTY — every color channel is zero; the \
+                             scene rendered nothing (1373)"
+                        );
+                    }
+                }
+            }
             if watch.stable < stable_frames() && !capped {
                 Phase::Building(n + 1)
             } else if let Some((rw, rh)) = resize_request().filter(|_| !ctx.resized) {

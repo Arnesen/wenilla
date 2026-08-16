@@ -220,5 +220,35 @@ impl Plugin for WorldFoundation {
                 ..Default::default()
             });
         }
+        // Direct draws on EVERY camera — the default, not a knob (1374/1376). Bevy's indirect
+        // lane is a per-draw indirect encode loop on Metal (no MULTI_DRAW_INDIRECT) plus the GPU
+        // preprocessing dispatches, and the 1374 bracket priced it ~4.3 cpu_ms at LBRS on 0.18 —
+        // shipped unclaimed for the campaign's whole run because 1364's knob under-measured it
+        // (the UI Camera2d leak, 1370). `WOW_INDIRECT=1` restores the upstream default for
+        // re-pricing. 1370's note that the lever must cover every camera, not just the world's,
+        // is why this is a sweep.
+        if std::env::var_os("WOW_INDIRECT").is_none() {
+            app.add_systems(bevy::app::Update, force_direct_draws);
+        }
+    }
+}
+
+/// Insert [`NoIndirectDrawing`] on any camera that lacks it — see the note at the registration
+/// site. Runs every frame so late-spawned cameras (portrait booths, the glue booth) are covered;
+/// the query is empty in steady state.
+fn force_direct_draws(
+    mut commands: Commands,
+    cams: Query<
+        Entity,
+        (
+            With<bevy::camera::Camera>,
+            Without<bevy::render::view::NoIndirectDrawing>,
+        ),
+    >,
+) {
+    for e in &cams {
+        commands
+            .entity(e)
+            .insert(bevy::render::view::NoIndirectDrawing);
     }
 }

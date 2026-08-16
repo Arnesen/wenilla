@@ -227,6 +227,14 @@ pub fn sample_mat_anim(
 /// seq-band loop per play (arm cursor) and a gseq loop per instance (attach anchor,
 /// `gseq-anchor.md`), but one uniform per material cannot phase per instance — meaningless for a
 /// seamless scroll either way. Entries drop when the material asset does.
+/// The scan marker (1375): a part whose material can ever be a [`UvAnimMaterials`]/
+/// [`TintAnimMaterials`] key — inserted at spawn, beside the registration itself, and only for a
+/// loop with a real period (a period-0 constant is fully served by its material seed). Without
+/// it, [`tick_anim_materials`]'s draw scan visited every `WowModelMaterial` row in the world
+/// (~48k at Stormwind) to find the placed instances of ~113 animated models.
+#[derive(bevy::prelude::Component)]
+pub struct AnimMatPart;
+
 #[derive(Resource, Default)]
 pub struct UvAnimMaterials(
     pub  std::collections::HashMap<
@@ -264,16 +272,21 @@ pub struct UvAnimMaterials(
 /// It over-includes (a part left `Inherited` under a hidden ancestor counts as drawn), which is the
 /// safe direction: an extra write costs a frame's uniform upload, a missed one would freeze a
 /// visible scroll.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn tick_anim_materials(
     time: Res<Time>,
     real: Res<Time<bevy::time::Real>>,
     mut uv_reg: ResMut<UvAnimMaterials>,
     mut tint_reg: ResMut<TintAnimMaterials>,
     mut materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
-    parts: Query<(
-        &MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
-        &Visibility,
-    )>,
+    parts: Query<
+        (
+            &MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
+            &Visibility,
+        ),
+        With<AnimMatPart>,
+    >,
+    twins: Res<crate::model_render::FarSideTwins>,
     mut drawn: Local<
         bevy::platform::collections::HashSet<AssetId<benilla_assets::materials::WowModelMaterial>>,
     >,
@@ -287,7 +300,12 @@ pub(super) fn tick_anim_materials(
     drawn.clear();
     for (mat, vis) in &parts {
         if *vis != Visibility::Hidden {
-            drawn.insert(mat.id());
+            let id = mat.id();
+            // A far-classified instance carries the far TWIN's id — never a registry key. Count
+            // it as its near identity, or a batch whose every instance sits beyond the water
+            // plane marks its near entry not-drawn and freezes both variants' scroll (1375; the
+            // twin itself keeps getting written by `classify_water_side`'s Modified mirror).
+            drawn.insert(twins.near_of(id).unwrap_or(id));
         }
     }
     let now = time.elapsed_secs();
@@ -298,23 +316,45 @@ pub(super) fn tick_anim_materials(
         if !drawn.contains(id) {
             return materials.contains(*id);
         }
-        let Some(mat) = materials.get_mut(*id) else {
-            return false; // material unloaded with its cache — drop the entry
-        };
         let uv = anim.sample(now);
-        mat.extension.sun_scale.z = uv[0];
-        mat.extension.sun_scale.w = uv[1];
+        // The write gate (`write_gated`'s reasoning, 1375): a `get_mut` deref alone marks the
+        // asset Modified — a uniform re-upload, a bind-group rebuild on the non-bindless Metal
+        // path, and the whole-population `AssetChanged` walks — so an unchanged value must be
+        // decided on the immutable view and never deref. Quantized because the input drifts
+        // continuously: 1/4096 of a texture repeat is below what any face can show.
+        let (zq, wq) = (
+            benilla_assets::quantize(uv[0], 4096.0),
+            benilla_assets::quantize(uv[1], 4096.0),
+        );
+        match materials.get(*id) {
+            None => return false, // material unloaded with its cache — drop the entry
+            Some(m) if m.extension.sun_scale.z == zq && m.extension.sun_scale.w == wq => {
+                return true;
+            }
+            Some(_) => {}
+        }
+        let Some(mat) = materials.get_mut(*id) else {
+            return false;
+        };
+        mat.extension.sun_scale.z = zq;
+        mat.extension.sun_scale.w = wq;
         true
     });
     tint_reg.0.retain(|id, anim| {
         if !drawn.contains(id) {
             return materials.contains(*id);
         }
+        let rgb = benilla_assets::quant255(anim.sample(now));
+        let tint = bevy::math::Vec4::new(rgb[0], rgb[1], rgb[2], 1.0);
+        match materials.get(*id) {
+            None => return false,
+            Some(m) if m.extension.tint == tint => return true,
+            Some(_) => {}
+        }
         let Some(mat) = materials.get_mut(*id) else {
             return false;
         };
-        let rgb = anim.sample(now);
-        mat.extension.tint = bevy::math::Vec4::new(rgb[0], rgb[1], rgb[2], 1.0);
+        mat.extension.tint = tint;
         true
     });
 }

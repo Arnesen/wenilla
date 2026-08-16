@@ -29,6 +29,11 @@ use benilla_world::world_census::WorldCensus;
 /// (scenario=`live`), and exits.
 pub(crate) struct LiveFpsPlugin;
 
+/// How long past `WOW_LIVE_FPS_AT` the probe waits for a world before declaring the run dead.
+/// Entry normally lands well inside `at` itself; 60 s of grace covers a cold-cache load without
+/// ever letting a stranded run ride out a harness timeout (see the `Waiting` arm).
+const BOOT_DEADLINE_SECS: f32 = 60.0;
+
 impl Plugin for LiveFpsPlugin {
     fn build(&self, app: &mut App) {
         let frames = std::env::var("WOW_LIVE_FPS")
@@ -146,6 +151,19 @@ fn drive_live_fps(
             // (The un-occludable window that keeps the SETTLE phase from streaming the world at
             // ~1 fps is [`ProbeFocusPlugin`]'s now — every probe needs it, not just this one.)
             if time.elapsed_secs() < probe.at || self_player.is_empty() {
+                // The boot deadline: entering the world takes seconds, and `at` already grants a
+                // settle window on top — a run still worldless this far past it is stranded on a
+                // glue screen (dead server, refused login the marker arms didn't catch) and every
+                // second more is the 1371 sitting's dead wall-clock again. `FATAL` is the marker
+                // leg.sh keys on.
+                if time.elapsed_secs() > probe.at + BOOT_DEADLINE_SECS {
+                    error!(
+                        "live-fps: FATAL — still not in world {:.0}s past the probe delay; a measurement run with no world is dead. exiting",
+                        BOOT_DEADLINE_SECS
+                    );
+                    exit.write(AppExit::error());
+                    probe.phase = LiveFpsPhase::Done;
+                }
                 return;
             }
             if let Ok(mut w) = windows.single_mut() {
