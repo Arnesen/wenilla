@@ -800,6 +800,7 @@ impl Loader<'_> {
         self.apply_button(el, wrapper, self_name, dbg_name);
         self.apply_editbox(el, wrapper, dbg_name);
         self.apply_messageframe(el, wrapper, dbg_name);
+        self.apply_simplehtml(el, wrapper, dbg_name);
         // 6 · <Scripts> handlers (rf24 `0x769ef0`); OnLoad is captured to fire bottom-up below.
         let onload = self.apply_scripts(el, wrapper, dbg_name);
 

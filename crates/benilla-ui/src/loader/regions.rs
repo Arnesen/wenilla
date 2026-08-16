@@ -98,6 +98,14 @@ impl Loader<'_> {
         parent_name: &str,
         dbg: &str,
     ) {
+        // **A `<SimpleHTML>`'s direct-child `<FontString>` is not a region at all** — it is the
+        // declaration of that widget's `P` element font (`0x78a1fe` → `CSimpleFont::LoadXML`), and
+        // `Loader::apply_simplehtml` owns it. Creating a real FontString here instead would leave
+        // an unanchored, textless string on the frame AND leave `elementFont[0]` empty, which is
+        // the one thing that makes every block fall back to the renderer's default face.
+        if el.tag.eq_ignore_ascii_case("SimpleHTML") {
+            return;
+        }
         for region in &el.children {
             if !region.tag.eq_ignore_ascii_case("FontString") {
                 continue; // <Layers>/<Frames>/<Scripts>/... are handled by their own passes
@@ -317,7 +325,7 @@ impl Loader<'_> {
     /// the single-font reality (a region cannot wear two faces) without pretending the list cannot
     /// exist. Depth is bounded: a template registry can contain a cycle, and a loader that hangs on
     /// a malformed addon is worse than one that gives up on it.
-    fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
+    pub(super) fn font_object_through_templates(&self, inherits: &str) -> Option<String> {
         // **The probes here stay case-EXACT, and the outcome is still folded.** Font names match
         // case-insensitively in 1.12 (`0x783870`, `SStrCmpI`), and that fold lives in
         // `Model::font_object` — so a miss here falls through to the caller's
@@ -359,7 +367,7 @@ impl Loader<'_> {
     /// `inherits=`'s affordance alone.
     ///
     /// Case-folded, because 1.12 matches font names with `SStrCmpI` (`0x783870`).
-    fn is_font_object(&self, name: &str) -> bool {
+    pub(super) fn is_font_object(&self, name: &str) -> bool {
         let model = self.model();
         let fonts = model.framexml_fonts.borrow();
         fonts.contains_key(name) || fonts.keys().any(|k| k.eq_ignore_ascii_case(name))

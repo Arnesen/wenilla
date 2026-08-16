@@ -6,8 +6,8 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, guild,
     inspect, item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log,
-    reputation, session, skills, slider, social, spellbook, taxi, trade, tradeskill, trainer,
-    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
+    reputation, session, simplehtml, skills, slider, social, spellbook, taxi, trade, tradeskill,
+    trainer, weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
     RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
@@ -115,6 +115,11 @@ pub(crate) struct Model {
     /// `SetBackdrop`). Absent ⇒ the frame draws no plate. Stored beside the arena like `region_data`
     /// (the arena models structure, not paint). The client's `frame+0x1ac` pointer.
     pub(crate) backdrops: HashMap<FrameHandle, backdrop::Backdrop>,
+    /// Per-`SimpleHTML` widget state (decision-free transcription of `CSimpleHTML`'s own members):
+    /// the four element fonts `+0x350`, the hyperlink format `+0x360`, and the CONTENTNODE list
+    /// `+0x340` of blocks the last `SetText` built. Stored beside the arena, like `backdrops`,
+    /// because its contents are script-layer types and `widget::kinds` is the layer below.
+    pub(crate) simple_html: simplehtml::SimpleHtmlStates,
     /// The named virtual **Font object** registry (`<Font name=…>` → resolved paint), keyed by name.
     /// Populated by the loader as it walks top-level `<Font>` nodes; read by `SetFontObject` and by
     /// FontString `inherits=` resolution. Data only — no Lua handles (MAXCSTACK discipline).
@@ -1090,6 +1095,7 @@ impl Model {
             chat_tab: false,
             region_data: HashMap::new(),
             backdrops: HashMap::new(),
+            simple_html: simplehtml::SimpleHtmlStates::new(),
             font_objects_by_lower: HashMap::new(),
             region_resolved: HashMap::new(),
             next_id: 1,

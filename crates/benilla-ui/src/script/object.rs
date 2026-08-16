@@ -326,6 +326,7 @@ fn kind_method_registries(lua: &Lua, this: &Table) -> &'static [&'static str] {
         // corpus's six method-class blockers) and made `SetInsertMode` unreachable.
         Some(FrameKind::MessageFrame) => &[super::messageframe::REG_MESSAGEFRAME_METHODS],
         Some(FrameKind::ScrollFrame) => &[super::scrollframe::REG_SCROLLFRAME_METHODS],
+        Some(FrameKind::SimpleHtml) => &[super::simplehtml::REG_SIMPLEHTML_METHODS],
         Some(FrameKind::Slider) => &[super::slider::REG_SLIDER_METHODS],
         Some(FrameKind::ColorSelect) => &[super::colorselect::REG_COLORSELECT_METHODS],
         Some(FrameKind::Button) => &[super::button::REG_BUTTON_METHODS],

@@ -208,7 +208,18 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// it stopped two engine facts hiding inside instrument modules this test deliberately does not
 /// count. The items were always crossing; the measurement improved. That is the only kind of raise
 /// that is not a retreat — a raise for a NEW leak is the failure this number exists to catch.
-const CEILING: usize = 154;
+///
+/// And 154 → 155: `modkeys::SyntheticHold`, a PUBLISH by 1164's test rather than a leak. The
+/// engine owns the macOS stuck-modifier reconciler, and that reconciler decides by polling the
+/// **hardware** flag state — which by construction reads "up" for a key no hand is on. So a
+/// synthesized press (the probe harness's `WOW_PROBE_KEY`) was released the frame after it was
+/// made, and logged as a stuck-key correction: every chord binding was silently unreachable
+/// headlessly on the platform we develop on. "Something is deliberately holding this key" has
+/// exactly one reader — the reconciler, engine-side — and its writers are whoever synthesizes
+/// input, which is game-side; a one-field resource is the smallest honest expression of that. The
+/// alternative was ordering a game system against an engine system, which crosses this same line
+/// *and* publishes a schedule point to do it.
+const CEILING: usize = 155;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

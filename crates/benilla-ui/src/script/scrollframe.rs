@@ -45,11 +45,26 @@ fn with_scroll<T>(
     }
 }
 
-/// `GetVerticalScrollRange()`'s live computation: `max(0, child_height − frame_height)` from the
-/// **resolved** rects — `0.0` when either is unresolved or there is no child. Never cached: the
+/// `GetVerticalScrollRange()`'s live computation: `max(0, contentExtent − frameHeight)` from the
+/// **resolved** rects — `0.0` when the frame is unresolved or there is no child. Never cached: the
 /// scroll offset always clamps against the current layout, not a stale snapshot.
 ///
-/// In **LOCAL units**, each height divided by its own frame's effective scale — i.e. exactly
+/// **The content extent is the scroll child's whole SUBTREE, not the child frame's own height**
+/// (wow-re `system/ui/scratch/simplehtml-markup-engine.md` §4.5, byte-identified during the
+/// SimpleHTML RE; decision 1338 corrects what 0112 shipped). `0x786e30` seeds a bounding box
+/// `{FLT_MAX, FLT_MAX, 0, 0}` and calls the **recursive** `0x786f80(scrollChild, &bbox)`, which
+/// unions the frame's REGION list (head `+0x1b4`, link `+0x1b8`, guard `[entry+8]+0xc4`) and
+/// re-enters itself for every CHILD FRAME (head `+0x2fc`, link `+0x300`, guard `[entry+8]+0xd0`);
+/// the range stored at `[+0x31c]` is `max(0, bboxExtent − viewportExtent)`.
+///
+/// The distinction is not academic: stock `ItemTextPageScrollChild` is declared **10×10**
+/// (`ItemTextFrame.xml` l.198) around a 270×304 SimpleHTML whose blocks extend well past it.
+/// Measured as the child's own height the range is zero and a book cannot be scrolled at all;
+/// measured as the subtree box it tracks the rendered text. Every ScrollFrame whose child is sized
+/// directly — the guild-info EditBox, the options panes, every faux list — is unchanged, because
+/// there its own rect already IS its subtree.
+///
+/// In **LOCAL units**, each height divided by the owning frame's effective scale — i.e. exactly
 /// `child:GetHeight() - self:GetHeight()`, the widget contract this method states. The resolved
 /// rects are screen px, and the scroll offset is NOT: `SetVerticalScroll` becomes the scroll
 /// child's anchor y-offset, which the solver multiplies by that child's scale (`resolve`'s
@@ -64,19 +79,55 @@ fn scroll_range(model: &Model, h: FrameHandle) -> f32 {
         _ => None,
     };
     let Some(child) = child else { return 0.0 };
-    let local_height = |h: FrameHandle| {
-        let scale = model
+    let scale_of = |f: FrameHandle| {
+        model
             .arena
-            .frame(h)
-            .map(|f| f.effective_scale)
+            .frame(f)
+            .map(|x| x.effective_scale)
             .filter(|s| s.abs() >= 1e-6)
-            .unwrap_or(1.0);
-        model.resolved.get(&h).map(|r| r.height() / scale)
+            .unwrap_or(1.0)
     };
-    match (local_height(h), local_height(child)) {
-        (Some(fh), Some(ch)) => (ch - fh).max(0.0),
-        _ => 0.0,
+    let Some(frame_h) = model.resolved.get(&h).map(|r| r.height() / scale_of(h)) else {
+        return 0.0;
+    };
+    let Some((top, bottom)) = subtree_span(model, child) else {
+        return 0.0;
+    };
+    ((top - bottom) / scale_of(child) - frame_h).max(0.0)
+}
+
+/// The vertical span `(top, bottom)` of `f`'s subtree in SCREEN px — its own resolved rect unioned
+/// with every VISIBLE descendant region and child frame, recursively (`0x786f80`). `None` when
+/// nothing in the subtree resolved.
+///
+/// Visibility is the client's own guard on both lists: a hidden block contributes no scroll range,
+/// which is what stops a window's parked art from inventing travel nobody can use.
+fn subtree_span(model: &Model, f: FrameHandle) -> Option<(f32, f32)> {
+    let frame = model.arena.frame(f)?;
+    let mut span: Option<(f32, f32)> = model.resolved.get(&f).map(|r| (r.top, r.bottom));
+    let union = |s: &mut Option<(f32, f32)>, t: f32, b: f32| {
+        *s = Some(match *s {
+            Some((ot, ob)) => (ot.max(t), ob.min(b)),
+            None => (t, b),
+        });
+    };
+    for &rh in &frame.regions {
+        if model.region_data.get(&rh).is_some_and(|d| d.hidden) {
+            continue;
+        }
+        if let Some(r) = model.region_resolved.get(&rh) {
+            union(&mut span, r.top, r.bottom);
+        }
     }
+    for &ch in &frame.children {
+        if !model.arena.frame(ch).is_some_and(|c| c.effective_visible) {
+            continue;
+        }
+        if let Some((t, b)) = subtree_span(model, ch) {
+            union(&mut span, t, b);
+        }
+    }
+    span
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {

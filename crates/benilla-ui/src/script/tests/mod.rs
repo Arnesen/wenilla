@@ -27,6 +27,7 @@ mod reference_surface;
 mod regions;
 mod scrollframe;
 mod setparent;
+mod simplehtml;
 mod size_changed;
 mod slider;
 mod statusbar;

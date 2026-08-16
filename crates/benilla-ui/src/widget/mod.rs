@@ -659,6 +659,37 @@ impl WidgetArena {
             .push(handle);
         Some(handle)
     }
+
+    /// **Free one region leaf** — unlink it from its owner's region list and release the slab slot,
+    /// so the handle stops resolving and the region stops drawing. Returns whether it was live.
+    ///
+    /// There is no `Region:Destroy` in the widget API and none is wanted: this exists for the one
+    /// engine-owned lifetime in the client, `CSimpleHTML::SetText`, which pool-frees the blocks of
+    /// the previous parse before building the new ones (`simplehtml-markup-engine.md` §10 step 1 —
+    /// the pool allocate at `0x78adc6` has a matching free, and the CONTENTNODE list at `+0x340` is
+    /// what names the objects to free). Without it a second `SetText` leaves the first parse's
+    /// FontStrings on screen, stacked behind the new ones.
+    ///
+    /// **The caller owns the rest of the region's identity.** The arena holds only structure;
+    /// paint (`RegionData`), the stable id maps, the resolved-rect cache and any name publish live
+    /// on the script model, and a caller that frees a region without dropping those leaves a
+    /// resolvable id pointing at a dead handle. [`crate::script`]'s SimpleHTML block teardown is
+    /// the one caller and does the whole set. For the same reason this must never be pointed at a
+    /// region some *state* still holds by handle (a button's texture slot, a tooltip line, an
+    /// EditBox's text region): freeing those would leave that state dangling.
+    pub fn destroy_region(&mut self, h: RegionHandle) -> bool {
+        let Some(region) = self.region(h) else {
+            return false;
+        };
+        let owner = region.owner;
+        if let Some(f) = self.frame_mut(owner) {
+            f.regions.retain(|&r| r != h);
+            if f.title_region == Some(h) {
+                f.title_region = None;
+            }
+        }
+        self.regions.remove(h.index, h.generation).is_some()
+    }
 }
 
 // The propagation mutators (visibility/strata/level/scale/alpha/reparenting) — split out for size;

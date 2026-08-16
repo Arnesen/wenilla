@@ -241,6 +241,24 @@ fn drawn_k(font_height: Option<f32>, font_size: f32) -> f32 {
     }
 }
 
+/// A DRAWN-space box, in the SNAPPED space every fit decision is made in — `(width, height)`, both
+/// divided by [`drawn_k`].
+///
+/// The three seams that measure a box against glyphs — [`measure_text`]'s wrap, [`ellipsize_to_fit`]
+/// and the emit pass's wrap + line stack — all shape at the nearest baked size and rescale by `k`
+/// at the end, while the rect they are handed is in drawn px. They must convert it the same way or
+/// they decide different breaks over the same string: the emit pass keeping the raw rect while
+/// measure moved into drawn space (1296) is what made an auto-sized FontString wrap inside its own
+/// measured width and lose its tail to the line stack, with no ellipsis (decision 1339). One body,
+/// so the conversion cannot drift back apart, and so the test that pins it binds this code and not
+/// a copy of it (`measure_fits_render`).
+///
+/// Identity at every baked size — all on-ladder UI text takes an unchanged path.
+fn fit_box(rect: Rect, font_height: Option<f32>, font_size: f32) -> (f32, f32) {
+    let k = drawn_k(font_height, font_size);
+    (rect.width() / k, rect.height() / k)
+}
+
 /// The multiline-EditBox row answer (the 2-D half of
 /// [`benilla_ui::script::UiScript::set_editbox_advances`]'s payload): the byte offset where each
 /// wrapped display row of `text` begins at `wrap_width` — the exact [`wrap_line`] pass the render
@@ -549,13 +567,12 @@ pub(crate) fn ellipsize_to_fit(
         .metrics
         .snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let step_extra = step_extra_of(font.outline);
-    // The whole fit test runs in SNAPPED space, so the box enters divided by the draw's exact-
-    // height rescale ([`drawn_k`]) — the rect is drawn px, the pitch and step table below are the
-    // snapped size, and the draw multiplies its quads by `k`. Measuring the box against unscaled
-    // glyphs is what let an off-ladder request truncate text that fits (B209; decision 0989's
-    // named residual). Identity at every baked size.
-    let k = drawn_k(font.height, font_size);
-    let (box_w, box_h) = (rect.width() / k, rect.height() / k);
+    // The whole fit test runs in SNAPPED space, so the box enters through [`fit_box`] — the rect
+    // is drawn px, the pitch and step table below are the snapped size, and the draw multiplies
+    // its quads by `k`. Measuring the box against unscaled glyphs is what let an off-ladder
+    // request truncate text that fits (B209; decision 0989's named residual). The emit pass reads
+    // its box through the same body, so this seam and the wrap it feeds cannot disagree.
+    let (box_w, box_h) = fit_box(rect, font.height, font_size);
     // The line pitch — identical to the emit pass's ([`layout_text_quads`]: the font em, NO
     // outline pad — the byte law, `fontstring-vertical-placement.md`), so the fit test and the
     // drawn stack agree line for line.
@@ -797,23 +814,34 @@ fn layout_text_quads_inner(
         0.0
     };
 
+    // The box, in the space this pass lays out in. Everything below — the wrap walk, the line
+    // stack, the pitch — is computed at the SNAPPED size and rescaled to the true height by `k`
+    // in one pass at the end ([`drawn_k`]); `rect` arrives in DRAWN px. So a box the wrap or the
+    // stack is measured against enters divided by `k`, exactly as [`measure_text`] and
+    // [`ellipsize_to_fit`] take it — this pass and those two must decide the same breaks over the
+    // same box or a string does not fit the width its own measure reported.
+    //
+    // Leaving it raw is what put the Main Menu's labels one character short (B272's sibling,
+    // decision 1339): 1296 moved measure into drawn space and left this pass in snapped space, so
+    // an auto-sized FontString — whose rect IS `measure_text`'s answer — wrapped inside its own
+    // box at `k < 1`, and the stack below then dropped the overflow line with no ellipsis to show
+    // for it ("Options" → "Option", "Return to Game" → "Return to"). The error is `w·(1−k)`, so it
+    // grows with the string and the +1 px of measure headroom stops covering it.
+    //
+    // The justify offsets below deliberately keep the raw `rect`: they position the block by an
+    // ANCHOR the final rescale pivots about, so the drawn-space rect term cancels exactly (Left
+    // and Top are the anchor; Center/Middle and Right/Bottom cancel to ±half the block). Only the
+    // two *fit* decisions here are measurements, and only they convert.
+    let (fit_w, fit_h) = fit_box(rect, font.height, font_size);
+
     // Word-wrap within the rect when it carries a pinned width; an unsized single-point FontString
     // resolves to a ~zero-width rect (no constraint) and keeps its single-line behavior. Wrapping
     // runs first, fully into `render_lines`, so its `&mut atlas.font_system` borrow is released
     // before the emit pass takes it again.
-    let mut render_lines: Vec<Vec<ColorRun>> = if rect.width() > WRAP_MIN_WIDTH {
+    let mut render_lines: Vec<Vec<ColorRun>> = if fit_w > WRAP_MIN_WIDTH {
         lines
             .iter()
-            .flat_map(|line| {
-                wrap_line(
-                    &atlas.metrics,
-                    &family,
-                    font_size,
-                    step_extra,
-                    line,
-                    rect.width(),
-                )
-            })
+            .flat_map(|line| wrap_line(&atlas.metrics, &family, font_size, step_extra, line, fit_w))
             .collect()
     } else {
         lines
@@ -824,8 +852,8 @@ fn layout_text_quads_inner(
     // truncated fits by construction, so this is the belt under any caller that skips that seam —
     // in the client the same split: the ui truncate feeds the gx string, and the gx line stack
     // clamps regardless. The pitch is the font em (the emit's `pitch` below — same law).
-    if rect.height() > HEIGHT_LIMIT_MIN {
-        render_lines.truncate(overflow::lines_allowed(rect.height(), font_size));
+    if fit_h > HEIGHT_LIMIT_MIN {
+        render_lines.truncate(overflow::lines_allowed(fit_h, font_size));
     }
 
     let mut quads = Vec::new();
@@ -1245,6 +1273,96 @@ mod row_start_tests {
 ///
 /// Run with `cargo test --release -p benilla-app -- --ignored --nocapture ellipsis_cost`. Skips
 /// without an install.
+/// **A string fits the width its own measure reported** — the invariant that binds
+/// [`measure_text`] to the emit pass's wrap, over the real client fonts.
+///
+/// An auto-sized FontString has no width of its own: the engine's measure round-trip
+/// (`ui_script::extract`) sizes its rect *from* [`measure_text`], and [`layout_text_quads`] then
+/// re-wraps inside that rect. So the two must decide the same breaks over the same box, or a
+/// string wraps inside itself — and the emit pass's line stack drops the overflow row with no
+/// ellipsis to show for it, which is text silently losing its tail.
+///
+/// They stopped agreeing at 1296, which moved measure into DRAWN space (`×k`) and left the emit
+/// pass measuring the drawn-space rect against the SNAPPED step table. The gap is `w·(1−k)`, so it
+/// grows with the string while the measure's headroom stays one pixel: short labels survived and
+/// long ones lost a character. The Main Menu — every label auto-sized, the whole window wearing
+/// `SetScale(ERA_WINDOW_SCALE)` = 0.78 so nothing lands on the ladder — showed it whole:
+/// `Options` → `Option`, `Return to Game` → `Return to` (B272's sibling, decision 1339).
+#[cfg(test)]
+mod measure_fits_render {
+    use super::*;
+
+    /// Friz Quadrata on a deliberately sparse ladder, so a request lands between bakes the way
+    /// every request does under a scaled frame. 16 snaps UP to 20: `k = 0.8`, the sign that
+    /// truncates (the emit pass's snapped glyphs are 25 % wider than what it draws).
+    const FACE: &str = "Fonts\\FRIZQT__.TTF";
+    const LADDER: &[f32] = &[10.0, 20.0];
+    const REQ: f32 = 16.0;
+
+    /// Every label the Main Menu draws, plus the two that survived — the shipped strings, so a
+    /// regression reads as the screenshot did.
+    const LABELS: &[&str] = &[
+        "Options",
+        "Support",
+        "Macros",
+        "Logout",
+        "Return to Game",
+        "Exit Game",
+        "Key Bindings",
+        "Edit",
+        "Main Menu",
+    ];
+
+    #[test]
+    fn a_string_fits_the_width_its_own_measure_reported() {
+        let Some(metrics) = super::super::atlas::test_metrics(&[(FACE, LADDER)], 1.0) else {
+            eprintln!("skipping: no install / font chain");
+            return;
+        };
+        let family = metrics.family_for(Some(FACE));
+        let font_size = metrics.snap_for(&family, REQ);
+        let k = drawn_k(Some(REQ), font_size);
+        assert!(k < 1.0, "the truncating sign: {REQ} must snap UP (k = {k})");
+        let step_extra = step_extra_of(Outline::None);
+        let spec = FontSpec {
+            path: Some(FACE),
+            height: Some(REQ),
+            outline: Outline::None,
+            paint_halo: true,
+            alpha_gradient: None,
+        };
+
+        let mut raw_wrapped = 0usize;
+        for label in LABELS {
+            // The rect an auto-sized FontString gets: measure's own answer, in drawn px.
+            let measured = measure_text(&metrics, label, None, spec).0;
+            let runs = parse_markup(label, [1.0, 1.0, 1.0, 1.0]);
+            let line = runs.first().expect("one line");
+
+            // The emit pass's wrap, over the box read through the SAME body it reads it through
+            // ([`fit_box`]) — so putting the raw rect back fails here, not just a copy of it.
+            let rect = Rect::new(0.0, 0.0, measured, REQ);
+            let (fit_w, _) = fit_box(rect, spec.height, font_size);
+            let rows = wrap_line(&metrics, &family, font_size, step_extra, line, fit_w);
+            assert_eq!(
+                rows.len(),
+                1,
+                "{label:?} wrapped inside its own measured width ({measured} drawn px)"
+            );
+
+            // The mutation check, welded in: measuring that same box RAW — what shipped — wraps
+            // the longer labels, and the emit pass's stack then eats the row it made.
+            let raw = wrap_line(&metrics, &family, font_size, step_extra, line, measured);
+            raw_wrapped += usize::from(raw.len() > 1);
+        }
+        assert!(
+            raw_wrapped > 0,
+            "the raw-box mutation must still break at least one label — otherwise this test \
+             cannot fail on the bug it pins"
+        );
+    }
+}
+
 #[cfg(test)]
 mod ellipsis_cost {
     use super::*;

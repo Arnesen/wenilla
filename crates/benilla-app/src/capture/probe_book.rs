@@ -79,7 +79,8 @@ struct BookProbe {
     plaque: Option<u64>,
     closed: Vec<Sample>,
     open: Vec<Sample>,
-    /// The page body the reader actually painted, in chars — the `n` the cost is quadratic in.
+    /// Characters the whole UI draws once the reader is up — the `n` the seam's cost scales in,
+    /// and the proof the page's blocks were built at all.
     page_chars: i64,
     fails: u32,
     exited: bool,
@@ -104,15 +105,92 @@ enum Phase {
     Done,
 }
 
-/// The reader's painted state, straight out of the live VM: `(shown, page body length)`.
+/// The reader's painted state: `(shown, characters the page actually draws)`.
+///
+/// The body is read off the RENDER LIST, not out of the VM. `ItemTextPageText` is a `SimpleHTML`
+/// since decisions 1337/1338 and 5875's SimpleHTML has no `GetText` (its Lua table is 19 entries
+/// and none of them is a text getter) — so the honest question is what the reader draws, which is
+/// also the stronger one: a parsed page is many blocks, a plain one is a single raw block, and a
+/// page that failed to build is zero.
 fn reader_state(script: &UiScript) -> (bool, i64) {
+    use benilla_ui::script::QuadContent;
     let shown = script
-        .eval::<bool>("return ItemTextFrame:IsShown() and 1 or nil")
+        .eval::<bool>("return ItemTextScrollFrame:IsShown() and 1 or nil")
         .unwrap_or(false);
     let chars = script
-        .eval::<i64>("return strlen(ItemTextPageText:GetText() or \"\")")
-        .unwrap_or(0);
+        .extract()
+        .into_iter()
+        .filter_map(|q| match q.content {
+            QuadContent::Text { text, .. } => text,
+            _ => None,
+        })
+        .map(|t| t.chars().count() as i64)
+        .sum();
     (shown, chars)
+}
+
+/// Every string the UI currently draws — the render list is the honest place to ask what the page
+/// looks like, and the only place since `ItemTextPageText` became a `SimpleHTML` (5875's has no
+/// `GetText`; wow-re `simplehtml-markup-engine.md` §5.1).
+fn drawn_strings(script: &UiScript) -> Vec<String> {
+    use benilla_ui::script::QuadContent;
+    script
+        .extract()
+        .into_iter()
+        .filter_map(|q| match q.content {
+            QuadContent::Text { text, .. } => text,
+            _ => None,
+        })
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// **B240's render half, checked where it was reported.** The page body is HTML; if the parse ever
+/// falls back, the reader draws the markup itself — which is what Goudy photographed. So: no drawn
+/// string may contain a tag, and the page's own lines must each be there as their own block.
+fn report_render(script: &UiScript) -> u32 {
+    let drawn = drawn_strings(script);
+    let mut fails = 0;
+    let markup: Vec<&String> = drawn
+        .iter()
+        .filter(|t| t.contains("<HTML>") || t.contains("<P align") || t.contains("</P>"))
+        .collect();
+    if markup.is_empty() {
+        info!("PROBE_BOOK: (render) PASS — nothing on screen draws its own markup");
+    } else {
+        fails += 1;
+        error!(
+            "PROBE_BOOK: (render) FAIL — the page is drawing markup: {:?}",
+            markup.iter().take(2).collect::<Vec<_>>()
+        );
+    }
+    // The blocks the plaque's own body must produce, each its own centred line.
+    let want = [
+        "ALLIANCE MILITARY RANKS",
+        "OFFICERS",
+        "Grand Marshal",
+        "Private",
+    ];
+    let missing: Vec<&str> = want
+        .iter()
+        .copied()
+        .filter(|w| !drawn.iter().any(|t| t == w))
+        .collect();
+    if missing.is_empty() {
+        info!("PROBE_BOOK: (render) PASS — the page's blocks are on screen, one per tag");
+    } else {
+        fails += 1;
+        error!("PROBE_BOOK: (render) FAIL — blocks missing from the page: {missing:?}");
+    }
+    // The other half of the reported look: a truncated block means the body is height-pinned
+    // again and decision 1332's ellipsis seam has it back.
+    if let Some(cut) = drawn.iter().find(|t| t.ends_with("...")) {
+        fails += 1;
+        error!("PROBE_BOOK: (render) FAIL — a drawn block is ellipsized: {cut:?}");
+    } else {
+        info!("PROBE_BOOK: (render) PASS — no block is cut off with \"...\"");
+    }
+    fails
 }
 
 /// Mean, median and max of a sample column, in µs.
@@ -218,6 +296,7 @@ fn book_probe(
             let (shown, chars) = reader_state(&script);
             if shown && chars > 0 {
                 probe.page_chars = chars;
+                probe.fails += report_render(&script);
                 info!("PROBE_BOOK: reader painted a {chars}-char body — sampling {SAMPLE_FRAMES} frames with it OPEN");
                 probe.phase = Phase::Open;
             } else if now - since > READY_TIMEOUT_SECS {

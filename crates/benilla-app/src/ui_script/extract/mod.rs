@@ -44,11 +44,19 @@ fn report_gate_miss(
     now: &[benilla_ui::script::ExtractedQuad],
     prev: &[benilla_ui::script::ExtractedQuad],
     dims_eq: bool,
+    bake_eq: bool,
     text_ui_eq: bool,
     portraits_eq: bool,
 ) {
     if !dims_eq {
         eprintln!("[ui-gate] miss: window/scale changed");
+        return;
+    }
+    if !bake_eq {
+        // Named, because it is the one miss whose cause is a QUARTER SECOND behind the input that
+        // provoked it (`REBAKE_SETTLE`): a resize that has already settled, re-converting again
+        // when the atlas it was waiting for finally lands (decision 1339).
+        eprintln!("[ui-gate] miss: glyph atlas re-baked");
         return;
     }
     if !text_ui_eq {
@@ -89,13 +97,16 @@ fn report_gate_miss(
 }
 
 /// Last frame's extract-gate inputs (decision 0740), held together as one `Local` — the gate
-/// compares all four or none, and a Bevy system has a hard param budget this was eating.
+/// compares all of them or none, and a Bevy system has a hard param budget this was eating.
 #[derive(Default)]
 pub(super) struct GateInputs {
     extracted: Vec<benilla_ui::script::ExtractedQuad>,
     text_ui: Option<benilla_ui::script::EditBoxTextUi>,
     dims: Option<(u32, u32, u32)>,
     portraits: std::collections::HashMap<String, crate::portrait::PortraitSource>,
+    /// The `UiFontAtlas::generation` the held quads' glyph cells were rasterized from — the term
+    /// that stopped being constant at decision 1296 (see the gate's own note below, decision 1339).
+    bake: Option<u64>,
 }
 
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
@@ -149,10 +160,20 @@ pub(super) fn drive_script(
     ui_scale: Res<super::UiScaleCvar>,
     // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
     // The conversion loop below is a pure function of (extracted, text_ui, window dims × seam
-    // scale, the portrait token map) — the glyph atlas bakes once at Startup and the sprite
-    // caches are monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff
-    // would then discard. Capture mode never skips (the harness wants exact per-frame output,
-    // including the cursor-icon quad's live mouse position).
+    // scale, the portrait token map, THE ATLAS BAKE) — the sprite caches are monotone
+    // path→handle, so equal inputs reproduce the same `UiQuads` the diff would then discard.
+    // Capture mode never skips (the harness wants exact per-frame output, including the
+    // cursor-icon quad's live mouse position).
+    //
+    // The bake term is decision 1339's correction: this list read "the glyph atlas bakes once at
+    // Startup", which decision 1296 falsified — the atlas now re-bakes whenever the raster
+    // environment moves, and every glyph quad the conversion emits carries that bake's cell UVs
+    // and image handle. The two are DEBOUNCED apart by design (`REBAKE_SETTLE` = 0.25 s), which is
+    // exactly what made the omission bite: the seam moves the instant the window resizes, the UI
+    // re-converts and settles well inside a quarter second, and *then* the new atlas arrives to a
+    // gate whose other four inputs all match — so the conversion is skipped and the screen keeps
+    // the old bake's resampled cells indefinitely. 1296's re-bake landed and nothing on screen
+    // used it, which is the shape of the reports that survived it.
     //
     // A [`crate::ui_script::VmMemo`] because a skip is not only a quad-conversion skip: it also skips
     // `set_link_spans` and the minimap-slot / booth-pane refills, which are pushes INTO the VM. The
@@ -401,6 +422,7 @@ pub(super) fn drive_script(
     let dims = (w.to_bits(), h.to_bits(), s.to_bits());
     let settled = capture.is_none()
         && prev.dims == Some(dims)
+        && prev.bake == generation
         && text_ui == prev.text_ui
         && booths.images.0 == prev.portraits
         && extracted == prev.extracted;
@@ -443,11 +465,13 @@ pub(super) fn drive_script(
             &extracted,
             &prev.extracted,
             prev.dims == Some(dims),
+            prev.bake == generation,
             text_ui == prev.text_ui,
             booths.images.0 == prev.portraits,
         );
     }
     prev.dims = Some(dims);
+    prev.bake = generation;
     prev.text_ui = text_ui.clone();
     prev.portraits = booths.images.0.clone();
     prev.extracted = extracted.clone();

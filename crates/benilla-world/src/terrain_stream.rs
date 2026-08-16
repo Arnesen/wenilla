@@ -207,6 +207,13 @@ pub struct WorldLoadProgress {
     pub colliders_pending: usize,
     /// Focus-neighbourhood placements not yet spawned (the wait instrument's term).
     pub placements_pending: usize,
+    /// **Which tile these facts are about** — the focus tile the streamer computed this frame.
+    /// `None` until the streamer first runs (and again after `release_world`). The settle release
+    /// compares it against the tile under the avatar's own feet and refuses the resident release on
+    /// a mismatch (decision 1336): residency published for one tile must never unfreeze a body
+    /// standing on another — the fail-closed guard that makes any future focus/snap ordering
+    /// regression cost a logged 6 s timeout instead of a silent fall through the world.
+    pub focus_tile: Option<(i32, i32)>,
 }
 
 impl WorldLoadProgress {
@@ -863,7 +870,17 @@ fn stream_terrain(
         let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.furnished);
         p.total = desired.len();
         p.ready = desired.iter().filter(|c| spawned(c)).count();
-        p.focus_resident = state.tiles.get(&(cx, cy)).is_none_or(|t| t.furnished);
+        p.focus_tile = Some((cx, cy));
+        // Resident = the focus tile is furnished — judged from the DESIRED set, not from the
+        // presence of a `state.tiles` entry: a desired tile whose request hasn't landed yet is
+        // absent from the map, and "no entry" must read as *not there*, never as "nothing to wait
+        // for". The vacuous arm is only for ground the WDT never authors (map edge, open ocean,
+        // a WMO-only map) — waiting there would hang forever on terrain that cannot exist.
+        p.focus_resident = if desired.contains(&(cx, cy)) {
+            state.tiles.get(&(cx, cy)).is_some_and(|t| t.furnished)
+        } else {
+            true
+        };
         // The focus neighbourhood's placements join the accounting (bar + scene term). A placement
         // is *up* once its own model spawned AND its WMO props (each an M2 arriving on its own
         // schedule) have — the furniture the reveal would otherwise pop in. Placements of tiles not

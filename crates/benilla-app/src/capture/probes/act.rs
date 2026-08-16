@@ -167,6 +167,10 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "X" => KeyCode::KeyX,
         "Z" => KeyCode::KeyZ,
         "Tab" => KeyCode::Tab,
+        // The nameplate toggles (`vplates`): bare `V` is enemy plates, `Shift`-held `V` is
+        // friendly. A probe that wants plates over a town's *friendly* NPCs — the only way to
+        // measure plate behaviour without standing in aggro range of something — presses this.
+        "V" => KeyCode::KeyV,
         // The detached free-fly toggle (`player.rs`) and its Ctrl speed boost (`camera.rs`, ×5).
         // Added because the harness could not reach the leg that broke decision 0793: the director's
         // first real run was a boosted free-fly, whose camera crosses the art radius in ~5 s, and
@@ -234,6 +238,7 @@ fn fire_probe_key(
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
+    mut hold: ResMut<benilla_world::modkeys::SyntheticHold>,
 ) {
     probe.armed |= !self_player.is_empty();
     if probe.taps.is_empty() || !probe.armed {
@@ -266,6 +271,21 @@ fn fire_probe_key(
             synth(tap.key, bevy::input::ButtonState::Released);
             tap.released = true;
         }
+    }
+    // Publish what we are holding, so the macOS stuck-modifier reconciler
+    // ([`benilla_world::modkeys`]) doesn't undo it: it polls the *hardware* flags, which read
+    // "up" for a key no hand is on, so before this every synthesized chord — `SHIFT-V`,
+    // `Ctrl`+`Shift`+`F` — was released the frame after it was pressed, and the release was
+    // logged as a stuck-key correction. Rewritten only when the held set changes (a plain
+    // `ResMut` write every frame would mark the resource changed forever).
+    let held: Vec<KeyCode> = probe
+        .taps
+        .iter()
+        .filter(|t| t.pressed && !t.released)
+        .map(|t| t.key)
+        .collect();
+    if hold.0 != held {
+        hold.0 = held;
     }
 }
 

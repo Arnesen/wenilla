@@ -9,8 +9,11 @@
 //!   bound to **V / Shift-V** by FrameXML `Bindings.xml` (asset-sourced default, like TAB).
 //! - **Gate**: never the own unit; never `NOT_SELECTABLE` (UNIT_FIELD_FLAGS bit 25); enemy bit
 //!   covers reaction ≤ neutral, friendly bit ≥ friendly; **max 20 yd**, hardcoded; **no
-//!   occlusion** (a 2-D overlay — plates draw through walls); snap, no smoothing; no
-//!   anti-overlap. (The friendly-totem exclusion waits on totems existing.)
+//!   occlusion** (a 2-D overlay — plates draw through walls); snap, no smoothing. Anti-overlap
+//!   there *is*, since 0367 found the shared solver ([`crate::smart_rect`]) — this file's older
+//!   "no anti-overlap" was the census that missed it. And the sphere is bounded by the frustum:
+//!   the unit must be **in view** ([`in_view`]), or its plate is not seated at all.
+//!   (The friendly-totem exclusion waits on totems existing.)
 //! - **Anchor**: the same overhead head point (`0x608640`, [`overhead_anchor`]) **+ 2/3 yd**
 //!   (`[0x80abfc]`), projected per frame (`0x483ee0`); the plate's **TOP-CENTER** lands on the
 //!   point (it hangs below — §8 Q5) and is edge-clamped half a plate inside the screen;
@@ -228,6 +231,50 @@ fn con_color(pl_level: u32, unit_level: u32) -> [f32; 4] {
     } else {
         CON_GRAY
     }
+}
+
+/// Snap a logical-pixel coordinate onto the **device** pixel grid — the plate's texel alignment
+/// (a benilla divergence: the reference draws at fractional device coords).
+///
+/// The plate rect is snapped so the sharp-resampled border art blits 1:1 and reads crisp instead
+/// of bilinear-smeared (0188). Alignment is a property of the **framebuffer**, though, and the
+/// quad lane is *logical* px ([`crate::ui_pass`]: 1 world unit = 1 logical px) — so the plain
+/// `round()` this shipped with quantized the plate to `scale_factor` PHYSICAL pixels: two pixels
+/// of stepping on the 2× display we develop and play on, against a world that slides continuously
+/// underneath. At a fractional scale (1.25/1.5, the Windows norm) it did not land on a texel
+/// boundary at all — the crispness it was bought for was an accident of an integer scale factor.
+///
+/// Snapping on the device grid keeps the 1:1 blit, is correct at any scale factor, and halves the
+/// stepping at 2×: measured over a Goldshire walk at 1440×810 (the `vpl` trace), the extra
+/// displacement the snap adds to a plate's glide fell from a median 0.33 / max 0.99 logical px per
+/// frame to 0.21 / 0.49. What is left is the ±½ device pixel every crisp UI pays.
+fn device_snap(v: f32, scale: f32) -> f32 {
+    (v * scale).round() / scale
+}
+
+/// **Is the unit in view?** — the gate between the 20-yd sphere and the seat.
+///
+/// The plate gate is a 20-yard *sphere*; the view is a 45° frustum, so most of what the sphere
+/// admits is beside or behind you. That would be harmless if an off-screen desire simply drew
+/// off-screen — but the seat's on-screen clamp ([`crate::smart_rect`]'s `normalize`, the ref's
+/// `0x509e20`) does not merely tidy a plate straddling an edge: it **translates a rect from
+/// anywhere bodily onto the screen**. Without this gate a unit two screens off to the side got a
+/// phantom plate pinned to the border — measured walking Goldshire at 1440×810 (the `vpl` trace,
+/// [`drive_vplates`]): **30% of every drawn plate while moving, two thirds while standing still**.
+/// They are not passive either: each claims bucket 0, so the anti-overlap solve pushed the plates
+/// of units you *can* see off phantoms you cannot, and they were live hover targets through
+/// [`PlateRects`].
+///
+/// That was the whole of the reported jitter — 26% of frame-steps moved a plate more than 4 px
+/// past its own projected motion, up to 300 px in a single frame, and 90% of those involved a
+/// phantom (after: 3.5% and 51 px, which is the solver's own documented snap-back). The projection
+/// is smooth throughout — median frame-to-frame acceleration 0.05 px — so none of it was ever a
+/// camera or an anchor problem.
+///
+/// The clamp keeps its job: a plate whose unit *is* in view still gets pulled fully inside the
+/// border, which is what it is for.
+fn in_view(screen: Vec2, viewport: Vec2) -> bool {
+    (0.0..=viewport.x).contains(&screen.x) && (0.0..=viewport.y).contains(&screen.y)
 }
 
 /// The knee of the plate's gx basis — **a director-pinned DEVIATION from the byte law**
@@ -531,8 +578,11 @@ fn drive_vplates(
         if !friendly && store.is_some_and(|s| s.0.unit_reads_dead()) {
             continue;
         }
-        // Project the plate point: the overhead anchor + 2/3 yd, per frame, no smoothing. A
-        // point behind the camera draws nothing (the plate has no clamp — offscreen is gone).
+        // Project the plate point: the overhead anchor + 2/3 yd, per frame, no smoothing. Behind
+        // the camera the projection itself fails and the plate is gone. (This comment used to
+        // claim "the plate has no clamp — offscreen is gone", which had not been true since the
+        // seat gained the solver's on-screen normalize: offscreen was dragged to the border. The
+        // gate below is what makes the sentence true again.)
         let anchor = overhead_anchor(
             entity,
             tf,
@@ -544,9 +594,14 @@ fn drive_vplates(
         let Ok(screen) = cam.world_to_viewport(&cam_tf, anchor + Vec3::Y * PLATE_LIFT) else {
             continue;
         };
+        // …and the unit has to be in view ([`in_view`]).
+        if !in_view(screen, viewport) {
+            continue;
+        }
         cands.push((
             screen.distance_squared(sort_pt),
             screen,
+            anchor,
             rank,
             is_player,
             entity,
@@ -555,7 +610,7 @@ fn drive_vplates(
         ));
     }
     cands.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (_, screen, rank, is_player, entity, guid, store) in cands {
+    for (_, screen, anchor, rank, is_player, entity, guid, store) in cands {
         plates.0.insert(entity);
 
         // The target-highlight relative alpha: target (or nobody targeted) opaque, others 0x7F.
@@ -591,14 +646,48 @@ fn drive_vplates(
             screen.y + ph,
         );
         let solved = bucket.resolve(desired, viewport);
-        // The rect SNAPS to whole logical pixels (benilla divergence, texel alignment): the
-        // solved corner is fractional and a half-pixel offset would bilinear-smear the fill
-        // bitmap (and blur text). Snap the LEFT edge (not the center): an odd width would put a
-        // snapped center's edges back on half-pixels. The CLAIM takes the snapped rect, so
-        // later plates dodge exactly what is drawn.
-        let top = solved.min.y.round();
-        let left = solved.min.x.round();
+        // The rect snaps to the device pixel grid ([`device_snap`]) — the LEFT edge, not the
+        // centre: an odd width would put a snapped centre's edges back between texels. The CLAIM
+        // takes the snapped rect, so later plates dodge exactly what is drawn.
+        let top = device_snap(solved.min.y, scale);
+        let left = device_snap(solved.min.x, scale);
         let plate = Rect::new(left, top, left + pw, top + ph);
+        // **The jitter decomposition** (`WOW_MOVE_TRACE` tag `vpl`, one line per plate per frame):
+        // the world anchor, the camera pose that projected it, the raw projected point, the
+        // solver's answer, and the snapped rect — so "the plates are jittery when moving" is
+        // attributed to one of the four (a moving anchor, a noisy camera, a flipping solve, the
+        // pixel snap) from numbers rather than from the eye. It rides the shared trace — tag-
+        // filtered, one line per plate — and not the `WOW_VPLATE_TRACE` eprintlns beside it, whose
+        // four unbuffered writes per plate per frame would distort the frame pacing the question
+        // is about (the 0880 lesson).
+        if benilla_assets::trace::enabled_for("vpl") {
+            let (cp, cf) = (cam_pose.translation, cam_pose.forward());
+            benilla_assets::trace::line(
+                "vpl",
+                &format!(
+                    "e={} vp=({:.0},{:.0}) anchor=[{:.4},{:.4},{:.4}] cam=[{:.4},{:.4},{:.4}] \
+                     fwd=[{:.4},{:.4},{:.4}] scr=({:.3},{:.3}) solved=({:.3},{:.3}) plate=({:.1},{:.1})",
+                    entity.index(),
+                    viewport.x,
+                    viewport.y,
+                    anchor.x,
+                    anchor.y,
+                    anchor.z,
+                    cp.x,
+                    cp.y,
+                    cp.z,
+                    cf.x,
+                    cf.y,
+                    cf.z,
+                    screen.x,
+                    screen.y,
+                    solved.min.x,
+                    solved.min.y,
+                    plate.min.x,
+                    plate.min.y,
+                ),
+            );
+        }
         bucket.claim(plate);
         rects.0.push((plate, entity));
         let hover = cursor.is_some_and(|c| plate.contains(c));
@@ -933,6 +1022,48 @@ mod tests {
         assert_eq!(CON_RED[1], 25.0 / 255.0);
         assert_eq!(CON_ORANGE[2], 63.0 / 255.0);
         assert_eq!(CON_GREEN[1], 178.0 / 255.0);
+    }
+
+    /// The in-view gate: the 20-yd sphere reaches far outside the frustum, and everything it
+    /// admits from out there used to be dragged onto a screen border by the seat's clamp. The
+    /// bounds are inclusive — a unit exactly on the edge is still in view, and the clamp (not this)
+    /// is what keeps its plate fully inside.
+    #[test]
+    fn only_a_unit_in_view_gets_a_plate() {
+        let vp = Vec2::new(1440.0, 810.0);
+        assert!(in_view(Vec2::new(720.0, 405.0), vp));
+        assert!(in_view(Vec2::ZERO, vp), "the corner is in view");
+        assert!(in_view(vp, vp), "so is the far corner");
+        for out in [
+            Vec2::new(-0.5, 405.0),    // off left
+            Vec2::new(1440.5, 405.0),  // off right
+            Vec2::new(720.0, -0.5),    // above
+            Vec2::new(720.0, 810.5),   // below
+            Vec2::new(1409.0, 1332.0), // the measured phantom: two thirds of a screen below
+        ] {
+            assert!(!in_view(out, vp), "{out:?} is not on screen");
+        }
+    }
+
+    /// The snap is on the DEVICE grid, not the logical one. At the 2× scale we develop on, a
+    /// logical `round()` moved the plate two physical pixels at a time; this moves it one, which
+    /// is the smallest step that still lands the border blit on a texel boundary. Pinned so the
+    /// `scale` argument can't be "simplified" away back into `round()`.
+    #[test]
+    fn the_plate_snaps_on_the_device_grid_not_the_logical_one() {
+        // 2× display: the grid is every half logical pixel, and every snapped value is a whole
+        // number of PHYSICAL pixels.
+        for (v, want) in [(10.0, 10.0), (10.2, 10.0), (10.3, 10.5), (10.6, 10.5)] {
+            let got = device_snap(v, 2.0);
+            assert_eq!(got, want, "{v} at 2×");
+            assert_eq!((got * 2.0).fract(), 0.0, "{got} is a whole physical pixel");
+        }
+        // 1×: unchanged from the old law.
+        assert_eq!(device_snap(10.4, 1.0), 10.0);
+        assert_eq!(device_snap(10.6, 1.0), 11.0);
+        // 1.5× (the Windows norm), where a logical round() was never texel-aligned at all.
+        assert_eq!((device_snap(10.4, 1.5) * 1.5).fract(), 0.0);
+        assert_eq!((device_snap(10.9, 1.5) * 1.5).fract(), 0.0);
     }
 
     /// Plate text ems ride the gx DIAGONAL like the frame geometry, growth-damped past the

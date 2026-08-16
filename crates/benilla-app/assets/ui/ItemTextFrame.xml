@@ -9,15 +9,11 @@
         ITEM_TEXT_BEGIN → ITEM_TEXT_READY → ITEM_TEXT_CLOSED.
 
         ADAPTATIONS (the MailFrame.xml precedents):
-          · The body scroll (ItemTextScrollFrame, UIPanelScrollFrameTemplate 280×355 at -66,-76) is
-            a plain Frame at that exact rect with the page FontString INSIDE it (no live scrollbar);
-            a very long page clips. The ref's own flanking scrollbar art (UI-Character-ScrollBar
-            top/bottom + the black middle strip) is quoted verbatim as inert layers, so the right
-            edge reads exactly like the reference at rest.
-          · ItemTextPageText is SimpleHTML in the ref — drawn here as a FontString at the same
-            rect (our letters/pages are plain text; an HTML page renders as its markup, accepted).
-          · The ScrollFrame-only verbs the reference's OnLoad/READY use (UpdateScrollChildRect,
-            ScrollBar SetValue/Hide, scrollBarHideable) are dropped with the live scrollbar.
+          · The body scroll and the page are the REFERENCE's own structure since decisions
+            1337/1338 (B240): a real ScrollFrame over a 10x10 scroll child holding a real
+            SimpleHTML. Before those, the scroll was a plain Frame with an inert bar and the page a
+            FontString — so an HTML body drew as its own markup and a long one was cut off with
+            "...", both of which Goudy reported.
           · The two material colour TABLES are the reference's data (its Fonts.xml), quoted
             verbatim — the numbers ARE the look. They live here Benilla-scoped (the MoneyInput-shim
             precedent) because our own Fonts.xml deliberately doesn't ship the reference's two
@@ -166,6 +162,10 @@
             end
             ItemTextPageText:SetText(body)
             ItemTextScrollFrame:Show()
+            -- A page is content the reader has never seen: re-measure what there is to scroll and
+            -- start at the top, or page two opens halfway down page one.
+            ItemTextScrollFrame:UpdateScrollChildRect()
+            ItemTextScrollFrameScrollBar:SetValue(0)
 
             local pageNumber = ItemTextGetPage()
             local hasNext = ItemTextHasNextPage()
@@ -275,9 +275,11 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- ref ItemTextScrollFrame l.145-219: the plain-Frame stand-in (see the header) with
-                 the ref's own flanking scrollbar art kept verbatim. -->
-            <Frame name="ItemTextScrollFrame" hidden="true">
+            <!-- ref ItemTextScrollFrame l.145-219 — the REAL one now (decisions 1337/1338): an
+                 engine ScrollFrame that pans and clips its scroll child, with the ref's own
+                 flanking art quoted verbatim as the bar's track. `scrollBarHideable` keeps the bar
+                 off a page that fits, which is most of them. -->
+            <ScrollFrame name="ItemTextScrollFrame" inherits="UIPanelScrollFrameTemplate" hidden="true">
                 <Size><AbsDimension x="280" y="355"/></Size>
                 <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-66" y="-76"/></Offset></Anchor></Anchors>
                 <Layers>
@@ -304,16 +306,35 @@
                             <Color r="0" g="0" b="0" a="0.8"/>
                         </Texture>
                     </Layer>
-                    <Layer level="OVERLAY">
-                        <!-- ref ItemTextPageText (SimpleHTML 270×304 at 0,-15 in the scroll child)
-                             as a FontString at the same rect. -->
-                        <FontString name="ItemTextPageText" inherits="ItemTextFontNormal" justifyH="LEFT" justifyV="TOP">
-                            <Size><AbsDimension x="270" y="304"/></Size>
-                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
-                        </FontString>
-                    </Layer>
                 </Layers>
-            </Frame>
+                <Scripts>
+                    <!-- The template's own OnLoad still has to run — a handler declared on an
+                         instance REPLACES the template's, it does not chain. -->
+                    <OnLoad>
+                        ScrollFrame_OnLoad()
+                        this.scrollBarHideable = 1
+                    </OnLoad>
+                </Scripts>
+                <ScrollChild>
+                    <!-- ref ItemTextPageScrollChild l.198-217, 10x10 and deliberately so: the
+                         scroll range is the child's whole SUBTREE box (decision 1338), so the page
+                         inside it is what gives the reader something to scroll. -->
+                    <Frame name="ItemTextPageScrollChild">
+                        <Size><AbsDimension x="10" y="10"/></Size>
+                        <Frames>
+                            <!-- ref ItemTextPageText l.203-215. A SimpleHTML for real now (1337):
+                                 an HTML body renders as blocks, and a plain one as a single block
+                                 through the engine's raw-text fallback. Its height is its content,
+                                 so a long page SCROLLS where it used to be cut off with "...". -->
+                            <SimpleHTML name="ItemTextPageText">
+                                <Size><AbsDimension x="270" y="304"/></Size>
+                                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                                <FontString inherits="ItemTextFontNormal"/>
+                            </SimpleHTML>
+                        </Frames>
+                    </Frame>
+                </ScrollChild>
+            </ScrollFrame>
             <!-- ref ItemTextStatusBar l.220-251 — the ITEM_TEXT_TRANSLATION progress bar; never
                  fires on our letters, kept for fidelity. -->
             <StatusBar name="ItemTextStatusBar" hidden="true">

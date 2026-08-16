@@ -420,6 +420,66 @@ fn a_scroll_child_element_gives_the_frame_a_real_scroll_range() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// **The scroll range is the child's SUBTREE, not the child frame's own height** (decision 1338,
+/// wow-re `simplehtml-markup-engine.md` §4.5: `0x786e30` seeds a bbox and walks `0x786f80`
+/// recursively over the child's region and child-frame lists).
+///
+/// The geometry is the reference reader's own: `ItemTextPageScrollChild` is declared **10×10**
+/// around a 270×304 page. Measured as the child's height that is range 0 — a book that cannot be
+/// scrolled — which is exactly what shipped before this. The second assertion is the mutation
+/// check welded in: it is the number the old law returned.
+#[test]
+fn the_scroll_range_is_the_childs_whole_subtree() {
+    let mut s = script();
+    s.set_screen_size(1024.0, 768.0);
+    register(
+        &s,
+        r#"<Ui>
+            <ScrollFrame name="Reader">
+              <Size><AbsDimension x="280" y="100"/></Size>
+              <Anchors><Anchor point="TOPLEFT"/></Anchors>
+              <ScrollChild>
+                <Frame name="$parentChild">
+                  <Size><AbsDimension x="10" y="10"/></Size>
+                  <Frames>
+                    <Frame name="Page">
+                      <Size><AbsDimension x="270" y="304"/></Size>
+                      <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    </Frame>
+                  </Frames>
+                </Frame>
+              </ScrollChild>
+            </ScrollFrame>
+          </Ui>"#,
+    );
+    s.resolve();
+
+    assert_eq!(
+        s.eval::<f64>("return Reader:GetVerticalScrollRange()")
+            .unwrap(),
+        204.0,
+        "the 304-tall page inside the 10-tall child, less the 100-tall window"
+    );
+    // The mutation check: under the old law the child's own 10 never reaches the window's 100, so
+    // the range clamps to zero and the reader's scrollbar has nowhere to go.
+    assert_eq!(
+        s.eval::<f64>("return ReaderChild:GetHeight()").unwrap(),
+        10.0,
+        "and the child itself really is the reference's 10 — the range does not come from it"
+    );
+
+    // A hidden branch contributes nothing: the client guards both list walks on visibility, which
+    // is what stops a window's parked art from inventing travel nobody can use.
+    s.run("Page:Hide()").unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return Reader:GetVerticalScrollRange()")
+            .unwrap(),
+        0.0,
+        "hidden subtree, no range"
+    );
+}
+
 /// An empty `<ScrollChild>` is an error — the reference's own behaviour (`rf28`), and the honest
 /// one: a ScrollFrame that declares a child and has none is a typo, not a design.
 #[test]

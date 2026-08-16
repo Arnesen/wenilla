@@ -91,17 +91,37 @@ fn dev_plane(keys: &ButtonInput<KeyCode>) -> bool {
     ctrl && shift && !blocked
 }
 
+/// Keys a **synthetic** input source is holding this frame — the probe harness's `WOW_PROBE_KEY`
+/// taps are the only writer today.
+///
+/// The reconciliation above polls the *hardware* flag state, which by construction reads "up" for
+/// a key no hand is on. Without this list a synthesized `Shift`/`Ctrl` is released the frame after
+/// it is pressed — and logged as a stuck-key correction, so the instrument reads as working while
+/// **no probe can reach a chord binding on macOS at all** (`SHIFT-V`'s friendly nameplates, the
+/// `Ctrl`+`Shift`+`F` free-fly the `"Shift"` tap name was added for). The engine owns the type
+/// because the reconciler does; whoever synthesizes input writes it, on every platform.
+#[derive(Resource, Default)]
+pub struct SyntheticHold(pub Vec<KeyCode>);
+
+/// Is `code` a modifier Bevy holds down that nothing is legitimately holding — i.e. stuck, and the
+/// reconciler's to release? Pure, so the rule is testable off-platform (the reconciler itself
+/// needs AppKit and the main thread) — which is also why it is compiled for the test build of
+/// every platform, and only there off macOS.
+#[cfg(any(target_os = "macos", test))]
+fn is_stuck(code: KeyCode, pressed: &ButtonInput<KeyCode>, hold: &SyntheticHold) -> bool {
+    pressed.pressed(code) && !hold.0.contains(&code)
+}
+
 pub struct ModKeysPlugin;
 
 impl Plugin for ModKeysPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<SyntheticHold>();
         #[cfg(target_os = "macos")]
         app.add_systems(
             PreUpdate,
             mac::reconcile_modifiers.after(bevy::input::InputSystems),
         );
-        #[cfg(not(target_os = "macos"))]
-        let _ = app;
     }
 }
 
@@ -118,6 +138,7 @@ mod mac {
         _main_thread: NonSendMarker,
         mut codes: ResMut<ButtonInput<KeyCode>>,
         mut logical: ResMut<ButtonInput<Key>>,
+        hold: Res<super::SyntheticHold>,
     ) {
         let flags = unsafe { NSEvent::modifierFlags_class() };
         let families = [
@@ -147,14 +168,17 @@ mod mac {
                 continue;
             }
             // Guarded so an in-sync frame (the overwhelmingly common case) never marks the
-            // resources changed.
+            // resources changed — and a key a synthetic source is holding
+            // ([`super::SyntheticHold`]) is never "stuck": the hardware poll cannot see it.
+            let mut synthetic = false;
             for code in keys {
-                if codes.pressed(code) {
+                if super::is_stuck(code, &codes, &hold) {
                     warn!("modkeys: releasing stuck {code:?} (OS reports it up)");
                     codes.release(code);
                 }
+                synthetic |= hold.0.contains(&code);
             }
-            if logical.pressed(key.clone()) {
+            if !synthetic && logical.pressed(key.clone()) {
                 logical.release(key);
             }
         }
@@ -202,6 +226,27 @@ mod tests {
         ] {
             assert!(!dev_plane(&keys(&held)), "{held:?} is not the chord");
         }
+    }
+
+    /// A modifier a **synthetic** source is holding is never "stuck". The macOS reconciler polls
+    /// the hardware flags, which read up for a key no hand is on — so without the exemption a
+    /// synthesized chord dies the frame after it is pressed, and every `WOW_PROBE_KEY` chord
+    /// (`SHIFT-V`'s friendly nameplates, `Ctrl`+`Shift`+`F`'s free-fly) is unreachable on the
+    /// platform we develop on, while the log calls it a stuck-key fix.
+    #[test]
+    fn a_synthesized_modifier_is_not_stuck() {
+        let held = keys(&[KeyCode::ShiftLeft]);
+        assert!(is_stuck(
+            KeyCode::ShiftLeft,
+            &held,
+            &SyntheticHold::default()
+        ));
+        let hold = SyntheticHold(vec![KeyCode::ShiftLeft]);
+        assert!(!is_stuck(KeyCode::ShiftLeft, &held, &hold));
+        assert!(
+            !is_stuck(KeyCode::ControlLeft, &held, &hold),
+            "an unheld key is nothing to release either way"
+        );
     }
 
     /// The label a hint prints is the plane actually listened for — one const, one predicate, so a

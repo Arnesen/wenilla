@@ -100,6 +100,7 @@ mod saved;
 mod scrollframe;
 mod session;
 mod shapeshift;
+mod simplehtml;
 mod skills;
 mod slash;
 mod slider;
@@ -169,6 +170,10 @@ pub(crate) use region::{apply_font_parts, implicit_creation_anchor_lua};
 pub use reputation::{FactionEntry, ReputationSend, ReputationState};
 pub use session::SessionRequest;
 pub use shapeshift::ShapeshiftFormView;
+pub(crate) use simplehtml::{
+    apply_element_font_parts as apply_simplehtml_font_parts,
+    element_of_xml_tag as simplehtml_element_of_xml_tag,
+};
 pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::SoundRequest;
@@ -189,7 +194,7 @@ pub use types::{
     Gradient, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent,
     ScriptValue, TexCoords,
 };
-pub(crate) use types::{MeasuredText, RegionData};
+pub(crate) use types::{FontExplicit, MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
 pub use weapon_enchant::WeaponEnchant;
 pub use worldmap::{WorldMapContinentView, WorldMapOverlayView, WorldMapState, WorldMapZoneView};
@@ -546,6 +551,7 @@ impl UiScript {
         quest_log::install(&lua)?;
         messageframe::install(&lua)?;
         scrollframe::install(&lua)?;
+        simplehtml::install(&lua)?;
         slider::install(&lua)?;
         colorselect::install(&lua)?;
         minimap::install(&lua)?;

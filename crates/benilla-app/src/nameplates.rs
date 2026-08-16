@@ -162,12 +162,22 @@ impl NamePaint {
 /// The nameplate render caches: one unlit depth-tested material per palette color (built once the
 /// atlas exists), one mesh per distinct line stack (every "Young Wolf" shares one mesh), and the
 /// live per-unit plate entities.
+///
+/// **Every field here is atlas-derived and dies with the bake it was built from** ([`baked_from`]).
+/// The meshes carry glyph-cell UVs in their vertex data ([`build_name_mesh`]) and the materials
+/// bind the atlas image by handle — both are readings of ONE `UiFontAtlas`, and a re-bake
+/// (`ui_text::atlas`'s `BakeEnv` edge, decision 1296) replaces that atlas with a new image and a
+/// new cell layout. Keeping either across the edge draws new-bake UVs through the old-bake
+/// texture: the garbage-glyph unit names the maximised window produced (B272, decision 1339).
 #[derive(Resource, Default)]
 pub(crate) struct Nameplates {
     materials: HashMap<NamePaint, Handle<StandardMaterial>>,
     meshes: HashMap<Vec<String>, Handle<Mesh>>,
     /// unit → (plate entity, the (lines, color) it was built with).
     live: bevy::ecs::entity::EntityHashMap<(Entity, Vec<String>, NamePaint)>,
+    /// The `UiFontAtlas::generation` every cache above was built from — `None` before the first
+    /// build. [`drop_stale_atlas_caches`] empties all three when it moves.
+    baked_from: Option<u64>,
 }
 
 impl Nameplates {
@@ -338,6 +348,8 @@ pub(crate) fn drive_nameplates(
     let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
         return;
     };
+    // A re-baked atlas invalidates every cache below it (see [`Nameplates`]).
+    drop_stale_atlas_caches(&mut plates, atlas.generation, &mut commands);
     // The palette materials, once (they need the atlas image).
     if plates.materials.is_empty() {
         let image = atlas.image();
@@ -657,9 +669,45 @@ impl Plugin for NameplatesPlugin {
     }
 }
 
+/// Empty every atlas-derived cache when the bake under it moves — the staleness edge [`Nameplates`]
+/// describes.
+///
+/// A re-bake hands us a different image and a different cell layout, so the meshes' baked UVs and
+/// the materials' bound texture both stop meaning what they meant. Dropping the maps alone is not
+/// enough: the live plate entities still hold their old `Mesh3d`/`MeshMaterial3d` handles, so they
+/// are despawned too and rebuilt from the new atlas on this same frame's walk below (which
+/// re-enters every visible unit). That one-frame rebuild is the whole cost of a re-bake here.
+///
+/// The **first** build is not an edge — `baked_from: None` seeds to the live generation with
+/// nothing to drop.
+fn drop_stale_atlas_caches(plates: &mut Nameplates, generation: u64, commands: &mut Commands) {
+    if plates.baked_from == Some(generation) {
+        return;
+    }
+    if plates.baked_from.is_some() {
+        debug!(
+            "nameplates: atlas re-baked (generation {generation}) — dropping {} meshes, {} \
+             materials and {} live plates",
+            plates.meshes.len(),
+            plates.materials.len(),
+            plates.live.len(),
+        );
+        for (plate, _, _) in plates.live.values() {
+            if let Ok(mut e) = commands.get_entity(*plate) {
+                e.despawn();
+            }
+        }
+        plates.live.clear();
+        plates.meshes.clear();
+        plates.materials.clear();
+    }
+    plates.baked_from = Some(generation);
+}
+
 /// Drop the per-line-stack mesh dedup on a cross-map transition (`world_map::MapChange` — see its
 /// doc): it grows with every distinct name ever seen and the old map's population never comes
-/// back. The palette `materials` stay — a small fixed set, rebuilt only if the atlas changes.
+/// back. The palette `materials` stay — they are keyed by the atlas bake, not the map
+/// ([`drop_stale_atlas_caches`] owns that edge).
 fn evict_name_meshes(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
     mut plates: ResMut<Nameplates>,
@@ -753,4 +801,100 @@ mod tests {
     }
 
     const RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);
+
+    /// A populated cache, as a re-bake finds it: one live plate, its mesh, its material.
+    fn primed(generation: Option<u64>, unit: Entity, plate: Entity) -> Nameplates {
+        let lines = vec!["Young Wolf".to_string()];
+        let mut plates = Nameplates {
+            baked_from: generation,
+            ..Default::default()
+        };
+        plates.meshes.insert(lines.clone(), Handle::default());
+        plates.materials.insert(NamePaint::Flash, Handle::default());
+        plates.live.insert(unit, (plate, lines, NamePaint::Flash));
+        plates
+    }
+
+    /// **A re-bake empties every atlas-derived cache, live plates included** (B272, decision 1339).
+    ///
+    /// The meshes carry glyph-cell UVs in vertex data and the materials bind the atlas image by
+    /// handle. A re-bake replaces the atlas with a new image whose HEIGHT is a function of the
+    /// seam-dependent size ladder, so every normalized V from the old bake addresses a different
+    /// row of the new one. Keeping the material while rebuilding meshes is what drew new-bake UVs
+    /// through the old-bake texture — unit names as fragments of other letters.
+    ///
+    /// Dropping the maps is not enough on its own: the live plate entities still hold the old
+    /// `Mesh3d`/`MeshMaterial3d`, so they must be despawned to be rebuilt. That is the assertion
+    /// the map-clear alone would pass and the screen would not.
+    #[test]
+    fn a_rebake_drops_the_meshes_the_materials_and_the_live_plates() {
+        let mut world = World::new();
+        let unit = world.spawn_empty().id();
+        let plate = world.spawn_empty().id();
+        let mut plates = primed(Some(7), unit, plate);
+
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            drop_stale_atlas_caches(&mut plates, 8, &mut commands);
+        }
+        queue.apply(&mut world);
+
+        assert!(plates.meshes.is_empty(), "stale UVs must not survive");
+        assert!(
+            plates.materials.is_empty(),
+            "the material binds the OLD atlas image — the half that made it garbage rather than \
+             merely soft"
+        );
+        assert!(plates.live.is_empty());
+        assert!(
+            world.get_entity(plate).is_err(),
+            "a live plate holds the old mesh+material handles: clearing the maps around it leaves \
+             the wrong cells on screen"
+        );
+        assert_eq!(plates.baked_from, Some(8));
+    }
+
+    /// The FIRST build is not an edge — there is nothing baked from a previous atlas to drop, and
+    /// treating it as one would despawn the plates the same frame they were spawned.
+    #[test]
+    fn the_first_bake_seeds_without_dropping_anything() {
+        let mut world = World::new();
+        let unit = world.spawn_empty().id();
+        let plate = world.spawn_empty().id();
+        let mut plates = primed(None, unit, plate);
+
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            drop_stale_atlas_caches(&mut plates, 0, &mut commands);
+        }
+        queue.apply(&mut world);
+
+        assert_eq!(plates.meshes.len(), 1);
+        assert_eq!(plates.live.len(), 1);
+        assert!(world.get_entity(plate).is_ok());
+        assert_eq!(plates.baked_from, Some(0));
+    }
+
+    /// The steady frame — every frame that is not a re-bake — costs nothing and keeps everything.
+    #[test]
+    fn an_unmoved_bake_is_a_no_op() {
+        let mut world = World::new();
+        let unit = world.spawn_empty().id();
+        let plate = world.spawn_empty().id();
+        let mut plates = primed(Some(3), unit, plate);
+
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            drop_stale_atlas_caches(&mut plates, 3, &mut commands);
+        }
+        queue.apply(&mut world);
+
+        assert_eq!(plates.meshes.len(), 1);
+        assert_eq!(plates.materials.len(), 1);
+        assert_eq!(plates.live.len(), 1);
+        assert!(world.get_entity(plate).is_ok());
+    }
 }

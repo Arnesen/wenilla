@@ -8,7 +8,16 @@ use benilla_ui::script::{ItemTextState, UiScript};
 
 const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
-const FILES: [&str; 3] = ["Fonts.xml", "UiPanels.xml", "ItemTextFrame.xml"];
+/// The reader's dependency prefix, in the manifest's own order. `ScrollTemplates.xml` and
+/// `UIPanelTemplates.xml` joined it with decisions 1337/1338: the page sits in a real ScrollFrame
+/// now, whose template is in the second and whose `ScrollFrame_OnLoad` is in the first.
+const FILES: [&str; 5] = [
+    "Fonts.xml",
+    "UiPanels.xml",
+    "ScrollTemplates.xml",
+    "UIPanelTemplates.xml",
+    "ItemTextFrame.xml",
+];
 
 fn load_ui(script: &UiScript) {
     let dir = std::path::Path::new(UI_DIR);
@@ -33,6 +42,24 @@ fn load_ui(script: &UiScript) {
             report.errors
         );
     }
+}
+
+/// The page body as the reader actually DRAWS it, one string per block.
+///
+/// `ItemTextPageText` is a `SimpleHTML` since decisions 1337/1338, and 5875's SimpleHTML has no
+/// `GetText` — its Lua table is 19 entries and none of them is a text getter (wow-re
+/// `simplehtml-markup-engine.md` §5.1; later clients grew one, this one has not). So the page is
+/// read the way it is seen: off the render list. A plain body is one block through the engine's
+/// raw-text fallback, which is what every letter here is.
+fn page_blocks(s: &UiScript) -> Vec<String> {
+    use benilla_ui::script::QuadContent;
+    s.extract()
+        .into_iter()
+        .filter_map(|q| match q.content {
+            QuadContent::Text { text, .. } => text,
+            _ => None,
+        })
+        .collect()
 }
 
 fn letter() -> ItemTextState {
@@ -63,11 +90,10 @@ fn a_letter_reads_with_the_creator_tail() {
     );
     s.fire_event("ITEM_TEXT_READY", vec![]);
     assert!(s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
-    assert_eq!(
-        s.eval::<String>("return ItemTextPageText:GetText()")
-            .unwrap(),
-        "\nasd\n\nFrom,\nOne\n\n",
-        "the reference creator tail (ITEM_TEXT_FROM really is comma'd)"
+    assert!(
+        page_blocks(&s).contains(&"\nasd\n\nFrom,\nOne\n\n".to_string()),
+        "the reference creator tail (ITEM_TEXT_FROM really is comma'd), drawn as one raw block: {:?}",
+        page_blocks(&s)
     );
     for hidden in [
         "ItemTextCurrentPage",
@@ -134,10 +160,10 @@ fn a_book_page_shows_the_paging_chrome() {
     }));
     s.fire_event("ITEM_TEXT_BEGIN", vec![]);
     s.fire_event("ITEM_TEXT_READY", vec![]);
-    assert_eq!(
-        s.eval::<String>("return ItemTextPageText:GetText()")
-            .unwrap(),
-        "\npage one\n"
+    assert!(
+        page_blocks(&s).contains(&"\npage one\n".to_string()),
+        "the page body drawn: {:?}",
+        page_blocks(&s)
     );
     assert_eq!(
         s.eval::<String>("return ItemTextCurrentPage:GetText()")
@@ -175,4 +201,68 @@ fn closing_queues_the_close_intent() {
     s.fire_event("ITEM_TEXT_CLOSED", vec![]);
     assert!(!s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
     assert!(s.take_errors().is_empty());
+}
+
+/// **B240's render half, on the reported page.** Goudy's plaque body (`page_text` 2676, the
+/// *Alliance Military Ranks* wall plaque in Stormwind's Old Town) went through the reader and came
+/// out as its own source — `<HTML><BODY><H1 align="center">…` drawn literally, and cut off with
+/// "..." partway down. Both were the page being a plain FontString where the reference has a
+/// `SimpleHTML` (decisions 1337/1338).
+///
+/// What this pins is the whole path the report exercises: the app's page feed → the reader's
+/// `"\n" .. body .. "\n"` padding → the markup parse → the drawn blocks. The falsification is
+/// stated at the bottom: if the parse ever regresses to the raw-text fallback, the page draws as
+/// one block that still has angle brackets in it, which is exactly what was reported.
+#[test]
+fn the_reported_html_page_draws_as_blocks_not_as_its_own_markup() {
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_item_text(Some(ItemTextState {
+        item: "Alliance Military Ranks".into(),
+        creator: None,
+        text: "<HTML>\n<BODY>\n\
+               <H1 align=\"center\">ALLIANCE MILITARY RANKS</H1><BR/>\n\
+               <P align=\"center\">OFFICERS</P><BR/>\n\
+               <P align=\"center\">Grand Marshal</P>\n\
+               <P align=\"center\">Knight</P><BR/>\n\
+               <P align=\"center\">ENLISTED</P><BR/>\n\
+               <P align=\"center\">Private</P>\n\
+               </BODY>\n</HTML>"
+            .into(),
+        page: 1,
+        has_next: false,
+        material: None,
+    }));
+    s.fire_event("ITEM_TEXT_BEGIN", vec![]);
+    s.fire_event("ITEM_TEXT_READY", vec![]);
+    assert!(s.eval::<bool>("return ItemTextFrame:IsShown()").unwrap());
+
+    let drawn = page_blocks(&s);
+    for line in [
+        "ALLIANCE MILITARY RANKS",
+        "OFFICERS",
+        "Grand Marshal",
+        "Knight",
+        "ENLISTED",
+        "Private",
+    ] {
+        assert!(
+            drawn.contains(&line.to_string()),
+            "{line:?} should draw as its own block; drawn: {drawn:?}"
+        );
+    }
+    // The reported symptom, stated as the thing that must not come back.
+    assert!(
+        !drawn
+            .iter()
+            .any(|b| b.contains("<HTML>") || b.contains("<P align")),
+        "the markup itself must never reach the page — that is what was photographed: {drawn:?}"
+    );
+    // And the second half of the same symptom: the body is no longer a height-pinned FontString,
+    // so decision 1332's ellipsis seam cannot cut a long page short. No block ends in the
+    // truncation marker.
+    assert!(
+        !drawn.iter().any(|b| b.ends_with("...")),
+        "a block was truncated — the page is height-pinned again: {drawn:?}"
+    );
 }

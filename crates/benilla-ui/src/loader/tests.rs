@@ -1294,6 +1294,110 @@ mod loader_tests {
             assert!(!is_global_string_key(no), "{no} is not key-shaped");
         }
     }
+
+    // ── <SimpleHTML> (the markup widget's XML element) ───────────────────────────────────────
+
+    /// **`<SimpleHTML>`'s `<FontString>` child is a font DECLARATION, not a region** — the shape
+    /// stock `ItemTextFrame.xml` uses, and the whole reason its `<H1>` renders at the `<P>` size.
+    ///
+    /// Four claims in one document: the element materializes as a real `SimpleHTML` frame with its
+    /// `<Size>`/`<Anchors>`/`<Scripts>` applied like any frame; the direct-child `<FontString
+    /// inherits=>` lands on `elementFont[0]` rather than creating a FontString region; a
+    /// `<FontStringHeader1>` lands on `elementFont[1]`; and `hyperlinkFormat=` reaches `+0x360`.
+    #[test]
+    fn simplehtml_xml_declares_element_fonts_not_regions() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Font name="ItemTextFontNormal" font="Fonts\MORPHEUS.TTF" justifyH="LEFT">
+                    <FontHeight val="15"/>
+                    <Color r="0.18" g="0.12" b="0.06"/>
+                </Font>
+                <Font name="BookHeader" font="Fonts\SKURRI.TTF">
+                    <FontHeight val="24"/>
+                </Font>
+                <SimpleHTML name="PageText" hyperlinkFormat="|H%s|h[%s]|h">
+                    <Size><AbsDimension x="270" y="304"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <FontString inherits="ItemTextFontNormal"/>
+                    <FontStringHeader1 inherits="BookHeader"/>
+                    <Scripts><OnLoad>LOADED = this:GetName()</OnLoad></Scripts>
+                </SimpleHTML>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+
+        assert_eq!(s.eval::<String>("return LOADED").unwrap(), "PageText");
+        assert_eq!(
+            s.eval::<String>("return PageText:GetObjectType()").unwrap(),
+            "SimpleHTML"
+        );
+        assert_eq!(
+            s.eval::<String>("return PageText:GetHyperlinkFormat()")
+                .unwrap(),
+            "|H%s|h[%s]|h"
+        );
+        // The two declarations landed on their own elements…
+        assert_eq!(
+            s.eval::<(String, f32)>("local p, h = PageText:GetFont(); return p, h")
+                .unwrap(),
+            ("Fonts\\MORPHEUS.TTF".to_string(), 15.0)
+        );
+        assert_eq!(
+            s.eval::<(String, f32)>("local p, h = PageText:GetFont(\"H1\"); return p, h")
+                .unwrap(),
+            ("Fonts\\SKURRI.TTF".to_string(), 24.0)
+        );
+        // …and NEITHER became a region. A `<FontString>` handled by the generic special-fontstring
+        // pass would leave an unanchored, textless string on the frame here.
+        let regions = {
+            let lua = s.lua();
+            let model = lua
+                .app_data_ref::<crate::script::Model>()
+                .expect("model app_data");
+            let fh = model.arena.lookup("PageText").expect("frame");
+            model.arena.frame(fh).expect("live").regions.len()
+        };
+        assert_eq!(regions, 0, "the font declarations created no regions");
+
+        // Now drive it: three blocks, the H1 in its OWN declared face, at the frame's width.
+        s.run(
+            r#"PageText:SetText("<HTML><BODY><H1>Title</H1><P align=\"center\">Body</P></BODY></HTML>")"#,
+        )
+        .unwrap();
+        let (kinds, fonts, widths) = {
+            let lua = s.lua();
+            let model = lua
+                .app_data_ref::<crate::script::Model>()
+                .expect("model app_data");
+            let fh = model.arena.lookup("PageText").expect("frame");
+            let blocks = &model.simple_html.get(&fh).expect("state").blocks;
+            (
+                blocks.len(),
+                blocks
+                    .iter()
+                    .map(|rh| model.region_data[rh].font_path.clone())
+                    .collect::<Vec<_>>(),
+                blocks
+                    .iter()
+                    .map(|rh| model.region_data[rh].size)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(kinds, 2);
+        assert_eq!(
+            fonts,
+            [
+                Some("Fonts\\SKURRI.TTF".to_string()),
+                Some("Fonts\\MORPHEUS.TTF".to_string())
+            ],
+            "a DECLARED header font wins; the P falls through to its own"
+        );
+        assert_eq!(widths, [Some((270.0, 0.0)); 2]);
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
+    }
 }
 
 mod layer_blend_tests {

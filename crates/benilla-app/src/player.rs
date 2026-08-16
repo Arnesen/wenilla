@@ -165,9 +165,19 @@ impl Plugin for PlayerPlugin {
         // 1160's wire (a), both directions (see `world_focus`): the game answers the world's
         // "where do I stream from" before the stream stage, and reads the residency the world
         // publishes after it to end its own post-snap hold.
+        //
+        // **Both ordering edges are load-bearing** (B263 round 3, decision 1336). `.before(Stream)`
+        // alone left the publish free to run before `control`'s teleport snap (conflicting access,
+        // no edge — the executor picks either order), and on the snap frame the streamer then
+        // streamed around the DEPARTURE position: residency read "world resident", the settle hold
+        // released on frame 0, and the body free-fell at the destination under the loading screen —
+        // every same-map `.tele` on the probe machine. `.after(Input)` pins the publish to the
+        // post-snap position; the schedule contract (snap → focus → stream → release → present)
+        // is only a contract if every arrow is an explicit edge.
         app.add_systems(
             Update,
             (world_focus::publish_viewer, world_focus::publish_view_focus)
+                .after(benilla_world::schedule::WorldStage::Input)
                 .before(benilla_world::schedule::WorldStage::Stream),
         )
         .add_systems(

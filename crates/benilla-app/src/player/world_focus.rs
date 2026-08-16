@@ -108,10 +108,21 @@ pub(super) fn release_post_snap_hold(
     mut last_counters: Local<Option<[usize; 4]>>,
 ) {
     let Some(p) = progress else { return };
+    // **The facts must be about the ground under our own feet** (decision 1336, B263 round 3).
+    // `WorldLoadProgress` names the tile it describes; a mismatch means the streamer's focus and
+    // the avatar diverged — the stale-focus snap frame this guard exists for, or a detached
+    // free-fly eye — and residency published for another tile must never unfreeze this body. On a
+    // mismatch the resident release and the stale-clear below are both refused; the stall backstop
+    // still runs, so a genuinely wedged mismatch costs a logged 6 s timeout, never a silent fall.
+    let focus_matches = p.focus_tile.is_some_and(|t| {
+        let wow = benilla_assets::coords::bevy_to_wow(player.pos);
+        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+        t == (tx as i32, ty as i32)
+    });
     // The streamer is the only authority on *which map* the colliders under the avatar belong to.
     // Residency here means this map's own tile (or, on a WMO-only map, its one building) is
     // spawned — reachable only after a swap has drained every tile of the map we left.
-    if p.focus_resident && p.total > 0 {
+    if p.focus_resident && p.total > 0 && focus_matches {
         player.world_stale = false;
     }
     // Did the stream move since last frame? Any counter changing — a tile spawned, a placement
@@ -133,7 +144,7 @@ pub(super) fn release_post_snap_hold(
     // still up. Only a stream that has made NO progress for the whole budget — missing data, dead
     // IO — can time out now, which is the case the backstop was always for.
     let now = time.elapsed_secs();
-    if p.scene_ready && p.colliders_pending == 0 && !player.world_stale {
+    if p.scene_ready && p.colliders_pending == 0 && !player.world_stale && focus_matches {
         player.end_settle(true, now);
     } else if player.world_stale || progressed {
         player.settle_deadline = now + SETTLE_TIMEOUT;
@@ -148,12 +159,25 @@ mod tests {
 
     use super::*;
 
+    /// The tile under `Player::default()`'s position — what the streamer would publish as
+    /// `focus_tile` when its focus and the avatar agree (the ordinary, correctly-ordered frame).
+    fn own_tile() -> (i32, i32) {
+        let wow = benilla_assets::coords::bevy_to_wow(Player::default().pos);
+        let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
+        (tx as i32, ty as i32)
+    }
+
     /// A test app with the release system registered (a registered system keeps its `Local`
     /// baseline across frames, which `run_system_once` would reset) and a hand-driven clock.
+    /// The published progress names the avatar's own tile — each test then describes residency
+    /// facts that are at least *about* the right place (the mismatch test overrides it).
     fn app() -> App {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
-            .insert_resource(WorldLoadProgress::default())
+            .insert_resource(WorldLoadProgress {
+                focus_tile: Some(own_tile()),
+                ..WorldLoadProgress::default()
+            })
             .insert_resource(Player {
                 settling: true,
                 settle_deadline: SETTLE_TIMEOUT,
@@ -274,5 +298,40 @@ mod tests {
             p.scene_ready = true;
         });
         assert!(!settling(&mut app), "presentable world, hold still on");
+    }
+
+    /// B263 round 3 (decision 1336): residency published for ANOTHER tile never releases the hold
+    /// and never clears the stale flag — the live defect was the focus publish racing the teleport
+    /// snap, so on the snap frame the streamer described the DEPARTURE city as fully resident and
+    /// the hold released into free fall at the destination. The facts now name their tile; facts
+    /// about somewhere else are not facts about the ground under this body.
+    #[test]
+    fn residency_about_another_tile_neither_releases_nor_clears_stale() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Player>().world_stale = true;
+        // A fully-resident, quiet world — but described for a tile the avatar is not standing on
+        // (the departure side of a same-map teleport, one frame stale).
+        let elsewhere = {
+            let (tx, ty) = own_tile();
+            Some((tx + 8, ty))
+        };
+        for _ in 0..3 {
+            step(&mut app, 0.05, |p| {
+                p.focus_tile = elsewhere;
+                p.total = 2000;
+                p.ready = 2000;
+                p.colliders_pending = 0;
+                p.scene_ready = true;
+                p.focus_resident = true;
+            });
+            assert!(settling(&mut app), "released on another tile's residency");
+            assert!(
+                app.world().resource::<Player>().world_stale,
+                "the stale flag cleared on another tile's residency"
+            );
+        }
+        // The same facts, now about the right tile: stale clears and the hold ends at once.
+        step(&mut app, 0.05, |p| p.focus_tile = Some(own_tile()));
+        assert!(!settling(&mut app), "matching residency must still release");
     }
 }
