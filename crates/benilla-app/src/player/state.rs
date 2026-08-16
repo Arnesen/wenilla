@@ -612,6 +612,14 @@ pub(crate) struct Player {
     /// it drops the ride + spline without mirroring the stale flight pose over the snap (the
     /// 4-yd-hover + full-6s-settle landing bug, decision 0501) and owes no `CMSG_MOVE_SPLINE_DONE`.
     pub(super) ride_abort: bool,
+    /// **A `MSG_MOVE_WORLDPORT_ACK` is owed, payable at the settle release** (decision 1340).
+    /// The real client sends the worldport ack as the LAST act of its blocking destination load
+    /// (wow-re: `0x401bc0` sends `0xDC` at `0x401cae` only after `0x66fbe0`'s load returns) — our
+    /// async re-expression of "after the load" is the release. Safe to defer: vmangos has no load
+    /// timeout, drops every packet we'd send meanwhile (the player is out-of-world for the whole
+    /// window), and force-acks at logout. Set by the non-riding worldport snap; a riding crossing
+    /// (0455) never settles and acks immediately, as before.
+    pub(crate) owes_worldport_ack: bool,
     /// `Time::elapsed_secs` when we last sent a heartbeat.
     pub(super) last_heartbeat: f32,
     /// `Time::elapsed_secs` when the current airborne phase (jump or step-off) began, else `None` on the

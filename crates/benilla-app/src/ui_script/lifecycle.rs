@@ -101,7 +101,82 @@ fn ui_wanted(world: &World) -> bool {
         || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
 }
 
-/// `OnEnter(InWorld)`: materialize the in-game UI for **this** session.
+/// The world-entry UI load, armed at `OnEnter(InWorld)` and run by [`run_pending_entry_load`]
+/// once the loading cover is actually ON THE GLASS.
+///
+/// This is 0962's frame accounting, second offender: `OnEnter(InWorld)` fires on exactly the
+/// frame whose render would first present the cover (the raise frame still renders the glue
+/// above it), so a synchronous burst there holds the *previous* present — the frozen character
+/// screen — for its whole duration. 0962 taught the menagerie to wait for
+/// `WARM_COVER_PRESENT_FRAMES`; 1051 then moved the FrameXML load onto the same unprotected
+/// frame, and by 1290+addons the burst had grown to ~0.5 s (measured live: raise 48.317 →
+/// reference sourcing + 55 files + addons + saved vars + `PLAYER_LOGIN` → 48.83) — the
+/// director's "frozen char for 1 sec" at every Enter World.
+///
+/// The counter counts covered+in-world frames, exactly like the warm pass: renders are serial,
+/// so at [`ENTRY_LOAD_COVER_FRAMES`] the two intermediate frames' renders — which draw the
+/// cover — have committed their presents before this frame's stall begins. The loading screen
+/// folds this resource's existence into its clear condition, so a reveal can never precede the
+/// UI it is supposed to reveal.
+#[derive(Resource, Default)]
+pub(crate) struct PendingEntryUiLoad {
+    covered_frames: u32,
+}
+
+/// Covered+in-world frames before the entry load runs — the same present proxy, and the same
+/// value, as `pipe_warm::WARM_COVER_PRESENT_FRAMES` (0962's argument, restated there).
+const ENTRY_LOAD_COVER_FRAMES: u32 = 3;
+
+/// `OnEnter(InWorld)`: arm the deferred entry load. The load itself runs a few frames later —
+/// see [`PendingEntryUiLoad`].
+pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
+    commands.insert_resource(PendingEntryUiLoad::default());
+}
+
+/// `PreUpdate` (chained after [`run_pending_reload`] — same exclusive slot, and a reload must
+/// not interleave an armed entry load): run the armed entry load once the cover has presented.
+///
+/// No cover at all — a capture booting straight `InWorld`, or the screen's assets missing —
+/// means there is no glass to protect and nothing watching the previous present: load
+/// immediately. Leaving the world first (an instant disconnect) drops the latch unrun;
+/// [`end_ui_session`] treats that as "the in-game UI never existed" and skips the shutdown
+/// writes, so a UI-less VM can never clobber the saved-variables files with its emptiness.
+pub(crate) fn run_pending_entry_load(world: &mut World) {
+    if world.get_resource::<PendingEntryUiLoad>().is_none() {
+        return;
+    }
+    let in_world = *world
+        .resource::<State<crate::char_select::ClientState>>()
+        .get()
+        == crate::char_select::ClientState::InWorld;
+    if !in_world {
+        // Left the world before the load ran — nothing to build a UI for.
+        world.remove_resource::<PendingEntryUiLoad>();
+        return;
+    }
+    let covering = world
+        .get_resource::<crate::loading_screen::LoadingScreen>()
+        .is_some_and(|s| s.covering());
+    if covering {
+        let mut pending = world.resource_mut::<PendingEntryUiLoad>();
+        pending.covered_frames += 1;
+        if pending.covered_frames < ENTRY_LOAD_COVER_FRAMES {
+            return;
+        }
+    }
+    world.remove_resource::<PendingEntryUiLoad>();
+    let start = std::time::Instant::now();
+    load_ingame_ui_on_world_entry(world);
+    // The standing instrument for this burst: the one number that says whether the cover is
+    // still hiding it, on every entry, in every log.
+    info!(
+        "ui_script: in-game UI up in {:.0} ms (behind the cover: {})",
+        start.elapsed().as_secs_f32() * 1000.0,
+        covering
+    );
+}
+
+/// Materialize the in-game UI for **this** session.
 ///
 /// **Once per world entry, not once per process** (decision 1290). The reference builds the whole
 /// in-game UI at `CGGameUI::Initialize 0x48fbf0` and destroys it again at `0x490bd0` on the way
@@ -293,11 +368,17 @@ pub(crate) fn shutdown_ui_state(script: &mut UiScript, identity: Option<&(String
 /// Exclusive rather than a `NonSendMut` system because it both drops and installs a `NonSend`, and
 /// because the shutdown writes must be ordered against each other — see [`shutdown_ui_state`].
 pub(crate) fn end_ui_session(world: &mut World) {
+    // An armed-but-unrun entry load ([`PendingEntryUiLoad`]) means this session never built an
+    // in-game UI: there are no globals to save and no addon state to write, and running the
+    // shutdown tail against the boot VM would overwrite the real files with that emptiness.
+    let ui_never_loaded = world.remove_resource::<PendingEntryUiLoad>().is_some();
     let identity = world
         .get_resource::<AddOnIdentity>()
         .and_then(|id| id.0.clone());
-    if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
-        shutdown_ui_state(&mut script, identity.as_ref());
+    if !ui_never_loaded {
+        if let Some(mut script) = world.get_non_send_resource_mut::<UiScript>() {
+            shutdown_ui_state(&mut script, identity.as_ref());
+        }
     }
     // The CVar bridge (decision 1291): the dying VM's table folds into the persist state — after
     // the shutdown events above (a `PLAYER_LOGOUT` handler may `SetCVar`, and in the reference
@@ -386,9 +467,14 @@ pub(crate) fn run_pending_reload(world: &mut World) {
 pub(crate) fn shutdown_on_exit(
     script: Option<NonSendMut<UiScript>>,
     id: Res<AddOnIdentity>,
+    pending_entry: Option<Res<PendingEntryUiLoad>>,
     mut exits: MessageReader<AppExit>,
 ) {
     if exits.read().next().is_none() {
+        return;
+    }
+    // Same guard as [`end_ui_session`]: a quit inside the entry-load window has no UI to save.
+    if pending_entry.is_some() {
         return;
     }
     if let Some(mut script) = script {

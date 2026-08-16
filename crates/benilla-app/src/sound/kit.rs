@@ -154,6 +154,14 @@ pub(super) fn play_kit_ext(
     source: Option<Entity>,
     force_loop: bool,
 ) -> Result<()> {
+    // The cover's audio hold ([`SoundConfig::world_hold`]): while the loading screen is up, no
+    // new sound starts — checked before anything allocates, so the per-frame retry drivers (the
+    // creature body-loop, the liquid loops) cost one bool while held and start clean at the
+    // reveal. A dropped one-shot under an opaque cover is a sound the reference never played:
+    // its world load blocks, and the events these sounds voice happen unheard.
+    if config.world_hold {
+        return Ok(());
+    }
     let kit = match kit_ref {
         KitRef::Id(id) => kits.catalog.get(id),
         KitRef::Name(name) => kits.catalog.by_name(name),
@@ -351,6 +359,10 @@ pub(crate) fn play_file(
     path: &str,
     category: SoundCategory,
 ) -> Result<()> {
+    // The cover's audio hold — same gate as [`play_kit_ext`], same reason.
+    if config.world_hold {
+        return Ok(());
+    }
     let data = kits.sfx(assets, path)?;
     let data = data.volume(mixer::amp_to_db(config.category_amp(category)));
     let mixer = out.mixer.as_mut().context("no audio device")?;

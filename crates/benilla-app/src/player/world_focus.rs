@@ -106,6 +106,7 @@ pub(super) fn release_post_snap_hold(
     progress: Option<Res<WorldLoadProgress>>,
     time: Res<Time>,
     mut last_counters: Local<Option<[usize; 4]>>,
+    net_cmds: Option<Res<crate::net::NetCommands>>,
 ) {
     let Some(p) = progress else { return };
     // **The facts must be about the ground under our own feet** (decision 1336, B263 round 3).
@@ -150,6 +151,17 @@ pub(super) fn release_post_snap_hold(
         player.settle_deadline = now + SETTLE_TIMEOUT;
     } else if now >= player.settle_deadline {
         player.end_settle(false, now);
+    }
+    // **Pay the worldport ack the moment the hold ends** (decision 1340) — on either end, the
+    // resident release or the stall timeout (a dead stream must still complete the transfer, or
+    // the server holds us out-of-world until logout). This is the real client's post-load `0xDC`,
+    // re-expressed: its blocking load's "done" is our release.
+    if !player.settling && player.owes_worldport_ack {
+        if let Some(net) = net_cmds.as_deref() {
+            player.owes_worldport_ack = false;
+            let _ = net.0.send(crate::net::ClientCommand::WorldportAck);
+            info!("worldport: ack sent at settle release");
+        }
     }
 }
 
@@ -333,5 +345,78 @@ mod tests {
         // The same facts, now about the right tile: stale clears and the hold ends at once.
         step(&mut app, 0.05, |p| p.focus_tile = Some(own_tile()));
         assert!(!settling(&mut app), "matching residency must still release");
+    }
+
+    /// Decision 1340: the arrival debts — the deferred worldport ack and the near-teleport
+    /// position report — are paid on the frame the hold ends, and exactly once. The ack is the
+    /// real client's post-load `0xDC`, so it must ride the release, never the snap — and go
+    /// out exactly once.
+    #[test]
+    fn the_resident_release_pays_the_worldport_ack_once() {
+        let mut app = app();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        {
+            let mut player = app.world_mut().resource_mut::<Player>();
+            player.world_stale = false;
+            player.owes_worldport_ack = true;
+        }
+        // Still streaming: settling holds, nothing is sent.
+        step(&mut app, 0.1, |p| {
+            p.total = 2000;
+            p.ready = 1500;
+            p.colliders_pending = 5;
+            p.scene_ready = false;
+        });
+        assert!(settling(&mut app));
+        assert!(
+            rx.try_recv().is_err(),
+            "the ack went out before the release"
+        );
+        // Residency lands: the hold ends and the ack goes out.
+        step(&mut app, 0.1, |p| {
+            p.ready = 2000;
+            p.colliders_pending = 0;
+            p.scene_ready = true;
+        });
+        assert!(!settling(&mut app));
+        let sent: Vec<crate::net::ClientCommand> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
+            "exactly one worldport ack at the release, got {sent:?}"
+        );
+        // Paid once: further quiet frames send nothing more.
+        step(&mut app, 0.1, |_| {});
+        assert!(rx.try_recv().is_err(), "the ack was paid twice");
+    }
+
+    /// The stall timeout pays the ack too: a dead stream must still complete the transfer —
+    /// vmangos keeps an unacked far teleport out-of-world (dropping every packet) until logout,
+    /// so a release with no ack would strand the session, silently.
+    #[test]
+    fn a_timeout_release_still_pays_the_ack() {
+        let mut app = app();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        app.insert_resource(crate::net::NetCommands(tx));
+        {
+            let mut player = app.world_mut().resource_mut::<Player>();
+            player.world_stale = false;
+            player.owes_worldport_ack = true;
+        }
+        // Frozen counters, scene never presentable: first frame baselines, then the budget runs.
+        for _ in 0..=(SETTLE_TIMEOUT + 2.0) as usize {
+            step(&mut app, 1.0, |p| {
+                p.total = 2000;
+                p.ready = 500;
+                p.colliders_pending = 300;
+                p.scene_ready = false;
+            });
+        }
+        assert!(!settling(&mut app), "the stall backstop never fired");
+        let sent: Vec<crate::net::ClientCommand> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [crate::net::ClientCommand::WorldportAck]),
+            "the timeout release must still ack the transfer, got {sent:?}"
+        );
     }
 }

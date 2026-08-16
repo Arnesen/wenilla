@@ -21,7 +21,7 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
 use crate::net::{
-    ClientCommand, ClientControlMessage, Embodied, Guid, MoveKind, MoveModeMessage, NetCommands,
+    ClientCommand, ClientControlMessage, Embodied, Guid, MoveModeMessage, NetCommands,
     SelfMoveMessage, SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
@@ -266,17 +266,25 @@ pub(super) fn apply_server_moves(
                                       // loaded map. If terrain setup never ran (no `./WoW/`), inserting is harmless.
         commands.insert_resource(CurrentMap(w.map_id));
         if w.needs_ack {
-            let _ = net_cmds.0.send(ClientCommand::WorldportAck);
-            info!(
-                "worldport: mapId {} @ {:?} ({}, acked)",
-                w.map_id,
-                w.position,
-                if riding {
-                    "riding, boat-local pose"
-                } else {
-                    "world pose"
-                }
-            );
+            if riding {
+                // A riding crossing never settles (the deck is the support, 0455) — ack now,
+                // exactly as before 1340.
+                let _ = net_cmds.0.send(ClientCommand::WorldportAck);
+                info!(
+                    "worldport: mapId {} @ {:?} (riding, boat-local pose, acked)",
+                    w.map_id, w.position
+                );
+            } else {
+                // The ack rides the settle release (decision 1340): the real client sends
+                // MSG_MOVE_WORLDPORT_ACK only after its blocking destination load completes, and
+                // vmangos keeps us out-of-world — dropping everything we'd send — until the ack
+                // lands, with no load timeout. See [`Player::owes_worldport_ack`].
+                player.owes_worldport_ack = true;
+                info!(
+                    "worldport: mapId {} @ {:?} (world pose, ack deferred to release)",
+                    w.map_id, w.position
+                );
+            }
         } else {
             info!(
                 "worldport: initial login on mapId {} @ {:?}",
@@ -304,29 +312,20 @@ pub(super) fn apply_server_moves(
         // and drops the ride instead of mirroring the stale flight pose back over this snap
         // (decision 0501 — the 4-yd hover + full-6s settle at every taxi landing).
         player.ride_abort = true;
+        // The echo goes now, and it is the WHOLE near-teleport handshake (decision 1340). The
+        // real client echoes on the very next movement tick (wow-re: the 0xC7 drain applies the
+        // snap, then `0x60e0a0` sends guid+counter+time) and sends nothing else — no
+        // `MSG_MOVE_STOP` exists anywhere in its chain. vmangos holds us at the OLD position
+        // until the echo lands; processing it runs the full relocation + visibility refresh
+        // (`ExecuteTeleportNear` → `TeleportPositionRelocation`), and the destination's units
+        // stream within ~1 s of this send — measured with the `pop` pulse, four legs, no
+        // stall. The invented echo-time Stop this arm used to send served nothing; if a
+        // silent-player pop-in ever resurfaces, `WOW_MOVE_TRACE_TAGS=pop` decides in one run.
         let _ = net_cmds.0.send(ClientCommand::TeleportAck {
             guid: t.guid,
             counter: t.counter,
         });
-        // After the ack, report our settled position. vmangos refreshes a STATIONARY player's
-        // surrounding object visibility only on its lazy relocation timer (~20s observed), but forces
-        // an immediate refresh on any received movement packet. Without this, the NPCs/GameObjects at
-        // the destination don't appear for ~20s after a teleport (yet a fresh login is instant, because
-        // that does a full world-enter) — the real client reports its position, so they show at once.
-        let _ = net_cmds.0.send(ClientCommand::Move {
-            kind: MoveKind::Stop,
-            flags: 0,
-            pos: t.position,
-            orientation: t.orientation,
-            pitch: 0.0, // a Stop clears the flags → not swimming → no pitch tail
-            fall_time: 0,
-            jump: None,
-            transport: None, // flags 0 → no transport tail
-        });
-        info!(
-            "teleport: snapped to {:?}, acked + reported position",
-            t.position
-        );
+        info!("teleport: snapped to {:?}, acked", t.position);
     }
     // A bare server-authored move for our own mover (decision 0725) — no handshake, no ack. Drained
     // after the teleport arms deliberately: a teleport in the same frame is the larger edge (it
@@ -609,6 +608,11 @@ pub(super) fn release_on_session_end(
         player.airborne_since = None;
         player.wedged = false;
         player.wedge_still = 0;
+        // The arrival debt dies with the session (decision 1340): a logout mid-settle must not
+        // carry a worldport ack into the NEXT login's settle release — the server would reject
+        // an ack from a player who is in world (vmangos ProcessPackets, STATUS_TRANSFER), and
+        // the old session's transfer was already force-acked server-side at logout.
+        player.owes_worldport_ack = false;
     }
 }
 

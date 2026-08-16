@@ -79,7 +79,6 @@ pub(super) fn emit(
             host.scale * host.font_scale,
         ),
         outline: style.outline,
-        paint_halo: true,
         alpha_gradient: style.alpha_gradient,
     };
     // The focused edit box's text draws WINDOWED (`0x77da80`): the scroll window's substring,
@@ -121,7 +120,7 @@ pub(super) fn emit(
     if let Some(ui) = ebox {
         let drawn = &text[ui.display_from.min(text.len())..];
         let (x0, top, cell_h) =
-            crate::ui_text::line_origin(atlas, drawn, host.rect, draw_justify, spec);
+            crate::ui_text::line_origin(&mut atlas.lock(), drawn, host.rect, draw_justify, spec);
         ebox_geom = Some((x0, top, cell_h));
         text_clip = Some(host.clip.map_or(host.rect, |c| c.intersect(host.rect)));
         if !ui.multi_line {
@@ -190,7 +189,7 @@ pub(super) fn emit(
         // (`ink=`). They diverge by the width of the markup when the advance table is measured over
         // the raw buffer — the caret-out-in-space report (decision 1075) as a pair of numbers.
         let ebox_geom = ebox.map(|ui| {
-            let ink = crate::ui_text::measure_text(&atlas.metrics, draw_text, None, spec).0;
+            let ink = crate::ui_text::measure_text(&mut atlas.lock(), draw_text, None, spec).0;
             format!(" caret={:.1} ink={ink:.1}", ui.caret_x * host.scale)
         });
         info!(
@@ -209,9 +208,9 @@ pub(super) fn emit(
     // the stable z-sort keeps it behind the glyph pass. Offset is WoW y-up (`y="-1"` = down) →
     // y-down screen dy = −y. Markup color codes inside the text tint the shadow run too (v1
     // corner, invisible for solid-color strings). The shadow is a single flat offset copy —
-    // never itself outlined (an outlined shadow would be a muddy black blob), so it suppresses
-    // the halo PAINT only: it keeps the font's true outline for the step law, laying out
-    // identically to its fill (a shadow with different steps would smear under long strings).
+    // never itself outlined — it lays out identically to its fill (a shadow with different steps
+    // would smear under long strings) and redraws the same composite cells in the shadow color,
+    // where the ring's black is indistinguishable from the shadow's.
     if let (Some(sh), Some((dx, dy))) = (style.shadow, shadow_delta) {
         // WHOLE pixels (`shadow_offset_px`, computed above): the shadow is a rigid copy of the
         // fill, so its displacement must be an integer in the rect's own space — see that fn for
@@ -222,12 +221,9 @@ pub(super) fn emit(
             draw_rect.max.x + dx,
             draw_rect.max.y + dy,
         );
-        let shadow_spec = crate::ui_text::FontSpec {
-            paint_halo: false,
-            ..spec
-        };
+        let shadow_spec = crate::ui_text::FontSpec { ..spec };
         let mut sq = layout_text_quads(
-            atlas,
+            &mut atlas.lock(),
             draw_text,
             srect,
             sh.color,
@@ -257,7 +253,7 @@ pub(super) fn emit(
         // for the engine's click hit-test (y-down → y-up flip).
         let mut spans = Vec::new();
         let g = layout_text_quads_links(
-            atlas,
+            &mut atlas.lock(),
             text,
             host.rect,
             base_color,
@@ -286,7 +282,7 @@ pub(super) fn emit(
         g
     } else {
         layout_text_quads(
-            atlas,
+            &mut atlas.lock(),
             draw_text,
             draw_rect,
             base_color,

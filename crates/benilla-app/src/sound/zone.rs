@@ -280,6 +280,17 @@ fn zone_audio(
     let phase = phase(&clock);
     let zone = &mut *zone;
 
+    // The cover's audio hold ([`SoundConfig::world_hold`]): the raise kills the world
+    // soundscape — the reference's loading screen sits over a torn-down world, so a departure
+    // zone's bed playing under the destination's cover is a sound it cannot make. Resetting
+    // `area`/`interior` with the beds is what makes the reveal a fresh zone entry: the first
+    // uncovered frame re-resolves the destination and starts its music/ambience through the
+    // ordinary change block below, exactly like walking into the zone.
+    if config.world_hold {
+        stop_world_soundscape(zone, "loading cover");
+        return;
+    }
+
     // ---- react to an area or interior change (the WMO row overrides the terrain chain where
     // its FKs are nonzero — sound::interior, decision 0076) ----
     let inside = interior.0;
@@ -630,6 +641,13 @@ fn server_sounds(
     if msgs.is_empty() {
         return;
     }
+    // Under the cover a push is dropped, not deferred (the hold, [`SoundConfig::world_hold`]):
+    // the reference's blocking load hears none of these, and the recurring pushes (the Darkmoon
+    // Faire emitter re-pushes every 5 s) re-arrive on their own after the reveal.
+    if config.world_hold {
+        msgs.clear();
+        return;
+    }
     let (Some(mut kits), Some(assets)) = (kits, assets) else {
         return;
     };
@@ -682,6 +700,15 @@ fn server_sounds(
 /// counterparts are process-global statics, not per-session state (the 6 s cold-start and the
 /// intro throttle survive a relog).
 fn leave_world(mut zone: NonSendMut<ZoneAudio>) {
+    stop_world_soundscape(&mut zone, "left world");
+}
+
+/// Stop the beds and reset the scheduler to cold — shared by the two edges where the world's
+/// audio dies: leaving the world ([`leave_world`]) and the loading cover rising over it
+/// ([`zone_audio`]'s hold arm, decision 1345 — the cover kills the world soundscape exactly
+/// as the reference's blocking load does). Idempotent: with the handles already taken, every
+/// line is a no-op and nothing logs.
+fn stop_world_soundscape(zone: &mut ZoneAudio, reason: &str) {
     // The teardown declick — fast enough to read as a cut, long enough not to pop.
     const WORLD_TEARDOWN_FADE_MS: u64 = 250;
     let had = zone.music.is_some() || zone.ambience.is_some();
@@ -705,7 +732,7 @@ fn leave_world(mut zone: NonSendMut<ZoneAudio>) {
     zone.interior = None;
     zone.was_underwater = false;
     if had {
-        info!("sound: world soundscape stopped (left world)");
+        info!("sound: world soundscape stopped ({reason})");
     }
 }
 

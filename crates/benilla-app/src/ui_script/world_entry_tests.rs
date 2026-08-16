@@ -568,3 +568,110 @@ fn a_looping_addon_cannot_freeze_world_entry() {
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ─────────────────── The deferred entry load (0962's frame accounting) ───────────────────
+
+/// **The director's "frozen char for 1 sec" report, from the other side.** With the cover up,
+/// the armed entry load waits [`super::lifecycle::run_pending_entry_load`]'s covered-frame
+/// count — the frames whose renders put the cover on the glass — and only then pays the burst.
+/// Before the deferral the load ran inside `OnEnter(InWorld)`, which is exactly the frame whose
+/// render would first present the cover, so the ~0.5 s of FrameXML + addons + `PLAYER_LOGIN`
+/// held the previous present: the frozen character screen.
+#[test]
+fn the_entry_load_waits_for_the_cover_to_present() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("defer");
+    let mut world = booted_world();
+    world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+    world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    world.insert_resource(roster_named("Onehunter", 1));
+    world.insert_resource(super::PendingEntryUiLoad::default());
+
+    // Covered frames 1 and 2: the cover has not provably presented yet — no load.
+    for frame in 1..=2 {
+        super::lifecycle::run_pending_entry_load(&mut world);
+        assert_eq!(
+            probe_saw(&world),
+            None,
+            "covered frame {frame}: the burst must wait for the cover to reach the glass"
+        );
+    }
+    // Covered frame 3: two cover renders have committed — the burst is hidden. Load.
+    super::lifecycle::run_pending_entry_load(&mut world);
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "the third covered frame pays the load, behind a presented cover"
+    );
+    assert!(
+        world.get_resource::<super::PendingEntryUiLoad>().is_none(),
+        "the latch is consumed — the loading screen's clear condition reads its absence"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// No cover — a capture booting straight `InWorld`, or the screen's assets missing — means no
+/// glass to protect: the armed load runs on the first frame. Without this arm a coverless run
+/// would count covered frames that never come and the UI would never load.
+#[test]
+fn no_cover_means_the_entry_load_runs_at_once() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("nocover");
+    let mut world = booted_world();
+    world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+    world.insert_resource(crate::loading_screen::LoadingScreen::default());
+    world.insert_resource(roster_named("Onehunter", 1));
+    world.insert_resource(super::PendingEntryUiLoad::default());
+
+    super::lifecycle::run_pending_entry_load(&mut world);
+    assert_eq!(
+        probe_saw(&world).as_deref(),
+        Some("Onehunter"),
+        "uncovered: the load runs immediately"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// An exit inside the deferral window (an instant disconnect at entry) drops the armed load and
+/// **writes nothing**: the session never built a UI, so the shutdown tail running against the
+/// boot VM would compose every saved file from emptiness — the wipe
+/// [`quitting_from_the_character_screen_does_not_blank_the_session_it_wrote`] guards at the
+/// other edge.
+#[test]
+fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("dropped");
+    let mut world = booted_world();
+    world.insert_resource(State::new(crate::char_select::ClientState::InWorld));
+    world.insert_resource(crate::loading_screen::LoadingScreen::test_covering());
+    world.insert_resource(roster_named("Onehunter", 1));
+    world.insert_resource(super::PendingEntryUiLoad::default());
+
+    super::lifecycle::run_pending_entry_load(&mut world); // covered frame 1 — still pending
+    super::end_ui_session(&mut world);
+
+    assert_eq!(probe_saw(&world), None, "no UI ever loaded");
+    assert!(
+        world.get_resource::<super::PendingEntryUiLoad>().is_none(),
+        "the latch died with the session — it must not fire on the glue"
+    );
+    let flat = crate::local_state::saved_variables_path()
+        .expect("hermetic home resolves the flat saved path");
+    assert!(
+        !flat.exists(),
+        "the shutdown tail was skipped — a UI-less VM must not write saved variables"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

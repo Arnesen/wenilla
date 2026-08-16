@@ -183,14 +183,11 @@ mod tests {
         // re-seats off `!script.has_text_measurer()` — it interrogates the VM instead of a memo,
         // which is the same guarantee arrived at the other way.
         ("ui_script/extract/mod.rs", "last_seam"),
-        // The atlas bake generation beside it (decision 1296) — a fact about the glyph atlas, a
-        // Bevy resource that outlives any VM, not about the VM. It gates the same re-seat
-        // `last_seam` does, and a fresh VM re-seats on `!has_text_measurer()` regardless.
-        ("ui_script/extract/mod.rs", "last_bake"),
-        // How long the raster environment has differed from the baked one (decision 1296's
-        // re-bake debounce): a stopwatch about the WINDOW, zeroed by its own equality test every
-        // frame. A new VM neither reads it nor is described by it.
-        ("ui_text/atlas.rs", "drifted_for"),
+        // The window's `scale_factor` beside it (decision 1342) — the other term a measure is
+        // only correct under, since a logical height becomes an integer DEVICE-pixel raster size.
+        // A fact about the window, not about the VM; it gates the same re-seat `last_seam` does,
+        // and a fresh VM re-seats on `!has_text_measurer()` regardless.
+        ("ui_script/extract/mod.rs", "last_dpi"),
         // Pushed unconditionally every frame; there is nothing remembered to go stale.
         ("ui_script/mod.rs", "smoothed"),
         // The cursor systems, both platform arms: these track the OS cursor and an `NSCursor` raw

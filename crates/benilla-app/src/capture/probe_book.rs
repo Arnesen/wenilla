@@ -190,6 +190,22 @@ fn report_render(script: &UiScript) -> u32 {
     } else {
         info!("PROBE_BOOK: (render) PASS — no block is cut off with \"...\"");
     }
+    // **Does the page FIT?** The director's own comparison against 1.12.1 (08-15) was that ours
+    // ran off the bottom where the reference's ends inside the window. The scroll range answers it
+    // exactly and without an eye: it is the content's overhang past the viewport, so this page —
+    // which the reference shows whole — must come out at zero.
+    let range = script
+        .eval::<f64>("return ItemTextScrollFrame:GetVerticalScrollRange()")
+        .unwrap_or(-1.0);
+    if range == 0.0 {
+        info!("PROBE_BOOK: (render) PASS — the page fits the window (scroll range 0)");
+    } else {
+        fails += 1;
+        error!(
+            "PROBE_BOOK: (render) FAIL — the page overhangs its window by {range} units; the \
+             reference shows this one whole"
+        );
+    }
     fails
 }
 

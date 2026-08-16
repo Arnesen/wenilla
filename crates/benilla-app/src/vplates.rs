@@ -12,7 +12,10 @@
 //!   occlusion** (a 2-D overlay — plates draw through walls); snap, no smoothing. Anti-overlap
 //!   there *is*, since 0367 found the shared solver ([`crate::smart_rect`]) — this file's older
 //!   "no anti-overlap" was the census that missed it. And the sphere is bounded by the frustum:
-//!   the unit must be **in view** ([`in_view`]), or its plate is not seated at all.
+//!   the unit must be **in view** ([`crate::ui_pass::project_overlay`]) or the reference
+//!   **destroys** the plate outright (`0x60f600`, before the 20-yard cull — wow-re
+//!   `nameplate-offscreen-cull.md`, §5-VERIFIED 2026-08-15); it is never clamped in from
+//!   off-screen, which is what ours did (1341/1344).
 //!   (The friendly-totem exclusion waits on totems existing.)
 //! - **Anchor**: the same overhead head point (`0x608640`, [`overhead_anchor`]) **+ 2/3 yd**
 //!   (`[0x80abfc]`), projected per frame (`0x483ee0`); the plate's **TOP-CENTER** lands on the
@@ -250,31 +253,6 @@ fn con_color(pl_level: u32, unit_level: u32) -> [f32; 4] {
 /// frame to 0.21 / 0.49. What is left is the ±½ device pixel every crisp UI pays.
 fn device_snap(v: f32, scale: f32) -> f32 {
     (v * scale).round() / scale
-}
-
-/// **Is the unit in view?** — the gate between the 20-yd sphere and the seat.
-///
-/// The plate gate is a 20-yard *sphere*; the view is a 45° frustum, so most of what the sphere
-/// admits is beside or behind you. That would be harmless if an off-screen desire simply drew
-/// off-screen — but the seat's on-screen clamp ([`crate::smart_rect`]'s `normalize`, the ref's
-/// `0x509e20`) does not merely tidy a plate straddling an edge: it **translates a rect from
-/// anywhere bodily onto the screen**. Without this gate a unit two screens off to the side got a
-/// phantom plate pinned to the border — measured walking Goldshire at 1440×810 (the `vpl` trace,
-/// [`drive_vplates`]): **30% of every drawn plate while moving, two thirds while standing still**.
-/// They are not passive either: each claims bucket 0, so the anti-overlap solve pushed the plates
-/// of units you *can* see off phantoms you cannot, and they were live hover targets through
-/// [`PlateRects`].
-///
-/// That was the whole of the reported jitter — 26% of frame-steps moved a plate more than 4 px
-/// past its own projected motion, up to 300 px in a single frame, and 90% of those involved a
-/// phantom (after: 3.5% and 51 px, which is the solver's own documented snap-back). The projection
-/// is smooth throughout — median frame-to-frame acceleration 0.05 px — so none of it was ever a
-/// camera or an anchor problem.
-///
-/// The clamp keeps its job: a plate whose unit *is* in view still gets pulled fully inside the
-/// border, which is what it is for.
-fn in_view(screen: Vec2, viewport: Vec2) -> bool {
-    (0.0..=viewport.x).contains(&screen.x) && (0.0..=viewport.y).contains(&screen.y)
 }
 
 /// The knee of the plate's gx basis — **a director-pinned DEVIATION from the byte law**
@@ -578,11 +556,16 @@ fn drive_vplates(
         if !friendly && store.is_some_and(|s| s.0.unit_reads_dead()) {
             continue;
         }
-        // Project the plate point: the overhead anchor + 2/3 yd, per frame, no smoothing. Behind
-        // the camera the projection itself fails and the plate is gone. (This comment used to
-        // claim "the plate has no clamp — offscreen is gone", which had not been true since the
-        // seat gained the solver's on-screen normalize: offscreen was dragged to the border. The
-        // gate below is what makes the sentence true again.)
+        // Project the plate point: the overhead anchor + 2/3 yd, per frame, no smoothing — and
+        // honour the projector's ACCEPT verdict ([`crate::ui_pass::project_overlay`]): behind the
+        // camera or outside the viewport, there is no plate. That is the reference's own law, and
+        // a hard one — `0x60f600` **destroys** the plate frame on a false verdict, before it ever
+        // reaches the seat (wow-re `nameplate-offscreen-cull.md`, §5-VERIFIED 2026-08-15).
+        //
+        // Ours instead ran an off-screen point into the seat, whose clamp translates a rect from
+        // anywhere bodily onto the screen: **30% of every drawn plate** was a unit nobody could
+        // see, pinned to a border, claiming bucket space and shoving the plates of units you can
+        // (1341 — two thirds of them while standing still, and 90% of the reported jitter).
         let anchor = overhead_anchor(
             entity,
             tf,
@@ -591,13 +574,11 @@ fn drive_vplates(
             &anchor_q.2,
             &anchor_q.3,
         );
-        let Ok(screen) = cam.world_to_viewport(&cam_tf, anchor + Vec3::Y * PLATE_LIFT) else {
+        let Some(screen) =
+            crate::ui_pass::project_overlay(cam, &cam_tf, anchor + Vec3::Y * PLATE_LIFT, viewport)
+        else {
             continue;
         };
-        // …and the unit has to be in view ([`in_view`]).
-        if !in_view(screen, viewport) {
-            continue;
-        }
         cands.push((
             screen.distance_squared(sort_pt),
             screen,
@@ -880,15 +861,15 @@ fn plate_text(
     color: [f32; 4],
     trace: bool,
 ) {
-    // Shape at the nearest baked atlas size, then rescale the quads to the exact target em
-    // around the anchor (the combat_text unbaked-size recipe) — plate ems are window-derived
-    // (8 at 768, 11 at 1080, [`text_px`]) and mostly absent from the baked set.
-    let shaped = atlas.snap_size(px);
+    // Laid out AT the target em. Plate ems are window-derived (8 at 768, 11 at 1080,
+    // [`text_px`]) and so landed on almost nothing in the old fixed size ladder: every plate on
+    // screen used to be shaped at the nearest rung and rescaled about the anchor. Since decision
+    // 1342 the raster follows the request, so the rescale — and its sub-pixel scatter — is gone.
+    let mut e = atlas.lock();
     let spec = FontSpec {
         path: None,
-        height: Some(shaped),
+        height: Some(px),
         outline: Outline::None,
-        paint_halo: true,
         alpha_gradient: None,
     };
     let justify = Justify {
@@ -896,7 +877,7 @@ fn plate_text(
         v: JustifyV::Middle,
     };
     let mut main = layout_text_quads(
-        atlas,
+        &mut e,
         text,
         Rect::from_center_size(anchor, Vec2::ZERO),
         color,
@@ -904,17 +885,9 @@ fn plate_text(
         Z_TEXT,
         spec,
     );
+    drop(e);
     if main.is_empty() {
         return;
-    }
-    let s = px / shaped;
-    for q in main.iter_mut() {
-        q.rect = Rect::new(
-            anchor.x + (q.rect.min.x - anchor.x) * s,
-            anchor.y + (q.rect.min.y - anchor.y) * s,
-            anchor.x + (q.rect.max.x - anchor.x) * s,
-            anchor.y + (q.rect.max.y - anchor.y) * s,
-        );
     }
     // Seat by measured INK, then the shadow is the same run offset one step right+down.
     let dy = {
@@ -956,7 +929,7 @@ fn plate_text(
             y1 = y1.max(q.rect.max.y);
         }
         eprintln!(
-            "vplate-trace: text {text:?} px={px:.1} shaped={shaped:.1} ink=({x0:.1},{y0:.1})..({x1:.1},{y1:.1}) anchor=({:.1},{:.1})",
+            "vplate-trace: text {text:?} px={px:.1} ink=({x0:.1},{y0:.1})..({x1:.1},{y1:.1}) anchor=({:.1},{:.1})",
             anchor.x, anchor.y
         );
     }
@@ -1022,27 +995,6 @@ mod tests {
         assert_eq!(CON_RED[1], 25.0 / 255.0);
         assert_eq!(CON_ORANGE[2], 63.0 / 255.0);
         assert_eq!(CON_GREEN[1], 178.0 / 255.0);
-    }
-
-    /// The in-view gate: the 20-yd sphere reaches far outside the frustum, and everything it
-    /// admits from out there used to be dragged onto a screen border by the seat's clamp. The
-    /// bounds are inclusive — a unit exactly on the edge is still in view, and the clamp (not this)
-    /// is what keeps its plate fully inside.
-    #[test]
-    fn only_a_unit_in_view_gets_a_plate() {
-        let vp = Vec2::new(1440.0, 810.0);
-        assert!(in_view(Vec2::new(720.0, 405.0), vp));
-        assert!(in_view(Vec2::ZERO, vp), "the corner is in view");
-        assert!(in_view(vp, vp), "so is the far corner");
-        for out in [
-            Vec2::new(-0.5, 405.0),    // off left
-            Vec2::new(1440.5, 405.0),  // off right
-            Vec2::new(720.0, -0.5),    // above
-            Vec2::new(720.0, 810.5),   // below
-            Vec2::new(1409.0, 1332.0), // the measured phantom: two thirds of a screen below
-        ] {
-            assert!(!in_view(out, vp), "{out:?} is not on screen");
-        }
     }
 
     /// The snap is on the DEVICE grid, not the logical one. At the 2× scale we develop on, a

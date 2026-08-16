@@ -138,8 +138,27 @@ impl Plugin for NetPlugin {
                     .in_set(WorldStage::Net),
             )
             // Not part of the movement chain above: one send on the world-enter message.
-            .add_systems(Update, send_query_time.in_set(WorldStage::Net));
+            .add_systems(Update, send_query_time.in_set(WorldStage::Net))
+            .add_systems(Update, population_pulse.in_set(WorldStage::Net));
     }
+}
+
+/// The population pulse (`WOW_MOVE_TRACE_TAGS=pop`): once a second, one trace line with the count
+/// of net entities resident in the object index. The "did the world arrive" instrument, born as
+/// decision 1340's retest: a teleport's visibility refresh (the release-time position report)
+/// reads as the count climbing within a couple of seconds of the `sett` release, while the ~20 s
+/// lazy-relocation pop-in the report guards against reads as the count sitting still until the
+/// server's own timer fires. Free when the tag is off.
+fn population_pulse(index: Res<GuidIndex>, time: Res<Time>, mut last: Local<f32>) {
+    if !benilla_assets::trace::enabled_for("pop") {
+        return;
+    }
+    let now = time.elapsed_secs();
+    if now - *last < 1.0 {
+        return;
+    }
+    *last = now;
+    benilla_assets::trace::line("pop", &format!("net entities={}", index.0.len()));
 }
 
 // ── ECS state: components ────────────────────────────────────────────────────────────────────────
@@ -698,6 +717,7 @@ pub(crate) static CAST_TRACE: std::sync::LazyLock<bool> =
 
 /// A message the ECS sends to the server through the write thread. Carries the player's pose so the
 /// writer thread needs no shared state.
+#[derive(Debug)]
 pub(crate) enum ClientCommand {
     /// A self-movement packet: the [`MoveKind`] opcode + the live CMovement `flags` + our pose, plus the
     /// airborne clock (`fall_time`, ms) and ballistic launch tail (`jump`) while jumping/falling. The

@@ -33,7 +33,13 @@
 //! **The render geometry** (wow-re `worldtext-geometry-law.md`, §5-verified, 9af65294 — zero free
 //! parameters; the anchor-seat half corrected here, see the seating comment in
 //! [`float_combat_text`]): the rise is added to **world z before projection**; the block is
-//! **h-centered with its bottom at** the projected point (rising above it), clamped on-screen;
+//! **h-centered with its bottom at** the projected point (rising above it), clamped on-screen —
+//! but only once the projector has ACCEPTED the point at all: a number whose anchor lands behind
+//! the camera or outside the viewport is **destroyed and its slot released**
+//! (`6c7d9d` → `6c6dda` → `0x6c86a0`; wow-re `object-layer/scratch/nameplate-offscreen-cull.md`,
+//! §5-VERIFIED 2026-08-15), never clamped to a border and never claiming a bucket-1 rect. Ours
+//! clamped, which put another unit's numbers on the screen edge — the worldtext half of 1341's
+//! phantom plates, and the half that record's §7 wrongly called byte-attested;
 //! the on-screen size is
 //! **constant with unit distance** (the depth counter-scale exists only in the *nameplate* path)
 //! and composes as `px = round_half_away(v × √(W²+H²))` — `v` the category's interpolated scale
@@ -261,6 +267,11 @@ pub(crate) fn float_combat_text(
     bucket.clear();
     let mut order: Vec<usize> = (0..texts.0.len()).collect();
     order.sort_by_key(|&i| (texts.0[i].anchor, std::cmp::Reverse(texts.0[i].slot)));
+    // A number whose anchor fails the projector's accept verdict is **destroyed, and its slot
+    // released** (`6c7d9d` → `6c6dda` → `0x6c86a0`) — not skipped for a frame, and never clamped
+    // to a border (wow-re `object-layer/scratch/nameplate-offscreen-cull.md`, §5-VERIFIED
+    // 2026-08-15). Collected here and reaped after the walk, since the walk holds the list.
+    let mut culled: Vec<usize> = Vec::new();
     for i in order {
         let t = &texts.0[i];
         let cat = &CATEGORIES[t.category as usize];
@@ -269,18 +280,21 @@ pub(crate) fn float_combat_text(
         // The rise enters world z BEFORE the projection (`6c7d29 fadd` into `+0x1c`, projected at
         // `6c7d96`) — no post-projection y term exists.
         let world = t.pos + Vec3::Y * (cat.rise * life);
-        let Ok(screen) = cam.world_to_viewport(&cam_tf, world) else {
-            continue; // behind the camera
+        let Some(screen) = crate::ui_pass::project_overlay(cam, &cam_tf, world, viewport) else {
+            culled.push(i); // behind the camera or off the viewport — the ref destroys it
+            continue;
         };
         // The size law: constant with distance (no depth term anywhere in the worldtext path).
         let size_value = scale_value(t.category, life);
         let target_px = text_px(size_value, viewport);
-        // Shape at the atlas size nearest the target (crisp bitmaps), then scale the quad rects
-        // about the anchor point for the exact size — the crit pop animates through sizes the
-        // atlas never baked.
-        let shaped_px = atlas.snap_size(target_px);
+        // Laid out AT the target size. The crit pop animates through a continuum of sizes, which
+        // under the old fixed ladder meant shaping at the nearest rung and rescaling every quad
+        // about the anchor — a resampled bitmap for the whole animation. Now the pop steps through
+        // whole device-pixel sizes and each one is rasterized crisp (decision 1342). The real
+        // client stretched a ≤32 px raster here; rendering the true size is the recorded upgrade.
+        let mut e = atlas.lock();
         let mut glyphs = layout_text_quads(
-            atlas,
+            &mut e,
             &t.text,
             Rect::from_center_size(screen, Vec2::ZERO),
             argb(t.color),
@@ -290,21 +304,16 @@ pub(crate) fn float_combat_text(
             },
             Z_WORLD_TEXT,
             FontSpec {
-                path: None, // DAMAGE_TEXT_FONT = Friz Quadrata (the atlas default), no outline
-                height: Some(shaped_px),
+                path: None, // DAMAGE_TEXT_FONT = Friz Quadrata (the default face), no outline
+                height: Some(target_px),
                 outline: Outline::None,
-                paint_halo: true,
                 alpha_gradient: None,
             },
         );
-        let ratio = target_px / shaped_px;
+        drop(e);
         let (alpha_text, alpha_shadow) = fade_alpha(cat, elapsed_ms);
         let mut bounds: Option<Rect> = None;
         for q in &mut glyphs {
-            q.rect = Rect {
-                min: screen + (q.rect.min - screen) * ratio,
-                max: screen + (q.rect.max - screen) * ratio,
-            };
             // REPLACE, never multiply: the fade byte IS the rendered alpha (module doc, the
             // ALPHA + SHADOW law) — the packed color's alpha byte (row 4's 0x80) never draws.
             q.color[3] = f32::from(alpha_text) / 255.0;
@@ -365,6 +374,29 @@ pub(crate) fn float_combat_text(
         }
         quads.overlays.append(&mut glyphs);
     }
+    // The destroy half of the cull above. Releasing the SLOT is the point, not just skipping the
+    // draw: the per-unit array is 4 deep and a spawn past it is a hard drop, so a number aging out
+    // of sight behind you would otherwise hold a slot a visible number could have had.
+    drop_indices(&mut texts.0, culled);
+}
+
+/// Remove `idx` (in any order, no duplicates) from `v`, keeping the rest in order.
+///
+/// Its own function because the walk that decides *which* numbers to destroy runs over a sorted
+/// index permutation while the list is borrowed, so the removal has to happen afterwards by index
+/// — and index bookkeeping under removal is exactly the kind of thing that is quietly wrong for a
+/// month. Tested below.
+fn drop_indices<T>(v: &mut Vec<T>, mut idx: Vec<usize>) {
+    if idx.is_empty() {
+        return;
+    }
+    idx.sort_unstable();
+    let mut i = 0;
+    v.retain(|_| {
+        let keep = idx.binary_search(&i).is_err();
+        i += 1;
+        keep
+    });
 }
 
 /// The MELEE number/word producer: consumes [`SwingImpact`] (the swing clip's impact keyframe —
@@ -478,5 +510,21 @@ mod tests {
         assert_eq!(texts.0[0].color, 0xFFFF_FFFF);
         let gold = texts.0.iter().find(|t| t.anchor == other).unwrap();
         assert_eq!(gold.color, COLOR_SPELL_GOLD);
+    }
+
+    /// The destroy half of the off-screen cull (1344): the walk collects indices out of order,
+    /// against the *pre-removal* list, so the reap has to take them all at once and keep the rest
+    /// in order. Slots are freed by this and by nothing else.
+    #[test]
+    fn drop_indices_takes_exactly_those() {
+        let mut v = vec!["a", "b", "c", "d", "e"];
+        drop_indices(&mut v, vec![3, 0, 1]); // unsorted, as the seat walk produces them
+        assert_eq!(v, ["c", "e"]);
+        drop_indices(&mut v, vec![]);
+        assert_eq!(v, ["c", "e"], "no culls, no change");
+        drop_indices(&mut v, vec![1]);
+        assert_eq!(v, ["c"]);
+        drop_indices(&mut v, vec![0]);
+        assert!(v.is_empty());
     }
 }

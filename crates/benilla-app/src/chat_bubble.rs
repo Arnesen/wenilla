@@ -448,33 +448,29 @@ fn draw_bubble(
     let border = border_px(viewport, basis);
     let margin = gx_px(MARGIN, basis);
 
-    // Shape at the nearest baked atlas size, then rescale to the exact window-derived em —
-    // the plate-text recipe (`crate::vplates::plate_text`).
+    // The exact window-derived em, laid out AT that em. This used to shape at the nearest baked
+    // ladder size and rescale the finished quads by `px/shaped` around the box centre — a bubble's
+    // size is derived from the viewport and so lands on nothing round, which meant every bubble on
+    // screen was a resampled bitmap. Since decision 1342 the raster follows the request.
     let px = text_px(TEXT_H, basis);
-    let shaped = atlas.snap_size(px);
-    if shaped <= 0.0 {
+    if px <= 0.0 {
         return;
     }
-    let s = px / shaped;
+    let mut e = atlas.lock();
     let spec = FontSpec {
-        path: None, // NAMEPLATE_FONT — Friz Quadrata, the atlas default
-        height: Some(shaped),
+        path: None, // NAMEPLATE_FONT — Friz Quadrata, the engine's default face
+        height: Some(px),
         outline: Outline::None,
-        paint_halo: true,
         alpha_gradient: None,
     };
     // The wrap law (`0x4b1600` tail): single-line width > 0.2 gx → hard-cap (forces wrap);
-    // else max(measured, 2·border-unit). All in shaped space, rescaled after.
-    let cap_s = gx_px(WRAP_W, basis) / s;
-    let floor_s = (2.0 * border) / s;
-    let (line_w, _) = measure_text(&atlas.metrics, &b.text, None, spec);
-    let box_w_s = if line_w > cap_s {
-        cap_s
-    } else {
-        line_w.max(floor_s)
-    };
-    let (_, box_h_s) = measure_text(&atlas.metrics, &b.text, Some(box_w_s), spec);
-    let (text_w, text_h) = ((box_w_s * s).ceil(), (box_h_s * s).ceil());
+    // else max(measured, 2·border-unit).
+    let cap = gx_px(WRAP_W, basis);
+    let floor = 2.0 * border;
+    let (line_w, _) = measure_text(&mut e, &b.text, None, spec);
+    let box_w = if line_w > cap { cap } else { line_w.max(floor) };
+    let (_, box_h) = measure_text(&mut e, &b.text, Some(box_w), spec);
+    let (text_w, text_h) = (box_w.ceil(), box_h.ceil());
 
     // The auto-fit body: the frame hugs the text layout ± the flat margin; BOTTOM-center on
     // the seat, growing upward. Snapped to whole logical px (the plate divergence — a
@@ -538,13 +534,13 @@ fn draw_bubble(
         color: [1.0, 1.0, 1.0, alpha],
         ..default()
     });
-    // The text: centered in the margin box, wrapped at the shaped-space cap, rescaled around
-    // the box center to the exact em (uniform, so wrap points survive the rescale).
+    // The text: centered in the margin box, wrapped at the cap. No rescale pass — the glyphs came
+    // out of the cache at this em.
     let center = Vec2::new(cx, (frame.min.y + frame.max.y) * 0.5);
     let mut text_quads = layout_text_quads(
-        atlas,
+        &mut e,
         &b.text,
-        Rect::from_center_size(center, Vec2::new(box_w_s, box_h_s)),
+        Rect::from_center_size(center, Vec2::new(box_w, box_h)),
         [b.color[0], b.color[1], b.color[2], alpha],
         Justify {
             h: JustifyH::Center,
@@ -553,14 +549,7 @@ fn draw_bubble(
         Z_TEXT,
         spec,
     );
-    for q in text_quads.iter_mut() {
-        q.rect = Rect::new(
-            center.x + (q.rect.min.x - center.x) * s,
-            center.y + (q.rect.min.y - center.y) * s,
-            center.x + (q.rect.max.x - center.x) * s,
-            center.y + (q.rect.max.y - center.y) * s,
-        );
-    }
+    drop(e);
     if trace {
         eprintln!(
             "bubble-trace: viewport={viewport:?} frame=({:.1},{:.1})..({:.1},{:.1}) border={border:.1} alpha={alpha:.2} text={:?}",

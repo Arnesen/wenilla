@@ -163,20 +163,26 @@ impl NamePaint {
 /// atlas exists), one mesh per distinct line stack (every "Young Wolf" shares one mesh), and the
 /// live per-unit plate entities.
 ///
-/// **Every field here is atlas-derived and dies with the bake it was built from** ([`baked_from`]).
-/// The meshes carry glyph-cell UVs in their vertex data ([`build_name_mesh`]) and the materials
-/// bind the atlas image by handle — both are readings of ONE `UiFontAtlas`, and a re-bake
-/// (`ui_text::atlas`'s `BakeEnv` edge, decision 1296) replaces that atlas with a new image and a
-/// new cell layout. Keeping either across the edge draws new-bake UVs through the old-bake
-/// texture: the garbage-glyph unit names the maximised window produced (B272, decision 1339).
+/// **The meshes are glyph-cell UVs on the GPU, and they die with the cell layout they were built
+/// from** ([`baked_from`]). This is the one place in the codebase that persists glyph UVs across
+/// frames ([`build_name_mesh`] bakes them into `ATTRIBUTE_UV_0`), which makes it the one place that
+/// has to watch [`UiFontAtlas::generation`].
+///
+/// The **materials** used to be on that list and no longer are: they bind the glyph sheet by
+/// handle, and since decision 1342 that texture is written in place and its handle never changes.
+/// It was the old size ladder's re-bake — a whole new image asset per window resize — that made a
+/// bound handle go stale, and drawing new-bake UVs through the old-bake texture is what turned unit
+/// names into fragments of other letters (B272, decision 1339). There is no successor texture now,
+/// so there is nothing for a material to go stale against; only the UVs can move, and only when the
+/// sheet fills and resets.
 #[derive(Resource, Default)]
 pub(crate) struct Nameplates {
     materials: HashMap<NamePaint, Handle<StandardMaterial>>,
     meshes: HashMap<Vec<String>, Handle<Mesh>>,
     /// unit → (plate entity, the (lines, color) it was built with).
     live: bevy::ecs::entity::EntityHashMap<(Entity, Vec<String>, NamePaint)>,
-    /// The `UiFontAtlas::generation` every cache above was built from — `None` before the first
-    /// build. [`drop_stale_atlas_caches`] empties all three when it moves.
+    /// The `UiFontAtlas::generation` the meshes' UVs were built from — `None` before the first
+    /// build. [`drop_stale_glyph_caches`] empties them when it moves.
     baked_from: Option<u64>,
 }
 
@@ -213,8 +219,15 @@ const ROCK_MEAN_RATE: f32 = 1.5;
 /// mean to it instead of easing through seconds of misplaced name.
 const ROCK_SNAP: f32 = 1.0;
 
-/// The shaped-glyph source size (px) for the mesh bake — a baked atlas size (crisp cells); only
-/// the cell UVs and the relative geometry survive the normalization to pitch units.
+/// The source size (logical px) the name glyphs are rasterized at for the mesh bake. Only the cell
+/// UVs and the *relative* geometry survive the normalization to pitch units, so this is purely a
+/// resolution dial: the world transform scales the block to its real size, and a bigger source
+/// means crisper letters when a name is close.
+///
+/// The real client's unit-name font is pinned at a 32-px raster and magnifies the cells for every
+/// plate (`UNIT_NAME_FONT`, size `0.99f` with string flag `0x80` — wow-re `system/font`, so its
+/// world text was always a stretched bitmap). Rendering the source larger is the same recorded
+/// crispness divergence world text already takes at the [`crate::ui_text::FONTSTRING_EM_CAP`].
 const BAKE_PX: f32 = 36.0;
 
 /// Build one name-block mesh in **name-local pitch units**: x centered on 0 (exact centering for
@@ -239,11 +252,17 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
     // asc/(asc+|desc|))` load_param the 2-D path seats with) — needed to hang each line FROM its
     // baseline. Invariant to the ratio's value: `line_top` shifts with it but the baseline stays
     // pinned to the byte grid, so this only has to AGREE with `layout_text_quads`, not be exact.
-    let baseline_frac = ((f64::from(BAKE_PX) * f64::from(atlas.ascent_ratio(None)) + 0.5).floor()
-        / f64::from(BAKE_PX)) as f32;
+    let mut e = atlas.lock();
+    // The size the glyphs are ACTUALLY laid out at: [`BAKE_PX`] rounded to whole device pixels and
+    // back ([`TextEngine::ppem`]). Normalizing by the requested 36 instead would be off by up to
+    // half a device pixel per unit of pitch on a fractional-DPI display — small, but it is exactly
+    // the kind of "close enough" that the size ladder was made of.
+    let src = e.drawn_size(BAKE_PX);
+    let baseline_frac =
+        ((f64::from(src) * f64::from(e.ascent_ratio(None)) + 0.5).floor() / f64::from(src)) as f32;
     for (i, line) in lines.iter().enumerate() {
         let glyphs = layout_text_quads(
-            atlas,
+            &mut e,
             line,
             Rect::from_center_size(Vec2::ZERO, Vec2::ZERO),
             [1.0, 1.0, 1.0, 1.0], // the material tints; glyph alpha rides the texture
@@ -253,10 +272,9 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
             },
             0,
             FontSpec {
-                path: None, // UNIT_NAME_FONT = Friz Quadrata, the atlas default
+                path: None, // UNIT_NAME_FONT = Friz Quadrata, the default face
                 height: Some(BAKE_PX),
                 outline: Outline::None,
-                paint_halo: true,
                 alpha_gradient: None,
             },
         );
@@ -271,10 +289,10 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
         // of a cell below the cell top, so the cell top maps to n − i + baseline_frac.
         let line_top = n - i as f32 + baseline_frac;
         for q in &glyphs {
-            let x0 = (q.rect.min.x - cx) / BAKE_PX;
-            let x1 = (q.rect.max.x - cx) / BAKE_PX;
-            let y0 = line_top - q.rect.min.y / BAKE_PX; // px top → local (higher)
-            let y1 = line_top - q.rect.max.y / BAKE_PX; // px bottom → local (lower)
+            let x0 = (q.rect.min.x - cx) / src;
+            let x1 = (q.rect.max.x - cx) / src;
+            let y0 = line_top - q.rect.min.y / src; // px top → local (higher)
+            let y1 = line_top - q.rect.max.y / src; // px bottom → local (lower)
             let base = positions.len() as u32;
             positions.extend([[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]]);
             let [tl, tr, br, bl] = q.uv.corners;
@@ -283,6 +301,7 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
             indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
         }
     }
+    drop(e);
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -348,8 +367,8 @@ pub(crate) fn drive_nameplates(
     let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
         return;
     };
-    // A re-baked atlas invalidates every cache below it (see [`Nameplates`]).
-    drop_stale_atlas_caches(&mut plates, atlas.generation, &mut commands);
+    // A glyph-sheet reset moves every cached UV (see [`Nameplates`]).
+    drop_stale_glyph_caches(&mut plates, atlas.generation, &mut commands);
     // The palette materials, once (they need the atlas image).
     if plates.materials.is_empty() {
         let image = atlas.image();
@@ -669,27 +688,30 @@ impl Plugin for NameplatesPlugin {
     }
 }
 
-/// Empty every atlas-derived cache when the bake under it moves — the staleness edge [`Nameplates`]
+/// Empty the UV-bearing caches when the glyph sheet resets — the staleness edge [`Nameplates`]
 /// describes.
 ///
-/// A re-bake hands us a different image and a different cell layout, so the meshes' baked UVs and
-/// the materials' bound texture both stop meaning what they meant. Dropping the maps alone is not
-/// enough: the live plate entities still hold their old `Mesh3d`/`MeshMaterial3d` handles, so they
-/// are despawned too and rebuilt from the new atlas on this same frame's walk below (which
-/// re-enters every visible unit). That one-frame rebuild is the whole cost of a re-bake here.
+/// A reset repacks the sheet from empty, so every UV baked into a mesh stops pointing at its own
+/// letter. Dropping the mesh map alone is not enough: the live plate entities still hold their old
+/// `Mesh3d` handles, so they are despawned too and rebuilt on this same frame's walk below (which
+/// re-enters every visible unit). That one-frame rebuild is the whole cost of a reset here.
+///
+/// The **materials survive**, because the sheet's texture handle does (decision 1342). Under the
+/// old size ladder this edge fired on every window resize and had to drop them too; now it fires
+/// only when the sheet fills, which the occupancy instrument (`WOW_GLYPH_CACHE=1`) exists to keep
+/// honest.
 ///
 /// The **first** build is not an edge — `baked_from: None` seeds to the live generation with
 /// nothing to drop.
-fn drop_stale_atlas_caches(plates: &mut Nameplates, generation: u64, commands: &mut Commands) {
+fn drop_stale_glyph_caches(plates: &mut Nameplates, generation: u64, commands: &mut Commands) {
     if plates.baked_from == Some(generation) {
         return;
     }
     if plates.baked_from.is_some() {
         debug!(
-            "nameplates: atlas re-baked (generation {generation}) — dropping {} meshes, {} \
-             materials and {} live plates",
+            "nameplates: glyph sheet reset (generation {generation}) — dropping {} meshes and {} \
+             live plates",
             plates.meshes.len(),
-            plates.materials.len(),
             plates.live.len(),
         );
         for (plate, _, _) in plates.live.values() {
@@ -699,15 +721,14 @@ fn drop_stale_atlas_caches(plates: &mut Nameplates, generation: u64, commands: &
         }
         plates.live.clear();
         plates.meshes.clear();
-        plates.materials.clear();
     }
     plates.baked_from = Some(generation);
 }
 
 /// Drop the per-line-stack mesh dedup on a cross-map transition (`world_map::MapChange` — see its
 /// doc): it grows with every distinct name ever seen and the old map's population never comes
-/// back. The palette `materials` stay — they are keyed by the atlas bake, not the map
-/// ([`drop_stale_atlas_caches`] owns that edge).
+/// back. The palette `materials` stay — they bind the one stable glyph sheet and outlive both this
+/// edge and [`drop_stale_glyph_caches`]'s.
 fn evict_name_meshes(
     mut changes: MessageReader<benilla_world::world_map::MapChange>,
     mut plates: ResMut<Nameplates>,
@@ -815,19 +836,19 @@ mod tests {
         plates
     }
 
-    /// **A re-bake empties every atlas-derived cache, live plates included** (B272, decision 1339).
+    /// **A sheet reset empties every UV-bearing cache, live plates included** (B272, decision
+    /// 1339; narrowed by 1342).
     ///
-    /// The meshes carry glyph-cell UVs in vertex data and the materials bind the atlas image by
-    /// handle. A re-bake replaces the atlas with a new image whose HEIGHT is a function of the
-    /// seam-dependent size ladder, so every normalized V from the old bake addresses a different
-    /// row of the new one. Keeping the material while rebuilding meshes is what drew new-bake UVs
-    /// through the old-bake texture — unit names as fragments of other letters.
+    /// The meshes carry glyph-cell UVs in vertex data, and a reset repacks the sheet from empty, so
+    /// every one of them stops pointing at its own letter. Dropping the map is not enough on its
+    /// own: the live plate entities still hold the old `Mesh3d`, so they must be despawned to be
+    /// rebuilt. That is the assertion a map-clear alone would pass and the screen would not.
     ///
-    /// Dropping the maps is not enough on its own: the live plate entities still hold the old
-    /// `Mesh3d`/`MeshMaterial3d`, so they must be despawned to be rebuilt. That is the assertion
-    /// the map-clear alone would pass and the screen would not.
+    /// The materials must **survive** — they bind a texture whose handle never changes. Dropping
+    /// them was right when a re-bake published a new image every window resize; keeping them now is
+    /// the difference between rebuilding a handful of meshes and rebuilding the whole palette.
     #[test]
-    fn a_rebake_drops_the_meshes_the_materials_and_the_live_plates() {
+    fn a_sheet_reset_drops_the_meshes_and_the_live_plates_but_not_the_materials() {
         let mut world = World::new();
         let unit = world.spawn_empty().id();
         let plate = world.spawn_empty().id();
@@ -836,29 +857,29 @@ mod tests {
         let mut queue = bevy::ecs::world::CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            drop_stale_atlas_caches(&mut plates, 8, &mut commands);
+            drop_stale_glyph_caches(&mut plates, 8, &mut commands);
         }
         queue.apply(&mut world);
 
         assert!(plates.meshes.is_empty(), "stale UVs must not survive");
-        assert!(
-            plates.materials.is_empty(),
-            "the material binds the OLD atlas image — the half that made it garbage rather than \
-             merely soft"
+        assert_eq!(
+            plates.materials.len(),
+            1,
+            "the material binds a texture whose handle never moves — dropping it is pure churn"
         );
         assert!(plates.live.is_empty());
         assert!(
             world.get_entity(plate).is_err(),
-            "a live plate holds the old mesh+material handles: clearing the maps around it leaves \
-             the wrong cells on screen"
+            "a live plate holds the old mesh handle: clearing the map around it leaves the wrong \
+             cells on screen"
         );
         assert_eq!(plates.baked_from, Some(8));
     }
 
-    /// The FIRST build is not an edge — there is nothing baked from a previous atlas to drop, and
+    /// The FIRST build is not an edge — there is nothing from a previous cell layout to drop, and
     /// treating it as one would despawn the plates the same frame they were spawned.
     #[test]
-    fn the_first_bake_seeds_without_dropping_anything() {
+    fn the_first_build_seeds_without_dropping_anything() {
         let mut world = World::new();
         let unit = world.spawn_empty().id();
         let plate = world.spawn_empty().id();
@@ -867,7 +888,7 @@ mod tests {
         let mut queue = bevy::ecs::world::CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            drop_stale_atlas_caches(&mut plates, 0, &mut commands);
+            drop_stale_glyph_caches(&mut plates, 0, &mut commands);
         }
         queue.apply(&mut world);
 
@@ -877,9 +898,10 @@ mod tests {
         assert_eq!(plates.baked_from, Some(0));
     }
 
-    /// The steady frame — every frame that is not a re-bake — costs nothing and keeps everything.
+    /// The steady frame — every frame that is not a reset, which is very nearly all of them —
+    /// costs nothing and keeps everything.
     #[test]
-    fn an_unmoved_bake_is_a_no_op() {
+    fn an_unmoved_generation_is_a_no_op() {
         let mut world = World::new();
         let unit = world.spawn_empty().id();
         let plate = world.spawn_empty().id();
@@ -888,7 +910,7 @@ mod tests {
         let mut queue = bevy::ecs::world::CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            drop_stale_atlas_caches(&mut plates, 3, &mut commands);
+            drop_stale_glyph_caches(&mut plates, 3, &mut commands);
         }
         queue.apply(&mut world);
 

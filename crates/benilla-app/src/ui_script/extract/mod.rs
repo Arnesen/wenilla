@@ -44,19 +44,19 @@ fn report_gate_miss(
     now: &[benilla_ui::script::ExtractedQuad],
     prev: &[benilla_ui::script::ExtractedQuad],
     dims_eq: bool,
-    bake_eq: bool,
+    generation_eq: bool,
     text_ui_eq: bool,
     portraits_eq: bool,
 ) {
     if !dims_eq {
-        eprintln!("[ui-gate] miss: window/scale changed");
+        eprintln!("[ui-gate] miss: window size / seam scale / DPI changed");
         return;
     }
-    if !bake_eq {
-        // Named, because it is the one miss whose cause is a QUARTER SECOND behind the input that
-        // provoked it (`REBAKE_SETTLE`): a resize that has already settled, re-converting again
-        // when the atlas it was waiting for finally lands (decision 1339).
-        eprintln!("[ui-gate] miss: glyph atlas re-baked");
+    if !generation_eq {
+        // Named, because it is the one miss with no visible cause at all: the glyph sheet filled
+        // and was repacked from empty, so every held quad's UV moved. It should be very rare —
+        // `WOW_GLYPH_CACHE=1` reports the occupancy that led here (decision 1342).
+        eprintln!("[ui-gate] miss: the glyph sheet reset");
         return;
     }
     if !text_ui_eq {
@@ -102,11 +102,11 @@ fn report_gate_miss(
 pub(super) struct GateInputs {
     extracted: Vec<benilla_ui::script::ExtractedQuad>,
     text_ui: Option<benilla_ui::script::EditBoxTextUi>,
-    dims: Option<(u32, u32, u32)>,
+    dims: Option<(u32, u32, u32, u32)>,
     portraits: std::collections::HashMap<String, crate::portrait::PortraitSource>,
-    /// The `UiFontAtlas::generation` the held quads' glyph cells were rasterized from — the term
-    /// that stopped being constant at decision 1296 (see the gate's own note below, decision 1339).
-    bake: Option<u64>,
+    /// The `UiFontAtlas::generation` the held quads' glyph UVs came from — see the gate's own
+    /// note below. Moves only when the glyph sheet resets (decisions 1339, 1342).
+    generation: Option<u64>,
 }
 
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
@@ -153,27 +153,29 @@ pub(super) fn drive_script(
     // VM has no cached measures to invalidate and no measurer at all, and the re-seat below already
     // catches that on its own test (`!script.has_text_measurer()`).
     mut last_seam: Local<f32>,
-    // The atlas bake this pass last seated a measurer from (decision 1296) — the other half of the
-    // same staleness edge. `None` until an atlas exists, which is also a real edge to catch.
-    mut last_bake: Local<Option<u64>>,
+    // The `scale_factor` this pass last answered measures under — the other half of the same
+    // staleness edge (decision 1342). `0.0` until the first frame, which is also a real edge.
+    mut last_dpi: Local<f32>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
     // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
-    // The conversion loop below is a pure function of (extracted, text_ui, window dims × seam
-    // scale, the portrait token map, THE ATLAS BAKE) — the sprite caches are monotone
-    // path→handle, so equal inputs reproduce the same `UiQuads` the diff would then discard.
-    // Capture mode never skips (the harness wants exact per-frame output, including the
+    // The conversion loop below is a pure function of (extracted, text_ui, the RASTER
+    // ENVIRONMENT, the portrait token map, the glyph-sheet generation) — the sprite caches are
+    // monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff would then
+    // discard. Capture mode never skips (the harness wants exact per-frame output, including the
     // cursor-icon quad's live mouse position).
     //
-    // The bake term is decision 1339's correction: this list read "the glyph atlas bakes once at
-    // Startup", which decision 1296 falsified — the atlas now re-bakes whenever the raster
-    // environment moves, and every glyph quad the conversion emits carries that bake's cell UVs
-    // and image handle. The two are DEBOUNCED apart by design (`REBAKE_SETTLE` = 0.25 s), which is
-    // exactly what made the omission bite: the seam moves the instant the window resizes, the UI
-    // re-converts and settles well inside a quarter second, and *then* the new atlas arrives to a
-    // gate whose other four inputs all match — so the conversion is skipped and the screen keeps
-    // the old bake's resampled cells indefinitely. 1296's re-bake landed and nothing on screen
-    // used it, which is the shape of the reports that survived it.
+    // The raster environment is window size × seam scale × **`scale_factor`**, and that last term
+    // is decision 1342's correction. A monitor hop at an unchanged window size moves nothing else
+    // in this list, but it changes the integer device-pixel size every glyph rasterizes at
+    // (`TextEngine::ppem`) — so the quads held from last frame are the wrong size and the gate
+    // must miss. (1339 caught the same hole through an atlas-bake counter, which was the right
+    // fix for a design where the atlas re-baked; there is nothing to re-bake now, so the term that
+    // survives is the one that actually moved.)
+    //
+    // The generation term is the glyph sheet RESETTING — the one event that moves a cached cell's
+    // UV, which happens when the sheet fills and is repacked from empty. Held quads carry the old
+    // UVs and would draw letters as fragments of other letters.
     //
     // A [`crate::ui_script::VmMemo`] because a skip is not only a quad-conversion skip: it also skips
     // `set_link_spans` and the minimap-slot / booth-pane refills, which are pushes INTO the VM. The
@@ -208,18 +210,20 @@ pub(super) fn drive_script(
     // eats fitting text: the director's "Contr..." rows, reproduced by `WOW_RESIZE`). Declare the
     // staleness at the seam and let every round-trip re-answer under the new `s`.
     //
-    // A **re-bake** is the same staleness by the other route: the atlas now follows the seam
-    // (decision 1296), and a fresh bake replaces the whole step table — so a cached metric answered
-    // off the old table is stale even when `s` itself did not move (a pure DPI hop, a monitor
-    // change). Watch the generation beside the seam and treat either edge identically.
+    // **The DPI is the other half of the same edge** (decision 1342). A logical height becomes an
+    // integer DEVICE-pixel raster size, so a monitor hop at an unchanged window size leaves `s`
+    // exactly where it was and still moves every measured width. (1296/1339 caught this through
+    // the atlas's bake generation, which followed the same two terms; with nothing to re-bake, the
+    // honest thing to watch is the term itself.)
+    let dpi = window.scale_factor();
     let generation = font_atlas.as_deref().map(|a| a.generation);
-    let seam_moved = *last_seam != s || *last_bake != generation;
+    let seam_moved = *last_seam != s || *last_dpi != dpi;
     if seam_moved {
         if *last_seam != 0.0 {
             script.invalidate_text_measures();
         }
         *last_seam = s;
-        *last_bake = generation;
+        *last_dpi = dpi;
     }
     // …and re-seat the VM's own font engine at the same edge, for the same reason: an
     // [`crate::ui_text::AtlasMeasurer`] answers only for the seam it was built under. This is what
@@ -233,7 +237,7 @@ pub(super) fn drive_script(
     if let Some(atlas) = font_atlas.as_deref() {
         if seam_moved || !script.has_text_measurer() {
             script.set_text_measurer(Box::new(crate::ui_text::AtlasMeasurer::new(
-                atlas.metrics(),
+                atlas.engine(),
                 s,
             )));
         }
@@ -323,7 +327,7 @@ pub(super) fn drive_script(
                 .iter()
                 .map(|r| {
                     let n = crate::ui_text::measure_wrapped_rows(
-                        atlas,
+                        &mut atlas.lock(),
                         &r.text,
                         // wrap_width is the RESOLVED frame width (scale already in it) — ×s only;
                         // the font height is frame-local — ×s × the frame's scale, the drawn size.
@@ -333,7 +337,6 @@ pub(super) fn drive_script(
                             // The band's own drawn px (one-to-one regime; inert ≤ 32).
                             height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // step-law width bias, as in the measures above
-                            paint_halo: true,   // measure never paints; irrelevant here
                             alpha_gradient: None,
                         },
                     );
@@ -386,10 +389,9 @@ pub(super) fn drive_script(
                 // request's `scale` doc).
                 height: crate::ui_text::drawn_px(req.height, None, s * req.scale),
                 outline: req.outline,
-                paint_halo: true,     // measure never paints
                 alpha_gradient: None, // alpha never changes metrics
             };
-            let cum: Vec<f32> = crate::ui_text::line_advances(atlas, &req.text, spec)
+            let cum: Vec<f32> = crate::ui_text::line_advances(&mut atlas.lock(), &req.text, spec)
                 .iter()
                 .map(|a| a / s)
                 .collect();
@@ -398,7 +400,7 @@ pub(super) fn drive_script(
             // Advances/pitch return in UI units (÷s): the engine's click→index and row math
             // compare them against the ÷s mouse feed.
             let (rows, cell_h) = match req.wrap_width {
-                Some(w) => crate::ui_text::line_rows(atlas, &req.text, w * s, spec),
+                Some(w) => crate::ui_text::line_rows(&mut atlas.lock(), &req.text, w * s, spec),
                 None => (vec![0], 0.0),
             };
             script.set_editbox_advances(req.id, req.key, cum, rows, cell_h / s);
@@ -419,10 +421,10 @@ pub(super) fn drive_script(
     // LBRS pin that was every single settled frame, ~0.3 ms/frame of glyph re-rasterization for
     // an identical `Vec`. On a skip, `quads`/`minimap_widget`/the engine's link spans all keep
     // last frame's values, which the equal inputs prove are this frame's values too.
-    let dims = (w.to_bits(), h.to_bits(), s.to_bits());
+    let dims = (w.to_bits(), h.to_bits(), s.to_bits(), dpi.to_bits());
     let settled = capture.is_none()
         && prev.dims == Some(dims)
-        && prev.bake == generation
+        && prev.generation == generation
         && text_ui == prev.text_ui
         && booths.images.0 == prev.portraits
         && extracted == prev.extracted;
@@ -465,13 +467,13 @@ pub(super) fn drive_script(
             &extracted,
             &prev.extracted,
             prev.dims == Some(dims),
-            prev.bake == generation,
+            prev.generation == generation,
             text_ui == prev.text_ui,
             booths.images.0 == prev.portraits,
         );
     }
     prev.dims = Some(dims);
-    prev.bake = generation;
+    prev.generation = generation;
     prev.text_ui = text_ui.clone();
     prev.portraits = booths.images.0.clone();
     prev.extracted = extracted.clone();
@@ -836,12 +838,12 @@ fn measure_fontstrings(
         return false;
     }
     // Every answer goes through the ONE measure body ([`crate::ui_text::measure_request`]) the VM's
-    // own synchronous measurer calls, over the same `Arc`-shared table — so a string measured here
+    // own synchronous measurer calls, against the same shared engine — so a string measured here
     // and the same string measured mid-tick are not two computations that agree, they are one.
     let measures: Vec<(u32, f32, f32, f32, u64)> = requests
         .iter()
         .map(|r| {
-            let (w, h, natural) = crate::ui_text::measure_request(&atlas.metrics, s, r);
+            let (w, h, natural) = crate::ui_text::measure_request(&mut atlas.lock(), s, r);
             (r.id, w, h, natural, r.key)
         })
         .collect();

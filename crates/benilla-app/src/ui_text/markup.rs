@@ -99,6 +99,40 @@ pub(super) fn parse_markup(input: &str, base_color: [f32; 4]) -> Vec<Vec<ColorRu
     lines
 }
 
+/// [`parse_markup`] under the FontString **line-count law** — what the client's height kernel
+/// `GxuFont_GetTextBlockHeight 0x5c2070` actually counts (wow-re `system/font/scratch/
+/// re-wave1-capi.md`; the two edge cases spelled out in `system/ui/scratch/
+/// simplehtml-markup-engine.md` §4.4).
+///
+/// The kernel walks the string: a bare line break at the cursor is an empty line and costs one;
+/// otherwise it lays a line, and **that line's own terminating break is consumed with it**. So a
+/// trailing break terminates its line rather than opening a new one, and the loop guard
+/// (`cmp byte [esi],0`) means an empty string is **zero** lines with height `0.0`, not one.
+///
+/// The difference from a plain split is exactly one line, on exactly the strings that end in a
+/// break — which is every `<BR/>` block SimpleHTML builds (`"\n"`: one blank line in the client,
+/// two under a split) and every page body the item-text reader pads. B240's reader drew its
+/// section gaps at double height until this existed (the director, 08-15, against his own 1.12.1
+/// shot); decision 1343.
+///
+/// **Not the EditBox's law.** A multiline box that ends in a newline really does show the empty
+/// row its caret sits on, and it reaches its rows through `line_rows`/`0x77da80`, not this kernel
+/// — so [`parse_markup`] itself is left alone and this is a separate seam over it.
+pub(super) fn fontstring_lines(input: &str, base_color: [f32; 4]) -> Vec<Vec<ColorRun>> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = parse_markup(input, base_color);
+    if lines.len() > 1
+        && lines
+            .last()
+            .is_some_and(|l| l.iter().all(|r| r.text.is_empty()))
+    {
+        lines.pop();
+    }
+    lines
+}
+
 /// Accumulate one drawn char into the current run, and into the open link's visible text.
 fn push_visible(c: char, cur: &mut String, link: &mut Option<(String, String, Vec<usize>)>) {
     if let Some((_, visible, _)) = link {
@@ -366,6 +400,36 @@ mod markup_tests {
         // No inline-texture escape exists in this build: it draws as text.
         let (drawn, _) = visible_map("a|Tfoo|tb");
         assert_eq!(drawn, "a|Tfoo|tb");
+    }
+
+    /// The FontString **line-count law** (`GxuFont_GetTextBlockHeight 0x5c2070`), pinned on the
+    /// strings that separate it from a plain split: a **trailing** break terminates its line
+    /// rather than opening a new one, and an empty string is **zero** lines.
+    ///
+    /// The director found this against his own 1.12.1 client (08-15): every `<BR/>` in a book page
+    /// is a `"\n"` block, and under a split that is two blank lines instead of one — so the page's
+    /// section gaps came out at double height and the text ran off the bottom. The second block
+    /// below is the mutation check: the cases a split already got right must not move.
+    #[test]
+    fn a_trailing_break_does_not_open_a_line() {
+        let n = |t: &str| fontstring_lines(t, [1.0, 1.0, 1.0, 1.0]).len();
+        // The three the kernel counts differently from a split.
+        assert_eq!(n("\n"), 1, "a <BR/> block is ONE blank line");
+        assert_eq!(n("a\n"), 1);
+        assert_eq!(n(""), 0, "an empty string is zero lines, height 0.0");
+        // …and everything else is unchanged.
+        assert_eq!(n("a"), 1);
+        assert_eq!(n("a\nb"), 2);
+        assert_eq!(
+            n("\nbody\n"),
+            2,
+            "the reader's own padding: a blank line, then the body"
+        );
+        assert_eq!(n("\n\n"), 2);
+        assert_eq!(n("a\n\nb"), 3);
+        // `|n` is the same break token, so it obeys the same law.
+        assert_eq!(n("a|n"), 1);
+        assert_eq!(n("a|nb"), 2);
     }
 
     /// A malformed escape is literal text to the draw, so it must be literal to the map too —

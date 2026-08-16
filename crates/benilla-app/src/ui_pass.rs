@@ -350,6 +350,44 @@ impl Material2d for UiQuadMaterial {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiQuadAppend;
 
+/// Project a world point for a world-anchored overlay, **with the reference projector's own accept
+/// verdict** — `None` means "this one does not draw", and the caller must honour it.
+///
+/// `0x483ee0` returns a boolean (wow-re `object-layer/scratch/nameplate-offscreen-cull.md`,
+/// §5-VERIFIED 2026-08-15). It rejects a point behind the near plane (`483f7a`) **and** a point
+/// outside the viewport — the four tests at `484075`/`484086`/`484096`/`4840a6`, against the
+/// **WorldFrame**'s own region (`[0xb4b2bc]`, mirrored ÷G44/÷G48 at `0x483970`), so the accept
+/// region is exactly the viewport, inclusive. Both plate and worldtext callers **destroy** the
+/// thing they were about to place when it comes back false.
+///
+/// **The trap this exists to remove:** on the viewport rejections the projector has *already
+/// written* the out-param (`484065`/`484067`), so a caller that ignores the verdict reads a
+/// perfectly plausible off-screen coordinate and sails on — which is exactly how benilla ended up
+/// clamping the plates of units nobody can see onto the screen border (1341). Returning `Option`
+/// makes the verdict unignorable at the call site.
+///
+/// The chat bubble deliberately does **not** call this: the reference's bubble seat is the one
+/// caller of the three that ignores the boolean, so a bubble simply slides off the edge with its
+/// speaker. Bevy's own `Err` covers only the behind-camera half, which is why the viewport test
+/// has to be here rather than left to it.
+pub(crate) fn project_overlay(
+    cam: &Camera,
+    cam_tf: &GlobalTransform,
+    world: Vec3,
+    viewport: Vec2,
+) -> Option<Vec2> {
+    // Bevy's `Err` is the near-plane half (`483f7a`); `accepts` is the viewport half.
+    let p = cam.world_to_viewport(cam_tf, world).ok()?;
+    accepts(p, viewport).then_some(p)
+}
+
+/// The accept REGION: exactly the viewport, **inclusive**. `[0xb4b2bc]` is the WorldFrame, and its
+/// region rect is mirrored ÷G44/÷G48 into the compare fields (`0x483970`), so the aspect factors
+/// cancel exactly and the test is against the raw screen box.
+fn accepts(p: Vec2, viewport: Vec2) -> bool {
+    (0.0..=viewport.x).contains(&p.x) && (0.0..=viewport.y).contains(&p.y)
+}
+
 /// Owns the player-UI camera + the per-frame quad→mesh rebuild. See the module doc for the
 /// camera-order arbitration and the batching/ordering approach.
 pub(crate) struct PlayerUiPlugin;
@@ -984,6 +1022,29 @@ mod tests {
         });
         quads.dirty = true;
         app
+    }
+
+    /// The projector's accept region is **exactly the viewport, inclusive** — the WorldFrame's own
+    /// region mirrored ÷G44/÷G48 (`0x483970`), so the aspect factors cancel. A point on the edge
+    /// draws (the seat's clamp, not this, is what keeps the rect fully inside); a point outside it
+    /// does not, however plausible the coordinate the projector already wrote looks. The last row
+    /// is the measured phantom that bought this: a unit two thirds of a screen below the bottom,
+    /// whose plate used to be dragged up onto the border (1341).
+    #[test]
+    fn the_accept_region_is_the_viewport_inclusive() {
+        let vp = Vec2::new(1440.0, 810.0);
+        assert!(accepts(Vec2::new(720.0, 405.0), vp));
+        assert!(accepts(Vec2::ZERO, vp), "the corner is in view");
+        assert!(accepts(vp, vp), "so is the far corner");
+        for out in [
+            Vec2::new(-0.5, 405.0),
+            Vec2::new(1440.5, 405.0),
+            Vec2::new(720.0, -0.5),
+            Vec2::new(720.0, 810.5),
+            Vec2::new(1409.0, 1332.0),
+        ] {
+            assert!(!accepts(out, vp), "{out:?} is not on screen");
+        }
     }
 
     fn batches(app: &mut App) -> usize {

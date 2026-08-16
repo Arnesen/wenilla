@@ -107,6 +107,17 @@ pub(crate) struct SoundConfig {
     /// persists — to hear what the DBC data asks for. (The reference's route is
     /// `/console SoundReverb 1`; benilla has no `ConsoleExec` yet.)
     pub reverb: bool,
+    /// **The loading cover's audio half** — NOT a CVar, a per-frame live bit fed from
+    /// [`crate::loading_screen::LoadingScreen::covering`] by [`feed_world_hold`]. While the cover
+    /// is up, no new sound *starts* ([`kit::play_kit_ext`]/[`kit::play_file`] return early) and
+    /// the zone beds hard-stop and stay down (`zone::zone_audio`'s hold arm) — the reference
+    /// blocks on its world load, so nothing world-side is audible under its loading screen, and
+    /// an async client has to build that observable explicitly (0737's argument, in audio).
+    /// Sounds already ringing when the cover rises play out — the reference's sound engine keeps
+    /// running through the load edge too, which is what lets the glue theme's 2 s fade tail
+    /// (1109) ride under the entry cover exactly as the real client's does: its amp is applied
+    /// once at start, and a playing stream never passes back through the kit starters.
+    pub world_hold: bool,
 }
 
 impl SoundConfig {
@@ -136,7 +147,24 @@ impl Default for SoundConfig {
             music_enabled: true,
             ambience_enabled: true,
             reverb: false,
+            world_hold: false,
         }
+    }
+}
+
+/// Copy the loading cover's state into [`SoundConfig::world_hold`], once per frame, in
+/// `PreUpdate` — before every trigger system, so the whole frame reads one answer. The one-frame
+/// lag off the raise (the raise happens in the previous frame's `Present`) is inherent and
+/// harmless: the raise frame is the snap frame, and the leaks this closes — units streaming in,
+/// footsteps, the fall grunt, the zone beds — all fire on later frames. The lag also keeps the
+/// enter-world button's own click audible: it plays on the raise frame, before the bit flips.
+fn feed_world_hold(
+    mut config: ResMut<SoundConfig>,
+    screen: Res<crate::loading_screen::LoadingScreen>,
+) {
+    let hold = screen.covering();
+    if config.world_hold != hold {
+        config.world_hold = hold;
     }
 }
 
@@ -224,6 +252,9 @@ impl Plugin for SoundPlugin {
         .init_resource::<SoundConfig>()
         .init_resource::<AudioListener>()
         .add_systems(Startup, hal_overload::setup)
+        // The cover's audio hold (see [`SoundConfig::world_hold`]): fed in PreUpdate so every
+        // trigger system this frame — whatever stage it runs in — reads one answer.
+        .add_systems(PreUpdate, feed_world_hold)
         .add_systems(
             Update,
             (

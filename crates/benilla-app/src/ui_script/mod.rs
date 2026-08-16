@@ -264,10 +264,14 @@ impl Plugin for UiScriptPlugin {
             // cast-fail display (0427) resolves its messages from.
             .add_systems(Startup, setup_script.after(benilla_assets::AssetSet::Open))
             // The in-game UI materializes on entering the world, not at boot (1051) — the
-            // reference's own seam. Only the font registry loads at `Startup`.
+            // reference's own seam; only the font registry loads at `Startup`. The entry edge
+            // ARMS the load; it runs a few frames later, once the loading cover has actually
+            // presented — the ~0.5 s burst must never stall the frame whose render would first
+            // show the cover, or what covers it is the frozen character screen (0962's frame
+            // accounting; see [`lifecycle::PendingEntryUiLoad`]).
             .add_systems(
                 OnEnter(crate::char_select::ClientState::InWorld),
-                load_ingame_ui_on_world_entry,
+                lifecycle::arm_entry_ui_load,
             )
             // The whole shutdown tail — events then writes, in the reference's order. See
             // [`shutdown_ui_state`]; the two edges here are its five roots as far as our session
@@ -285,7 +289,13 @@ impl Plugin for UiScriptPlugin {
             // `save_config`, discarding a dirty CVar edit, or after `seed_bindings`, giving one
             // whole frame with an empty binding table. See [`run_pending_reload`].
             .init_resource::<ReloadUiPending>()
-            .add_systems(PreUpdate, run_pending_reload)
+            // The armed entry load shares the reload's slot, chained after it: both are
+            // exclusive edges on the same VM, and a reload must not interleave a pending entry
+            // load.
+            .add_systems(
+                PreUpdate,
+                (run_pending_reload, lifecycle::run_pending_entry_load).chain(),
+            )
             // `GetFramerate()`'s host half (decision 1195), before the VM ticks so an `OnUpdate`
             // handler reads this frame's number rather than the previous one's.
             .add_systems(Update, feed_framerate.before(UiInput))
@@ -354,15 +364,18 @@ fn arbitrate_pointer_over_ui(
 /// lives there; this module keeps the per-frame bridge. See its header.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    end_ui_session, run_pending_reload, setup_script, AddOnIdentity, ReloadUiPending,
+    end_ui_session, run_pending_reload, setup_script, AddOnIdentity, PendingEntryUiLoad,
+    ReloadUiPending,
 };
 // Consumed only from other modules' test code (the emote-table checks, the harness's UI-init
 // tail, the quit-once pin) — a plain re-export would warn unused in a non-test build.
 #[cfg(test)]
+use lifecycle::load_ingame_ui_on_world_entry;
+use lifecycle::shutdown_on_exit;
+#[cfg(test)]
 pub(crate) use lifecycle::{
     finish_ui_load, is_emote_token_line, seat_from_roster, shutdown_ui_state,
 };
-use lifecycle::{load_ingame_ui_on_world_entry, shutdown_on_exit};
 
 /// `GetFramerate()`'s host half: push a **smoothed** frames-per-second into the VM each frame
 /// (decision 1195).

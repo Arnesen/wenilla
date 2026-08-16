@@ -1,24 +1,29 @@
-//! Text rendering for `QuadContent::Text` (decision 0068 §2): a glyph atlas baked from the client's
-//! own TTFs, shaped through `cosmic-text` 0.16, emitted as [`crate::ui_pass::UiQuad`]s the quad pass
-//! draws with no special case. Ported from `probes/text-glyph/src/{font,atlas,markup,layout}.rs`
-//! (screenshot-verified there, 2026-07-02) into the real render path; the port's only structural change
-//! is the font source (the app's own [`WorldAssets`] patch chain, not a probe-local `Chain::open`) and
-//! the output type (this crate's real `UiQuad`, not the probe's mirror struct).
+//! Text rendering for `QuadContent::Text` (decision 0068 §2): an on-demand glyph cache over the
+//! client's own TTFs, shaped through `cosmic-text` 0.16, emitted as [`crate::ui_pass::UiQuad`]s the
+//! quad pass draws with no special case.
+//!
+//! - [`engine`] — the cache: faces, the size law, and the two lookup tables everything else reads.
+//! - [`pack`] — the texture the cells live in, and how they get there.
+//! - [`outline`] — the client's outline blit recipe, run per cell.
+//! - [`layout`] — the emit pass, and (in `layout::measure`) the width law, the wrap and the
+//!   ellipsis seam.
+//! - [`measurer`] — the same engine, as the script VM holds it for a synchronous `GetStringWidth`.
 //!
 //! ## Font objects (decision 0084) and remaining v1 simplifications
 //!
 //! - **Per-`FontString` size + face.** [`QuadContent::Text`] now carries the resolved `{ font, height }`
-//!   from the engine's font registry (`Fonts.xml`'s named virtual `<Font>` objects). The atlas bakes
-//!   every registered client TTF at each of [`FONT_SIZES`]; [`layout_text_quads`] selects the face by
-//!   `font` path (via [`UiFontAtlas::path_to_family`]) and the nearest baked size. A `FontString` with
-//!   no font object falls back to Friz Quadrata at [`DEFAULT_FONT_SIZE`] (the pre-0084 behavior).
-//! - **DPI-aware bake.** The atlas is baked at `logical_size × Window::scale_factor` (physical
-//!   resolution), and [`layout_text_quads`]/[`measure_text`] shape at that physical size, divide the
-//!   metrics back to logical, and snap glyph origins to the physical-pixel grid — so a baked cell
-//!   draws one texel per device pixel instead of a half-res bitmap upscaled by a retina framebuffer.
-//! - **Outlines are rasterized** as the classic bitmap outline: [`layout_text_quads`] stamps each
-//!   glyph's baked coverage in black over a filled `r×r` neighbourhood (`r=1` NORMAL, `r=2` THICK)
-//!   behind the fill — `cosmic-text` has no native outline. The Number* fonts (action-bar
+//!   from the engine's font registry (`Fonts.xml`'s named virtual `<Font>` objects). A `FontString`
+//!   with no font object falls back to Friz Quadrata at [`DEFAULT_FONT_SIZE`] (the pre-0084 behavior).
+//! - **One exact raster size, on demand** (decision 1342). A logical height becomes the integer
+//!   device-pixel size it will be drawn at (`round(height × scale_factor)` — the client's own
+//!   `0x5ca030` law), and the glyphs for that size are rasterized the first time anything asks for
+//!   them. There is no size ladder, no snapping, and no rescale of finished quads: the size a
+//!   string is measured at, rasterized at, and drawn at is one number. See [`engine`] for what that
+//!   replaced and why.
+//! - **Outlines are one composite cell.** An outlined glyph's black ring and its fill are
+//!   rasterized together into a single cell and blitted once — the client's own baked-outline
+//!   architecture (`glyph_blit_aa_outline 0x5cea30`; see [`outline`]), which is what makes an
+//!   outlined string fade as one thing instead of blackening. The Number* fonts (action-bar
 //!   hotkeys/counts) carry it.
 //! - **`justifyH` and `justifyV` are honored** (see [`layout_text_quads`]): lines justify
 //!   horizontally per line, and the line block vertically (default MIDDLE, the client's
@@ -29,34 +34,42 @@
 //!
 //! ## The metric-fidelity seam
 //!
-//! [`layout_text_quads`] shapes every run through `cosmic-text`'s shaper for glyph SELECTION and
-//! rasterization, but the pen now **advances by the client's own step law** (wow-re
-//! `system/font`): per glyph, `floor(advance) + 1` px (`rasterize_glyph` 0x5d1120's
+//! `cosmic-text`'s shaper is used for glyph SELECTION and rasterization, **one character at a
+//! time** ([`engine::TextEngine::ensure_char`]); the pen then **advances by the client's own step
+//! law** (wow-re `system/font`): per glyph, `floor(advance) + 1` px (`rasterize_glyph` 0x5d1120's
 //! `out[5] = (FT_advance>>6)+1.0`), plus another `+1` for a **THICK**-outlined font only
 //! (`GlyphStepBase` 0x5ca2b0 biases solely under the THICK flag — `outline-bake-tint.md`,
 //! correcting this module's earlier any-outline reading) — the extra tracking that makes real
-//! client text read wider/denser than raw font metrics. Remaining divergences, all confined here: kerning is dropped (the client applies only
-//! negative pair kerns and rounds — ~0 at UI sizes), the law is applied at logical ppem (the
-//! 768-window reference look), and glyph BITMAPS are cosmic/swash unhinted coverage where the
+//! client text read wider/denser than raw font metrics.
+//!
+//! Per character is not a shortcut; it is the law. The client's `ComputeStep` (0x5ca2d0) has no
+//! neighbour term, so a string's width is a pure function of its characters — which is what lets
+//! one table answer a measure and a draw, and what lets a measure be answered from inside a Lua
+//! call. It is a property of the FONTS that the decomposition holds (no ligatures, no contextual
+//! substitution in these four faces), so it is asserted directly rather than assumed:
+//! `engine::differential_tests`.
+//!
+//! Remaining divergences, all confined here: kerning is dropped entirely (the client applies only
+//! *negative* pair kerns and rounds — ~0 at UI sizes; the test that pins the width law also pins
+//! that this is what we are doing), and glyph BITMAPS are cosmic/swash unhinted coverage where the
 //! client runs 2004-era FreeType with hinting flags (0x208a/0x20c2) — slightly slimmer stems at
 //! small sizes. A future bit-exact replacement (wow-re's font kernel) only changes this module;
-//! nothing in its callers moves.
+//! nothing in its callers moves. The deliberate *rendering* divergences — where the client stretches
+//! a cell and we rasterize the true size — are named in [`engine`]'s module doc.
 
-mod atlas;
+mod engine;
 mod layout;
 mod markup;
 mod measurer;
+mod outline;
+mod pack;
 
-pub(crate) use atlas::{UiFontAtlas, UiTextPlugin};
+pub(crate) use engine::{UiFontAtlas, UiTextPlugin};
 
 use benilla_ui::script::Outline;
 use benilla_ui::widget::RegionHandle;
 pub(crate) use measurer::{measure_request, AtlasMeasurer};
 
-/// The width law itself, for the differential test that pins it to the pre-table shaped sum
-/// (`atlas::metrics_tests`). Not a production seam — every caller goes through [`measure_text`].
-#[cfg(test)]
-pub(crate) use layout::measure_line_width_for_test;
 pub(crate) use layout::{
     ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances, line_origin,
     line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, UI_SEAT_NUDGE,
@@ -262,7 +275,6 @@ mod ellipsis_memo_tests {
             path,
             height,
             outline,
-            paint_halo: true,
             alpha_gradient: None,
         }
     }

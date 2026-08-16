@@ -118,6 +118,15 @@ impl LoadingScreen {
         self.active
     }
 
+    /// An active cover, for tests that drive covered-frame accounting (the entry-load deferral).
+    #[cfg(test)]
+    pub(crate) fn test_covering() -> Self {
+        Self {
+            active: true,
+            ..Self::default()
+        }
+    }
+
     /// Raise (or re-arm) the screen for a fresh load. `awaiting_snap` marks a raise whose
     /// destination snap is still in flight; `map` is the destination when the edge knows it.
     fn raise(&mut self, reason: &str, awaiting_snap: bool, map: Option<u32>, now: f32) {
@@ -164,34 +173,13 @@ fn setup_loading_screen(
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let Some(mut assets) = world_assets else {
-        return;
-    };
-
-    // Catalog (LoadingScreenID → BLP path).
-    match load_loading_screens(&mut assets.chain.lock_recover()) {
-        Ok(c) => {
-            info!("LoadingScreens.dbc: {} screens catalogued", c.len());
-            commands.insert_resource(LoadingScreenCatalogRes(c));
-        }
-        Err(e) => {
-            error!("LoadingScreens.dbc unavailable, loading screen disabled: {e:#}");
-            return;
-        }
-    }
-
-    // The two layers 1.12 actually draws (sRGB clamp sprites — UI art, not tiling world art).
-    let mut tex = |path: &str| assets.sprite_texture(path, &mut images);
-    let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
-        error!("loading bar textures missing, loading screen disabled");
-        return;
-    };
-    let fill = tex("Interface\\Glues\\LoadingBar\\Loading-BarFill.blp").unwrap_or_default();
-    // The spawned ImageNodes below own these handles (the root is never despawned, only hidden), so
-    // the textures stay resident without a separate holder resource.
-
-    // Root: fullscreen black — this IS the pillarbox letterbox. Flex-centres the 4:3 content area.
-    commands
+    // Root: fullscreen black — this IS the pillarbox letterbox, and it spawns UNCONDITIONALLY.
+    // Every `covering()` consumer (the world camera stays active to warm pipelines, the warm
+    // pass, the settle hold, and now the audio hold) behaves as if covered whenever
+    // `LoadingScreen::active` is true — so a missing catalog or bar texture must degrade to a
+    // plain black cover, never to "no cover node at all" while the whole client pretends one is
+    // up (the naked-world failure this used to be). Flex-centres the 4:3 content area.
+    let root = commands
         .spawn((
             LoadingRoot,
             Node {
@@ -207,73 +195,101 @@ fn setup_loading_screen(
             GlobalZIndex(1000),
             Visibility::Hidden,
         ))
-        .with_children(|root| {
-            // The whole loading screen renders in one 4:3 area fit to viewport height, centred, with
-            // the root's black showing as pillarbox bars L/R (the reference's behaviour — the glue/load
-            // screen is authored 4:3; on a wider window it letterboxes). Width = height·4/3 in vh.
-            // The backdrop + bar are children, so their verified fractions are relative to THIS area.
-            // Sibling paint order = spawn order: backdrop → fill → border (border on top).
-            root.spawn(Node {
-                width: Val::Vh(100.0 * BACKDROP_ASPECT),
-                height: Val::Vh(100.0),
-                position_type: PositionType::Relative,
-                ..default()
-            })
-            .with_children(|area| {
-                // Backdrop art: the square BLP stretched to fill the 4:3 area (mild widen — what the
-                // reference does). Starts black (default-white texture tinted) until the art resolves.
-                area.spawn((
-                    LoadingBackdrop,
-                    ImageNode {
-                        color: Color::BLACK,
-                        image_mode: NodeImageMode::Stretch,
-                        ..default()
-                    },
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                ));
-                // Fill — left-anchored; width = progress·FILL_MAX_WIDTH (set each frame). y from the
-                // BOTTOM (verified by screenshot + binary). The fill art is a horizontally-uniform
-                // gradient, so width-scaling reads as a left→right reveal.
-                area.spawn((
-                    LoadingBarFill,
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Percent(FILL_LEFT * 100.0),
-                        bottom: Val::Percent(FILL_BOTTOM * 100.0),
-                        width: Val::Percent(0.0), // set each frame
-                        height: Val::Percent(FILL_HEIGHT * 100.0),
-                        ..default()
-                    },
-                    ImageNode {
-                        image: fill,
-                        image_mode: NodeImageMode::Stretch,
-                        ..default()
-                    },
-                ));
-                // Border frame, on top.
-                area.spawn((
-                    LoadingBarBorder,
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Percent(BORDER_LEFT * 100.0),
-                        bottom: Val::Percent(BORDER_BOTTOM * 100.0),
-                        width: Val::Percent(BORDER_WIDTH * 100.0),
-                        height: Val::Percent(BORDER_HEIGHT * 100.0),
-                        ..default()
-                    },
-                    ImageNode {
-                        image: border,
-                        image_mode: NodeImageMode::Stretch,
-                        ..default()
-                    },
-                ));
-            });
+        .id();
+
+    let Some(mut assets) = world_assets else {
+        return;
+    };
+
+    // Catalog (LoadingScreenID → BLP path).
+    match load_loading_screens(&mut assets.chain.lock_recover()) {
+        Ok(c) => {
+            info!("LoadingScreens.dbc: {} screens catalogued", c.len());
+            commands.insert_resource(LoadingScreenCatalogRes(c));
+        }
+        Err(e) => {
+            error!("LoadingScreens.dbc unavailable — plain black cover, no art: {e:#}");
+            return;
+        }
+    }
+
+    // The two layers 1.12 actually draws (sRGB clamp sprites — UI art, not tiling world art).
+    let mut tex = |path: &str| assets.sprite_texture(path, &mut images);
+    let Some(border) = tex("Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp") else {
+        error!("loading bar textures missing — plain black cover, no art");
+        return;
+    };
+    let fill = tex("Interface\\Glues\\LoadingBar\\Loading-BarFill.blp").unwrap_or_default();
+    // The spawned ImageNodes below own these handles (the root is never despawned, only hidden), so
+    // the textures stay resident without a separate holder resource.
+
+    commands.entity(root).with_children(|root| {
+        // The whole loading screen renders in one 4:3 area fit to viewport height, centred, with
+        // the root's black showing as pillarbox bars L/R (the reference's behaviour — the glue/load
+        // screen is authored 4:3; on a wider window it letterboxes). Width = height·4/3 in vh.
+        // The backdrop + bar are children, so their verified fractions are relative to THIS area.
+        // Sibling paint order = spawn order: backdrop → fill → border (border on top).
+        root.spawn(Node {
+            width: Val::Vh(100.0 * BACKDROP_ASPECT),
+            height: Val::Vh(100.0),
+            position_type: PositionType::Relative,
+            ..default()
+        })
+        .with_children(|area| {
+            // Backdrop art: the square BLP stretched to fill the 4:3 area (mild widen — what the
+            // reference does). Starts black (default-white texture tinted) until the art resolves.
+            area.spawn((
+                LoadingBackdrop,
+                ImageNode {
+                    color: Color::BLACK,
+                    image_mode: NodeImageMode::Stretch,
+                    ..default()
+                },
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+            ));
+            // Fill — left-anchored; width = progress·FILL_MAX_WIDTH (set each frame). y from the
+            // BOTTOM (verified by screenshot + binary). The fill art is a horizontally-uniform
+            // gradient, so width-scaling reads as a left→right reveal.
+            area.spawn((
+                LoadingBarFill,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(FILL_LEFT * 100.0),
+                    bottom: Val::Percent(FILL_BOTTOM * 100.0),
+                    width: Val::Percent(0.0), // set each frame
+                    height: Val::Percent(FILL_HEIGHT * 100.0),
+                    ..default()
+                },
+                ImageNode {
+                    image: fill,
+                    image_mode: NodeImageMode::Stretch,
+                    ..default()
+                },
+            ));
+            // Border frame, on top.
+            area.spawn((
+                LoadingBarBorder,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(BORDER_LEFT * 100.0),
+                    bottom: Val::Percent(BORDER_BOTTOM * 100.0),
+                    width: Val::Percent(BORDER_WIDTH * 100.0),
+                    height: Val::Percent(BORDER_HEIGHT * 100.0),
+                    ..default()
+                },
+                ImageNode {
+                    image: border,
+                    image_mode: NodeImageMode::Stretch,
+                    ..default()
+                },
+            ));
         });
+    });
 }
 
 /// Per-frame: observe the lifecycle edges, run the trigger/clear state machine, resolve backdrop
@@ -303,6 +319,11 @@ fn drive_loading_screen(
     // The 0837 warm pass: the cover holds until the menagerie's pipelines have compiled — the
     // point of the cover is that NOTHING first-sight-compiles after it lifts.
     warm: Res<crate::pipe_warm::WarmPass>,
+    // The deferred world-entry UI load (0962's frame accounting, applied to 1051's burst):
+    // armed at the entry edge, run behind this cover a few frames in. While it is still
+    // pending the reveal would show a world with no interface — the reference's reveal always
+    // has the UI up, because its UI load happens inside its blocking world load.
+    entry_ui_pending: Option<Res<crate::ui_script::PendingEntryUiLoad>>,
     // The lifecycle edges (decisions 0737/0738), all observed from what the net bridge already
     // publishes — this module owns the whole state machine, nothing else is instrumented for it.
     edges: (
@@ -425,6 +446,7 @@ fn drive_loading_screen(
             && !screen.awaiting_snap
             && !player_settling
             && warm.satisfied()
+            && entry_ui_pending.is_none()
         {
             screen.ready_frames += 1;
             if screen.ready_frames >= CLEAR_AFTER_READY_FRAMES {
@@ -445,7 +467,7 @@ fn drive_loading_screen(
                 screen.last_wait_log = now;
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
-                     {} colliders pending, awaiting_snap={}, settling={}, warm={}",
+                     {} colliders pending, awaiting_snap={}, settling={}, warm={}, ui_pending={}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
@@ -454,6 +476,7 @@ fn drive_loading_screen(
                     screen.awaiting_snap,
                     player_settling,
                     warm.satisfied(),
+                    entry_ui_pending.is_some(),
                 );
             }
         }
