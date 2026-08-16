@@ -4,6 +4,7 @@
 //! component (`CreateAction`, `SelectAction`, …); each degrades to a plain-fill + text face
 //! without client art.
 
+use benilla_ui::markup::{tokens, TokenKind};
 use benilla_ui::widget::EditBoxState;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
@@ -93,6 +94,10 @@ pub(crate) fn overlay() -> Node {
 
 /// A glue string's look, before the outline treatment: content, authored size, color, and whether
 /// it may wrap (the ref FontStrings never break a label; only the info paragraphs wrap).
+///
+/// `text` is **markup**, not a literal: its `|cAARRGGBB…|r` escapes decode to colour and `color`
+/// is the base they override ([`markup_spans`]). Every glue string goes through that decode
+/// because every `CSimpleFontString` in 5875 does.
 pub(crate) struct GlueText<'a> {
     pub text: &'a str,
     pub size: f32,
@@ -123,7 +128,7 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
         node,
         wrapper_extra,
         text_extra,
-        &[(spec.text.to_string(), spec.color)],
+        &markup_spans(spec.text, spec.color, spec.wrap),
         spec.size,
         spec.wrap,
         font,
@@ -131,13 +136,79 @@ pub(crate) fn outlined_text<W: Bundle, T: Bundle>(
     )
 }
 
-/// [`outlined_text`] over **coloured spans** — WoW's `|cAARRGGBB…|r` inline markup rendered the
-/// way the reference FontString renders it: one string, colour switching mid-run (the escape
-/// grammar is `benilla_ui::markup`, byte-verified). The real text is a span tree (Bevy's
-/// `Text` root + `TextSpan` children); the eight outline copies carry the flattened plain string,
-/// which is identical geometry because the copies only exist to be a black ring.
+/// Split a glue string into its coloured spans — WoW's `|cAARRGGBB…|r` inline markup, decoded by
+/// the byte-verified grammar ([`benilla_ui::markup`], RF-0087) instead of drawn literally.
+///
+/// **This lives in the primitive on purpose.** It used to be one call site's private helper (the
+/// AddOns row title), which is exactly how the same `|cff0055FF…|r` came out coloured in a list
+/// row and literal in the tooltip an inch to its left (B273): a FontString property implemented
+/// per-caller is a property no caller reliably has. In the real client the decode is
+/// `CSimpleFontString`'s own and takes no opt-in — `0x5c2810` parses `|c`/`|r`/`|H`/`|h`/`||`
+/// unconditionally for every one of them (the flags word that could disable them has no writer
+/// anywhere in the image). So every `GlueText` decodes, and there is no way to spawn one that
+/// doesn't.
+///
+/// `base` is the string's own colour; an escape overrides it until `|r`, and the escape's alpha
+/// byte is discarded exactly as the client discards it (`0x5c2ab2`). Link escapes hide their
+/// payload and keep their visible text — the glue has no clickable links, so a `|H…|h` reads as
+/// its text. `||` draws one `|`.
+///
+/// A line break (`\n`, `|n`) follows the string's own `wrap`: a real break where the ref lets the
+/// string wrap (a tooltip paragraph), a space where it authored one line (a row title, a button
+/// caption) — the flag is our stand-in for the multi-line bit the client tests, and collapsing
+/// beats a label growing a second row inside a 20-unit slot.
+///
+/// Never empty: an empty string yields one empty span, so [`outlined_spans`] always has a root.
+pub(crate) fn markup_spans(text: &str, base: Color, wrap: bool) -> Vec<(String, Color)> {
+    let mut spans: Vec<(String, Color)> = Vec::new();
+    let mut cur = String::new();
+    let mut colour = base;
+    for (_, tok) in tokens(text) {
+        let switch = match tok.kind {
+            TokenKind::Color(rgba) => {
+                let [r, g, b, _] = rgba.to_f32_at(1.0);
+                Some(Color::srgb(r, g, b))
+            }
+            TokenKind::ColorReset => Some(base),
+            TokenKind::EscapedPipe => {
+                cur.push('|');
+                None
+            }
+            TokenKind::LineBreak => {
+                cur.push(if wrap { '\n' } else { ' ' });
+                None
+            }
+            TokenKind::LinkOpen { .. } | TokenKind::LinkClose => None,
+            TokenKind::Char(c) => {
+                cur.push(c);
+                None
+            }
+        };
+        if let Some(next) = switch {
+            if !cur.is_empty() {
+                spans.push((std::mem::take(&mut cur), colour));
+            }
+            colour = next;
+        }
+    }
+    if !cur.is_empty() {
+        spans.push((cur, colour));
+    }
+    if spans.is_empty() {
+        spans.push((String::new(), base));
+    }
+    spans
+}
+
+/// [`outlined_text`]'s span-tree body — the decoded spans of [`markup_spans`] drawn as one string
+/// with the colour switching mid-run. The real text is Bevy's `Text` root + `TextSpan` children;
+/// the eight outline copies carry the flattened plain string, which is identical geometry because
+/// the copies only exist to be a black ring.
+///
+/// **Private**: [`outlined_text`] is the one door in, so no caller can hand-build spans and skip
+/// the markup decode (B273's shape — see [`markup_spans`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn outlined_spans<W: Bundle, T: Bundle>(
+fn outlined_spans<W: Bundle, T: Bundle>(
     parent: &mut ChildSpawnerCommands,
     node: Node,
     wrapper_extra: W,
@@ -726,4 +797,91 @@ pub(crate) fn glue_button<A: Component>(
             s,
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `|cAARRGGBB…|r` markup renders as colour, not as text — for **every** glue string, which
+    /// is the whole point of the decode living in the primitive.
+    ///
+    /// Two regressions are pinned here. The MapCoords one (a `## Title` of
+    /// `|cff00ff00MapCoords 0.32`, printed literally in the AddOns list), and B273: the same
+    /// screen's tooltip printed `|cff0055FFDeadly Boss Mod API|r` raw while the row an inch to
+    /// its left drew it blue, because only the row had opted into a decode. Nothing opts in now
+    /// — [`outlined_text`] is the one door and it always decodes — so the case worth testing is
+    /// the function, once, for both.
+    ///
+    /// The grammar is the byte-verified [`benilla_ui::markup`]; the escape's alpha byte is
+    /// discarded there, so only rgb reaches the span colour.
+    #[test]
+    fn colour_escapes_become_spans_not_text() {
+        let base = GOLD;
+        let green = Color::srgb(0.0, 1.0, 0.0);
+        let blue = Color::srgb(0.0, 0x55 as f32 / 255.0, 1.0);
+
+        assert_eq!(
+            markup_spans("|cff00ff00MapCoords 0.32", base, false),
+            vec![("MapCoords 0.32".to_string(), green)],
+            "the whole-title escape colours everything and prints nothing"
+        );
+        assert_eq!(
+            markup_spans("|cff0055FFDeadly Boss Mod API|r", base, true),
+            vec![("Deadly Boss Mod API".to_string(), blue)],
+            "B273: the tooltip's title wraps, and wrapping does not exempt it from the decode"
+        );
+        assert_eq!(
+            markup_spans("A |cff00ff00B|r C", base, false),
+            vec![
+                ("A ".to_string(), base),
+                ("B".to_string(), green),
+                (" C".to_string(), base)
+            ],
+            "|r restores the string's base colour"
+        );
+        assert_eq!(
+            markup_spans("pipe || pipe", base, false),
+            vec![("pipe | pipe".to_string(), base)],
+            "|| draws one literal pipe"
+        );
+        assert_eq!(
+            markup_spans("|xnot an escape", base, false),
+            vec![("|xnot an escape".to_string(), base)],
+            "a | that opens nothing well-formed is an ordinary character (the grammar's \
+             fall-through arm)"
+        );
+        assert_eq!(
+            markup_spans("", base, false),
+            vec![(String::new(), base)],
+            "an empty string still yields one span, so the text entity exists"
+        );
+    }
+
+    /// A `|H…|h` link keeps its visible text and drops its payload — the glue has no clickable
+    /// links, so the alternative is an addon note printing `|Hitem:1234|h`.
+    #[test]
+    fn a_link_escape_keeps_its_text_and_hides_its_payload() {
+        assert_eq!(
+            markup_spans("see |Hitem:1234:0:0:0|h[Thunderfury]|h now", GOLD, true),
+            vec![("see [Thunderfury] now".to_string(), GOLD)],
+        );
+    }
+
+    /// A line break follows the string's own `wrap`: a real break where the ref lets the string
+    /// wrap, a space where it authored one line. A 20-unit row title growing a second row is the
+    /// failure this avoids; a tooltip paragraph losing its author's break is the other.
+    #[test]
+    fn a_line_break_follows_the_strings_own_wrap_flag() {
+        assert_eq!(
+            markup_spans("one|ntwo", GOLD, true),
+            vec![("one\ntwo".to_string(), GOLD)],
+            "a wrapping string breaks where the author asked"
+        );
+        assert_eq!(
+            markup_spans("one|ntwo", GOLD, false),
+            vec![("one two".to_string(), GOLD)],
+            "a one-line label collapses the break to a space"
+        );
+    }
 }

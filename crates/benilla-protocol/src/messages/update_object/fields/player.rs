@@ -378,7 +378,19 @@ impl ObjectFields {
     /// (id, name, multiplier) triple: `1` = rested, `2` = normal (vmangos `REST_STATE_*`,
     /// `Player.h:673`). The server writes it with hysteresis off the rest pool — rested when the
     /// pool exceeds 10, normal when it falls to ≤1 (`SetRestBonus`) — so the byte, not the pool,
-    /// is the state authority. `None` when never sent; a fresh descriptor reads absent as normal.
+    /// is the state authority.
+    ///
+    /// **Absent reads `0`, not "normal"** — the struct's own absent-field law, and it is the
+    /// truth: vmangos always writes this word (`Player::Create` and `LoadFromDB` seed byte 3 with
+    /// `REST_STATE_NORMAL` and byte 1 with `0xEE`, so the field is never zero and never masked out
+    /// of a create block), so on a created store this IS the wire's byte. `0` is what the client's
+    /// own zero-initialized descriptor holds *before* the create lands, and it is a state
+    /// `Exhaustion.dbc` cannot map — `GetRestState()` answers the binary's `(nil, nil, nil)` fail
+    /// path for it, which the reference's own unguarded `exhaustionStateID >= 3` cannot survive.
+    /// The reference never meets that because FrameXML is up and the descriptor has landed before
+    /// any handler runs; we hold the same guarantee at the feed's own gate
+    /// (`ui_script::ingame_ui_pending`, 1348). Do not fabricate a `2` here — that hides an
+    /// ordering bug behind a value.
     pub fn player_rest_state(&self) -> Option<u8> {
         self.player_bytes_2().map(|b| (b >> 24) as u8)
     }

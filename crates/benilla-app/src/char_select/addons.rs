@@ -18,7 +18,8 @@
 //! coloured **gold when loadable, red when enabled-and-broken — except `DEP_DISABLED`, which reads
 //! grey** (AddonList.lua's own exception), and the status token (`getglobal("ADDON_"..reason)`) in
 //! `GlueFontNormalSmall` 30 units right of the title box. Titles render their `|cAARRGGBB` markup
-//! as colour, exactly as every FontString does ([`title_spans`]). Hovering a row raises
+//! as colour, exactly as every FontString does — as does every other string on this screen,
+//! the tooltip included ([`crate::glue::widgets::markup_spans`]). Hovering a row raises
 //! `AddonTooltip` (title + notes + `ADDON_DEPENDENCIES`) anchored to the row's left; hovering a
 //! MIXED checkbox raises `ENABLED_FOR_SOME`. **A row has no hover highlight and no row-click** —
 //! only the checkbox toggles (the entry template carries no `HighlightTexture` and no `OnClick`);
@@ -43,14 +44,14 @@
 use bevy::prelude::*;
 use bevy::ui_render::ui_material::MaterialNode;
 
-use benilla_ui::markup::{tokens, TokenKind};
 use benilla_ui::script::addon_gate::{can_load, GateRow, Verdict};
 use benilla_ui::script::UiScript;
+use benilla_ui::widget::{slider_fraction, slider_grab};
 
 use crate::glue::art::{tc_rect, GlueArt, DIM, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    glue_button, outlined_spans, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText, Hilight,
+    glue_button, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText, Hilight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::sound::GlueSound;
@@ -100,6 +101,12 @@ const FORCE_TOP: f32 = 42.0;
 const SCROLL_TOP: f32 = 73.0;
 const SCROLL_H: f32 = 390.0;
 const SCROLL_RIGHT: f32 = 49.0 + 510.0;
+/// The slider column between the two 16² arrows — the `<Slider>` the reference's
+/// `GlueScrollBarTemplate` authors, and the surface a drag measures itself against ([`ScrollBand`]).
+const BAR_TOP: f32 = SCROLL_TOP + 16.0;
+const BAR_H: f32 = SCROLL_H - 32.0;
+/// The knob's extent along the track (`UI-ScrollBar-Knob`, 16²).
+const KNOB: f32 = 16.0;
 /// The bottom row: 35 tall, 13 off the plate bottom.
 const BTN_TOP: f32 = BG_H - 13.0 - 35.0;
 
@@ -168,6 +175,15 @@ pub(super) struct AddonsPanel {
     version_check: bool,
     /// First visible row (`AddonList.offset`).
     offset: usize,
+    /// The scroll bar's in-flight drag: the grab [`slider_grab`] returned at the press, as a
+    /// fraction of the band's own height ([`ScrollBand`]).
+    ///
+    /// Held here rather than read back off `Interaction::Pressed` because the panel **respawns
+    /// its whole tree** on any repaint — and a drag repaints it every row it crosses. A fresh
+    /// entity's `Interaction` starts at `None`, so a capture inferred from the widget would drop
+    /// the moment the drag moved the list. The button's own held state (`ButtonInput`) is the
+    /// only thing that survives a respawn, so that is what the drag rides on.
+    drag: Option<f32>,
     /// The spawned tooltip, keyed by what it describes — **the only thing hover drives, and
     /// never a repaint trigger**. The old model set `dirty` on every hover change and respawned
     /// the whole tree, which reset the fresh entities' `Interaction` to `None`, which flipped
@@ -197,6 +213,7 @@ impl Default for AddonsPanel {
             // for the frame before the drive system's first CVar read corrects it.
             version_check: true,
             offset: 0,
+            drag: None,
             tip: None,
             root: None,
             spawned_s: 0.0,
@@ -314,6 +331,30 @@ impl AddonsPanel {
         self.list.len().saturating_sub(MAX_ROWS)
     }
 
+    /// Where the knob sits, as a fraction of its travel — the value→pixel direction. Shared by the
+    /// spawn (which draws the knob there) and the drag (which needs to know where it grabbed), so
+    /// the two can never disagree about what the bar is showing.
+    fn thumb_fraction(&self) -> f32 {
+        match self.max_offset() {
+            0 => 0.0,
+            max => self.offset as f32 / max as f32,
+        }
+    }
+
+    /// The pixel→value direction: seat the first visible row at `fraction` of the way down.
+    ///
+    /// Rounded to a whole row because this list scrolls by ROWS, not pixels — the reference's
+    /// AddonList is a faux scroll frame over 19 fixed slots, so the knob rides in row-sized
+    /// detents. `dirty` only when the row actually changes: a drag inside one detent must not
+    /// respawn the tree 60 times a second.
+    fn scroll_to(&mut self, fraction: f32) {
+        let next = (fraction * self.max_offset() as f32).round() as usize;
+        if next != self.offset {
+            self.offset = next;
+            self.dirty = true;
+        }
+    }
+
     /// One row's checkbox state for the current view. A single character's view is plain
     /// two-state over their column; the All view is the reference's tri-state — its
     /// `GetAddOnEnableState(nil, i)`: enabled for all / for some (the greyed check) / for none.
@@ -388,7 +429,7 @@ impl AddonsPanel {
     /// which reads grey like a disabled row (the Lua's own `reason ~= "DEP_DISABLED"` guard: the
     /// player already made that choice one row up, and red would blame the dependent); grey
     /// otherwise. Any `|c` markup in the title overrides this base per-span, exactly as the
-    /// reference FontString renders it ([`title_spans`]).
+    /// reference FontString renders it ([`crate::glue::widgets::markup_spans`]).
     fn title_colour(&self, i: usize) -> Color {
         let verdict = self.verdict(i);
         if verdict.loadable() {
@@ -471,53 +512,6 @@ fn status_label<'a>(strings: &'a GlueStrings, token: &'a str) -> &'a str {
     strings.get(&format!("ADDON_{token}")).unwrap_or(fallback)
 }
 
-/// Split a title into its coloured spans — WoW's `|cAARRGGBB…|r` inline markup, decoded by the
-/// byte-verified grammar (`benilla_ui::markup`, RF-0087) instead of drawn literally. `base` is
-/// the row's own colour ([`AddonsPanel::title_colour`]); an escape overrides it until `|r`, and
-/// the escape's alpha byte is discarded exactly as the client discards it. Link escapes hide
-/// their payload and keep their visible text; `||` draws one `|`; a line break becomes a space
-/// (a title is one line).
-fn title_spans(text: &str, base: Color) -> Vec<(String, Color)> {
-    let mut spans: Vec<(String, Color)> = Vec::new();
-    let mut cur = String::new();
-    let mut colour = base;
-    for (_, tok) in tokens(text) {
-        let switch = match tok.kind {
-            TokenKind::Color(rgba) => {
-                let [r, g, b, _] = rgba.to_f32_at(1.0);
-                Some(Color::srgb(r, g, b))
-            }
-            TokenKind::ColorReset => Some(base),
-            TokenKind::EscapedPipe => {
-                cur.push('|');
-                None
-            }
-            TokenKind::LineBreak => {
-                cur.push(' ');
-                None
-            }
-            TokenKind::LinkOpen { .. } | TokenKind::LinkClose => None,
-            TokenKind::Char(c) => {
-                cur.push(c);
-                None
-            }
-        };
-        if let Some(next) = switch {
-            if !cur.is_empty() {
-                spans.push((std::mem::take(&mut cur), colour));
-            }
-            colour = next;
-        }
-    }
-    if !cur.is_empty() {
-        spans.push((cur, colour));
-    }
-    if spans.is_empty() {
-        spans.push((String::new(), base));
-    }
-    spans
-}
-
 /// Flip the *Load out of date AddOns* box: the `checkAddonVersion` CVar **inverted** (1292 §2,
 /// byte-verified — ticked = `"0"`). Written through [`UiScript::set_cvar_engine`] so it rides the
 /// change queue like a Lua `SetCVar` and the host's sync persists it (the minimap-zoom pattern) —
@@ -543,6 +537,10 @@ pub(super) enum AddonsAction {
     Cancel,
     ScrollUp,
     ScrollDown,
+    /// The slider column — **one surface covering knob and track alike**, because the law has no
+    /// thumb hit-test to gate capture on: a press anywhere on the bar captures, and where it
+    /// *grabs* is [`slider_grab`]'s to say, from geometry rather than from picking.
+    ScrollBar,
     /// The dropdown control — opens/closes the option list. Also carried by the open list's
     /// full-screen backdrop, so a click that misses every option closes it (click-away).
     DropdownToggle,
@@ -555,6 +553,17 @@ pub(super) enum AddonsAction {
 /// The panel root (despawned whole on close).
 #[derive(Component)]
 struct AddonsUi;
+
+/// The scroll bar's travel band — the node spanning [`BAR_TOP`]`..`[`BAR_TOP`]`+`[`BAR_H`], with
+/// the knob riding inside it as a child.
+///
+/// The drag reads its `ComputedNode`/`UiGlobalTransform` rather than re-deriving where the bar
+/// landed on screen: this panel is centered by a flex parent at a window-dependent scale, so any
+/// hand-rolled screen-rect math here would be a second copy of the layout, wrong the first time
+/// the window resizes. Normalizing the cursor into this node's own box is scale-free by
+/// construction.
+#[derive(Component)]
+pub(super) struct ScrollBand;
 
 /// A panel button whose child [`Hilight`] lights on hover (the checkboxes' `UI-CheckBox-Highlight`,
 /// the close X, the dropdown arrow, the open list's `UI-QuestTitleHighlight` rows, the scroll
@@ -575,12 +584,14 @@ pub(super) fn drive_addons_panel(
     strings: Option<Res<GlueStrings>>,
     mut script: Option<NonSendMut<UiScript>>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut sounds: MessageWriter<GlueSound>,
     presses: Query<(&AddonsAction, &Interaction), Changed<Interaction>>,
     hovers: Query<(Entity, &AddonsAction, &Interaction)>,
     lit: Query<(&Interaction, &Children), With<HoverLit>>,
     mut hilights: Query<&mut Visibility, With<Hilight>>,
+    band: Query<(&ComputedNode, &UiGlobalTransform), With<ScrollBand>>,
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     if !panel.open {
@@ -588,6 +599,7 @@ pub(super) fn drive_addons_panel(
             commands.entity(root).despawn();
         }
         panel.tip = None;
+        panel.drag = None;
         wheel.clear();
         return;
     }
@@ -595,6 +607,7 @@ pub(super) fn drive_addons_panel(
     // ── the flows ─────────────────────────────────────────────────────────────────────────────
     let mut close_and_save = false;
     let mut close_and_discard = false;
+    let mut bar_pressed = false;
     for (action, interaction) in &presses {
         if *interaction != Interaction::Pressed {
             continue;
@@ -608,6 +621,7 @@ pub(super) fn drive_addons_panel(
             AddonsAction::Cancel => close_and_discard = true,
             AddonsAction::ScrollUp => scroll(&mut panel, -1),
             AddonsAction::ScrollDown => scroll(&mut panel, 1),
+            AddonsAction::ScrollBar => bar_pressed = true,
             AddonsAction::DropdownToggle => {
                 // The reference's dropdown button click (`ToggleDropDownMenu` +
                 // `PlaySound("igMainMenuOptionCheckBoxOn")`).
@@ -640,6 +654,41 @@ pub(super) fn drive_addons_panel(
     for ev in wheel.read() {
         if ev.y != 0.0 {
             scroll(&mut panel, if ev.y > 0.0 { -1 } else { 1 });
+        }
+    }
+
+    // ── the scroll bar's drag (B274) ──────────────────────────────────────────────────────────
+    // Benilla's one slider law, reached from the glue lane: the press grabs ([`slider_grab`] —
+    // on the knob it keeps the grabbed point, off it the knob's centre warps under the cursor),
+    // and press and every move after it share the one absolute cursor→value map
+    // ([`slider_fraction`]). Absolute, so it cannot drift off the cursor over a long drag; and
+    // the capture rides the held BUTTON, not the widget, so it survives the repaint that every
+    // crossed row triggers and keeps tracking with the cursor off the bar entirely.
+    let cursor = window
+        .single()
+        .ok()
+        .and_then(|w| w.physical_cursor_position());
+    if !mouse.pressed(MouseButton::Left) || cursor.is_none() {
+        // Release, or the cursor left the window — the widget lane abandons a capture on the
+        // same two conditions.
+        panel.drag = None;
+    }
+    if let (Some(cursor), Ok((node, xf))) = (cursor, band.single()) {
+        // Everything below is a fraction of the band's own height, which makes it free of the
+        // window scale, the panel's centering, and the retina factor all at once.
+        if let Some(local) = node.normalize_point(*xf, cursor) {
+            let cursor_n = local.y + 0.5;
+            let thumb_n = KNOB / BAR_H;
+            if bar_pressed && panel.drag.is_none() {
+                let lead_n = panel.thumb_fraction() * (1.0 - thumb_n);
+                panel.drag = Some(slider_grab(cursor_n, lead_n, thumb_n));
+            }
+            if let Some(grab) = panel.drag {
+                // `None` = a knob with nowhere to go; the bar is not spawned in that case.
+                if let Some(f) = slider_fraction(cursor_n, grab, 1.0, thumb_n) {
+                    panel.scroll_to(f);
+                }
+            }
         }
     }
 
@@ -1177,9 +1226,10 @@ fn spawn_panel(
                     ))
                     .with_children(|r| {
                         // Title — `GlueFontNormal`, 220 wide, colour markup rendered
-                        // ([`title_spans`]); clipped at the authored box so a long title
+                        // ([`crate::glue::widgets::markup_spans`], run by every `GlueText`);
+                        // clipped at the authored box so a long title
                         // cannot run into the status column.
-                        outlined_spans(
+                        outlined_text(
                             r,
                             Node {
                                 position_type: PositionType::Absolute,
@@ -1192,9 +1242,12 @@ fn spawn_panel(
                             },
                             (),
                             (),
-                            &title_spans(addon.display_title(), colour),
-                            15.0, // GlueFontNormal
-                            false,
+                            GlueText {
+                                text: addon.display_title(),
+                                size: 15.0, // GlueFontNormal
+                                color: colour,
+                                wrap: false,
+                            },
                             &font,
                             s,
                         );
@@ -1278,8 +1331,8 @@ fn spawn_panel(
                     }
                     // The slider column: TOPLEFT at scrollframe TOPRIGHT +(6, −16).
                     let bar_left = SCROLL_RIGHT + 6.0;
-                    let bar_top = SCROLL_TOP + 16.0;
-                    let bar_h = SCROLL_H - 32.0;
+                    let bar_top = BAR_TOP;
+                    let bar_h = BAR_H;
                     if let Some(sc) = &art.scroll {
                         for (action, up, top) in [
                             (AddonsAction::ScrollUp, &sc.up_btn, bar_top - 16.0),
@@ -1305,16 +1358,39 @@ fn spawn_panel(
                                 ));
                             });
                         }
-                        let travel = bar_h - 16.0;
-                        let frac = panel.offset as f32 / panel.max_offset() as f32;
+                        // The band IS the slider: pressable end to end, with the knob a
+                        // decorative child riding at the value fraction. Splitting them into two
+                        // pickable surfaces would put a thumb hit-test back into the capture
+                        // decision, which the class does not have (`slider_grab`).
                         b.spawn((
-                            ImageNode {
-                                image: sc.knob.0.clone(),
-                                rect: Some(tc_rect(sc.knob.1, crate::glue::art::SCROLL_BTN_TC)),
-                                ..default()
-                            },
-                            abs(bar_left, bar_top + frac * travel, 16.0, 16.0),
-                        ));
+                            AddonsAction::ScrollBar,
+                            ScrollBand,
+                            Button,
+                            abs(bar_left, bar_top, KNOB, bar_h),
+                        ))
+                        .with_children(|band| {
+                            band.spawn((
+                                // The knob must NOT capture the press it sits under: a UI node
+                                // with no `FocusPolicy` defaults to `Block`, and a blocking knob
+                                // would swallow every press aimed at it — the one gesture this
+                                // whole path exists to serve — leaving only the bare track
+                                // draggable.
+                                bevy::ui::FocusPolicy::Pass,
+                                ImageNode {
+                                    image: sc.knob.0.clone(),
+                                    rect: Some(tc_rect(sc.knob.1, crate::glue::art::SCROLL_BTN_TC)),
+                                    ..default()
+                                },
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: px(0.0),
+                                    top: px(panel.thumb_fraction() * (bar_h - KNOB)),
+                                    width: px(KNOB),
+                                    height: px(KNOB),
+                                    ..default()
+                                },
+                            ));
+                        });
                     } else {
                         for (action, caption, top) in [
                             (AddonsAction::ScrollUp, "-", bar_top - 16.0),
@@ -1787,47 +1863,6 @@ mod tests {
         );
     }
 
-    /// `|cAARRGGBB…|r` markup renders as colour, not as text — the MapCoords regression (its
-    /// `## Title` is `|cff00ff00MapCoords 0.32`, which the screen printed literally, in full).
-    /// The grammar is the byte-verified `benilla_ui::markup`; the alpha byte is discarded there,
-    /// so only rgb reaches the span colour.
-    #[test]
-    fn colour_escapes_become_spans_not_text() {
-        let base = GOLD;
-        let green = Color::srgb(0.0, 1.0, 0.0);
-
-        assert_eq!(
-            title_spans("|cff00ff00MapCoords 0.32", base),
-            vec![("MapCoords 0.32".to_string(), green)],
-            "the whole-title escape colours everything and prints nothing"
-        );
-        assert_eq!(
-            title_spans("A |cff00ff00B|r C", base),
-            vec![
-                ("A ".to_string(), base),
-                ("B".to_string(), green),
-                (" C".to_string(), base)
-            ],
-            "|r restores the row's base colour"
-        );
-        assert_eq!(
-            title_spans("pipe || pipe", base),
-            vec![("pipe | pipe".to_string(), base)],
-            "|| draws one literal pipe"
-        );
-        assert_eq!(
-            title_spans("|xnot an escape", base),
-            vec![("|xnot an escape".to_string(), base)],
-            "a | that opens nothing well-formed is an ordinary character (the grammar's \
-             fall-through arm)"
-        );
-        assert_eq!(
-            title_spans("", base),
-            vec![(String::new(), base)],
-            "an empty title still yields one span, so the text entity exists"
-        );
-    }
-
     /// The All view's gate input is OUR carve (1293): "enabled = any staged character has it on".
     #[test]
     fn the_all_view_feeds_the_gate_any_character_on() {
@@ -2008,6 +2043,121 @@ mod tests {
             script.take_cvar_changes(),
             vec![("checkAddonVersion".to_string(), "1".to_string())],
             "untick: back to the registrar default, and the queue carries it again"
+        );
+    }
+
+    /// **B274** — the knob is draggable, and the drag is the client's own law.
+    ///
+    /// This models the press/move arithmetic the drive system runs, in the same band-normalized
+    /// units: `cursor_n` is the cursor as a fraction of the bar's height, `thumb_n` the knob's
+    /// share of it. Only the cursor read and the `ComputedNode` lookup are left out — everything
+    /// that decides where the list lands is here.
+    ///
+    /// What it pins is the property the reporter is missing (a grab moves the list at all) plus
+    /// the two that make it feel right: **offset-preserving** on the knob (grab its bottom edge,
+    /// and the list does not jump before you have moved), and **absolute, not accumulated**, so a
+    /// long drag cannot walk away from the cursor.
+    #[test]
+    fn the_scroll_knob_drags_the_list_under_the_cursor() {
+        let thumb_n = KNOB / BAR_H;
+        // 39 addons over 19 slots = 20 scroll positions.
+        let mut p = panel(
+            (0..MAX_ROWS * 2 + 1)
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
+                .collect(),
+        );
+        let max = p.max_offset();
+        assert_eq!(max, MAX_ROWS + 1);
+
+        // Press the knob at its BOTTOM edge, at rest (knob at the top of the track).
+        let grab = slider_grab(thumb_n, 0.0, thumb_n);
+        assert_eq!(grab, thumb_n, "grabbing the knob's bottom keeps that point");
+        let f = slider_fraction(thumb_n, grab, 1.0, thumb_n).expect("the bar has travel");
+        p.scroll_to(f);
+        assert_eq!(p.offset, 0, "the press alone must not jump the list");
+
+        // Drag to the middle of the track; the grabbed point stays under the cursor, so the
+        // knob's LEADING edge lands half a knob above it.
+        let f = slider_fraction(0.5 + thumb_n * 0.5, grab, 1.0, thumb_n).unwrap();
+        p.scroll_to(f);
+        assert_eq!(p.offset, max / 2, "mid-track = mid-list");
+
+        // Past the bottom end: pinned, never past it (the clamp `SetValue` does in the client).
+        let f = slider_fraction(4.0, grab, 1.0, thumb_n).unwrap();
+        p.scroll_to(f);
+        assert_eq!(p.offset, max);
+        assert_eq!(p.visible().count(), MAX_ROWS, "the last page is still full");
+
+        // Absolute, not accumulated: returning the cursor to where it pressed returns the list
+        // to where it started, however far it wandered in between.
+        let f = slider_fraction(thumb_n, grab, 1.0, thumb_n).unwrap();
+        p.scroll_to(f);
+        assert_eq!(p.offset, 0);
+    }
+
+    /// A press on the TRACK — off the knob — warps the knob's centre under the cursor and drags
+    /// on from there, one gesture. Byte-verified 1.12 (wow-re `slider-mouse-law.md` §1, and the
+    /// director's own requirement in 0989); the glue bar runs the same law as every in-game one.
+    #[test]
+    fn a_press_on_the_bare_track_warps_the_knob_under_the_cursor() {
+        let thumb_n = KNOB / BAR_H;
+        let mut p = panel(
+            (0..MAX_ROWS * 2 + 1)
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
+                .collect(),
+        );
+        let max = p.max_offset();
+
+        // Press well below the resting knob, three quarters down the bar.
+        let grab = slider_grab(0.75, 0.0, thumb_n);
+        assert_eq!(grab, thumb_n * 0.5, "off the knob = grab it by its centre");
+        let f = slider_fraction(0.75, grab, 1.0, thumb_n).unwrap();
+        p.scroll_to(f);
+        assert_eq!(
+            p.offset,
+            ((0.75 - thumb_n * 0.5) / (1.0 - thumb_n) * max as f32).round() as usize,
+            "the press itself moves the list — the knob's centre goes to the cursor"
+        );
+        assert!(p.dirty, "and the move repaints");
+    }
+
+    /// The two directions are inverses at every stop: draw the knob where the offset says
+    /// ([`AddonsPanel::thumb_fraction`]), read the offset back out of that position
+    /// ([`AddonsPanel::scroll_to`]), and land on the same row. A bar that fails this creeps a row
+    /// per grab.
+    #[test]
+    fn the_knob_position_and_the_row_it_means_are_inverses() {
+        let mut p = panel(
+            (0..MAX_ROWS + 7)
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
+                .collect(),
+        );
+        for row in 0..=p.max_offset() {
+            p.offset = row;
+            let drawn = p.thumb_fraction();
+            p.offset = usize::MAX; // so a no-op `scroll_to` cannot pass by accident
+            p.scroll_to(drawn);
+            assert_eq!(p.offset, row, "knob at {drawn} must read back as row {row}");
+        }
+    }
+
+    /// A list that fits has no bar at all, and nothing may divide by its zero travel.
+    #[test]
+    fn a_list_that_fits_has_no_scroll_positions() {
+        let mut p = panel(
+            (0..MAX_ROWS)
+                .map(|i| addon(&format!("A{i}"), &[], 11200))
+                .collect(),
+        );
+        assert_eq!(p.max_offset(), 0);
+        assert_eq!(p.thumb_fraction(), 0.0);
+        p.scroll_to(1.0);
+        assert_eq!(p.offset, 0, "nowhere to scroll to");
+        assert!(!p.dirty);
+        assert_eq!(
+            slider_fraction(0.5, 0.0, 1.0, 1.0),
+            None,
+            "a knob as long as its track reports no travel rather than dividing by zero"
         );
     }
 

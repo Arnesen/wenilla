@@ -133,6 +133,30 @@ pub(crate) fn arm_entry_ui_load(mut commands: Commands) {
     commands.insert_resource(PendingEntryUiLoad::default());
 }
 
+/// **Is the in-game UI still owed for this world entry?** True from `OnEnter(InWorld)` until
+/// [`run_pending_entry_load`] has built the frame tree — the window in which the VM is still the
+/// *boot* VM: strings, emote tokens and fonts, and not one frame.
+///
+/// The run condition on [`crate::ui_unit::UnitFeed`], and the reason it exists (1348): the feeds
+/// fire the login **one-shots** — `PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE`, the first
+/// `UPDATE_EXHAUSTION` — and every one of them is latched by a [`super::VmMemo`] keyed on the VM's
+/// *session*, which the entry load does not change (it loads files ONTO this VM). So an event
+/// fired in this window is delivered to nobody and then never fires again for the whole session:
+/// the frames built moments later do their first paint with no first paint. That is not a
+/// hypothetical ordering — it is a RACE against the wire, which is why it took some logins and not
+/// others, and why the symptom moved between characters. The self descriptor arriving inside the
+/// [`ENTRY_LOAD_COVER_FRAMES`] deferral window is all it takes.
+///
+/// The reference has no such window: `UI_Init 0x48fbf0` loads all of FrameXML and *then* fires the
+/// world-enter cascade (`PLAYER_LOGIN` at `0x49094b`, `PLAYER_ENTERING_WORLD` at `0x490965`) from
+/// inside itself, so a UI-less client never sees a unit event at all. Gating the feed here is that
+/// same ordering, expressed against our deferred load: nothing is pushed and nothing is fired until
+/// there is a UI to receive it, and the very next frame's feed — running against a fresh, unlatched
+/// world — delivers the full set in order.
+pub(crate) fn ingame_ui_pending(pending: Option<Res<PendingEntryUiLoad>>) -> bool {
+    pending.is_some()
+}
+
 /// `PreUpdate` (chained after [`run_pending_reload`] — same exclusive slot, and a reload must
 /// not interleave an armed entry load): run the armed entry load once the cover has presented.
 ///

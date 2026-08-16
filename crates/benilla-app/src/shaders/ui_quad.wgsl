@@ -64,6 +64,18 @@
 // The fold runs on the GAMMA byte (after `linear_to_srgb`) because the reference's UI is 8-bit
 // arithmetic end to end; greying a linearized texel would land a different byte than the client's.
 @group(2) @binding(7) var<uniform> desaturate: u32;
+// The sampled texture is already PREMULTIPLIED — a portrait/paper-doll/dressing-room booth bake,
+// and nothing else (see `UiQuad::premultiplied`).
+//
+// Every other texture this pass samples is authored STRAIGHT (a BLP's rgb means nothing where its
+// alpha is 0), so the premultiply below has to happen here. A booth render target is the opposite
+// by construction: its opaque geometry wrote `a = 1`, its alpha batches blended over that, and its
+// ADDITIVE particles added light while contributing NO coverage (`wow_effect.wgsl` returns
+// `(rgb·a, 0)`). Colour is emitted light, alpha is coverage — premultiplied. Weighting it by its own
+// alpha again multiplies exactly the emitted light that sits over EMPTY pane space by zero, which is
+// how a transparent-clear pane lost the R14 pauldrons' fire entirely and kept a weapon glow only
+// where it overlapped the model's own opaque pixels.
+@group(2) @binding(8) var<uniform> premultiplied: u32;
 
 // ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
 // `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
@@ -101,21 +113,29 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if desaturate != 0u {
         rgb = vec3<f32>(dot(texel, LUMA));
     }
-    var a = t.a * c.a;
+    // `k` is the COVERAGE the UI itself imposes — the vertex colour's alpha (`SetAlpha`, the frame's
+    // inherited alpha) and the two masks. It is kept apart from the texel's OWN alpha `t.a` because
+    // the two premultiply differently: `k` scales a premultiplied source's colour and alpha alike,
+    // while `t.a` must weight the colour only when the source is straight.
+    var k = c.a;
     if circular != 0u {
         // Soft ~2%-of-width edge: reads as the ref's stencil at portrait size, no jaggies.
-        a *= 1.0 - smoothstep(0.48, 0.5, distance(in.uv, vec2<f32>(0.5)));
+        k *= 1.0 - smoothstep(0.48, 0.5, distance(in.uv, vec2<f32>(0.5)));
     }
     if mask_rect.z > mask_rect.x {
         let muv = (in.position.xy - mask_rect.xy) / (mask_rect.zw - mask_rect.xy);
         let inside = f32(all(muv >= vec2<f32>(0.0)) && all(muv <= vec2<f32>(1.0)));
         let m = textureSampleLevel(mask_texture, mask_sampler, clamp(muv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).a;
-        a *= m * inside;
+        k *= m * inside;
     }
+    let a = t.a * k;
     // Premultiply in GAMMA (decision 0160's lesson, here for the UI): the hardware `SrcAlpha` factor
     // would weight a linearized colour and inflate every soft edge and every dim additive skirt.
+    // An already-premultiplied source (a booth bake) takes `k` alone — folding in `t.a` a second
+    // time is the double multiply that erased the panes' effects.
+    let weight = select(a, k, premultiplied != 0u);
     if additive != 0u {
-        return vec4<f32>(rgb * a, 0.0);
+        return vec4<f32>(rgb * weight, 0.0);
     }
-    return vec4<f32>(rgb * a, a);
+    return vec4<f32>(rgb * weight, a);
 }

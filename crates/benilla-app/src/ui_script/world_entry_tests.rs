@@ -675,3 +675,100 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ───────────── The login one-shots wait for the in-game UI (decision 1348) ─────────────
+
+/// **The director's white XP bar, from the side that causes it.**
+///
+/// The world-entry UI load is deferred a few covered frames (0962/1051), and the unit feed is not:
+/// it fires `PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE` and the first `UPDATE_EXHAUSTION`
+/// the moment our own descriptor lands. When that lands *inside* the deferral window the events go
+/// to a VM with no frames, and because every one of them is latched by a [`super::VmMemo`] keyed on
+/// the VM's session — which the entry load does not change — they never fire again. The frames
+/// built moments later do their first paint with no first paint, which is why
+/// `ExhaustionTick_Update` had never run and `ExhaustionLevelFillBar` was still wearing its
+/// authored opaque white across the whole XP strip, with the tick parked at the strip's centre.
+///
+/// It is a RACE against the wire, so it took some logins and not others.
+///
+/// The probe is a plain frame in the boot VM registering the event the way FrameXML does — if the
+/// feed runs at all in the window, it sees it.
+#[test]
+fn the_login_one_shots_wait_for_the_in_game_ui() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("oneshot");
+
+    let mut app = App::new();
+    app.add_plugins(crate::ui_unit::UiUnitPlugin);
+    app.init_resource::<super::AddOnIdentity>();
+    app.init_resource::<crate::minimap::MinimapZoom>();
+    app.init_resource::<super::ReloadUiPending>();
+    app.init_resource::<crate::target::Selection>();
+    app.init_resource::<crate::names::NameCache>();
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    app.init_resource::<crate::net::Reputations>();
+    app.init_resource::<crate::ui_party::GroupState>();
+    app.init_resource::<crate::ui_chat::ChatLog>();
+    app.init_resource::<crate::ui_guild::GuildState>();
+    app.add_message::<crate::creature_anim::SwingImpact>();
+    super::setup_script(app.world_mut());
+
+    // The probe frame — FrameXML's own shape, in the VM that exists before the entry load.
+    app.world()
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            "EnteringWorldSeen = 0 \
+             local f = CreateFrame(\"Frame\") \
+             f:RegisterEvent(\"PLAYER_ENTERING_WORLD\") \
+             f:SetScript(\"OnEvent\", function() \
+                 EnteringWorldSeen = EnteringWorldSeen + 1 end)",
+        )
+        .expect("probe frame");
+
+    // Our own descriptor has landed — the condition the feed fires the one-shots on.
+    app.world_mut().spawn((
+        crate::net::SelfPlayer,
+        crate::net::Guid(1),
+        crate::net::ObjectStore(
+            benilla_protocol::messages::ObjectFields::from_pairs(&[])
+                .into_created(benilla_protocol::messages::ObjectType::Player),
+        ),
+    ));
+
+    let seen = |app: &App| -> i64 {
+        app.world()
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<i64>("return EnteringWorldSeen")
+            .expect("probe global")
+    };
+
+    // …but the in-game UI is still owed. Three frames inside the deferral window.
+    app.insert_resource(super::PendingEntryUiLoad::default());
+    for frame in 1..=3 {
+        app.update();
+        assert_eq!(
+            seen(&app),
+            0,
+            "frame {frame}: the feed must not spend PLAYER_ENTERING_WORLD on a UI-less VM"
+        );
+    }
+
+    // The entry load has run (its own tests cover the timing) — the latch is gone, and the very
+    // next feed delivers the full set to the frames that now exist.
+    app.world_mut()
+        .remove_resource::<super::PendingEntryUiLoad>();
+    app.update();
+    assert_eq!(
+        seen(&app),
+        1,
+        "with the UI up the one-shot fires — once, on the first feed after the load"
+    );
+    app.update();
+    assert_eq!(seen(&app), 1, "and exactly once per world entry");
+
+    drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

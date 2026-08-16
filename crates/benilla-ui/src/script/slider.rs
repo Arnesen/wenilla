@@ -28,7 +28,9 @@ use super::region::region_wrapper;
 use super::{event, Model, RegionData};
 use crate::layout::Rect;
 use crate::order::DrawLayer;
-use crate::widget::{FrameHandle, KindState, RegionKind, SliderState};
+use crate::widget::{
+    slider_fraction, slider_grab, FrameHandle, KindState, RegionKind, SliderState,
+};
 
 /// Registry key of the Slider method table (the MAXCSTACK discipline: Lua-side root, named key).
 pub(super) const REG_SLIDER_METHODS: &str = "__benilla_slider_methods";
@@ -303,25 +305,26 @@ pub(super) fn thumb_rect(
     }
 }
 
-/// The in-flight thumb drag (decision 0250 §5): the slider being dragged + the grab offset (the
-/// cursor's distance from the thumb's leading edge along the axis at grab time), so the thumb tracks
-/// the cursor without jumping. Engine C++-equivalent — no Lua, like the real client's scrollbar.
+/// The in-flight thumb drag (decision 0250 §5): the slider being dragged + the grab offset
+/// [`slider_grab`] returned, so the thumb tracks the cursor without jumping. Engine C++-equivalent
+/// — no Lua, like the real client's scrollbar.
 #[derive(Clone, Copy)]
 pub(crate) struct SliderDrag {
     pub(crate) slider: FrameHandle,
-    /// cursor-along-axis − thumb-leading-edge at grab (VERTICAL: `y − thumb.top`; HORIZONTAL:
-    /// `x − thumb.left`).
+    /// The grab, in **distance from the track's leading edge** — the axis-neutral frame
+    /// [`slider_grab`]/[`slider_fraction`] are stated in, so this arena's y-up rects and the glue
+    /// screens' y-down nodes run the identical arithmetic.
     pub(crate) grab_offset: f32,
 }
 
 /// On a LeftButton press at `(x, y)` whose hit frame is `hit`: if that frame is an **enabled**
-/// Slider with a resolved rect, begin a drag capture (records [`Model::slider_drag`]). A press ON
-/// the thumb grabs it **offset-preserving** (the grabbed point stays under the cursor — 0250 §5);
-/// a press on the TRACK seats the thumb's **center** under the cursor — the value jumps there and
-/// the same capture begins, one continuous press-drag gesture (decision 0989: "the only way to
-/// set the bar was the arrows"). Returns `Some((frame id, new value))` when the press itself
-/// changed the value (the track jump) — the caller fires `OnValueChanged` outside the model
-/// borrow, exactly like [`drag_move`]'s changes — else `None`.
+/// Slider with a resolved rect, begin a drag capture (records [`Model::slider_drag`]). Where the
+/// press grabs is [`slider_grab`]'s to say — one law, shared with the glue lane's scrollbars, so
+/// an in-game bar and a character-screen bar cannot drift apart on feel.
+///
+/// Returns `Some((frame id, new value))` when the press itself changed the value (the track jump)
+/// — the caller fires `OnValueChanged` outside the model borrow, exactly like [`drag_move`]'s
+/// changes — else `None`.
 pub(super) fn begin_drag(
     model: &mut Model,
     hit: Option<FrameHandle>,
@@ -342,27 +345,17 @@ pub(super) fn begin_drag(
         .and_then(|d| d.size);
     let trect = thumb_rect(r, size, vertical, fraction);
     let on_thumb = point_in_rect(trect, x, y);
-    let grab_offset = if on_thumb {
-        // The grabbed thumb point rides under the cursor for the whole drag.
-        if vertical {
-            y - trect.top
-        } else {
-            x - trect.left
-        }
+    // Everything below is stated as distance from the TRACK'S LEADING EDGE — the end the thumb
+    // sits at when the value is `min`. Vertical tracks run downward from `r.top` in this y-up
+    // arena, so that distance is `top − y`; horizontal ones run rightward from `r.left`.
+    let (cursor, thumb_lead, thumb_extent) = if vertical {
+        (r.top - y, r.top - trect.top, trect.top - trect.bottom)
     } else {
-        // Track press: grab the thumb by its center, so the seat-under-cursor jump below and
-        // every subsequent move share one formula ([`drag_move`]). The offset is
-        // cursor − leading edge at grab: +tw/2 horizontal; −th/2 vertical (top is the leading
-        // edge and sits ABOVE the center in y-up, hence bottom − top, which is −th).
-        if vertical {
-            (trect.bottom - trect.top) * 0.5
-        } else {
-            (trect.right - trect.left) * 0.5
-        }
+        (x - r.left, trect.left - r.left, trect.right - trect.left)
     };
     model.slider_drag = Some(SliderDrag {
         slider: h,
-        grab_offset,
+        grab_offset: slider_grab(cursor, thumb_lead, thumb_extent),
     });
     if on_thumb {
         return None; // no value change from the grab itself
@@ -371,9 +364,10 @@ pub(super) fn begin_drag(
 }
 
 /// On a pointer move at `(x, y)` while a thumb is captured: recompute the value from the cursor
-/// position (absolute, drift-free — the grab offset keeps the same thumb point under the cursor) and
-/// store it. Returns `Some((frame id, new value))` if the value actually changed — the caller fires
-/// `OnValueChanged` outside the model borrow — else `None` (no capture, no travel, or no change).
+/// position via [`slider_fraction`] (absolute, drift-free — the grab offset keeps the same thumb
+/// point under the cursor) and store it. Returns `Some((frame id, new value))` if the value
+/// actually changed — the caller fires `OnValueChanged` outside the model borrow — else `None` (no
+/// capture, no travel, or no change).
 pub(super) fn drag_move(model: &mut Model, x: f32, y: f32) -> Option<(u32, f32)> {
     let SliderDrag {
         slider,
@@ -388,19 +382,14 @@ pub(super) fn drag_move(model: &mut Model, x: f32, y: f32) -> Option<(u32, f32)>
         .and_then(|rh| model.region_data.get(&rh))
         .and_then(|d| d.size)
         .unwrap_or((r.width(), r.height()));
-    let fraction = if vertical {
-        let travel = r.height() - th;
-        if travel <= 0.0 {
-            return None; // nothing to scroll
-        }
-        ((r.top - (y - grab_offset)) / travel).clamp(0.0, 1.0)
+    // The same leading-edge frame [`begin_drag`] stored the grab in.
+    let (cursor, track_extent, thumb_extent) = if vertical {
+        (r.top - y, r.height(), th)
     } else {
-        let travel = r.width() - tw;
-        if travel <= 0.0 {
-            return None;
-        }
-        (((x - grab_offset) - r.left) / travel).clamp(0.0, 1.0)
+        (x - r.left, r.width(), tw)
     };
+    // `None` = nothing to scroll (a thumb as long as its track).
+    let fraction = slider_fraction(cursor, grab_offset, track_extent, thumb_extent)?;
     let value = min + fraction * (max - min);
     let changed = match model.arena.frame_mut(slider).map(|f| &mut f.kind_state) {
         Some(KindState::Slider(s)) => s.store_value(value),

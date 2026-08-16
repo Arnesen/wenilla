@@ -555,12 +555,19 @@ pub(super) fn drive_script(
                             .0
                             .insert(token.clone(), rect.width() / rect.height());
                     }
-                    let handle = match booths.images.0.get(token) {
-                        Some(PortraitSource::Live(h)) => Some(h.clone()),
-                        Some(PortraitSource::File(p)) => assets
-                            .as_mut()
-                            .and_then(|a| a.sprite_texture(p, &mut images)),
-                        None => None,
+                    // The bake is a render target and carries PREMULTIPLIED colour; the 2D stand-in
+                    // is an ordinary straight-alpha BLP. The quad pass has to be told which, or it
+                    // premultiplies the bake a second time and erases every effect the pane draws
+                    // over empty space (see [`crate::ui_pass::UiQuad::premultiplied`]).
+                    let (handle, premultiplied) = match booths.images.0.get(token) {
+                        Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
+                        Some(PortraitSource::File(p)) => (
+                            assets
+                                .as_mut()
+                                .and_then(|a| a.sprite_texture(p, &mut images)),
+                            false,
+                        ),
+                        None => (None, false),
                     };
                     let Some(handle) = handle else {
                         continue;
@@ -587,6 +594,7 @@ pub(super) fn drive_script(
                         // rounds the square stand-in art the same way); `BenillaSetBoothTexture`
                         // (the paper-doll model pane, decision 0208 §5) samples the bake square.
                         circular,
+                        premultiplied,
                         clip,
                         ..default()
                     });
@@ -1147,6 +1155,49 @@ mod extract_gate_tests {
         assert!(
             app.world().resource::<UiQuads>().dirty,
             "a moved frame must re-extract"
+        );
+    }
+
+    /// **A booth bake reaches the quad pass flagged PREMULTIPLIED, an ordinary region does not**
+    /// (decision 1347). This is the wiring half of the paper-doll/dressing-room fix, and it is the
+    /// half that can silently rot: the shader's `select(a, k, premultiplied)` is only correct if
+    /// exactly the render-target quads carry the flag. Drop it and every additive effect the pane
+    /// draws over EMPTY space is multiplied by its own zero alpha again — the R14 pauldrons' fire
+    /// gone, a weapon glow chopped at the model's silhouette (Goudy, `#bugs` 2026-07-27).
+    #[test]
+    fn a_booth_bake_quad_is_flagged_premultiplied_and_a_plain_one_is_not() {
+        let mut app = app_with_marker();
+        // The paper doll's own binding — the square booth pane (`BenillaSetBoothTexture`).
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("BenillaSetBoothTexture(marker, 'paperdoll')")
+            .unwrap();
+        // The booth publishes a live bake for that slot; without an entry the region draws nothing.
+        let bake = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().resource_mut::<PortraitImages>().0.insert(
+            "paperdoll".to_string(),
+            crate::portrait::PortraitSource::Live(bake.clone()),
+        );
+        app.update();
+
+        let quads = &app.world().resource::<UiQuads>().quads;
+        let pane = quads
+            .iter()
+            .find(|q| q.texture.as_ref() == Some(&bake))
+            .expect("the booth pane's quad reached the pass");
+        assert!(
+            pane.premultiplied,
+            "a render-target bake carries premultiplied colour — the pass must not re-weight it"
+        );
+        assert!(
+            quads
+                .iter()
+                .filter(|q| q.texture.as_ref() != Some(&bake))
+                .all(|q| !q.premultiplied),
+            "every straight-alpha region stays unflagged — the flag is the booth's alone"
         );
     }
 }

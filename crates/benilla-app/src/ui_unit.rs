@@ -148,7 +148,15 @@ impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(
             Update,
-            UnitFeed.after(benilla_world::schedule::WorldStage::Net), // the set's own doc: the why
+            UnitFeed
+                .after(benilla_world::schedule::WorldStage::Net) // the set's own doc: the why
+                // …and never before the in-game UI exists (1348). The whole SET, not just
+                // `feed_units`: every feed in it either fires a login one-shot or latches a
+                // per-VM memo, and both are lost forever against the boot VM. The window and
+                // the reference's own ordering: `ui_script::ingame_ui_pending`.
+                .run_if(bevy::ecs::schedule::common_conditions::not(
+                    crate::ui_script::ingame_ui_pending,
+                )),
         )
         .init_resource::<UnitFeedState>()
         .add_message::<UnitCombatFeedback>()

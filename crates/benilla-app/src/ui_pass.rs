@@ -162,6 +162,27 @@ pub(crate) struct UiQuad {
     /// own `SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)` lands as greyscale *and* dim.
     /// Splits the run like `additive`/`circular`.
     pub desaturated: bool,
+    /// The sampled texture already carries **premultiplied** colour, so the shader must not weight
+    /// it by its own alpha a second time — the booth render targets ([`crate::portrait`]), and
+    /// nothing else.
+    ///
+    /// A booth that clears **transparent** (the `<PlayerModel>` body panes and the dressing room,
+    /// which composite over the page's own art — decision 1083) builds its target the way any
+    /// render-to-texture does: opaque geometry writes `a = 1`, alpha batches blend over it, and an
+    /// **additive particle adds light while contributing no coverage** (`wow_effect.wgsl`'s
+    /// `(rgb·a, 0)` under a premultiplied state). That buffer is premultiplied by construction —
+    /// colour is emitted light, alpha is coverage. Sampling it as *straight* alpha and applying the
+    /// usual `rgb·a` multiplies every effect hanging in EMPTY pane space by zero: the R14
+    /// pauldrons' fire vanished outright, and a weapon glow survived only where it happened to
+    /// overlap the model's own opaque pixels — chopped to a hard edge at the silhouette (the
+    /// director's paper-doll/dressing-room report). The opaque-cleared round portraits hid it,
+    /// because `a = 1` everywhere makes the extra multiply a no-op — exactly the way opaque panels
+    /// hid the identical defect one level up, in this camera's own output blend (see
+    /// [`spawn_player_ui_camera`]'s note on `rgb·a²`).
+    ///
+    /// Splits the run like `additive`/`circular`; a booth target is its own texture anyway, so no
+    /// batching is lost.
+    pub premultiplied: bool,
     /// CPU-clip stand-in for a real scissor rect (see the module doc). `None` = unclipped.
     pub clip: Option<Rect>,
     /// Rotate the quad's corners by this many radians **clockwise on screen** about the rect's
@@ -207,6 +228,7 @@ impl Default for UiQuad {
             additive: false,
             circular: false,
             desaturated: false,
+            premultiplied: false,
             clip: None,
             rotation: 0.0,
             mask: None,
@@ -287,6 +309,9 @@ pub(crate) struct UiQuadMaterial {
     /// Fold the texel to luminance — see [`UiQuad::desaturated`].
     #[uniform(7)]
     desaturate: u32,
+    /// The texel is already premultiplied (a booth bake) — see [`UiQuad::premultiplied`].
+    #[uniform(8)]
+    premultiplied: u32,
     /// The screen-anchored mask span in **physical framebuffer px** (`min.xy, max.xy` — the
     /// fragment shader compares `@builtin(position)`, which is physical): [`UiQuadMask::rect`]
     /// scaled by the window's scale factor at mesh build. `z <= x` (degenerate) disables masking.
@@ -534,6 +559,7 @@ struct Run {
     additive: bool,
     circular: bool,
     desaturated: bool,
+    premultiplied: bool,
     mask: Option<UiQuadMask>,
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -547,6 +573,7 @@ impl Run {
         additive: bool,
         circular: bool,
         desaturated: bool,
+        premultiplied: bool,
         mask: Option<UiQuadMask>,
     ) -> Self {
         Self {
@@ -554,6 +581,7 @@ impl Run {
             additive,
             circular,
             desaturated,
+            premultiplied,
             mask,
             positions: Vec::new(),
             uvs: Vec::new(),
@@ -635,6 +663,7 @@ struct BatchPools {
 /// NaN/-0.0 can't split cache entries byte-equal materials would share).
 type MatKey = (
     AssetId<Image>,
+    bool,
     bool,
     bool,
     bool,
@@ -770,6 +799,7 @@ fn rebuild_ui_mesh(
                 && r.additive == q.additive
                 && r.circular == q.circular
                 && r.desaturated == q.desaturated
+                && r.premultiplied == q.premultiplied
                 && r.mask == q.mask
         });
         if !same_run {
@@ -778,6 +808,7 @@ fn rebuild_ui_mesh(
                 q.additive,
                 q.circular,
                 q.desaturated,
+                q.premultiplied,
                 q.mask.clone(),
             ));
         }
@@ -865,6 +896,7 @@ fn rebuild_ui_mesh(
             run.additive,
             run.circular,
             run.desaturated,
+            run.premultiplied,
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
         );
@@ -877,6 +909,7 @@ fn rebuild_ui_mesh(
                     texture: Some(run.texture),
                     circular: u32::from(run.circular),
                     desaturate: u32::from(run.desaturated),
+                    premultiplied: u32::from(run.premultiplied),
                     mask_rect,
                     mask,
                 })
