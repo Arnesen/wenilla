@@ -1,0 +1,69 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The innkeeper's "make this your home?" dialog (decision 1331): a registry entry on the
+        shared StaticPopup engine (UiPanels.xml) plus its UIParent event arm, written against the
+        patch-chain FrameXML (mpqx extraction, decision 0246) — StaticPopup.lua l.1308-1322 (the
+        entry) and UIParent.lua l.125 / l.547-548 (the registration and the show arm). The string
+        is GlobalStrings.lua l.840, verbatim.
+
+        It is NOT part of GossipFrame.xml, and the reason is the wire: selecting the innkeeper's
+        gossip line makes the server CLOSE the gossip menu and then ask. By the time this dialog
+        goes up the window that raised it is already gone, so it belongs with the other free-
+        standing confirms rather than with the panel.
+
+        The whole flow behind it is two packets — SMSG_BINDER_CONFIRM in, CMSG_BINDER_ACTIVATE out
+        — and only the second one binds anything (`crate::ui_binder`'s header carries the law).
+        Accepting is therefore the ONLY path to a moved hearthstone; there is no client-side bind
+        and nothing to undo on Cancel, which is why this entry has no OnCancel.
+    -->
+    <Script><![CDATA[
+        -- ── Strings (GlobalStrings.lua, verbatim) ───────────────────────────────────────────────
+        local CONFIRM_BINDER = "Do you want to make %s your new home?" -- l.840
+        local ACCEPT = "Accept"  -- l.10
+        local CANCEL = "Cancel"  -- l.464
+
+        -- ── The confirm — answering to StaticPopup.lua l.1308-1322 ─────────────────────────────
+        -- This is the dialog's ONLY teardown, and it is a poll rather than an event: walk out of
+        -- the innkeeper's range and the question leaves the screen by itself, with no packet
+        -- either way. `CheckBinderDist()` is the engine binding behind it
+        -- (`benilla-ui/src/script/binder.rs`), false as soon as the app's NPC-session guard has
+        -- closed the question. Named rather than inlined into the entry, because "the question
+        -- expires when you walk away" is the interesting half of this file.
+        local function hideOnceOutOfRange(_, dialog)
+            if not CheckBinderDist() then
+                dialog:Hide()
+            end
+        end
+
+        StaticPopupDialogs["CONFIRM_BINDER"] = {
+            text = CONFIRM_BINDER,
+            button1 = ACCEPT,
+            button2 = CANCEL,
+            OnAccept = function()
+                ConfirmBinder()
+            end,
+            OnUpdate = hideOnceOutOfRange,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+
+        -- ── The UIParent event arm (UIParent.lua l.547-548) ────────────────────────────────────
+        -- arg1 is the area name the "%s" takes.
+        function BenillaBinderConfirmDriver_OnEvent()
+            if event == "CONFIRM_BINDER" then
+                StaticPopup_Show("CONFIRM_BINDER", arg1)
+            end
+        end
+    ]]></Script>
+
+    <Frame name="BenillaBinderConfirmDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("CONFIRM_BINDER")
+            </OnLoad>
+            <OnEvent>BenillaBinderConfirmDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

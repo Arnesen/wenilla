@@ -16,9 +16,13 @@ use benilla_ui::script::{
 
 const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
 
-/// The talent window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
-const FILES: [&str; 5] = [
+/// The talent window's load prefix — the app's own order (`assets/ui/benilla.toc`), members only.
+/// `ItemButtonTemplate.xml` is the `SetItemButton*` family the talent buttons grey through (the
+/// reference's own verb; see TalentFrame.xml's header) — it sits at .toc line 32, above every
+/// other entry here bar `Fonts.xml`.
+const FILES: [&str; 6] = [
     "Fonts.xml",
+    "ItemButtonTemplate.xml",
     "UiPanels.xml",
     "GameTooltip.xml",
     "ScrollTemplates.xml",
@@ -234,6 +238,67 @@ fn a_locked_tier_still_draws_the_branch_gray() {
             "#,
         )
         .expect("gray branch");
+}
+
+/// **B162 — an unavailable talent goes GREYSCALE, not merely dim.**
+///
+/// The reporter's own A/B: 1.12.1 at 0 talent points draws every unlearned icon in black and
+/// white; benilla drew them in full colour. The Lua was never wrong — it asked for the grey-out
+/// and the ask reached the region — but the engine had no `Texture:SetDesaturated`, so
+/// `SetItemButtonDesaturated`'s no-shader arm was the only one available and "greyed" meant a
+/// `SetVertexColor(0.65)` brightness multiply. On colourful art that reads as a slightly dimmer
+/// colourful icon, which is exactly what was reported.
+///
+/// So the assertion is on the DESATURATION FLAG reaching the renderer, not on the tint: the tint
+/// was always there and was never the thing that was missing. The fixture is the reporter's state
+/// — points spent, none left — and Deep Wounds' tier is locked besides.
+///
+/// The control is the same extract's learned talent: full colour, no flag. A regression that
+/// greys the whole tree passes the first assertion and fails this one.
+#[test]
+fn an_unavailable_talent_reaches_the_renderer_desaturated() {
+    let mut script = open_window(2);
+    script.resolve();
+    let icon = |quads: &[benilla_ui::script::ExtractedQuad], leaf: &str| -> (bool, [f32; 4]) {
+        quads
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    desaturated,
+                    ..
+                } if p.ends_with(leaf) => Some((*desaturated, color.unwrap_or([1.0; 4]))),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {leaf} icon quad in the extract"))
+    };
+    let quads = script.extract();
+
+    // Deep Wounds: tier 3 with 2 points spent — locked, and the player has 2 points to spend, so
+    // this is the tier gate alone, not the no-points force-desaturate.
+    let (grey, tint) = icon(&quads, "Ability_BackStab");
+    assert!(
+        grey,
+        "an unavailable talent's icon must carry the greyscale flag — the whole of B162"
+    );
+    // The reference's own `(1, 0.65, 0.65, 0.65)` still SETS that tint, and on shader-capable
+    // hardware it has no effect on colour — the desaturated fragment discards the vertex RGB
+    // entirely (wow-re `texture-desaturate-law.md` §6.2; decision 1330 corrected 1327 here). It is
+    // pinned anyway because the value must keep reaching the quad: it is what the no-shader arm
+    // would have drawn with, and its ALPHA is read on both paths.
+    assert!(
+        (tint[0] - 0.65).abs() < 1e-3,
+        "the ref's 0.65 still lands on the quad (inert on RGB, live on alpha), got {tint:?}"
+    );
+
+    // The control: Improved Rend is learned to max, so it is available — full colour, no flag.
+    let (grey, tint) = icon(&quads, "Ability_Gouge");
+    assert!(!grey, "a learned talent must NOT be greyed");
+    assert!(
+        (tint[0] - 1.0).abs() < 1e-3,
+        "…and draws at full colour, got {tint:?}"
+    );
 }
 
 #[test]

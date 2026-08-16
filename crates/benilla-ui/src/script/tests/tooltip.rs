@@ -422,3 +422,89 @@ fn owner_anchored_tooltip_clamps_to_screen() {
     .unwrap();
     assert!(s.take_errors().is_empty());
 }
+
+/// `0x52fa50`'s ladder as pure logic (law §3-BUFF-TIME-FORMAT) — the arm thresholds, the
+/// ceil/truncate asymmetry, and the `_P1` pick — over SYNTHETIC templates, so this asserts the
+/// mechanism and carries none of the reference's own eight strings. The real ones are read off the
+/// player's install and exercised in `benilla::ui_script::buff_tests`.
+#[test]
+fn the_duration_ladder_ceils_every_arm_but_seconds() {
+    // Deliberately not the shipped wording: what is under test is which key is reached and what
+    // number fills it, never what the string says.
+    let table = |key: &str| -> Option<String> {
+        Some(
+            match key {
+                "T_DAYS" => "<%d day>",
+                "T_DAYS_P1" => "<%d days>",
+                "T_HOURS" => "<%d hour>",
+                "T_HOURS_P1" => "<%d hours>",
+                "T_MIN" => "<%d min>",
+                "T_MIN_P1" => "<%d mins>",
+                "T_SEC" => "<%d sec>",
+                "T_SEC_P1" => "<%d secs>",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    };
+    let d = |ms: u32| crate::script::tooltip::duration_text(ms, "T", true, &table);
+
+    // The three arm boundaries, from the compare instructions — each is exact, and the arm below
+    // it counts in its own unit right up to the edge.
+    assert_eq!(d(86_400_000).as_deref(), Some("<1 day>"), "the day edge");
+    assert_eq!(
+        d(86_399_999).as_deref(),
+        Some("<24 hours>"),
+        "one ms under a day is still HOURS, and ceil takes it to 24"
+    );
+    assert_eq!(d(3_600_000).as_deref(), Some("<1 hour>"), "the hour edge");
+    assert_eq!(
+        d(3_599_999).as_deref(),
+        Some("<60 mins>"),
+        "the carve's own example: no '1 hour' until the hour is whole"
+    );
+    assert_eq!(d(60_000).as_deref(), Some("<1 min>"), "the minute edge");
+    assert_eq!(
+        d(61_000).as_deref(),
+        Some("<2 mins>"),
+        "the carve's own example: 61 s ceils to 2, it does not truncate to 1"
+    );
+
+    // The asymmetry that makes this one function rather than four format calls: roundUp reaches
+    // the top three arms only.
+    assert_eq!(
+        d(59_999).as_deref(),
+        Some("<59 secs>"),
+        "seconds TRUNCATE — a ceil here would read 60"
+    );
+    assert_eq!(d(5_400).as_deref(), Some("<5 secs>"), "5.4 s is 5, not 6");
+    assert_eq!(
+        d(400).as_deref(),
+        Some("<0 secs>"),
+        "the lapsing second: 0, and PLURAL — the reference's own last reading"
+    );
+    assert_eq!(d(0).as_deref(), Some("<0 secs>"), "a fully lapsed aura");
+    assert_eq!(
+        d(1_000).as_deref(),
+        Some("<1 sec>"),
+        "exactly one is singular"
+    );
+
+    // roundUp = 0 truncates the top arms too (the parameter is real, not a constant we folded).
+    assert_eq!(
+        crate::script::tooltip::duration_text(61_000, "T", false, &table).as_deref(),
+        Some("<1 min>"),
+    );
+
+    // A key the string table does not carry yields NO LINE rather than an invented one.
+    assert_eq!(
+        crate::script::tooltip::duration_text(1_000, "NOPE", true, &table),
+        None
+    );
+    // …and a family shipping only the singular falls back to it rather than vanishing.
+    let singular_only = |key: &str| (key == "S_SEC").then(|| "<%d s>".to_string());
+    assert_eq!(
+        crate::script::tooltip::duration_text(5_000, "S", true, &singular_only).as_deref(),
+        Some("<5 s>"),
+    );
+}

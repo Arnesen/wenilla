@@ -90,6 +90,11 @@ pub struct UnitState {
     /// This token is a PLAYER character (guid family) — the unit tooltip's level line renders
     /// "Race Class (Player)" instead of the creature type (decision 0276's verified law).
     pub is_player: bool,
+    /// The unit's guild membership (`GetGuildInfo(unit)`, decision 1257). `None` = guildless, or
+    /// a creature, or a player whose `PLAYER_GUILDID` has not streamed yet. Filled from the
+    /// PUBLIC descriptor fields 191/192 joined against the app's guild-identity cache — see
+    /// [`super::guild::UnitGuild`].
+    pub guild: Option<super::guild::UnitGuild>,
     /// The NPC subtitle line ("Stable Master") — the creature template's subname; the unit
     /// tooltip's second line. `None` for players/untitled creatures.
     pub subtitle: Option<String>,

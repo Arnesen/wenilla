@@ -912,23 +912,23 @@ fn editbox_justify_v_echoes_but_multiline_alone_decides_the_pixels() {
     );
 }
 
-/// **`Texture:SetDesaturated(flag)` answers `shaderSupported`, and ours says nil.**
+/// **`Texture:SetDesaturated(flag)` answers `shaderSupported`, and since 1327 ours says yes.**
 ///
 /// `0x79c1e0` (wow-re ledger). The reference's own `ItemButtonTemplate.lua:69` is
 /// `local shaderSupported = icon:SetDesaturated(desaturated)`, and lines 70-78 fall back to a 0.5
 /// grey vertex tint when that answer is falsy — 1.12 shipped on cards without the shader, so the
 /// verb reporting "no" is a real machine's answer, not a stub.
 ///
-/// We have no desaturating shader, so nil is the honest reply: claiming support would suppress
-/// FrameXML's grey fallback and leave disabled icons at full colour, which looks *more* wrong.
-/// The test pins the return shape rather than the state, because the return is what callers branch
-/// on — and `nil`, not `false`, because the C answer is `1|nil` and the reference writes
-/// `not shaderSupported`.
+/// benilla answered nil for exactly as long as nothing greyed. Decision 1327 gave the renderer the
+/// luminance fold, so the honest answer flipped: a caller that asks for grey now gets grey, and
+/// keeps its own tint instead of having it overwritten by the 0.5 fallback. The test pins the
+/// return SHAPE, because the return is what callers branch on — `1`, not `true`, because the C
+/// answer is `1|nil` and every reference consumer writes `not shaderSupported`.
 ///
 /// 98 of the 109 draw-then-raise addons in the corpus die on this one verb, via
 /// `FuBar_Panel.lua:43` → Dewdrop `AddLine` → `button.arrow:SetDesaturated(true)`, unguarded.
 #[test]
-fn set_desaturated_reports_no_shader_support_and_does_not_raise() {
+fn set_desaturated_reports_shader_support_and_does_not_raise() {
     let s = crate::script::UiScript::new().unwrap();
     s.run(r#"f = CreateFrame("Frame", "DsF") tex = f:CreateTexture("DsTex", "ARTWORK")"#)
         .unwrap();
@@ -936,11 +936,11 @@ fn set_desaturated_reports_no_shader_support_and_does_not_raise() {
     // Dewdrop's exact call — the one 98 addons reach. It must not raise.
     s.run("DsTex:SetDesaturated(true)").unwrap();
 
-    // ...and it answers nil, so the reference's `not shaderSupported` branch is taken.
+    // ...and it answers truthy, so the reference's shader arm is taken.
     assert!(
-        s.eval::<bool>("return DsTex:SetDesaturated(true) == nil")
+        s.eval::<bool>("return DsTex:SetDesaturated(true) == 1")
             .unwrap(),
-        "shaderSupported must be nil (1|nil C shape), not false"
+        "shaderSupported must be 1 (1|nil C shape), not true"
     );
     assert_eq!(
         s.eval::<i64>("return select('#', DsTex:SetDesaturated(true))")
@@ -949,11 +949,13 @@ fn set_desaturated_reports_no_shader_support_and_does_not_raise() {
         "one return value"
     );
 
-    // The reference's own consumer, transcribed: a falsy answer greys via vertex colour.
+    // The reference's own consumer, transcribed: a truthy answer keeps the CALLER's tint, and the
+    // 0.5 fallback never fires. This is the half B162 turned on — the talent tree asks for
+    // `(1, 0.65, 0.65, 0.65)` and must get 0.65, greyscale, not a flat 0.5 colour multiply.
     s.run(
         r#"
         local shaderSupported = DsTex:SetDesaturated(true)
-        local r, g, b = 1, 1, 1
+        local r, g, b = 0.65, 0.65, 0.65
         if not shaderSupported then r, g, b = 0.5, 0.5, 0.5 end
         DsTex:SetVertexColor(r, g, b)
         "#,
@@ -962,7 +964,10 @@ fn set_desaturated_reports_no_shader_support_and_does_not_raise() {
     let (r, g, b) = s
         .eval::<(f32, f32, f32)>("return DsTex:GetVertexColor()")
         .unwrap();
-    assert_eq!((r, g, b), (0.5, 0.5, 0.5), "the no-shader fallback greys");
+    assert!(
+        (r - 0.65).abs() < 1e-6 && (g - 0.65).abs() < 1e-6 && (b - 0.65).abs() < 1e-6,
+        "the shader arm keeps the caller's tint, got {r},{g},{b}"
+    );
 
     // Both spellings of "off" are off — nil and false.
     s.run("DsTex:SetDesaturated(nil) DsTex:SetDesaturated(false)")

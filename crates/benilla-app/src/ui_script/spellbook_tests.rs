@@ -547,3 +547,180 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
         .eval::<bool>("return SpellBookFrame.bookType == BOOKTYPE_SPELL")
         .unwrap());
 }
+
+/// The spellbook's **macro-editor fork**, pinned in both directions (report B248).
+///
+/// The reference's contract, read off the 1.12.1 install's own `SpellBookFrame.lua:271-283` and
+/// `MacroFrame.lua:93-97`, is narrow and easy to "fix" into a later expansion's:
+///
+///   * only a **shift**-click reaches the editor at all — a plain left OR **right** click still
+///     casts, exactly as it does with no macro window on screen;
+///   * what lands is a whole **`/cast <name>[(<rank>)]` line**, not the bare name (the bare-name
+///     insert is 2.x's `ChatEdit_InsertLink`, a different client — and `MACRO_HELP_TEXT_LINE5`,
+///     which advertises this feature, says "*Shift* click");
+///   * it is **appended with no separator** — the reference's own `GetText()..line` — so two
+///     shift-clicks run together on one line;
+///   * a **passive** contributes nothing, and neither does a shift-click while the name/icon
+///     popup has the body box hidden;
+///   * with the editor hidden the shift-click is a **pickup** again.
+///
+/// DO NOT "FIX" the `/cast` prefix away (the standing rule, decision 1030): B248 reported it as
+/// wrong, and the install says it is what 1.12.1 does.
+#[test]
+fn the_macro_editor_takes_a_shift_click_and_only_a_shift_click() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The macro window's own strings (the app runs the real `GlobalStrings.lua`; `macro_tests`'
+    // harness is the source of this list).
+    s.run(
+        r#"
+        CREATE_MACROS = "Create Macros"
+        GENERAL_MACROS = "General Macros"
+        CHARACTER_SPECIFIC_MACROS = "%s Specific Macros"
+        ENTER_MACRO_LABEL = "Enter Macro Commands:"
+        MACROFRAME_CHAR_LIMIT = "%d/255 Characters Used"
+        MACRO_POPUP_TEXT = "Enter Macro Name (Max 16 Characters):"
+        MACRO_POPUP_CHOOSE_ICON = "Choose an Icon:"
+        CHANGE_MACRO_NAME_ICON = "Change Name/Icon"
+        DELETE = "Delete" NEW = "New" EXIT = "Exit" CANCEL = "Cancel" OKAY = "Okay"
+        MACROS = "Macros"
+        TOOLTIP_DEFAULT_COLOR = { r = 1.0, g = 1.0, b = 1.0 }
+        TOOLTIP_DEFAULT_BACKGROUND_COLOR = { r = 0.09, g = 0.09, b = 0.19 }
+        "#,
+    )
+    .unwrap();
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "GameTooltip.xml",
+        "Cooldown.xml",
+        "ScrollTemplates.xml",
+        "MicroMenu.xml",
+        "ActionBar.xml",
+        "MacroFrame.xml",
+        "SpellBookFrame.xml",
+    ] {
+        load_xml(&s, file);
+    }
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+
+    // The file's own book plus a third Fire spell that is PASSIVE — book id 3, which the ref's
+    // column-major grid puts on SpellButton5.
+    let mut b = book();
+    b.tabs[0].num_spells = 3;
+    b.tabs[1].offset = 3;
+    b.slots.insert(
+        2,
+        SpellSlotView {
+            spell_id: 168,
+            name: "Frost Warding".into(),
+            texture: Some("Interface\\Icons\\Spell_Frost_FrostWard".into()),
+            passive: true,
+            ..Default::default()
+        },
+    );
+    s.set_spellbook(b);
+
+    s.run(r#"CreateMacro("Ambush", 1, "")"#).unwrap();
+    s.run("ShowMacroFrame()").unwrap();
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
+    let body = |s: &UiScript| -> String {
+        s.eval::<String>("return BenillaMacroFrameText:GetText()")
+            .unwrap()
+    };
+    assert!(
+        s.eval::<bool>("return BenillaMacroFrameText:IsVisible()")
+            .unwrap(),
+        "the editor's body box is up — the ref's own `MacroFrame_AddMacroLine` gate"
+    );
+    assert_eq!(body(&s), "");
+
+    // ── B248's reported gesture: a plain RIGHT click still CASTS, and writes nothing ──────────
+    click(&mut s, "SpellButton1", "RightButton");
+    assert!(
+        s.errors().is_empty(),
+        "right-click errors: {:?}",
+        s.errors()
+    );
+    assert_eq!(s.take_spell_casts(), vec![133], "a right-click casts");
+    assert_eq!(
+        body(&s),
+        "",
+        "B248: an UNSHIFTED click must never reach the macro editor (ref l.271 tests shift first)"
+    );
+    assert!(s.cursor_payload().is_none());
+
+    // …and so does a plain left click, the other half of the same arm.
+    click(&mut s, "SpellButton1", "LeftButton");
+    assert_eq!(s.take_spell_casts(), vec![133]);
+    assert_eq!(body(&s), "");
+
+    // ── The reference gesture: shift-click APPENDS a whole `/cast` line, and never casts ──────
+    s.set_modifiers(true, false, false);
+    click(&mut s, "SpellButton1", "LeftButton");
+    assert!(
+        s.errors().is_empty(),
+        "shift-click errors: {:?}",
+        s.errors()
+    );
+    assert_eq!(
+        body(&s),
+        "/cast Fireball(Rank 1)",
+        "ref l.276: SLASH_CAST1 + name + the rank in parens"
+    );
+    assert!(
+        s.take_spell_casts().is_empty(),
+        "the macro arm replaces the cast, it does not add to it"
+    );
+    assert!(
+        s.cursor_payload().is_none(),
+        "with the editor open a shift-click writes instead of picking up"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaMacroFrame.textChanged == 1")
+            .unwrap(),
+        "the write goes through the box's own OnTextChanged, so the window is dirty"
+    );
+
+    // A second one runs straight on: the reference appends with NO separator (`GetText()..line`),
+    // which is why a two-spell macro built this way needs the player to break the line himself.
+    // DO NOT "fix" this into a newline join.
+    click(&mut s, "SpellButton3", "RightButton"); // shift outranks the button — ref l.271 vs l.284
+    assert_eq!(
+        body(&s),
+        "/cast Fireball(Rank 1)/cast Fire Blast(Rank 1)",
+        "ref MacroFrame.lua:95 — appended, unseparated"
+    );
+    assert!(s.take_spell_casts().is_empty());
+
+    // A PASSIVE writes nothing at all — and does not fall through to a pickup either (ref l.274's
+    // guard sits INSIDE the macro-frame arm).
+    let before = body(&s);
+    click(&mut s, "SpellButton5", "LeftButton");
+    assert_eq!(body(&s), before, "a passive is not a castable line");
+    assert!(s.cursor_payload().is_none());
+
+    // The name/icon popup hides the body box; the ref's AddMacroLine gates on exactly that.
+    s.run("BenillaMacroNewButton_OnClick()").unwrap();
+    assert!(!s
+        .eval::<bool>("return BenillaMacroFrameText:IsVisible()")
+        .unwrap());
+    click(&mut s, "SpellButton1", "LeftButton");
+    assert!(s.errors().is_empty(), "popup-open errors: {:?}", s.errors());
+    assert!(s.cursor_payload().is_none(), "still not a pickup");
+    s.run("BenillaMacroPopupFrame:Hide()").unwrap();
+    s.run("BenillaMacroFrame_Update()").unwrap();
+    assert_eq!(body(&s), before, "nothing landed while the popup was up");
+
+    // ── Editor hidden: the shift-click is a PICKUP again (ref l.281-282's else) ───────────────
+    s.run("HideUIPanel(BenillaMacroFrame)").unwrap();
+    click(&mut s, "SpellButton1", "LeftButton");
+    s.set_modifiers(false, false, false);
+    assert!(s.errors().is_empty(), "pickup errors: {:?}", s.errors());
+    let (kind, spell_id) = s
+        .eval::<(String, i64)>("local k, _, _, id = GetCursorInfo() return k, id")
+        .unwrap();
+    assert_eq!((kind.as_str(), spell_id), ("spell", 133));
+    assert!(s.take_spell_casts().is_empty());
+}

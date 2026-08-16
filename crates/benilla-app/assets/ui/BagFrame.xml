@@ -1174,7 +1174,8 @@
                 SetDesaturation(b.icon, nil)
             end
             -- The four slots' own paint decides their restored colour: an item locked on the cursor
-            -- wants 0.4 grey, not the flat white SetDesaturation(nil) just left.
+            -- wants its 0.4 grey back, which the un-desaturate above does not restore (it clears
+            -- the greyscale flag, not the tint).
             for i = 1, 4 do
                 BenillaBagBarSlot_Update(getglobal("CharacterBag" .. (i - 1) .. "Slot"))
             end

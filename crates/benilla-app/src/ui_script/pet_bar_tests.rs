@@ -348,24 +348,21 @@ fn a_disabled_bar_greys_rather_than_hides() {
         2,
         "the bar is still on screen"
     );
-    // `SetDesaturation` has no shader path in this engine, so the grey is the reference's own
-    // no-shader fallback: vertex colour 0.5 (UiPanels.xml's transcription).
-    let tint = quads
+    // Since decision 1327 `SetDesaturation` takes its SHADER arm — the icon carries the greyscale
+    // flag to the renderer and keeps its own tint, rather than the reference's no-shader 0.5
+    // vertex-colour fallback (which is what this asserted while nothing greyed).
+    let grey = quads
         .iter()
         .find_map(|q| match &q.content {
             QuadContent::Texture {
                 path: Some(p),
-                color,
+                desaturated,
                 ..
-            } if p == "Interface\\Icons\\Ability_Druid_Rake" => Some(*color),
+            } if p == "Interface\\Icons\\Ability_Druid_Rake" => Some(*desaturated),
             _ => None,
         })
         .expect("Claw's icon");
-    assert_eq!(
-        tint.map(|c| [c[0], c[1], c[2]]),
-        Some([0.5, 0.5, 0.5]),
-        "a disabled bar greys every icon on it"
-    );
+    assert!(grey, "a disabled bar greys every icon on it");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

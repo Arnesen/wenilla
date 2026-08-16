@@ -55,6 +55,11 @@ fn setup() -> UiScript {
     // the manifest includes it (it loads well before FriendsFrame.xml in the real order).
     load_xml(&s, "UnitPopup.xml");
     load_xml(&s, "ScrollTemplates.xml");
+    // The guild pane's frames inherit the reference's shared UIPanelButtonTemplate /
+    // UIPanelCloseButton / UIPanelScrollFrameTemplate rather than a private copy (decision 1257),
+    // so this file's slice needs the shared kit — and the strict `load_xml` above is what would
+    // otherwise let those frames load art-less and silent.
+    load_xml(&s, "UIPanelTemplates.xml");
     load_xml(&s, "FriendsFrame.xml");
     s
 }
@@ -76,8 +81,17 @@ fn push(s: &mut UiScript, state: SocialState, event: &str) {
     s.fire_event(event, Vec::new());
 }
 
-/// The window loads, opens on the Friends tab, and the GUILD tab comes up disabled — which is
-/// what a character in no guild sees in the reference, and what we always are.
+/// The window loads, opens on the Friends tab, and the GUILD tab comes up disabled — the
+/// GUILDLESS case of `InGuildCheck`.
+///
+/// **This assertion changed meaning with decision 1257 and was kept rather than deleted.** It used
+/// to pin a hardcoded `PanelTemplates_DisableTab(this, 3)`, because there was no guild arc and the
+/// tab was permanently dead. The tab is live now, and this is the other half of its law: with no
+/// guild seated in the engine, `IsInGuild()` answers nil, `FriendsFrame_OnShow` runs
+/// `InGuildCheck()`, and the tab greys — which is exactly what the reference does for a character
+/// in no guild. The IN-guild half is `guild_tests`. Note that this file seats no guild fixture at
+/// all: it is asserting against the REAL `script::guild` bindings' empty state, which is the state
+/// every character starts a session in.
 #[test]
 fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
     let s = setup();
@@ -92,11 +106,26 @@ fn the_window_opens_on_friends_with_the_guild_tab_disabled() {
         "Friends List"
     );
     assert_eq!(
+        s.eval::<i64>("return IsInGuild() and 1 or 0").unwrap(),
+        0,
+        "no guild is seated, which is what makes the next assertion mean something"
+    );
+    assert_eq!(
         s.eval::<i64>("return FriendsFrameTab3.isDisabled or 0")
             .unwrap(),
         1,
         "the guild tab is disabled, not absent"
     );
+    // …and the tab refuses to be reached by NUMBER either, which is the second of the two locks
+    // (`ToggleFriendsFrame`'s own `tab == 3 and not IsInGuild()` early-out).
+    s.run("ToggleFriendsFrame(3)").unwrap();
+    assert!(
+        !s.eval::<bool>("return GuildFrame:IsVisible()").unwrap(),
+        "a guildless character cannot open the guild pane at all"
+    );
+    assert!(s
+        .eval::<bool>("return FriendsListFrame:IsVisible()")
+        .unwrap());
     // The two tab kinds are different templates and must not be swapped: the strip along the
     // bottom is the big window tab (20px end slices), the Friends/Ignore pair inside tab 1 is the
     // ref's compact TabButtonTemplate (16px). Getting this wrong is invisible to every behaviour
@@ -788,9 +817,13 @@ fn the_window_geometry_matches_the_reference_framexml() {
         "FriendsFrameFriendsScrollFrame",
         "FriendsFrameIgnoreScrollFrame",
         "WhoListScrollFrame",
-        // No UIPanelCloseButton template ships here, so ours states the 32x32 the ref inherits.
+        // …and the guild pane's, the fourth of the same kind (decision 1257).
+        "GuildListScrollFrame",
+        // The window's own close button predates UIPanelTemplates.xml shipping the reference's
+        // `UIPanelCloseButton`, so it states inline the 32x32 that template confers. The guild
+        // pane's two close buttons inherit it and therefore need no entry here.
         "FriendsFrameCloseButton",
     ];
 
-    super::framexml_diff::assert_geometry_matches("FriendsFrame.xml", &reference, EXPECTED, 61);
+    super::framexml_diff::assert_geometry_matches("FriendsFrame.xml", &reference, EXPECTED, 210);
 }

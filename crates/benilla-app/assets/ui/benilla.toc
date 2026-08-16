@@ -88,6 +88,10 @@ DuelFrame.xml
 # registry again. Not CraftFrame's — the gate that raises them is the generic item-target
 # bind, reached by a poison or a sharpening stone with no profession window open.
 EnchantConfirm.xml
+# The innkeeper's bind confirm + its event driver (decision 1331): the same StaticPopup registry.
+# Not GossipFrame's, and the wire is why — the server closes the gossip menu BEFORE it asks, so
+# this dialog is free-standing by the time it shows. Needs only UiPanels.xml, far above.
+BinderConfirm.xml
 # The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
 # consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
 Cooldown.xml

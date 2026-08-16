@@ -25,8 +25,10 @@
       reference. `/pvp` is the toggle the client has.
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
       BENILLA_UNITPOPUP_DEFERRED set below) rather than shown-dead: TARGET (the friends
-      list), GUILD_PROMOTE/GUILD_LEAVE (the guild arc), RESET_INSTANCES (instances). TRADE came out
-      with decision 0592 P1, DUEL with 0633, INSPECT with 0631, FOLLOW with 0890's follow-up — and
+      list), RESET_INSTANCES (instances). TRADE came out
+      with decision 0592 P1, DUEL with 0633, INSPECT with 0631, GUILD_PROMOTE/GUILD_LEAVE with
+      the guild arc (1257 — their hide predicates and click rows are below), FOLLOW with 0890's
+      follow-up — and
       that last entry's stated reason ("its CMSG family is its own slice") was simply WRONG: 0890
       verified auto-follow sends nothing at all, it is pure client-side movement, so the row was
       waiting on a wire slice that does not exist. It was the motion law it really needed.
@@ -225,7 +227,7 @@
         -- The DEFERRED set (header): entries hidden until their backing arc lands.
         BENILLA_UNITPOPUP_DEFERRED = {
             TARGET = 1,
-            GUILD_PROMOTE = 1, GUILD_LEAVE = 1, RESET_INSTANCES = 1,
+            RESET_INSTANCES = 1,
         };
 
         -- ── Shared helpers ─────────────────────────────────────────────────────────────────
@@ -393,6 +395,26 @@
         HIDE_ROW["RAID_PROMOTE"] = hideAlways;
         HIDE_ROW["RAID_DEMOTE"] = hideAlways;
         HIDE_ROW["RAID_REMOVE"] = hideAlways;
+
+        -- The two GUILD rows, ref UnitPopup.lua l.323-330 (decision 1257's guild arc un-defers
+        -- them). Both gate on `GuildFrame:IsVisible()`, which is the whole point of them: these
+        -- rows exist for right-clicking a GUILD ROSTER row, not a unit, so they are hidden
+        -- everywhere else — a friend-list or /who row opens the same FRIEND menu and must not
+        -- offer them.
+        --   · GUILD_PROMOTE — hand over the guild. Guild master only, and never on yourself.
+        --   · GUILD_LEAVE — leave the guild. Only ever offered on YOURSELF.
+        -- `GuildFrame and` is a nil-guard, not a behaviour change: FriendsFrame.xml loads after
+        -- this file in the manifest, so in a real session the frame always exists and the
+        -- condition is exactly the reference's. It is here because this file must stay usable
+        -- when loaded on its own (the same reason FriendsFrame.xml guards `UpdateMicroButtons`).
+        HIDE_ROW["GUILD_PROMOTE"] = function(menu)
+            return not IsGuildLeader() or menu.name == UnitName("player")
+                or not (GuildFrame and GuildFrame:IsVisible());
+        end
+        HIDE_ROW["GUILD_LEAVE"] = function(menu)
+            return menu.name ~= UnitName("player")
+                or not (GuildFrame and GuildFrame:IsVisible());
+        end
 
         -- Marking is leader/assistant business, and a mark on an enemy-faction player nobody in
         -- the group can cooperate with is pointless — except on our OWN menu, which marks us.
@@ -743,6 +765,28 @@
         end
         CLICK_ROW["PET_RENAME"] = function()
             StaticPopup_Show("RENAME_PET");
+        end
+
+        -- The two GUILD arms, ref UnitPopup_OnClick l.571-575 (decision 1257). Both go behind a
+        -- confirm, and both are addressed by NAME — a guild roster row has no unit token behind
+        -- it, which is the reason this menu takes a name at all.
+        --
+        -- GUILD_PROMOTE stashes the name on the DIALOG (`dialog.data`), not on a global: the
+        -- popup engine hands `data` back to OnAccept, so the dialog acts on the name that was
+        -- right-clicked even if the selection moved while it was open. GUILD_LEAVE needs no
+        -- data — it is only ever offered on yourself — and formats the guild's own name into
+        -- "Really leave %s?". The `if dialog` is ours, and it is not decoration: the ref writes
+        -- `dialog.data` on the bare return because its engine runs FOUR dialog instances and
+        -- ours runs two (UiPanels.xml's header), so a refused Show returning nil is reachable
+        -- here and indexing it would raise inside a menu click.
+        CLICK_ROW["GUILD_PROMOTE"] = function(menu)
+            local dialog = StaticPopup_Show("CONFIRM_GUILD_PROMOTE", menu.name);
+            if ( dialog ) then
+                dialog.data = menu.name;
+            end
+        end
+        CLICK_ROW["GUILD_LEAVE"] = function()
+            StaticPopup_Show("CONFIRM_GUILD_LEAVE", GetGuildInfo("player"));
         end
 
         function UnitPopup_OnClick()

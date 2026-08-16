@@ -483,15 +483,44 @@ fn wrapped_rows(
     text: &str,
     wrap_width: f32,
 ) -> usize {
+    wrapped_rows_capped(
+        metrics,
+        family,
+        font_size,
+        step_extra,
+        text,
+        wrap_width,
+        usize::MAX,
+    )
+}
+
+/// [`wrapped_rows`] that stops once `cap` rows exist — the client's own fit walk is bounded by the
+/// BOX, not by the string: `GxuFont_GetMaxCharsWithinHeight` (`0x5c21c0`) lays out `min(needed,
+/// fits + 1)` lines and abandons the rest, because the height test sits downstream of the per-line
+/// kernel call (wow-re `system/ui/scratch/fontstring-ellipsis-cost.md`). A caller that only needs
+/// to know whether the text OVERFLOWS passes `allowed + 1` and never pays for the tail; the chat
+/// band's row count, which is a real number, passes [`usize::MAX`].
+fn wrapped_rows_capped(
+    metrics: &TextMetrics,
+    family: &str,
+    font_size: f32,
+    step_extra: f32,
+    text: &str,
+    wrap_width: f32,
+    cap: usize,
+) -> usize {
     let lines = parse_markup(text, [1.0, 1.0, 1.0, 1.0]);
-    if wrap_width > WRAP_MIN_WIDTH {
-        lines
-            .iter()
-            .map(|line| wrap_line(metrics, family, font_size, step_extra, line, wrap_width).len())
-            .sum()
-    } else {
-        lines.len()
+    if wrap_width <= WRAP_MIN_WIDTH {
+        return lines.len().min(cap);
     }
+    let mut rows = 0usize;
+    for line in &lines {
+        rows += wrap_line(metrics, family, font_size, step_extra, line, wrap_width).len();
+        if rows >= cap {
+            return cap;
+        }
+    }
+    rows
 }
 
 /// The FontString display string under the height-gated ellipsis-truncate — `CSimpleFontString
@@ -507,6 +536,7 @@ fn wrapped_rows(
 /// C++ counterparts never call `0x771ec0`.
 pub(crate) fn ellipsize_to_fit(
     atlas: &mut UiFontAtlas,
+    region: benilla_ui::widget::RegionHandle,
     text: &str,
     rect: Rect,
     font: FontSpec,
@@ -531,10 +561,26 @@ pub(crate) fn ellipsize_to_fit(
     // drawn stack agree line for line.
     // The line-count law lives in `overflow` (it is the FIT law here, not the render stack's) —
     // see `overflow::ellipsize_in_box`.
+    // The remembered answer, under exactly these inputs ([`super::EllipsisMemo`] — the client's
+    // `CGxString+0xf8`). The paint pass runs every frame; this seam is what the client rebuilds
+    // only on invalidation, and it is the most expensive thing in the pass by an order of
+    // magnitude (B240, decision 1332).
+    if let Some(hit) = atlas.ellipsis.get(region, text, box_w, box_h, &font) {
+        return hit.clone();
+    }
+    // The fit test only has to decide OVERFLOW, so it stops one row past the box — the client's
+    // own bound ([`wrapped_rows_capped`]).
+    let cap = overflow::lines_fitting(box_h.max(font_size), font_size) + 1;
     let metrics = &atlas.metrics;
-    overflow::ellipsize_in_box(text, box_h, font_size, |candidate| {
-        wrapped_rows(metrics, &family, font_size, step_extra, candidate, box_w)
-    })
+    let display = overflow::ellipsize_in_box(text, box_h, font_size, |candidate| {
+        wrapped_rows_capped(
+            metrics, &family, font_size, step_extra, candidate, box_w, cap,
+        )
+    });
+    atlas
+        .ellipsis
+        .put(region, text, box_w, box_h, &font, display.clone());
+    display
 }
 
 /// The drawn line's origin for the EditBox text-UI overlays: the line's x0 under `justifyH`
@@ -1177,5 +1223,145 @@ mod row_start_tests {
     fn a_blank_segment_still_occupies_a_row_and_base_offsets() {
         assert_eq!(starts("", &[], 7), vec![7]);
         assert_eq!(starts("xy", &runs(&["xy"]), 3), vec![3]);
+    }
+}
+
+/// **B240's performance half, measured.** A world book halves the framerate while its reader is
+/// open (Goudy, 2026-08-09: *"page text with html text absolutely annihilates performance"* —
+/// 62 → 36 fps, recovering the moment the window closes).
+///
+/// The seam this measures: the page body draws in a **height-pinned** FontString (270×304, the
+/// rect the reference gives its SimpleHTML), and a body that overflows it enters
+/// [`ellipsize_to_fit`] — a back-off that strips one character at a time from the END of the
+/// string, re-testing the whole candidate at every step. That shape is the real client's, byte for
+/// byte (wow-re `system/ui/scratch/fontstring-ellipsis-cost.md`, §5 trio: the loop seeds from
+/// `strlen`, the `fitCount` it already has is discarded, and it steps one UTF-8 code point per
+/// iteration). What the client does *not* do is run it per frame, or re-lay the whole string on
+/// each step — the two divergences decision 1332 closes.
+///
+/// The HTML body is only the loudest case, not the boundary: the seam is armed by OVERFLOW, and
+/// vmangos ships 1257 page bodies of which the longest are **plain prose** — measured here beside
+/// the reported one, and four times worse.
+///
+/// Run with `cargo test --release -p benilla-app -- --ignored --nocapture ellipsis_cost`. Skips
+/// without an install.
+#[cfg(test)]
+mod ellipsis_cost {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    /// The reported page verbatim — vmangos `page_text` 2676, the *Alliance Military Ranks* plaque
+    /// in Stormwind's Old Town (`GameObject` 3011, the object in Goudy's screenshots). 647 bytes.
+    const PAGE: &str = concat!(
+        "<HTML>\n",
+        "<BODY>\n",
+        "<H1 align=\"center\">ALLIANCE MILITARY RANKS</H1><BR/>\n",
+        "<P align=\"center\">OFFICERS</P><BR/>\n",
+        "<P align=\"center\">Grand Marshal</P>\n",
+        "<P align=\"center\">Field Marshal</P>\n",
+        "<P align=\"center\">Marshal</P>\n",
+        "<P align=\"center\">Commander</P>\n",
+        "<P align=\"center\">Lieutenant Commander</P>\n",
+        "<P align=\"center\">Knight-Champion</P>\n",
+        "<P align=\"center\">Knight-Captain</P>\n",
+        "<P align=\"center\">Knight-Lieutenant</P>\n",
+        "<P align=\"center\">Knight</P><BR/>\n",
+        "<P align=\"center\">ENLISTED</P><BR/>\n",
+        "<P align=\"center\">Sergeant Major</P>\n",
+        "<P align=\"center\">Master Sergeant</P>\n",
+        "<P align=\"center\">Sergeant</P>\n",
+        "<P align=\"center\">Corporal</P>\n",
+        "<P align=\"center\">Private</P>\n",
+        "</BODY>\n",
+        "</HTML>",
+    );
+
+    /// The longest body vmangos actually ships (`page_text` 2880, a Hearthglen letter, 928 bytes)
+    /// — **plain prose, no markup at all**. It is here because the report's framing ("html text")
+    /// names the loudest case, not the boundary: the seam is armed by OVERFLOW, and the longest
+    /// pages in the world are plain. `$b` arrives expanded (`npc_text::substitute`, the feed).
+    const PLAIN: &str = concat!(
+        "Reuben,\n\nI write this letter knowing you may never see it; I simply can't remain idle, ",
+        "listening to the constant pounding against the Hearthglen walls. The undead are outside ",
+        "our village, unceasing in their assault, and we have been charged with defending the ",
+        "townsfolk until reinforcements arrive.\n\nMy leg was broken in the last charge, and so I ",
+        "sit, useless, with my sword at my side should there be a breach in our defenses. There is ",
+        "no idle banter... only the sounds of fighting and death. The air is thick with fear.\n\n",
+        "Prince Arthas is here, fighting on the front lines with the men. Were he not present we ",
+        "would have fallen long ago. His love for this land and its people is infectious; I gladly ",
+        "serve under him, and will to the end of my days.\n\nThe fighting grows more intense; ",
+        "broken leg or not, I cannot sit here. Every sword is needed.  I hope these words find you ",
+        "in happier times.\n\nYour friend,\nLeagrem\n\n",
+    );
+
+    /// The reader's own wrapper — `ItemTextFrame.xml`'s READY handler frames an authorless page
+    /// with a leading and a trailing newline.
+    /// The reader's own wrapper — `ItemTextFrame.xml`'s READY handler frames an authorless page
+    /// with a leading and a trailing newline.
+    fn page_body(page: &str) -> String {
+        format!("\n{page}\n")
+    }
+
+    /// `ItemTextPageText`'s geometry and face: 270×304 at `ItemTextFontNormal`
+    /// (`Fonts\MORPHEUS.TTF`, height 15). At the 768-tall design window the seam scale is 1, so
+    /// these are also the drawn px; a taller window scales box and pitch together, which leaves
+    /// the line counts — and therefore this whole measurement — unchanged.
+    const FACE: &str = "Fonts\\MORPHEUS.TTF";
+    const SIZE: f32 = 15.0;
+    const BOX_W: f32 = 270.0;
+    const BOX_H: f32 = 304.0;
+
+    #[test]
+    #[ignore = "bakes a real font atlas from the install; run explicitly"]
+    fn a_page_that_overflows_its_box_costs_a_whole_back_off() {
+        let Some(metrics) = super::super::atlas::test_metrics(&[(FACE, &[SIZE])], 1.0) else {
+            eprintln!("skipping: no install / font chain");
+            return;
+        };
+        let family = metrics.family_for(Some(FACE));
+        let font_size = metrics.snap_for(&family, SIZE);
+        let step_extra = step_extra_of(Outline::None);
+        let fits = overflow::lines_fitting(BOX_H, font_size);
+
+        for (label, page) in [("html 2676", PAGE), ("plain 2880", PLAIN)] {
+            let text = page_body(page);
+            let full = wrapped_rows(&metrics, &family, font_size, step_extra, &text, BOX_W);
+            eprintln!(
+                "[ellipsis-cost] {label:<11} {:>4} chars -> {full:>2} rows in a {fits}-row box",
+                text.chars().count(),
+            );
+
+            // Uncapped (what shipped) against the client's box-bounded fit walk. Both must return
+            // the same display string — the cap decides overflow, it does not decide the answer.
+            let mut out = Vec::new();
+            for (how, cap) in [("whole string", usize::MAX), ("box-bounded", fits + 1)] {
+                let probes = Cell::new(0usize);
+                let chars = Cell::new(0usize);
+                let t = Instant::now();
+                let got = overflow::ellipsize_in_box(&text, BOX_H, font_size, |candidate| {
+                    probes.set(probes.get() + 1);
+                    chars.set(chars.get() + candidate.chars().count());
+                    wrapped_rows_capped(
+                        &metrics, &family, font_size, step_extra, candidate, BOX_W, cap,
+                    )
+                });
+                let us = t.elapsed().as_secs_f64() * 1e6;
+                eprintln!(
+                    "[ellipsis-cost]   {how:<13} {:>4} probes, {:>6} candidate chars, {us:>7.0} us",
+                    probes.get(),
+                    chars.get(),
+                );
+                assert!(
+                    got.is_some(),
+                    "{label} overflows its box — the seam is armed"
+                );
+                out.push(got);
+            }
+            assert_eq!(
+                out[0], out[1],
+                "{label}: the row cap changed the display string"
+            );
+        }
     }
 }

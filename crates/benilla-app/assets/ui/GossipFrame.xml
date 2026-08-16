@@ -80,12 +80,28 @@
         -- The Era icon-type string → the real Blizzard gossip-icon texture (resolves from the MPQ at
         -- render). Unmapped types fall back to the chat bubble (the app already defaults unknowns to
         -- "gossip", so this is belt-and-braces).
+        --
+        -- These are ALL TEN the 1.12 install ships under `Interface\GossipFrame\*GossipIcon.blp`.
+        -- The reference builds the path by pasting the type string straight in (ref
+        -- GossipFrame.lua:123), so the shipped art is the whole vocabulary a row can draw. The app
+        -- indexes the wire icon byte into the client's own name table (`ui_gossip::
+        -- GOSSIP_ICON_TYPES`, VERIFIED at 0x84b7ac — decisions 1331/1335); four of these
+        -- (healer/banker/petition/tabard) were unreachable before 1331, which is why the
+        -- innkeeper's bind line drew a speech bubble (B249).
+        --
+        -- The client's table has an ELEVENTH name, `auctioneer` at index 10, and 5875 ships no
+        -- texture for it — the reference draws nothing there. No key for it here on purpose: our
+        -- lookup then falls back to the chat bubble, which is the better wrong answer than a
+        -- missing texture, and `ui_gossip`'s test pins the absence so nobody invents a path.
         BENILLA_GOSSIP_ICONS = {
             gossip = "Interface\\GossipFrame\\GossipGossipIcon",
             vendor = "Interface\\GossipFrame\\VendorGossipIcon",
             taxi = "Interface\\GossipFrame\\TaxiGossipIcon",
             trainer = "Interface\\GossipFrame\\TrainerGossipIcon",
+            healer = "Interface\\GossipFrame\\HealerGossipIcon",
             binder = "Interface\\GossipFrame\\BinderGossipIcon",
+            banker = "Interface\\GossipFrame\\BankerGossipIcon",
+            petition = "Interface\\GossipFrame\\PetitionGossipIcon",
             tabard = "Interface\\GossipFrame\\TabardGossipIcon",
             battlemaster = "Interface\\GossipFrame\\BattleMasterGossipIcon",
         }

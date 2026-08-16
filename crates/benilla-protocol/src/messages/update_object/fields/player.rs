@@ -433,6 +433,28 @@ impl ObjectFields {
     pub fn player_duel_team(&self) -> u32 {
         self.get_u32(FIELD_PLAYER_DUEL_TEAM).unwrap_or(0)
     }
+    /// `PLAYER_GUILDID` (field 191) — the id of the guild this player belongs to, `0` for a
+    /// guildless one (and for the absent field, which is the same thing: the descriptor skips
+    /// zeroes). **PUBLIC**, so it arrives for every visible player, not only for us.
+    ///
+    /// It names a guild but does not describe one: the name and the rank names come only from
+    /// `SMSG_GUILD_QUERY_RESPONSE`, keyed by this id (decision 1257). The real client's own
+    /// `GetGuildInfo 0x4c9330` reads exactly this field and answers nil on both the `0` and the
+    /// cache-miss legs (`0x4c93a9`, `0x4c93d7`).
+    pub fn player_guild_id(&self) -> u32 {
+        self.get_u32(FIELD_PLAYER_GUILDID).unwrap_or(0)
+    }
+    /// `PLAYER_GUILDRANK` (field 192) — this player's rank within [`Self::player_guild_id`]'s
+    /// guild, **0-based with `0` = guild master** (vmangos promotes with `rank--`). Meaningless
+    /// while the guild id is `0`. Indexes both [`crate::messages::GuildQueryResponse::rank_names`]
+    /// and [`crate::messages::GuildRoster::rank_rights`].
+    ///
+    /// The reference indexes its cached rank-name array with this **unbounded**
+    /// (`0x4c93e4 mov edx,[ecx+0x10]` / `shl edx,0x6`); a consumer of ours must bound it against
+    /// the ten slots that array really has.
+    pub fn player_guild_rank(&self) -> u32 {
+        self.get_u32(FIELD_PLAYER_GUILDRANK).unwrap_or(0)
+    }
     /// `PLAYER_FIELD_BYTES` byte 0 bit `0x08` — `PLAYER_FIELD_BYTE_RELEASE_TIMER`, "Display time
     /// till auto release spirit" (the header's own comment): set at death iff the map is
     /// non-instanceable, i.e. exactly when the server will force-release after 6:00. The client

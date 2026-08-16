@@ -621,6 +621,11 @@ pub(crate) struct UiFontAtlas {
     /// Shared (never copied) with the script VM's synchronous measurer, so a string measured
     /// mid-tick and the same string measured at extract are the same number by construction.
     pub(crate) metrics: Arc<TextMetrics>,
+    /// Per-region ellipsis display strings ([`super::EllipsisMemo`]) — the client's own
+    /// `CGxString+0xf8` cache, keyed by the inputs instead of a dirty flag. It lives here because
+    /// a re-bake replaces this whole resource, which is exactly when every answer in it is stale:
+    /// the step table it was computed against is gone.
+    pub(super) ellipsis: super::EllipsisMemo,
 }
 
 impl UiFontAtlas {
@@ -972,6 +977,7 @@ fn load_fonts_and_build_atlas(
             sizes_by_family,
             scale,
         }),
+        ellipsis: super::EllipsisMemo::default(),
     });
 }
 
@@ -1407,4 +1413,49 @@ mod metrics_tests {
         }
         w
     }
+}
+
+/// Real-font [`TextMetrics`] for a test or bench: the named client faces, read through the app's
+/// own patch chain and baked at the given logical sizes. `None` when there is no install, or the
+/// chain or a face will not open — every caller **skips** rather than fails, the same posture
+/// [`metrics_tests`]'s install-backed tests take (`wow_data_or_skip!`).
+///
+/// The first face is the default family. Only the metric table matters to the callers (the wrap +
+/// step law); the glyph cells are built because [`build_char_steps`] reads their baked advances.
+#[cfg(test)]
+pub(super) fn test_metrics(faces: &[(&str, &[f32])], scale: f32) -> Option<TextMetrics> {
+    let data = benilla_formats::wow_data()?;
+    let chain = benilla_formats::open_chain(&data).ok()?;
+    let charset = default_charset();
+    let mut font_system = FontSystem::new_with_fonts(std::iter::empty());
+    let mut swash = SwashCache::new();
+
+    let mut built: Vec<(fontdb::ID, String, Vec<f32>)> = Vec::new();
+    let mut path_to_family = HashMap::new();
+    let mut sizes_by_family = HashMap::new();
+    for (path, sizes) in faces {
+        let bytes = chain.read(path).ok()?;
+        let (id, family) = register_font(&mut font_system, bytes).ok()?;
+        path_to_family.insert(path.to_ascii_lowercase(), family.clone());
+        sizes_by_family.insert(family.clone(), sizes.to_vec());
+        built.push((id, family, sizes.to_vec()));
+    }
+    let (_, default_family, sizes) = built.first()?.clone();
+    let atlas = build_atlas(
+        &mut font_system,
+        &mut swash,
+        &built,
+        &charset,
+        1024,
+        scale,
+        &HashMap::new(),
+    );
+    Some(TextMetrics {
+        steps: build_char_steps(&mut font_system, &atlas.glyphs, &built, &charset, scale),
+        path_to_family,
+        default_family,
+        sizes,
+        sizes_by_family,
+        scale,
+    })
 }

@@ -81,10 +81,18 @@ pub(super) fn query_statuses(
     quest.retain_statuses(|npc| index.0.contains_key(&npc));
     for (guid, obj) in &units {
         if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER == 0 {
-            // No longer a questgiver: drop the stale answer (and the marker with it).
-            if state.asked.remove(&guid.0).is_some() {
-                quest.clear_status(guid.0);
-            }
+            // No longer a questgiver: drop the stale answer (and the marker with it) —
+            // **unconditionally**, never "only if we had asked". The reference's sweep callback
+            // (`0x5eb0a0`) tears the marker down on the flag test alone, with no prior-asked
+            // precondition (decision 0647), and the gate we used to put here was disarmed by the
+            // very sweep that arrives with it: an escort's giver drops `UNIT_NPC_FLAGS` in the same
+            // server tick as the quest-log write (vmangos `FollowerAI::StartFollow`,
+            // `ScriptedEscortAI`'s "disable npcflags"), so the quest-log change bumps the
+            // generation, `asked` is cleared above, `remove` finds nothing, and the cached
+            // AVAILABLE status — with its `!` — was frozen over the NPC for the whole escort, with
+            // no way back: the flag stays off, so this arm never queries either (B257).
+            state.asked.remove(&guid.0);
+            quest.clear_status(guid.0);
             continue;
         }
         // Re-ask when this unit's own key moves — its service bits or its faction template. The
@@ -282,6 +290,112 @@ mod tests {
         assert!(
             app.world().resource::<QuestGiver>().status(NPC).is_none(),
             "and its stale answer is dropped"
+        );
+    }
+
+    /// **B257 — an escort giver's `!` outlived the accept.** The teardown branch used to be gated on
+    /// the guid still being in `asked` ("did we ever query it?"), which is a memo about *questions*
+    /// standing in for a fact about *answers* — and the sweep clears that memo. On accepting an
+    /// escort both halves land in the same update: vmangos writes the quest-log slot and, from the
+    /// script hook in the same handler, zeroes `UNIT_NPC_FLAGS`
+    /// (`FollowerAI::StartFollow` / `ScriptedEscortAI`'s "disable npcflags"). So the quest-log write
+    /// bumps the generation, `asked.clear()` runs first, `remove` finds nothing, and the cached
+    /// AVAILABLE status stays — forever, because the flag stays off and this arm never queries.
+    /// The reference tears down on the flag test alone (`0x5eb0a0`, decision 0647).
+    ///
+    /// The control below is the half that must NOT change: an ordinary giver, whose flag stays on,
+    /// is re-asked by the same sweep rather than torn down.
+    #[test]
+    fn an_escort_giver_loses_its_marker_when_the_flag_drops_with_the_quest_log_write() {
+        use crate::net::{Guid, NetEntity};
+        use benilla_protocol::{EntityKind, ObjectFields};
+
+        const ESCORT: u64 = 0x5115; // Mist: gives the quest, then follows with npcflags off
+        const PLAIN: u64 = 0x5116; // an ordinary giver standing next to her
+        const FIELD_NPC_FLAGS: u16 = 147;
+        const FIELD_QUEST_LOG_1_1: u16 = 198;
+
+        let net_entity = || NetEntity {
+            kind: EntityKind::Unit,
+            display_id: None,
+            scale: 1.0,
+        };
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.insert_resource(NetCommands(tx))
+            .init_resource::<GuidIndex>()
+            .init_resource::<QuestGiver>()
+            .add_systems(Update, query_statuses);
+
+        let me = app
+            .world_mut()
+            .spawn((SelfPlayer, net_entity(), Guid(1), ObjectStore::default()))
+            .id();
+        let spawn = |app: &mut App, guid: u64| {
+            let e = app
+                .world_mut()
+                .spawn((
+                    net_entity(),
+                    Guid(guid),
+                    ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0x2)])),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+            e
+        };
+        let escort = spawn(&mut app, ESCORT);
+        spawn(&mut app, PLAIN);
+        app.update(); // both asked, both marked in `asked`
+
+        // The server's answer: a gold `!` over each.
+        for npc in [ESCORT, PLAIN] {
+            app.world_mut()
+                .resource_mut::<QuestGiver>()
+                .set_status(npc, 5);
+        }
+
+        // The accept, as one update: the quest-log slot appears in OUR store (the sweep) and the
+        // escort's questgiver bit goes off (the teardown) — in the same drained batch.
+        *app.world_mut()
+            .entity_mut(me)
+            .get_mut::<ObjectStore>()
+            .unwrap() = ObjectStore(ObjectFields::from_pairs(&[(FIELD_QUEST_LOG_1_1, 938)]));
+        *app.world_mut()
+            .entity_mut(escort)
+            .get_mut::<ObjectStore>()
+            .unwrap() = ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0x0)]));
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<QuestGiver>()
+                .status(ESCORT)
+                .is_none(),
+            "the escortee stopped being a questgiver: its stale AVAILABLE status — and the `!` \
+             the marker layer draws from it — must go, sweep or no sweep"
+        );
+        assert_eq!(
+            app.world().resource::<QuestGiver>().status(PLAIN),
+            Some(5),
+            "the control: a giver whose flag is still on keeps its answer until the server \
+             replies to the sweep's fresh query"
+        );
+
+        // And it self-heals: when the escort ends and the bit returns, the NPC is asked again.
+        *app.world_mut()
+            .entity_mut(escort)
+            .get_mut::<ObjectStore>()
+            .unwrap() = ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_FLAGS, 0x2)]));
+        app.update();
+        assert!(
+            app.world()
+                .resource::<QuestGiver>()
+                .status(ESCORT)
+                .is_none(),
+            "still nothing cached — the answer arrives from the server, not from us"
         );
     }
 

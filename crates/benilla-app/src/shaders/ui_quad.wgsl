@@ -40,6 +40,40 @@
 @group(2) @binding(4) var<uniform> mask_rect: vec4<f32>;
 @group(2) @binding(5) var mask_texture: texture_2d<f32>;
 @group(2) @binding(6) var mask_sampler: sampler;
+// `Texture:SetDesaturated(1)` — the greyed-out icon (decisions 1327, 1330). This is the verb every
+// disabled affordance in the reference is built on: a bag icon under the game menu, an unusable pet
+// action, a disconnected party portrait — and the unavailable talent B162 reported.
+//
+// It is not a tint and not a stage flag: `+0x128` on the texture object is a `CGxShader*`, and the
+// one shader the UI ever loads is `Shaders\Pixel\Desaturate.bls` (wow-re
+// `system/ui/scratch/texture-desaturate-law.md`, VERIFIED at the asset's own bytes). Its whole body
+// is four instructions, and the two that matter are reproduced exactly below:
+//
+//     MUL result.color.w   , fragment.color.primary, texel   ; a = vertexColour.a x texel.a
+//     DP3 result.color.xyz , texel, c[0]                     ; rgb = dot(texel.rgb, LUMA)
+//
+// **The vertex colour's RGB is DISCARDED, not modulated in.** A bound fragment program supersedes
+// the fixed-function stage chain entirely, so the `MODULATE(TEXTURE, DIFFUSE)` law that governs
+// every other UI quad simply does not run here — there is no desaturate-then-tint or
+// tint-then-desaturate, the tint is *absent*. FrameXML walks straight into this:
+// `SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)` still SETS that 0.65, and on
+// shader-capable hardware it has no effect on colour. Only its ALPHA survives, which is why the
+// alpha multiply below is shared with the ordinary path rather than special-cased — dropping it
+// would make every desaturated icon ignore `SetAlpha` and its frame's alpha.
+//
+// The fold runs on the GAMMA byte (after `linear_to_srgb`) because the reference's UI is 8-bit
+// arithmetic end to end; greying a linearized texel would land a different byte than the client's.
+@group(2) @binding(7) var<uniform> desaturate: u32;
+
+// ITU-R BT.601 luma — the `PARAM c[0]` of that shader, read as raw f32 words: `0x3E991687`,
+// `0x3F1645A2`, `0x3DE978D5`. Not `(0.3, 0.3, 0.3)`, not `(0.3, 0.59, 0.11)` (this file's own first
+// guess, corrected by the carve), not BT.709.
+//
+// **Do not normalise these and do not compute them in f64.** They sum to 1.0000000074505806, so a
+// white texel evaluates just above 1.0 and relies on the output clamp; the ARB text and the D3D
+// blob round-trip to the same three f32 words, so the backend cannot change a bit and neither may
+// we.
+const LUMA: vec3<f32> = vec3<f32>(0.299, 0.587, 0.114);
 
 // Linear → sRGB (the exact IEC 61966-2-1 curve the hardware's sRGB store uses, so this inverts the
 // sampler's decode bit-for-bit in f32). Alpha carries no gamma and never passes through here.
@@ -60,7 +94,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Back to the client's byte space, then tint there: `UiQuad.color` is already a client-space
     // sRGB value (FrameXML's `<Color>`, `|cff…`, quality colors), so this multiply IS the FFP's
     // gamma-space `tint × texel`.
-    let rgb = linear_to_srgb(t.rgb) * c.rgb;
+    let texel = linear_to_srgb(t.rgb);
+    // The desaturated arm REPLACES the modulate — see the `desaturate` binding above. `c.rgb` is
+    // deliberately unread here; only `c.a` carries into the alpha below, as it does on both paths.
+    var rgb = texel * c.rgb;
+    if desaturate != 0u {
+        rgb = vec3<f32>(dot(texel, LUMA));
+    }
     var a = t.a * c.a;
     if circular != 0u {
         // Soft ~2%-of-width edge: reads as the ref's stencil at portrait size, no jaggies.

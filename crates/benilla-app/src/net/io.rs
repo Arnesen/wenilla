@@ -763,6 +763,7 @@ fn writer_loop(
                     ClientCommand::RepairItem { vendor, item_guid } => {
                         w.repair_item(vendor, item_guid)
                     }
+                    ClientCommand::BinderActivate { binder } => w.binder_activate(binder),
                     ClientCommand::BankerActivate { guid } => w.banker_activate(guid),
                     ClientCommand::BuyBankSlot { guid } => w.buy_bank_slot(guid),
                     ClientCommand::AutoBankItem { bag, slot } => w.autobank_item(bag, slot),
@@ -923,6 +924,34 @@ fn writer_loop(
                     ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
                     ClientCommand::Who { request } => w.who(&request),
                     ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
+                    ClientCommand::GuildQuery { guild_id } => w.guild_query(guild_id),
+                    ClientCommand::GuildCreate { name } => w.guild_create(&name),
+                    ClientCommand::GuildInvite { name } => w.guild_invite(&name),
+                    ClientCommand::GuildAccept => w.guild_accept(),
+                    ClientCommand::GuildDecline => w.guild_decline(),
+                    ClientCommand::GuildInfoRequest => w.guild_info(),
+                    ClientCommand::GuildRosterRequest => w.guild_roster(),
+                    ClientCommand::GuildPromote { name } => w.guild_promote(&name),
+                    ClientCommand::GuildDemote { name } => w.guild_demote(&name),
+                    ClientCommand::GuildLeave => w.guild_leave(),
+                    ClientCommand::GuildRemove { name } => w.guild_remove(&name),
+                    ClientCommand::GuildDisband => w.guild_disband(),
+                    ClientCommand::GuildLeader { name } => w.guild_leader(&name),
+                    ClientCommand::GuildMotd { motd } => w.guild_motd(&motd),
+                    ClientCommand::GuildRank {
+                        rank_id,
+                        rights,
+                        name,
+                    } => w.guild_rank(rank_id, rights, &name),
+                    ClientCommand::GuildAddRank { name } => w.guild_add_rank(&name),
+                    ClientCommand::GuildDelRank => w.guild_del_rank(),
+                    ClientCommand::GuildSetPublicNote { name, note } => {
+                        w.guild_set_public_note(&name, &note)
+                    }
+                    ClientCommand::GuildSetOfficerNote { name, note } => {
+                        w.guild_set_officer_note(&name, &note)
+                    }
+                    ClientCommand::GuildInfoText { text } => w.guild_info_text(&text),
                     ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
                     ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
                     ClientCommand::ActivateTaxi {

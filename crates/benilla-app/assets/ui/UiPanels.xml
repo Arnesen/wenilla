@@ -740,15 +740,16 @@
 
         -- SetDesaturation(texture, desaturation) — ref UIParent.lua l.1499-1510, plus two guards
         -- it does not have: a nil texture, and a texture carrying no `SetDesaturated` method at
-        -- all (the reference calls it unconditionally, l.1501; ours cannot, see below). The
-        -- reference itself has a no-shader fallback, and OURS IS ALWAYS THAT PATH: this engine has
-        -- no SetDesaturated, so `shaderSupported` is false exactly as on a 1.12 card without the
-        -- desaturation shader, and the grey comes from the ref's own vertex-colour branch. Written
-        -- as the wrapper rather than open-coded at each call site so the day a real desaturation
-        -- lands, one function changes. First caller here is the game menu's bag-bar greying
-        -- (decision 0674); PartyFrame.xml's disconnected-member branch has been CALLING this
-        -- global since decision 0434 with nothing defining it — an error thrown every time a party
-        -- member went offline, which is why it went unnoticed.
+        -- all (the reference calls it unconditionally, l.1501; ours keeps the guard for a region
+        -- leaf that never grew the verb). Since decision 1327 the engine HAS a desaturating
+        -- shader, so `shaderSupported` is true and the greyscale arm is the one taken — the
+        -- vertex-colour branch below is now the ref's own no-shader fallback, kept because it is
+        -- the ref's and because a texture without the method still has to grey somehow. Written as
+        -- the wrapper rather than open-coded at each call site precisely so that flip was one
+        -- function. First caller here is the game menu's bag-bar greying (decision 0674);
+        -- PartyFrame.xml's disconnected-member branch has been CALLING this global since decision
+        -- 0434 with nothing defining it — an error thrown every time a party member went offline,
+        -- which is why it went unnoticed.
         function SetDesaturation(texture, desaturation)
             if not texture then return end
             local shaderSupported = texture.SetDesaturated and texture:SetDesaturated(desaturation)
@@ -778,9 +779,12 @@
         --   · hasEditBox + maxLetters + EditBoxOnEnterPressed are live (decision 0668's
         --     ADD_FRIEND/ADD_IGNORE are the first customers): the box shows, caps its length,
         --     opens empty, and re-anchors the buttons under itself.
+        --   · hasWideEditBox is live too (the guild arc's SET_GUILDMOTD / SET_GUILDPLAYERNOTE /
+        --     SET_GUILDOFFICERNOTE, registered in FriendsFrame.xml): the 350x64 centred box
+        --     replaces the narrow one, and the dialog widens to 420. See the widen arm below for
+        --     the reference's own oddity — the widen is keyed on `which`, not on hasWideEditBox.
         --   · Accepted but v1-inert: exclusive, interruptCinematic (cinematics are acked
-        --     instantly — 0196), notClosableByLogout, preferredIndex, hasWideEditBox (guild
-        --     MOTD/notes — the guild arc), and the money variant.
+        --     instantly — 0196), notClosableByLogout, preferredIndex, and the money variant.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -829,7 +833,11 @@
             end
         end
 
-        -- Ref l.1428-1438, the no-editbox/no-money leg only (v1 has neither variant).
+        -- Ref l.1428-1438, the no-money leg only (v1 has no money variant).
+        --
+        -- Note the ref measures the NARROW `EditBox` for the height even when the shown box is the
+        -- wide one — the wide box is 64 tall, anchored CENTER, and floats over a frame sized for a
+        -- 32-tall box. Transcribed as written: the guild MOTD dialog's look is that arithmetic.
         function StaticPopup_Resize(dialog, which)
             local text = getglobal(dialog:GetName() .. "Text")
             local button1 = getglobal(dialog:GetName() .. "Button1")
@@ -925,28 +933,48 @@
                 text:SetText(format(info.text, text_arg1, text_arg2))
             end
 
-            -- The alert dress (ref l.1579-1589): every Show resets width 320 / icon hidden, then
-            -- a showAlert entry widens to 420 and shows the icon. The ref's neighbouring arms —
-            -- the guild-MOTD 420 widen and HELP_TICKET's 350 — wait for their dialogs.
+            -- The width/alert dress (ref l.1576-1589), an if/elseif in the ref's own order: every
+            -- Show resets width 320 / icon hidden; a GUILD MESSAGE dialog widens to 420 with NO
+            -- icon; otherwise a showAlert entry widens to 420 and shows the icon. HELP_TICKET's
+            -- 350 arm waits for that dialog.
+            --
+            -- **The widen is keyed on `which`, not on `hasWideEditBox`** — that is the reference's
+            -- own shape, transcribed rather than improved: a fourth wide-box dialog would get the
+            -- 350x64 box inside an un-widened 320 frame until its name joins this list. (The ref's
+            -- list also names SET_GUILDPLAYERNOTE twice, l.1582; the duplicate is inert.)
             local alertIcon = getglobal(dialog:GetName() .. "AlertIcon")
             alertIcon:Hide()
             dialog:SetWidth(320)
-            if info.showAlert then
+            if (which == "SET_GUILDMOTD") or (which == "SET_GUILDPLAYERNOTE")
+                or (which == "SET_GUILDOFFICERNOTE") then
+                dialog:SetWidth(420)
+            elseif info.showAlert then
                 dialog:SetWidth(420)
                 alertIcon:Show()
             end
 
             -- The edit box (ref l.1599-1624): shown only for a hasEditBox entry, capped at the
             -- entry's maxLetters, and always empty on open — a name left over from the last time
-            -- the dialog ran would be sent by a reflexive Enter. The wide variant is guild-only
-            -- (MOTD/notes), so it waits for the guild arc.
+            -- the dialog ran would be sent by a reflexive Enter. `hasWideEditBox` picks the 350x64
+            -- centred box INSTEAD of the narrow one; exactly one of the two is ever shown, and
+            -- neither is when the entry has no box at all (the ref's three-way, verbatim).
             local editBox = getglobal(dialog:GetName() .. "EditBox")
+            local wideEditBox = getglobal(dialog:GetName() .. "WideEditBox")
             if info.hasEditBox then
-                editBox:SetMaxLetters(info.maxLetters or 0)
-                editBox:SetText("")
-                editBox:Show()
+                if info.hasWideEditBox then
+                    wideEditBox:SetMaxLetters(info.maxLetters or 0)
+                    wideEditBox:SetText("")
+                    wideEditBox:Show()
+                    editBox:Hide()
+                else
+                    editBox:SetMaxLetters(info.maxLetters or 0)
+                    editBox:SetText("")
+                    editBox:Show()
+                    wideEditBox:Hide()
+                end
             else
                 editBox:Hide()
+                wideEditBox:Hide()
             end
 
             -- The buttons (ref l.1634-1676; fixed 120 widths — header note). Button2 shows only
@@ -1765,6 +1793,44 @@
                             <Size><AbsDimension x="75" y="32"/></Size>
                             <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
                             <TexCoords left="0.70703125" right="1.0" top="0" bottom="1.0"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnterPressed>StaticPopup_EditBoxOnEnterPressed(self)</OnEnterPressed>
+                    <OnEscapePressed>StaticPopup_EditBoxOnEscapePressed(self)</OnEscapePressed>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+            <!-- The WIDE entry box (ref StaticPopup.xml l.138-202): 350x64 at CENTER, hidden
+                 unless the entry sets hasWideEditBox. Its border is the same chat-input art
+                 stretched over three slices — a 256 left cap, a 75 right cap, and a 5-wide middle
+                 pinned between the two so it fills whatever is left. First customers: the guild
+                 arc's SET_GUILDMOTD / SET_GUILDPLAYERNOTE / SET_GUILDOFFICERNOTE. It shares the
+                 narrow box's two key handlers, which take the box as an argument for exactly this
+                 reason. -->
+            <EditBox name="$parentWideEditBox" historyLines="1" hidden="true" autoFocus="false">
+                <Size><AbsDimension x="350" y="64"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentLeft" file="Interface\ChatFrame\UI-ChatInputBorder-Left">
+                            <Size><AbsDimension x="256" y="32"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0" bottom="1.0"/>
+                        </Texture>
+                        <Texture name="$parentRight" file="Interface\ChatFrame\UI-ChatInputBorder-Right">
+                            <Size><AbsDimension x="75" y="32"/></Size>
+                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.70703125" right="1.0" top="0" bottom="1.0"/>
+                        </Texture>
+                        <Texture file="Interface\ChatFrame\UI-ChatInputBorder-Left">
+                            <Size><AbsDimension x="5" y="32"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.29296875" right="1.0" top="0" bottom="1.0"/>
                         </Texture>
                     </Layer>
                 </Layers>

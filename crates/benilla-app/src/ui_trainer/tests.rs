@@ -676,3 +676,56 @@ fn tooltip_falls_back_to_the_wire_spell() {
         },
     );
 }
+
+/// **B256 — the state filter died on every purchase.** The reset the reference's list builder does
+/// per packet (`0x4d75d9`, decision 1128) is only ever observable there at a window *opening*: the
+/// reference never receives a list packet with the window already up, because it repaints a purchase
+/// from a client-side state re-derivation (`0x4d7d40`). benilla has no such re-derivation and asks
+/// the server for a fresh list after every buy — so our synthetic packet was dragging a reset along
+/// that the reference cannot produce, and the player's "Available only" came back as
+/// available+unavailable the moment they learned a spell (their collapsed groups went with it).
+///
+/// So [`TrainerOpen::fresh_list`] means *this packet begins a window session*, and the post-buy
+/// re-request marks its own answer as the repaint it is. The four cases below are the whole law.
+#[test]
+fn only_a_packet_that_opens_a_window_resets_the_filter() {
+    const TRAINER: u64 = 0xabc;
+    let list = || vec![wire(1, trainer_spell_state::GREEN, 10, 1, 0)];
+    let mut open = TrainerOpen::default();
+
+    open.open(TRAINER, 0, list(), "Greetings".into());
+    assert!(open.fresh_list, "a first list opens the window: reset");
+    open.fresh_list = false; // the feed consumes it
+
+    // The post-buy re-request (`net::apply::npc::trainer_buy_succeeded`) marks its own answer.
+    open.refresh_pending = true;
+    open.open(TRAINER, 0, list(), "Greetings".into());
+    assert!(
+        !open.fresh_list,
+        "our own re-list repaints the open window — the player's filter and collapse stand"
+    );
+    assert!(
+        !open.refresh_pending,
+        "and the mark is spent, so the NEXT packet is a real open again"
+    );
+
+    open.open(TRAINER, 0, list(), "Greetings".into());
+    assert!(
+        open.fresh_list,
+        "an unmarked packet is always a session start"
+    );
+
+    // A refresh that never came back must not eat a later open's reset: the close spends it.
+    open.refresh_pending = true;
+    open.clear();
+    open.open(TRAINER, 0, list(), "Greetings".into());
+    assert!(open.fresh_list, "a close drops any in-flight refresh mark");
+
+    // Nor may a mark meant for one trainer be spent by another's list.
+    open.refresh_pending = true;
+    open.open(TRAINER + 1, 0, list(), "Greetings".into());
+    assert!(
+        open.fresh_list,
+        "a different trainer is a new window whatever is in flight"
+    );
+}

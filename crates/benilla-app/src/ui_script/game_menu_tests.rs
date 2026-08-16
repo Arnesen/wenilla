@@ -607,16 +607,16 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     s.resolve();
 
     // The backpack icon + the four slot rings, by name.
-    let art = |s: &UiScript, owner: &str| -> Vec<(String, Option<[f32; 4]>)> {
+    let art = |s: &UiScript, owner: &str| -> Vec<(String, bool)> {
         s.extract()
             .into_iter()
             .filter(|eq| s.quad_owner_name(eq.target).as_deref() == Some(owner))
             .filter_map(|eq| match &eq.content {
                 benilla_ui::script::QuadContent::Texture {
                     path: Some(p),
-                    color,
+                    desaturated,
                     ..
-                } => Some((p.clone(), *color)),
+                } => Some((p.clone(), *desaturated)),
                 _ => None,
             })
             .collect()
@@ -650,7 +650,8 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
             "{owner} must still DRAW under the open menu — greyed is not gone"
         );
     }
-    // The backpack icon specifically: still its own art, and tinted to SetDesaturation's grey.
+    // The backpack icon specifically: still its own art, and carrying SetDesaturation's greyscale
+    // flag to the renderer (decision 1327 — before it, the grey was the ref's no-shader 0.5 tint).
     let toggle = art(&s, "MainMenuBarBackpackButton");
     assert!(
         toggle
@@ -661,8 +662,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     assert!(
         toggle
             .iter()
-            .any(|(p, c)| p == "Interface\\Buttons\\Button-Backpack-Up"
-                && c.is_some_and(|c| (c[0] - 0.5).abs() < 0.01)),
+            .any(|(p, grey)| p == "Interface\\Buttons\\Button-Backpack-Up" && *grey),
         "…and it is greyed, not full-bright: {toggle:?}"
     );
 
@@ -672,8 +672,7 @@ fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
     assert!(
         toggle
             .iter()
-            .any(|(p, c)| p == "Interface\\Buttons\\Button-Backpack-Up"
-                && c.is_none_or(|c| (c[0] - 1.0).abs() < 0.01)),
+            .any(|(p, grey)| p == "Interface\\Buttons\\Button-Backpack-Up" && !*grey),
         "closing the menu restores full colour: {toggle:?}"
     );
     assert!(

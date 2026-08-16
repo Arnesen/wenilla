@@ -494,6 +494,17 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::IgnoreList { guids } => vec![SessionEvent::IgnoreList { guids }],
         ServerPacket::FriendStatus(status) => vec![SessionEvent::FriendStatus(status)],
         ServerPacket::WhoResults(results) => vec![SessionEvent::WhoResults(results)],
+        ServerPacket::GuildQueryResponse(response) => {
+            vec![SessionEvent::GuildQueryResponse(response)]
+        }
+        ServerPacket::GuildRoster(roster) => vec![SessionEvent::GuildRoster(roster)],
+        ServerPacket::GuildEvent(notice) => vec![SessionEvent::GuildEvent(notice)],
+        ServerPacket::GuildCommandResult(result) => vec![SessionEvent::GuildCommandResult(result)],
+        ServerPacket::GuildInvite { inviter, guild } => {
+            vec![SessionEvent::GuildInvite { inviter, guild }]
+        }
+        ServerPacket::GuildDecline { name } => vec![SessionEvent::GuildDecline { name }],
+        ServerPacket::GuildInfo(info) => vec![SessionEvent::GuildInfo(info)],
         ServerPacket::DestroyObject { guid } => vec![SessionEvent::ObjectDestroyed(guid)],
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]
@@ -593,6 +604,10 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::ServerUnixTime { unix_time }]
         }
         ServerPacket::BindPoint { area, .. } => vec![SessionEvent::BindPoint { area }],
+        ServerPacket::BinderConfirm { binder } => vec![SessionEvent::BinderConfirm { binder }],
+        ServerPacket::PlayerBound { binder, area } => {
+            vec![SessionEvent::PlayerBound { binder, area }]
+        }
         ServerPacket::SetProficiency {
             item_class,
             subclass_mask,

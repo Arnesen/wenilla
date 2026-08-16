@@ -96,6 +96,7 @@ mod transport;
 mod ui_action;
 mod ui_aura;
 mod ui_bank;
+mod ui_binder;
 mod ui_cast;
 mod ui_char;
 mod ui_chat;
@@ -105,6 +106,7 @@ mod ui_duel;
 mod ui_follow;
 mod ui_gamma;
 mod ui_gossip;
+mod ui_guild;
 mod ui_hide;
 mod ui_inspect;
 mod ui_item_text;
@@ -164,6 +166,7 @@ use transport::TransportPlugin;
 use ui_action::UiActionPlugin;
 use ui_aura::UiAuraPlugin;
 use ui_bank::UiBankPlugin;
+use ui_binder::UiBinderPlugin;
 use ui_cast::UiCastPlugin;
 use ui_char::UiCharPlugin;
 use ui_chat::UiChatPlugin;
@@ -171,6 +174,7 @@ use ui_craft::UiCraftPlugin;
 use ui_duel::UiDuelPlugin;
 use ui_follow::UiFollowPlugin;
 use ui_gossip::UiGossipPlugin;
+use ui_guild::UiGuildPlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
 use ui_logout::UiLogoutPlugin;
@@ -499,6 +503,10 @@ pub fn run(build: BuildId) -> AppExit {
     // Duels (decision 0633): the wire session, the client-side countdown tick, the four Era
     // events, and the accept/cancel/challenge intents.
     .add_plugins(UiDuelPlugin)
+    // Setting your hearthstone (decision 1331): the innkeeper's SMSG_BINDER_CONFIRM question, the
+    // CONFIRM_BINDER dialog it raises, and the CMSG_BINDER_ACTIVATE its Accept sends — the only
+    // packet in the flow that actually binds anything.
+    .add_plugins(UiBinderPlugin)
     // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
     // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
     .add_plugins(UiFollowPlugin)
@@ -506,6 +514,10 @@ pub fn run(build: BuildId) -> AppExit {
     // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
     .add_plugins(UiLogoutPlugin)
     .add_plugins(UiSocialPlugin)
+    // Guilds (decision 1257): the identity/roster mirror behind the four guild windows, the
+    // membership verbs, and the `ERR_GUILD_*` lines. Right after the social session, whose
+    // FriendsFrame it shares a window with and whose ignore list its sign-on lines consult.
+    .add_plugins(UiGuildPlugin)
     .add_plugins(UiTooltipPlugin)
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.

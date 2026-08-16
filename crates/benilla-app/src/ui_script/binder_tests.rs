@@ -1,0 +1,105 @@
+//! The innkeeper bind confirm (decision 1331, BinderConfirm.xml): the dialog `ui_binder`'s feed
+//! raises, its Accept, and the range poll that takes it away — driven exactly as that feed and the
+//! app's NPC-session guard drive it.
+
+use benilla_ui::script::{ScriptValue, UiScript};
+
+/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the duel tests'
+/// loader, duplicated so this file is self-contained).
+fn load_xml(s: &UiScript, file: &str) -> usize {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/ui")
+            .join(file),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "{file}: loader errors: {:?}",
+        report.errors
+    );
+    report.frames
+}
+
+/// The app's own pre-state: a question is pending and in range, which is what
+/// `CheckBinderDist()` reports while the dialog is up.
+fn setup() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "BinderConfirm.xml");
+    s.set_binder_pending(true);
+    s
+}
+
+/// `CONFIRM_BINDER(area)` raises the dialog with the area name filled in, and Accept queues the
+/// one `ConfirmBinder()` that becomes `CMSG_BINDER_ACTIVATE`. The whole point of the arc: before
+/// this wiring the click produced no dialog and no packet at all (B249).
+#[test]
+fn the_confirm_shows_the_area_and_accept_queues_the_bind() {
+    let mut s = setup();
+    s.fire_event(
+        "CONFIRM_BINDER",
+        vec![ScriptValue::Str("Dolanaar".to_string())],
+    );
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "CONFIRM_BINDER shows the dialog"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Do you want to make Dolanaar your new home?",
+        "arg1 fills the GlobalStrings template's %s"
+    );
+
+    s.run("StaticPopup_OnClick(StaticPopup1, 1)").unwrap();
+    assert_eq!(s.take_binder_confirms(), 1);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "accepting closes it"
+    );
+}
+
+/// Cancel and ESC both send **nothing**: declining an innkeeper is silent on the wire (there is
+/// no decline opcode), so the only observable is that no confirm was queued.
+#[test]
+fn declining_sends_nothing() {
+    let mut s = setup();
+    s.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str("Goldshire".into())]);
+    s.run("StaticPopup_OnClick(StaticPopup1, 2)").unwrap();
+    assert_eq!(s.take_binder_confirms(), 0);
+
+    s.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str("Goldshire".into())]);
+    s.run("ToggleGameMenu()").unwrap();
+    assert_eq!(s.take_binder_confirms(), 0);
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "hideOnEscape takes it down"
+    );
+}
+
+/// Walking away takes the question off screen: the entry's OnUpdate polls `CheckBinderDist()`,
+/// which the app drives from the shared NPC-session range guard. While it holds, ticking changes
+/// nothing; the frame it goes false, the dialog hides itself — with no packet either way.
+#[test]
+fn leaving_the_innkeepers_range_hides_the_confirm() {
+    let mut s = setup();
+    s.fire_event("CONFIRM_BINDER", vec![ScriptValue::Str("Kharanos".into())]);
+    s.run("StaticPopup_OnUpdate(StaticPopup1, 0.1)").unwrap();
+    assert!(
+        s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "in range, the tick leaves it alone"
+    );
+
+    s.set_binder_pending(false);
+    s.run("StaticPopup_OnUpdate(StaticPopup1, 0.1)").unwrap();
+    assert!(
+        !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
+        "out of range, the dialog takes itself down"
+    );
+    assert_eq!(s.take_binder_confirms(), 0, "and sends nothing");
+}

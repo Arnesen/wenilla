@@ -123,6 +123,11 @@ pub enum QuadContent {
         /// player arrow spins by it, standing in for the reference's engine arrow model; 0203
         /// flags the stand-in). `0.0` for the overwhelmingly common unrotated case.
         rotation: f32,
+        /// `Texture:SetDesaturated(1)` — draw the sampled texel as its **luminance** instead of
+        /// its colour (decision 1327). The renderer greys the texel and *then* modulates by
+        /// `color`, because the reference's own consumers pass a dim tint alongside the flag
+        /// (`SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)`) and expect both to land.
+        desaturated: bool,
     },
     /// One frame `Backdrop` piece (the tiled bg, or one of the 8 border pieces) — emitted at the
     /// owning frame's own draw slot, behind its regions ([`UiScript::extract`](super::UiScript::extract)). A textured quad
@@ -446,8 +451,9 @@ pub(crate) struct RegionData {
     /// unset inherited from the owner frame's rect.
     pub(crate) anchors: Vec<Anchor>,
     /// `Texture:SetDesaturated(flag)` — the shader desaturation state (`0x79c1e0`, verified in
-    /// wow-re's ledger). **Stored; the renderer does not yet honour it**, which is exactly why the
-    /// binding answers "shader unsupported" — see `region.rs`'s `SetDesaturated`.
+    /// wow-re's ledger). Rides the extract as [`QuadContent::Texture::desaturated`] and the
+    /// renderer greys the texel by it (decision 1327), so the binding answers "shader supported"
+    /// — see `region/paint.rs`'s `SetDesaturated`.
     pub(crate) desaturated: bool,
     /// `SetNonSpaceWrap` / `CanNonSpaceWrap` — FontString only (`0x79e9f0`/`0x79ead0`, wow-re's
     /// widget-method batch). **State only here.** The real client's gx flag `0x40` feeds a

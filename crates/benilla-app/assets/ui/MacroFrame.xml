@@ -233,15 +233,20 @@
             BenillaMacroFrameText_Resize()
         end
 
-        -- ref l.122-126. The engine calls nothing by this name; the spellbook's shift-click does
-        -- (SpellBookFrame.xml, ref SpellBookFrame.lua:272-280) — the "shift click a spell in your
-        -- spellbook with the macro UI open" line MACRO_HELP_TEXT_LINE5 advertises.
+        -- ref MacroFrame.lua:93-97. The engine calls nothing by this name; the spellbook's
+        -- SHIFT-click does (SpellBookFrame.xml, ref SpellBookFrame.lua:271-283) — the "Shift click
+        -- a spell in your spellbook with the macro UI open" line MACRO_HELP_TEXT_LINE5 advertises.
+        --
+        -- Three things here are the reference's, not oversights (B248 reported the first as a bug):
+        -- the line arrives WHOLE (`/cast <name>`, never the bare name — that insert is a later
+        -- client's `ChatEdit_InsertLink`), it is appended with NO separator, and the visibility
+        -- gate is the BODY BOX's, so a shift-click with the name/icon popup up writes nothing.
+        -- The dirty flag and the scroll refit are the box's own OnTextChanged, exactly as they are
+        -- for a typed character — this function is the ref's three lines and stays them.
         function BenillaMacroFrame_AddMacroLine(line)
             local box = getglobal("BenillaMacroFrameText")
             if box:IsVisible() then
                 box:SetText((box:GetText() or "") .. line)
-                getglobal("BenillaMacroFrame").textChanged = 1
-                BenillaMacroFrameText_Resize()
             end
         end
 

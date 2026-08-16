@@ -4,11 +4,11 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, inspect,
-    item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log, reputation,
-    session, skills, slider, social, spellbook, taxi, trade, tradeskill, trainer, weapon_enchant,
-    ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue,
-    SoundRequest, UnitState,
+    backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, guild,
+    inspect, item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log,
+    reputation, session, skills, slider, social, spellbook, taxi, trade, tradeskill, trainer,
+    weapon_enchant, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
+    RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -281,6 +281,19 @@ pub(crate) struct Model {
     /// Social intents (`AddFriend`/`RemoveFriend`/`SendWho`/…) queued since the app's last
     /// [`super::UiScript::take_social_requests`] drain — the outbound seam ([`social`]).
     pub(crate) social_requests: Vec<social::SocialRequest>,
+    /// The guild snapshot the app pushes (roster, ranks, MOTD, info text — decision 1257):
+    /// `GetNumGuildMembers`/`GetGuildRosterInfo`/`GuildControlGetRankFlags`/… read it
+    /// ([`guild`]). Already display-resolved and already sorted + filtered, because the sort
+    /// field and the show-offline toggle live app-side where the roster does.
+    pub(crate) guild: guild::GuildState,
+    /// The rank-control popup's staging buffer ([`guild::GuildRankEdit`]) — deliberately NOT part
+    /// of [`Self::guild`], because a snapshot push mid-edit would discard the user's unsaved
+    /// checkbox clicks. Flushed by `GuildControlSaveRank`.
+    pub(crate) guild_control: guild::GuildRankEdit,
+    /// Guild intents (`GuildInviteByName`/`GuildSetMOTD`/`GuildControlSaveRank`/…) queued since
+    /// the app's last [`super::UiScript::take_guild_requests`] drain — the outbound seam
+    /// ([`guild`]).
+    pub(crate) guild_requests: Vec<guild::GuildRequest>,
     /// Whisper targets `ChatFrame_SendTell` queued since the app's last
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
@@ -996,6 +1009,15 @@ pub(crate) struct Model {
     /// Empty only before that packet has landed — `""`, never nil, matching [`Self::realm_name`]
     /// beside it: a consumer concatenates this (`Necrosis.lua:1089`), so nil would be a raise.
     pub(crate) bind_location: String,
+    /// `ConfirmBinder()` calls queued since the app last drained them — each is one
+    /// `CMSG_BINDER_ACTIVATE`. A COUNT for [`Self::played_time_asks`]'s reason: the intent carries
+    /// no payload (the app holds the innkeeper's guid), so two calls are two sends.
+    pub(crate) binder_confirms: u32,
+    /// Is an innkeeper's bind question still live and in range — the answer `CheckBinderDist()`
+    /// gives, pushed by the app each frame ([`super::UiScript::set_binder_pending`]). The
+    /// CONFIRM_BINDER dialog polls it from OnUpdate and hides itself when it goes false, which is
+    /// how walking away from the innkeeper takes the question off screen (decision 1331).
+    pub(crate) binder_pending: bool,
     /// Frames per second, behind `GetFramerate()`. Pushed per tick by the app, which owns the
     /// clock this crate does not have.
     pub(crate) framerate: f64,
@@ -1103,6 +1125,9 @@ impl Model {
             party_requests: Vec::new(),
             social: social::SocialState::default(),
             social_requests: Vec::new(),
+            guild: guild::GuildState::default(),
+            guild_control: guild::GuildRankEdit::default(),
+            guild_requests: Vec::new(),
             tell_requests: Vec::new(),
             open_chat_requests: Vec::new(),
             default_language: None,
@@ -1266,6 +1291,8 @@ impl Model {
             played_time_asks: 0,
             realm_name: String::new(),
             bind_location: String::new(),
+            binder_confirms: 0,
+            binder_pending: false,
             framerate: 0.0,
             modifiers: (false, false, false),
             money: 0,

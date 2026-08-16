@@ -41,6 +41,7 @@ mod addon_message;
 mod aura;
 mod backdrop;
 mod bank;
+mod binder;
 mod binding_abi;
 mod button;
 mod channel;
@@ -68,6 +69,7 @@ mod follow;
 pub(crate) mod font;
 mod font_block;
 mod gossip;
+mod guild;
 mod inspect;
 mod item_stats;
 mod item_text;
@@ -144,6 +146,10 @@ pub use dressup::DressUpIntent;
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;
 pub use gossip::{GossipMenu, GossipOptionView, GossipQuestRow};
+pub use guild::{
+    GuildMemberInfo, GuildRankEdit, GuildRankInfo, GuildRequest, GuildState, LastOnline, UnitGuild,
+    MAX_RANKS, MIN_RANKS, RANK_RIGHT_BITS,
+};
 pub use inspect::InspectView;
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
@@ -496,6 +502,8 @@ impl UiScript {
         unit::install(&lua)?;
         party::install(&lua)?;
         social::install(&lua)?;
+        guild::install(&lua)?;
+        binder::install(&lua)?;
         duel::install(&lua)?;
         follow::install(&lua)?;
         session::install(&lua)?;

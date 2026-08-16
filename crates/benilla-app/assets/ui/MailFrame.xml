@@ -21,9 +21,12 @@
 
         RENDER APPROXIMATIONS (the only geometry-affecting deviations; every other measurement in the
         markup below is the reference's own):
-          · Unread/read row **desaturation**: the engine has no `SetDesaturation`, so the read icon +
-            slot ring grey via vertex color (0.5) — ref MailFrame.lua l.130-141's SetVertexColor legs
-            are exact, only the icon's desaturation is the vertex-grey stand-in.
+          · Unread/read row **desaturation**: the read icon + slot ring grey via vertex color (0.5)
+            — ref MailFrame.lua l.130-141's SetVertexColor legs are exact, only the icon's
+            desaturation is the vertex-grey stand-in. The engine HAS `SetDesaturation` since
+            decision 1327 (it did not when this was written); routing the read icon through it is a
+            known, unclaimed gap — it needs the ref's own l.130-141 legs read back first, so that
+            the restore side is the reference's and not an invention.
           · The **body scroll**: `OpenMail/SendMailScrollFrame` (296×257 at 21,-97) is transcribed as a
             plain Frame at that exact rect with the body FontString/EditBox INSIDE it (no live
             scrollbar); a very long letter clips. The stationery backdrop + scrollbar-art geometry are
@@ -172,8 +175,9 @@
                     subjectText:SetText(subject)
                     local senderText = getglobal("MailItem"..i.."Sender")
                     senderText:SetText(sender)
-                    -- Unread gold / read grey (ref l.130-141; the read icon's SetDesaturation is our
-                    -- vertex-grey stand-in — the engine has no desaturation).
+                    -- Unread gold / read grey (ref l.130-141; the read icon's SetDesaturation is
+                    -- still our vertex-grey stand-in — see this file's header for why 1327's real
+                    -- desaturation has not been wired in here yet).
                     if wasRead then
                         senderText:SetTextColor(0.75, 0.75, 0.75)
                         subjectText:SetTextColor(0.75, 0.75, 0.75)

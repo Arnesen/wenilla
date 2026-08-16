@@ -66,11 +66,24 @@ pub(crate) struct TrainerOpen {
     pub(crate) trainer_type: u32,
     /// The trainer's greeting line (`SMSG_TRAINER_LIST`'s trailing string).
     pub(crate) greeting: String,
-    /// A `SMSG_TRAINER_LIST` has landed and the feed has not yet handed it to the engine. Drives the
-    /// engine's **per-packet** filter/collapse reset ([`UiScript::reset_trainer_filter`]) — the
-    /// reference's builder rewrites both masks on every list packet, and only on a packet (decision
-    /// 1128). It is not the same edge as a snapshot change: those re-push the same list.
+    /// A `SMSG_TRAINER_LIST` that **begins a window session** has landed and the feed has not yet
+    /// handed it to the engine. Drives the engine's filter/collapse reset
+    /// ([`UiScript::reset_trainer_filter`]) — the reference's builder rewrites both masks on every
+    /// list packet (decision 1128). It is not the same edge as a snapshot change: those re-push the
+    /// same list.
+    ///
+    /// "Begins a session", not "a packet arrived", because the two are the same thing in the
+    /// reference and are **not** in benilla (B253/B256's arc): the reference gets a list packet only
+    /// when a trainer opens — it repaints a purchase from a client-side state re-derivation
+    /// (`0x4d7d40`, decision 1128 §4.2) — while we ask for a fresh list after every buy. Letting our
+    /// own refresh carry the reference's per-packet reset made the state filter (and the collapse
+    /// set) evaporate on learning a spell, which is not something the reference can do. See
+    /// [`Self::refresh_pending`].
     pub(crate) fresh_list: bool,
+    /// The post-buy re-list **we asked for** ([`crate::net::apply`]'s `trainer_buy_succeeded`) is in
+    /// flight: the answering packet repaints the open window rather than opening one, so it must not
+    /// reset the filter/collapse masks. Cleared by the packet it belongs to, and by any close.
+    pub(crate) refresh_pending: bool,
 }
 
 impl TrainerOpen {
@@ -82,11 +95,14 @@ impl TrainerOpen {
         services: Vec<TrainerSpell>,
         greeting: String,
     ) {
+        // A repaint of the trainer already on screen, asked for by our own post-buy re-request, is
+        // not a new window session — so it carries no mask reset (the field's own doc says why).
+        let refresh = self.trainer == Some(trainer) && std::mem::take(&mut self.refresh_pending);
         self.trainer = Some(trainer);
         self.trainer_type = trainer_type;
         self.services = services;
         self.greeting = greeting;
-        self.fresh_list = true;
+        self.fresh_list = !refresh;
     }
 
     /// Close the open window (a client-side close). Keeps nothing — a re-open re-lists.
@@ -96,6 +112,8 @@ impl TrainerOpen {
         self.trainer_type = 0;
         self.greeting.clear();
         self.fresh_list = false;
+        // An in-flight refresh dies with the window: the next list is a real open, and must reset.
+        self.refresh_pending = false;
     }
 
     /// Disconnect: drop the open window (mirrors the gossip/merchant session clears).

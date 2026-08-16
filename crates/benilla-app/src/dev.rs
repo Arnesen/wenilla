@@ -216,6 +216,19 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PROBE_BANK").is_ok() {
                 app.add_plugins(crate::capture::ProbeBankPlugin);
             }
+            // The innkeeper-bind live probe: `WOW_PROBE_BINDER=1` GM-hops to Innkeeper Keldamyr, asserts
+            // the bind row's icon reads "binder", selects it, and answers the server's confirm through the
+            // live VM's own `ConfirmBinder()` — decision 1331's end-to-end instrument, the evidence that
+            // closes B249 (see `capture::ProbeBinderPlugin`).
+            if std::env::var("WOW_PROBE_BINDER").is_ok() {
+                app.add_plugins(crate::capture::ProbeBinderPlugin);
+            }
+            // The world-book live probe: `WOW_PROBE_BOOK=1` teleports to the Old Town plaque and
+            // measures what having the item-text reader open costs per frame, closed vs open —
+            // B240's instrument (see `capture::ProbeBookPlugin`).
+            if std::env::var("WOW_PROBE_BOOK").is_ok() {
+                app.add_plugins(crate::capture::ProbeBookPlugin);
+            }
             // The cast-cancel live probe: `WOW_PROBE=castcancel` hearths and presses W mid-cast — the
             // local self-cancel's end-to-end timing instrument (see `capture::ProbeCastCancelPlugin`).
             if std::env::var("WOW_PROBE").as_deref() == Ok("castcancel") {

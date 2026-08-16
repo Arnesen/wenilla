@@ -1,6 +1,7 @@
 //! The engine spell/aura tooltip channel (decision 0274 P2, law per 0276): the verified line
 //! shapes — name|rank, ONE cost|range line, ONE casttime|cooldown line, the passive omission,
-//! the aura variant (white description + the SetPlayerBuff-only remaining line), and SetAction's
+//! the aura variant (white description + the SetPlayerBuff-only remaining line, itself gold —
+//! B62), and SetAction's
 //! pure delegation.
 
 use super::common::script;
@@ -253,6 +254,12 @@ fn player_buff_hover_is_the_aura_variant() {
     );
     s.run(
         r#"
+        -- The duration line's wording comes from the VM's GlobalStrings, which the app runs off
+        -- the player's own install at boot. This VM has no install, so the test supplies the pair
+        -- itself — deliberately NOT the shipped wording, because what is under test here is that
+        -- the engine reads the string table at all, not what the strings say.
+        SPELL_TIME_REMAINING_MIN    = "<%d m>"
+        SPELL_TIME_REMAINING_MIN_P1 = "<%d mm>"
         local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
         local tt = CreateFrame("GameTooltip", "TT")
         tt:SetOwner(a, "ANCHOR_RIGHT")
@@ -260,7 +267,8 @@ fn player_buff_hover_is_the_aura_variant() {
         tt:SetPlayerBuff(0)
         assert(tt:NumLines() == 3, "name + description + remaining, got " .. tt:NumLines())
         assert(TTTextLeft2:GetText() == "Intellect increased by 2.", "the AURA description column")
-        assert(TTTextLeft3:GetText() == "2 minutes remaining", "got " .. TTTextLeft3:GetText())
+        -- 90 s left ceils to 2 minutes, and 2 takes the _P1 twin.
+        assert(TTTextLeft3:GetText() == "<2 mm>", "got " .. TTTextLeft3:GetText())
     "#,
     )
     .unwrap();
@@ -280,6 +288,16 @@ fn player_buff_hover_is_the_aura_variant() {
             if t == "Arcane Intellect" && (c[1] - 210.0 / 255.0).abs() < 1e-6)
     });
     assert!(gold_name, "aura name is gold, not white");
+    // …and so is the DURATION-REMAINING line — the same `0xffffd200`, not the description's
+    // white. Report B62: measured on the reporter's own 1.12.1 reference shot
+    // (`media/1530672450247856148`), the "29 minutes remaining" glyphs are exactly
+    // `(255, 210, 0)`, the same pixels as that shot's title row, while its description rows are
+    // `(255, 255, 255)`. Ours drew the line white, which is the whole report.
+    let gold_remaining = quads.iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == "<2 mm>" && *c == [1.0, 210.0 / 255.0, 0.0, 1.0])
+    });
+    assert!(gold_remaining, "duration-remaining line is gold, not white");
     assert!(s.take_errors().is_empty());
 }
 
@@ -814,6 +832,109 @@ fn set_craft_spell_selects_the_builder_like_the_trainer_hover_does() {
     assert_eq!(
         texts[0], "Runed Copper Rod",
         "a CREATE_ITEM recipe hovers the ITEM, though its icon is the spell's: {texts:?}"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// Law §3-BUFF-DURATION's **gate**: `0x532b00` skips the duration block on `untilCancelled`
+/// (`532bda: 8b 46 0c` / `532bdf: 75 2d`) — never on "has this aura a duration yet". The three
+/// cases below are the ones that separate the two questions, and the middle two are what the old
+/// `duration > 0 && left > 0` gate got wrong.
+#[test]
+fn the_remaining_line_is_gated_on_until_cancelled_not_on_the_duration() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(
+        1459,
+        SpellTooltipView {
+            name: "Arcane Intellect".into(),
+            aura_description: "Intellect increased by 2.".into(),
+            ..Default::default()
+        },
+    );
+    s.tick(10.0);
+    s.run(
+        r#"
+        SPELL_TIME_REMAINING_MIN    = "<%d m>"
+        SPELL_TIME_REMAINING_MIN_P1 = "<%d mm>"
+        SPELL_TIME_REMAINING_SEC    = "<%d s>"
+        SPELL_TIME_REMAINING_SEC_P1 = "<%d ss>"
+        BENILLA_ANCHOR = CreateFrame("Button", "BF2")
+        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetSize(10, 10)
+        BENILLA_TIP = CreateFrame("GameTooltip", "TT2")
+    "#,
+    )
+    .unwrap();
+    let hover = r#"
+        BENILLA_TIP:SetOwner(BENILLA_ANCHOR, "ANCHOR_RIGHT")
+        BENILLA_TIP:SetPlayerBuff(0)
+        BENILLA_LINES = BENILLA_TIP:NumLines()
+        BENILLA_LAST = BENILLA_LINES == 3 and TT2TextLeft3:GetText() or ""
+    "#;
+    let mut show = |aura: AuraState| {
+        s.set_auras("player", Some(vec![aura]));
+        s.run(hover).unwrap();
+        (
+            s.eval::<i64>("return BENILLA_LINES").unwrap(),
+            s.eval::<String>("return BENILLA_LAST").unwrap(),
+        )
+    };
+    let base = AuraState {
+        spell_id: 1459,
+        name: Some("Arcane Intellect".into()),
+        helpful: true,
+        ..Default::default()
+    };
+
+    // 1 · Permanent — and carrying a duration anyway, so only the FLAG can be doing the work.
+    // Title + description, nothing else.
+    assert_eq!(
+        show(AuraState {
+            duration: 1800.0,
+            expiration_time: 100.0,
+            until_cancelled: true,
+            ..base.clone()
+        }),
+        (2, String::new()),
+        "untilCancelled suppresses the line even with a live duration on the record"
+    );
+
+    // 2 · Timed, but no duration packet has landed yet — the frame an aura appears. The old gate
+    // blanked this; the reference shows the line, counting from zero.
+    assert_eq!(
+        show(AuraState {
+            duration: 0.0,
+            expiration_time: 0.0,
+            until_cancelled: false,
+            ..base.clone()
+        }),
+        (3, "<0 ss>".to_string()),
+        "a timed aura's first frames still carry the line"
+    );
+
+    // 3 · Lapsed — the reading the reference's own truncating seconds arm produces, which the old
+    // gate hid entirely.
+    assert_eq!(
+        show(AuraState {
+            duration: 30.0,
+            expiration_time: 9.6, // 0.4 s in the past at now = 10
+            until_cancelled: false,
+            ..base.clone()
+        }),
+        (3, "<0 ss>".to_string()),
+        "a lapsed aura reads 0, it does not lose the line"
+    );
+
+    // Control: an ordinary live aura still counts, so none of the above is the line going missing
+    // for an unrelated reason.
+    assert_eq!(
+        show(AuraState {
+            duration: 1800.0,
+            expiration_time: 100.0,
+            until_cancelled: false,
+            ..base
+        }),
+        (3, "<2 mm>".to_string()),
     );
     assert!(s.take_errors().is_empty());
 }

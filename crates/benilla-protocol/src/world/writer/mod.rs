@@ -36,6 +36,7 @@
 //! | [`quest`] | the questgiver dialog walk + the two quest-log verbs |
 //! | [`gameobject`] | the one USE verb + the template ask |
 //! | [`group`] | party/raid: invite, kick, leader, loot method, icons, ready checks |
+//! | [`guild`] | the guild: the two cache asks, invitations, member verbs, rank administration |
 //! | [`trade`] | the player-trade dance |
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
@@ -54,6 +55,7 @@ mod action_bar;
 mod area_trigger;
 mod attack;
 mod bank;
+mod binder;
 mod channel;
 mod chat;
 mod death;
@@ -61,6 +63,7 @@ mod duel;
 mod gameobject;
 mod gossip;
 mod group;
+mod guild;
 mod items;
 mod lifecycle;
 mod loot;

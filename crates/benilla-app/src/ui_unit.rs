@@ -774,6 +774,10 @@ fn feed_units(
     reputations: Res<Reputations>,
     group: Res<crate::ui_party::GroupState>,
     mut chat: ResMut<ChatLog>,
+    // The guild-identity cache `GetGuildInfo(unit)` reads — `ResMut` because it is a LAZY cache
+    // (decision 1257): a lookup that misses is what sends the `CMSG_GUILD_QUERY`, exactly as a
+    // `NameCache::resolve` miss sends the name query above.
+    mut guild: ResMut<crate::ui_guild::GuildState>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -791,6 +795,11 @@ fn feed_units(
         s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
+        // `GetGuildInfo("player")` — the unit's own PUBLIC descriptor fields (191/192) joined
+        // against the app's guild-identity cache, which the miss also asks for (decision 1257).
+        // Filled here rather than in `snapshot` for the reason `faction_group` and `can_attack`
+        // are: it needs a resource, and `snapshot`'s other six call sites hold none.
+        s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
         s
     });
     // The GM-mode confound, made audible (decision 0657). A self player whose faction template
@@ -841,6 +850,9 @@ fn feed_units(
             &reputations,
             self_pair.map(|(s, _)| s),
         );
+        // `GetGuildInfo("target")` — see the player leg. PLAYER_GUILDID/RANK are PUBLIC, which is
+        // the whole reason the binding is per-unit rather than per-player.
+        s.guild = crate::ui_guild::unit_guild(&store.0, &mut guild, &commands);
         enrich_unit(
             &mut s,
             guid,

@@ -538,18 +538,27 @@
         (used for header rows, blanked per-row for services), the name, and the rank subtext beside it.
         NO item icon (the list rows carry none; the spell icon is the DETAIL pane's). <OnLoad> wires the
         child regions + the fold highlight onto `self` (the QuestLogFrame.xml row-template shape).
+
+        THE ROW IS A FLOW, NOT TWO COLUMNS (B253). The name carries **no width**, so it never wraps:
+        a FontString given an explicit width wraps at it, and a 16px row cannot grow — which is how
+        "Handstitched Leather Pants" came to draw two lines over the row beneath it. The reference's
+        own row (`ClassTrainerFrameTemplates.xml`, read off the player's chain, never transcribed)
+        makes the name the Button's `<ButtonText>` at width **0** and then SetPoints the subtext to
+        that text's RIGHT + 10 from Lua, per row — so a long name simply runs on and pushes its
+        "(Rank N)" along. We express the same law declaratively: no size on either string, the
+        subtext anchored to the name's right edge. The 160/188 fixed columns this replaces were
+        benilla's invention, and both halves of them were wrong — the cap wrapped, and the column
+        put the rank at a fixed x the reference never uses.
     -->
     <Button name="BenillaTrainerServiceTemplate" virtual="true" hidden="true">
         <Size><AbsDimension x="293" y="16"/></Size>
         <Layers>
             <Layer level="ARTWORK">
                 <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
-                    <Size><AbsDimension x="160" y="0"/></Size>
                     <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
                 </FontString>
                 <FontString name="$parentSubText" inherits="GameFontNormalSmall" justifyH="LEFT">
-                    <Size><AbsDimension x="100" y="0"/></Size>
-                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="188" y="0"/></Offset></Anchor></Anchors>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentName" relativePoint="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>
         </Layers>
@@ -644,21 +653,30 @@
                 </Texture>
             </Layer>
             <!-- The FIXED detail-pane FontStrings (ref DetailScrollChildFrame), flattened onto this
-                 window's own Layers (the flat-layout gap). Blanked/filled by Hide/ShowDetails. -->
+                 window's own Layers (the flat-layout gap). Blanked/filled by Hide/ShowDetails.
+
+                 THE WIDTHS ARE THE REFERENCE'S, not ours (B253). A FontString wraps at whatever
+                 width it is given, so an invented narrow one is a wrap bug waiting for a long name:
+                 the detail name at 150 broke "Handstitched Leather Pants" over two lines. The
+                 reference's detail child is 296 wide with its name/requirements at **244** and its
+                 description at **290**; our flattened anchors put the name at the same window x (68)
+                 the child's 46 resolves to, so the same numbers land in the same place — and, unlike
+                 the 290/300 they replace, they stay inside the pane instead of running past its
+                 right edge at 358/330. -->
             <Layer level="OVERLAY">
                 <FontString name="BenillaTrainerSkillName" inherits="GameFontNormal" justifyH="LEFT">
-                    <Size><AbsDimension x="150" y="0"/></Size>
+                    <Size><AbsDimension x="244" y="0"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="68" y="-293"/></Offset></Anchor></Anchors>
                 </FontString>
                 <FontString name="BenillaTrainerSkillRequirements" inherits="GameFontHighlightSmall" justifyH="LEFT">
-                    <Size><AbsDimension x="290" y="0"/></Size>
+                    <Size><AbsDimension x="244" y="0"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerSkillName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
                 </FontString>
                 <FontString name="BenillaTrainerCostLabel" inherits="GameFontNormalSmall" justifyH="LEFT">
                     <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="-340"/></Offset></Anchor></Anchors>
                 </FontString>
                 <FontString name="BenillaTrainerSkillDescription" inherits="GameFontHighlightSmall" justifyH="LEFT">
-                    <Size><AbsDimension x="300" y="0"/></Size>
+                    <Size><AbsDimension x="290" y="0"/></Size>
                     <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerCostLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
                 </FontString>
             </Layer>

@@ -8,6 +8,7 @@ use super::{
     ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
     CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
+    GuildCommandResult, GuildEventNotice, GuildInfo, GuildQueryResponse, GuildRoster,
     InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object,
     PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, QuestComplete, QuestDetails,
@@ -204,6 +205,19 @@ pub enum ServerPacket {
     BindPoint {
         position: Vector3d,
         map: u32,
+        area: u32,
+    },
+    /// `SMSG_BINDER_CONFIRM` — an innkeeper is *asking* whether to make this your home
+    /// (decision 1331). The body is the innkeeper's guid, which must come back in
+    /// `CMSG_BINDER_ACTIVATE` for anything to happen: this packet binds nothing on its own.
+    BinderConfirm {
+        binder: u64,
+    },
+    /// `SMSG_PLAYERBOUND` — the bind took: who bound us and the AreaTable id we are now bound in.
+    /// Arrives beside [`Self::BindPoint`], which carries the same area id plus the position; this
+    /// one exists for the "X is now your home" acknowledgement.
+    PlayerBound {
+        binder: u64,
         area: u32,
     },
     /// `SMSG_SET_PROFICIENCY` (at login + on train): the subclass bitmask the player can equip
@@ -984,6 +998,32 @@ pub enum ServerPacket {
     FriendStatus(FriendStatusUpdate),
     /// `SMSG_WHO` — the `/who` answer: up to 49 rows plus the true match total.
     WhoResults(WhoResults),
+    /// `SMSG_GUILD_QUERY_RESPONSE` — one guild's public identity: name, its ten rank names, tabard.
+    /// The guild twin of the name query: an ask-once cache fill keyed by guild id.
+    GuildQueryResponse(GuildQueryResponse),
+    /// `SMSG_GUILD_ROSTER` — the whole guild: MOTD, info text, every rank's rights, every member.
+    /// Always a complete snapshot (the server re-sends it for any change), never a delta.
+    GuildRoster(GuildRoster),
+    /// `SMSG_GUILD_EVENT` — one thing that happened in the guild, as an event id plus its
+    /// already-formatted string arguments.
+    GuildEvent(GuildEventNotice),
+    /// `SMSG_GUILD_COMMAND_RESULT` — the verdict on a guild verb we sent. The command tag beside
+    /// the code is load-bearing, not decorative (result `0x08` means two different things).
+    GuildCommandResult(GuildCommandResult),
+    /// `SMSG_GUILD_INVITE` — somebody asked us into their guild. Answered by `CMSG_GUILD_ACCEPT` /
+    /// `CMSG_GUILD_DECLINE`, neither of which echoes anything back, so the pending invite is
+    /// client-side state.
+    GuildInvite {
+        inviter: String,
+        guild: String,
+    },
+    /// `SMSG_GUILD_DECLINE` — the player we invited turned it down. Sent only to the inviter.
+    GuildDecline {
+        name: String,
+    },
+    /// `SMSG_GUILD_INFO` — the "founded on / N members / N accounts" summary; a separate ask from
+    /// the roster, with no overlapping fields.
+    GuildInfo(GuildInfo),
     /// A `SMSG_SPLINE_SET_*_SPEED` — a speed change on a unit we don't control (a creature, or a
     /// player mid-spline): `[packed guid][f32 speed]`, no counter, no ack (decision 0441 — how an
     /// observed unit's mounted speed reaches us).
@@ -1144,6 +1184,8 @@ impl ServerPacket {
             ServerPacket::TimeSpeed { .. } => "SMSG_LOGIN_SETTIMESPEED".into(),
             ServerPacket::QueryTimeResponse { .. } => "SMSG_QUERY_TIME_RESPONSE".into(),
             ServerPacket::BindPoint { .. } => "SMSG_BINDPOINTUPDATE".into(),
+            ServerPacket::BinderConfirm { .. } => "SMSG_BINDER_CONFIRM".into(),
+            ServerPacket::PlayerBound { .. } => "SMSG_PLAYERBOUND".into(),
             ServerPacket::SetProficiency { .. } => "SMSG_SET_PROFICIENCY".into(),
             ServerPacket::InitializeFactions { .. } => "SMSG_INITIALIZE_FACTIONS".into(),
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
@@ -1303,6 +1345,13 @@ impl ServerPacket {
             ServerPacket::IgnoreList { .. } => "SMSG_IGNORE_LIST".into(),
             ServerPacket::FriendStatus(..) => "SMSG_FRIEND_STATUS".into(),
             ServerPacket::WhoResults(..) => "SMSG_WHO".into(),
+            ServerPacket::GuildQueryResponse(..) => "SMSG_GUILD_QUERY_RESPONSE".into(),
+            ServerPacket::GuildRoster(..) => "SMSG_GUILD_ROSTER".into(),
+            ServerPacket::GuildEvent(..) => "SMSG_GUILD_EVENT".into(),
+            ServerPacket::GuildCommandResult(..) => "SMSG_GUILD_COMMAND_RESULT".into(),
+            ServerPacket::GuildInvite { .. } => "SMSG_GUILD_INVITE".into(),
+            ServerPacket::GuildDecline { .. } => "SMSG_GUILD_DECLINE".into(),
+            ServerPacket::GuildInfo(..) => "SMSG_GUILD_INFO".into(),
             ServerPacket::SplineSpeedChange { kind, .. } => {
                 format!("SMSG_SPLINE_SET_{kind:?}_SPEED")
             }

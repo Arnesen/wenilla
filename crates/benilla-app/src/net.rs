@@ -1033,6 +1033,12 @@ pub(crate) enum ClientCommand {
     /// else the one item. Success is durability rising + coinage falling via `UPDATE_OBJECT`
     /// (no dedicated answer packet).
     RepairItem { vendor: u64, item_guid: u64 },
+    /// Accept an innkeeper's bind offer (`CMSG_BINDER_ACTIVATE`, decision 1331): the
+    /// `CONFIRM_BINDER` dialog's Accept, carrying the guid `SMSG_BINDER_CONFIRM` asked with. This
+    /// is the ONLY packet in the flow that binds anything — selecting the gossip line just raises
+    /// the question. Answered by `SMSG_BINDPOINTUPDATE` + `SMSG_PLAYERBOUND` once the innkeeper's
+    /// Bind cast lands; declining sends nothing.
+    BinderActivate { binder: u64 },
     /// Open the bank (`CMSG_BANKER_ACTIVATE`, decision 0604): the direct opener a right-click on
     /// a pure banker (bit 8 the lowest service bit) uses — a gossip-flagged banker routes through
     /// the gossip menu instead, whose bank option makes the server volunteer the same answer.
@@ -1361,6 +1367,76 @@ pub(crate) enum ClientCommand {
     /// the unit popup's PvP row, both through the VM's intent queue. Nothing local changes; the
     /// answer is the descriptor's PvP bit (and flagging *off* waits out the server's 300 s timer).
     TogglePvp,
+    // ── The guild family (writer bodies in benilla-protocol `world/writer/guild.rs`) ──────────
+    //
+    //    Three things shape every caller of this band. **Members are addressed by NAME**, not by
+    //    guid as the friend list is. **Rank ids are 0-based with 0 = guild master**, and authority
+    //    falls as the id rises (promote = `rank - 1`). And **almost nothing is acked
+    //    individually**: the mutating verbs answer with a whole fresh `SMSG_GUILD_ROSTER` (plus an
+    //    `SMSG_GUILD_QUERY_RESPONSE` for the rank verbs), so the model updates when that snapshot
+    //    lands, never optimistically at the send; a refusal arrives separately as
+    //    `SMSG_GUILD_COMMAND_RESULT`.
+    //
+    //    Every one of these is sent by `crate::ui_guild` (decision 1257) except `GuildCreate`,
+    //    which keeps its `#[allow(dead_code)]`: *founding* a guild is the charter/petition flow,
+    //    deliberately out of the membership slice, and vmangos registers the opcode `STATUS_NEVER`
+    //    so nothing would answer it anyway.
+    /// Ask a guild's public identity by id (`CMSG_GUILD_QUERY`) — the ask-once cache fill behind
+    /// every "which guild is that?" (a roster row, a `/who` hit, a guild chat line).
+    GuildQuery { guild_id: u32 },
+    /// Found a guild by name (`CMSG_GUILD_CREATE`). vmangos registers the opcode `STATUS_NEVER` —
+    /// at 1.12 founding runs through the charter flow — so this draws no reply.
+    #[allow(dead_code)]
+    GuildCreate { name: String },
+    /// Invite a character into our guild (`CMSG_GUILD_INVITE`).
+    GuildInvite { name: String },
+    /// Accept the guild invitation we are holding (`CMSG_GUILD_ACCEPT`, empty body) — which one is
+    /// the server's pending state, not a field.
+    GuildAccept,
+    /// Turn it down (`CMSG_GUILD_DECLINE`, empty body); the inviter hears about it, we don't.
+    GuildDecline,
+    /// Ask our guild's founding date + member/account counts (`CMSG_GUILD_INFO`, empty body).
+    GuildInfoRequest,
+    /// Refresh the guild roster (`CMSG_GUILD_ROSTER`, empty body) — the guild pane's opener. The
+    /// server also pushes the roster unasked after every change, so this is never the only path.
+    GuildRosterRequest,
+    /// Promote a member one rank (`CMSG_GUILD_PROMOTE`) — towards guild master.
+    GuildPromote { name: String },
+    /// Demote a member one rank (`CMSG_GUILD_DEMOTE`).
+    GuildDemote { name: String },
+    /// Leave our guild (`CMSG_GUILD_LEAVE`, empty body). Refused while we are the guild master and
+    /// anyone else remains.
+    GuildLeave,
+    /// Kick a member by name (`CMSG_GUILD_REMOVE`).
+    GuildRemove { name: String },
+    /// Disband the guild (`CMSG_GUILD_DISBAND`, empty body) — guild master only, irreversible.
+    GuildDisband,
+    /// Hand the guild to another member (`CMSG_GUILD_LEADER`).
+    GuildLeader { name: String },
+    /// Set the message of the day (`CMSG_GUILD_MOTD`); `""` clears it.
+    GuildMotd { motd: String },
+    /// Rewrite one rank's name **and** rights together (`CMSG_GUILD_RANK`) — there is no partial
+    /// form, so a caller changing one must resend the other's current value. Rank 0's rights are
+    /// ignored and forced to "all"; an over-long name gets the session kicked, so cap it at
+    /// `messages::GUILD_RANK_MAX_LENGTH`.
+    GuildRank {
+        rank_id: u32,
+        rights: u32,
+        name: String,
+    },
+    /// Append a rank at the bottom of the ladder (`CMSG_GUILD_ADD_RANK`).
+    GuildAddRank { name: String },
+    /// Delete the **lowest** rank (`CMSG_GUILD_DEL_RANK`, empty body) — there is no rank id on the
+    /// wire, it is always the last one.
+    GuildDelRank,
+    /// Set a member's public note (`CMSG_GUILD_SET_PUBLIC_NOTE`).
+    GuildSetPublicNote { name: String, note: String },
+    /// Set a member's officer note (`CMSG_GUILD_SET_OFFICER_NOTE`). Editing and *viewing* officer
+    /// notes are separate rights — an all-empty officer column may mean we cannot see them.
+    GuildSetOfficerNote { name: String, note: String },
+    /// Set the guild information text (`CMSG_GUILD_INFO_TEXT`) — the long free-text pane, which
+    /// rides back as the roster's `info` field.
+    GuildInfoText { text: String },
     // ── The taxi/flight-master family (decision 0484 phase 1; writer bodies in
     //    benilla-protocol `messages::taxi`) ──────────────────────────────────────────────────
     /// Ask a nearby flight master's known status (`CMSG_TAXINODE_STATUS_QUERY`): the guid of the

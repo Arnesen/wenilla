@@ -50,9 +50,6 @@
             slot glow while its form is up), but the trade-skill-window arm of the engine
             predicate is unmodeled (the same named gap `ui_action`'s IsCurrentAction carries),
             so those four events would re-read an arm that never fires — omitted with it.
-          - The MacroFrame branch (`SpellButton_OnClick`'s shift-click "already in a macro editor"
-            fork): no macro window exists — shift-click always falls to the ref's own "else"
-            (`PickupSpell`), exactly what the ref itself does whenever no MacroFrame is visible.
           - The `this.updateTooltip`/`OnUpdate` re-poll loop around the hover: `GameTooltip:SetSpell`
             itself is LIVE (the engine channel, decision 0276's line law; it reads whichever book
             `bookType` names — 1050), but its per-frame re-poll is dropped, since nothing in the
@@ -361,9 +358,15 @@
             elseif IsShiftKeyDown() then
                 -- ref SpellButton_OnClick l.271-283 (LIVE since decision 0983): with the macro
                 -- editor open a shift-click APPENDS `/cast <name>[(<rank>)]` to the body instead of
-                -- picking the spell up — the behaviour MACRO_HELP_TEXT_LINE5 advertises ("shift
+                -- picking the spell up — the behaviour MACRO_HELP_TEXT_LINE5 advertises ("Shift
                 -- click a spell in your spellbook with the macro UI open to add it to your macro").
                 -- The `/cast` alias comes from the shipped strings (SLASH_CAST1), never typed here.
+                --
+                -- DO NOT "FIX" THIS TO INSERT THE BARE NAME (B248, decision 1328). The whole
+                -- `/cast` line is what 1.12.1 writes; the bare-name-at-the-cursor insert people
+                -- remember is a LATER client's (`ChatEdit_InsertLink`). And the gate is SHIFT,
+                -- not the mouse button: a plain right click on this page casts, same as a left one
+                -- — pinned both ways in `ui_script::spellbook_tests`.
                 local macroFrame = getglobal("BenillaMacroFrame")
                 if macroFrame and macroFrame:IsVisible() then
                     local spellName, subSpellName = GetSpellName(id, SpellBookFrame.bookType)

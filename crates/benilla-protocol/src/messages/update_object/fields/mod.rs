@@ -442,6 +442,19 @@ const FIELD_PLAYER_FLAGS: u16 = 190;
 // three reads `UnitReaction 0x6061e0`'s duel leg makes (decision 0633).
 const FIELD_PLAYER_DUEL_ARBITER: u16 = 188;
 const FIELD_PLAYER_DUEL_TEAM: u16 = 196;
+// PLAYER_GUILDID = UNIT_END(188) + 0x3, PLAYER_GUILDRANK = UNIT_END + 0x4 — both INT and both
+// **PUBLIC** (VERIFIED vmangos `UpdateFields_1_12_1.h:120-121`), the same arithmetic that pins
+// PLAYER_FLAGS = 190 at +0x2 above. Independently VERIFIED in the binary off the very player-block
+// base the duel pair is read through: `GetGuildInfo 0x4c9330` takes the guild id at `[+0xe68]+0xc`
+// (`0x4c93a9`, whose `test ecx,ecx` IS the guildless→nil path) and the rank at `+0x10` (`0x4c93e4`,
+// `shl edx,0x6` — the 0x40-byte rank-name slot in the cached guild record). 0xc/4 + 188 = 191 and
+// 0x10/4 + 188 = 192, with `+0x8` = PLAYER_FLAGS(190) as the third point on the same line.
+//
+// PUBLIC is the load-bearing half: these stream for *every visible player*, not just for us, which
+// is what makes `GetGuildInfo(unit)` answerable for an arbitrary unit — and why the guild query
+// response carries a fixed ten rank names to decode another player's rank against (decision 1257).
+const FIELD_PLAYER_GUILDID: u16 = 191;
+const FIELD_PLAYER_GUILDRANK: u16 = 192;
 // PLAYER_FIELD_COMBO_TARGET = UNIT_END(188) + 0x20E (GUID, PRIVATE) — VERIFIED vmangos
 // `UpdateFields_1_12_1.h:251`, and independently by the binary: `GetComboPoints 0x51a190` reads the
 // pair at `[player+0xe68]+0x838/+0x83c`, and 0x838/4 + 188 = 714 (decision 0875). The same player-

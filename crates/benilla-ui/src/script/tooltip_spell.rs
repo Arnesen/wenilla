@@ -13,7 +13,8 @@
 //! - reagents — inline red per missing item (the one builder that uses the `|cffff2020` escape;
 //!   joins when a reagent feed exists);
 //! - description — gold, wrapped. An AURA's description is **white** (byte-verified difference),
-//!   and only `SetPlayerBuff` appends the duration-remaining line.
+//!   and only `SetPlayerBuff` appends the duration-remaining line, which is **gold** again
+//!   (`0xffffd200`, the title's gold — B62; see [`render_spell`]'s tail).
 //!
 //! The engine renders VIEWS ([`SpellTooltipView`]) the app resolves at push time — the $-token
 //! substitution (values off Spell.dbc + the player's level), cast-time/duration/range text —
@@ -266,8 +267,14 @@ fn render_spell(
             )?;
         }
     }
+    // The duration-remaining line (`SetPlayerBuff` only) is GOLD `0xffffd200` — the same gold as
+    // the aura title it sits under, NOT the description's white. Measured off the reporter's own
+    // 1.12.1 reference shot for B62 (`media/1530672450247856148`, Ice Armor in Wetlands): the
+    // "29 minutes remaining" glyphs read exactly `(255, 210, 0)`, pixel-identical to that shot's
+    // "Ice Armor" / "Magic" title row, while its description rows read `(255, 255, 255)`. Ours
+    // rendered it white (`media/1530672304877469696`, `(255, 255, 255)`) — that white *is* B62.
     if let Some(rem) = remaining {
-        append_line(lua, this, (rem, WHITE), None, false)?;
+        append_line(lua, this, (rem, GOLD), None, false)?;
     }
     Ok(())
 }
@@ -412,9 +419,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
         })?,
     )?;
     // GameTooltip:SetPlayerBuff(buffIndex) — the buff-bar hover: the aura variant (white
-    // AuraDescription) + the duration-remaining line only this entry point appends
-    // (byte-verified; remaining computed live off the aura's GetTime expiry — the TEXT shape is
-    // INTERIM until a live capture pins SPELL_TIME_REMAINING's exact number formatting).
+    // AuraDescription) + the duration-remaining line only this entry point appends (byte-verified;
+    // remaining computed live off the aura's GetTime expiry). The line's TEXT is no longer interim:
+    // §3-BUFF-TIME-FORMAT pinned `0x52fa50`'s four-arm ladder and its rounding, and
+    // `tooltip::duration_text` is it.
     //
     // **The argument is a 1.12 CACHE POSITION, not a filtered ordinal** — the same 0-based handle
     // `GetPlayerBuff` returns and every `GetPlayerBuff*` sibling consumes (see
@@ -440,22 +448,31 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let g = lua.globals();
                 g.get::<f64>("__benilla_now").unwrap_or(0.0)
             };
-            let (spell_id, name, remaining) = {
+            let (spell_id, name, remaining_ms) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let hit = usize::try_from(index)
                     .ok()
                     .and_then(|pos| model.auras.get("player").and_then(|a| a.get(pos)));
                 match hit {
                     Some(a) => {
-                        let left = a.expiration_time - now;
-                        let rem = (a.duration > 0.0 && left > 0.0).then(|| {
-                            if left >= 60.0 {
-                                format!("{} minutes remaining", (left / 60.0).ceil() as i64)
-                            } else {
-                                format!("{} seconds remaining", left.ceil() as i64)
-                            }
+                        // The gate is `untilCancelled`, NOT "does this aura have a duration yet".
+                        // §3-BUFF-DURATION: `0x532b00` skips the whole duration block when the
+                        // cache record's `+0xc` is set (`532bda: 8b 46 0c` / `532bdf: 75 2d`), so
+                        // a permanent aura shows title + description and nothing more. That flag
+                        // is DBC-derived, so it is already right on the frame an aura appears —
+                        // before any `SMSG_UPDATE_AURA_DURATION` lands — which is exactly why
+                        // `AuraState::until_cancelled`'s own doc calls it a different question
+                        // from `expiration_time == 0.0`. Gating on the duration (what this did)
+                        // blanked the line for a timed aura's first frames, and hid the
+                        // reference's own "0 seconds remaining" once one lapsed.
+                        let ms = (!a.until_cancelled).then(|| {
+                            // The reference counts integer milliseconds off GetTickCount; ours is
+                            // a float second clock, so this is the nearest millisecond to it.
+                            ((a.expiration_time - now) * 1000.0)
+                                .round()
+                                .clamp(0.0, f64::from(u32::MAX)) as u32
                         });
-                        (a.spell_id, a.name.clone(), rem)
+                        (a.spell_id, a.name.clone(), ms)
                     }
                     // The miss clears rather than leaving the previous plate up — the same shape
                     // SetUnitBuff uses, and the one Loatheb's scan depends on: it breaks its loop
@@ -463,6 +480,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     None => (0, None, None),
                 }
             };
+            // The text is `0x52fa50`'s, over the player's own GlobalStrings — never a string of
+            // ours. Off an install the table is absent and the line simply does not render.
+            let remaining = remaining_ms.and_then(|ms| {
+                let g = lua.globals();
+                super::tooltip::duration_text(ms, "SPELL_TIME_REMAINING", true, &|key| {
+                    g.get::<String>(key).ok()
+                })
+            });
             set_spell_by_id(
                 lua,
                 &this,

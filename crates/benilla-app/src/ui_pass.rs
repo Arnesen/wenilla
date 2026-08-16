@@ -156,6 +156,12 @@ pub(crate) struct UiQuad {
     /// real client's round bake stencil). Splits the run like `additive`; in practice a portrait's
     /// render-target texture is unique to it, so no batching is actually lost.
     pub circular: bool,
+    /// Draw the sampled texel as its **luminance** — `Texture:SetDesaturated(1)`, the greyed-out
+    /// icon every disabled affordance in the reference wears (decision 1327). Folded in the
+    /// client's GAMMA byte space and applied BEFORE the vertex-colour multiply, so the reference's
+    /// own `SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)` lands as greyscale *and* dim.
+    /// Splits the run like `additive`/`circular`.
+    pub desaturated: bool,
     /// CPU-clip stand-in for a real scissor rect (see the module doc). `None` = unclipped.
     pub clip: Option<Rect>,
     /// Rotate the quad's corners by this many radians **clockwise on screen** about the rect's
@@ -200,6 +206,7 @@ impl Default for UiQuad {
             color: [1.0, 1.0, 1.0, 1.0],
             additive: false,
             circular: false,
+            desaturated: false,
             clip: None,
             rotation: 0.0,
             mask: None,
@@ -277,6 +284,9 @@ pub(crate) struct UiQuadMaterial {
     /// Mask to the inscribed circle (live unit portraits) — see [`UiQuad::circular`].
     #[uniform(3)]
     circular: u32,
+    /// Fold the texel to luminance — see [`UiQuad::desaturated`].
+    #[uniform(7)]
+    desaturate: u32,
     /// The screen-anchored mask span in **physical framebuffer px** (`min.xy, max.xy` — the
     /// fragment shader compares `@builtin(position)`, which is physical): [`UiQuadMask::rect`]
     /// scaled by the window's scale factor at mesh build. `z <= x` (degenerate) disables masking.
@@ -485,6 +495,7 @@ struct Run {
     texture: Handle<Image>,
     additive: bool,
     circular: bool,
+    desaturated: bool,
     mask: Option<UiQuadMask>,
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -497,12 +508,14 @@ impl Run {
         texture: Handle<Image>,
         additive: bool,
         circular: bool,
+        desaturated: bool,
         mask: Option<UiQuadMask>,
     ) -> Self {
         Self {
             texture,
             additive,
             circular,
+            desaturated,
             mask,
             positions: Vec::new(),
             uvs: Vec::new(),
@@ -582,7 +595,14 @@ struct BatchPools {
 
 /// A material's full identity: texture, blend/shape flags, mask texture + mask rect (as bits, so
 /// NaN/-0.0 can't split cache entries byte-equal materials would share).
-type MatKey = (AssetId<Image>, bool, bool, Option<AssetId<Image>>, [u32; 4]);
+type MatKey = (
+    AssetId<Image>,
+    bool,
+    bool,
+    bool,
+    Option<AssetId<Image>>,
+    [u32; 4],
+);
 
 /// Retire every pooled batch entity (blank frame / no drawable content). Mesh handles and the
 /// material cache stay — assets referenced only by the pool cost nothing to keep and come back
@@ -711,10 +731,17 @@ fn rebuild_ui_mesh(
             r.texture == texture
                 && r.additive == q.additive
                 && r.circular == q.circular
+                && r.desaturated == q.desaturated
                 && r.mask == q.mask
         });
         if !same_run {
-            runs.push(Run::new(texture, q.additive, q.circular, q.mask.clone()));
+            runs.push(Run::new(
+                texture,
+                q.additive,
+                q.circular,
+                q.desaturated,
+                q.mask.clone(),
+            ));
         }
         let run = runs.last_mut().unwrap();
         match (q.corners, plain) {
@@ -799,6 +826,7 @@ fn rebuild_ui_mesh(
             run.texture.id(),
             run.additive,
             run.circular,
+            run.desaturated,
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
         );
@@ -810,6 +838,7 @@ fn rebuild_ui_mesh(
                     additive: u32::from(run.additive),
                     texture: Some(run.texture),
                     circular: u32::from(run.circular),
+                    desaturate: u32::from(run.desaturated),
                     mask_rect,
                     mask,
                 })
@@ -993,6 +1022,47 @@ mod tests {
             batches(&mut app),
             1,
             "the UI comes back on the same content"
+        );
+    }
+
+    /// **The desaturation flag reaches the MATERIAL, and splits the run** (decision 1327).
+    ///
+    /// Everything upstream of here can be right — the Lua sets it, extract carries it, the quad
+    /// holds it — and the screen still not change, because the greyscale lives in a shader uniform
+    /// and a uniform only exists per material. Two quads that differ ONLY in `desaturated` must
+    /// therefore batch apart; if they merged, whichever of the two came first would decide the look
+    /// of both, and the visible symptom would be a talent tree that greys in blocks.
+    #[test]
+    fn desaturation_splits_the_run_and_lands_on_the_material() {
+        let mut app = rebuild_app();
+        // Same texture (the shared white), same blend, adjacent in z — everything that batches
+        // agrees, so `desaturated` is the only thing that can split them.
+        let mut quads = app.world_mut().resource_mut::<UiQuads>();
+        quads.quads.push(UiQuad {
+            rect: Rect::new(64.0, 0.0, 128.0, 64.0),
+            z_key: 1,
+            desaturated: true,
+            ..default()
+        });
+        quads.dirty = true;
+        app.update();
+        assert_eq!(
+            batches(&mut app),
+            2,
+            "a desaturated quad cannot share a material with a full-colour one"
+        );
+
+        let mut flags: Vec<u32> = app
+            .world_mut()
+            .resource::<Assets<UiQuadMaterial>>()
+            .iter()
+            .map(|(_, m)| m.desaturate)
+            .collect();
+        flags.sort_unstable();
+        assert_eq!(
+            flags,
+            vec![0, 1],
+            "one material greys and one does not — the uniform the shader branches on"
         );
     }
 

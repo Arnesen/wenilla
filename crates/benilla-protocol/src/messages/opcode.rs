@@ -666,9 +666,20 @@ pub const CMSG_TRAINER_BUY_SPELL: u16 = 0x01B2; // 434
 pub const SMSG_TRAINER_BUY_SUCCEEDED: u16 = 0x01B3; // 435
 pub const SMSG_TRAINER_BUY_FAILED: u16 = 0x01B4; // 436
 
-// The bank set (VERIFIED vmangos `Opcodes_1_12_1.h`: 439,440-441,642-643 — 0x01B5/0x01B6
-// `CMSG_BINDER_ACTIVATE`/`SMSG_PLAYERBINDERROR` sit between the trainer set and this one but are
-// out of scope, decision 0604). `CMSG_BANKER_ACTIVATE` right-clicks a pure banker;
+// The innkeeper bind set (VERIFIED vmangos `Opcodes_1_12_1.h`: 437, 344, 747; decision 1331).
+// Selecting an innkeeper's `GOSSIP_OPTION_INNKEEPER` line makes the server close the gossip menu
+// and send `SMSG_BINDER_CONFIRM` — a QUESTION, not a bind. Nothing is bound until the client
+// answers `CMSG_BINDER_ACTIVATE`, which is what the confirm dialog's Accept sends; the server then
+// has the innkeeper cast spell 3286 "Bind" on the player, whose `SPELL_EFFECT_BIND` sends
+// `SMSG_BINDPOINTUPDATE` (above) and `SMSG_PLAYERBOUND` (vmangos `SpellEffects.cpp` `EffectBind`).
+// Bodies in [`super::binder`]. `SMSG_PLAYERBINDERROR` (0x01B6) is the refusal and is not parsed:
+// vmangos never sends it on any path (`SendBindPoint` simply returns inside an instance).
+pub const CMSG_BINDER_ACTIVATE: u16 = 0x01B5; // 437
+pub const SMSG_PLAYERBOUND: u16 = 0x0158; // 344
+pub const SMSG_BINDER_CONFIRM: u16 = 0x02EB; // 747
+
+// The bank set (VERIFIED vmangos `Opcodes_1_12_1.h`: 439,440-441,642-643).
+// `CMSG_BANKER_ACTIVATE` right-clicks a pure banker;
 // `SMSG_SHOW_BANK` also arrives unprompted from the `GOSSIP_OPTION_BANKER` gossip option. Slot
 // purchase and deposit/withdraw bodies in [`super::bank`].
 pub const CMSG_BANKER_ACTIVATE: u16 = 0x01B7; // 439
@@ -779,6 +790,49 @@ pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
 pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
 pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108
 pub const CMSG_DEL_IGNORE: u16 = 0x006D; // 109
+
+// The guild family — the query/roster caches, invitations, the member verbs, rank administration
+// and the event broadcast (VERIFIED vmangos `Opcodes_1_12_1.h:87-88`, `:132-151`, `:562-566`,
+// `:765` + `Server/Packets/Guild.{h,cpp}`, `Guild/Guild.{h,cpp}`, `Handlers/GuildHandler.cpp`; the
+// client side of `SMSG_GUILD_EVENT` is wow-re's RF-0077,
+// `system/object-layer/scratch/rf77-smsg-chat-wire-order.md`, which pins handler `0x5e7180` to
+// this 0x92 and reads its guild-init registration/teardown block). Bodies in [`super::guild`].
+//
+// The numbers are two contiguous runs plus two strays: the query pair sits with the other ask-once
+// caches at 0x54/0x55, the core family runs 0x81-0x93 immediately after the group family, rank
+// administration was appended at 0x231-0x235, and the guild info text at 0x2FC. The
+// charter/petition/tabard opcodes that *found* a guild are a separate slice and are not here.
+pub const CMSG_GUILD_QUERY: u16 = 0x0054; // 84
+pub const SMSG_GUILD_QUERY_RESPONSE: u16 = 0x0055; // 85
+/// vmangos registers this `STATUS_NEVER` (`Opcodes.cpp:210`): at 1.12 a guild is founded through
+/// the charter/petition flow, not by this packet. Modelled for completeness; no reply comes back.
+pub const CMSG_GUILD_CREATE: u16 = 0x0081; // 129
+pub const CMSG_GUILD_INVITE: u16 = 0x0082; // 130
+pub const SMSG_GUILD_INVITE: u16 = 0x0083; // 131
+pub const CMSG_GUILD_ACCEPT: u16 = 0x0084; // 132
+pub const CMSG_GUILD_DECLINE: u16 = 0x0085; // 133
+pub const SMSG_GUILD_DECLINE: u16 = 0x0086; // 134
+pub const CMSG_GUILD_INFO: u16 = 0x0087; // 135
+pub const SMSG_GUILD_INFO: u16 = 0x0088; // 136
+pub const CMSG_GUILD_ROSTER: u16 = 0x0089; // 137
+/// The widest packet in the game — the sender truncates its member list to `0x8000 - 4` bytes —
+/// and the one conditional-field trap in the family: see [`super::guild::read_guild_roster`].
+pub const SMSG_GUILD_ROSTER: u16 = 0x008A; // 138
+pub const CMSG_GUILD_PROMOTE: u16 = 0x008B; // 139
+pub const CMSG_GUILD_DEMOTE: u16 = 0x008C; // 140
+pub const CMSG_GUILD_LEAVE: u16 = 0x008D; // 141
+pub const CMSG_GUILD_REMOVE: u16 = 0x008E; // 142
+pub const CMSG_GUILD_DISBAND: u16 = 0x008F; // 143
+pub const CMSG_GUILD_LEADER: u16 = 0x0090; // 144
+pub const CMSG_GUILD_MOTD: u16 = 0x0091; // 145
+pub const SMSG_GUILD_EVENT: u16 = 0x0092; // 146
+pub const SMSG_GUILD_COMMAND_RESULT: u16 = 0x0093; // 147
+pub const CMSG_GUILD_RANK: u16 = 0x0231; // 561
+pub const CMSG_GUILD_ADD_RANK: u16 = 0x0232; // 562
+pub const CMSG_GUILD_DEL_RANK: u16 = 0x0233; // 563
+pub const CMSG_GUILD_SET_PUBLIC_NOTE: u16 = 0x0234; // 564
+pub const CMSG_GUILD_SET_OFFICER_NOTE: u16 = 0x0235; // 565
+pub const CMSG_GUILD_INFO_TEXT: u16 = 0x02FC; // 764
 
 // The group/party family — invite/accept/decline/kick/leader/disband, the loot-method setting, the
 // roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for the party/raid

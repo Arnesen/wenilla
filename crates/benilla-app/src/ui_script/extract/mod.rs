@@ -29,6 +29,65 @@ fn ui_cost_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("WOW_UI_COST").as_deref() == Ok("1"))
 }
 
+/// `WOW_UI_GATE=1` — the extract gate's miss reporter ([`report_gate_miss`]). Off by default and
+/// read once, the `[ui-cost]` meter's posture.
+fn gate_log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_UI_GATE").as_deref() == Ok("1"))
+}
+
+/// One line naming why the extract gate did not skip this frame — the input that differed, and for
+/// the render list the first entry that moved. A settled UI is what makes the paint pass free; when
+/// it is never settled, this says what is moving.
+fn report_gate_miss(
+    script: &UiScript,
+    now: &[benilla_ui::script::ExtractedQuad],
+    prev: &[benilla_ui::script::ExtractedQuad],
+    dims_eq: bool,
+    text_ui_eq: bool,
+    portraits_eq: bool,
+) {
+    if !dims_eq {
+        eprintln!("[ui-gate] miss: window/scale changed");
+        return;
+    }
+    if !text_ui_eq {
+        eprintln!("[ui-gate] miss: focused editbox text-UI changed");
+        return;
+    }
+    if !portraits_eq {
+        eprintln!("[ui-gate] miss: portrait sources changed");
+        return;
+    }
+    if now.len() != prev.len() {
+        eprintln!(
+            "[ui-gate] miss: render list {} -> {} entries",
+            prev.len(),
+            now.len()
+        );
+        return;
+    }
+    match now.iter().zip(prev).position(|(a, b)| a != b) {
+        Some(i) => {
+            let (a, b) = (&now[i], &prev[i]);
+            let (was, now_s) = (format!("{b:?}"), format!("{a:?}"));
+            let owner = match a.target {
+                benilla_ui::order::ZTarget::Frame(fh) => script.frame_name(fh),
+                benilla_ui::order::ZTarget::Region(_) => None,
+            };
+            eprintln!(
+                "[ui-gate] miss: entry {i}/{} target={:?} name={owner:?}\n           was {}\n           now {}",
+                now.len(),
+                a.target,
+                &was[..was.len().min(280)],
+                &now_s[..now_s.len().min(280)],
+            );
+        }
+        // Nothing in this pass's own inputs moved — the miss came from the capture-mode arm.
+        None => eprintln!("[ui-gate] miss: capture mode (the gate never skips under a capture)"),
+    }
+}
+
 /// Last frame's extract-gate inputs (decision 0740), held together as one `Local` — the gate
 /// compares all four or none, and a Bevy system has a hard param budget this was eating.
 #[derive(Default)]
@@ -375,6 +434,19 @@ pub(super) fn drive_script(
         }
         return;
     }
+    // `WOW_UI_GATE=1` — why the gate MISSED. A skip is worth the whole conversion, so the
+    // question "what moved?" is where a per-frame cost always ends, and a `Vec` inequality does
+    // not answer it. Off by default, like the `[ui-cost]` meter beside it.
+    if gate_log_enabled() {
+        report_gate_miss(
+            &script,
+            &extracted,
+            &prev.extracted,
+            prev.dims == Some(dims),
+            text_ui == prev.text_ui,
+            booths.images.0 == prev.portraits,
+        );
+    }
     prev.dims = Some(dims);
     prev.text_ui = text_ui.clone();
     prev.portraits = booths.images.0.clone();
@@ -436,6 +508,7 @@ pub(super) fn drive_script(
                 circular,
                 portrait_unit,
                 rotation,
+                desaturated,
             } => {
                 // A live unit portrait (`SetPortraitTexture(region, unit)`): sample this token's
                 // source ([`crate::portrait::PortraitImages`]) — the off-screen model bake, or the
@@ -555,6 +628,7 @@ pub(super) fn drive_script(
                     // The engine's SetRotation is counterclockwise-positive; the quad pass spins
                     // clockwise-on-screen (`UiQuad::rotation`) — negate to convert.
                     rotation: -rotation,
+                    desaturated,
                     ..default()
                 });
             }

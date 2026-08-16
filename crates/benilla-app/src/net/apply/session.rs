@@ -160,6 +160,7 @@ pub(super) fn disconnected(
     bank: &mut crate::ui_bank::BankOpen,
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
+    guild: &mut crate::ui_guild::GuildState,
     pending_transfer: &mut PendingTransfer,
     disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {
@@ -232,6 +233,13 @@ pub(super) fn disconnected(
     // server re-pushes both lists at the next login, and a stale ignore list would silence the
     // wrong guids after a reconnect renumbers nothing but re-streams everything.
     *social = crate::ui_social::SocialState::default();
+    // The guild session is login-scoped the same way (decision 1257) — and more strictly, because
+    // the next login may be a *different character*, whose guild id, rank, rights and roster share
+    // nothing with this one's. The identity cache goes too: it is keyed by guild id, so it would
+    // survive correctly, but the reference's own is backed by `guildcache.wdb` and re-primed
+    // lazily, and keeping a cache alive across a socket only to save one query is not worth the
+    // one wrong name a renamed guild would show.
+    *guild = crate::ui_guild::GuildState::default();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

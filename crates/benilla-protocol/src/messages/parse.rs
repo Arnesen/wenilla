@@ -11,10 +11,11 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
-    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, page_text, pet,
-    progression, quest, social, spellbook, spells, taxi, trade, trainer, update_object, vendor,
-    world_state, Character, CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
+    action_bar, area_trigger, attack, bank, binder, channel, chat, combat_log, death, duel,
+    gameobject, gossip, group, guild, items, loot, mail, mirror_timer, monster_move, movement,
+    opcode, page_text, pet, progression, quest, social, spellbook, spells, taxi, trade, trainer,
+    update_object, vendor, world_state, Character, CreatureQueryInfo, MoveMode, ServerPacket,
+    SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -284,6 +285,16 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 position,
                 map,
                 area,
+            }
+        }
+        opcode::SMSG_BINDER_CONFIRM => ServerPacket::BinderConfirm {
+            binder: binder::read_binder_confirm(&mut r)?,
+        },
+        opcode::SMSG_PLAYERBOUND => {
+            let bound = binder::read_player_bound(&mut r)?;
+            ServerPacket::PlayerBound {
+                binder: bound.binder,
+                area: bound.area,
             }
         }
         opcode::SMSG_SET_PROFICIENCY => {
@@ -972,6 +983,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::FriendStatus(social::read_friend_status(&mut r)?)
         }
         opcode::SMSG_WHO => ServerPacket::WhoResults(social::read_who(&mut r)?),
+        // The guild family (bodies in `guild`). The two big ones are caches — a query response
+        // fills the guild-id→identity cache, the roster replaces the whole membership — and the
+        // three small ones are notifications. `SMSG_GUILD_ROSTER`'s member loop carries the
+        // family's one conditional field; see `guild::read_guild_roster`.
+        opcode::SMSG_GUILD_QUERY_RESPONSE => {
+            ServerPacket::GuildQueryResponse(guild::read_guild_query_response(&mut r)?)
+        }
+        opcode::SMSG_GUILD_ROSTER => ServerPacket::GuildRoster(guild::read_guild_roster(&mut r)?),
+        opcode::SMSG_GUILD_EVENT => ServerPacket::GuildEvent(guild::read_guild_event(&mut r)?),
+        opcode::SMSG_GUILD_COMMAND_RESULT => {
+            ServerPacket::GuildCommandResult(guild::read_guild_command_result(&mut r)?)
+        }
+        opcode::SMSG_GUILD_INVITE => {
+            let (inviter, guild) = guild::read_guild_invite(&mut r)?;
+            ServerPacket::GuildInvite { inviter, guild }
+        }
+        opcode::SMSG_GUILD_DECLINE => ServerPacket::GuildDecline {
+            name: guild::read_guild_decline(&mut r)?,
+        },
+        opcode::SMSG_GUILD_INFO => ServerPacket::GuildInfo(guild::read_guild_info(&mut r)?),
         // The observer speed legs (decision 0441): a unit we don't control changed speed — a
         // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
         // family, which carries a fresh pose too). No ack on either.

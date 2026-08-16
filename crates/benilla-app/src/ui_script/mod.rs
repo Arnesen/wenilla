@@ -739,6 +739,9 @@ mod delete_item_tests;
 mod static_popup_tests;
 
 #[cfg(test)]
+mod binder_tests;
+
+#[cfg(test)]
 mod death_tests;
 
 #[cfg(test)]
@@ -753,6 +756,12 @@ mod framexml_diff;
 
 #[cfg(test)]
 mod friends_tests;
+
+/// The four guild windows — the social window's third tab and its three satellites (decision
+/// 1257). Its own module rather than more of `friends_tests` because it stands the whole guild
+/// engine API in for in Lua before the XML loads, which that file must not.
+#[cfg(test)]
+mod guild_tests;
 
 #[cfg(test)]
 mod quest_tests;

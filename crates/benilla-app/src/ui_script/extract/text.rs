@@ -155,6 +155,7 @@ pub(super) fn emit(
                 color: [hc[0], hc[1], hc[2], hc[3] * host.alpha],
                 additive: false,
                 circular: false,
+                desaturated: false,
                 clip: text_clip,
                 rotation: 0.0,
                 mask: None,
@@ -171,10 +172,11 @@ pub(super) fn emit(
     // gate inside is geometric and needs no fixed-vs-measured flag. Computed before the shadow
     // so the shadow pass draws the same display string (the client's shadow is a second draw of
     // the same truncated CGxString).
-    let ellipsized = if ebox.is_none() && !matches!(host.target, ZTarget::Frame(_)) {
-        crate::ui_text::ellipsize_to_fit(atlas, draw_text, draw_rect, spec)
-    } else {
-        None
+    let ellipsized = match host.target {
+        ZTarget::Region(region) if ebox.is_none() => {
+            crate::ui_text::ellipsize_to_fit(atlas, region, draw_text, draw_rect, spec)
+        }
+        _ => None,
     };
     if let Some(display) = ellipsized.as_deref() {
         draw_text = display;
@@ -339,6 +341,7 @@ pub(super) fn emit(
                 color: [1.0, 1.0, 1.0, host.alpha],
                 additive: false,
                 circular: false,
+                desaturated: false,
                 clip: text_clip,
                 rotation: 0.0,
                 mask: None,

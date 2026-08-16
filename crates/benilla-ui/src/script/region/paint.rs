@@ -1,7 +1,7 @@
 //! Region method-table cluster: **paint** — what a Texture shows and how it is tinted,
 //! blended, cropped and layered. Split out of `region.rs` at the 0716 file-size budget.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::script::object::{as_f32, draw_layer_from_str};
 use crate::script::{Model, TexCoords};
@@ -154,6 +154,25 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let data = model.region_data.entry(rh).or_default();
                 data.circular = false;
                 data.portrait_unit = None;
+                // **`SetTexture` CLEARS the desaturation** (wow-re `texture-desaturate-law.md` §2.3,
+                // VERIFIED): `+0x128` is a `CGxShader*`, and `CSimpleTexture::SetTexture`
+                // (`0x770200`) writes it from its 4th stack arg, for which the Lua binding
+                // (`0x79bb40`) pushes slot 0 — permanently NULL — on both of its legs. A
+                // re-implementation that keeps a desaturate boolean independent of the texture
+                // handle diverges on every `icon:SetDesaturated(1)` followed by `icon:SetTexture(t)`.
+                //
+                // Scoped exactly as the binary scopes it:
+                //  · the **same path** is inert — `0x770225` returns before ever reaching the write,
+                //    so a repaint that re-sets the icon it already shows keeps its grey;
+                //  · `nil`/`""` DO clear — the `test esi,esi` leg falls through to the write;
+                //  · the **colour form** does NOT — that is `0x770360`, which is not among the four
+                //    writers of the field.
+                let same_path = matches!((&arg, &data.texture),
+                    (Value::String(s), Some(cur)) if s.to_str().is_ok_and(|s| *s == **cur));
+                let colour_form = matches!(&arg, Value::Number(_) | Value::Integer(_));
+                if !same_path && !colour_form {
+                    data.desaturated = false;
+                }
                 // Both forms write the SAME `+0xcc` texture slot — the path form loads a file
                 // there (`0x770200`), the colour form generates an 8×8 solid into it
                 // (`0x770360`) — so each clears the other. NEITHER touches the vertex colour at
@@ -227,26 +246,52 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     //     elseif ( not r or not shaderSupported ) then r,g,b = 0.5,0.5,0.5 end
     //     icon:SetVertexColor(r, g, b)
     //
-    // We have no desaturation in the renderer, so we answer **nil — unsupported**, which is a real
-    // 1.12 machine's answer and not a lie. Claiming support would suppress that grey fallback and
-    // leave disabled icons drawn at full colour: strictly worse-looking than saying no. When a
-    // desaturating shader lands, flip the return and this comment with it.
+    // The renderer now greys the texel (decision 1327 — `ui_quad.wgsl`'s luminance fold), so we
+    // answer **1 — supported**, and the branch above takes its shader arm: the icon goes greyscale
+    // AND wears the caller's own dim tint. Until 1327 this answered nil, which is a real 1.12
+    // card's answer and was the honest one while nothing greyed — but it costs the *look*: a 0.65
+    // grey multiply on colourful art is a dimmer, still-colourful icon, which is precisely what
+    // B162 reported against the talent tree.
     //
     // Why it matters far past one verb: **98 of the 109 addons that draw and then raise on being
     // used, raise here** — `FuBar_Panel.lua:43`'s right-click reaches Dewdrop's `AddLine`
     // (`Dewdrop-2.0.lua:2172`), which calls `button.arrow:SetDesaturated(true)` unguarded. A
     // static scan costed this at 61 addons and it was declined; the use-probe costed it at 98 the
     // moment anyone right-clicks.
+    //
+    // **The argument's truth table is not `if flag then`** (wow-re `texture-desaturate-law.md` §1.1,
+    // VERIFIED — `0x6f1c10(L, 2, default=1)` dispatched through the jump table at `0x6f1ce8`). Two
+    // of its arms are the opposite of the obvious reading, and both are reachable:
+    //  · **no argument at all is ON**, not off — `LUA_TNONE` takes the `ja` default arm, so
+    //    `tex:SetDesaturated()` greys. This is why the flag arrives as a `MultiValue`: mlua hands a
+    //    missing `Value` parameter through as `Nil`, which is the one arm that means OFF.
+    //  · **a number truncating to 0 is OFF** (`0x6f3620`+`0x40a2b0`), so `SetDesaturated(0)` clears.
+    //  · a table/function/userdata is ON (same default arm as absent).
+    // The string arm (`0x6f1c51`, comparing against `0x871460`/`0x853758`) is NOT modelled — no
+    // corpus caller passes one, and the comparands were not read; a string takes the ON arm here.
     m.set(
         "SetDesaturated",
-        lua.create_function(|lua, (this, flag): (Table, Value)| {
-            let on = !matches!(flag, Value::Nil | Value::Boolean(false));
+        lua.create_function(|lua, args: MultiValue| {
+            let mut args = args.into_iter();
+            let this: Table = match args.next() {
+                Some(Value::Table(t)) => t,
+                _ => return Ok(Value::Nil),
+            };
+            let on = match args.next() {
+                None => true,
+                Some(Value::Nil) => false,
+                Some(Value::Boolean(b)) => b,
+                Some(Value::Integer(i)) => i != 0,
+                Some(Value::Number(n)) => n.trunc() != 0.0,
+                Some(_) => true,
+            };
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.region_data.entry(rh).or_default().desaturated = on;
-            // nil, not false: the reference's `shaderSupported` is a 1|nil C answer and callers
+            // 1, not true: the reference's `shaderSupported` is a 1|nil C answer (byte-verified —
+            // `0x6f3810 lua_pushnumber(L, 1.0)`, never `false`, never zero values) and callers
             // write `not shaderSupported`.
-            Ok(Value::Nil)
+            Ok(Value::Number(1.0))
         })?,
     )?;
 

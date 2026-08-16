@@ -159,14 +159,22 @@ pub(super) fn trainer_list(
 /// any next rank); the server never auto-resends on a buy (VERIFIED vmangos
 /// `HandleTrainerBuySpellOpcode`). Guard on the window still being open for this trainer so a
 /// late reply for a closed/switched window doesn't re-open it.
+///
+/// This re-request is **benilla's**, not the reference's — the reference repaints a purchase by
+/// re-deriving every service's state client-side (`0x4d7d40`, decision 1128 §4.2) and receives no
+/// packet at all. So the answering list is marked as a *refresh* ([`TrainerOpen::refresh_pending`]):
+/// it repaints the open window, and must not carry the reference's per-packet filter/collapse reset,
+/// which is what dropped the player's "Available only" choice the moment they learned a spell
+/// (B256).
 pub(super) fn trainer_buy_succeeded(
     trainer: u64,
     spell_id: u32,
-    trainer_open: &TrainerOpen,
+    trainer_open: &mut TrainerOpen,
     net_commands: &NetCommands,
 ) {
     debug!("net: trainer {trainer:#x} taught spell {spell_id} — re-listing");
     if trainer_open.trainer == Some(trainer) {
+        trainer_open.refresh_pending = true;
         let _ = net_commands.0.send(ClientCommand::TrainerList { trainer });
     }
 }

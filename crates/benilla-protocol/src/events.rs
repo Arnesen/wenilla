@@ -12,7 +12,8 @@
 use crate::messages::{
     ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
     EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
-    GroupLootInfo, GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
+    GroupLootInfo, GroupMemberEntry, GuildCommandResult, GuildEventNotice, GuildInfo,
+    GuildQueryResponse, GuildRoster, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
     LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
     MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
     QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems,
@@ -337,6 +338,13 @@ pub enum SessionEvent {
     /// The player's hearthstone bind point (`SMSG_BINDPOINTUPDATE`): the AreaTable id the
     /// `$z` token names ("Returns you to <area>.").
     BindPoint { area: u32 },
+    /// An innkeeper is asking whether to make this your home (`SMSG_BINDER_CONFIRM`) — the
+    /// question the `CONFIRM_BINDER` dialog puts on screen. `binder` is the innkeeper's guid, and
+    /// it must be echoed in `CMSG_BINDER_ACTIVATE` for the bind to happen at all (decision 1331).
+    BinderConfirm { binder: u64 },
+    /// The bind took (`SMSG_PLAYERBOUND`): `area` is the AreaTable id we are now bound in, the
+    /// same one [`Self::BindPoint`] carries in the packet beside it.
+    PlayerBound { binder: u64, area: u32 },
     /// The player's equip proficiencies for one item class (`SMSG_SET_PROFICIENCY`, at login +
     /// on train): the subclass bitmask the item tooltip's slot-line red compares against
     /// (the client's `0xc4d4a0[class]` store).
@@ -1036,6 +1044,32 @@ pub enum SessionEvent {
     FriendStatus(FriendStatusUpdate),
     /// A `/who` answer (`SMSG_WHO`) — at most 49 rows, plus the true match total.
     WhoResults(WhoResults),
+    /// One guild's public identity (`SMSG_GUILD_QUERY_RESPONSE`) — name, its ten rank names,
+    /// tabard. The guild twin of the name query: an ask-once cache fill keyed by guild id, so a
+    /// consumer holds these by [`GuildQueryResponse::guild_id`] and a roster row or a chat line
+    /// can name its guild late rather than never.
+    GuildQueryResponse(GuildQueryResponse),
+    /// The whole guild (`SMSG_GUILD_ROSTER`) — MOTD, info text, per-rank rights, every member.
+    /// Always a complete snapshot, never a delta, so it *replaces* whatever is held; the server
+    /// re-sends it for anything worth showing (a note edit, a rank-rights change, a promotion).
+    GuildRoster(GuildRoster),
+    /// One thing that happened in the guild (`SMSG_GUILD_EVENT`) — a
+    /// [`guild_event`](crate::messages::guild_event) id plus its already-formatted arguments. The
+    /// arguments are the display text; the optional guid rides only on the sign-on/off pair.
+    GuildEvent(GuildEventNotice),
+    /// The server's verdict on a guild verb we sent (`SMSG_GUILD_COMMAND_RESULT`). Carry the
+    /// command tag through to the display: it is what tells the two meanings of result `0x08`
+    /// apart (see [`guild_command_error`](crate::messages::guild_command_error)).
+    GuildCommandResult(GuildCommandResult),
+    /// Somebody asked us into their guild (`SMSG_GUILD_INVITE`) — the popup. Answered with
+    /// `CMSG_GUILD_ACCEPT`/`_DECLINE`, neither of which says *which* invitation it means, so the
+    /// pending invitation is the consumer's own state.
+    GuildInvite { inviter: String, guild: String },
+    /// The player we invited turned it down (`SMSG_GUILD_DECLINE`) — delivered to the inviter only.
+    GuildDecline { name: String },
+    /// The guild's "founded on / N members / N accounts" summary (`SMSG_GUILD_INFO`) — a separate
+    /// ask from the roster, sharing no fields with it.
+    GuildInfo(GuildInfo),
     /// The taxi map (`SMSG_SHOWTAXINODES`, decision 0484): `flightmaster` is the NPC the menu
     /// opened on, `nearest_node` the node it sits at, `known_mask` the full known-node bitmask
     /// ([`TaxiMask::is_known`]). The wire's window-framing constant carries no state and is

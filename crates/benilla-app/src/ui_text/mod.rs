@@ -48,6 +48,9 @@ mod markup;
 mod measurer;
 
 pub(crate) use atlas::{UiFontAtlas, UiTextPlugin};
+
+use benilla_ui::script::Outline;
+use benilla_ui::widget::RegionHandle;
 pub(crate) use measurer::{measure_request, AtlasMeasurer};
 
 /// The width law itself, for the differential test that pins it to the pre-table shaped sum
@@ -139,3 +142,293 @@ mod cap_tests {
 // cosmic-text's convention, not the client's, and read as "line height too large" against the
 // reference. Cosmic buffers get `size` as their `Metrics` line height too — every run shapes
 // single-line (`Wrap::None`), so that value never affects layout.
+
+/// The FontString **display string** — the ellipsis seam's answer, remembered per region.
+///
+/// The real client does not recompute this per frame, and the reason it can afford the back-off's
+/// shape is that it almost never runs (wow-re `system/ui/scratch/fontstring-ellipsis-cost.md`, §5
+/// trio + byte arbitration): `0x771ec0`'s result is built into the `CGxString` at `+0xf8` and
+/// rebuilt only when the rebuild guard `[fontstring+0x60] & 1` is cleared — by `SetFont`
+/// (`0x7715e0`), `SetTextHeight` (`0x771666`), `SetText` (`0x771ea4`), or a resolved-rect **size**
+/// change (`0x768d20`, which fires nothing when all four edges move less than `1e-5`). Nothing on
+/// the draw path can reach it at all: the note's dword scan of every PE section finds `0x771ec0`
+/// and `0x7724a0` in no vtable, table or pointer cell, so the complete caller set is their direct
+/// `call` sites — none of them per-frame. **A pure move, a same-text `SetText`, and any no-op
+/// setter cost zero.**
+///
+/// We had the opposite: the paint pass recomputed the seam every frame for every overflowing
+/// FontString, and the extract gate (decision 0740) is all-or-nothing over the whole render list,
+/// so one flashing frame (`PlayerFrameStatusGlow`, which never stops while you are resting) kept
+/// it open — measured live at the reported plaque, 0 of 240 frames skipped. That is what turned a
+/// one-time 5.6 ms into +5.4 ms *per frame* and halved the framerate (B240, decision 1332).
+///
+/// This is the same invalidation set, expressed as a comparison of the inputs rather than a dirty
+/// flag — which cannot go stale by construction, because the answer is a pure function of exactly
+/// what is compared. **Position is deliberately not compared** (the client's guard is a size
+/// change; a window dragged across the screen re-uses its string), and sizes compare at the
+/// client's own `1e-5`, so anchor-graph dust cannot evict an entry every frame.
+#[derive(Default)]
+pub(crate) struct EllipsisMemo {
+    entries: std::collections::HashMap<RegionHandle, Remembered>,
+}
+
+/// What a region's remembered answer depends on — every input [`layout::ellipsize_to_fit`] reads.
+struct Remembered {
+    text: String,
+    box_w: f32,
+    box_h: f32,
+    font: Option<String>,
+    height: Option<f32>,
+    outline: Outline,
+    /// The answer itself. `None` = "this text fits, draw it raw" — a real answer worth
+    /// remembering, and the common case for every FontString that is merely *near* its box.
+    display: Option<String>,
+}
+
+/// The client's own rect-change tolerance (`0x768d20`: a resolve whose four edges all move less
+/// than this fires no rebuild).
+const RECT_EPS: f32 = 1e-5;
+
+/// Entries past which the map is dropped wholesale. One entry per region that has ever passed the
+/// seam's geometric gate, so the live set is small (the overflow-capable FontStrings on screen);
+/// the cap only catches handle churn — a `/reload` builds a whole new frame tree, and the old
+/// regions' handles never come back.
+const MEMO_CAP: usize = 4096;
+
+impl EllipsisMemo {
+    /// The remembered display string for `region` under these exact inputs, or `None` if this
+    /// region has no entry or any input moved.
+    fn get(
+        &self,
+        region: RegionHandle,
+        text: &str,
+        box_w: f32,
+        box_h: f32,
+        font: &FontSpec,
+    ) -> Option<&Option<String>> {
+        let e = self.entries.get(&region)?;
+        (e.text == text
+            && (e.box_w - box_w).abs() < RECT_EPS
+            && (e.box_h - box_h).abs() < RECT_EPS
+            && e.font.as_deref() == font.path
+            && e.height == font.height
+            && e.outline == font.outline)
+            .then_some(&e.display)
+    }
+
+    /// Remember `display` as `region`'s answer under these inputs.
+    fn put(
+        &mut self,
+        region: RegionHandle,
+        text: &str,
+        box_w: f32,
+        box_h: f32,
+        font: &FontSpec,
+        display: Option<String>,
+    ) {
+        if self.entries.len() >= MEMO_CAP {
+            self.entries.clear();
+        }
+        self.entries.insert(
+            region,
+            Remembered {
+                text: text.to_string(),
+                box_w,
+                box_h,
+                font: font.path.map(str::to_string),
+                height: font.height,
+                outline: font.outline,
+                display,
+            },
+        );
+    }
+}
+
+/// [`EllipsisMemo`]'s invalidation set — the client's own (`fontstring-ellipsis-cost.md` §6:
+/// `SetFont`, `SetTextHeight`, `SetText`, and a resolved-rect SIZE change past `1e-5`), expressed
+/// as an input comparison. A memo that misses is merely slow; one that HITS when an input moved
+/// draws a stale string, so each input gets its own test.
+#[cfg(test)]
+mod ellipsis_memo_tests {
+    use super::*;
+    use benilla_ui::widget::RegionHandle;
+
+    fn spec(
+        path: Option<&'static str>,
+        height: Option<f32>,
+        outline: Outline,
+    ) -> FontSpec<'static> {
+        FontSpec {
+            path,
+            height,
+            outline,
+            paint_halo: true,
+            alpha_gradient: None,
+        }
+    }
+
+    fn base() -> FontSpec<'static> {
+        spec(Some("Fonts\\MORPHEUS.TTF"), Some(15.0), Outline::None)
+    }
+
+    /// Real `RegionHandle`s — the engine owns their construction, so the honest way to get some
+    /// is to build regions and read their targets off `extract()`. Returns them in draw order.
+    fn regions(n: usize) -> Vec<RegionHandle> {
+        use benilla_ui::order::ZTarget;
+        let mut script = benilla_ui::script::UiScript::new().expect("a VM");
+        script.set_screen_size(1024.0, 768.0);
+        script
+            .run(
+                r#"
+                local f = CreateFrame("Frame", "MemoHost")
+                f:SetPoint("TOPLEFT", 0, 0)
+                f:SetSize(100, 100)
+                for i = 1, 8 do
+                    local t = f:CreateTexture(nil, "ARTWORK")
+                    t:SetTexture(1, 0, 0)
+                    t:SetAllPoints()
+                end
+            "#,
+            )
+            .expect("the fixture loads");
+        script.resolve();
+        let out: Vec<RegionHandle> = script
+            .extract()
+            .into_iter()
+            .filter_map(|q| match q.target {
+                ZTarget::Region(r) => Some(r),
+                ZTarget::Frame(_) => None,
+            })
+            .collect();
+        assert!(out.len() >= n, "the fixture makes enough regions");
+        out.into_iter().take(n).collect()
+    }
+
+    /// A stored answer comes back under identical inputs — including `None`, which is a real
+    /// answer ("this fits, draw it raw") and the common case for text merely near its box.
+    #[test]
+    fn identical_inputs_hit() {
+        let mut m = EllipsisMemo::default();
+        let r = regions(1)[0];
+        m.put(
+            r,
+            "a long page body",
+            270.0,
+            304.0,
+            &base(),
+            Some("a lo...".into()),
+        );
+        assert_eq!(
+            m.get(r, "a long page body", 270.0, 304.0, &base()),
+            Some(&Some("a lo...".into()))
+        );
+        m.put(r, "short", 270.0, 304.0, &base(), None);
+        assert_eq!(m.get(r, "short", 270.0, 304.0, &base()), Some(&None));
+    }
+
+    /// Every input that changes the answer evicts. `SetText`, `SetFont`, `SetTextHeight`, and a
+    /// box that resized — the client's four.
+    #[test]
+    fn a_changed_input_misses() {
+        let mut m = EllipsisMemo::default();
+        let r = regions(1)[0];
+        m.put(r, "body", 270.0, 304.0, &base(), Some("bo...".into()));
+        assert!(
+            m.get(r, "other", 270.0, 304.0, &base()).is_none(),
+            "SetText"
+        );
+        assert!(
+            m.get(r, "body", 271.0, 304.0, &base()).is_none(),
+            "wider box"
+        );
+        assert!(
+            m.get(r, "body", 270.0, 305.0, &base()).is_none(),
+            "taller box"
+        );
+        assert!(
+            m.get(
+                r,
+                "body",
+                270.0,
+                304.0,
+                &spec(Some("Fonts\\FRIZQT__.TTF"), Some(15.0), Outline::None)
+            )
+            .is_none(),
+            "SetFont"
+        );
+        assert!(
+            m.get(
+                r,
+                "body",
+                270.0,
+                304.0,
+                &spec(Some("Fonts\\MORPHEUS.TTF"), Some(16.0), Outline::None)
+            )
+            .is_none(),
+            "SetTextHeight"
+        );
+        assert!(
+            m.get(
+                r,
+                "body",
+                270.0,
+                304.0,
+                &spec(Some("Fonts\\MORPHEUS.TTF"), Some(15.0), Outline::Thick)
+            )
+            .is_none(),
+            "the outline biases the step law, so it changes where the wrap breaks"
+        );
+    }
+
+    /// Anchor-graph dust must not evict every frame — the client's guard is `1e-5` and so is this.
+    /// A box that really resized still does.
+    #[test]
+    fn sub_epsilon_rect_dust_still_hits() {
+        let mut m = EllipsisMemo::default();
+        let r = regions(1)[0];
+        m.put(r, "body", 270.0, 304.0, &base(), Some("bo...".into()));
+        assert!(m
+            .get(r, "body", 270.0 + 1e-7, 304.0 - 1e-7, &base())
+            .is_some());
+        assert!(m.get(r, "body", 270.001, 304.0, &base()).is_none());
+    }
+
+    /// One entry per region — two regions holding the same text keep their own answers, and a
+    /// region with no entry misses.
+    #[test]
+    fn entries_are_per_region() {
+        let mut m = EllipsisMemo::default();
+        let r = regions(3);
+        m.put(r[0], "body", 270.0, 304.0, &base(), Some("one...".into()));
+        m.put(r[1], "body", 100.0, 40.0, &base(), Some("two...".into()));
+        assert_eq!(
+            m.get(r[0], "body", 270.0, 304.0, &base()),
+            Some(&Some("one...".into()))
+        );
+        assert_eq!(
+            m.get(r[1], "body", 100.0, 40.0, &base()),
+            Some(&Some("two...".into()))
+        );
+        assert!(m.get(r[2], "body", 270.0, 304.0, &base()).is_none());
+    }
+
+    /// The handle-churn backstop: the map is dropped wholesale rather than grown without bound.
+    #[test]
+    fn the_map_is_capped() {
+        let mut m = EllipsisMemo::default();
+        // Distinct keys are what the cap counts, and the engine hands out only a few per fixture —
+        // so the same handles are re-put under distinct TEXTS, which is the churn shape anyway.
+        let r = regions(8);
+        for i in 0..=MEMO_CAP {
+            m.put(
+                r[i % r.len()],
+                &format!("body {i}"),
+                270.0,
+                304.0,
+                &base(),
+                None,
+            );
+        }
+        assert!(m.entries.len() <= MEMO_CAP);
+    }
+}

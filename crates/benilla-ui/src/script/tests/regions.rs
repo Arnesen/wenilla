@@ -534,6 +534,155 @@ fn a_solid_colour_texel_multiplies_with_the_vertex_colour() {
     );
 }
 
+/// **`SetDesaturated` rides the extract, and only against real ART** (decision 1327).
+///
+/// The state was stored from the day the verb landed and read by nobody, which is why every
+/// greyed-out affordance in the UI was a brightness tint (B162's talent tree). The flag now travels
+/// on the quad, so this pins the two ends of that wire — set/clear — plus the one carve-out: a
+/// PATHLESS solid has its colour folded into the quad's tint and draws against a 1x1 white texel,
+/// so a shader that greys the texel would grey white and change nothing. Carrying the flag there
+/// would read as honoured while doing nothing at all, so extract drops it.
+#[test]
+fn desaturation_rides_the_extract_for_art_and_never_for_a_solid() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "DsOwner")
+        f:SetPoint("BOTTOMLEFT", 0, 0)
+        f:SetWidth(100) f:SetHeight(50)
+        art = f:CreateTexture("DsArt", "ARTWORK")
+        art:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")
+        art:SetAllPoints()
+        solid = f:CreateTexture("DsSolid", "OVERLAY")
+        solid:SetTexture(1, 0, 0)
+        solid:SetAllPoints()
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let grey = |s: &UiScript, want_path: bool| {
+        s.extract()
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path, desaturated, ..
+                } if path.is_some() == want_path => Some(*desaturated),
+                _ => None,
+            })
+            .expect("the quad")
+    };
+    assert!(!grey(&s, true), "art starts full colour");
+
+    s.run("art:SetDesaturated(1) solid:SetDesaturated(1)")
+        .unwrap();
+    assert!(grey(&s, true), "the flag reaches the art quad");
+    assert!(
+        !grey(&s, false),
+        "a pathless solid never carries it — greying a white texel is a no-op dressed as a feature"
+    );
+
+    // And it clears — the reference's own `SetItemButtonDesaturated(button, nil)` restore.
+    s.run("art:SetDesaturated(nil)").unwrap();
+    assert!(!grey(&s, true), "clearing the flag restores full colour");
+}
+
+/// Read a Texture region's desaturation state straight off the model, by name.
+///
+/// It has no getter in Lua on purpose — `IsDesaturated` (`0x79c2c0`) is in wow-re's ledger but its
+/// return shape is not carved, and inventing one to make a test convenient is how an unverified API
+/// gets shipped (decision 1327's own residual). The extract quad is the other way to see it, but a
+/// cleared texture emits no quad at all, which is exactly the case these tests need to observe.
+fn desaturated(s: &UiScript, name: &str) -> bool {
+    let lua = s.lua();
+    let model = lua.app_data_ref::<crate::script::Model>().expect("model");
+    let id = *model.region_names.get(name).expect("region name");
+    let h = *model.id_to_region.get(&id).expect("region handle");
+    model.region_data.get(&h).is_some_and(|d| d.desaturated)
+}
+
+/// **`SetTexture` clears the desaturation — except when the path does not actually change**
+/// (wow-re `texture-desaturate-law.md` §2.3, VERIFIED; decision 1330).
+///
+/// `+0x128` is a `CGxShader*`, and `CSimpleTexture::SetTexture` writes it from a shader index the
+/// Lua binding always passes as slot 0 (permanently NULL). Storing a desaturate boolean *beside*
+/// the texture handle — which is what benilla did on 1327 — diverges on the single most common
+/// FrameXML shape there is: a repaint that re-sets the icon and expects the grey to follow the art.
+/// The same-path early-out (`0x770225`) is what makes the *idempotent* repaint keep its grey, and
+/// it is the half a plausible implementation drops.
+#[test]
+fn set_texture_clears_desaturation_unless_the_path_is_unchanged() {
+    let s = script();
+    s.run(
+        r#"
+        local f = CreateFrame("Frame", "ClrOwner")
+        icon = f:CreateTexture("ClrIcon", "ARTWORK")
+        icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")
+        icon:SetDesaturated(1)
+    "#,
+    )
+    .unwrap();
+    let grey = |s: &UiScript| desaturated(s, "ClrIcon");
+
+    // The idempotent repaint: same file, so the client returns before it can clear anything.
+    s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep")"#)
+        .unwrap();
+    assert!(grey(&s), "re-setting the SAME art keeps the grey");
+
+    // A different file reaches the write and zeroes the slot.
+    s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Fire_Fireball")"#)
+        .unwrap();
+    assert!(!grey(&s), "a texture CHANGE clears the desaturation");
+
+    // The clear forms take the same leg (`test esi,esi` falls through to the write).
+    s.run("icon:SetDesaturated(1) icon:SetTexture(nil)")
+        .unwrap();
+    assert!(!grey(&s), "SetTexture(nil) clears it too");
+
+    // The COLOUR form is a different function (`0x770360`) and is not one of the field's writers.
+    s.run(r#"icon:SetTexture("Interface\\Icons\\Spell_Nature_Sleep") icon:SetDesaturated(1)"#)
+        .unwrap();
+    s.run("icon:SetTexture(1, 0, 0)").unwrap();
+    assert!(grey(&s), "the colour form does not touch the shader slot");
+}
+
+/// **`SetDesaturated`'s argument truth table has two arms that read backwards** (wow-re
+/// `texture-desaturate-law.md` §1.1, VERIFIED at `0x6f1c10`'s jump table; decision 1330).
+///
+/// `0x6f1c10(L, 2, default=1)` takes its DEFAULT on `LUA_TNONE`, so a bare `SetDesaturated()` greys
+/// — the opposite of the `if flag then` an implementation writes without looking. And a number is
+/// truncated to an int, so `SetDesaturated(0)` clears where truthiness would have greyed.
+#[test]
+fn set_desaturated_takes_the_clients_argument_truth_table() {
+    let s = script();
+    s.run(r#"f = CreateFrame("Frame", "ArgOwner") tex = f:CreateTexture("ArgTex", "ARTWORK")"#)
+        .unwrap();
+    let grey = |s: &UiScript| desaturated(s, "ArgTex");
+
+    // NO ARGUMENT is ON — the LUA_TNONE default arm, not the nil arm.
+    s.run("ArgTex:SetDesaturated()").unwrap();
+    assert!(
+        grey(&s),
+        "a bare SetDesaturated() greys (LUA_TNONE default)"
+    );
+
+    s.run("ArgTex:SetDesaturated(nil)").unwrap();
+    assert!(!grey(&s), "nil clears");
+
+    // A number truncating to zero clears; a non-zero one greys.
+    s.run("ArgTex:SetDesaturated(1) ArgTex:SetDesaturated(0)")
+        .unwrap();
+    assert!(!grey(&s), "0 clears — the number arm truncates to int");
+    s.run("ArgTex:SetDesaturated(0.5)").unwrap();
+    assert!(!grey(&s), "0.5 truncates to 0 and clears");
+
+    // Both booleans, and Dewdrop's `true` (the call 98 corpus addons reach).
+    s.run("ArgTex:SetDesaturated(true)").unwrap();
+    assert!(grey(&s), "true greys");
+    s.run("ArgTex:SetDesaturated(false)").unwrap();
+    assert!(!grey(&s), "false clears");
+}
+
 /// The draw gate is the TEXTURE slot, never the colour (`texture-color-composition.md` §4,
 /// VERIFIED): `0x7706e0` tests `+0xcc` and emits NOTHING when it is empty, whatever the vertex
 /// colour holds. Since the tint deliberately survives `SetTexture(nil)` ("a tint outlives the art

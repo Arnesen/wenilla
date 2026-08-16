@@ -131,23 +131,57 @@ impl NpcSession for GossipState {
     }
 }
 
-/// The lowercase Era `GetGossipOptions()` icon *type* for a wire `GOSSIP_ICON` byte — the value the
-/// XML resolves to a `Interface\GossipFrame\<Type>GossipIcon` texture. Only the common icons are
-/// mapped (decision 0081 v1: minimal-but-era-shaped); anything else falls back to the chat bubble,
-/// so an unmapped icon still shows a row rather than nothing. The GOSSIP_ICON values are vmangos's
-/// (`GossipDef.h`): 0 chat · 1 vendor · 2 taxi · 3 trainer · 4 interact-1 · 5 interact-2 · 6 money ·
-/// 7 talk · 8 tabard · 9 battlefield.
+/// The lowercase Era `GetGossipOptions()` icon *type* for a wire `GOSSIP_ICON` byte — the value
+/// the XML resolves to a `Interface\GossipFrame\<Type>GossipIcon` texture.
+///
+/// **The byte is a bare index into [`GOSSIP_ICON_TYPES`], with no bounds check anywhere on the
+/// client's path** — VERIFIED at the bytes (wow-re `system/ui/scratch/gossip-icon-and-binder-flow.md`,
+/// decision 1335): `GetGossipOptions 0x4e28d0` reads the stored byte and does
+/// `mov edx,[eax*4 + 0x84b7ac]` straight into a 14-entry pointer table, then `lua_pushstring`s it.
+///
+/// The old map read the byte through **vmangos's `GossipDef.h` enum *names*** (`INTERACT_1`,
+/// `MONEY_BAG`, `TALK`, …), which name a **later** client's icon art. It was wrong for six of the
+/// eleven values; 5 — the icon every `GOSSIP_OPTION_INNKEEPER` row in the world DB sends — had no
+/// entry at all and fell through to the chat bubble, which is the icon half of B249 (decision 1331).
+///
+/// Two of the reference's out-of-range behaviours we deliberately do **not** reproduce, because
+/// both are its missing guard rather than its design (wow-re's note says so in as many words):
+/// index **14** is a NULL in the table, so the reference pushes `nil` as the option's type and the
+/// row draws whatever the XML's own fallback gives it — the chat bubble, which is what we return
+/// directly. Index **≥15** walks off the end into the gossip Lua *binding* table, pushing API-name
+/// literals and `strlen`'d `.text` addresses as type strings, and eventually faults. We clamp.
 fn gossip_icon_type(icon: u8) -> &'static str {
-    match icon {
-        1 => "vendor",
-        2 => "taxi",
-        3 => "trainer",
-        4 => "binder",
-        6 => "tabard",
-        9 => "battlemaster",
-        _ => "gossip", // 0/5/7/8/unknown → the chat bubble
-    }
+    GOSSIP_ICON_TYPES
+        .get(icon as usize)
+        .copied()
+        .unwrap_or("gossip")
 }
+
+/// The client's icon-name table verbatim — `0x84b7ac`, 14 entries, indexed by the wire
+/// `GOSSIP_ICON` byte (see [`gossip_icon_type`]). Indices 11-13 are genuine `gossip` aliases in the
+/// binary, not padding.
+///
+/// Ten of the eleven distinct names have a `Interface\GossipFrame\<Type>GossipIcon.blp` behind
+/// them on the 5875 chain; **`auctioneer` does not** — the table names art the client never shipped
+/// (auction houses came with 1.9, the icon later). [`gossip_icon_types_name_the_shipped_art`] pins
+/// both halves of that, and the XML deliberately has no `auctioneer` key: a missing texture draws
+/// nothing, our fallback draws the bubble, and the bubble is the better wrong answer.
+const GOSSIP_ICON_TYPES: [&str; 14] = [
+    "gossip",
+    "vendor",
+    "taxi",
+    "trainer",
+    "healer",
+    "binder",
+    "banker",
+    "petition",
+    "tabard",
+    "battlemaster",
+    "auctioneer",
+    "gossip",
+    "gossip",
+    "gossip",
+];
 
 /// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open.
 fn snapshot(state: &GossipState) -> Option<GossipMenu> {
@@ -312,16 +346,9 @@ fn drain_gossip(
 mod tests {
     use super::*;
 
-    #[test]
-    fn icon_types_map_the_common_gossip_icons() {
-        assert_eq!(gossip_icon_type(0), "gossip");
-        assert_eq!(gossip_icon_type(1), "vendor");
-        assert_eq!(gossip_icon_type(2), "taxi");
-        assert_eq!(gossip_icon_type(3), "trainer");
-        assert_eq!(gossip_icon_type(7), "gossip"); // talk bubble
-        assert_eq!(gossip_icon_type(9), "battlemaster");
-        assert_eq!(gossip_icon_type(200), "gossip"); // unknown → bubble
-    }
+    /// The one type string [`GOSSIP_ICON_TYPES`] names that the 5875 install ships no art for.
+    /// Test-only: nothing in the client needs to know, because the XML simply has no key for it.
+    const GOSSIP_ICON_TYPE_UNSHIPPED: &str = "auctioneer";
 
     #[test]
     fn snapshot_is_none_until_a_menu_opens() {
@@ -387,5 +414,59 @@ mod tests {
             Some("Well met, sister.")
         );
         assert_eq!(state.draw_greeting(78, 0), None, "record not yet arrived");
+    }
+
+    /// The icon byte is an INDEX into the client's own table (`0x84b7ac`, VERIFIED — decision
+    /// 1335), and these are the seats that were wrong before 1331. Each is pinned to the
+    /// `option_id` the world DB pairs it with, because that pairing is what makes the table
+    /// legible: spirit healers send 4, innkeepers 5, bankers 6, petitioners 7, tabard designers 8,
+    /// battlemasters 9.
+    #[test]
+    fn the_icon_byte_indexes_the_clients_own_table() {
+        assert_eq!(gossip_icon_type(0), "gossip");
+        assert_eq!(gossip_icon_type(1), "vendor"); // GOSSIP_OPTION_VENDOR / _ARMORER
+        assert_eq!(gossip_icon_type(2), "taxi"); // _TAXIVENDOR
+        assert_eq!(gossip_icon_type(3), "trainer"); // _TRAINER
+        assert_eq!(gossip_icon_type(4), "healer"); // _SPIRITHEALER / _SPIRITGUIDE — was "binder"
+        assert_eq!(gossip_icon_type(5), "binder"); // _INNKEEPER — B249: was the chat bubble
+        assert_eq!(gossip_icon_type(6), "banker"); // _BANKER — was "tabard"
+        assert_eq!(gossip_icon_type(7), "petition"); // _PETITIONER — was the chat bubble
+        assert_eq!(gossip_icon_type(8), "tabard"); // _TABARDDESIGNER — was the chat bubble
+        assert_eq!(gossip_icon_type(9), "battlemaster"); // _BATTLEFIELD
+        assert_eq!(gossip_icon_type(10), "auctioneer"); // _AUCTIONEER — was the chat bubble
+                                                        // 11-13 are genuine `gossip` aliases in the binary, not padding.
+        assert_eq!(gossip_icon_type(11), "gossip");
+        assert_eq!(gossip_icon_type(13), "gossip");
+        // 14 is a NULL the reference pushes as `nil`, and 15+ walks off its table into the Lua
+        // binding array. Both are its missing guard, not its design — we clamp (see the fn's doc).
+        assert_eq!(gossip_icon_type(14), "gossip");
+        assert_eq!(gossip_icon_type(255), "gossip");
+    }
+
+    /// The table must name the art the install actually ships — the check that could not have
+    /// passed while the mapping was wrong-by-naming, because the reference builds the path by
+    /// concatenation (`GossipFrame.lua:123`:
+    /// `SetTexture("Interface\\GossipFrame\\" .. arg[i+1] .. "GossipIcon")`), so a type with no BLP
+    /// behind it is a blank row.
+    ///
+    /// **`auctioneer` is the one exception, and it is the client's, not ours**: index 10 names a
+    /// texture 5875 never shipped, so the reference itself draws nothing for it. Asserting the
+    /// absence pins that as a fact rather than leaving it as a hole someone later "fixes" by
+    /// inventing a path. Skips without client data.
+    #[test]
+    fn gossip_icon_types_name_the_shipped_art() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let chain = benilla_formats::open_chain(&data).expect("open chain");
+        let blp = |ty: &str| format!("Interface\\GossipFrame\\{ty}GossipIcon.blp");
+        for ty in GOSSIP_ICON_TYPES {
+            if ty == GOSSIP_ICON_TYPE_UNSHIPPED {
+                continue;
+            }
+            assert!(chain.contains(&blp(ty)), "{} is not on the chain", blp(ty));
+        }
+        assert!(
+            !chain.contains(&blp(GOSSIP_ICON_TYPE_UNSHIPPED)),
+            "5875 has grown a {GOSSIP_ICON_TYPE_UNSHIPPED} gossip icon — give the XML its key"
+        );
     }
 }

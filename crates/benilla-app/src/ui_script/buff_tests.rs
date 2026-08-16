@@ -749,3 +749,89 @@ fn the_temporary_enchant_row_shows_a_weapon_enchant_and_moves_the_top_row_aside(
     assert!((s.eval::<f64>("return BuffFrame:GetRight()").unwrap() - resting).abs() < 1e-3);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The duration line against the **real shipped strings**, end to end — the leg the engine's own
+/// synthetic-template tests cannot reach.
+///
+/// The engine formats through `tooltip::duration_text` (`0x52fa50`'s ladder, wow-re
+/// §3-BUFF-TIME-FORMAT) over whatever `GlobalStrings.lua` the player's install carries; this runs
+/// that file into a real VM exactly as the boot's `load_global_strings` does, then asserts the
+/// wording that comes back. Every expectation below is a reading the PREVIOUS two-arm formatter got
+/// wrong, so this is the carve's whole delta in one place. Skips without client data.
+#[test]
+fn the_duration_line_reads_the_real_global_strings() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let src = chain
+        .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+        .expect("GlobalStrings.lua in the chain");
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+    s.set_spell_tooltip(
+        1459,
+        benilla_ui::script::SpellTooltipView {
+            name: "Arcane Intellect".into(),
+            aura_description: "Intellect increased by 2.".into(),
+            ..Default::default()
+        },
+    );
+    s.tick(10.0); // GetTime = 10
+    s.run(
+        r#"
+        BENILLA_ANCHOR = CreateFrame("Button", "BF9")
+        BENILLA_ANCHOR:SetPoint("CENTER", 0, 0); BENILLA_ANCHOR:SetSize(10, 10)
+        BENILLA_TIP = CreateFrame("GameTooltip", "TT9")
+    "#,
+    )
+    .unwrap();
+
+    // `secs_left` seconds remaining at GetTime = 10, read back as the tooltip's last line.
+    let mut line = |secs_left: f64| -> String {
+        s.set_auras(
+            "player",
+            Some(vec![AuraState {
+                spell_id: 1459,
+                name: Some("Arcane Intellect".into()),
+                duration: 86_400.0,
+                expiration_time: 10.0 + secs_left,
+                helpful: true,
+                ..Default::default()
+            }]),
+        );
+        s.run(
+            r#"
+            BENILLA_TIP:SetOwner(BENILLA_ANCHOR, "ANCHOR_RIGHT")
+            BENILLA_TIP:SetPlayerBuff(0)
+            BENILLA_LAST = TT9TextLeft3:GetText()
+        "#,
+        )
+        .unwrap();
+        s.eval::<String>("return BENILLA_LAST").unwrap()
+    };
+
+    // The headline divergence: anything past an hour was reading in MINUTES.
+    assert_eq!(line(7_200.0), "2 hours remaining", "was '120 minutes'");
+    assert_eq!(line(3_600.0), "1 hour remaining", "the hour edge, singular");
+    assert_eq!(
+        line(3_599.999),
+        "60 minutes remaining",
+        "one ms under the hour stays in minutes — no '1 hour' until it is whole"
+    );
+    // The singular half: the shipped pair really is "%d minute" / "%d minutes".
+    assert_eq!(line(60.0), "1 minute remaining", "was '1 minutes'");
+    assert_eq!(line(61.0), "2 minutes remaining", "the minute arm ceils");
+    // The seconds arm truncates where every arm above it ceils.
+    assert_eq!(line(5.4), "5 seconds remaining", "was '6 seconds'");
+    assert_eq!(line(1.0), "1 second remaining", "singular at exactly one");
+    assert_eq!(
+        line(-0.4),
+        "0 seconds remaining",
+        "the lapsing read, plural at zero"
+    );
+    // And the top of the ladder, which had no arm at all.
+    assert_eq!(line(129_600.0), "2 days remaining", "was '2160 minutes'");
+
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}

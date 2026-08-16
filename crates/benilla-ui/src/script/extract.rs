@@ -342,7 +342,8 @@ impl UiScript {
                         // API change. The approximation is visible, and it is stated there and here
                         // rather than discovered later.
                         let fill = data.fill.or_else(|| data.gradient.map(|g| g.midpoint()));
-                        let has_texture = data.texture.is_some() || fill.is_some();
+                        let has_path = data.texture.is_some();
+                        let has_texture = has_path || fill.is_some();
                         QuadContent::Texture {
                             path: data.texture,
                             color: has_texture
@@ -353,6 +354,13 @@ impl UiScript {
                             circular: data.circular,
                             portrait_unit: data.portrait_unit,
                             rotation: data.rotation,
+                            // Only ever set against real ART. A pathless solid has its colour
+                            // FOLDED into `color` two lines up (the renderer draws it as a tint on
+                            // a 1x1 white texel), so a shader that greys the *texel* would grey
+                            // white and change nothing — the flag would read as honoured while
+                            // doing nothing at all. No reference consumer desaturates a solid;
+                            // every one of them is an icon. Stated here rather than discovered.
+                            desaturated: data.desaturated && has_path,
                         }
                     };
                     // A region draws at its owner's scale — same single hop as alpha (a region
@@ -402,6 +410,13 @@ impl UiScript {
 /// The single colour a Texture region draws with: **`texel × vertexColour`**, per channel and
 /// **alpha included** (wow-re `system/ui/scratch/texture-color-composition.md`, VERIFIED — the
 /// stage-0 combine's `MODULATE(TEXTURE, DIFFUSE)` for both colour and alpha).
+///
+/// **That law is scoped to a region with no pixel shader bound** (`+0x128 == 0` — wow-re
+/// `texture-desaturate-law.md` §6.1's correction to that note). A DESATURATED region takes the
+/// fragment program instead, which supersedes the whole stage chain and reads the vertex colour's
+/// ALPHA only; its RGB never reaches the pixel. The colour computed here still travels — the
+/// renderer needs the alpha, and the RGB is simply unread on that branch (`ui_quad.wgsl`) — so
+/// nothing changes here, but the note this cites no longer says what it used to.
 ///
 /// `fill` is the region's own solid-colour texture ([`RegionData::fill`] — the client generates a
 /// real 8×8 texel block from it), so where it is set it IS the texel and the product is the drawn

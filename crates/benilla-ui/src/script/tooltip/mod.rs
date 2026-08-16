@@ -400,6 +400,96 @@ pub(super) fn set_shown(lua: &Lua, h: FrameHandle, shown: bool) {
 /// `0xffffd200` at `0xc0d3e8` (§0-BINDINGS verdict, 2026-07-14).
 pub(in crate::script) const DEFAULT_TEXT_GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 
+/// The client's duration-string formatter, `0x52fa50` — the one that turns a millisecond count
+/// into "2 hours remaining" / "45 seconds remaining" (wow-re `ui/scratch/tooltip-content-law.md`
+/// §3-BUFF-TIME-FORMAT, the 2026-08-14 carve). Its parameter vector is the binary's:
+/// `(V_ms, keyPrefix, roundUp)`, minus the `extraArg` slot only the enchant line fills.
+///
+/// **The ladder, with the thresholds decoded from the compare instructions** (`52fa76`, `52fab4`,
+/// `52fb03`, falling through to `0x52fb4f`): `≥ 86_400_000` → `_DAYS` · `≥ 3_600_000` → `_HOURS` ·
+/// `≥ 60_000` → `_MIN` · else `_SEC`. Each arm divides by its own threshold, so the number shown is
+/// always in the unit the arm names.
+///
+/// **`roundUp` ceils — but only in the top three arms; `_SEC` always truncates.** That asymmetry is
+/// the whole reason this is a shared function and not four `format!`s, and it is what produces the
+/// reference's three surprising readings: 61 s is "2 minutes remaining" (ceil, not "1"), 3 599 999 ms
+/// is "60 minutes remaining" (the hour arm needs the full hour, so there is no "1 hour" until
+/// exactly 3 600 000), and the final second before an aura lapses reads "**0** seconds remaining"
+/// (truncation, not "1").
+///
+/// **The text is the player's own `GlobalStrings.lua`, never ours.** `get` is the VM-global lookup
+/// (`load_global_strings` runs the shipped file into this VM at boot, off the patch chain); the
+/// template arrives as `"%d minutes remaining"` and the count fills its one `%d`. A key the string
+/// table doesn't carry yields **no line at all** rather than an invented one — the same disposition
+/// 0620 §5 took for a reagent whose template hasn't streamed. That is also why this house ships no
+/// copy of the eight strings: on an install they are read, and off one there is nothing to render.
+pub(in crate::script) fn duration_text(
+    ms: u32,
+    key_prefix: &str,
+    round_up: bool,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    const DAY_MS: u32 = 86_400_000;
+    const HOUR_MS: u32 = 3_600_000;
+    const MIN_MS: u32 = 60_000;
+    const SEC_MS: u32 = 1_000;
+
+    let (suffix, divisor) = if ms >= DAY_MS {
+        ("DAYS", DAY_MS)
+    } else if ms >= HOUR_MS {
+        ("HOURS", HOUR_MS)
+    } else if ms >= MIN_MS {
+        ("MIN", MIN_MS)
+    } else {
+        ("SEC", SEC_MS)
+    };
+    // `roundUp` reaches the day/hour/minute arms only — the seconds arm has no rounding branch at
+    // all, so it truncates whatever `roundUp` says.
+    let n = if round_up && divisor != SEC_MS {
+        ms.div_ceil(divisor)
+    } else {
+        ms / divisor
+    };
+    let template = plural_template(&format!("{key_prefix}_{suffix}"), n, get)?;
+    Some(template.replacen("%d", &n.to_string(), 1))
+}
+
+/// The `_P1` pick behind `GetText(token, gender, n)`. **The rule is the bare token for exactly one
+/// and the `_P1` twin otherwise** — so a zero count takes the plural, which is why the lapsing
+/// second reads "0 second*s* remaining".
+///
+/// **Byte-pinned** (wow-re §3-BUFF-PLURAL, `aff4df61`), which upgrades what this house had read
+/// twice by inference — `FriendsFrame.xml`'s `guildPlural` and `TradeSkillFrame.xml`'s
+/// `pluralAbbr`. The exe resolves nothing itself: `0x52fa50` snprintf's the bare key, then
+/// `0x703bf0` looks up the **Lua global** `GetText` (`703c43: ba c8 2c 87 00`) and pcalls it with
+/// (key, ordinal, gender), using what comes back as the printf format. The predicate lives in
+/// `LocaleProperties.lua`'s `GetPluralIndex` — singular iff `not ordinal or ordinal == 1` — and
+/// `> 1` is REFUTED: `703c89: 7d 07` is a *signed* test, so a zero ordinal is pushed as the number
+/// `0` (Lua truthy) and takes the plural arm; only a negative becomes nil. Had it mapped zero to
+/// nil the lapsing line would read "0 second remaining".
+///
+/// We collapse that to Rust rather than route through a `GetText` global because this line is
+/// computed engine-side off the live clock, and because `LocaleProperties.lua` is a file this house
+/// does not transcribe.
+///
+/// **Gender is not modelled, and that is faithful, not a gap:** `0x52fa50` pushes a literal `0` on
+/// both arms (`52fb8d: 6a 00`, `52fbaa: 6a 00`), which `0x703bf0` turns into nil, and enUS folds
+/// nil to no suffix.
+///
+/// **Falls back to the bare token when `_P1` is absent** — also byte-pinned: a nil `genderTag`
+/// sends `GetText` down its short arm to `getglobal(token)`, the singular. (When *both* are absent
+/// the reference renders an EMPTY line, off its pre-seeded `0x882748`; we render no line at all.
+/// The divergence is unreachable with shipped data — all eight of this family's keys ship — and off
+/// an install there is no string table to be faithful to.)
+fn plural_template(token: &str, n: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    if n != 1 {
+        if let Some(p1) = get(&format!("{token}_P1")).filter(|s| !s.is_empty()) {
+            return Some(p1);
+        }
+    }
+    get(token).filter(|s| !s.is_empty())
+}
+
 /// A colour-component argument — `lua_tonumber`'s coercion (a numeric string counts, `""` and
 /// other strings don't).
 fn color_num(v: Option<&Value>) -> Option<f32> {

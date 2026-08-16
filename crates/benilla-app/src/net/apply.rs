@@ -197,10 +197,16 @@ pub(super) fn apply_net_updates(
 
             // entry stops the whole system implementing `SystemParam` — nesting is the same
 
-            // escape this tuple already is.
+            // escape this tuple already is. Third member: the guild session (decision 1257) —
+            // the identity/roster mirror the seven `SessionEvent::Guild*` arms below drive.
             (
                 ResMut<crate::ui_item_text::PageTexts>,
                 ResMut<crate::net::PlayedTimeAnswer>,
+                ResMut<crate::ui_guild::GuildState>,
+                // The innkeeper's pending bind question (decision 1331) — `SMSG_BINDER_CONFIRM`
+                // parks the innkeeper's guid here and `crate::ui_binder` turns it into the
+                // CONFIRM_BINDER dialog, whose Accept is the only thing that binds anything.
+                ResMut<crate::ui_binder::BinderState>,
             ),
         ),
     ),
@@ -348,7 +354,7 @@ pub(super) fn apply_net_updates(
             mut mirror_timers,
             mut pet_bar,
             mut ui_error_keys,
-            (mut page_texts, mut played_time_answer),
+            (mut page_texts, mut played_time_answer, mut guild, mut binder),
         ),
     ) = caches;
     let (
@@ -437,6 +443,7 @@ pub(super) fn apply_net_updates(
                     &mut bank_open,
                     &mut duel,
                     &mut social,
+                    &mut guild,
                     &mut aura.6,
                     &mut disconnects,
                 );
@@ -620,6 +627,17 @@ pub(super) fn apply_net_updates(
                 session::reputation_visible(list_id, &mut reputations)
             }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
+            SessionEvent::BinderConfirm { binder: npc } => binder.ask(npc),
+            SessionEvent::PlayerBound { binder: npc, area } => {
+                debug!("net: bound to area {area} by {npc:#x}");
+                crate::ui_binder::apply::bound(
+                    area,
+                    &mut binder,
+                    &mut chat_log,
+                    area_table.as_deref(),
+                    &mut audio.0,
+                )
+            }
             SessionEvent::Proficiency {
                 item_class,
                 subclass_mask,
@@ -885,6 +903,29 @@ pub(super) fn apply_net_updates(
                 crate::ui_social::apply::friend_status(&mut social, update)
             }
             SessionEvent::WhoResults(results) => crate::ui_social::apply::who(&mut social, results),
+            // ── The guild family (decision 1257): the identity cache, the roster, and the
+            // `ERR_GUILD_*` lines the engine composes. Every arm's law lives in
+            // `ui_guild::apply` beside the state it drives; the guild EVENTS fire off the mirror
+            // in `ui_guild::feed_guild`, on their edges.
+            SessionEvent::GuildQueryResponse(response) => {
+                crate::ui_guild::apply::query_response(&mut guild, response)
+            }
+            SessionEvent::GuildRoster(roster) => crate::ui_guild::apply::roster(&mut guild, roster),
+            // The sign-on/sign-off pair's trailing guid exists for exactly one purpose — the
+            // ignore check that suppresses their line — which is why this arm reads `social`.
+            SessionEvent::GuildEvent(notice) => {
+                crate::ui_guild::apply::event(&mut guild, &mut chat_log, &social, notice)
+            }
+            SessionEvent::GuildCommandResult(result) => {
+                crate::ui_guild::apply::command_result(&mut guild, &mut chat_log, result)
+            }
+            SessionEvent::GuildInvite { inviter, guild: g } => {
+                crate::ui_guild::apply::invite(&mut guild, &mut chat_log, inviter, g)
+            }
+            SessionEvent::GuildDecline { name } => {
+                crate::ui_guild::apply::decline(&mut chat_log, &name)
+            }
+            SessionEvent::GuildInfo(info) => crate::ui_guild::apply::info(&mut chat_log, info),
             SessionEvent::LootResponse {
                 guid,
                 loot_type,
@@ -1277,7 +1318,7 @@ pub(super) fn apply_net_updates(
                 greeting,
             } => npc::trainer_list(trainer, trainer_type, services, greeting, &mut trainer_open),
             SessionEvent::TrainerBuySucceeded { trainer, spell_id } => {
-                npc::trainer_buy_succeeded(trainer, spell_id, &trainer_open, &net_commands)
+                npc::trainer_buy_succeeded(trainer, spell_id, &mut trainer_open, &net_commands)
             }
             SessionEvent::TrainerBuyFailed { error, .. } => {
                 npc::trainer_buy_failed(error, &mut ui_actions.8)

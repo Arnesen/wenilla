@@ -118,10 +118,15 @@
             (Blizzard_TalentUITemplates.xml)'s own additions (the EmptySlot backdrop, RankBorder, Rank
             text) — CharacterFrame.xml's own `BenillaPaperDollItemSlotTemplate` is the identical-shape
             precedent for this whole reconstruction move.
-          - `SetItemButtonTexture`/`SetItemButtonDesaturated`: no engine equivalent (ENGINE API note).
-            The icon Texture child (`$parentIconTexture`) is `SetTexture`'d directly; desaturation is
-            approximated by `SetVertexColor(0.65, 0.65, 0.65)` / restored to `(1, 1, 1)`
-            (CharacterFrame.xml:873's identical gray-dim convention for its own equip slots).
+          - `SetItemButtonTexture`: no engine equivalent (ENGINE API note). The icon Texture child
+            (`$parentIconTexture`) is `SetTexture`'d directly.
+          - `SetItemButtonDesaturated` IS the ref's own verb here (ItemButtonTemplate.xml, loaded far
+            above this file in the .toc), called exactly as the ref calls it. It used to be open-coded
+            as `SetVertexColor(0.65, 0.65, 0.65)` / restored to `(1, 1, 1)`, because the engine had no
+            desaturation and a dim tint was the whole of what a grey-out could be. Decision 1327 gave
+            the engine `Texture:SetDesaturated`, so the ref's verb now lands as greyscale AND the 0.65
+            dim — B162: at 0 talent points every unlearned icon in the real client goes greyscale, and
+            a 0.65 multiply on colourful art does not read as greyed out at all.
 
         Engine-gap notes (transcribed anyway per this file's own instructions, or worked around):
           - `text=` XML attributes are a LITERAL, verbatim `SetText` in this engine — verified,
@@ -462,8 +467,7 @@
                     -- Talent must meet prereqs or the player must have no points to spend
                     if BenillaTalentFrame_SetPrereqs(tier, column, forceDesaturated, tierUnlocked,
                         GetTalentPrereqs(selectedTab, i)) and meetsPrereq then
-                        -- SetItemButtonDesaturated(button, nil): restore full color.
-                        getglobal(buttonName .. "IconTexture"):SetVertexColor(1, 1, 1)
+                        SetItemButtonDesaturated(button, nil)
 
                         if rank < maxRank then
                             -- Rank is green if not maxed out
@@ -478,9 +482,7 @@
                         getglobal(buttonName .. "RankBorder"):Show()
                         getglobal(buttonName .. "Rank"):Show()
                     else
-                        -- SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65): gray-dim the icon
-                        -- (this file's header comment, CharacterFrame.xml:873's precedent).
-                        getglobal(buttonName .. "IconTexture"):SetVertexColor(0.65, 0.65, 0.65)
+                        SetItemButtonDesaturated(button, 1, 0.65, 0.65, 0.65)
                         getglobal(buttonName .. "Slot"):SetVertexColor(0.5, 0.5, 0.5)
                         if rank == 0 then
                             getglobal(buttonName .. "RankBorder"):Hide()
