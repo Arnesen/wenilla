@@ -816,4 +816,88 @@ mod tests {
         step(&mut app, 0.05);
         assert_twins_equal(&mut app, &oj, ours); // woke to the absolute-clock pose
     }
+
+    /// The DOODAD lane's drive pattern (decision 1360's golden, built AHEAD of the collapse):
+    /// the three player mutations `doodad_anim` performs — the FirstSeq arm
+    /// (`play(node).repeat()`), the variation re-roll's snap (`stop_all` + replay,
+    /// `reroll_doodad_variation`), and the draw gate's hide/resume (`stop_all`, then re-arm +
+    /// `seek_to` the absolute clock, `gate_doodad_anim`) — each run identically on the oracle
+    /// and the evaluator rig and asserted bit-equal, wraps and the untouched-property law
+    /// included. Green here means the joint-entity collapse only has to move consumers; the
+    /// drive semantics are already proven shared.
+    #[test]
+    fn doodad_drive_pattern_matches_animate_targets() {
+        let mut app = app();
+        // Clip A keys bones 0+1; clip B keys only bone 1 — so the re-roll snap leaves bone 0 on
+        // clip A's last-applied value on BOTH paths (the no-rest-reset law across a re-arm).
+        let spec_a = ClipSpec {
+            bones: vec![
+                (
+                    0,
+                    BoneSpec {
+                        t: vec![(0.0, Vec3::ZERO), (0.4, Vec3::X), (0.8, Vec3::Y)],
+                        r: vec![(0.0, Quat::IDENTITY), (0.8, Quat::from_rotation_y(1.1))],
+                        s: vec![],
+                    },
+                ),
+                (
+                    1,
+                    BoneSpec {
+                        t: vec![(0.1, Vec3::Z), (0.7, Vec3::splat(0.3))],
+                        r: vec![],
+                        s: vec![(0.0, Vec3::ONE), (0.8, Vec3::splat(1.5))],
+                    },
+                ),
+            ],
+            mask: 0,
+        };
+        let spec_b = ClipSpec {
+            bones: vec![(
+                1,
+                BoneSpec {
+                    t: vec![(0.0, Vec3::NEG_Y), (0.5, Vec3::NEG_X)],
+                    r: vec![(0.0, Quat::from_rotation_z(0.3)), (0.5, Quat::IDENTITY)],
+                    s: vec![],
+                },
+            )],
+            mask: 0,
+        };
+        let (graph, nodes, pose) = build(&mut app, &[spec_a, spec_b], vec![0, 0]);
+        let (oracle, oj, ours) = twin_rigs(&mut app, 2, &graph, &pose);
+        let rigs = [oracle, ours];
+        app.update(); // ThreadedAnimationGraphs warm-up (see single_clip's note)
+
+        // 1 · the FirstSeq arm, mid-loop and across the loop wrap.
+        drive(&mut app, &rigs, |p, _| {
+            p.play(nodes[0]).repeat();
+        });
+        step(&mut app, 0.3);
+        assert_twins_equal(&mut app, &oj, ours);
+        step(&mut app, 0.6); // past 0.8 — the repeat wrap
+        assert_twins_equal(&mut app, &oj, ours);
+
+        // 2 · the re-roll snap: stop everything, hard-play the new variation.
+        drive(&mut app, &rigs, |p, _| {
+            p.stop_all();
+            p.play(nodes[1]).repeat();
+        });
+        step(&mut app, 0.2);
+        assert_twins_equal(&mut app, &oj, ours); // bone 0 untouched-by-B on both paths
+
+        // 3 · the draw gate's hide: stop (not pause — a paused animation is still sampled;
+        // stopped, both paths leave every target exactly where it stands).
+        drive(&mut app, &rigs, |p, _| {
+            p.stop_all();
+        });
+        step(&mut app, 0.15);
+        assert_twins_equal(&mut app, &oj, ours);
+
+        // 4 · the resume: re-arm + seek to the shared-clock cursor, the gate's exact calls.
+        drive(&mut app, &rigs, |p, _| {
+            p.stop_all();
+            p.play(nodes[0]).repeat().seek_to(0.37);
+        });
+        step(&mut app, 0.1);
+        assert_twins_equal(&mut app, &oj, ours);
+    }
 }

@@ -15,8 +15,9 @@
 //!
 //! benilla's translation: the spawn site ([`crate::terrain_stream`]) classifies each placed model by
 //! [`classify`] — the ~90% with no animated channel stay on today's static path (measured,
-//! `benilla-extract doodadscan`) — and an animated one spawns the skinned twin + a joint hierarchy
-//! under an anim-root entity carrying [`DoodadAnimHost`]: an `AnimationPlayer` on the armed clip,
+//! `benilla-extract doodadscan`) — and an animated one spawns the skinned twin + a collapsed
+//! [`RigPose`] buffer (decision 1365 — no joint entities; consumers ride on-demand anchors) on an
+//! anim-root entity carrying [`DoodadAnimHost`]: an `AnimationPlayer` on the armed clip,
 //! re-rolled every window by [`reroll_doodad_variation`], and/or a [`GlobalSeqDrive`] for the
 //! free-running channels. [`gate_doodad_anim`] here is the draw-time tick made explicit: animation
 //! runs iff any of the doodad's submeshes is actually drawn (the `Visibility` verdict the debug-panel
@@ -26,14 +27,13 @@
 //! *linkage* (here: residency) gates the variation cycle.
 
 use bevy::animation::graph::AnimationNodeIndex;
-use bevy::animation::AnimatedBy;
 use bevy::app::AnimationSystems;
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 
-use benilla_assets::{bone_target_id, AnimClip, M2Model, ModelAnimations, ModelSkeleton};
+use benilla_assets::{AnimClip, M2Model, ModelAnimations, ModelSkeleton};
 
-use crate::rig_anim::GlobalSeqDrive;
+use crate::rig_anim::{AnimParked, GlobalSeqDrive, RigPose};
 
 mod lazy;
 mod mat_anim;
@@ -118,15 +118,19 @@ pub fn classify<'a>(
     }
 }
 
-/// What [`spawn_anim_host`] set up for one animated placement — the spawn site binds each ordinary
-/// submesh's skinned twin to `joints`/`inverse_bindposes` and arms the [`DoodadAnimHost`] on `root`
-/// with the submesh list once it has spawned them.
+/// What [`spawn_anim_host`] set up for one animated placement — the spawn site arms the
+/// [`DoodadAnimHost`] on `root` with the submesh list once it has spawned them.
+///
+/// Since decision 1365 there are NO joint entities: the pose lives in a [`RigPose`] buffer,
+/// carried here BY VALUE so the caller can mint consumer anchors ([`Self::anchor`]) for the bones
+/// something actually rides — billboard cards, emitters, ribbons — and then attach the buffer
+/// with [`Self::finish`]. Only consumed bones ever get an entity (the 1354 census: 96 % of the
+/// old eagerly-spawned population hosted nothing).
 pub struct AnimHostSpawn {
     pub root: Entity,
-    /// The host's joint entities, bone-indexed. NO palette slot rides along any more (decision
-    /// 0863): the terrain-stream caller stores these in a [`LazyRig`] and the draw gate
-    /// allocates at first wake; a gate-less caller (quest markers) allocates eagerly itself.
-    pub joints: Vec<Entity>,
+    /// The collapsed rig's pose buffer, not yet inserted — [`Self::finish`] attaches it to
+    /// `root` once every consumer anchor is minted.
+    pose: RigPose,
     pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
     /// The looping first-sequence node + duration, `None` on the gseq-only tier.
     pub(crate) clip: Option<(AnimationNodeIndex, f32)>,
@@ -146,6 +150,30 @@ pub struct AnimHostSpawn {
     pub(crate) anim_id: Option<u16>,
 }
 
+impl AnimHostSpawn {
+    /// The anchor entity standing in for `bone` — spawned on first demand, shared on repeat asks
+    /// ([`RigPose::anchor_for`]). `None` = the bone is outside this skeleton (the consumer
+    /// misses, exactly as `joints.get(bone)` used to).
+    pub fn anchor(&mut self, commands: &mut Commands, bone: u16) -> Option<Entity> {
+        self.pose.anchor_for(commands, self.root, bone)
+    }
+
+    /// The skeleton's bone count — what a palette allocation sizes itself with now that there is
+    /// no joint list to measure.
+    pub fn bones(&self) -> u32 {
+        self.pose.locals.len() as u32
+    }
+
+    /// Attach the pose buffer to the host root. Called once, after the caller minted its
+    /// anchors; returns the `(bone, anchor)` registry for consumers that resolve after this
+    /// point (the placement's emitter/ribbon spawns).
+    pub fn finish(self, commands: &mut Commands) -> Vec<(u16, Entity)> {
+        let anchors = self.pose.anchors.clone();
+        commands.entity(self.root).insert(self.pose);
+        anchors
+    }
+}
+
 /// Whether [`spawn_anim_host`] would rig this model — the model-forms requester's twin of the
 /// spawn gate (decision 0834), so the skinned twins are built exactly for the placed models that
 /// will draw them. Mirrors both of the host's gates: the tier, and the capture freeze (captures
@@ -159,13 +187,14 @@ pub fn wants_rig(m: &M2Model) -> bool {
 }
 
 /// Spawn the animation host for one placed M2, if [`classify`] says it animates: an anim-root entity
-/// at the placement transform, the joint hierarchy as its children (so despawning the root cascades),
+/// at the placement transform carrying the collapsed [`RigPose`] buffer (decision 1365 — no joint
+/// entities; consumer anchors are minted on demand and cascade with the root),
 /// and — per tier — an `AnimationPlayer` looping the **loader-idle seed's** clip (the client's
 /// one-time load arm at `0x70ebd0`: `0x7121a0(bone 0, animation id 0 resolved through the model's
 /// own `playableAnimationLookup`, linkFlag=1)` once — wow-re `gameobject-anim-arm.md` §1, which
 /// CORRECTED `doodad-anim-host.md` §1's prose reading of `animations[0].id`; decision 0637) and/or
-/// the free-running [`GlobalSeqDrive`]. `None` ⇒ the model is static and
-/// the caller keeps today's path untouched.
+/// the free-running [`GlobalSeqDrive`] (bone-index targets, the collapsed lane). `None` ⇒ the
+/// model is static and the caller keeps today's path untouched.
 pub fn spawn_anim_host(
     commands: &mut Commands,
     m: &M2Model,
@@ -183,20 +212,18 @@ pub fn spawn_anim_host(
     }
     let anims = m.animations.as_ref().expect("animated tier ⇒ animations");
     let root = commands.spawn((transform, Visibility::default())).id();
-    let joints = crate::rig_palette::spawn_joints(commands, root, root, &m.skeleton);
-    // NO palette rig here (decision 0863). The host's slot allocation is the CALLER's policy:
-    // the terrain-stream lane goes lazy — parts spawn on the static form and the draw gate
-    // allocates at the first wake ([`LazyRig`]) — because the resident population is thousands
-    // of parked hosts while the 2048-slot table is the scarce axis (the 0863 census: 1300–1750
-    // parked of ~1900 live slots, active peak ~630). A gate-less caller (quest markers)
-    // allocates eagerly itself, or its host would never skin.
+    // The collapsed pose buffer (decision 1365 — 0724 replayed for this lane): no joint
+    // entities, no `AnimatedBy` targets, no `BillboardJointRig`. The 0712 evaluator poses
+    // `locals` off the player, the model pass folds + seats the anchors, and the world pass
+    // handles the billboard/arm bones and the palette rows.
     //
-    // Billboard bones on an animated doodad (a swinging lamp's glow child): the joint-level
-    // camera facing, children inheriting — independent of the palette slot (its pass rewrites
-    // joint GlobalTransforms, which the cards follow whether or not the parts skin yet).
-    if let Some(bb) = crate::billboard::BillboardJointRig::new(&m.skeleton, &joints, root) {
-        commands.entity(root).insert(bb);
-    }
+    // NO palette rig here either (decision 0863). The host's slot allocation is the CALLER's
+    // policy: the terrain-stream lane goes lazy — parts spawn on the static form and the draw
+    // gate allocates at the first wake ([`LazyRig`]) — because the resident population is
+    // thousands of parked hosts while the 2048-slot table is the scarce axis (the 0863 census:
+    // 1300–1750 parked of ~1900 live slots, active peak ~630). A gate-less caller (quest
+    // markers) allocates eagerly itself, or its host would never skin.
+    let pose = RigPose::new(root, &m.skeleton);
     let mut clip_info = None;
     let mut armed_seq = None;
     let mut arm_id = None;
@@ -218,21 +245,16 @@ pub fn spawn_anim_host(
             // (`playing_seq`): the emitters' rate/enable tracks, the material-alpha sampler.
             anims.clone(),
         ));
-        for (i, &j) in joints.iter().enumerate() {
-            commands
-                .entity(j)
-                .insert((bone_target_id(i as u16), AnimatedBy(root)));
-        }
         clip_info = Some((head.node, head.duration));
         armed_seq = Some(head.seq_index);
         arm_id = Some(head.anim_id);
     }
-    if let Some(drive) = GlobalSeqDrive::new(&anims.global_bones, &joints) {
+    if let Some(drive) = GlobalSeqDrive::new_rig(&anims.global_bones, m.skeleton.joints.len()) {
         commands.entity(root).insert(drive);
     }
     Some(AnimHostSpawn {
         root,
-        joints,
+        pose,
         inverse_bindposes: m.inverse_bindposes.clone(),
         clip: clip_info,
         seq: armed_seq,
@@ -347,6 +369,7 @@ fn gate_doodad_anim(
         Entity,
         &mut DoodadAnimHost,
         Option<&lazy::LazyRig>,
+        Option<&RigPose>,
         Has<crate::rig_palette::RigSkin>,
         Option<&mut AnimationPlayer>,
         Option<&mut GlobalSeqDrive>,
@@ -389,7 +412,7 @@ fn gate_doodad_anim(
         world_cam.map(|(tf, _, proj)| (tf, proj)),
     );
     let camera_instance = camera_claim.0.map(|c| c.room.instance);
-    for (entity, mut host, lazy, has_rig, player, drive) in &mut hosts {
+    for (entity, mut host, lazy, pose, has_rig, player, drive) in &mut hosts {
         let drawn = if host.meshes.is_empty() {
             // Meshless (particles-only) host: the emitters' own draw-set law (see the `fade`
             // field doc) — the reference ticks animation for any model in the draw set, and a
@@ -454,6 +477,7 @@ fn gate_doodad_anim(
                     &worlds,
                     entity,
                     lazy,
+                    pose,
                     &mut twin_parts,
                 );
             }
@@ -462,8 +486,16 @@ fn gate_doodad_anim(
             continue;
         }
         host.active = drawn;
-        if !drawn {
+        // The rig-machinery half of the park (decision 1365): the marker gates the 0712
+        // evaluator, the model compose, and the world finalize — so a hidden host's collapsed
+        // rig costs nothing at all, where the joint hierarchy kept paying propagation. The
+        // commands apply before `AnimationSystems` (the gate orders `.before` it), so a resume's
+        // re-arm below evaluates the same frame the marker drops — 0739's wake law.
+        if drawn {
+            commands.entity(entity).remove::<AnimParked>();
+        } else {
             host.parked_at = now; // the reaper's age key (decision 0863)
+            commands.entity(entity).insert(AnimParked);
         }
         if let Some(mut p) = player {
             if drawn {

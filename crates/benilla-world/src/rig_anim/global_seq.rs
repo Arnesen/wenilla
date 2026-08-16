@@ -156,6 +156,7 @@ pub fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rig_anim::RigPose;
     use benilla_assets::GlobalSeqChannel;
 
     fn eyelid_bone() -> GlobalBone {
@@ -248,5 +249,63 @@ mod tests {
             c.sample(3.0 + 2.0 * 6.633).abs_diff_eq(Vec3::ZERO, 1e-3),
             "wraps on its period"
         );
+    }
+
+    /// The two write targets of the one sampler agree (decision 1360's second golden, built
+    /// AHEAD of the doodad collapse): the same channels driven through a joint entity
+    /// ([`GlobalSeqDrive::new`], the doodad/effect lane) and through a `RigPose` local
+    /// ([`GlobalSeqDrive::new_rig`], the collapsed lane) read **bit-identically** frame after
+    /// frame — the collapse changes where a sample lands, never what it is. Both drives spawn
+    /// the same frame, so the per-instance anchors coincide by the attach law.
+    #[test]
+    fn joint_and_rig_targets_write_the_same_pose() {
+        let full = GlobalBone {
+            bone: 0,
+            translation: Some(benilla_assets::GlobalSeqChannel {
+                period: 2.5,
+                keys: vec![(0.0, Vec3::ZERO), (1.2, Vec3::X), (2.5, Vec3::NEG_Z)],
+            }),
+            rotation: Some(benilla_assets::GlobalSeqChannel {
+                period: 1.7,
+                keys: vec![(0.0, Quat::IDENTITY), (1.7, Quat::from_rotation_y(0.9))],
+            }),
+            scale: Some(benilla_assets::GlobalSeqChannel {
+                period: 100.0,
+                keys: vec![(0.0, Vec3::ONE), (100.0, Vec3::splat(3.0))],
+            }),
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(47),
+        ));
+        app.add_systems(Update, apply_global_sequences);
+
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut().spawn(
+            GlobalSeqDrive::new(std::slice::from_ref(&full), &[joint]).expect("keyed channels map"),
+        );
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![benilla_assets::ModelJoint {
+                parent: -1,
+                local_translation: Vec3::ZERO,
+                billboard: None,
+                parent_arm: None,
+            }],
+            spine_bone: None,
+            head_bone: None,
+        };
+        let host = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(host).insert((
+            RigPose::new(host, &skeleton),
+            GlobalSeqDrive::new_rig(&[full], 1).expect("keyed channels map"),
+        ));
+
+        for frame in 0..6 {
+            app.update();
+            let jt = *app.world().entity(joint).get::<Transform>().unwrap();
+            let rl = app.world().entity(host).get::<RigPose>().unwrap().locals[0];
+            assert_eq!(jt, rl, "frame {frame}: joint target vs rig target diverged");
+        }
     }
 }

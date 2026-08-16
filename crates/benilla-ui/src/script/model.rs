@@ -1400,5 +1400,37 @@ impl Model {
     /// loudly, by proving the fingerprint still matches whenever tier 1 claims quiet.
     pub(crate) fn touch_layout(&mut self) {
         self.layout_epoch = self.layout_epoch.wrapping_add(1);
+        // `WOW_LAYOUT_TOUCH_TRACE=<n>` — name the epoch's per-frame toucher: print a backtrace
+        // for the first n touches (a mechanism probe, meaningful in a debuginfo build). Built
+        // because the SW meters read `resolve≈240 µs, solves=0` on every steady frame: the
+        // tier-1 gate is being defeated by a toucher whose writes never move a fingerprint,
+        // and 48 call sites is too many to tag by hand.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::OnceLock;
+        // Spec `<secs>:<n>`: arm after `secs` (past UI load + settle, so the trace names the
+        // STEADY toucher, not the thousands of legitimate load-time touches), then print `n`.
+        static SPEC: OnceLock<Option<(std::time::Instant, f64, AtomicU32)>> = OnceLock::new();
+        let spec = SPEC.get_or_init(|| {
+            let v = std::env::var("WOW_LAYOUT_TOUCH_TRACE").ok()?;
+            let (secs, n) = v.split_once(':')?;
+            Some((
+                std::time::Instant::now(),
+                secs.trim().parse().ok()?,
+                AtomicU32::new(n.trim().parse().ok()?),
+            ))
+        });
+        if let Some((t0, delay, left)) = spec {
+            if t0.elapsed().as_secs_f64() >= *delay
+                && left
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+                    .is_ok()
+            {
+                eprintln!(
+                    "[layout-touch] epoch={} at:\n{}",
+                    self.layout_epoch,
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+        }
     }
 }

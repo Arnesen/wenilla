@@ -102,7 +102,15 @@ pub(super) fn gate_rig_animation(
         // events), `go_anim`'s state machine arms the player regardless of the marker, and the
         // wake samples the absolute clock. Booth/studio rigs are entity-joint-lane (no
         // `RigPose`), so this query can never park the character pane.
-        With<RigPose>,
+        //
+        // `Without<DoodadAnimHost>` (decision 1365): placed doodads joined the collapsed lane,
+        // and their draw gate (`doodad_anim::gate_doodad_anim`) owns their `AnimParked` marker —
+        // it parks on the composed draw verdict + fade sphere, the doodad lane's own law, and
+        // two writers to one marker would fight every frame the two policies disagree.
+        (
+            With<RigPose>,
+            Without<benilla_world::doodad_anim::DoodadAnimHost>,
+        ),
     >,
     self_hosts: Query<Has<Embodied>>,
     instances: Query<&WmoPortalInstance>,

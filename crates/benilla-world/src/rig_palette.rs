@@ -524,9 +524,10 @@ impl RigSkin {
         Self::allocate_inner(palettes, bones, Vec::new(), ibp)
     }
 
-    /// Allocate a palette rig over live joint entities (the doodad/effect/booth lane — the
-    /// change sweep computes its rows). `None` (with one loud warn per session) when the table
-    /// is full — the caller renders the static bind-pose mesh instead.
+    /// Allocate a palette rig over live joint entities (the effect/booth/equipment lane — the
+    /// change sweep computes its rows; doodads moved to [`Self::allocate_bones`], decision 1365).
+    /// `None` (with one loud warn per session) when the table is full — the caller renders the
+    /// static bind-pose mesh instead.
     pub fn allocate(
         palettes: &mut RigPalettes,
         joints: Vec<Entity>,

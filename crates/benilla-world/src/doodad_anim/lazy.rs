@@ -52,8 +52,10 @@ const REAP_MIN_PARKED_SECS: f32 = 2.0;
 /// drawn. Present ⇔ the placement has skinned parts worth a slot.
 #[derive(Component)]
 pub(crate) struct LazyRig {
-    /// The host's joint entities, bone-indexed — [`RigSkin`]'s joint list at promote.
-    pub(crate) joints: Vec<Entity>,
+    /// The skeleton's bone count — the allocation size. No joint list since decision 1365: the
+    /// pose lives in the host's [`crate::rig_anim::RigPose`] buffer and the world pass writes
+    /// the rows.
+    pub(crate) bones: u32,
     pub(crate) ibp: Handle<SkinnedMeshInverseBindposes>,
     /// The [`SkinnedTwin`]-carrying part entities the promote/demote swaps.
     pub(crate) parts: Vec<Entity>,
@@ -80,11 +82,13 @@ pub(super) type TwinParts<'w, 's> = Query<
     ),
 >;
 
-/// The wake edge: allocate the slot, seed its rows from the joints' CURRENT worlds, and swap the
-/// parts. Returns whether the host now has a rig (so the gate can keep retrying a denial while
-/// the host stays drawn). Rows are seeded before the meshes swap: the first skinned frame shows
-/// the parked pose the static mesh was already showing, and the palette sweep takes over the
-/// same frame (the wake re-arms the player, whose targets mark the joints changed).
+/// The wake edge: allocate the slot, seed its rows from the pose buffer's CURRENT composed
+/// affines, and swap the parts. Returns whether the host now has a rig (so the gate can keep
+/// retrying a denial while the host stays drawn). Rows are seeded before the meshes swap: the
+/// first skinned frame shows the parked pose the static mesh was already showing, and the world
+/// pass takes over the same frame (the wake re-arms the player, whose evaluation re-raises
+/// `pose_dirty`).
+#[allow(clippy::too_many_arguments)] // the gate's full promote handoff
 pub(super) fn promote_lazy_rig(
     commands: &mut Commands,
     palettes: &mut RigPalettes,
@@ -92,31 +96,18 @@ pub(super) fn promote_lazy_rig(
     worlds: &Query<&GlobalTransform>,
     root: Entity,
     lazy: &LazyRig,
+    pose: Option<&crate::rig_anim::RigPose>,
     parts: &mut TwinParts,
 ) -> bool {
-    let Some(rig) = RigSkin::allocate(palettes, lazy.joints.clone(), lazy.ibp.clone()) else {
+    let Some(rig) = RigSkin::allocate_bones(palettes, lazy.bones, lazy.ibp.clone()) else {
         return false; // table full — the warn fired; the gate retries while drawn
     };
     let slot = rig.slot;
-    if let Some(ibp) = ibps.get(&lazy.ibp) {
-        // Rig-relative like every other seed (decision 0974) — these joint worlds came off Bevy
-        // propagation, so the rebase only carries the convention here; it cannot un-spend the
-        // precision propagation already spent. The sweep rewrites the rows the same frame anyway.
-        let origin = crate::rig_palette::rebase_origin(
-            worlds
-                .get(root)
-                .map(|g| g.translation())
-                .unwrap_or_default(),
-        );
-        let joint_worlds: Vec<GlobalTransform> = lazy
-            .joints
-            .iter()
-            .map(|&j| {
-                let g = worlds.get(j).copied().unwrap_or_default();
-                crate::rig_palette::rebase_global(g, origin)
-            })
-            .collect();
-        palettes.write_rig_worlds(&rig, &joint_worlds, ibp, origin);
+    if let (Some(ibp), Some(pose)) = (ibps.get(&lazy.ibp), pose) {
+        // Rig-relative like every other seed (decision 0974): the same compose the world pass
+        // runs, from the root's propagated world.
+        let root_g = worlds.get(root).copied().unwrap_or_default();
+        crate::rig_anim::seed_rig_rows(pose, root_g, &rig, ibp, palettes);
     }
     // Queued, liveness-checked at APPLY time: the slot's only free path is the component's
     // `on_replace` hook, so a plain `insert` racing this frame's tile-unload despawn would drop
@@ -225,8 +216,9 @@ mod tests {
     }
 
     /// One host: a hidden-by-default part carrying a [`SkinnedTwin`] of two distinct weak mesh
-    /// handles, a one-joint [`LazyRig`], and the mesh-backed draw-gate shape. Returns
-    /// `(host, part, mesh_vis_entity)` — the part IS the visibility carrier, like assemble's.
+    /// handles, a one-bone [`LazyRig`] + [`crate::rig_anim::RigPose`] (the collapsed shape,
+    /// decision 1365), and the mesh-backed draw-gate shape. Returns `(host, part)` — the part IS
+    /// the visibility carrier, like assemble's.
     fn lazy_host(app: &mut App, visible: bool) -> (Entity, Entity) {
         let stat = Handle::<Mesh>::default();
         let skinned = app
@@ -249,10 +241,6 @@ mod tests {
                 },
             ))
             .id();
-        let joint = app
-            .world_mut()
-            .spawn((Transform::default(), GlobalTransform::default()))
-            .id();
         let ibp = app
             .world_mut()
             .resource_mut::<Assets<SkinnedMeshInverseBindposes>>()
@@ -271,12 +259,24 @@ mod tests {
                     parked_at: 0.0,
                 },
                 LazyRig {
-                    joints: vec![joint],
+                    bones: 1,
                     ibp,
                     parts: vec![part],
                 },
             ))
             .id();
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![benilla_assets::ModelJoint {
+                parent: -1,
+                local_translation: Vec3::ZERO,
+                billboard: None,
+                parent_arm: None,
+            }],
+            spine_bone: None,
+            head_bone: None,
+        };
+        let pose = crate::rig_anim::RigPose::new(host, &skeleton);
+        app.world_mut().entity_mut(host).insert(pose);
         (host, part)
     }
 
@@ -295,8 +295,8 @@ mod tests {
     /// The lazy law end to end: born hidden, a host holds NO slot; a wake allocates on its
     /// SECOND consecutive drawn frame (the first is the spawn-default-visibility lie — see the
     /// gate's promote comment), swaps the part to the skinned twin, writes its tag's rig field,
-    /// and seeds the palette rows (the joint's identity world × identity bindpose = a non-zero
-    /// row — the swapped-in mesh never renders zeroed rows).
+    /// and seeds the palette rows (the pose buffer's identity bind affine × identity bindpose =
+    /// a non-zero row — the swapped-in mesh never renders zeroed rows).
     #[test]
     fn a_host_rigs_at_first_wake_not_at_spawn() {
         let mut app = app();

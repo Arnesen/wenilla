@@ -25,6 +25,7 @@ mod compose;
 mod global_seq;
 mod pose;
 
+pub(crate) use compose::seed_rig_rows;
 pub use compose::{finalize_rig_worlds, PosePost};
 pub use global_seq::GlobalSeqDrive;
 pub use pose::{RigAnchor, RigFrame, RigPose};

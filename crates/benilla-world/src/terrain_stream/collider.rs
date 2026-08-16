@@ -102,9 +102,15 @@ pub(super) fn finish_colliders(
     // released onto. This system heads the Stream chain (0738), so the consumers read this
     // frame's depth; the count is the depth entering the frame (attaches below shrink it next
     // publish), which can only delay a release, never wrong one.
+    // The weld accumulators count as pending too (decision 1369): each unflushed batch becomes
+    // at least one collider on this queue, and the settle release must not let a body go while
+    // doodad hulls still sit in one. Same conservative semantics as the depth itself.
+    let weld_backlog = world
+        .get_resource::<super::weld::HullWelds>()
+        .map_or(0, |w| w.unflushed());
     if let Some(mut progress) = world.get_resource_mut::<crate::terrain_stream::WorldLoadProgress>()
     {
-        progress.colliders_pending = pending;
+        progress.colliders_pending = pending + weld_backlog;
     }
     if ready.is_empty() {
         // `get_`: the unit tests below drive this system on a minimal App without the perf layer.
@@ -149,6 +155,26 @@ pub(super) fn finish_colliders(
         activity.colliders_attached += attached;
         activity.collider_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
+}
+
+/// `WOW_NO_DOODAD_BODIES=1` — spawn NO doodad/prop hulls at all (decision 1367's premise
+/// bracket): the ceiling of what the whole lane can be worth, measured by deleting it. The
+/// player loses doodad collision and the doodad pick clamp for the run — a measurement lever,
+/// never a setting. Terrain, impassable fences and WMO building colliders are untouched.
+pub(crate) fn doodad_bodies_disabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_NO_DOODAD_BODIES").is_some())
+}
+
+/// `WOW_BARE_DOODAD_COLLIDERS=1` — doodad/prop hulls spawn as body-LESS colliders (decision
+/// 1367): avian 0.6 files a collider with no `ColliderOf` in its first-class **Standalone**
+/// tree (`collider_tree/proxy_key.rs`), still spatial-queryable and still a contact target, so
+/// this is the idiomatic collider-only shape itself, not an approximation of it. What the lever
+/// removes is the `RigidBody::Static` row weight — the velocities/mass/solver components the
+/// 1364 census counted 12.2k of at the Stormwind pin.
+pub(crate) fn doodad_hulls_bare() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_BARE_DOODAD_COLLIDERS").is_some())
 }
 
 /// The world-space `(vertices, triangles)` for a model's static collider — its raw-WoW collision hull

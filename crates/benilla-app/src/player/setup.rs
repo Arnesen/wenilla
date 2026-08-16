@@ -85,7 +85,7 @@ pub(super) fn setup_player(
     // radius-derived view range); distance fog itself is added back in the lighting rebuild (step 5).
     let spawn = wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]);
     let cam_far = (fog_range(config.tile_radius).1 + 800.0).max(3000.0);
-    commands.spawn((
+    let mut world_cam = commands.spawn((
         Camera3d::default(),
         // THE world camera (the portrait booths are further `Camera3d`s — every "where is the viewer"
         // consumer filters on this marker, never on bare `Camera3d`; see its doc).
@@ -125,6 +125,25 @@ pub(super) fn setup_player(
             speed: 100.0,
         },
     ));
+    // `WOW_NO_INDIRECT=1` — opt the world camera out of indirect draws + GPU culling. An
+    // EXPERIMENT knob (the full-picture sizing): wgpu 27 dropped MULTI_DRAW_INDIRECT from
+    // bevy's gate, so 0.18 is the first release where Metal reaches `Culling` mode — silently.
+    // This knob restores the pre-0.18 mode for an A/B. It must ride the SPAWN: the phase
+    // cache latches the preprocessing mode the first time it sees the view.
+    if std::env::var_os("WOW_NO_INDIRECT").is_some() {
+        world_cam.insert(bevy::render::view::NoIndirectDrawing);
+    }
+    // `WOW_NO_CLUSTERS=1` — turn off Bevy's clustered-forward light assignment on the world
+    // camera. An EXPERIMENT knob (the 1370 bracket): every world shader takes its point-light
+    // term off OUR storage buffer (`lighting::global_light` — bevy's clusterable buffer is
+    // fragment-only in the view layout and nothing of ours imports `apply_pbr_lighting`), so
+    // the whole assign/extract/prepare cluster lane is suspected dead work proportional to the
+    // resident `PointLight` population (794 at the SW pin). `ClusterConfig::None` short-circuits
+    // `assign_objects_to_clusters` per view and starves the light extract/prepare downstream;
+    // the `Clusters` component stays, so the view bind group still builds.
+    if std::env::var_os("WOW_NO_CLUSTERS").is_some() {
+        world_cam.insert(bevy::light::cluster::ClusterConfig::None);
+    }
 }
 
 /// The world camera's demand gate (decision 0540): active in world or under the opaque loading

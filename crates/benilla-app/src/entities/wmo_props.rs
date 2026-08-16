@@ -310,15 +310,14 @@ pub(super) fn spawn_wmo_gameobject_props(
             if let Some(&root) = ents.first() {
                 let placement = host_world.mul_transform(prop.local);
                 for em in &m.emitters {
-                    // The emitter rides its host bone's joint when the prop animates (the same
-                    // ride as a terrain doodad — an unanimated chain reproduces the static path
-                    // exactly); a boneless prop follows its root. Either owner's propagated
+                    // The emitter rides its host bone's anchor when the prop animates (the
+                    // same ride as a terrain doodad — an unanimated chain reproduces the static
+                    // path exactly); a boneless prop follows its root. Either owner's propagated
                     // global composes the moving hull.
                     let owner = host
                         .as_ref()
-                        .map(|h| h.joints.as_slice())
-                        .and_then(|js| js.get(em.def.bone as usize))
-                        .map_or((root, [0.0; 3]), |&j| (j, em.bone_pivot));
+                        .and_then(|h| h.anchor(em.def.bone))
+                        .map_or((root, [0.0; 3]), |a| (a, em.bone_pivot));
                     if let Some(e) = particles::spawn_emitter(
                         &mut commands,
                         em,
@@ -358,9 +357,8 @@ pub(super) fn spawn_wmo_gameobject_props(
                 for rb in &m.ribbons {
                     let (owner, use_pivot) = host
                         .as_ref()
-                        .map(|h| h.joints.as_slice())
-                        .and_then(|js| js.get(rb.def.bone as usize))
-                        .map_or((root, false), |&j| (j, true));
+                        .and_then(|h| h.anchor(rb.def.bone))
+                        .map_or((root, false), |a| (a, true));
                     if benilla_world::ribbons::spawn_ribbon(
                         &mut commands,
                         rb,

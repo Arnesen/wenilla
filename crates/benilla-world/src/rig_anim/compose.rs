@@ -50,7 +50,18 @@ pub struct PosePost;
 /// Pre-propagation: fold each pose-dirty rig's locals into model-space affines and re-seat its
 /// anchors' local `Transform`s, so this frame's propagation places every consumer subtree at
 /// this frame's pose. `pose_dirty` stays raised — the world pass consumes and clears it.
-fn compose_rig_models(mut rigs: Query<&mut RigPose>, mut anchors: Query<&mut Transform>) {
+///
+/// A PARKED rig skips even this (decision 1365): the doodad lane's hosts are born pose-dirty and
+/// spend most of their residency parked with the flag still raised (the world pass, which clears
+/// it, also skips parked rigs), so an unfiltered pass re-composed every parked host's bind pose
+/// every frame. Nothing observable is lost — a parked rig's anchors were seated by its last
+/// composed frame (or by `RigPose::new`/`anchor_for` at bind pose), its consumers are out of the
+/// draw set by the same gate that parked it, and the wake drops the marker before this pass runs,
+/// so the first unparked frame composes the current pose before anything reads it.
+fn compose_rig_models(
+    mut rigs: Query<&mut RigPose, Without<AnimParked>>,
+    mut anchors: Query<&mut Transform>,
+) {
     for rig in &mut rigs {
         if !rig.pose_dirty {
             continue;
@@ -134,13 +145,37 @@ fn rig_worlds(
     (worlds, touched)
 }
 
+/// Seed one collapsed rig's palette rows from its CURRENT composed pose — the doodad lane's
+/// lazy-promote edge (decision 1365, the 0863 wake): the slot is claimed mid-frame and the
+/// skinned mesh swaps in the same frame, so the rows must be written NOW or the first skinned
+/// frame renders zeroed (origin-collapsed) rows. No camera basis — a billboard bone seeds at its
+/// composed pose and the world pass re-faces it this same frame (the promoted host is unparked
+/// and `has_billboard` puts it in the refresh set).
+pub(crate) fn seed_rig_rows(
+    rig: &RigPose,
+    root_g: GlobalTransform,
+    skin: &RigSkin,
+    ibp: &[Mat4],
+    palettes: &mut RigPalettes,
+) {
+    let origin = crate::rig_palette::rebase_origin(root_g.translation());
+    let root_rel = crate::rig_palette::rebase_global(root_g, origin);
+    let (worlds, _) = rig_worlds(rig, root_rel, None);
+    palettes.write_rig_worlds(skin, &worlds, ibp, origin);
+}
+
 /// Post-propagation (inside `BillboardPlace`, chained after the entity lane's
 /// `billboard_joint_palette` and before `face_billboards`): finalize every rig that needs it —
 /// palette rows + replaced-subtree anchor re-seats, with the seat-frame cascade.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // billboard_joint_palette's shape
 pub fn finalize_rig_worlds(
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    mut rigs: Query<(Entity, &mut RigPose, &RigSkin, Has<AnimParked>)>,
+    // `Option<&RigSkin>`, not `&RigSkin` (decision 1365): the doodad lane's rigs hold their
+    // palette slot lazily (allocated at first wake, reaped under pressure), and a slot-less rig
+    // still needs this pass for two things — clearing `pose_dirty` (or the model pass re-composes
+    // it every frame for ever) and, when it authors billboard/arm bones, the camera-dependent
+    // anchor re-seat its cards and emitters ride. The palette write alone is skipped.
+    mut rigs: Query<(Entity, &mut RigPose, Option<&RigSkin>, Has<AnimParked>)>,
     // B0001: the `Changed` filter reads `GlobalTransform` ticks, which conflicts with the
     // mutable frame query — a `ParamSet` sequences them (the refresh set is collected first).
     mut worlds_params: ParamSet<(
@@ -191,10 +226,16 @@ pub fn finalize_rig_worlds(
     let mut cascade: Vec<Entity> = Vec::new();
     let mut finalize =
         |rig: &mut RigPose,
-         skin: &RigSkin,
+         skin: Option<&RigSkin>,
          globals: &mut Query<(&Transform, &mut GlobalTransform), Without<WorldCamera>>,
          cascade: &mut Vec<Entity>,
          root_moved: bool| {
+            // A slot-less rig with no special bones has nothing left for this pass: no rows to
+            // write, and its anchors were placed by the model pass + ordinary propagation. The
+            // caller still clears `pose_dirty` — which is the point of arriving here at all.
+            if skin.is_none() && !rig.has_special && !root_moved {
+                return;
+            }
             let Ok(root_g) = globals.get(rig.joints_root).map(|(_, g)| *g) else {
                 return;
             };
@@ -210,8 +251,10 @@ pub fn finalize_rig_worlds(
             let origin = crate::rig_palette::rebase_origin(root_g.translation());
             let root_rel = crate::rig_palette::rebase_global(root_g, origin);
             let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
-            if let Some(ibp) = ibps.get(&skin.ibp) {
-                palettes.write_rig_worlds(skin, &worlds, ibp, origin);
+            if let Some(skin) = skin {
+                if let Some(ibp) = ibps.get(&skin.ibp) {
+                    palettes.write_rig_worlds(skin, &worlds, ibp, origin);
+                }
             }
             if !rig.has_special && !root_moved {
                 return;

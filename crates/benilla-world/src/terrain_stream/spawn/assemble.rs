@@ -21,11 +21,14 @@ use crate::model_render::{ModelKind, ModelPart};
 use benilla_assets::materials::WowModelMaterial;
 
 /// What one placement's animation host armed, for the consumers that spawn alongside its submeshes.
-/// Both fields are *per placement*, not per model: the joint set is this instance's, and `arm` is
+/// All fields are *per placement*, not per model: the anchors are this instance's, and `arm` is
 /// this instance's own anim root, whose live player names the sequence it is currently playing.
 pub struct PlacementHost {
-    /// Bone-indexed joint entities — an emitter or ribbon rides its host bone's joint off this.
-    pub joints: Vec<Entity>,
+    /// `(bone, anchor)` — the consumer anchors this placement minted (decision 1365): one entity
+    /// per bone something actually rides, registered in the host's `RigPose` (its compose passes
+    /// re-seat them) and pre-minted here for every emitter and ribbon bone the model authors, so
+    /// the fx spawns that run after the pose buffer is attached only look entities up.
+    anchors: Vec<(u16, Entity)>,
     /// This placement's anim-root entity. It rides the returned entity list so it despawns with the
     /// placement, but it is **not geometry** — a caller tagging "everything this placement draws"
     /// has to be able to leave it out, or it lands in a cull that can only fail open on a boundless
@@ -39,6 +42,18 @@ pub struct PlacementHost {
     /// (decision 0768), so a captured slot goes stale within about a second and the consumer has to
     /// resolve against the live player instead.
     pub arm: Option<Entity>,
+}
+
+impl PlacementHost {
+    /// The anchor standing in for `bone` — what `joints.get(bone)` used to answer. `None` = the
+    /// bone hosts nothing this placement consumes (or is outside the skeleton): the consumer
+    /// falls back exactly as it did on a missing joint.
+    pub fn anchor(&self, bone: u16) -> Option<Entity> {
+        self.anchors
+            .iter()
+            .find(|&&(b, _)| b == bone)
+            .map(|&(_, e)| e)
+    }
 }
 
 /// Spawn a model's submeshes at `transform` with the full doodad/WMO component set. Returns the spawned
@@ -120,7 +135,7 @@ pub fn spawn_model_entities(
     // (0 render batches — the InstancePortal swirl, whose two emitters sit on the spinning rotor
     // bones) still needs its joints driven. Only a model with nothing but billboard cards and no
     // emitters/ribbons spawns no host.
-    let host = m2
+    let mut host = m2
         .filter(|(m, _)| {
             submeshes.iter().any(|s| s.billboard.is_none())
                 || !m.emitters.is_empty()
@@ -129,9 +144,7 @@ pub fn spawn_model_entities(
         .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, m, transform));
     // Captures freeze material-alpha clocks at 0 (deterministic frames) — read the env once.
     let mat_frozen = crate::dev_state::deterministic_run();
-    let skin = host
-        .as_ref()
-        .map(|h| (h.joints.clone(), h.inverse_bindposes.clone()));
+    let animated = host.is_some();
     let rig_root = host.as_ref().map(|h| h.root);
     if let Some(h) = &host {
         out.push(h.root);
@@ -280,14 +293,12 @@ pub fn spawn_model_entities(
         // lamp does instead of hanging in the air far past it. The mesh is centred at the pivot, so the
         // fade centre is `ZERO` (→ the entity's world translation = the pivot).
         let (entity, fade_center) = if let Some(info) = &sub.billboard {
-            // An animated doodad's card rides its billboard bone's live joint (the swinging
-            // lamp's glow follows the swing — 0153 follow-up; the joint frame bakes the pivot,
-            // 0130 rig identity). A static doodad keeps the fixed placement-baked pivot.
-            let card = match skin
-                .as_ref()
-                .and_then(|(joints, _)| joints.get(info.bone as usize))
-            {
-                Some(&joint) => BillboardCard::following_joint(info, joint),
+            // An animated doodad's card rides its billboard bone's live anchor (the swinging
+            // lamp's glow follows the swing — 0153 follow-up; the anchor frame bakes the pivot,
+            // the 0130 rig identity carried into the collapsed lane by 1365). A static doodad
+            // keeps the fixed placement-baked pivot.
+            let card = match host.as_mut().and_then(|h| h.anchor(commands, info.bone)) {
+                Some(anchor) => BillboardCard::following_joint(info, anchor),
                 None => match card_owner {
                     Some(anchor) => BillboardCard::following(info, anchor),
                     None => BillboardCard::new(info, transform),
@@ -324,8 +335,7 @@ pub fn spawn_model_entities(
             // (decision 0863, `doodad_anim::lazy`). The twin comes from the app-built forms
             // (0834); a lane that didn't request it (or a contract break) simply never promotes,
             // rather than arm the picker with a joint-less "skinned" mesh.
-            let skinned_mesh = skin
-                .is_some()
+            let skinned_mesh = animated
                 .then(|| forms.skin.and_then(|s| s.get(batch_idx)).cloned())
                 .flatten();
             let mut part_entity = commands.spawn((
@@ -358,10 +368,9 @@ pub fn spawn_model_entities(
             // second query recomputed the very box 1259 had just widened, and the birds went back
             // to blinking a second after they streamed in. The bound here is authored, not derived;
             // this component is how that is said.
-            if let Some(aabb) = cull_bound(
-                stat_aabb.as_ref(),
-                skin.is_some().then_some(anim_bound).flatten(),
-            ) {
+            if let Some(aabb) =
+                cull_bound(stat_aabb.as_ref(), animated.then_some(anim_bound).flatten())
+            {
                 part_entity.insert((aabb, NoAutoAabb));
             }
             if let Some(sm) = skinned_mesh {
@@ -372,12 +381,10 @@ pub fn spawn_model_entities(
                 lazy_parts.push(part_entity.id());
             }
             let entity = part_entity.id();
-            if skin.is_some() {
-                if let Some(root) = rig_root {
-                    commands
-                        .entity(entity)
-                        .insert(crate::rig_palette::RigPart(root));
-                }
+            if let Some(root) = rig_root {
+                commands
+                    .entity(entity)
+                    .insert(crate::rig_palette::RigPart(root));
                 // The draw-gate list is about visibility, not skinning — the bind-pose fallback
                 // part still represents the placement.
                 skinned_meshes.push(entity);
@@ -420,8 +427,21 @@ pub fn spawn_model_entities(
     // or, for a meshless (particles-only) host, iff the placement's fade sphere is in the draw
     // set (the same 0171 law its emitters gate on).
     let arm = host.as_ref().and_then(|h| h.seq.map(|_| h.root));
-    if let Some(h) = host {
+    let placement_host = host.map(|mut h| {
         let now = m2.map(|(_, now)| now).unwrap_or_default();
+        // Pre-mint the fx consumers' anchors (decision 1365) while the pose buffer is still in
+        // hand: exactly the bones the model authors emitters/ribbons on, nothing speculative —
+        // the fx spawns that run after this only look the entities up ([`PlacementHost::anchor`]).
+        if let Some((m, _)) = m2 {
+            for bone in m
+                .emitters
+                .iter()
+                .map(|e| e.def.bone)
+                .chain(m.ribbons.iter().map(|r| r.def.bone))
+            {
+                h.anchor(commands, bone);
+            }
+        }
         commands.entity(h.root).insert(DoodadAnimHost {
             meshes: skinned_meshes,
             fade: (radius, transform.transform_point(local_center)),
@@ -444,17 +464,16 @@ pub fn spawn_model_entities(
         // (chimney smoke) never takes a slot, which under the eager design it wasted one on.
         if !lazy_parts.is_empty() {
             commands.entity(h.root).insert(crate::doodad_anim::LazyRig {
-                joints: h.joints.clone(),
+                bones: h.bones(),
                 ibp: h.inverse_bindposes.clone(),
                 parts: lazy_parts,
             });
         }
-    }
-    (
-        out,
-        skin.zip(rig_root)
-            .map(|((joints, _), root)| PlacementHost { joints, root, arm }),
-    )
+        let root = h.root;
+        let anchors = h.finish(commands);
+        PlacementHost { anchors, root, arm }
+    });
+    (out, placement_host)
 }
 
 /// The `Aabb` a placed submesh is culled with: its build-time bind-pose bound, widened by the

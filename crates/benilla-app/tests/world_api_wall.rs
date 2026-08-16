@@ -209,6 +209,16 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// count. The items were always crossing; the measurement improved. That is the only kind of raise
 /// that is not a retreat — a raise for a NEW leak is the failure this number exists to catch.
 ///
+/// And 155 → 156: `doodad_anim::DoodadAnimHost`, a PUBLISH by 1164's test (decision 1365). The
+/// doodad joint collapse put placed doodads on the collapsed-rig lane (`RigPose`), which made
+/// them visible to the game's animation-LOD gate — whose park marker the engine's own doodad
+/// draw gate already owns, on a different law (the composed draw verdict + fade sphere, not the
+/// unit frustum test). Two writers to one marker silently un-park hidden hosts, so the game's
+/// gate must be able to say "this population is not mine" — and the engine component that IS
+/// that population's name is the smallest honest way to say it. The instruments already named
+/// it; this makes the one gameplay filter explicit rather than inventing a second marker to
+/// carry the same fact.
+///
 /// And 154 → 155: `modkeys::SyntheticHold`, a PUBLISH by 1164's test rather than a leak. The
 /// engine owns the macOS stuck-modifier reconciler, and that reconciler decides by polling the
 /// **hardware** flag state — which by construction reads "up" for a key no hand is on. So a
@@ -219,7 +229,7 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// input, which is game-side; a one-field resource is the smallest honest expression of that. The
 /// alternative was ordering a game system against an engine system, which crosses this same line
 /// *and* publishes a schedule point to do it.
-const CEILING: usize = 155;
+const CEILING: usize = 156;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

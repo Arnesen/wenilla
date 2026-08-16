@@ -204,5 +204,21 @@ impl Plugin for WorldFoundation {
             // read, whose defaults ARE the player behaviour. The debug panel is only its editor
             // and may not be installed at all.
             .init_resource::<crate::dev_state::DebugState>();
+        // `WOW_NO_PHYS_PREPROP=1` — skip avian's own copy of Bevy's transform propagation in
+        // FixedPostUpdate. An EXPERIMENT knob (the 1370 bracket): `PhysicsTransformPlugin`
+        // re-registers `mark_dirty_trees`/`propagate_parent_transforms`/`sync_simple_transforms`
+        // to run before each physics step — a second whole-world transform sweep on top of
+        // PostUpdate's own. Our world is static geometry plus kinematic movers that write
+        // `Position` directly, so the pre-step copy is suspected dead work; the gate is a
+        // runtime `run_if` on this resource, so inserting it IS the whole mechanism. Known
+        // semantic edge while on: a collider whose `Transform` moves during Update reaches
+        // physics with last frame's `GlobalTransform` (one-frame lag) — a measurement lever,
+        // never a setting.
+        if std::env::var_os("WOW_NO_PHYS_PREPROP").is_some() {
+            app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
+                propagate_before_physics: false,
+                ..Default::default()
+            });
+        }
     }
 }

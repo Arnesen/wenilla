@@ -243,6 +243,20 @@ pub fn run(build: BuildId) -> AppExit {
     // when MOST rows move in one frame (a load burst into a near-empty world), where
     // dirty-marking briefly costs more than it saves — a loading-band term, accepted knowingly.
     app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
+    // The Update schedule runs on the SINGLE-THREADED executor (decision 1366). Not a tuning
+    // whim: ~60% of our per-frame Update systems are non-Send (mlua's UiScript, kira's audio
+    // handles) and serialize through the multi-threaded executor's one `local_thread_running`
+    // flag anyway, so the cross-thread dispatch machinery was pure overhead — measured
+    // −1.30 cpu_ms at the LBRS pin under 5-round grading with the wall tail (p95/p99/max)
+    // flat-to-better (the 1364 "fatter tail" reading did not reproduce; 1366 has the tables,
+    // both pins). PostUpdate stays multi-threaded — its wide parallel bands
+    // (propagation, visibility) are real parallelism; re-grading it is a named open probe.
+    // `WOW_MT_UPDATE=1` is the A/B lever back to the multi-threaded executor.
+    if std::env::var_os("WOW_MT_UPDATE").is_none() {
+        app.edit_schedule(Update, |s| {
+            s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+        });
+    }
     // …and one startup line says which build produced this log. Registered HERE, beside the stamp
     // it prints, rather than in `preflight` where it sat until decision 1179: **which build is
     // this** is the first thing a bug report from someone else's machine has to establish, and a

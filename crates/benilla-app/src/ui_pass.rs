@@ -656,7 +656,24 @@ impl Run {
 struct BatchPools {
     entities: Vec<Entity>,
     meshes: Vec<Handle<Mesh>>,
+    /// Each slot's last-written content — the per-run skip gate (decision 1361): a slot whose
+    /// run is bit-identical to what its pooled mesh already holds is not rewritten, so one
+    /// animating quad no longer drags every batch through the GPU mesh allocator.
+    stored: Vec<StoredRun>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
+}
+
+/// One pooled batch slot's full identity: the mesh bytes plus everything the entity was last
+/// written with (material key, z). Equality is exact — see the skip gate's comment for why a
+/// hash was rejected.
+#[derive(PartialEq)]
+struct StoredRun {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+    z_bits: u32,
+    key: MatKey,
 }
 
 /// A material's full identity: texture, blend/shape flags, mask texture + mask rect (as bits, so
@@ -678,6 +695,9 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
     for entity in pools.entities.drain(..) {
         commands.entity(entity).despawn();
     }
+    // The skip gate must forget with them (decision 1361): a retired slot's entity is gone, so
+    // "content unchanged" must not skip the respawn when the UI returns.
+    pools.stored.clear();
 }
 
 /// Per frame: when the BASE lane flagged a change ([`UiQuads::dirty`]) or the APPEND lane's
@@ -685,6 +705,11 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
 /// texture-identity runs, and write the runs into the pooled batches ([`BatchPools`]). See the
 /// module doc for the full approach (painter's order within/across runs) and its batching
 /// consequence.
+fn ui_mesh_frozen() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_FREEZE_UI_MESH").is_some())
+}
+
 fn rebuild_ui_mesh(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
@@ -716,6 +741,40 @@ fn rebuild_ui_mesh(
     }
     if !q.dirty && q.overlays == q.last_overlays {
         return;
+    }
+    // `WOW_UI_DIFF=1` — WHO re-triggers the rebuild? Names the first differing overlay quad (or
+    // says the BASE lane's dirty flag did it), once a second. The instrument behind the
+    // Stormwind mesh-churn hunt: a widget re-emitting a moving/jittering quad every frame drags
+    // every batch through a full rebuild and the GPU allocator through ~90 frees+reallocs.
+    if std::env::var_os("WOW_UI_DIFF").is_some() {
+        if q.dirty {
+            eprintln!("[ui-diff] BASE lane dirty");
+        } else {
+            let i = q
+                .overlays
+                .iter()
+                .zip(&q.last_overlays)
+                .position(|(a, b)| a != b);
+            match i {
+                Some(i) => {
+                    let (a, b) = (&q.overlays[i], &q.last_overlays[i]);
+                    eprintln!(
+                        "[ui-diff] overlay {i}/{} differs: tex={:?} rect {:?} -> {:?} uv_changed={} color_changed={}",
+                        q.overlays.len(),
+                        a.texture.as_ref().and_then(|t| t.path()),
+                        b.rect,
+                        a.rect,
+                        a.uv != b.uv,
+                        a.color != b.color,
+                    );
+                }
+                None => eprintln!(
+                    "[ui-diff] overlay COUNT changed: {} -> {}",
+                    q.last_overlays.len(),
+                    q.overlays.len()
+                ),
+            }
+        }
     }
     q.dirty = false;
     q.last_overlays.clone_from(&q.overlays);
@@ -849,27 +908,6 @@ fn rebuild_ui_mesh(
             continue;
         }
         let z = -450.0 + (i as f32 / run_count) * 900.0;
-        // MAIN_WORLD too (not RENDER_WORLD-only): the pool rewrites this asset in place next
-        // rebuild, so the main-world copy must survive extraction.
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, run.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, run.uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, run.colors);
-        mesh.insert_indices(Indices::U32(run.indices));
-        let mesh_handle = match pools.meshes.get(used) {
-            Some(handle) => {
-                let _ = meshes.insert(handle.id(), mesh);
-                handle.clone()
-            }
-            None => {
-                let handle = meshes.add(mesh);
-                pools.meshes.push(handle.clone());
-                handle
-            }
-        };
         // The mask span converts to physical framebuffer px here (the shader compares
         // `@builtin(position)`); a maskless run gets a degenerate rect, which disables the branch.
         let scale = window.scale_factor();
@@ -900,6 +938,61 @@ fn rebuild_ui_mesh(
             mask.as_ref().map(bevy::asset::Handle::id),
             mask_rect.to_array().map(f32::to_bits),
         );
+        // The per-slot skip gate (decision 1361). A rebuild fires for the WHOLE quad stream the
+        // moment anything differs — and one continuously-animating quad (the resting blink on
+        // the player frame, in every city) fires it every frame. The run that quad lives in is
+        // the only one whose bytes moved; the other ~90 slots are bit-identical to what their
+        // pooled mesh already holds, and rewriting them anyway put every UI batch through the
+        // GPU mesh allocator's free+realloc each frame (0.86 ms/frame at the Stormwind pin).
+        // Full content compare, not a hash — a stale batch drawn over a collision would be a
+        // rendering bug no one could reproduce.
+        let stored = StoredRun {
+            positions: run.positions,
+            uvs: run.uvs,
+            colors: run.colors,
+            indices: run.indices,
+            z_bits: z.to_bits(),
+            key,
+        };
+        if pools.stored.get(used) == Some(&stored) {
+            used += 1;
+            continue;
+        }
+        // MAIN_WORLD too (not RENDER_WORLD-only): the pool rewrites this asset in place next
+        // rebuild, so the main-world copy must survive extraction.
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, stored.positions.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, stored.uvs.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, stored.colors.clone());
+        mesh.insert_indices(Indices::U32(stored.indices.clone()));
+        if pools.stored.len() > used {
+            pools.stored[used] = stored;
+        } else {
+            pools.stored.push(stored);
+        }
+        let mesh_handle = match pools.meshes.get(used) {
+            Some(handle) => {
+                // `WOW_FREEZE_UI_MESH=1` — never rewrite a pooled batch mesh in place (the UI
+                // freezes at its first-built frame). An EXPERIMENT knob (the 1370 bracket): the
+                // resting blink's ~2 rewrites/frame are one-asset `Assets<Mesh>` mutations, and
+                // bevy 0.18's `AssetChanged<Mesh3d>` fast path is all-or-nothing — one modified
+                // mesh arms a hash probe over every `Mesh3d` row in the scene (~44k at the SW
+                // pin) in three PostUpdate walks. This lever prices that arming; `WOW_MESH_EVENTS`
+                // confirms it (events/s → 0). First build (the `None` arm) is untouched.
+                if !ui_mesh_frozen() {
+                    let _ = meshes.insert(handle.id(), mesh);
+                }
+                handle.clone()
+            }
+            None => {
+                let handle = meshes.add(mesh);
+                pools.meshes.push(handle.clone());
+                handle
+            }
+        };
         let material_handle = pools
             .materials
             .entry(key)
@@ -946,6 +1039,7 @@ fn rebuild_ui_mesh(
         commands.entity(entity).despawn();
     }
     pools.meshes.truncate(used);
+    pools.stored.truncate(used);
 }
 
 /// Deliberately-overlapping synthetic content proving the sort: 5 z strata × 40 quads each, offset both

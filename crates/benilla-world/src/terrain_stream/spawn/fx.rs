@@ -179,11 +179,13 @@ pub(super) fn emitter_fade(
 /// `out` so they ride the placement's lifecycle (despawn when it streams out). Emitters with no
 /// resolved texture are skipped by [`particles::spawn_emitter`].
 ///
-/// `joints` is the placement's anim-host joint set when it animates (0130 phase 4): each emitter then
-/// rides its host bone's joint — the torch flame follows the flame-bone jiggle, the inn chandelier's
-/// candle flames swing with it. Riding is unconditional given a joint set: for a bone whose chain
-/// never animates the joint holds its telescoped rest pivot, so `joint · (position − pivot)` is
-/// byte-for-byte the static `placement · position` — no per-emitter classification needed.
+/// `host` is the placement's [`PlacementHost`] when it animates (0130 phase 4): each emitter then
+/// rides its host bone's ANCHOR (decision 1365 — the collapsed rig's stand-in for the joint,
+/// pre-minted by the assembler for exactly these bones) — the torch flame follows the flame-bone
+/// jiggle, the inn chandelier's candle flames swing with it. Riding is unconditional given a
+/// host: for a bone whose chain never animates the anchor holds its telescoped rest pivot, so
+/// `anchor · (position − pivot)` is byte-for-byte the static `placement · position` — no
+/// per-emitter classification needed.
 ///
 /// `armed_seq` is the FILE sequence slot this placement's own arm rolled, and the emitters sample
 /// their rate/gate tracks against **that** slot. This site used to pass `EmitClock::Pinned` — slot 0,
@@ -198,18 +200,18 @@ pub(super) fn spawn_emitters_for(
     commands: &mut Commands,
     emitters: &[ModelEmitter],
     transform: Transform,
-    joints: Option<&[Entity]>,
-    arm: Option<Entity>,
+    host: Option<&super::assemble::PlacementHost>,
     // The shared draw-set gate ([`emitter_fade`]), cloned onto every emitter this model spawns.
     fade: &particles::EmitterFade,
     out: &mut Vec<Entity>,
 ) {
+    let arm = host.and_then(|h| h.arm);
     for em in emitters {
         // Static placements (no anim host — the ~90% tier, and every capture) have no owner to
         // follow; they despawn via the placement's entity list.
-        let owner = joints
-            .and_then(|js| js.get(em.def.bone as usize))
-            .map(|&j| (j, em.bone_pivot));
+        let owner = host
+            .and_then(|h| h.anchor(em.def.bone))
+            .map(|a| (a, em.bone_pivot));
         if let Some(e) = particles::spawn_emitter(
             commands,
             em,
@@ -242,7 +244,7 @@ pub(super) fn spawn_emitters_for(
 }
 
 /// Spawn a ribbon trail for each of a model's ribbon emitters (wisp streamers, the Caverns-of-Time
-/// energy trails). A trail rides its host bone's joint when the placement animates (same ride as
+/// energy trails). A trail rides its host bone's anchor when the placement animates (same ride as
 /// [`spawn_emitters_for`]); a static placement's trail rides the first spawned submesh entity (its
 /// transform IS the placement). Trails self-despawn when their owner goes, so they don't join
 /// `out` — the placement's despawn cascades within a frame.
@@ -250,8 +252,7 @@ pub(super) fn spawn_ribbons_for(
     commands: &mut Commands,
     ribbons: &[benilla_assets::ModelRibbon],
     transform: Transform,
-    joints: Option<&[Entity]>,
-    arm: Option<Entity>,
+    host: Option<&super::assemble::PlacementHost>,
     fallback_owner: Option<Entity>,
     // The SAME draw-set gate the quad clouds one function up are given ([`emitter_fade`]) — a trail
     // is one of this model's emitters and is admitted by exactly the same five terms. It has to be
@@ -259,9 +260,10 @@ pub(super) fn spawn_ribbons_for(
     // its owner model's fade sphere or its rooms ([`crate::ribbons::RibbonTrail::fade`]).
     fade: &particles::EmitterFade,
 ) {
+    let arm = host.and_then(|h| h.arm);
     for rb in ribbons {
-        let (owner, use_pivot) = match joints.and_then(|js| js.get(rb.def.bone as usize)).copied() {
-            Some(j) => (j, true),
+        let (owner, use_pivot) = match host.and_then(|h| h.anchor(rb.def.bone)) {
+            Some(a) => (a, true),
             None => match fallback_owner {
                 Some(e) => (e, false),
                 None => continue, // nothing to ride (an entity-less placement)

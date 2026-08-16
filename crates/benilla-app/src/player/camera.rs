@@ -543,7 +543,7 @@ pub(super) fn seat_camera(
     cam_pivot_height: f32,
     rig: &mut CameraControl,
     cam: &mut FlyCam,
-    cam_t: &mut Transform,
+    cam_t: &mut Mut<Transform>,
     collide: &benilla_world::collision::WorldCollision<'_, '_>,
     cam_probe: &Collider,
 ) {
@@ -573,8 +573,10 @@ pub(super) fn seat_camera(
     // instead of overshooting (the old min-distance floor used to force the camera *past* a too-close
     // hit — gone; collision wins outright). `cast_move` ignores origin penetration, so a head grazing
     // a surface still casts outward.
-    cam_t.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
-    let cam_fwd = *cam_t.forward();
+    let rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
+    // `Transform::forward()` is exactly `rotation * -Z` (no renormalize), computed here from the
+    // local so the write below can be gated.
+    let cam_fwd = rotation * Vec3::NEG_Z;
     let pivot = player_pos + Vec3::Y * cam_pivot_height;
     let seat = pivot - cam_fwd * rig.distance;
     let boom = seat - head;
@@ -593,7 +595,20 @@ pub(super) fn seat_camera(
         rig.collision_distance + (open - rig.collision_distance) * t
     };
     let frac = (rig.collision_distance / boom_len).clamp(0.0, 1.0);
-    cam_t.translation = head + boom * frac;
+    let translation = head + boom * frac;
+    // The no-op write gate (decision 1362 — 1355's clamp lesson, at the camera): a parked
+    // camera's pose is bit-stable once the collision ease settles, but writing it anyway marked
+    // the camera's transform changed every frame — which re-ran its propagation and told every
+    // camera-watching gate in the app that the view moved when it hadn't. Bit equality, not an
+    // epsilon: a real sub-epsilon drift must still land.
+    {
+        let t = cam_t.bypass_change_detection();
+        if t.rotation != rotation || t.translation != translation {
+            t.rotation = rotation;
+            t.translation = translation;
+            cam_t.set_changed();
+        }
+    }
     // No waterline handling here — deliberately. The reference NEVER moves the eye for liquid
     // (verified negative, wow-re `water-frame-straddle` §4a: zero liquid-height queries in the
     // camera TU); the no-straddle experience is the *submersion probe's* — the frame flips
@@ -622,23 +637,20 @@ pub(super) fn seat_camera(
             open,
             rig.collision_distance,
             frac,
-            cam_t.translation.x,
-            cam_t.translation.y,
-            cam_t.translation.z,
-            cam_t.translation.x.to_bits(),
-            cam_t.translation.y.to_bits(),
-            cam_t.translation.z.to_bits(),
+            translation.x,
+            translation.y,
+            translation.z,
+            translation.x.to_bits(),
+            translation.y.to_bits(),
+            translation.z.to_bits(),
         );
     }
 
     // Fade the avatar as the camera nears its pivot (zoom-in / a wall pulling the boom in): opaque
     // in third-person, ramping to invisible in first-person. Keyed off the *realized* camera→pivot
     // distance (collision-pulled), so backing into a wall also thins you — the faithful behavior.
-    rig.self_fade_alpha = self_model_fade_alpha(
-        (cam_t.translation - pivot).length(),
-        CAM_NEAR,
-        SELF_FADE_WINDOW,
-    );
+    rig.self_fade_alpha =
+        self_model_fade_alpha((translation - pivot).length(), CAM_NEAR, SELF_FADE_WINDOW);
 }
 
 /// Apply the self-avatar zoom-in fade ([`CameraControl::self_fade_alpha`], computed in [`control`]) to

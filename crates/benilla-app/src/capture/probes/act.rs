@@ -167,6 +167,10 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "X" => KeyCode::KeyX,
         "Z" => KeyCode::KeyZ,
         "Tab" => KeyCode::Tab,
+        // TOGGLEAUTORUN's 1.12 default. The moving-axis protocol (task: grade streaming while
+        // running) engages autorun with one tap and steers with `WOW_PROBE_LOOK` — the whole
+        // scripted drive out of two instruments that already existed.
+        "NumLock" => KeyCode::NumLock,
         // The nameplate toggles (`vplates`): bare `V` is enemy plates, `Shift`-held `V` is
         // friendly. A probe that wants plates over a town's *friendly* NPCs — the only way to
         // measure plate behaviour without standing in aggro range of something — presses this.

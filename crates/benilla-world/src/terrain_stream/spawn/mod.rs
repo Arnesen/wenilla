@@ -35,7 +35,11 @@ use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
-use super::collider::{build_collider_task, placement_collider_data, PendingCollider};
+use super::collider::{
+    build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
+    PendingCollider,
+};
+use super::weld::{hull_weld_disabled, HullWelds};
 use super::{
     doodad_ground_shade, ModelHandle, Placements, ShadeResolve, TerrainStreamer, SPAWN_BUDGET,
 };
@@ -59,6 +63,7 @@ type SpawnTables<'w> = (
     ResMut<'w, crate::terrain_stream::StreamActivity>,
     Res<'w, crate::terrain_stream::ViewFocus>,
     ResMut<'w, ModelForms>,
+    ResMut<'w, HullWelds>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -86,7 +91,7 @@ pub(super) fn spawn_loaded_placements(
     // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms) = tables;
+    let (mut probes, mut activity, focus, mut forms, mut welds) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -195,26 +200,35 @@ pub(super) fn spawn_loaded_placements(
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
                     }
-                    // Doodad collider (avian): a static trimesh hull baked at this placement's transform,
-                    // built off-thread, as its own entity so it despawns with the placement. `None` ⇒
-                    // the model has no collision hull. A world-static doodad hull also clamps the
-                    // mouse pick (`PickOccluder` — a hull-less tree canopy stays pick-through,
-                    // matching the reference's collision-flagged-doodads-only world trace).
-                    if let Some((verts, tris)) =
-                        placement_collider_data(m.collision.as_ref(), &p.transform)
+                    // Doodad collider (avian): a static trimesh hull baked at this placement's
+                    // transform, WELDED into its owner tile's batch (decision 1369 — the entity
+                    // granularity was ~0.8 cpu_ms of avian per-frame cost at Stormwind; see
+                    // `super::weld`). `None` ⇒ the model has no collision hull, so a hull-less
+                    // tree canopy stays pick-through, matching the reference's
+                    // collision-flagged-doodads-only world trace — the weld carries the
+                    // `PickOccluder` clamp for the hulls it absorbs.
+                    // (`!doodad_bodies_disabled()` / `!doodad_hulls_bare()`: the 1367 premise
+                    // levers. `hull_weld_disabled`: the pre-1369 per-placement shape, for A/B.)
+                    if let Some((verts, tris)) = (!doodad_bodies_disabled())
+                        .then(|| placement_collider_data(m.collision.as_ref(), &p.transform))
+                        .flatten()
                     {
-                        ents.push(
-                            commands
-                                .spawn((
-                                    PendingCollider::new(
-                                        build_collider_task(verts, tris),
-                                        None,
-                                        true,
-                                    ),
-                                    PickOccluder,
-                                ))
-                                .id(),
-                        );
+                        if hull_weld_disabled() {
+                            ents.push(
+                                commands
+                                    .spawn((
+                                        PendingCollider::new(
+                                            build_collider_task(verts, tris),
+                                            None,
+                                            !doodad_hulls_bare(),
+                                        ),
+                                        PickOccluder,
+                                    ))
+                                    .id(),
+                            );
+                        } else {
+                            welds.add_tile(p.owner, verts, tris);
+                        }
                     }
                     // One gate for both emitter families. `None`/empty: an ADT map doodad
                     // belongs to no building, so neither the window exemption nor the room
@@ -224,8 +238,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         &m.emitters,
                         p.transform,
-                        host.as_ref().map(|h| h.joints.as_slice()),
-                        host.as_ref().and_then(|h| h.arm),
+                        host.as_ref(),
                         &fade,
                         &mut ents,
                     );
@@ -233,8 +246,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         &m.ribbons,
                         p.transform,
-                        host.as_ref().map(|h| h.joints.as_slice()),
-                        host.as_ref().and_then(|h| h.arm),
+                        host.as_ref(),
                         ents.first().copied(),
                         &fade,
                     );
@@ -604,19 +616,32 @@ pub(super) fn spawn_loaded_placements(
             // Prop collider (avian): a static trimesh from the prop's collision hull at its world
             // transform — collide-iff-hull, exactly like a map doodad, so a weapon rack / crate / cargo
             // net is solid to both the player and the camera while a hull-less prop (banner, small
-            // candle) isn't. Default collision layer ⇒ both audiences. Joins `ents`, so it despawns with
-            // the placement. (WMO doodad props were previously render-only — no collision at all.)
-            if let Some((verts, tris)) = placement_collider_data(m.collision.as_ref(), &d.transform)
+            // candle) isn't. Default collision layer ⇒ both audiences. WELDED per placement
+            // (decision 1369): every prop of a building despawns with the building, so the batch
+            // has exactly the lifetime the individual hulls had — the weld flushes into
+            // `Placement::entities` one chain-step later. (The 1367 premise levers and the 1369
+            // A/B lever gate here exactly as at the map-doodad site above.)
+            if let Some((verts, tris)) = (!doodad_bodies_disabled())
+                .then(|| placement_collider_data(m.collision.as_ref(), &d.transform))
+                .flatten()
             {
-                ents.push(
-                    commands
-                        .spawn((
-                            PendingCollider::new(build_collider_task(verts, tris), None, true),
-                            // A world-static WMO prop's hull clamps the mouse pick like any doodad.
-                            PickOccluder,
-                        ))
-                        .id(),
-                );
+                if hull_weld_disabled() {
+                    ents.push(
+                        commands
+                            .spawn((
+                                PendingCollider::new(
+                                    build_collider_task(verts, tris),
+                                    None,
+                                    !doodad_hulls_bare(),
+                                ),
+                                // A world-static WMO prop's hull clamps the mouse pick like any doodad.
+                                PickOccluder,
+                            ))
+                            .id(),
+                    );
+                } else {
+                    welds.add_prop(unique_id, verts, tris);
+                }
             }
             // One gate for both emitter families: the prop rides its building's exterior-window
             // exemption AND the portal PVS of the rooms that name it — the same `WmoGroupVis` the
@@ -632,8 +657,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 &m.emitters,
                 d.transform,
-                host.as_ref().map(|h| h.joints.as_slice()),
-                host.as_ref().and_then(|h| h.arm),
+                host.as_ref(),
                 &fade,
                 &mut ents,
             );
@@ -641,8 +665,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 &m.ribbons,
                 d.transform,
-                host.as_ref().map(|h| h.joints.as_slice()),
-                host.as_ref().and_then(|h| h.arm),
+                host.as_ref(),
                 ents.first().copied(),
                 &fade,
             );

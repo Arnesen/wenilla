@@ -322,11 +322,13 @@ fn build_markers(
         // EAGER slot allocation — this lane has no draw gate to promote lazily (decision 0863
         // made laziness the terrain-stream caller's policy, not the host's). A handful of
         // markers exist at once, so eager is the right spend; slot 0 (table full, warned)
-        // falls back to the static mesh below exactly as before.
+        // falls back to the static mesh below exactly as before. `allocate_bones` — the
+        // collapsed shape (decision 1365): the world pass writes the rows off the host's
+        // `RigPose`, no joint list exists.
         let marker_slot = host.as_ref().map_or(0, |h| {
-            benilla_world::rig_palette::RigSkin::allocate(
+            benilla_world::rig_palette::RigSkin::allocate_bones(
                 &mut palettes,
-                h.joints.clone(),
+                h.bones(),
                 h.inverse_bindposes.clone(),
             )
             .map_or(0, |rig| {
@@ -413,6 +415,16 @@ fn build_markers(
                     commands.entity(seat).add_child(child);
                 }
             }
+        }
+        // Attach the pose buffer, plus the seat-frame cascade marker (decision 1365): the
+        // marker host root is a rig's `joints_root` living inside the UNIT's anchor subtree, so
+        // a patch walk that re-seats the overhead anchor must re-finalize the marker rig the
+        // same frame (`RigFrame` — the mount seat's law, `finalize_rig_worlds`).
+        if let Some(h) = host {
+            commands
+                .entity(h.root)
+                .insert(benilla_world::rig_anim::RigFrame(h.root));
+            h.finish(&mut commands);
         }
         marker.seat = Some(seat);
     }

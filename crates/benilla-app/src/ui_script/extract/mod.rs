@@ -787,6 +787,28 @@ pub(super) fn drive_script(
     let n_quads = out.len();
     let changed = quads.quads != out;
     if changed {
+        // `WOW_UI_DIFF=1` — the base-lane half of the rebuild-trigger probe (`ui_pass`' twin):
+        // names the first Lua-UI quad that differs from last frame's extraction.
+        if std::env::var_os("WOW_UI_DIFF").is_some() {
+            match quads.quads.iter().zip(&out).position(|(a, b)| a != b) {
+                Some(i) => {
+                    let (b, a) = (&quads.quads[i], &out[i]);
+                    eprintln!(
+                        "[ui-diff-base] quad {i}/{n_quads}: tex={:?} rect {:?} -> {:?} uv_changed={} color_changed={}",
+                        a.texture.as_ref().and_then(|t| t.path()),
+                        b.rect,
+                        a.rect,
+                        a.uv != b.uv,
+                        a.color != b.color,
+                    );
+                }
+                None => eprintln!(
+                    "[ui-diff-base] quad COUNT changed: {} -> {}",
+                    quads.quads.len(),
+                    out.len()
+                ),
+            }
+        }
         quads.quads = out;
         quads.dirty = true;
     }
