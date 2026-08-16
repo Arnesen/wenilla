@@ -1061,8 +1061,15 @@ pub(super) fn route_cast_visuals(
 /// exactly that bug: Stealth's kit 312 carries no models, no anim and no attach at all (its whole
 /// visual is one proc-14 CharProc), so an effects-only test dropped it and the character showed
 /// nothing.
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn arm_aura_state_fx(
+    // The slot diff below is a pure function of the store's aura fields, so it re-runs only when
+    // the store was written — `arm_level_up_fx`'s idiom (decision 1357's sibling gate): at the
+    // LBRS pin this was ~800 full aura-slot walks/frame re-deriving an unchanged answer. The
+    // unfiltered twin runs exactly once per DBC-resource arrival: a unit that streamed in before
+    // `SpellVisuals`/`Spells` landed carries standing auras no store write will re-announce.
     units: Query<(Entity, &ObjectStore)>,
+    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut fx: MessageWriter<SpellKitFx>,
@@ -1070,10 +1077,17 @@ pub(crate) fn arm_aura_state_fx(
     mut sounds: MessageWriter<SpellKitSound>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
 ) {
+    let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed())
+        || spells.as_ref().is_some_and(|s| s.is_changed());
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
         return; // no client data — no spell visuals (the DBC-resource degrade shape)
     };
-    for (entity, store) in &units {
+    let scan = if full_sweep {
+        units.iter().collect::<Vec<_>>()
+    } else {
+        changed.iter().collect::<Vec<_>>()
+    };
+    for (entity, store) in scan {
         let prev = armed.entry(entity).or_default();
         // Occupied slots, deduped (the same spell re-applied by two casters holds two slots —
         // one state instance either way).
@@ -1160,15 +1174,25 @@ pub(crate) fn arm_aura_state_fx(
 /// [`LOOT_FX_KEY`] — the client hangs loot art on the same `Effect_C` node type its spell
 /// visuals use, so sharing the one attach body is the faithful shape.
 pub(super) fn arm_loot_fx(
+    // Dead+lootable is a pure function of store fields — the same `Changed<ObjectStore>` gate as
+    // `arm_level_up_fx` below and `arm_aura_state_fx` above, with the same one-shot full sweep
+    // when the DBC resource lands after units already streamed in.
     units: Query<(Entity, &ObjectStore)>,
+    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
     visuals: Option<Res<SpellVisuals>>,
     mut fx: MessageWriter<SpellKitFx>,
     mut armed: Local<EntityHashSet>,
 ) {
+    let full_sweep = visuals.as_ref().is_some_and(|v| v.is_changed());
     let Some(path) = visuals.as_ref().and_then(|v| v.0.loot_art_path()) else {
         return; // no client data / no such row — no loot art (the DBC-resource degrade shape)
     };
-    for (entity, store) in &units {
+    let scan = if full_sweep {
+        units.iter().collect::<Vec<_>>()
+    } else {
+        changed.iter().collect::<Vec<_>>()
+    };
+    for (entity, store) in scan {
         let lootable = store.0.unit_is_dead() && store.0.unit_lootable();
         if lootable && armed.insert(entity) {
             fx.write(SpellKitFx::Begin {

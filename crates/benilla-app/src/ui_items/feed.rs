@@ -626,6 +626,12 @@ pub(crate) fn feed_containers(
         return;
     };
     let memory = memory.get(&script);
+    // `WOW_FEED_COST=1` — the premise counter for gating this feed (the 2026-08-15 ledger's #8):
+    // the whole snapshot+diff below runs per frame; before an epoch gate is built, this says what
+    // that actually costs on a real bag population. Printed once a second.
+    let cost_t0 = std::env::var_os("WOW_FEED_COST")
+        .is_some()
+        .then(std::time::Instant::now);
     // The frame's atomic clock pair (`crate::ui_script::UiClock`): the slot resolves read the
     // cooldown store and convert triples through ONE coherent instant, so a running cooldown's
     // pushed start is frame-stable (the resource's own doc).
@@ -922,6 +928,21 @@ pub(crate) fn feed_containers(
         script.set_has_key(key);
     }
 
+    if let Some(t0) = cost_t0 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SUM_NS: AtomicU64 = AtomicU64::new(0);
+        static N: AtomicU64 = AtomicU64::new(0);
+        let sum = SUM_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(60) {
+            let slots: usize = fresh.values().map(|c| c.slots.len()).sum();
+            eprintln!(
+                "[feed-cost] ms={:.3} slots={slots} containers={}",
+                sum as f64 / n as f64 / 1e6,
+                fresh.len(),
+            );
+        }
+    }
     apply_container_source(
         &mut script,
         memory,

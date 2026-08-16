@@ -131,8 +131,11 @@ pub(super) struct PartDress<'a> {
     pub(super) inst_slot: u16,
     /// Whether the unit built a rig at all — the gate on a part drawing its skinned twin.
     pub(super) rigged: bool,
-    /// Bone index → anchor entity, for a billboard batch's card to ride its live joint.
-    pub(super) anchors: &'a std::collections::HashMap<u16, Entity>,
+    /// Bone index → anchor entity, for a billboard batch's card to ride its live joint. Resolved
+    /// by the CALLER through `RigPose::anchor_for` for exactly the card bones this dress will
+    /// spawn (decision 1355) — owned, because the resolver needs `&mut` on the pose and this
+    /// context is shared immutably across every part.
+    pub(super) anchors: std::collections::HashMap<u16, Entity>,
     /// The model's interior fold reference (model-local) — one verdict per unit, so a body can
     /// never split across the two light laws.
     pub(super) bake_center: Vec3,
@@ -477,7 +480,7 @@ mod tests {
         let unit = app.world_mut().spawn(Transform::default()).id();
         let mut fadeable = part(None, false);
         fadeable.fade_blend = Some(mat(99));
-        let anchors = std::collections::HashMap::new();
+        let anchors: std::collections::HashMap<u16, Entity> = std::collections::HashMap::new();
         let object = WorldObject {
             kind: ModelKind::Creature,
             label: String::new(),
@@ -492,7 +495,7 @@ mod tests {
             object: &object,
             inst_slot: 0,
             rigged: false,
-            anchors: &anchors,
+            anchors,
             bake_center: Vec3::ZERO,
             idle_aabb: None,
             now: 0.0,
@@ -541,7 +544,7 @@ mod tests {
             scale_anim: None,
             seq_translations: Vec::new(),
         });
-        let anchors = std::collections::HashMap::new();
+        let anchors: std::collections::HashMap<u16, Entity> = std::collections::HashMap::new();
         let object = WorldObject {
             kind: ModelKind::Creature,
             label: String::new(),
@@ -556,7 +559,7 @@ mod tests {
             object: &object,
             inst_slot: 0,
             rigged: false,
-            anchors: &anchors,
+            anchors,
             bake_center: Vec3::ZERO,
             idle_aabb: None,
             now: 0.0,

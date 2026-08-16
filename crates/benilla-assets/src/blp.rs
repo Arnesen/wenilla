@@ -125,7 +125,16 @@ fn world_art_image(chain: BlpMipChain, wrap: (bool, bool)) -> Image {
         TextureDimension::D2,
         mip0,
         color_format(),
-        RenderAssetUsages::default(),
+        // `RENDER_WORLD`: the render world TAKES the mip chain on extract instead of cloning it and
+        // leaving a main-world copy resident for the asset's life (bevy_render `render_asset.rs` —
+        // the `asset_usage == RENDER_WORLD` branch moves, every other usage clones). This is the
+        // variant carrying every terrain layer, model albedo and WMO albedo in the game, so the
+        // default usage was paying a full mip-chain memcpy on every landing frame and holding a
+        // second copy of the whole world's art in system RAM. Nothing reads a world texture
+        // main-side (the minimap, colliders and clutter all derive from other sources) — same
+        // reasoning, and now the same usage, as the terrain tile arrays (`terrain.rs`) and the
+        // Sprite/Effect/PointSprite variants below.
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;

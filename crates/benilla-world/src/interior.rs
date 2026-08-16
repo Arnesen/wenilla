@@ -615,8 +615,28 @@ pub fn classify_entity_interior(
     // anchor walk replaced). Cheap enough to leave in: three counters and one `Instant` per frame.
     static COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *COST.get_or_init(|| std::env::var_os("WOW_INTERIOR_COST").is_some()) {
+        // `WOW_COLUMN_COST=1` adds the column-query split to the same line: this lane IS the
+        // grid's caller, so its per-frame traffic belongs beside its per-frame cost. `spanning` was
+        // 0711's residual — the oversized floor slabs tested on every query, 99.26 % of everything
+        // tested when 1351 finally measured it. It is now the coarse level's residue and should
+        // read near zero; `spanning_pct` climbing is the regression watch.
+        let column = if benilla_assets::column_grid::column_cost_enabled() {
+            let (queries, binned, coarse, spanning) =
+                benilla_assets::column_grid::take_column_query_stats();
+            let tested = binned + coarse + spanning;
+            let pct = if tested == 0 {
+                0.0
+            } else {
+                100.0 * spanning as f32 / tested as f32
+            };
+            format!(
+                " col_queries={queries} col_tested={tested} col_binned={binned} col_coarse={coarse} col_spanning={spanning} spanning_pct={pct:.1}"
+            )
+        } else {
+            String::new()
+        };
         eprintln!(
-            "[interior-cost] anchors={n_anchors} resolved={n_resolved} fade_blocked={n_fade_blocked} parts_written={n_written} resolve_ms={:.2} total_ms={:.2}",
+            "[interior-cost] anchors={n_anchors} resolved={n_resolved} fade_blocked={n_fade_blocked} parts_written={n_written} resolve_ms={:.2} total_ms={:.2}{column}",
             resolve_us / 1000.0,
             _t0.elapsed().as_secs_f32() * 1000.0
         );

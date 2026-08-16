@@ -258,6 +258,9 @@ fn build_markers(
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
     index: Res<GuidIndex>,
     anchors: Query<&BoneAttach>,
+    // The unit's pose buffer: the overhead joint the marker parents under spawns on first
+    // demand (`RigPose::anchor_for`, decision 1355).
+    mut poses: Query<&mut benilla_world::rig_anim::RigPose>,
     mounts: Query<(), With<crate::entities::mount::MountChild>>,
     time: Res<Time>,
 ) {
@@ -290,11 +293,13 @@ fn build_markers(
         } else {
             ATTACH_OVERHEAD
         };
-        let Some((joint, offset)) = anchor
-            .points
-            .get(&slot)
-            .and_then(|&(bone, offset)| Some((anchor.anchor(bone)?, offset)))
-        else {
+        let Some((joint, offset)) = anchor.points.get(&slot).and_then(|&(bone, offset)| {
+            poses
+                .get_mut(unit)
+                .ok()
+                .and_then(|mut p| p.anchor_for(&mut commands, unit, bone))
+                .map(|joint| (joint, offset))
+        }) else {
             debug!(
                 "quest_markers: {:#x} has no slot-{slot} attachment — marker never parents (invisible, the client's own behavior)",
                 marker.npc

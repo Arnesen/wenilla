@@ -40,8 +40,8 @@ mod redress;
 pub(super) use redress::redress_player_looks;
 
 /// Set up the skinned instance shared by creatures/players (decision 0019) and animated
-/// GameObjects (decision 0242): the per-instance consumer-bone anchors, the pose buffer, the
-/// palette rig slot, and the global-sequence drive.
+/// GameObjects (decision 0242): the pose buffer, the palette rig slot, and the global-sequence
+/// drive.
 ///
 /// The **sequence clock** — the `AnimationPlayer` + graph + [`ModelAnimations`] + the driver that
 /// owns the choice — is NOT set up here; it is [`arm_sequence_clock`], called by the spawn site
@@ -49,15 +49,14 @@ pub(super) use redress::redress_player_looks;
 /// slot and a skinned twin, and is worth spending only on a model whose bones actually move; the
 /// clock is worth arming on every instance, because a sequence drives far more than a pose.
 ///
-/// This lane spawns **no joint
-/// entities** (decision 0724): the pose lives in a [`benilla_world::rig_anim::RigPose`] array on
-/// `entity`, and only the CONSUMER bones — attachment points, event markers, emitter/ribbon/
-/// light hosts, billboard-card bones — get an anchor entity under `joints_root`, re-seated from
-/// the composed pose each frame it changes. Returns the anchors + the palette rig slot
-/// (decision 0720), or `None` when the model has no inverse bindposes. Slot `0` = the palette
-/// table was full: the anchors still exist (emitters/attachments ride them), but parts fall
-/// back to the static bind-pose mesh. No animations ⇒ the pose just holds bind pose
-/// (Milestone A).
+/// This lane spawns **no joint entities** (decision 0724) — the pose lives in a
+/// [`benilla_world::rig_anim::RigPose`] array — and **no anchor entities either** (decision
+/// 1355): a bone gets its anchor from `RigPose::anchor_for` the moment something actually
+/// consumes it, re-seated from the composed pose each frame it changes. Returns the pose (still
+/// in hand — see [`RigBuild`]) + the palette rig slot (decision 0720), or `None` when the model
+/// has no inverse bindposes. Slot `0` = the palette table was full: anchors still resolve
+/// (emitters/attachments ride them), but parts fall back to the static bind-pose mesh. No
+/// animations ⇒ the pose just holds bind pose (Milestone A).
 fn setup_skinned_instance(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,
@@ -71,48 +70,13 @@ fn setup_skinned_instance(
     // rider's frame is the seat anchor instead (decision 0441), a conform-tilted model's its
     // conform node, while the `AnimationPlayer`/driver components stay on `entity`. Skinned
     // parts render purely from the palette, so their own parentage is free.
-    let mut pose = benilla_world::rig_anim::RigPose::new(joints_root, &d.skeleton);
-    // The consumer bones: every bone something in the world reaches by entity — an attachment
-    // point (held items, spell effects, the mount seat, overhead anchors), an event marker, an
-    // emitter/ribbon/light host, a billboard card's bone. Everything else is palette-only.
-    let mut bone_set = std::collections::BTreeSet::new();
-    bone_set.extend(d.attachments.iter().map(|a| a.bone));
-    bone_set.extend(d.markers.iter().map(|m| m.bone));
-    bone_set.extend(d.emitters.iter().map(|e| e.def.bone));
-    bone_set.extend(d.ribbons.iter().map(|r| r.def.bone));
-    bone_set.extend(
-        d.lights
-            .iter()
-            .filter_map(|l| u16::try_from(l.def.bone).ok()),
-    );
-    if let Some(parts) = &d.parts {
-        bone_set.extend(
-            parts
-                .iter()
-                .filter_map(|p| p.billboard.as_ref().map(|b| b.bone)),
-        );
-    }
-    let mut anchors = std::collections::HashMap::new();
-    for bone in bone_set {
-        let Some(m) = pose.model.get(bone as usize) else {
-            continue; // an out-of-range authored bone reference — no anchor, consumers miss
-        };
-        let (scale, rotation, translation) = m.to_scale_rotation_translation();
-        let anchor = commands
-            .spawn((
-                Transform {
-                    translation,
-                    rotation,
-                    scale,
-                },
-                Visibility::default(),
-                benilla_world::rig_anim::RigAnchor { rig: entity, bone },
-            ))
-            .id();
-        commands.entity(joints_root).add_child(anchor);
-        pose.anchors.push((bone, anchor));
-        anchors.insert(bone, anchor);
-    }
+    // No anchor entities are spawned here (decision 1355). A consumer bone gets its anchor the
+    // moment something actually consumes it — [`benilla_world::rig_anim::RigPose::anchor_for`],
+    // called by the emitter/ribbon/light arms, the billboard dress, held items, the mount seat,
+    // spell kits and quest markers — and the position-only readers (the overhead anchor, missile
+    // launch points, the bowstring) read `RigPose::posed_point` and never need an entity at all.
+    // The eager population this replaced was 96 % never-consumed at the LBRS pin (decision 1354).
+    let pose = benilla_world::rig_anim::RigPose::new(joints_root, &d.skeleton);
     // The owned palette rig (decision 0720): the world pass writes this rig's composed frames ×
     // these bindposes into the slot; every skinned part below tags the slot so the vertex stage
     // finds its palette. The on-replace hook frees the slot with the visual teardown.
@@ -153,11 +117,12 @@ fn setup_skinned_instance(
             commands.entity(entity).insert(drive);
         }
     }
-    // The pose buffer last — the anchors above registered themselves into it. The evaluator
+    // The pose buffer travels in the build result, NOT onto the entity yet: the arms of
+    // `attach_entity_visuals` below still resolve anchors into it (`RigPose::anchor_for` needs
+    // `&mut`), and it lands on the entity in one piece once the build is dressed. The evaluator
     // (decision 0712) samples the player state straight into `locals`; with no joint entities and
     // no `AnimationTargetId`s, Bevy's `animate_targets` has nothing of ours to touch.
-    commands.entity(entity).insert(pose);
-    Some(RigBuild { anchors, slot })
+    Some(RigBuild { pose, slot })
 }
 
 /// Arm this instance's **sequence clock**: the `AnimationPlayer` + graph + [`ModelAnimations`] that
@@ -241,10 +206,12 @@ fn arm_sequence_clock(
     }
 }
 
-/// A collapsed rig's build result (decision 0724): the consumer anchors by bone + the palette
-/// slot each skinned part tags.
+/// A collapsed rig's build result (decision 0724): the pose buffer, still in hand so the build's
+/// own arms can resolve anchors into it (decision 1355 — anchors spawn on first consumer, via
+/// [`benilla_world::rig_anim::RigPose::anchor_for`]), + the palette slot each skinned part tags.
+/// The pose lands on the entity at the end of the build.
 struct RigBuild {
-    anchors: std::collections::HashMap<u16, Entity>,
+    pose: benilla_world::rig_anim::RigPose,
     slot: u16,
 }
 
@@ -268,9 +235,14 @@ pub(super) fn attach_entity_visuals(
         Without<VisualAttached>,
     >,
     // The mount children's build state (decision 0441): a mounted unit's rider waits on its mount
-    // child's attach — the seat is the mount's attachment-0 joint out of this `BoneAttach`; the
-    // `NetEntity` is the staleness check (the field moved while the unit was still pending).
+    // child's attach — the seat resolves through the mount's attachment-0 point (`BoneAttach`)
+    // into its `RigPose` below; the `NetEntity` is the staleness check (the field moved while
+    // the unit was still pending).
     mount_children: super::mount::MountChildren,
+    // Already-built rigs' pose buffers — the mount child's, for its seat anchor to resolve on
+    // demand (decision 1355). The unit being built here has no `RigPose` component yet (its pose
+    // is still in `RigBuild`), so the two never alias.
+    mut built_poses: Query<&mut benilla_world::rig_anim::RigPose>,
     // The ItemDisplayInfo catalog (armor region textures, decision 0074). Read-only here; the
     // held-item systems in the same chain hold it mutably in their own turns.
     displays: Option<Res<super::ItemDisplays>>,
@@ -366,6 +338,7 @@ pub(super) fn attach_entity_visuals(
                 match super::mount::seat_or_spawn_mount(
                     &mut commands,
                     &mount_children,
+                    &mut built_poses,
                     creatures.as_deref(),
                     entity,
                     mount_child.map(|&super::mount::MountChild(c)| c),
@@ -454,7 +427,7 @@ pub(super) fn attach_entity_visuals(
                 && stores
                     .get(entity)
                     .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
-            let skin: Option<RigBuild> = match (net.kind, dm) {
+            let mut skin: Option<RigBuild> = match (net.kind, dm) {
                 // A creature (or player body — decision 0041) with a real skeleton. The `!is_empty`
                 // guard keeps a degenerate boneless model on the static mesh (its skinned twin would
                 // carry joint attributes but have no joints to index — out of bounds).
@@ -539,9 +512,11 @@ pub(super) fn attach_entity_visuals(
                     arm_sequence_clock(&mut commands, entity, anims, net.kind, go_state_machine);
                 }
             }
-            // The bone-riding surface (decision 0072): the instance's joints + the model's attachment
-            // points, so held items (and future bone riders) can hang from the hand/hip/back joints.
-            if let (Some(rb), Some(d)) = (&skin, dm) {
+            // The bone-riding surface (decision 0072): the model's attachment points + event
+            // markers, so held items (and future bone riders) can hang from the hand/hip/back
+            // joints. Pure model data — the anchor *entities* live in `RigPose.anchors` and
+            // spawn on first consumer (decision 1355).
+            if let (Some(_), Some(d)) = (&skin, dm) {
                 // The event markers keep the client's first-match scan order: an ident already
                 // present wins (character models carry six `$CSD` records — the first is the one
                 // `0x7130e0` would return).
@@ -550,7 +525,6 @@ pub(super) fn attach_entity_visuals(
                     markers.entry(m.ident).or_insert((m.bone, m.offset));
                 }
                 commands.entity(entity).insert(super::BoneAttach {
-                    anchors: rb.anchors.clone(),
                     points: d
                         .attachments
                         .iter()
@@ -672,7 +646,28 @@ pub(super) fn attach_entity_visuals(
             // Everything one part's spawn reads from this unit, gathered once (`attach::dress`) —
             // the same context the gear-change **re-dress** feeds `spawn_part`, so a body built at
             // stream-in and a geoset that appears when a belt is swapped are dressed by one law.
-            let no_anchors = std::collections::HashMap::new();
+            //
+            // Billboard-card bones are the one dress input that needs an anchor ENTITY (the card
+            // rides its live joint), so they resolve here — through the same first-consumer
+            // resolver as everything else (decision 1355), over the same geoset predicate as the
+            // spawn loop below, so a hidden variant's card bone spawns nothing.
+            let card_anchors: std::collections::HashMap<u16, Entity> = match skin.as_mut() {
+                Some(rb) => parts
+                    .iter()
+                    .filter(|part| {
+                        !visible_geosets
+                            .as_ref()
+                            .is_some_and(|vis| !vis.contains(&part.geoset_id))
+                    })
+                    .filter_map(|part| part.billboard.as_ref().map(|b| b.bone))
+                    .filter_map(|bone| {
+                        rb.pose
+                            .anchor_for(&mut commands, entity, bone)
+                            .map(|a| (bone, a))
+                    })
+                    .collect(),
+                None => std::collections::HashMap::new(),
+            };
             let dress = PartDress {
                 unit: entity,
                 kind,
@@ -680,7 +675,7 @@ pub(super) fn attach_entity_visuals(
                 object: &object,
                 inst_slot,
                 rigged: skin.is_some(),
-                anchors: skin.as_ref().map_or(&no_anchors, |rb| &rb.anchors),
+                anchors: card_anchors,
                 bake_center,
                 idle_aabb,
                 now,
@@ -766,9 +761,9 @@ pub(super) fn attach_entity_visuals(
             {
                 for em in emitters {
                     let owner = skin
-                        .as_ref()
-                        .and_then(|rb| rb.anchors.get(&em.def.bone))
-                        .map_or((entity, [0.0; 3]), |&j| (j, em.bone_pivot));
+                        .as_mut()
+                        .and_then(|rb| rb.pose.anchor_for(&mut commands, entity, em.def.bone))
+                        .map_or((entity, [0.0; 3]), |j| (j, em.bone_pivot));
                     particles::spawn_emitter(
                         &mut commands,
                         em,
@@ -802,21 +797,30 @@ pub(super) fn attach_entity_visuals(
             // GameObject brazier. Same host-bone ride as the emitters, for the same reason: the
             // reference re-registers each light at its LIVE bone position every frame. (The far more
             // common carried light is the held torch — that one spawns on the item model, in
-            // `equipment`.)
+            // `equipment`.) The light bones resolve BEFORE the call: the closure can't borrow
+            // `commands` while `spawn_carried_lights` holds it.
+            let light_anchors: std::collections::HashMap<i16, Entity> = model_lights
+                .iter()
+                .filter(|l| l.def.casts())
+                .filter_map(|l| {
+                    let bone = u16::try_from(l.def.bone).ok()?;
+                    let rb = skin.as_mut()?;
+                    rb.pose
+                        .anchor_for(&mut commands, entity, bone)
+                        .map(|a| (l.def.bone, a))
+                })
+                .collect();
             super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
-                skin.as_ref()
-                    .zip(u16::try_from(bone).ok())
-                    .and_then(|(rb, b)| rb.anchors.get(&b))
-                    .copied()
+                light_anchors.get(&bone).copied()
             });
             // Ribbon trails (wisp streamers, trailing quest-object crystals) — the same host-bone
             // ride as the emitters; the trail self-despawns when its owner joint/entity goes.
             {
                 for rb in dm.map(|d| d.ribbons.as_slice()).unwrap_or_default() {
                     let (owner, use_pivot) = skin
-                        .as_ref()
-                        .and_then(|build| build.anchors.get(&rb.def.bone))
-                        .map_or((entity, false), |&j| (j, true));
+                        .as_mut()
+                        .and_then(|build| build.pose.anchor_for(&mut commands, entity, rb.def.bone))
+                        .map_or((entity, false), |j| (j, true));
                     // The `+0xc0` enable gate reads THIS instance's playing sequence, live —
                     // a GameObject flips state under its own trails (a trap springs, a door
                     // opens), so there is no spawn-time answer. Passing `None` here (the old
@@ -839,6 +843,13 @@ pub(super) fn attach_entity_visuals(
                         None,
                     );
                 }
+            }
+            // The pose buffer lands last (decision 1355): every build arm above has resolved its
+            // anchors into it, so it arrives on the entity in one piece — the evaluator, the
+            // compose pass and every later `anchor_for` (a weapon equipped in combat, a spell
+            // kit) find the same buffer the build populated.
+            if let Some(rb) = skin {
+                commands.entity(entity).insert(rb.pose);
             }
             // Static collision for solid GameObjects (chests, mining veins, doors…): the model-local
             // collider baked at build time rides the entity's pose, so player + camera collide with it.

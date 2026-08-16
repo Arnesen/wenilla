@@ -37,7 +37,11 @@ pub(crate) struct Bowstring {
 /// this frame's). Two segments: tip → middle → tip.
 fn draw_bowstrings(
     bows: Query<(&Bowstring, &GlobalTransform, &InheritedVisibility)>,
-    owners: Query<(&BoneAttach, Has<NockLatch>)>,
+    owners: Query<(
+        &BoneAttach,
+        &benilla_world::rig_anim::RigPose,
+        Has<NockLatch>,
+    )>,
     joints: Query<&GlobalTransform>,
     mut gizmos: Gizmos,
 ) {
@@ -54,11 +58,12 @@ fn draw_bowstrings(
         let middle = owners
             .get(bs.owner)
             .ok()
-            .filter(|(_, latched)| *latched)
-            .and_then(|(bones, _)| {
+            .filter(|(_, _, latched)| *latched)
+            .and_then(|(bones, pose, _)| {
+                // A pure position read — `posed_point` off the composed pose, no anchor entity
+                // (decision 1355).
                 let &(bone, offset) = bones.points.get(&HAND_ARROW)?;
-                let joint = bones.anchor(bone)?;
-                Some(joints.get(joint).ok()?.transform_point(offset))
+                pose.posed_point(joints.get(pose.joints_root).ok()?, bone, offset)
             })
             .unwrap_or_else(|| (top + bottom) / 2.0);
         gizmos.line(top, middle, STRING_COLOR);

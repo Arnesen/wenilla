@@ -308,6 +308,7 @@ fn drive_bubbles(
     // The overhead-anchor inputs ([`overhead_anchor`]).
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform>,
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -417,6 +418,7 @@ fn drive_bubbles(
             &anchor_q.1,
             &anchor_q.2,
             &anchor_q.3,
+            &anchor_q.4,
         );
         let seat_world = Vec3::new(tf.translation.x, anchor.y + LIFT, tf.translation.z);
         let cam_tf = GlobalTransform::from(*cam_pose);

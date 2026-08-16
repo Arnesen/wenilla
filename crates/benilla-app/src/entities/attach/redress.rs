@@ -79,6 +79,9 @@ pub(in crate::entities) fn redress_player_looks(
             &Children,
             Option<&benilla_world::rig_palette::RigSkin>,
             Option<&super::super::BoneAttach>,
+            // The pose buffer: a revealed billboard batch's card bone resolves its anchor on
+            // first demand (`RigPose::anchor_for`, decision 1355).
+            Option<&mut benilla_world::rig_anim::RigPose>,
             Option<&benilla_world::interior::BodyBakeCenter>,
             Option<&benilla_world::model_fade::UnitAppearFade>,
         ),
@@ -113,7 +116,7 @@ pub(in crate::entities) fn redress_player_looks(
     let (sections, world_assets, mut images, mut skin_composites, asset_server, mut mats) =
         skin_build;
     let now = time.elapsed_secs();
-    for (entity, net, live, mut applied, children, rig, bones, bake_center, unit_fade) in
+    for (entity, net, live, mut applied, children, rig, bones, mut pose, bake_center, unit_fade) in
         &mut players
     {
         // `settled` (decision 0074): every non-empty visible-item entry has resolved through the
@@ -206,7 +209,19 @@ pub(in crate::entities) fn redress_player_looks(
         // Pass 2 — the batches the new gear reveals. They join the unit's own appear-fade clock if
         // one is still in flight (the login gear cascade lands mid-ramp), exactly as a
         // late-resolving held item does — never a second ramp of their own, never a pop.
-        let no_anchors = std::collections::HashMap::new();
+        //
+        // A revealed billboard batch's card bone resolves its anchor first (decision 1355), over
+        // exactly the parts the spawn loop below will dress.
+        let card_anchors: std::collections::HashMap<u16, Entity> = match pose.as_mut() {
+            Some(p) => parts
+                .iter()
+                .enumerate()
+                .filter(|&(i, part)| !present[i] && shows(part.geoset_id))
+                .filter_map(|(_, part)| part.billboard.as_ref().map(|b| b.bone))
+                .filter_map(|bone| p.anchor_for(&mut commands, entity, bone).map(|a| (bone, a)))
+                .collect(),
+            None => std::collections::HashMap::new(),
+        };
         let dress = PartDress {
             unit: entity,
             kind: benilla_world::model_render::ModelKind::Creature,
@@ -219,7 +234,7 @@ pub(in crate::entities) fn redress_player_looks(
             },
             inst_slot: rig.map_or(0, |r| r.slot),
             rigged: bones.is_some(),
-            anchors: bones.map_or(&no_anchors, |b| &b.anchors),
+            anchors: card_anchors,
             bake_center: bake_center.map_or(dm.bake_center_local, |c| c.0),
             idle_aabb: idle_aabb(dm),
             now,
@@ -426,7 +441,6 @@ mod tests {
             .spawn((Transform::default(), Visibility::default(), ChildOf(joint)))
             .id();
         app.world_mut().entity_mut(player).insert(BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::new(),
             markers: HashMap::new(),
         });

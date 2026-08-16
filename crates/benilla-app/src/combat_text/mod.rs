@@ -188,6 +188,7 @@ pub(crate) fn float_combat_text(
     // The overhead-anchor resolution (`0x608640`): the unit's PlayerName attachment joint, else
     // the bbox fallback.
     anchors: Query<&BoneAttach>,
+    poses: Query<&benilla_world::rig_anim::RigPose>,
     fallbacks: Query<&OverheadFallback>,
     globals: Query<&GlobalTransform>,
     mounts: Query<(), With<crate::entities::mount::MountChild>>,
@@ -211,7 +212,15 @@ pub(crate) fn float_combat_text(
         };
         // The spawn snapshot (`0x6c73f0`): the unit's OVERHEAD anchor (`0x608640` — head height,
         // [`overhead_anchor`]), then the client's `z − 1/3` lift. NOT feet-anchored.
-        let overhead = overhead_anchor(spawn.anchor, tf, &anchors, &fallbacks, &globals, &mounts);
+        let overhead = overhead_anchor(
+            spawn.anchor,
+            tf,
+            &anchors,
+            &poses,
+            &fallbacks,
+            &globals,
+            &mounts,
+        );
         debug!(
             "fct: \"{}\" (cat {}) over {:?}",
             spawn.text, spawn.category, spawn.anchor

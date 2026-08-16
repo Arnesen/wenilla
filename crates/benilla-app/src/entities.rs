@@ -143,10 +143,15 @@ pub(crate) struct OverheadFallback(pub(crate) f32);
 /// per-frame by the nameplate and snapshotted at spawn by the floating combat text. Generic over
 /// the joint-globals query filter so a caller that also mutates `GlobalTransform` elsewhere (the
 /// nameplate placer) can pass a disjoint query.
+///
+/// A pure position read: it computes through `RigPose::posed_point` — the composed pose × the
+/// rig root's frame — and never touches an anchor entity, so the overhead bone spawns nothing
+/// (decision 1355).
 pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
     entity: Entity,
     tf: &Transform,
     anchors: &Query<&BoneAttach>,
+    poses: &Query<&benilla_world::rig_anim::RigPose>,
     fallbacks: &Query<&OverheadFallback>,
     globals: &Query<&GlobalTransform, F>,
     mounts: &Query<(), With<mount::MountChild>>,
@@ -162,8 +167,9 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
                 ATTACH_OVERHEAD
             };
             let &(bone, offset) = a.points.get(&slot)?;
-            let joint = a.anchor(bone)?;
-            Some(globals.get(joint).ok()?.transform_point(offset))
+            let pose = poses.get(entity).ok()?;
+            let root = globals.get(pose.joints_root).ok()?;
+            pose.posed_point(root, bone, offset)
         })
         .unwrap_or_else(|| {
             let bbox_z = fallbacks.get(entity).map_or(0.0, |f| f.0);

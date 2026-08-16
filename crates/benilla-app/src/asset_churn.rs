@@ -9,9 +9,16 @@
 //! Prints one line per second: for each watched asset type, the per-frame Added/Modified counts,
 //! and for images the megabytes those modifications ask the render world to re-upload, plus the
 //! top offenders by how many frames they were touched in.
+//!
+//! The megabytes come from the image's `texture_descriptor`, not from `data.len()`. A
+//! `RenderAssetUsages::RENDER_WORLD` image has its bytes MOVED into the render world on extract, so
+//! main-side `data` is `None` from then on — measuring it read 0 for the sprite sheets, the effect
+//! textures and all three terrain arrays, i.e. for most of the texture set. The meter was blind to
+//! precisely the assets it exists to catch.
 
 use std::collections::HashMap;
 
+use benilla_assets::image_gpu_bytes;
 use bevy::asset::AssetEvent;
 use bevy::prelude::*;
 use bevy::time::Real;
@@ -72,9 +79,7 @@ fn watch_images(
             AssetEvent::Added { .. } => churn.counts.entry("Image").or_default().0 += 1,
             AssetEvent::Modified { id } => {
                 churn.counts.entry("Image").or_default().1 += 1;
-                let bytes = images
-                    .get(id)
-                    .map_or(0, |i| i.data.as_ref().map_or(0, Vec::len));
+                let bytes = images.get(id).map_or(0, image_gpu_bytes);
                 churn.image_bytes += bytes as u64;
                 let frame = churn.frames;
                 let slot = churn.images.entry(id).or_default();

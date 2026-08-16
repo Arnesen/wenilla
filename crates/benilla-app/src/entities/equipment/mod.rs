@@ -216,29 +216,20 @@ pub(super) enum ItemModelKind {
     Quiver,
 }
 
-/// The per-instance bone-riding surface, inserted at visual attach (decision 0072): the rig's
-/// consumer **anchors** by bone (decision 0724 — one anchor entity per bone something reaches,
-/// not a full joint hierarchy) + the model's attachment points (id → bone + Bevy-space local
-/// offset). Held items spawn under `anchor(bone)` at the offset; every bone rider (mount seat,
-/// spell effects, overhead anchors) uses the same two-step lookup.
+/// The per-instance bone-riding surface, inserted at visual attach (decision 0072): the model's
+/// attachment points and event markers (id → bone + Bevy-space local offset). **Pure model data**
+/// — the anchor *entities* live in `RigPose.anchors` and spawn on first consumer (decision 1355):
+/// a rider that needs a frame to parent under resolves `points`/`markers` here, then
+/// `RigPose::anchor_for(bone)`; a reader that only needs a position goes straight to
+/// `RigPose::posed_point(bone, offset)` and touches no entity at all.
 #[derive(Component)]
 pub(crate) struct BoneAttach {
-    /// Bone index → its anchor entity. Populated for every bone in `points`/`markers` (and the
-    /// emitter/ribbon/light/billboard hosts) — a `points` hit always resolves.
-    pub(crate) anchors: HashMap<u16, Entity>,
     /// Attachment id → `(bone index, bevy-space offset from the bone's bind pivot)`.
     pub(crate) points: HashMap<u16, (u16, Vec3)>,
     /// Animation-event marker 4CC → the same `(bone, offset)` shape — first record per ident
     /// (the client's `0x7130e0` first-match scan). The missile launch points: `$CSL`/`$CSR`/`$CST`
     /// (casting hand left/right/two-hand, `0x60c9b0`'s cascade) and `$BWR` (ranged release).
     pub(crate) markers: HashMap<[u8; 4], (u16, Vec3)>,
-}
-
-impl BoneAttach {
-    /// The anchor entity standing in for `bone` — the frame a rider parents under / reads.
-    pub(crate) fn anchor(&self, bone: u16) -> Option<Entity> {
-        self.anchors.get(&bone).copied()
-    }
 }
 
 /// The held-item children currently spawned for a unit: the [`HeldItems`] they were built from (the

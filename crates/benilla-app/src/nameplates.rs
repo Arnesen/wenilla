@@ -358,6 +358,7 @@ pub(crate) fn drive_nameplates(
     // The overhead-anchor inputs ([`overhead_anchor`]) — the spawn-frame seat only.
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform>,
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -417,7 +418,7 @@ pub(crate) fn drive_nameplates(
     }
     // The billboard facing: screen-aligned (the camera's own rotation), this frame's camera.
     let facing = cam_tf.rotation;
-    let mut seen: Vec<Entity> = Vec::new();
+    let mut seen = bevy::ecs::entity::EntityHashSet::default();
     for (entity, net, guid, tf, store, is_self, drawn) in &units {
         // **A name needs a body to float over.** The director, inside Caverns of Time: the Tanaris
         // mobs 222 yd overhead had correctly stopped drawing, and their names went on hanging in
@@ -530,6 +531,7 @@ pub(crate) fn drive_nameplates(
             &anchor_q.1,
             &anchor_q.2,
             &anchor_q.3,
+            &anchor_q.4,
         );
         let scale = height_scale(anchor.y - tf.translation.y);
         let place = Transform {
@@ -537,7 +539,7 @@ pub(crate) fn drive_nameplates(
             rotation: facing,
             scale: Vec3::splat(scale),
         };
-        seen.push(entity);
+        seen.insert(entity);
         match plates.live.get(&entity) {
             Some((_, l, c)) if *l == lines && *c == color => {}
             stale => {
@@ -588,6 +590,7 @@ fn place_nameplates(
     mut plate_tfs: Query<(&mut Transform, &mut GlobalTransform), With<NamePlate>>,
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform, Without<NamePlate>>, // disjoint from the plate global write
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -610,11 +613,19 @@ fn place_nameplates(
         else {
             continue; // spawned this frame and not yet flushed, or unit despawning — next frame
         };
-        let raw = overhead_anchor(unit, tf, &anchor_q.0, &anchor_q.1, &anchor_q.2, &anchor_q.3);
+        let raw = overhead_anchor(
+            unit,
+            tf,
+            &anchor_q.0,
+            &anchor_q.1,
+            &anchor_q.2,
+            &anchor_q.3,
+            &anchor_q.4,
+        );
         // The mounted rock damp: seat the plate at mean + ROCK_KEEP·residual instead of the raw
         // gallop-riding anchor. Everything is in root-relative offsets, so the damped plate still
         // tracks a 7 yd/s run with zero world-space lag (the on-foot trailing lesson).
-        let anchor = if anchor_q.3.contains(unit) {
+        let anchor = if anchor_q.4.contains(unit) {
             let off = raw - tf.translation;
             let mean = rock.entry(unit).or_insert(off);
             if (off - *mean).length_squared() > ROCK_SNAP * ROCK_SNAP {
@@ -646,7 +657,7 @@ fn place_nameplates(
         *pglobal = GlobalTransform::from(place);
     }
     // Dismounted or despawned units drop their damping state (a re-mount starts fresh).
-    rock.retain(|e, _| anchor_q.3.contains(*e));
+    rock.retain(|e, _| anchor_q.4.contains(*e));
 }
 
 /// Registers the plate driver (Update — the entity/mesh churn stays in the schedule the mesh

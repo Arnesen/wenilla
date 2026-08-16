@@ -74,7 +74,7 @@ use crate::net::GuidIndex;
 use benilla_world::particles::buffer::EffectVertex;
 use benilla_world::view::WorldCamera;
 
-use super::{BoneAttach, OverheadFallback};
+use super::OverheadFallback;
 
 /// The caster-end anchor's height factor when the model has no `$CSL` marker: the reference's
 /// `base + (0, 0, modelHeight × modelScale × 0.75)` (`0x6ec73e`–`0x6ec771`, the `0.75f` at
@@ -178,14 +178,14 @@ fn jitter(rng: &mut u32) -> f32 {
 /// `0x61ceb0` read the same table the same way.
 fn caster_world_pos(
     caster: Entity,
-    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: &super::missile::AttachPosQuery,
     joints: &Query<&GlobalTransform>,
     heights: &Query<&OverheadFallback>,
 ) -> Option<Vec3> {
-    let (base, bones) = units.get(caster).ok()?;
-    let marker = bones.and_then(|b| {
+    let (base, bones, pose) = units.get(caster).ok()?;
+    let marker = bones.zip(pose).and_then(|(b, p)| {
         let &(bone, offset) = b.markers.get(b"$CSL")?;
-        Some(joints.get(b.anchor(bone)?).ok()?.transform_point(offset))
+        p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
     });
     Some(marker.unwrap_or_else(|| {
         let (scale, _, translation) = base.to_scale_rotation_translation();
@@ -437,7 +437,7 @@ pub(crate) fn simulate_chain_beams(
     mut draw: benilla_world::particles::buffer::WorldEffectDraw,
     images: Res<Assets<Image>>,
     world_cam: Query<Entity, With<WorldCamera>>,
-    units: Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: super::missile::AttachPosQuery,
     joints: Query<&GlobalTransform>,
     heights: Query<&OverheadFallback>,
     mut beams: Query<(Entity, &mut ChainBeam)>,

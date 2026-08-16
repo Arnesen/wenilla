@@ -156,9 +156,11 @@ pub(super) type MountChildren<'w, 's> = Query<
 /// Drive one unit's mount side to the point where the rider can be seated. Spawns the child when
 /// it is missing, drops and retries a child built for a display the field has since moved off, and
 /// resolves the seat frame once the child's rig is up.
+#[allow(clippy::too_many_arguments)] // the seat law's full input set, like its callers
 pub(super) fn seat_or_spawn_mount(
     commands: &mut Commands,
     children: &MountChildren,
+    poses: &mut Query<&mut RigPose>,
     creatures: Option<&super::Creatures>,
     unit: Entity,
     child: Option<Entity>,
@@ -188,11 +190,16 @@ pub(super) fn seat_or_spawn_mount(
     let Ok((true, Some(bones), _)) = children.get(child) else {
         return Seat::Wait; // the mount child is still building
     };
-    let Some((joint, offset)) = bones
-        .points
-        .get(&0)
-        .and_then(|&(bone, offset)| bones.anchor(bone).map(|j| (j, offset)))
-    else {
+    // The mount's attachment-0 joint, spawned on first demand from the MOUNT's composed pose
+    // (`RigPose::anchor_for`, decision 1355) — registered into the mount's own `RigPose.anchors`,
+    // which is what lets the world pass's patch walk find the seat subtree and cascade the rider.
+    let Some((joint, offset)) = bones.points.get(&0).and_then(|&(bone, offset)| {
+        poses
+            .get_mut(child)
+            .ok()
+            .and_then(|mut p| p.anchor_for(commands, child, bone))
+            .map(|j| (j, offset))
+    }) else {
         warn!(
             "MOUNTDISPLAYIDNOMOUNTATTACHMENT: display {mount_display} authors no attachment 0 — \
              rider stays at the unit matrix"
@@ -274,22 +281,26 @@ fn reseat_rig(commands: &mut Commands, rig: &mut RigPose, frame: Entity, conform
 #[allow(clippy::type_complexity)]
 pub(super) fn reseat_mounts(
     mut commands: Commands,
-    mut units: Query<
+    units: Query<
         (
             Entity,
             &NetEntity,
             &ObjectStore,
-            Option<&mut RigPose>,
             Option<&AppliedMount>,
             Option<&MountChild>,
         ),
         With<super::VisualAttached>,
     >,
+    // One pose query for BOTH sides of the seat — the rider's rig (re-rooted onto the seat) and
+    // the mount's (its attachment-0 anchor resolves on demand, decision 1355). Split from the
+    // `units` query because the two sides are different entities out of the same component, and
+    // borrowed strictly in sequence below.
+    mut poses: Query<&mut RigPose>,
     children: MountChildren,
     conforms: Query<(), With<super::conform::ConformNode>>,
     creatures: Option<Res<super::Creatures>>,
 ) {
-    for (entity, net, store, rig, applied, child) in &mut units {
+    for (entity, net, store, applied, child) in &units {
         if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
             continue;
         }
@@ -307,7 +318,7 @@ pub(super) fn reseat_mounts(
         // orders it a mount — stamp the field so it can never churn, exactly as the first build
         // does, and sweep a child if one ever did reach it (the stamp alone would then re-fire
         // every frame, since the settled test asks about the child too).
-        let Some(mut rig) = rig else {
+        let Ok(seated_root) = poses.get(entity).map(|r| r.joints_root) else {
             if let Some(&MountChild(child)) = child {
                 if let Ok(mut ec) = commands.get_entity(child) {
                     ec.despawn();
@@ -328,9 +339,11 @@ pub(super) fn reseat_mounts(
             // on its own entity, or on the conform node that tilts it — is where it belongs, and
             // asking for a ground frame anyway would orphan a second conform node beside the
             // first.
-            if rig.joints_root != entity && !conforms.contains(rig.joints_root) {
+            if seated_root != entity && !conforms.contains(seated_root) {
                 let ground = ground_frame(&mut commands, entity, net, creatures.as_deref());
-                reseat_rig(&mut commands, &mut rig, ground, false);
+                if let Ok(mut rig) = poses.get_mut(entity) {
+                    reseat_rig(&mut commands, &mut rig, ground, false);
+                }
             }
             if let Some(child) = child {
                 if let Ok(mut ec) = commands.get_entity(child) {
@@ -347,6 +360,7 @@ pub(super) fn reseat_mounts(
         match seat_or_spawn_mount(
             &mut commands,
             &children,
+            &mut poses,
             creatures.as_deref(),
             entity,
             child,
@@ -355,8 +369,10 @@ pub(super) fn reseat_mounts(
         ) {
             Seat::Wait => {}
             Seat::Frame(anchor) => {
-                let leaving_conform = conforms.contains(rig.joints_root);
-                reseat_rig(&mut commands, &mut rig, anchor, leaving_conform);
+                if let Ok(mut rig) = poses.get_mut(entity) {
+                    let leaving_conform = conforms.contains(seated_root);
+                    reseat_rig(&mut commands, &mut rig, anchor, leaving_conform);
+                }
                 commands.entity(entity).insert(AppliedMount(live));
             }
             Seat::UnitMatrix => {

@@ -443,6 +443,7 @@ fn drive_vplates(
     // The overhead-anchor inputs ([`overhead_anchor`]).
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform>,
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -573,6 +574,7 @@ fn drive_vplates(
             &anchor_q.1,
             &anchor_q.2,
             &anchor_q.3,
+            &anchor_q.4,
         );
         let Some(screen) =
             crate::ui_pass::project_overlay(cam, &cam_tf, anchor + Vec3::Y * PLATE_LIFT, viewport)

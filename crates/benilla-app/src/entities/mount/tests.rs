@@ -111,15 +111,14 @@ impl Standing {
     /// give it the attachment-0 anchor the seat hangs from. Returns the child.
     fn mount_attaches(&mut self) -> Entity {
         let child = self.mount_child().expect("a mount child was ordered");
-        let joint = self
-            .app
-            .world_mut()
-            .spawn((Transform::default(), Visibility::default(), ChildOf(child)))
-            .id();
+        // The seat joint spawns on first demand out of the mount's pose (decision 1355) — the
+        // test provides the pose, not a hand-built joint.
+        let pose =
+            benilla_world::testing::test_rig_pose(child, &[Vec3::ZERO; SEAT_BONE as usize + 1]);
         self.app.world_mut().entity_mut(child).insert((
             VisualAttached,
+            pose,
             BoneAttach {
-                anchors: [(SEAT_BONE, joint)].into_iter().collect(),
                 points: [(0u16, (SEAT_BONE, Vec3::Y))].into_iter().collect(),
                 markers: Default::default(),
             },
@@ -306,7 +305,6 @@ fn a_mount_without_a_seat_leaves_the_body_at_the_unit_matrix() {
     s.app.world_mut().entity_mut(child).insert((
         VisualAttached,
         BoneAttach {
-            anchors: Default::default(),
             points: Default::default(),
             markers: Default::default(),
         },

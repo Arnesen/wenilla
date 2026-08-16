@@ -85,6 +85,10 @@ pub(crate) struct Model {
     /// change-gated — `tooltip::append_line`, and the gate
     /// `layout_gate::the_hover_re_enter_loop_neither_re_measures_nor_re_solves`.
     pub(crate) layout_epoch: u64,
+    /// Per-node input hashes + the dirty-closure scratch — what makes a resolve cost the nodes
+    /// that MOVED rather than the whole graph (decision 1350; see `script::layout::LayoutScope`).
+    /// Tiers 1 and 2 above decide *whether* to solve; this decides *what*.
+    pub(crate) layout_scope: super::layout::LayoutScope,
     /// The [`Self::layout_epoch`] value the last SETTLED resolve closed on — one whose
     /// fingerprint matched, proving the input set (seeds included) has stopped moving. `None`
     /// forces the next resolve through tier 1: the initial state, a cycle-bailed pass, and every
@@ -97,6 +101,11 @@ pub(crate) struct Model {
     /// merely producing the same rects. Counts the gate's decision, so it reads the same with the
     /// `WOW_LAYOUT_VERIFY` self-check on (which re-runs skipped resolves) as with it off.
     pub(crate) layout_solves: u64,
+    /// The SCOPE of the last solve that ran: `(frames solved, regions swept)` — decision 1350's
+    /// own meter, and the number its gate asserts on. `layout_solves` says how often the gate let
+    /// a solve through and `layout_rounds` how deep each went; this says how WIDE, which is the
+    /// axis that used to be "the whole UI" and is the one a growing UI silently inflates.
+    pub(crate) layout_last_scope: (usize, usize),
     /// How many fixpoint ROUNDS those solves ran in total. A solve's cost is rounds × the whole
     /// graph, so this is what separates "the gate let too much through" from "each pass is doing
     /// too much" — the two have different fixes.
@@ -1087,6 +1096,8 @@ impl Model {
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
             layout_epoch: 0,
+            layout_scope: super::layout::LayoutScope::default(),
+            layout_last_scope: (0, 0),
             layout_epoch_resolved: None,
             layout_solves: 0,
             layout_rounds: 0,

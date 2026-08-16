@@ -183,37 +183,43 @@ pub(super) struct Missile {
     weapon_visual: Option<u32>,
 }
 
+/// The unit-side inputs every attach/marker **position read** shares: the base frame, the
+/// attachment/marker tables, and the pose the point is computed from. A pure read — the point
+/// comes from `RigPose::posed_point` (composed pose × rig root frame), so these reads spawn no
+/// anchor entity (decision 1355). Shared with the chain-beam lane.
+pub(super) type AttachPosQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static GlobalTransform,
+        Option<&'static BoneAttach>,
+        Option<&'static benilla_world::rig_anim::RigPose>,
+    ),
+>;
+
 /// A unit's attach-point world position through the given tag cascade, else its base translation.
 /// `None` only when the unit itself is gone. Shared with the chain-beam lane, whose non-caster
 /// endpoints anchor through the very same table and cascade (`0x6ec780`; decision 0955).
 pub(super) fn attach_world_pos(
     unit: Entity,
     tags: impl IntoIterator<Item = u16>,
-    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: &AttachPosQuery,
     joints: &Query<&GlobalTransform>,
 ) -> Option<Vec3> {
-    let (base, bones) = units.get(unit).ok()?;
-    let point = bones.and_then(|b| {
-        tags.into_iter()
-            .find_map(|tag| b.points.get(&tag).copied())
-            .and_then(|(bone, offset)| b.anchor(bone).map(|j| (j, offset)))
+    let (base, bones, pose) = units.get(unit).ok()?;
+    let point = bones.zip(pose).and_then(|(b, p)| {
+        let (bone, offset) = tags
+            .into_iter()
+            .find_map(|tag| b.points.get(&tag).copied())?;
+        p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
     });
-    Some(
-        match point.and_then(|(j, off)| joints.get(j).ok().map(|g| g.transform_point(off))) {
-            Some(p) => p,
-            None => base.translation(),
-        },
-    )
+    Some(point.unwrap_or_else(|| base.translation()))
 }
 
 /// Where a missile is heading **this frame**: a unit target's live dest attach point (so the
 /// path bends as it moves — the client's re-solve per tick), or the ground shot's fixed point.
 /// `None` only when a unit target is gone.
-fn aim_point(
-    aim: Aim,
-    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
-    joints: &Query<&GlobalTransform>,
-) -> Option<Vec3> {
+fn aim_point(aim: Aim, units: &AttachPosQuery, joints: &Query<&GlobalTransform>) -> Option<Vec3> {
     match aim {
         Aim::Unit {
             target, dest_tag, ..
@@ -235,23 +241,18 @@ fn aim_point(
 fn launch_world_pos(
     caster: Entity,
     fired: Option<[u8; 4]>,
-    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: &AttachPosQuery,
     joints: &Query<&GlobalTransform>,
 ) -> Option<Vec3> {
-    let (base, bones) = units.get(caster).ok()?;
-    let point = bones.and_then(|b| {
-        fired
+    let (base, bones, pose) = units.get(caster).ok()?;
+    let point = bones.zip(pose).and_then(|(b, p)| {
+        let (bone, offset) = fired
             .into_iter()
             .chain(MARKER_CASCADE)
-            .find_map(|ident| b.markers.get(&ident).copied())
-            .and_then(|(bone, offset)| b.anchor(bone).map(|j| (j, offset)))
+            .find_map(|ident| b.markers.get(&ident).copied())?;
+        p.posed_point(joints.get(p.joints_root).ok()?, bone, offset)
     });
-    Some(
-        match point.and_then(|(j, off)| joints.get(j).ok().map(|g| g.transform_point(off))) {
-            Some(p) => p,
-            None => base.translation(),
-        },
-    )
+    Some(point.unwrap_or_else(|| base.translation()))
 }
 
 /// One GO's projectiles parked on their caster, waiting for the release keyframe — the client's
@@ -380,7 +381,7 @@ fn launch_go(
     go: &QueuedGo,
     launch: Vec3,
     commands: &mut Commands,
-    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: &AttachPosQuery,
     joints: &Query<&GlobalTransform>,
     sounds: &mut MessageWriter<MissileSound>,
     impacts: &mut MessageWriter<CastEvent>,
@@ -459,7 +460,7 @@ pub(super) fn spawn_missiles(
     fx: Option<ResMut<SpellFx>>,
     displays: Option<Res<ItemDisplays>>,
     asset_server: Res<AssetServer>,
-    units: Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: AttachPosQuery,
     joints: Query<&GlobalTransform>,
     casters: Query<(
         &AnimDriver,
@@ -661,7 +662,7 @@ pub(super) fn move_missiles(
     mut commands: Commands,
     time: Res<Time>,
     mut missiles: Query<(Entity, &mut Missile, &mut Transform)>,
-    units: Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    units: AttachPosQuery,
     joints: Query<&GlobalTransform>,
     mut impacts: MessageWriter<CastEvent>,
     mut defenses: MessageWriter<DefenseAnim>,
@@ -734,22 +735,22 @@ mod tests {
         app.update();
     }
 
-    /// A caster whose `$CSL` marker joint sits at `hand` (the release launch point).
+    /// A caster whose `$CSL` marker sits at `hand` (the release launch point) — bone 0 of its
+    /// pose is seated there, and the read computes through `posed_point` (decision 1355).
     fn caster(app: &mut App, hand: Vec3) -> Entity {
-        let joint = app
+        let caster = app
             .world_mut()
-            .spawn(GlobalTransform::from_translation(hand))
-            .id();
-        app.world_mut()
             .spawn((
                 GlobalTransform::default(),
                 BoneAttach {
-                    anchors: HashMap::from([(0u16, joint)]),
                     points: HashMap::new(),
                     markers: HashMap::from([(*b"$CSL", (0u16, Vec3::ZERO))]),
                 },
             ))
-            .id()
+            .id();
+        let pose = benilla_world::testing::test_rig_pose(caster, &[hand]);
+        app.world_mut().entity_mut(caster).insert(pose);
+        caster
     }
 
     fn go(caster: Entity, target: Entity, awaits_release: bool) -> MissileSpawn {

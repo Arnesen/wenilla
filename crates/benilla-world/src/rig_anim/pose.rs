@@ -139,6 +139,71 @@ impl RigPose {
             } * local;
         }
     }
+
+    /// The anchor entity standing in for `bone`, spawned on first demand (decision 1355): a
+    /// consumer that needs an *entity* on a bone — a held item's parent, an emitter's owner
+    /// frame, a quest marker's seat — resolves it here, and only bones something actually
+    /// consumes ever get one. At the LBRS pin, 96 % of the eagerly-spawned population hosted
+    /// nothing (decision 1354).
+    ///
+    /// The spawn seats from `model` — the same matrices the compose pass re-seats every anchor
+    /// from — so an anchor created mid-frame (a weapon equipped in combat) stands at the current
+    /// composed pose, never the rest pose. `rig` is the [`RigPose`] holder (`self` cannot know
+    /// its own entity); the anchor parents under [`Self::joints_root`] and dies with it.
+    ///
+    /// `None` = the bone is outside this skeleton (an out-of-range authored reference — the
+    /// consumer misses, as it always has).
+    pub fn anchor_for(
+        &mut self,
+        commands: &mut Commands,
+        rig: Entity,
+        bone: u16,
+    ) -> Option<Entity> {
+        if let Some(&(_, anchor)) = self.anchors.iter().find(|&&(b, _)| b == bone) {
+            return Some(anchor);
+        }
+        let m = self.model.get(bone as usize)?;
+        let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        let anchor = commands
+            .spawn((
+                Transform {
+                    translation,
+                    rotation,
+                    scale,
+                },
+                Visibility::default(),
+                RigAnchor { rig, bone },
+            ))
+            .id();
+        commands.entity(self.joints_root).add_child(anchor);
+        self.anchors.push((bone, anchor));
+        Some(anchor)
+    }
+
+    /// The world-space point `offset` under `bone` at the current composed pose — what a
+    /// consumer that only ever *reads* a position (the overhead anchor, a missile launch point,
+    /// the bowstring's nock) gets instead of an anchor entity, so those reads spawn nothing
+    /// (decision 1355). `root_global` is [`Self::joints_root`]'s `GlobalTransform` — exactly the
+    /// frame an anchor's own global would compose through.
+    ///
+    /// One deliberate difference from reading a spawned anchor: `model` carries the composed
+    /// pose with the `flags & 0x7` arm folded in but **not** the world pass's camera-billboard
+    /// replacement. No attachment point or event marker sits on a camera-faced bone (those bones
+    /// carry cards, which stay entity-anchored via [`Self::anchor_for`]), so nothing observable
+    /// rides on the difference.
+    pub fn posed_point(
+        &self,
+        root_global: &GlobalTransform,
+        bone: u16,
+        offset: Vec3,
+    ) -> Option<Vec3> {
+        let m = self.model.get(bone as usize)?;
+        Some(
+            root_global
+                .affine()
+                .transform_point3(m.transform_point3(offset)),
+        )
+    }
 }
 
 /// On every consumer anchor: which rig and bone it stands in for. The body twist's model-frame

@@ -235,6 +235,14 @@ pub fn run(build: BuildId) -> AppExit {
     let mut app = App::new();
     // The stamp is plain data from here on — the panel footer and preflight banner read it back.
     app.insert_resource(build);
+    // Pin Bevy's static-scene transform tracking ON (decision 1356). At the default threshold
+    // `mark_dirty_trees` re-decides per frame by counting every changed-Transform row and every
+    // tree row — two full scans of the very population the tracking exists to skip. This scene
+    // is provably static-heavy (terrain/WMO batches and parked units barely move), so the
+    // auto-tuner can only ever confirm what this line states. The guard it removes bites only
+    // when MOST rows move in one frame (a load burst into a near-empty world), where
+    // dirty-marking briefly costs more than it saves — a loading-band term, accepted knowingly.
+    app.insert_resource(bevy::transform::systems::StaticTransformOptimizations::enabled());
     // …and one startup line says which build produced this log. Registered HERE, beside the stamp
     // it prints, rather than in `preflight` where it sat until decision 1179: **which build is
     // this** is the first thing a bug report from someone else's machine has to establish, and a

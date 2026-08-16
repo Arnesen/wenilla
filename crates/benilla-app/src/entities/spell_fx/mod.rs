@@ -777,13 +777,16 @@ fn reap_matching(
 /// so the whole effect — meshes and particle emitters alike — rides the animating bone. The one
 /// exception is the kit's **world-plant slot** ([`benilla_formats::WORLD_EFFECT_TAG`], kit field
 /// 12): its root is a free world entity at the owner's position/facing/scale, [`WorldPlantFx`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn attach_spell_fx(
     mut commands: Commands,
     mut units: Query<(
         Entity,
         &mut FxAttached,
         Option<&BoneAttach>,
+        // The unit's pose buffer: the attach joint spawns on first demand from the composed
+        // pose (`RigPose::anchor_for`, decision 1355).
+        Option<&mut benilla_world::rig_anim::RigPose>,
         &GlobalTransform,
     )>,
     fx: Option<Res<SpellFx>>,
@@ -798,7 +801,7 @@ pub(super) fn attach_spell_fx(
         return;
     };
     let now = time.elapsed_secs();
-    for (unit, mut att, bones, unit_gt) in &mut units {
+    for (unit, mut att, bones, mut pose, unit_gt) in &mut units {
         att.instances.retain_mut(|inst| {
             // Self-termination (the cast-release flash ran its span).
             if let Some(expires) = inst.expires {
@@ -880,7 +883,9 @@ pub(super) fn attach_spell_fx(
                         .chain(ATTACH_FALLBACKS)
                         .find_map(|tag| b.points.get(&tag).copied().map(|p| (tag, p)))
                         .and_then(|(tag, (bone, offset))| {
-                            b.anchor(bone).map(|joint| (tag, joint, offset))
+                            pose.as_mut()
+                                .and_then(|p| p.anchor_for(&mut commands, unit, bone))
+                                .map(|joint| (tag, joint, offset))
                         })
                 });
                 let ground_anchor = point.is_none_or(|(tag, ..)| tag == 0x13);

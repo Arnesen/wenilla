@@ -98,6 +98,30 @@ pub mod testing {
     pub fn plain_particle_def() -> ParticleEmitterDef {
         particle_def(ParticleShape::Plane)
     }
+
+    /// A bind-pose [`crate::rig_anim::RigPose`] for tests that resolve consumer anchors
+    /// (decision 1355: anchors spawn on first demand through `RigPose::anchor_for`, so a test
+    /// wearer/mount/caster needs a pose, not a hand-built joint map): one root-parented joint per
+    /// entry, seated at its local translation.
+    pub fn test_rig_pose(
+        root: bevy::ecs::entity::Entity,
+        joints: &[bevy::math::Vec3],
+    ) -> crate::rig_anim::RigPose {
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: joints
+                .iter()
+                .map(|&t| benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: t,
+                    billboard: None,
+                    parent_arm: None,
+                })
+                .collect(),
+            spine_bone: None,
+            head_bone: None,
+        };
+        crate::rig_anim::RigPose::new(root, &skeleton)
+    }
 }
 
 pub mod art_scope;

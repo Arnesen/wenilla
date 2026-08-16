@@ -136,6 +136,10 @@ pub(in crate::entities) fn attach_held_items(
         // gated on the mesh's own joint attributes. The one exception is an item that rigs itself
         // (0841) — it carries its own slot instead, and inherits the tint up the `ParentModel` chain.
         Option<&benilla_world::rig_palette::RigSkin>,
+        // The wearer's pose buffer: the attach joint spawns on first demand from the composed
+        // pose (`RigPose::anchor_for`, decision 1355) — a weapon equipped in combat seats at the
+        // live pose, never the rest pose.
+        Option<&mut benilla_world::rig_anim::RigPose>,
     )>,
     held: Option<Res<ItemDisplays>>,
     time: Res<Time>,
@@ -148,7 +152,9 @@ pub(in crate::entities) fn attach_held_items(
         return;
     };
     let now = time.elapsed_secs();
-    for (items, bones, attached, entity, unit_fade, body_center, unit_tf, skin) in &mut units {
+    for (items, bones, attached, entity, unit_fade, body_center, unit_tf, skin, mut pose) in
+        &mut units
+    {
         // A held item / helm / shoulder resolves and spawns asynchronously (a template round trip, a
         // model load) — often *after* the body has already armed its appear-fade (decision 0032 is a
         // per-unit property: the reference fades the whole unit, attachments included, as one). Read
@@ -209,7 +215,10 @@ pub(in crate::entities) fn attach_held_items(
                         .get(&n.attach)
                         .zip(ctx.bones.points.get(&w.attach))
                     {
-                        if let Some(joint) = ctx.bones.anchor(bone) {
+                        if let Some(joint) = pose
+                            .as_mut()
+                            .and_then(|p| p.anchor_for(&mut commands, entity, bone))
+                        {
                             commands.entity(joint).add_child(root);
                             commands
                                 .entity(root)
@@ -230,7 +239,15 @@ pub(in crate::entities) fn attach_held_items(
                 commands.entity(old).despawn();
             }
             *root = wants.and_then(|hs| {
-                spawn_slot(&mut commands, &mut palettes, &ctx, &held, slot_idx, &hs)
+                spawn_slot(
+                    &mut commands,
+                    &mut palettes,
+                    &ctx,
+                    pose.as_deref_mut(),
+                    &held,
+                    slot_idx,
+                    &hs,
+                )
             });
         }
         let applied = HeldAttached {
@@ -253,6 +270,7 @@ fn spawn_slot(
     commands: &mut Commands,
     palettes: &mut benilla_world::rig_palette::RigPalettes,
     ctx: &WearerCtx,
+    pose: Option<&mut benilla_world::rig_anim::RigPose>,
     held: &ItemDisplays,
     slot_idx: usize,
     hs: &HeldSlot,
@@ -263,7 +281,8 @@ fn spawn_slot(
     let parts = dm.parts.as_ref()?;
     // Body model has no such attach point (a non-character skeleton) — hold nothing.
     let &(bone, offset) = bones.points.get(&hs.attach)?;
-    let joint = bones.anchor(bone)?;
+    // The attach joint, spawned on first demand from the wearer's composed pose (decision 1355).
+    let joint = pose?.anchor_for(commands, entity, bone)?;
     let root = commands
         .spawn((
             Transform::from_translation(offset),
@@ -766,9 +785,7 @@ mod tests {
         displays.models.insert((7, KIND), dm);
         app.insert_resource(displays);
 
-        let joint = app.world_mut().spawn(Transform::default()).id();
         let bones = BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::from([(attach_id::SHOULDER_LEFT, (3u16, Vec3::ZERO))]),
             markers: HashMap::new(),
         };
@@ -788,8 +805,12 @@ mod tests {
         )
         .expect("a fresh palette has room");
         let wearer_slot = skin.slot;
-        app.world_mut()
-            .spawn((items, bones, Transform::default(), skin));
+        let wearer = app
+            .world_mut()
+            .spawn((items, bones, Transform::default(), skin))
+            .id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
 
@@ -836,10 +857,7 @@ mod tests {
         displays.models.insert((7, HELM_KIND), dm);
         app.insert_resource(displays);
 
-        // The bone the helm hangs on, and the wearer.
-        let joint = app.world_mut().spawn(Transform::default()).id();
         let bones = BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::from([(attach_id::HELM, (3u16, Vec3::ZERO))]),
             markers: HashMap::new(),
         };
@@ -865,6 +883,9 @@ mod tests {
         if let Some(skin) = skin {
             wearer.insert(skin);
         }
+        let wearer = wearer.id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
 
@@ -1005,9 +1026,7 @@ mod tests {
         displays.models.insert((7, SHOULDER_KIND), dm);
         app.insert_resource(displays);
 
-        let joint = app.world_mut().spawn(Transform::default()).id();
         let bones = BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::from([(attach_id::SHOULDER_RIGHT, (3u16, ATTACH))]),
             markers: HashMap::new(),
         };
@@ -1018,7 +1037,12 @@ mod tests {
             attach: attach_id::SHOULDER_RIGHT,
             visual: NO_GLOW,
         });
-        app.world_mut().spawn((items, bones, Transform::default()));
+        let wearer = app
+            .world_mut()
+            .spawn((items, bones, Transform::default()))
+            .id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
 
@@ -1097,9 +1121,7 @@ mod tests {
         displays.models.insert((7, KIND), dm);
         app.insert_resource(displays);
 
-        let joint = app.world_mut().spawn(Transform::default()).id();
         let bones = BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::from([(attach_id::HAND_RIGHT, (3u16, Vec3::ZERO))]),
             markers: HashMap::new(),
         };
@@ -1112,12 +1134,17 @@ mod tests {
         });
         // The wearer is mid-login: its own ramp is still pending, so everything attaching to it
         // must join that ramp rather than open opaque beside it.
-        app.world_mut().spawn((
-            items,
-            bones,
-            Transform::default(),
-            UnitAppearFade::Pending { since: SINCE },
-        ));
+        let wearer = app
+            .world_mut()
+            .spawn((
+                items,
+                bones,
+                Transform::default(),
+                UnitAppearFade::Pending { since: SINCE },
+            ))
+            .id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
 
@@ -1190,9 +1217,7 @@ mod tests {
         displays.models.insert((7, KIND), dm);
         app.insert_resource(displays);
 
-        let joint = app.world_mut().spawn(Transform::default()).id();
         let bones = BoneAttach {
-            anchors: HashMap::from([(3u16, joint)]),
             points: HashMap::from([(attach_id::HAND_RIGHT, (3u16, Vec3::ZERO))]),
             markers: HashMap::new(),
         };
@@ -1203,12 +1228,17 @@ mod tests {
             attach: attach_id::HAND_RIGHT,
             visual: NO_GLOW,
         });
-        app.world_mut().spawn((
-            items,
-            bones,
-            Transform::default(),
-            UnitAppearFade::Pending { since: SINCE },
-        ));
+        let wearer = app
+            .world_mut()
+            .spawn((
+                items,
+                bones,
+                Transform::default(),
+                UnitAppearFade::Pending { since: SINCE },
+            ))
+            .id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
 
@@ -1271,15 +1301,9 @@ mod tests {
         }
         app.insert_resource(displays);
 
-        // Three attach points on three bones: the hand, the back (where a stowed weapon rides) and
-        // the shoulder.
-        let (hand, back, shoulder) = (
-            app.world_mut().spawn(Transform::default()).id(),
-            app.world_mut().spawn(Transform::default()).id(),
-            app.world_mut().spawn(Transform::default()).id(),
-        );
+        // Three attach points on three bones: the hand, the back (where a stowed weapon rides)
+        // and the shoulder — their joints spawn on first demand (decision 1355).
         let bones = BoneAttach {
-            anchors: HashMap::from([(1u16, hand), (2u16, back), (3u16, shoulder)]),
             points: HashMap::from([
                 (attach_id::HAND_RIGHT, (1u16, HAND_AT)),
                 (SHEATH_BACK, (2u16, BACK_AT)),
@@ -1304,6 +1328,8 @@ mod tests {
             .world_mut()
             .spawn((items, bones, Transform::default()))
             .id();
+        let pose = benilla_world::testing::test_rig_pose(wearer, &[Vec3::ZERO; 4]);
+        app.world_mut().entity_mut(wearer).insert(pose);
         app.add_systems(Update, attach_held_items);
         app.update();
         (app, wearer)
@@ -1367,9 +1393,12 @@ mod tests {
                 .map(|c| c.parent()),
             app.world()
                 .entity(wearer)
-                .get::<BoneAttach>()
+                .get::<benilla_world::rig_anim::RigPose>()
                 .unwrap()
-                .anchor(2),
+                .anchors
+                .iter()
+                .find(|&&(b, _)| b == 2)
+                .map(|&(_, j)| j),
             "re-parented onto the sheath point's joint"
         );
         assert_eq!(

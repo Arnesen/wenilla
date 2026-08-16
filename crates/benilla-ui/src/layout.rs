@@ -509,6 +509,15 @@ fn anchor_scan_y(ids: &[usize; 3], f: &EdgeInput) -> f64 {
 /// `width·scale` / `height·scale` — the `layout_767_span` PRIMITIVE (`rf32-composed-resolver.md`):
 /// operands are `f32` fields, the product narrowed to `f32` at the `fstp [esp]` site, negated for
 /// LEFT/BOTTOM.
+///
+/// **`size` is not always the authored field, and this is the trap** (decision 1349, wow-re
+/// `region-size-fallback.md`): each caller's `call [eax+0x1c]` is **virtual**. A plain frame lands on
+/// `0x768420 fld [G+0x50]` — the flat read this signature assumes — but a `CSimpleTexture` lands on
+/// `0x770720` and a `CSimpleFontString` on `0x772930`, both of which substitute a **content-derived**
+/// extent when the authored value is exactly `0.0` (the texture's own texel size, one texel per
+/// FrameXML unit; the string's measured text, floored at one unit). benilla feeds this the authored
+/// number only, so a zero-authored *texture* axis yields a zero span here where the client yields a
+/// real one. 1349 §4 carries the change and its scope; do not read this kernel as the whole law.
 fn size_span(size: f32, scale: f32, negate: bool) -> f32 {
     let span = (f64::from(size) * f64::from(scale)) as f32;
     if negate {

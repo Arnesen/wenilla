@@ -105,11 +105,12 @@ fn mark_place<F: bevy::ecs::query::QueryFilter>(
     plates: &Nameplates,
     facing: Quat,
     attach: &Query<&BoneAttach>,
+    poses: &Query<&benilla_world::rig_anim::RigPose>,
     fallback: &Query<&OverheadFallback>,
     globals: &Query<&GlobalTransform, F>,
     mounts: &Query<(), With<crate::entities::mount::MountChild>>,
 ) -> Transform {
-    let anchor = overhead_anchor(unit, tf, attach, fallback, globals, mounts);
+    let anchor = overhead_anchor(unit, tf, attach, poses, fallback, globals, mounts);
     // `scale` (the name's world height-law) drives ONLY the seat — the marker sits one
     // line-pitch above the top of the name block. The quad SIZE is a fixed world unit (§6:
     // `scale` never enters the marker geometry), not `scale`-scaled.
@@ -141,6 +142,7 @@ fn drive_raid_marks(
     camera: Query<&Transform, With<WorldCamera>>,
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform>,
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -203,6 +205,7 @@ fn drive_raid_marks(
                 &anchor_q.1,
                 &anchor_q.2,
                 &anchor_q.3,
+                &anchor_q.4,
             )
         });
         let marker = commands
@@ -228,6 +231,7 @@ fn place_raid_marks(
     mut mark_tfs: Query<(&mut Transform, &mut GlobalTransform), With<RaidMarkBillboard>>,
     anchor_q: (
         Query<&BoneAttach>,
+        Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
         Query<&GlobalTransform, Without<RaidMarkBillboard>>,
         Query<(), With<crate::entities::mount::MountChild>>,
@@ -252,6 +256,7 @@ fn place_raid_marks(
             &anchor_q.1,
             &anchor_q.2,
             &anchor_q.3,
+            &anchor_q.4,
         );
         *mtf = place;
         *mglobal = GlobalTransform::from(place);

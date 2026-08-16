@@ -9,8 +9,11 @@
 //! that actually change. That is what [`tooltip_change_costs_a_whole_ui_solve`] drives, and with it
 //! the cost reproduces headlessly and can be measured against a fix.
 //!
-//! Run with `cargo test --release -p benilla -- --ignored --nocapture resolve_bench`;
-//! `WOW_LAYOUT_PROF=1` adds the per-solve shape (rounds, graph size, frame-vs-region split).
+//! Run with `cargo test --release -p benilla-app --lib -- --ignored --nocapture resolve_bench`;
+//! `WOW_LAYOUT_PROF=1` adds the per-solve shape — and since decision 1350 its `solved=`/`swept=`
+//! columns are the ones to read: they are the SCOPE of the solve, and 1350's whole claim is that
+//! they stay a handful while `frames=`/`anchored=` grow without bound. A solve whose scope tracks
+//! the graph again is precisely the regression this file exists to catch.
 
 use std::time::Instant;
 
@@ -153,5 +156,100 @@ fn a_tooltip_content_change_costs_exactly_one_layout_solve() {
         answer_measures(&mut s),
         0,
         "after a settled frame nothing may still be waiting to be measured"
+    );
+}
+
+/// The perf half of decision 1350, asserted as a COUNT: a tooltip content change must cost a
+/// solve whose SCOPE is tooltip-sized, on a UI of 3,000 frames and 8,800 anchored regions.
+///
+/// Milliseconds are deliberately not the gate here. This exact cost has now been chased three
+/// times — 0735 (the measure cache), 0771 (the double solve), and this — and on two of those the
+/// ms column was contaminated by machine state (0713's stall class) while the work counts were
+/// clean. The bound is also what makes the regression *reportable*: 1350's pin found the sweep's
+/// cost tripling with no counter behind it, because `regions_swept` counted the entries the sweep
+/// skipped as well as the ones it resolved.
+#[test]
+fn a_tooltip_content_change_solves_a_tooltip_sized_scope() {
+    let mut s = settled_default_ui();
+    install_changing_tooltip(&s, "ScopeSizeOwner", "scope_size_change");
+
+    // Settle the newly-created owner and the tooltip's first content — a birth is legitimately a
+    // wide solve (a new node has no cached rect to trust).
+    for _ in 0..6 {
+        s.run("scope_size_change()").unwrap();
+        app_frame(&mut s);
+    }
+    for step in 0..10 {
+        s.run("scope_size_change()").unwrap();
+        app_frame(&mut s);
+        let (frames, regions) = s.layout_last_scope();
+        assert!(
+            frames < 100 && regions < 500,
+            "step {step}: a tooltip content change solved {frames} frames and swept {regions} \
+             regions — the scope is tracking the graph, not the change (measured at the time of \
+             writing: 5 frames, 67 regions, against 3,003 and 8,821 in the graph)"
+        );
+    }
+}
+
+/// The scoped resolve's falsifier (decision 1350): on the shipped UI, mid-sweep, a solve that
+/// touched only the dirty closure must produce **exactly** the rects a from-scratch whole-graph
+/// solve produces.
+///
+/// This is the gate for the whole change, and it is deliberately run on the frames that never
+/// settle — a hover sweep changes content every frame, so `WOW_LAYOUT_VERIFY`'s settled-frame
+/// comparison never fires there, and those are the only frames the scope was built for. The
+/// comparison is `extract()`, not an internal rect map: a stale rect that no quad carries is not a
+/// bug, and a stale rect that one does carry is the bug in the form the screen would show it.
+#[test]
+fn a_scoped_resolve_reproduces_the_whole_graph_solve() {
+    let mut s = settled_default_ui();
+    install_changing_tooltip(&s, "ScopeOwner", "scope_change");
+
+    for step in 0..12 {
+        // A content change, resolved the way the app resolves it — scoped.
+        s.run("scope_change()").unwrap();
+        app_frame(&mut s);
+        let scoped = s.extract();
+
+        // The same model, re-solved from nothing but its inputs.
+        s.force_full_layout_resolve();
+        app_frame(&mut s);
+        let full = s.extract();
+
+        assert!(
+            scoped == full,
+            "step {step}: the scoped resolve and the whole-graph resolve disagree — a node the \
+             scope judged clean did move. {} quads vs {}",
+            scoped.len(),
+            full.len(),
+        );
+    }
+}
+
+/// The steady-state cost of the per-frame measure sweep alone: the UI settled, every FontString
+/// measured, every key a cache hit — what does *asking* cost? It is paid on EVERY frame, quiet
+/// ones included, which made it a suspect on 1350's successor list — and this bench closed it:
+/// 0.046 ms/sweep on the full shipped UI in release (2026-08-15; the ~1.0 ms once quoted was a
+/// dev-build number). Kept as the lane's regression watch: if this climbs toward a milli-
+/// second, the sweep's per-row clones/hash grew or the cache stopped hitting.
+#[test]
+#[ignore]
+fn measure_sweep_steady_state_cost() {
+    let mut s = settled_default_ui();
+    // One more settle so the sweep below is provably pure cache hits.
+    let residual = answer_measures(&mut s);
+    let t = Instant::now();
+    let mut asked = 0usize;
+    const N: u32 = 200;
+    for _ in 0..N {
+        asked += s.fontstrings_needing_measure().len();
+    }
+    println!(
+        "measure sweep steady state: {:.4} ms/sweep ({} sweeps, {} residual requests, {} pre-settle)",
+        ms(t) / f64::from(N),
+        N,
+        asked,
+        residual,
     );
 }

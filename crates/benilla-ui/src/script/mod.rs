@@ -930,6 +930,25 @@ impl UiScript {
     /// engine deliberately never sees the seam scale — so staleness is the host's to declare; the
     /// round-trips re-answer on the frames that follow (the same one-frame convergence every
     /// measure already has).
+    /// Force the next [`UiScript::resolve`] to rebuild the **whole** layout graph rather than the
+    /// dirty closure a scoped resolve would (decision 1350) — and to run at all, rather than stop
+    /// at either change gate.
+    ///
+    /// This is the scoped resolve's own falsifier, and it exists so the claim the scope rests on —
+    /// *a node whose own inputs and whose dependencies did not move recomputes to the rect it
+    /// already holds* — is something a test can **disprove** rather than something the engine
+    /// argues. Drive a change, resolve, read the rects; call this, resolve again, read them again;
+    /// they must be identical. `WOW_LAYOUT_VERIFY` makes the same comparison automatically on every
+    /// SETTLED frame; this is for the frames that never settle, which is exactly the hover sweep
+    /// the scope was built for.
+    pub fn force_full_layout_resolve(&mut self) {
+        let mut model = self.model_mut();
+        model.layout_scope.invalidate();
+        model.layout_fingerprint = None;
+        model.layout_epoch_resolved = None;
+        model.touch_layout();
+    }
+
     pub fn invalidate_text_measures(&mut self) {
         let mut model = self.model_mut();
         for d in model.region_data.values_mut() {
@@ -1059,6 +1078,17 @@ impl UiScript {
     /// depth.
     pub fn layout_rounds(&self) -> u64 {
         self.model_ref().layout_rounds
+    }
+
+    /// The last solve's SCOPE — `(frames solved, regions swept)`, decision 1350's meter.
+    ///
+    /// The third axis of a solve's cost, and the one that used to be "all of it": solves says how
+    /// OFTEN, rounds says how DEEP, this says how WIDE. A change that touches ten FontStrings must
+    /// read a handful here however large the UI grows; a scope that tracks the graph is the
+    /// regression, and it is asserted as a COUNT because milliseconds have twice failed to catch
+    /// this class (0735, 0771).
+    pub fn layout_last_scope(&self) -> (usize, usize) {
+        self.model_ref().layout_last_scope
     }
 
     /// Is `name` a registered FrameXML template — one `CreateFrame`'s fourth argument or an

@@ -5,6 +5,7 @@ use crate::order::ZTarget;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle};
 
 use super::backdrop;
+use super::types::RegionData;
 use super::{ExtractedQuad, MeasureRequest, Model, QuadContent, UiScript, SCREEN};
 
 /// The paint a frame slot's derived quads inherit — its `effective_alpha` and `effective_scale`
@@ -94,12 +95,180 @@ impl InputFingerprint {
         self.f32(i.extent_y);
     }
 
+    /// Collapse to the single `u64` [`LayoutScope`] compares per node. Never [`NO_NODE`]: a
+    /// present node reading as *absent* would be a false CLEAN — the one direction that ships a
+    /// stale rect rather than a wasted resolve.
+    #[inline]
+    fn finish(self) -> u64 {
+        let h = self.0 ^ self.1.rotate_left(32);
+        if h == NO_NODE {
+            1
+        } else {
+            h
+        }
+    }
+
     #[inline]
     fn rect(&mut self, r: Rect) {
         self.f32(r.bottom);
         self.f32(r.left);
         self.f32(r.top);
         self.f32(r.right);
+    }
+}
+
+/// The sentinel in [`LayoutScope::last`]/`now` for "this id was not in that pass's graph". A real
+/// hash colliding with it costs a spurious DIRTY (a node re-solved for nothing), never a stale
+/// rect — the same one-sided failure the fingerprint above is built on.
+const NO_NODE: u64 = 0;
+
+/// [`LayoutScope::node_of`] holds one roster index per id, and the two rosters are separate
+/// (`plan` for frames, `regions` for regions) — this bit says which one. Node counts run in the
+/// thousands, so the top bit is free forever.
+const REGION_TAG: u32 = 0x8000_0000;
+
+/// Per-node layout scope — the state that lets a resolve touch only what MOVED (decision 1350,
+/// the phase 2 decision 0771 left open).
+///
+/// 0771 halved the per-content-change cost by folding two whole-UI solves into one; it also said
+/// plainly that halving it was not fixing it, because *one* solve is still a fixpoint over every
+/// frame and every region for a change that touches ten FontStrings inside one frame. Two later
+/// correctness fixes then tripled what a region costs — `0dd6a559a` (a region whose owner has no
+/// rect resolves from its own anchors) and 1310 (every anchor-less Texture/FontString gets
+/// implicit anchors at creation) each moved a large population out of the sweep's cheap
+/// `continue` and into full resolution. Neither is wrong; both are why the whole-UI shape had to
+/// go.
+///
+/// Everything here is indexed **densely by layout id** — frames and regions are minted from one
+/// monotonic counter (`Model::next_id`), so a single array covers both, and the solver's own rect
+/// array is indexed the same way.
+///
+/// Nothing in here allocates on a steady frame: every buffer is resized once and refilled.
+#[derive(Default)]
+pub(crate) struct LayoutScope {
+    /// Per id: the input hash the last CONVERGED resolve saw, [`NO_NODE`] if the id was not in
+    /// that graph. A mismatch is a dirty SEED — and a birth is a mismatch for free.
+    last: Vec<u64>,
+    /// How many ids `last` holds a real hash for. Compared against how many of THIS pass's nodes
+    /// were also in the last graph: a shortfall means a node DIED, whose dependents we can no
+    /// longer enumerate (its edges died with it), so that pass falls back to full scope.
+    last_count: usize,
+    /// The screen rect the `last` set was hashed under. It is every clamped frame's extent and the
+    /// root of every chain, so a move is a full-scope event.
+    last_screen: Option<Rect>,
+    /// This pass's hash per id (parallel to `last`); swapped into `last` on convergence.
+    now: Vec<u64>,
+    /// Per id: index into this pass's node roster, or [`u32::MAX`].
+    node_of: Vec<u32>,
+    /// Per id: head index into `dep_to`/`dep_next` of the nodes that DEPEND on it, or
+    /// [`u32::MAX`]. An intrusive list rather than a CSR so the edges are built in one walk.
+    dep_head: Vec<u32>,
+    dep_to: Vec<u32>,
+    dep_next: Vec<u32>,
+    /// Per id: in the dirty closure.
+    dirty: Vec<bool>,
+    /// The closure's worklist.
+    stack: Vec<u32>,
+}
+
+/// One anchored, live region as the round loop consumes it — resolved ONCE per call instead of
+/// re-derived per round (decision 1350). Before this list the sweep walked `region_data` itself
+/// every round and paid, per region per round, an `arena.region` probe for liveness/owner/kind and
+/// a `region_to_id` probe to publish the result — and it paid them for the anchor-less entries too,
+/// which it then `continue`d past.
+///
+/// It is also the addressable form the scope needs: a dirty set is a list of INDICES into this,
+/// and "sweep only what moved" is `for &i in sweep { … regions[i] … }`.
+struct RegionNode<'a> {
+    rh: RegionHandle,
+    data: &'a RegionData,
+    /// The layout id — the solver's dense array index, and the scope's node key.
+    id: u32,
+    /// The owning frame: supplies the fallback edges for the axes this region's own anchors do
+    /// not pin, and is therefore a layout DEPENDENCY of it.
+    owner: FrameHandle,
+    is_fontstring: bool,
+}
+
+impl LayoutScope {
+    /// Grow every per-id array to cover `n` ids and reset the per-pass ones. `last` keeps its
+    /// contents (it is the memory of the previous converged pass); everything else is scratch.
+    fn begin(&mut self, n: usize) {
+        self.last.resize(n, NO_NODE);
+        self.now.clear();
+        self.now.resize(n, NO_NODE);
+        self.node_of.clear();
+        self.node_of.resize(n, u32::MAX);
+        self.dep_head.clear();
+        self.dep_head.resize(n, u32::MAX);
+        self.dirty.clear();
+        self.dirty.resize(n, false);
+        self.dep_to.clear();
+        self.dep_next.clear();
+        self.stack.clear();
+    }
+
+    /// Record that node `from` reads `to`'s rect — so a change at `to` reaches `from`.
+    #[inline]
+    fn edge(&mut self, from: u32, to: u32) {
+        let Some(head) = self.dep_head.get_mut(to as usize) else {
+            return; // an anchor to an id this pass has no node for (the screen root, a dead
+                    // target): it cannot become dirty, so it constrains nothing.
+        };
+        let e = self.dep_to.len() as u32;
+        self.dep_to.push(from);
+        self.dep_next.push(*head);
+        *head = e;
+    }
+
+    /// Mark `id` dirty and queue it, if it is not already.
+    #[inline]
+    fn seed(&mut self, id: u32) {
+        if let Some(d) = self.dirty.get_mut(id as usize) {
+            if !*d {
+                *d = true;
+                self.stack.push(id);
+            }
+        }
+    }
+
+    /// Close the dirty set under "depends on": everything that reads a dirty node's rect, and
+    /// everything that reads *those*, must resolve again too.
+    fn close(&mut self) {
+        while let Some(id) = self.stack.pop() {
+            let mut e = self.dep_head[id as usize];
+            while e != u32::MAX {
+                let to = self.dep_to[e as usize];
+                e = self.dep_next[e as usize];
+                self.seed(to);
+            }
+        }
+    }
+
+    /// Everything present is dirty — the fallback for the structural cases a per-node diff cannot
+    /// speak about (a death, a screen move, the first pass, a graph left mid-flight by a cycle).
+    fn dirty_all(&mut self) {
+        for (id, &n) in self.node_of.iter().enumerate() {
+            if n != u32::MAX {
+                self.dirty[id] = true;
+            }
+        }
+    }
+
+    /// Adopt this pass's hashes as the converged memory.
+    fn commit(&mut self, count: usize, screen: Rect) {
+        std::mem::swap(&mut self.last, &mut self.now);
+        self.last_count = count;
+        self.last_screen = Some(screen);
+    }
+
+    /// Forget it: the next resolve must run in full scope. Called wherever a pass leaves the
+    /// rects mid-flight (the cycle bail), because the memory would then describe a graph that
+    /// never settled.
+    pub(crate) fn invalidate(&mut self) {
+        self.last_count = 0;
+        self.last_screen = None;
+        self.last.clear();
     }
 }
 
@@ -214,12 +383,15 @@ impl UiScript {
             frame_to_id,
             id_to_region,
             region_to_id,
+            next_id,
             screen,
             warnings,
             solver,
+            layout_scope: scope,
             layout_fingerprint,
             layout_epoch_resolved,
             layout_solves,
+            layout_last_scope,
             layout_rounds,
             pending_size_changed,
             ..
@@ -343,18 +515,57 @@ impl UiScript {
         // `resolved` / `region_resolved` are the previous pass's OUTPUT carried forward as the
         // 0294 seed; at convergence seed and output are equal, so re-running against an unchanged
         // input set is guaranteed to reproduce them — which is precisely what makes the skip safe.
+        //
+        // ── …and, in the same walk, the SCOPE (decision 1350) ─────────────────────────────────
+        // Each node's own inputs are hashed a second time on their own, into
+        // [`LayoutScope::now`], and its anchor targets are recorded as reverse edges. That turns
+        // the gate's one verdict ("something moved") into the far more useful one ("*these* moved,
+        // and here is everything downstream of them"), for the cost of a second accumulator over
+        // a read set we were walking anyway. Everything the aggregate `fp` feeds still feeds it,
+        // byte for byte, so tiers 1 and 2 are untouched.
+        // Sized past `next_id` because the region walk below MINTS ids (see there) — every id it
+        // can mint is one more than the anchored regions it walks.
+        scope.begin(*next_id as usize + region_data.len() + 1);
         let mut fp = InputFingerprint::default();
         fp.rect(*screen);
         fp.feed(plan.len() as u64);
-        for &(_, id, input, over) in &plan {
+        for (i, &(_, id, input, over)) in plan.iter().enumerate() {
             fp.feed(u64::from(id));
             fp.input(input);
+            let mut node = InputFingerprint::default();
+            node.input(input);
             match over {
-                Some(a) => fp.anchors(std::slice::from_ref(&a)),
-                None => fp.feed(u64::MAX),
+                Some(a) => {
+                    fp.anchors(std::slice::from_ref(&a));
+                    node.anchors(std::slice::from_ref(&a));
+                }
+                None => {
+                    fp.feed(u64::MAX);
+                    node.feed(u64::MAX);
+                }
+            }
+            if let Some(slot) = scope.now.get_mut(id as usize) {
+                *slot = node.finish();
+                scope.node_of[id as usize] = i as u32;
+            }
+            // A frame reads the rect of every anchor target it has — its OVERRIDE's target when a
+            // ScrollFrame supplies one (the authored anchors are not consulted at all in that
+            // case, exactly as the round loop's `set_frame_anchored` does not consult them).
+            match over {
+                Some(a) => scope.edge(id, a.relative_to),
+                None => {
+                    for a in &input.anchors {
+                        scope.edge(id, a.relative_to);
+                    }
+                }
             }
         }
         let mut fed_regions = 0u64;
+        // The round loop's region roster, built in this same walk (decision 1350) — see
+        // [`RegionNode`]. Only LIVE, anchored regions: an anchor-less one is invisible to the
+        // rounds and a destroyed one has already been dropped from `region_resolved` by the retain
+        // above, so both are exactly what the sweep used to `continue` past.
+        let mut regions: Vec<RegionNode> = Vec::with_capacity(region_data.len());
         for (&rh, data) in region_data.iter() {
             // Anchor-less entries are invisible to the rounds — the sweep `continue`s on empty
             // anchors and the seed retain drops them — so they are not inputs and must not be
@@ -364,21 +575,74 @@ impl UiScript {
                 continue;
             }
             fed_regions += 1;
+            let live = arena.region(rh);
+            let mut node = InputFingerprint::default();
             fp.feed(rh.fingerprint_bits());
             fp.anchors(&data.anchors);
+            node.anchors(&data.anchors);
             match data.size {
                 Some((w, h)) => {
                     fp.f32(w);
                     fp.f32(h);
+                    node.f32(w);
+                    node.f32(h);
                 }
-                None => fp.feed(u64::MAX),
+                None => {
+                    fp.feed(u64::MAX);
+                    node.feed(u64::MAX);
+                }
             }
             match data.measured {
                 Some(m) => {
                     fp.f32(m.w);
                     fp.f32(m.h);
+                    node.f32(m.w);
+                    node.f32(m.h);
                 }
-                None => fp.feed(u64::MAX),
+                None => {
+                    fp.feed(u64::MAX);
+                    node.feed(u64::MAX);
+                }
+            }
+            if let Some(r) = live {
+                // Mint the layout id here if the region has never needed one. The sweep used to
+                // resolve an id-less region and simply not publish its rect (`if let Some(&id) =
+                // region_to_id.get(..)`) — an EditBox's implicit text FontString is exactly that
+                // shape, created and anchored by `SetTextInsets` and given an id only when extract
+                // or a measure first asks. The scope addresses nodes BY id, so it needs one; and
+                // minting it is pure addressing — it moves no rect, so unlike `Model::region_id`
+                // this does not touch the layout epoch (doing so would re-dirty the very resolve
+                // that is running).
+                let id = match region_to_id.get(&rh) {
+                    Some(&id) => id,
+                    None => {
+                        let id = *next_id;
+                        *next_id += 1;
+                        region_to_id.insert(rh, id);
+                        id_to_region.insert(id, rh);
+                        id
+                    }
+                };
+                if let Some(slot) = scope.now.get_mut(id as usize) {
+                    *slot = node.finish();
+                    scope.node_of[id as usize] = regions.len() as u32 | REGION_TAG;
+                }
+                // A region reads its anchor targets' rects, and — for any axis its anchors do not
+                // pin — its OWNER's rect and scale. Both are dependencies; the owner one is the
+                // edge that carries a window moving to every unpinned texture inside it.
+                for a in &data.anchors {
+                    scope.edge(id, a.relative_to);
+                }
+                if let Some(&owner_id) = frame_to_id.get(&r.owner) {
+                    scope.edge(id, owner_id);
+                }
+                regions.push(RegionNode {
+                    rh,
+                    data,
+                    id,
+                    owner: r.owner,
+                    is_fontstring: matches!(r.kind, crate::widget::RegionKind::FontString),
+                });
             }
             // Liveness only. The sweep also reads the region's `owner` and `kind`, but both are
             // fixed at creation and can never change under a live handle; the owner's contribution
@@ -387,7 +651,7 @@ impl UiScript {
             // frame pass's own output). A DESTROYED region does still matter: `WidgetArena::destroy`
             // drops the arena entry but leaves `region_data` behind, so membership alone would miss
             // it and the sweep's `continue` would go unnoticed.
-            fp.feed(u64::from(arena.region(rh).is_some()));
+            fp.feed(u64::from(live.is_some()));
         }
         // The count of FED entries (not the map's len — see the vacuous-entry skip above), so an
         // entry leaving the anchored set is a change even if a sibling enters the same frame.
@@ -439,7 +703,95 @@ impl UiScript {
         if !gate_skips {
             *layout_solves += 1;
         }
-
+        // ── The scope: which nodes this solve is actually allowed to touch (decision 1350) ────
+        // A node whose own inputs are unchanged, and none of whose dependencies moved, recomputes
+        // to the rect it already holds — the 0294 seed property, stated per node instead of for
+        // the graph as a whole. So the solve below runs over the dirty CLOSURE and leaves every
+        // other rect at its cached value, feeding it to the solver as an external where a dirty
+        // node anchors to it.
+        //
+        // Four structural cases the per-node diff cannot speak about fall back to full scope,
+        // because getting them wrong ships a stale rect rather than a slow frame:
+        //   * no memory yet (the first resolve, or a pass invalidated below);
+        //   * the SCREEN moved — the root external and every clamped frame's extent;
+        //   * a node DIED: its reverse edges died with it, so its dependents are unreachable.
+        //     Counted, not searched: if fewer of this pass's nodes carry a `last` hash than the
+        //     last pass had nodes, something left;
+        //   * verify, which runs the scoped pass and then the full one and compares.
+        let mut matched = 0usize;
+        let mut scope_nodes = 0usize;
+        for (id, &n) in scope.node_of.iter().enumerate() {
+            if n == u32::MAX {
+                continue;
+            }
+            scope_nodes += 1;
+            if scope.last.get(id).copied().unwrap_or(NO_NODE) != NO_NODE {
+                matched += 1;
+            }
+        }
+        let a_node_died = matched != scope.last_count;
+        let full_scope = scope.last.is_empty()
+            || scope.last_screen != Some(*screen)
+            || a_node_died
+            || gate_skips; // the verify path's re-run: it must reproduce the whole graph
+        if full_scope {
+            scope.dirty_all();
+        } else {
+            for (id, &n) in scope.node_of.iter().enumerate() {
+                if n != u32::MAX && scope.now[id] != scope.last[id] {
+                    scope.stack.push(id as u32);
+                    scope.dirty[id] = true;
+                }
+            }
+            scope.close();
+        }
+        // The rosters the rounds walk. A frame in the closure is SOLVED; a region in it is SWEPT;
+        // anything a closure node anchors to is SEEDED as an external at its cached rect. A dirty
+        // REGION is seeded as well as swept: the frame pass runs before the sweep that refreshes
+        // it, so it needs last round's value in front of it — which is exactly what the whole-graph
+        // seeding did before.
+        let mut solve_frames: Vec<u32> = Vec::new();
+        let mut sweep_regions: Vec<u32> = Vec::new();
+        let mut seed_frames: Vec<u32> = Vec::new();
+        let mut seed_regions: Vec<u32> = Vec::new();
+        // Is any node that reads `id` in the closure? (Seeding is per-node work too, so a rect
+        // nothing dirty reads must not be seeded.)
+        let read_by_dirty = |scope: &LayoutScope, id: u32| -> bool {
+            let mut e = scope.dep_head[id as usize];
+            while e != u32::MAX {
+                if scope.dirty[scope.dep_to[e as usize] as usize] {
+                    return true;
+                }
+                e = scope.dep_next[e as usize];
+            }
+            false
+        };
+        for id in 0..scope.node_of.len() {
+            let n = scope.node_of[id];
+            if n == u32::MAX {
+                continue;
+            }
+            let (idx, is_region, dirty) = (n & !REGION_TAG, n & REGION_TAG != 0, scope.dirty[id]);
+            #[allow(clippy::cast_possible_truncation)]
+            let id32 = id as u32;
+            if is_region {
+                if dirty {
+                    sweep_regions.push(idx);
+                    seed_regions.push(idx);
+                } else if read_by_dirty(scope, id32) {
+                    seed_regions.push(idx);
+                }
+            } else if dirty {
+                solve_frames.push(idx);
+            } else if read_by_dirty(scope, id32) {
+                seed_frames.push(idx);
+            }
+        }
+        // The meter: how WIDE this solve is, beside `layout_solves` (how often) and
+        // `layout_rounds` (how deep). The gate asserts on it, because a scope that tracks the
+        // graph is the regression and milliseconds are not evidence of it (decision 0735's lesson,
+        // paid for twice).
+        *layout_last_scope = (solve_frames.len(), sweep_regions.len());
         let round_cap = plan.len() + region_data.len() + 2;
         // `WOW_LAYOUT_PROF=1` — the per-solve shape: rounds, the graph's size, and the split
         // between the frame solve and the region sweep. The numbers that say whether a solve is
@@ -453,25 +805,35 @@ impl UiScript {
             let t_round = prof.then(std::time::Instant::now);
             let mut changed = false;
 
-            // Seed the solver: the screen root, then every region rect settled so far (regions are
-            // externals to the frame solve — the fixpoint is what closes the loop between them).
-            // Frame ids and region ids come from one monotonic counter, so both live in the
-            // solver's single dense rect array and every anchor-target lookup is an array index.
+            // Seed the solver: the screen root, then every rect this pass is NOT recomputing but
+            // something in it reads (regions are externals to the frame solve — the fixpoint is
+            // what closes the loop between them). Frame ids and region ids come from one monotonic
+            // counter, so both live in the solver's single dense rect array and every anchor-target
+            // lookup is an array index.
             solver.begin();
             solver.set_external(SCREEN, *screen);
-            for (&id, rh) in id_to_region.iter() {
-                if let Some(r) = region_resolved.get(rh) {
+            for &i in &seed_regions {
+                let n = &regions[i as usize];
+                if let Some(r) = region_resolved.get(&n.rh) {
+                    solver.set_external(n.id, *r);
+                }
+            }
+            for &i in &seed_frames {
+                let (h, id, _, _) = plan[i as usize];
+                if let Some(r) = resolved.get(&h) {
                     solver.set_external(id, *r);
                 }
             }
-            for &(_, id, input, over) in &plan {
+            for &i in &solve_frames {
+                let (_, id, input, over) = plan[i as usize];
                 match over {
                     Some(a) => solver.set_frame_anchored(id, input, a),
                     None => solver.set_frame(id, input),
                 }
             }
             solver.solve();
-            for &(h, id, _, _) in &plan {
+            for &i in &solve_frames {
+                let (h, id, _, _) = plan[i as usize];
                 match solver.rect(id) {
                     Some(r) => {
                         if resolved.get(&h) != Some(&r) {
@@ -503,21 +865,17 @@ impl UiScript {
             }
             let t_reg = prof.then(std::time::Instant::now);
             let mut scratch = LayoutInput::default();
-            for (&rh, data) in region_data.iter() {
+            for &ri in &sweep_regions {
+                let &RegionNode {
+                    rh,
+                    data,
+                    id: region_id,
+                    owner,
+                    is_fontstring,
+                } = &regions[ri as usize];
                 if prof {
                     n_regions_swept += 1;
                 }
-                if data.anchors.is_empty() {
-                    continue;
-                }
-                let Some((owner, is_fontstring)) = arena.region(rh).map(|r| {
-                    (
-                        r.owner,
-                        matches!(r.kind, crate::widget::RegionKind::FontString),
-                    )
-                }) else {
-                    continue;
-                };
                 // An owner with NO resolved rect does not disqualify its regions. `owner_rect`
                 // is only the fallback for the axes this region's own anchors do not pin (see the
                 // two `axis(..)` calls below) — a region anchored fully to some OTHER frame needs
@@ -579,6 +937,16 @@ impl UiScript {
                 //
                 // `None` = this axis needs the owner and the owner has no rect (above): the region
                 // is unresolvable, like its owner.
+                //
+                // **The owner fallback is OURS, not the client's** (decision 1349, from wow-re's
+                // byte-verified `region-size-fallback.md`): a complete operand enumeration of the
+                // real resolver `[0x7671a0, 0x76761f)` finds no parent pointer in it at all. The
+                // client reaches the same answer for the case that matters — a region with a parent
+                // and NO anchors — at *attach* time instead, via an implicit `SetAllPoints(parent)`
+                // (`0x7701c0` / `0x771480`), and reaches a DIFFERENT answer for every other shape,
+                // because its size getters are virtual and content-derived (see `layout::size_span`).
+                // That is why an authored-zero-width texture with one anchor resolves to its OWNER's
+                // width here and to 8 points there. 1349 §4 carries the replacement and its scope.
                 let axis = |lo: Option<f32>,
                             hi: Option<f32>,
                             owner: Option<(f32, f32)>|
@@ -607,9 +975,7 @@ impl UiScript {
                 // Publish into the solver as well as the model: a later region in THIS same sweep
                 // that anchors to this one must see the fresh rect (the sweep has always worked
                 // that way — it read the same `region_resolved` map it was writing).
-                if let Some(&id) = region_to_id.get(&rh) {
-                    solver.set_external(id, rect);
-                }
+                solver.set_external(region_id, rect);
                 if region_resolved.get(&rh) != Some(&rect) {
                     region_resolved.insert(rh, rect);
                     changed = true;
@@ -621,12 +987,22 @@ impl UiScript {
             }
             if !changed {
                 if prof {
+                    // `anchored` (live + anchored regions) is reported beside `regions_total`
+                    // deliberately: the sweep never touched the difference, so a solve's real
+                    // population was invisible in this line — which is exactly why two commits
+                    // that moved a large batch of regions from "skipped" to "resolved" (1350's
+                    // pin) showed up as a cost with no counter behind it. `solved`/`swept` are
+                    // this pass's SCOPE: with the graph settled they should be a handful.
                     eprintln!(
-                        "[layout-prof] rounds={} frames={} regions_total={} regions_swept={} \
-                         frame_us={} region_us={}",
+                        "[layout-prof] rounds={} frames={} regions_total={} anchored={} \
+                         solved={} swept={} scope={} regions_swept={} frame_us={} region_us={}",
                         round + 1,
                         plan.len(),
                         region_data.len(),
+                        regions.len(),
+                        solve_frames.len(),
+                        sweep_regions.len(),
+                        if full_scope { "full" } else { "dirty" },
                         n_regions_swept,
                         t_frames.as_micros(),
                         t_regions.as_micros()
@@ -645,6 +1021,11 @@ impl UiScript {
                     );
                 }
                 *layout_fingerprint = Some(fp);
+                // The scope's memory is adopted only HERE, on the converged path, for the same
+                // reason the fingerprint is: a pass left mid-flight describes a graph that never
+                // settled, and seeding the next pass's "unchanged ⇒ unmoved" argument from it
+                // would be seeding it from a lie.
+                scope.commit(scope_nodes, *screen);
                 // Tier 1 closes only on a `gate_skips` frame: a real solve (`!gate_skips`) hashed
                 // `fp` over now-outgrown seeds — see the gate above. The re-store here is for the
                 // VERIFY path, whose full re-run of a settled frame passed through the state
@@ -664,7 +1045,9 @@ impl UiScript {
         }
         // The cycle bail (the loop ran out of rounds and warned above): the rects it leaves are
         // still the ones every reader will see this frame, so the sizes that moved get their
-        // `OnSizeChanged` here exactly as on the converged path.
+        // `OnSizeChanged` here exactly as on the converged path — and the scope forgets, so the
+        // next resolve rebuilds the whole graph rather than trusting a half-solved one.
+        scope.invalidate();
         queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
     }
 

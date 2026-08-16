@@ -427,34 +427,112 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 /// Z untouched (no pop). Runs right after [`sample_splines`] so a walker's freshly-sampled XY+Z is
 /// what we re-ground; an idle unit (no spline) is re-grounded in place each frame, which also catches
 /// it once its terrain collider loads.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(in crate::net) fn ground_clamp_creatures(
     world: benilla_world::collision::WorldCollision,
+    mut commands: Commands,
     mut q: Query<(
+        Entity,
         &NetEntity,
         Option<&Spline>,
         &mut Transform,
+        Option<&mut GroundClamped>,
         Has<CreatureSwimming>,
     )>,
 ) {
-    for (net, spline, mut t, swimming) in &mut q {
+    let cost = clamp_cost_enabled();
+    let t0 = cost.then(std::time::Instant::now);
+    let (mut visited, mut skipped, mut held, mut cast, mut hit_n, mut moved) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+
+    for (entity, net, spline, mut t, mut clamped, swimming) in &mut q {
+        visited += 1;
         if net.kind != EntityKind::Unit {
+            skipped += 1;
             continue; // players + GameObjects own their Z
         }
         if spline.is_some_and(|s| !s.grounded) {
+            skipped += 1;
             continue; // a flying path is authoritative on Z
         }
         if swimming {
+            skipped += 1;
             continue; // in-liquid: the wire Z is the creature's swim depth
+        }
+        // The cast gate (decision 1357): a unit standing exactly where its last cast stood, with
+        // a Y nothing has touched since that cast wrote it, cannot get a different answer — the
+        // ray's inputs are its position and the walking colliders, and a *moving* floor (a lift,
+        // a transport deck) reaches its rider through the wire's own position writes, which break
+        // the bit-equality below and re-arm the cast. A MISS never caches (`hit` gates it), so a
+        // unit standing on a tile whose collider hasn't streamed in keeps asking until it lands —
+        // the original re-ground-in-place behaviour, kept exactly where it is load-bearing.
+        let xz = [t.translation.x, t.translation.z];
+        if let Some(c) = clamped.as_deref() {
+            if c.hit && c.xz == xz && c.y_written == t.translation.y {
+                held += 1;
+                continue;
+            }
         }
         let origin = t.translation + Vec3::Y * GROUND_CLAMP_UP;
         let reach = GROUND_CLAMP_UP + GROUND_CLAMP_DOWN;
+        cast += 1;
         // The one-sided down-ray (decision 0970): a creature grounds like the player grounds — a
         // face whose winding points away is no floor, or an idle NPC would stand mid-air on the
         // very shell face the player mover now falls through.
-        if let Some(hit) = world.ray_body(origin, Dir3::NEG_Y, reach) {
-            t.translation.y = origin.y - hit.distance; // the down-ray's hit point Y = feet on the surface
+        let hit = world.ray_body(origin, Dir3::NEG_Y, reach);
+        if let Some(hit) = &hit {
+            hit_n += 1;
+            let y = origin.y - hit.distance; // the down-ray's hit point Y = feet on the surface
+                                             // Exact bit equality is deliberate, not a sloppy float compare: the question is
+                                             // "would the write change anything" — Bevy's change detection fires on the
+                                             // DerefMut regardless of value, so writing an equal Y every frame marked every
+                                             // standing creature's transform subtree dirty. An epsilon would answer a
+                                             // different question: a real sub-epsilon ground shift must still land.
+            if y != t.translation.y {
+                moved += 1;
+                t.translation.y = y;
+            }
+        }
+        let state = GroundClamped {
+            xz,
+            y_written: t.translation.y,
+            hit: hit.is_some(),
+        };
+        match clamped.as_deref_mut() {
+            Some(c) => *c = state,
+            None => {
+                commands.entity(entity).insert(state);
+            }
         }
     }
+
+    if let Some(t0) = t0 {
+        // `WOW_CLAMP_COST=1` — the premise check for gating this sweep (0732 slice S), which
+        // 0732 sized at 0.42 traced against avian's `SpatialQuery::cast_ray`. **0970 replaced
+        // that ray** with a broadphase-plus-BVH gather, so the recorded price measures a
+        // mechanism that no longer exists and the lane is honestly unsized until this prints.
+        //
+        // The two fields that decide the two possible gates, and their kill conditions:
+        //   · `cast` vs `visited`  — how much of the walk even reaches a ray. A movement gate can
+        //     only ever save the `cast` share; if `ms` is small this whole item is dead.
+        //   · `moved` vs `hit`     — how often the write actually CHANGES Y. Every hit writes
+        //     `Transform` unconditionally today, and a write dirties the transform subtree whether
+        //     or not the value differs. If `moved` is a small fraction of `hit`, an equality gate
+        //     on the write is the cheap half and needs no movement tracking at all.
+        //
+        // Per 0734's law (~10.5 ns per row visit), the walk itself is never the cost here: at ~800
+        // units it is ~8 µs. Only `ms` justifies the slice — quote it, not the counts.
+        eprintln!(
+            "[clamp-cost] visited={visited} skipped={skipped} held={held} cast={cast} hit={hit_n} moved={moved} ms={:.3}",
+            t0.elapsed().as_secs_f32() * 1000.0
+        );
+    }
+}
+
+/// Whether the ground-clamp meter is armed (`WOW_CLAMP_COST`). Read once, then a relaxed bool.
+fn clamp_cost_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_CLAMP_COST").is_some())
 }
 
 /// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
@@ -488,6 +566,21 @@ const CREATURE_SWIM_EXIT_BAND: f32 = 1.0 / 36.0;
 /// [`ground_clamp_creatures`] exemption above, and the enter-water splash (`sound::water`).
 #[derive(Component)]
 pub(crate) struct CreatureSwimming;
+
+/// The last ground clamp this unit took (decision 1357) — [`ground_clamp_creatures`]' cast gate.
+/// All three fields compare by bit: the gate's question is "are the ray's inputs identical to the
+/// cast that produced this", never "close enough".
+#[derive(Component)]
+pub(in crate::net) struct GroundClamped {
+    /// Where the last cast stood.
+    xz: [f32; 2],
+    /// The Y standing after that cast (written or left) — an external write (the wire moving the
+    /// unit, a lift carrying it) breaks equality and re-arms the cast.
+    y_written: f32,
+    /// Only a HIT caches: a miss keeps casting, so a tile whose collider streams in late still
+    /// catches its standing units.
+    hit: bool,
+}
 
 /// Maintain [`CreatureSwimming`] on `Unit` creatures from the water over their feet (module docs on
 /// the INTERIM boundary). Runs chained before [`ground_clamp_creatures`] so a fresh mark exempts the

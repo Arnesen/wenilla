@@ -142,6 +142,29 @@ fn fire_entity_census(world: &mut World) {
         }
     }
     world.resource_mut::<EntityCensus>().fired = true;
+
+    // The anchor split (0732 slice A's premise check). `RigAnchor` leaves are the single largest
+    // archetype in the scene — 53 % of all entities — and slice A's claim is that most of them ride
+    // nothing. "Rides nothing" is directly observable: an anchor whose entity has no `Children` is
+    // hosting no attachment, no emitter, no ribbon, no card. Counted here rather than inferred from
+    // the model's bone sources, because the model says what COULD attach and the world says what
+    // DID.
+    {
+        let mut q = world.query_filtered::<Option<&bevy::prelude::Children>, bevy::prelude::With<benilla_world::rig_anim::RigAnchor>>();
+        let (mut total, mut childless) = (0u32, 0u32);
+        for kids in q.iter(world) {
+            total += 1;
+            if kids.is_none_or(|k| k.is_empty()) {
+                childless += 1;
+            }
+        }
+        eprintln!(
+            "ENTITY_CENSUS_ANCHORS total={total} childless={childless} ({:.1}%) hosting={}",
+            100.0 * f32::from(u16::try_from(childless).unwrap_or(u16::MAX))
+                / f32::from(u16::try_from(total.max(1)).unwrap_or(u16::MAX)),
+            total - childless
+        );
+    }
     let components = world.components();
     let mut rows: Vec<(usize, String)> = world
         .archetypes()

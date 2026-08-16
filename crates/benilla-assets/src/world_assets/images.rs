@@ -49,7 +49,12 @@ pub fn repeat_texture_authored(chain: BlpMipChain, wrap: (bool, bool)) -> Image 
         TextureDimension::D2,
         mip0,
         color_texture_format(),
-        RenderAssetUsages::default(),
+        // `RENDER_WORLD` — see [`image_gpu_bytes`] and the `blp.rs` `WorldArt` variant this is the
+        // synchronous twin of: the render world takes the chain rather than cloning it and keeping
+        // a main-world copy. Its callers are `WorldAssets::texture` and the character-skin
+        // composite, and neither reads the result back; a composite is built CPU-side and handed
+        // over whole.
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;
@@ -124,7 +129,11 @@ pub fn liquid_frame_array(frames: Vec<BlpMipChain>) -> Image {
         },
         TextureDimension::D2,
         color_texture_format(),
-        RenderAssetUsages::default(),
+        // `RENDER_WORLD`: 136 frames of a 256² nine-level RGBA8 pyramid is 47,535,264 B (the figure
+        // `gpu_bytes_count_every_array_layer` pins), built at `Startup` and resident for the whole
+        // process. The default usage held that twice — once on the GPU and once in system RAM,
+        // which nothing ever read.
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = mip_level_count;
@@ -273,6 +282,41 @@ pub fn sprite_image_tiled(width: u32, height: u32, rgba: Vec<u8>) -> Image {
     image
 }
 
+/// The bytes an [`Image`] occupies **on the GPU** — every mip level of every array layer, derived
+/// from the `texture_descriptor` alone.
+///
+/// Read from the descriptor, never from `image.data.len()`: an asset declared
+/// [`RenderAssetUsages::RENDER_WORLD`] has its bytes *moved* into the render world on extract
+/// (`bevy_render::render_asset`), so main-side `data` is `None` for its whole life. A meter that
+/// measures `data` therefore reads 0 for exactly the textures that cost the most — the terrain
+/// arrays, the sprite sheets, the world albedo. This is the arithmetic bevy_image itself uses, and
+/// it is block-aware, so it stays right if a format is ever uploaded compressed.
+pub fn image_gpu_bytes(image: &Image) -> usize {
+    let d = &image.texture_descriptor;
+    let format = d.format;
+    let (bw, bh) = format.block_dimensions();
+    // A copy is defined per block, and a block is only whole: a 1×1 mip of a 4×4-block format still
+    // costs one full block.
+    let Some(block_bytes) = format.block_copy_size(None) else {
+        return 0; // multi-planar/depth-stencil: no single block size, and we upload neither
+    };
+    let volume = d.dimension == TextureDimension::D3;
+    (0..d.mip_level_count.max(1))
+        .map(|i| {
+            let w = (d.size.width >> i).max(1);
+            let h = (d.size.height >> i).max(1);
+            // Array layers do not halve with the mip level; a 3-D texture's depth does.
+            let layers = if volume {
+                (d.size.depth_or_array_layers >> i).max(1)
+            } else {
+                d.size.depth_or_array_layers.max(1)
+            };
+            let blocks = w.div_ceil(bw) * h.div_ceil(bh);
+            (blocks * block_bytes * layers) as usize
+        })
+        .sum()
+}
+
 /// Total bytes for a mip pyramid of `mip_count` levels starting at `top²` RGBA8.
 pub fn mip_chain_byte_size(top: u32, mip_count: u32) -> usize {
     (0..mip_count)
@@ -298,4 +342,91 @@ pub fn extend_nearest(out: &mut Vec<u8>, src: &[u8], sw: u32, sh: u32, dw: u32, 
     };
     let resized = image::imageops::resize(&buf, dw, dh, image::imageops::FilterType::Nearest);
     out.extend_from_slice(resized.as_raw());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor_only(size: Extent3d, mips: u32, format: TextureFormat) -> Image {
+        let mut image = Image::new_uninit(
+            size,
+            TextureDimension::D2,
+            format,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.texture_descriptor.mip_level_count = mips;
+        image
+    }
+
+    /// The arithmetic must agree with [`mip_chain_byte_size`], which the liquid array already
+    /// budgets with — two independent expressions of the same pyramid.
+    #[test]
+    fn gpu_bytes_agree_with_the_rgba8_chain_arithmetic() {
+        for (top, mips) in [(256, 9), (128, 8), (64, 7), (1, 1)] {
+            let image = descriptor_only(
+                Extent3d {
+                    width: top,
+                    height: top,
+                    depth_or_array_layers: 1,
+                },
+                mips,
+                TextureFormat::Rgba8Unorm,
+            );
+            assert_eq!(
+                image_gpu_bytes(&image),
+                mip_chain_byte_size(top, mips),
+                "{top}²/{mips}"
+            );
+        }
+    }
+
+    /// The number the liquid lane costs, stated once so it cannot drift silently: 136 frames of a
+    /// 256² RGBA8 nine-level pyramid, stacked as array layers.
+    #[test]
+    fn gpu_bytes_count_every_array_layer() {
+        let frames = 136;
+        let image = descriptor_only(
+            Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: frames,
+            },
+            9,
+            TextureFormat::Rgba8Unorm,
+        );
+        assert_eq!(image_gpu_bytes(&image), 47_535_264); // 45.33 MiB
+        assert_eq!(
+            image_gpu_bytes(&image),
+            mip_chain_byte_size(256, 9) * frames as usize
+        );
+    }
+
+    /// Block-compressed formats are the point of reading the descriptor rather than a pixel size:
+    /// a 4×4-block format still owes a WHOLE block for its 2×2 and 1×1 mips.
+    #[test]
+    fn gpu_bytes_are_block_aware_and_round_up() {
+        let bc1 = descriptor_only(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            3,
+            TextureFormat::Bc1RgbaUnorm,
+        );
+        // 4×4 → 1 block, 2×2 → 1 block, 1×1 → 1 block; BC1 is 8 bytes a block.
+        assert_eq!(image_gpu_bytes(&bc1), 24);
+        // The same pyramid uncompressed is 4 B/texel with no rounding: 64 + 16 + 4.
+        let rgba = descriptor_only(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            3,
+            TextureFormat::Rgba8Unorm,
+        );
+        assert_eq!(image_gpu_bytes(&rgba), 84);
+    }
 }
