@@ -200,9 +200,9 @@ pub use models::{
     wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes,
     wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim,
     BoneSpin, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris,
-    GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light,
-    M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
-    RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim,
+    GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
+    M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim,
+    RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton, SkeletonBone, StringAnchors, UvAnim,
     WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
     WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };

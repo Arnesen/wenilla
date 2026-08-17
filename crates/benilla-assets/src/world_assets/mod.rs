@@ -601,7 +601,13 @@ impl WorldAssets {
 /// `tile_radius` for the fog range. Inserted by [`AssetPlugin`] alongside [`WorldAssets`].
 #[derive(Resource, Clone, Copy)]
 pub struct RenderConfig {
-    /// Tiles loaded in each direction around the player (`$WOW_TILE_RADIUS`, default 1).
+    /// Tiles loaded in each direction around the player (`$WOW_TILE_RADIUS`, default **2** — the
+    /// 5×5 block whose *worst* case (standing on a tile line) still reaches two full tiles
+    /// ≈ 1066 yd, clear of the 777 yd `farclip` wall, so terrain is resident before the wall
+    /// reveals it). `1` is the perf knob: a 3×3 block, ~2.8× smaller working set, reaching only
+    /// 533 yd in the worst case — the band from there to the wall has neither detailed terrain nor
+    /// the WDL backdrop (whose near plane sits at `farclip − 33`), so it shows only where the
+    /// zone's own fog end does not already hide it.
     pub tile_radius: u32,
     /// Ground-texture repeats per chunk (`$WOW_TEX_TILES`, default 8).
     pub tex_tiles: f32,

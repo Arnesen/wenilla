@@ -164,6 +164,7 @@ impl M2BatchMaterials<'_> {
             false,
             true, // the sky lane
             &light,
+            None, // one shared sky material — no per-sequence channel to key on
         ))
     }
 
@@ -319,6 +320,7 @@ impl M2BatchMaterials<'_> {
                 false, // …nor the WINDOW flag
                 false, // a character composite is never a skybox
                 &light,
+                None, // a composite sheet carries no animated UV/tint channel at all
             )
         };
         Some(BatchVariants {
@@ -427,6 +429,11 @@ impl M2BatchMaterials<'_> {
             // asks for, so it cannot be one more variant built from `sub` here.
             false,
             light,
+            // The ENTITY lane's batches (units, GameObjects, held items): shared per batch, as
+            // ever. The per-placement lane is the world streamer's alone (decision 1408) — every
+            // affected model is a placed `World\…` prop, and an entity already resolves its
+            // sequence through `MatAnim::host`.
+            None,
         )
     }
 }

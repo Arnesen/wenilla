@@ -292,13 +292,15 @@ pub(super) fn track_unit_interiors(
     streamer: Res<TerrainStreamer>,
     adt_tiles: Res<Assets<AdtTile>>,
     residency: Res<crate::interior::WmoResidency>,
-    mut units: Query<
-        (Entity, &GlobalTransform, Option<&mut UnitWmoRoom>),
-        With<crate::world_unit::WorldUnit>,
-    >,
+    mut units: Query<(
+        Entity,
+        &GlobalTransform,
+        &crate::world_unit::WorldUnit,
+        Option<&mut UnitWmoRoom>,
+    )>,
 ) {
     let generation = residency.generation();
-    for (entity, transform, claim) in &mut units {
+    for (entity, transform, body, claim) in &mut units {
         // World position, not the local one: a mounted unit's `Transform` is seat-relative
         // (0441), and its room is decided where it actually stands.
         let pos = transform.translation();
@@ -313,7 +315,18 @@ pub(super) fn track_unit_interiors(
                 continue;
             }
         }
-        let room = room_at(&wmos, &instances, &streamer, &adt_tiles, pos);
+        // The under-floor fallback's reach for THIS body: the height of its own bound's centre
+        // above its origin, floored at [`ROOM_UNDER_FLOOR_TOLERANCE`]. A placed object's origin is
+        // wherever the artist put it *inside its own model*, so the middle of that model is a point
+        // the body genuinely occupies — self-scaling, and it cannot reach a floor the body does not
+        // already straddle. The flat tolerance alone left Orgrimmar's Onyxia trophy post (origin
+        // 3.25 yd under group 133's floor) still reading outdoors.
+        let reach = body
+            .bound
+            .map(|b| transform.transform_point(Vec3::from(b.center)).y - pos.y)
+            .unwrap_or(0.0)
+            .max(ROOM_UNDER_FLOOR_TOLERANCE);
+        let room = room_at(&wmos, &instances, &streamer, &adt_tiles, pos, reach);
         let next = UnitWmoRoom {
             room,
             at: pos,
@@ -334,8 +347,28 @@ pub(super) fn track_unit_interiors(
     }
 }
 
+/// The FLOOR on how far above its own origin a body's room claim looks for the surface it stands
+/// on, when the position cast found nothing at all below it ([`room_at`]'s second pass). The reach
+/// itself is per body — the height of its own bound's centre, see [`track_unit_interiors`] — and
+/// this is what a body with no bound yet, or a squat one, gets.
+///
+/// **A placed object's origin is wherever the artist put it, and for anything planted in the ground
+/// that is UNDER the surface** — a firepit's origin sits in the pit, a signpost's at the buried foot
+/// of its post. A ray down from such an origin passes beneath the floor the object stands on and
+/// finds nothing, so the body reads "outdoors" in the middle of a building. Orgrimmar: 32 of 133
+/// streamed bodies at once, measured 0.45–1.16 yd under their floor face (decision 1409).
+///
+/// Two yards covers that spread with margin and cannot reach the storey above — no room we draw is
+/// under two yards tall. A **fallback, not a lift**: it runs only where the position cast found no
+/// face at all, so it can turn "outdoors" into a room and can never move a body between two rooms it
+/// was already choosing from. The primary pass keeps [`POSITION_PROBE_LIFT`] and the buried-terrain
+/// race that constant was chosen for.
+pub(crate) const ROOM_UNDER_FLOOR_TOLERANCE: f32 = 2.0;
+
 /// The WMO room a world position stands in — the placement + group of the nearest **face** under it,
-/// faces-only ([`area_down_ray`], EXTERIOR `0x8` excluded, terrain raced), first claim wins.
+/// faces-only ([`area_down_ray`], EXTERIOR `0x8` excluded, terrain raced), first claim wins; on a
+/// total miss, a second pass from `reach` higher catches a body whose origin is authored below the
+/// surface it stands on ([`ROOM_UNDER_FLOOR_TOLERANCE`]).
 ///
 /// The shared body of the per-unit claim; the same shape as [`track_area_interior`]'s loop, returning
 /// the placement identity instead of the `WMOAreaTable` keys.
@@ -345,8 +378,22 @@ fn room_at(
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
     feet_world: Vec3,
+    reach: f32,
 ) -> Option<WmoRoom> {
-    let probe_world = feet_world + Vec3::Y * POSITION_PROBE_LIFT;
+    room_cast(wmos, instances, streamer, adt_tiles, feet_world, 0.0)
+        .or_else(|| room_cast(wmos, instances, streamer, adt_tiles, feet_world, reach))
+}
+
+/// One faces-only room cast from `feet_world + rise` — the shared body of [`room_at`]'s two passes.
+fn room_cast(
+    wmos: &Assets<WmoModel>,
+    instances: &Query<(Entity, &WmoPortalInstance)>,
+    streamer: &TerrainStreamer,
+    adt_tiles: &Assets<AdtTile>,
+    feet_world: Vec3,
+    rise: f32,
+) -> Option<WmoRoom> {
+    let probe_world = feet_world + Vec3::Y * (POSITION_PROBE_LIFT + rise);
     let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
     for (entity, inst) in instances {
         let Some(model) = wmos.get(&inst.handle) else {

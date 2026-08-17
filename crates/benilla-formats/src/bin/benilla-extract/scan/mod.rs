@@ -7,7 +7,8 @@
 //! - [`world`] — placed content: a WMO root's own tables, an ADT block's placements.
 //! - [`lighting`] — what lights a model: the WMO prop lanes, M2 light blocks, terrain shadow.
 //! - [`geometry`] — what geometry a model draws: billboards, geosets, flat ground quads.
-//! - [`material`] — how a batch is textured and blended: blend modes, UV wrap, env stages.
+//! - [`material`] — how a batch is textured and blended: blend modes, UV wrap, env stages,
+//!   the batches whose UV/tint loop differs between sequence slots.
 //! - [`particles`] — particle and ribbon emitters, and the features the corpus authors.
 //! - [`skeleton`] — the bone tree and the attachment table that addresses it.
 //! - [`sequence`] — which sequence an arm plays, and what breaks when it is the wrong one.
@@ -29,7 +30,7 @@ mod world;
 
 pub use geometry::{animboundscan, bbfacescan, bbscan, geosetscan, groundscan, normalscan};
 pub use lighting::{darkpropscan, m2lightscan, shadeat};
-pub use material::{alphascan, blendscan, envmapscan, texmodescan, uvwrapscan};
+pub use material::{alphascan, blendscan, envmapscan, texmodescan, uvslotscan, uvwrapscan};
 pub use particles::{
     cellscan, fxordercensus, partcensus, partscan, partslotscan, ribbonscan, shardcensus,
 };
@@ -86,4 +87,49 @@ fn wmo_roots(chain: &mut Chain, prefix: Option<&str>) -> Result<Vec<String>> {
             !group && pfx.as_deref().is_none_or(|p| l.starts_with(p))
         })
         .collect())
+}
+
+/// Capitalize an `Item\ObjectComponents\<sub>` path component for consistent family-key display
+/// regardless of how a given asset's listfile entry happened to be cased (`WEAPON`/`weapon`/
+/// `Weapon` all collapse to `Weapon`).
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => {
+            first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
+        }
+        None => String::new(),
+    }
+}
+
+/// The top-level content-family bucket for an internal M2 path — the summary dimension for "how
+/// much content is affected, and of what KIND", shared by [`lighting::m2lightscan`] and
+/// [`material::uvslotscan`]. Derived from the path's first one or two components,
+/// case-insensitively.
+///
+/// The split that earns its keep is `World\` versus everything else: a `World\` model is a placed
+/// doodad or WMO prop, which reaches the screen through the shared-material lanes (the M2-light
+/// spawn, the `UvAnimMaterials`/`MatAnimTable` registries), while a `Creature\`/`Spells\` one
+/// reaches an entirely different consumer. `World\Goober\` (GameObject displays) splits off again
+/// because it is the hosted lane, not the ADT/WMO one; everything not otherwise named folds into
+/// `other`.
+pub(super) fn family_of(name: &str) -> String {
+    let comps: Vec<&str> = name.split('\\').collect();
+    let low = |s: &str| s.to_ascii_lowercase();
+    match comps.first().map(|s| low(s)).as_deref() {
+        Some("creature") => "Creature\\".to_string(),
+        Some("character") => "Character\\".to_string(),
+        Some("spells") => "Spells\\".to_string(),
+        Some("item") if comps.get(1).map(|s| low(s)).as_deref() == Some("objectcomponents") => {
+            match comps.get(2) {
+                Some(sub) => format!("Item\\ObjectComponents\\{}\\", title_case(sub)),
+                None => "Item\\ObjectComponents\\".to_string(),
+            }
+        }
+        Some("world") if comps.get(1).map(|s| low(s)).as_deref() == Some("goober") => {
+            "World\\Goober\\".to_string()
+        }
+        Some("world") => "World\\".to_string(),
+        _ => "other".to_string(),
+    }
 }

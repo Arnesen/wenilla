@@ -49,6 +49,12 @@ pub(super) fn apply_model_visibility(
     // marker + the twin map) instead of a second writer re-swapping the handle it just wrote —
     // the exact fight decision 0025's one-authority law exists to prevent.
     far_twins: Res<super::FarSideTwins>,
+    // Every entity that can OWN a billboard card — the model root a card belongs to, or a joint of
+    // its rig, both of which carry the root's propagated verdict. Read-only, and for the same
+    // one-authority reason as the two above: a card is a world root, so nothing carries its owner's
+    // hide to it, and the mirror that used to live in `billboard::face_billboards` was ordered too
+    // late to survive (decision 1409).
+    card_owners: Query<&InheritedVisibility>,
     mut q: Query<(
         &ModelPart,
         &GlobalTransform,
@@ -61,6 +67,7 @@ pub(super) fn apply_model_visibility(
         Option<&crate::doodad_anim::MatAnim>,
         Has<crate::exterior_cull::ExteriorScene>,
         Has<super::FarSideOfWater>,
+        Option<&crate::billboard::BillboardCard>,
     )>,
     // The building's own MLIQ surfaces (canals, dungeon pools, Ragefire's lava). They carry a
     // `WmoGroupVis` like every other piece of their group but no `ModelPart` — they are not model
@@ -94,7 +101,20 @@ pub(super) fn apply_model_visibility(
     // serial walk alone blew half the 16.7 ms budget (the Stormwind fps hunt). Every write below
     // is change-gated, so the steady state is a pure read fan-out.
     q.par_iter_mut().for_each(
-        |(part, xf, mut vis, fade, tag, mat, aabb, group_vis, mat_anim, exterior, far_side)| {
+        |(
+            part,
+            xf,
+            mut vis,
+            fade,
+            tag,
+            mat,
+            aabb,
+            group_vis,
+            mat_anim,
+            exterior,
+            far_side,
+            card,
+        )| {
             let toggled_on =
                 m.kind_visible[kind_index(part.kind)] && m.blend_visible[blend_index(part.blend)];
             // `farclip` is the *world-doodad/WMO* draw distance only. Creatures/GameObjects come from the
@@ -170,6 +190,26 @@ pub(super) fn apply_model_visibility(
             let own_building = group_vis.is_some_and(|gv| Some(gv.instance) == own_instance);
             let exterior_ok = !exterior || own_building || gate.admits(xf, aabb);
 
+            // **A billboard card draws only while the model it is a batch OF draws** (decision
+            // 1409). A card is split out to a world root because its transform belongs to the
+            // billboard system, so it inherits nothing — and every hide that reaches its model
+            // through the scene graph (the exterior-scene election on a net root, a transport's
+            // off-map leg) reaches the card not at all. That is how an Orgrimmar bonfire's glow
+            // card went on burning over its own culled wood.
+            //
+            // The owner's `InheritedVisibility` is last propagate's — one frame of lag, the same
+            // accepted class as the interior law's. **Only on entity-lane cards**: a world-placement
+            // card is tagged `ExteriorScene` and `exterior_ok` above already gates it with the rest
+            // of its placement, while its owner is a joint of its own placement rig, which is never
+            // hidden apart from the model this system is already hiding whole.
+            // Fails OPEN on an unreadable owner: an owner that has gone is `face_billboards`'
+            // despawn case, and deciding a card's draw on absent information is how the world
+            // flickers.
+            let owner_hidden = !exterior
+                && card
+                    .and_then(crate::billboard::BillboardCard::follows)
+                    .is_some_and(|o| matches!(card_owners.get(o), Ok(v) if !v.get()));
+
             // `Inherited` (not `Visible`) so child submeshes still respect a hidden parent root. A fully
             // faded doodad (`fade_alpha == 0`) is culled just like an out-of-range one.
             let desired = if toggled_on
@@ -178,6 +218,7 @@ pub(super) fn apply_model_visibility(
                 && mat_factor > 0.0
                 && portal_visible
                 && exterior_ok
+                && !owner_hidden
             {
                 Visibility::Inherited
             } else {
@@ -332,6 +373,10 @@ type TracedModels<'w, 's> = Query<
         &'static InheritedVisibility,
         &'static ViewVisibility,
         Option<&'static Aabb>,
+        // Which lane the row is: a world-root billboard CARD inherits nothing, so `inh=true` on it
+        // means only "no parent", never "my model is drawn" — the one row where the second field
+        // must not be read as the owner's verdict (decision 1409).
+        Has<crate::billboard::BillboardCard>,
     ),
 >;
 
@@ -354,7 +399,7 @@ pub(super) fn trace_model_visibility(
     let (cam_pos, cam_fwd) = cam_t.map_or((Vec3::ZERO, Vec3::Z), |t| {
         (t.translation(), Vec3::from(t.forward()))
     });
-    for (e, object, xf, vis, inherited, view, aabb) in &q {
+    for (e, object, xf, vis, inherited, view, aabb, card) in &q {
         if !object.label.to_ascii_lowercase().contains(&trace.needle) {
             continue;
         }
@@ -370,7 +415,7 @@ pub(super) fn trace_model_visibility(
         };
         let depth = (centre - cam_pos).dot(cam_fwd);
         println!(
-            "VIS_TRACE {e} {label} vis={vis:?} inh={inh} view={view} \
+            "VIS_TRACE {e} {label} vis={vis:?} inh={inh} view={view} card={card} \
              origin=[{ox:.1},{oy:.1},{oz:.1}] \
              bound=[{cx:.1},{cy:.1},{cz:.1}] r={radius:.1} depth={depth:.1} \
              cam=[{px:.1},{py:.1},{pz:.1}]",
@@ -386,6 +431,87 @@ pub(super) fn trace_model_visibility(
             px = cam_pos.x,
             py = cam_pos.y,
             pz = cam_pos.z,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::billboard::BillboardCard;
+    use benilla_assets::BillboardInfo;
+    use benilla_formats::{BillboardKind, ModelBlend};
+
+    /// **A billboard card draws only while the model it is a batch of draws** (decision 1409).
+    ///
+    /// A card is split out to a world root — its transform belongs to the billboard system — so
+    /// nothing carries its owner's hide to it. `billboard::face_billboards` used to mirror that
+    /// hide, and its own unit test proved it wrote `Hidden`; the write was thrown away every frame
+    /// because `BillboardPlace` is ordered only `before(CheckVisibility)`, so it landed after the
+    /// propagation that would have consumed it and this system overwrote it with `Inherited` in
+    /// the next `Update`. In Orgrimmar that was a bonfire's glow card burning over its own culled
+    /// wood. The term lives here now, where nothing runs after it.
+    #[test]
+    fn a_card_follows_its_owners_verdict() {
+        let mut app = App::new();
+        app.init_resource::<DebugState>()
+            .init_resource::<ViewDistance>()
+            .init_resource::<crate::wmo_portal::ExteriorWindows>()
+            .init_resource::<crate::wmo_portal::CameraInteriorClaim>()
+            .init_resource::<super::super::FarSideTwins>()
+            .add_systems(Update, apply_model_visibility);
+        let owner = app.world_mut().spawn(InheritedVisibility::VISIBLE).id();
+        let info = BillboardInfo {
+            bone: 0,
+            pivot: Vec3::ZERO,
+            kind: BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: vec![],
+        };
+        let card = app
+            .world_mut()
+            .spawn((
+                ModelPart {
+                    kind: ModelKind::GameObject,
+                    blend: ModelBlend::Blend,
+                },
+                GlobalTransform::IDENTITY,
+                Visibility::Inherited,
+                BillboardCard::following(&info, owner),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().entity(card).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "a visible owner leaves its card drawing"
+        );
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(InheritedVisibility::HIDDEN);
+        app.update();
+        assert_eq!(
+            *app.world().entity(card).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "a hidden owner takes its card with it"
+        );
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(InheritedVisibility::VISIBLE);
+        app.update();
+        assert_eq!(
+            *app.world().entity(card).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "a re-shown owner restores its card"
+        );
+        // …and the owner going away must NOT blank the card: that is `face_billboards`' despawn
+        // case, and deciding a draw on absent information is how the world flickers.
+        app.world_mut().entity_mut(owner).despawn();
+        app.update();
+        assert_eq!(
+            *app.world().entity(card).get::<Visibility>().unwrap(),
+            Visibility::Inherited,
+            "an unreadable owner fails OPEN"
         );
     }
 }

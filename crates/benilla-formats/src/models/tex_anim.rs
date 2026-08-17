@@ -12,7 +12,7 @@
 
 use benilla_m2::M2Model;
 
-use super::key_anim::{bake_track, KeyAnim, SeqSlot};
+use super::key_anim::{bake_track, KeyAnim, SeqLoops, SeqSlot};
 
 /// One baked UV-offset loop, seconds — see [`KeyAnim`]. The texture-transform translation
 /// channel's instantiation: values are the track's raw `(x, y)`.
@@ -54,6 +54,39 @@ pub(super) fn bake_uv_anim(
         |v| [v[0], v[1]],
         is_zero,
         is_zero,
+    )
+}
+
+/// Bake the batch's UV-offset loop **for every file sequence slot** — the per-sequence form of
+/// [`bake_uv_anim`], and the answer to the question that function's own doc used to settle by
+/// measurement ("every UV-animating model measured is a scroll that runs the same in every
+/// sequence"). `benilla-extract uvslotscan` re-ran that measurement and it is false: 22 of the 32
+/// multi-slot UV batch-channels in the 1.12 corpus have a **dead slot 0** beside a live later slot.
+///
+/// `None` when no slot animates at all. The caller keeps [`bake_uv_anim`]'s slot-0 loop for the
+/// shared-material lane and reaches for this only when [`SeqLoops::uniform`] declines (decision
+/// 1408).
+pub(super) fn bake_uv_seqs(
+    model: &M2Model,
+    combo_index: u16,
+    slots: &[SeqSlot],
+) -> Option<SeqLoops<[f32; 2]>> {
+    let ti = *model.texture_transform_lookup.get(combo_index as usize)?;
+    let t = model.texture_transforms.get(ti as usize)?;
+    SeqLoops::new(
+        slots
+            .iter()
+            .map(|&slot| {
+                bake_track(
+                    &t.translation,
+                    &model.global_sequences,
+                    Some(slot),
+                    |v| [v[0], v[1]],
+                    is_zero,
+                    is_zero,
+                )
+            })
+            .collect(),
     )
 }
 

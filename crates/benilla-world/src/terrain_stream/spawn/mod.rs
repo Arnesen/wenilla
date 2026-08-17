@@ -602,8 +602,15 @@ pub(super) fn spawn_loaded_placements(
             // visible-group walk `0x698720`), so furniture never outlives its room (decision 0689)
             // and a prop several rooms name is drawn from ANY of them. Every submesh spawned above
             // is this one prop, so they all share the one key.
+            //
+            // The anim-host ROOT is skipped, for the reason the ADT site skips it (0784): it is a
+            // joint hierarchy, not geometry — no `ModelPart`, no `Aabb` — so it lands in the cull's
+            // fail-open arm and inflates every "objects tested" count without ever being drawn. The
+            // ADT lane has excluded it since 0784; this lane did not, which made the same root a
+            // silent passenger of the WMO prop path's counts.
+            let anim_root = host.as_ref().map(|h| h.root);
             if let (Some(instance), false) = (portal_instance, d.groups.is_empty()) {
-                for &entity in &ents {
+                for &entity in ents.iter().filter(|e| Some(**e) != anim_root) {
                     commands.entity(entity).insert((
                         WmoGroupVis {
                             instance,

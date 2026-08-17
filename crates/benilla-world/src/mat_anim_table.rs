@@ -32,8 +32,18 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 /// Slots in the table, row 0 included (row 0 is the pinned-zero identity every static material
 /// reads). B131 observed material-anim residency grow to ~250 entries on a long single-map
-/// session; 512 leaves that headroom ×2 and costs 8 KB.
-pub(crate) const MAX_MAT_ANIM_SLOTS: usize = 512;
+/// session, which is what sized the original 512.
+///
+/// **Raised to 2048 by decision 1408**, and measured rather than guessed: the per-placement lane
+/// gives a batch whose UV/tint loop differs between sequences one row *per placement*, and a live
+/// probe into Upper Blackrock Spire armed **145 rows within half a second of world entry** — 22
+/// placements of one 5-batch prop, each batch taking a row for its cutout material and another for
+/// its blend twin. The old ceiling would have exhausted in one dungeon, and exhaustion is silent by
+/// design (the batch stays at its built seed), i.e. it would have re-frozen exactly the bubbles the
+/// decision unfroze. The row count is inherent to the fix, not to how it is addressed — a
+/// per-instance row in a shared material would need the same 220. 2048 costs 32 KB per
+/// `wow_light`-layout buffer.
+pub(crate) const MAX_MAT_ANIM_SLOTS: usize = 2048;
 
 /// Byte offset of the mat-anim region inside a `wow_light`-layout buffer: after the rig-origin
 /// table, before the palette rows — mirroring `wow_model.wgsl`'s struct order.
@@ -41,7 +51,7 @@ pub(crate) fn region_offset() -> u64 {
     crate::rig_palette::rig_origin_region_offset() + crate::rig_palette::rig_origin_region_bytes()
 }
 
-/// Bytes this region adds to every `wow_light`-layout buffer (8 KB at 512 slots).
+/// Bytes this region adds to every `wow_light`-layout buffer (32 KB at 2048 slots).
 pub(crate) fn region_bytes() -> u64 {
     (MAX_MAT_ANIM_SLOTS * 16) as u64
 }

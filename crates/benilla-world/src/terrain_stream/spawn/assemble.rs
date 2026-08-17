@@ -196,6 +196,19 @@ pub fn spawn_model_entities(
         // distance-fades with its doodad (below — the halo must cull when the lamp does), so it
         // keeps its fade twin and its `DoodadFade`.
         let steady_interior_prop = interior_probe && sub.billboard.is_none();
+        // **Does this batch need a material of its own?** (decision 1408.) A batch whose UV or tint
+        // loop differs between sequences cannot share one: the registries are keyed by material,
+        // so a shared one has no instance to ask which sequence is playing — and these placements
+        // re-roll their variation independently every window (0768), so at any instant they are on
+        // different slots. Keying the material by this placement's anim host gives each its own
+        // registry entry, its own table row, and its own sequence. Everything else — every batch in
+        // the world but a measured 28 on this lane, 49 corpus-wide of 24103 (`uvslotscan`) — keeps
+        // the shared material it always had.
+        //
+        // No host ⇒ no sequence to read ⇒ share, and stay at the built seed: a per-sequence batch
+        // on a model the content gate declined is exactly today's frozen behaviour, not a new one.
+        let per_seq = sub.uv_seq.is_some() || sub.rgb_seq.is_some();
+        let seq_owner = per_seq.then_some(rig_root).flatten();
         let cutout = model_material(
             mat_cache,
             materials,
@@ -220,6 +233,7 @@ pub fn spawn_model_entities(
             sub.window,
             false, // the world streamer never spawns a skybox
             light,
+            seq_owner,
         );
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
@@ -262,6 +276,7 @@ pub fn spawn_model_entities(
                 sub.window,
                 false, // the world streamer never spawns a skybox
                 light,
+                seq_owner,
             )
         };
         // Register both variants' materials for the per-frame UV scroll (idempotent per material —
@@ -269,15 +284,57 @@ pub fn spawn_model_entities(
         // A period-0 loop is a constant the material seed already wrote (`sample(0.0)` IS its
         // forever value) — registering it would buy a per-frame re-write of the same number
         // (1375), so only a real loop enters the registry.
-        if let Some(anim) = sub.uv_anim.as_ref().filter(|a| a.period > 0.0) {
-            crate::doodad_anim::register_uv(uv_reg, anim_table, materials, cutout.id(), anim);
-            crate::doodad_anim::register_uv(uv_reg, anim_table, materials, blend.id(), anim);
+        // The per-placement lane first: its set replaces the shared loop outright, and it only
+        // arms when this placement actually has a host to read a sequence from.
+        if let (Some(seqs), Some(host)) = (sub.uv_seq.as_ref(), seq_owner) {
+            for id in [cutout.id(), blend.id()] {
+                crate::doodad_anim::register_uv(
+                    uv_reg,
+                    anim_table,
+                    materials,
+                    id,
+                    crate::doodad_anim::UvLoop::PerSeq {
+                        seqs: seqs.clone(),
+                        host,
+                    },
+                );
+            }
+        } else if let Some(anim) = sub.uv_anim.as_ref().filter(|a| a.period > 0.0) {
+            for id in [cutout.id(), blend.id()] {
+                crate::doodad_anim::register_uv(
+                    uv_reg,
+                    anim_table,
+                    materials,
+                    id,
+                    crate::doodad_anim::UvLoop::Shared(anim.clone()),
+                );
+            }
         }
         // …and for the per-frame tint re-sample (the animated M2Color RGB, same shared clock —
         // the same invisible seq-band phase divergence as the UV scroll, recorded there).
-        if let Some(anim) = sub.rgb_anim.as_ref().filter(|a| a.period > 0.0) {
-            crate::doodad_anim::register_tint(tint_reg, anim_table, materials, cutout.id(), anim);
-            crate::doodad_anim::register_tint(tint_reg, anim_table, materials, blend.id(), anim);
+        if let (Some(seqs), Some(host)) = (sub.rgb_seq.as_ref(), seq_owner) {
+            for id in [cutout.id(), blend.id()] {
+                crate::doodad_anim::register_tint(
+                    tint_reg,
+                    anim_table,
+                    materials,
+                    id,
+                    crate::doodad_anim::TintLoop::PerSeq {
+                        seqs: seqs.clone(),
+                        host,
+                    },
+                );
+            }
+        } else if let Some(anim) = sub.rgb_anim.as_ref().filter(|a| a.period > 0.0) {
+            for id in [cutout.id(), blend.id()] {
+                crate::doodad_anim::register_tint(
+                    tint_reg,
+                    anim_table,
+                    materials,
+                    id,
+                    crate::doodad_anim::TintLoop::Shared(anim.clone()),
+                );
+            }
         }
         // `MeshTag` is the per-instance lighting/fade scalar: an interior prop carries its SH-probe
         // slot index here (the shader evaluates the folded probe instead of the sky base);
@@ -406,6 +463,7 @@ pub fn spawn_model_entities(
         // unmarked one.
         if sub.uv_anim.as_ref().is_some_and(|a| a.period > 0.0)
             || sub.rgb_anim.as_ref().is_some_and(|a| a.period > 0.0)
+            || seq_owner.is_some()
         {
             commands
                 .entity(entity)

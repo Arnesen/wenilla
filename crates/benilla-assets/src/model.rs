@@ -123,12 +123,19 @@ pub struct ModelSubmesh {
     /// texture transform and all WMO batches. The `Arc` doubles as the material-dedup identity:
     /// every instance of a loaded model shares this allocation.
     pub uv_anim: Option<std::sync::Arc<benilla_formats::UvAnim>>,
+    /// The batch's UV loop **per file sequence slot**, `Some` only where the slots disagree — the
+    /// batches for which [`Self::uv_anim`]'s single loop is structurally unable to be right,
+    /// because which loop applies depends on the sequence the *instance* is playing (decision
+    /// 1408). Like [`Self::uv_anim`], the `Arc` doubles as a material-dedup identity.
+    pub uv_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red). When `Some`, the static vertex tint was skipped
     /// at parse (`benilla-formats`): the render side seeds the material's tint at the first key —
     /// pixel-identical to the old static bake — and the material-animating lanes tick it per
     /// frame. `None` for constant/keyless tints (the vertex bake).
     pub rgb_anim: Option<std::sync::Arc<benilla_formats::RgbAnim>>,
+    /// The tint twin of [`Self::uv_seq`], on the same rule.
+    pub rgb_seq: Option<std::sync::Arc<benilla_formats::SeqLoops<[f32; 3]>>>,
     /// The batch's MOBA section for WMO group batches ([`benilla_formats::WmoBatchClass`] — an
     /// interior group's per-batch lighting law: INT = unlit `tex × MOCV`, TRANS = the MOCV-alpha
     /// lit↔bake lerp, EXT = the exterior day/night law). `None` for every M2 batch.

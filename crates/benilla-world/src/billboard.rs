@@ -182,6 +182,10 @@ impl BillboardCard {
     /// (the self-avatar fade; the light node's shade push in `entity_shade`) can only recognise the
     /// model's own cards by testing this against the entities it walked. `None` = a fixed terrain
     /// doodad's card, whose shade rides its material selector instead.
+    ///
+    /// It is also the entity whose `InheritedVisibility` decides whether an entity-lane card draws
+    /// at all — a world root inherits nothing, so its model's hide has to be *read*, by the one
+    /// `Visibility` authority (`model_render::visibility`, decision 1409).
     pub fn follows(&self) -> Option<Entity> {
         self.follow
     }
@@ -523,24 +527,26 @@ pub struct BillboardPlace;
 /// despawned when the owner is gone (streamed out, unequipped, died). Runs in [`BillboardPlace`]
 /// (post-propagation), so it writes `GlobalTransform` directly alongside `Transform` — cards
 /// write ABSOLUTE world transforms and live at the root/identity, so the direct write is exact.
-#[allow(clippy::type_complexity)] // the owner pose + visibility read, commented inline
+///
+/// It does NOT own a card's `Visibility` — [`crate::model_render::visibility`] does, for every
+/// card as for every other `ModelPart` (decision 0025). This system used to mirror a hidden owner
+/// here as well, and that write was **dead**: [`BillboardPlace`] is only ordered
+/// `before(CheckVisibility)`, not before `VisibilityPropagate`, so the `Hidden` it wrote landed
+/// after the propagation that would have consumed it and was overwritten in the next frame's
+/// `Update` by the authority — for a year, a GameObject's glow card went on burning over its own
+/// culled model (decision 1409).
+#[allow(clippy::type_complexity)] // the card tuple, commented inline
 pub(crate) fn face_billboards(
     mut commands: Commands,
     time: Res<Time>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    owners: Query<
-        (&GlobalTransform, Option<&InheritedVisibility>),
-        (Without<WorldCamera>, Without<BillboardCard>),
-    >,
+    owners: Query<&GlobalTransform, (Without<WorldCamera>, Without<BillboardCard>)>,
     mut cards: Query<
         (
             Entity,
             &mut BillboardCard,
             &mut Transform,
             &mut GlobalTransform,
-            &mut Visibility,
-            // Whether the exterior-scene cull owns this card's `Visibility` — see the mirror below.
-            Has<crate::exterior_cull::ExteriorScene>,
             // Read for the trace probe below (the tag's low bits are the card's render alpha).
             Option<&bevy::mesh::MeshTag>,
         ),
@@ -554,10 +560,10 @@ pub(crate) fn face_billboards(
     // for every billboard; never a per-pivot aim).
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
-    for (entity, mut card, mut tf, mut global, mut visibility, gated, tag) in &mut cards {
+    for (entity, mut card, mut tf, mut global, tag) in &mut cards {
         if let Some(owner) = card.follow {
             match owners.get(owner) {
-                Ok((gt, vis)) => {
+                Ok(gt) => {
                     let pivot = card.local_pivot;
                     card.re_place(gt.compute_transform(), pivot);
                     // The card-provenance trace (`WOW_MOVE_TRACE`, ~2 Hz): where each following
@@ -580,31 +586,6 @@ pub(crate) fn face_billboards(
                                 card.world_pivot
                             ),
                         );
-                    }
-                    // A card is visually part of its owner — mirror a HIDDEN owner, because the
-                    // card is a world root and inherits nothing. The live case: the sea-crossing
-                    // transport's off-map leg hides the boat subtree (`tick_transports`); without
-                    // the mirror a deck lantern's glow keeps rendering at the other continent's
-                    // coordinates. (The owner's inherited visibility is last propagate's — one
-                    // frame of lag on a minutes-long hide.)
-                    //
-                    // **Not on a card the exterior-scene cull owns** (decision 0784). One component,
-                    // one authority (0025): a world-placement card is tagged
-                    // [`crate::exterior_cull::ExteriorScene`] with the rest of its model, and both
-                    // systems run in the same unordered post-propagation window — so this write
-                    // silently undid the cull's `Hidden` and the card drew straight through a sealed
-                    // room's wall. Nothing is lost by standing down: such a card's owner is a joint of
-                    // its own placement rig, which is never hidden apart from the model the cull is
-                    // already hiding whole. The transport case above is an entity-lane card, untagged,
-                    // and still mirrors.
-                    if !gated {
-                        let want = match vis {
-                            Some(v) if !v.get() => Visibility::Hidden,
-                            _ => Visibility::Inherited,
-                        };
-                        if *visibility != want {
-                            *visibility = want;
-                        }
                     }
                 }
                 Err(_) => {
@@ -763,27 +744,10 @@ mod tests {
             Vec3::new(5.0, 1.7, 0.0),
             "owner translation + authored pivot — not the model origin"
         );
-        // The hidden-owner mirror: the card is a world root and inherits nothing, so a hidden
-        // owner (the sea-crossing transport's off-map leg) must hide it explicitly — and a
-        // re-shown owner must bring it back.
-        app.world_mut()
-            .entity_mut(owner)
-            .insert(InheritedVisibility::HIDDEN);
-        app.update();
-        assert_eq!(
-            *app.world().entity(card).get::<Visibility>().unwrap(),
-            Visibility::Hidden,
-            "a hidden owner hides its card"
-        );
-        app.world_mut()
-            .entity_mut(owner)
-            .insert(InheritedVisibility::VISIBLE);
-        app.update();
-        assert_eq!(
-            *app.world().entity(card).get::<Visibility>().unwrap(),
-            Visibility::Inherited,
-            "a re-shown owner restores its card"
-        );
+        // The hidden-owner half of this test used to live here, asserting a `Visibility` write
+        // this system made and the real schedule then threw away — a green test pinning a dead
+        // write (decision 1409). The law is unchanged and now lives with the one authority that
+        // can enforce it: `model_render::visibility::a_card_follows_its_owners_verdict`.
         app.world_mut().entity_mut(owner).despawn();
         app.update();
         assert!(

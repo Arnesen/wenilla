@@ -219,6 +219,68 @@ pub(super) fn sample_window<V: Lerp>(
 /// `gseq_durations` is the model's global-sequence table (ms); `seq` the sequence to bake for
 /// (see [`SeqSlot`]). A `gseq`-tagged track ignores `seq` entirely — it runs on the global
 /// sequence's own free clock, the same loop in every animation.
+/// One baked loop **per file sequence slot** — the shape a channel needs when its track is keyed
+/// differently in different sequences, which the reference reads as a matter of course (it samples
+/// the *playing* sequence's own key window every frame, `ranges[seqSlot]`; wow-re `eval.md` FN1
+/// `0x713d50`) and benilla's UV/tint lanes did not.
+///
+/// Its whole reason to exist is [`Self::uniform`]. The UV and tint loops are consumed through a
+/// registry keyed by MATERIAL, which is shared by every instance of a batch and so has no sequence
+/// to key on — a design that is exactly right while every slot bakes the same loop, and silently
+/// wrong when they don't. `uniform()` is the question "may this batch keep the shared lane?", asked
+/// once at bake time instead of assumed: `Some` ⇒ yes, and the consumer carries one loop as before;
+/// `None` ⇒ the batch's animation depends on which sequence its instance is playing, so it needs a
+/// per-instance consumer (decision 1408).
+///
+/// The corpus population is small and real (`benilla-extract uvslotscan`): 22 of the 32 multi-slot
+/// UV batch-channels ship a **dead slot 0** beside a live later slot — the BRM lava bubbles keying
+/// their whole flipbook inside the 50 %-weighted variation 1, bug B98.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeqLoops<V> {
+    /// One entry per **file** sequence slot, `None` where that slot's key window moves nothing.
+    per_seq: Vec<Option<KeyAnim<V>>>,
+}
+
+impl<V: PartialEq> SeqLoops<V> {
+    /// Build from one entry per file sequence slot; `None` when no slot animates at all (the
+    /// overwhelming majority — the caller then carries no set).
+    pub fn new(per_seq: Vec<Option<KeyAnim<V>>>) -> Option<Self> {
+        per_seq
+            .iter()
+            .any(Option::is_some)
+            .then_some(Self { per_seq })
+    }
+
+    /// The one loop every slot bakes to, or `None` when the slots disagree — including the
+    /// asymmetric case a dead slot 0 makes (`None` in one slot, a loop in another), which is the
+    /// whole population this type was added for.
+    pub fn uniform(&self) -> Option<&KeyAnim<V>> {
+        let first = self.per_seq.first()?;
+        self.per_seq
+            .iter()
+            .all(|s| s == first)
+            .then_some(first.as_ref())
+            .flatten()
+    }
+
+    /// This batch's loop in sequence slot `seq` — slot 0 when unknown or out of range, the same
+    /// degrade [`super::mat_anim::AlphaAnim::seq`] makes and for the same reason (a consumer with
+    /// no live sequence is one that arms slot 0 and never leaves it).
+    pub fn seq(&self, seq: Option<usize>) -> Option<&KeyAnim<V>> {
+        seq.and_then(|i| self.per_seq.get(i))
+            .or_else(|| self.per_seq.first())?
+            .as_ref()
+    }
+
+    /// Every slot's loop, file order — the census instrument's read
+    /// (`benilla-extract uvslotscan`), which asks this type rather than a hand-rolled twin of the
+    /// sampler (the `idleslotscan` rule: an instrument that re-implements the gate can drift from
+    /// it).
+    pub fn slots(&self) -> &[Option<KeyAnim<V>>] {
+        &self.per_seq
+    }
+}
+
 pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     track: &M2Track<T>,
     gseq_durations: &[u32],
@@ -312,4 +374,71 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
         gseq: false,
         keys: baked,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loop_of(period: f32, keys: &[(f32, f32)]) -> KeyAnim<f32> {
+        KeyAnim {
+            period,
+            step: false,
+            wrap: true,
+            gseq: false,
+            keys: keys.to_vec(),
+        }
+    }
+
+    /// The whole point of the type: **an asymmetric pair is not uniform.** A dead slot 0 beside a
+    /// live slot 1 is the shape 22 of the corpus's 32 multi-slot UV batch-channels ship, and the
+    /// shared-material lane must be refused for it — a `uniform()` that only compared the *present*
+    /// loops would wave the BRM lava bubbles straight back through (bug B98).
+    #[test]
+    fn a_dead_slot_zero_beside_a_live_slot_is_not_uniform() {
+        let set = SeqLoops::new(vec![None, Some(loop_of(3.3, &[(0.0, 0.0), (1.0, 0.6)]))])
+            .expect("one slot animates");
+        assert!(set.uniform().is_none());
+        assert!(set.seq(Some(0)).is_none(), "slot 0 is the dead hold");
+        assert!(set.seq(Some(1)).is_some(), "slot 1 is the animation");
+    }
+
+    /// The population the shared lane was built for, and keeps: every slot the same loop. `uniform`
+    /// hands back that loop, so the caller carries one and nothing changes.
+    #[test]
+    fn matching_slots_collapse_to_the_one_shared_loop() {
+        let l = loop_of(1.0, &[(0.0, 0.0), (1.0, 1.0)]);
+        let set = SeqLoops::new(vec![Some(l.clone()), Some(l.clone())]).expect("animates");
+        assert_eq!(set.uniform(), Some(&l));
+    }
+
+    /// Two loops that differ are refused even though both are live — the DIFFERS class, where the
+    /// slot-0 pin renders a real but *wrong* animation rather than a frozen one
+    /// (`Deterrence_State_Base` tints red→blue in Stand and green→red in Hold).
+    #[test]
+    fn differing_live_slots_are_not_uniform_either() {
+        let set = SeqLoops::new(vec![
+            Some(loop_of(1.0, &[(0.0, 0.0), (1.0, 1.0)])),
+            Some(loop_of(2.0, &[(0.0, 1.0), (2.0, 0.0)])),
+        ])
+        .expect("animates");
+        assert!(set.uniform().is_none());
+    }
+
+    /// Nothing anywhere ⇒ no set at all: the caller carries nothing, as it always has for the
+    /// ~98.6 % of batches with no texture transform.
+    #[test]
+    fn a_set_with_no_live_slot_is_no_set() {
+        assert!(SeqLoops::<f32>::new(vec![None, None]).is_none());
+    }
+
+    /// An out-of-range or unknown sequence degrades to slot 0 — the same rule `AlphaAnim::seq`
+    /// makes, so a consumer with no live sequence reads what a slot-0-arming consumer would.
+    #[test]
+    fn an_unknown_sequence_degrades_to_slot_zero() {
+        let l = loop_of(1.0, &[(0.0, 0.0), (1.0, 1.0)]);
+        let set = SeqLoops::new(vec![Some(l.clone()), None]).expect("animates");
+        assert_eq!(set.seq(None), Some(&l));
+        assert_eq!(set.seq(Some(9)), Some(&l));
+    }
 }

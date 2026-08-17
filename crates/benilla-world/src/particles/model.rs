@@ -109,6 +109,7 @@ pub(super) fn update_model_particles(
                         false,
                         false, // an effect model is never a skybox
                         &light.0,
+                        None, // a shard's material is shared by the whole emitter
                     );
                     // The owner-last draw-order rung, stamped on after the fact: a 3-D model
                     // particle is one of its owner's emitters exactly like the quad cloud beside

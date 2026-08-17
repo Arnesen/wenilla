@@ -192,7 +192,7 @@ struct WowLight {
     // batch's sampled UV-scroll delta (xy, added to sun_scale.zw) or tint delta (xyz, added to
     // tint.rgb). Zero region = every batch at its built seed — the studio buffers and
     // deterministic captures ride that exactly like the tint table's zero-identity.
-    matanim: array<vec4<f32>, 512>,
+    matanim: array<vec4<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;

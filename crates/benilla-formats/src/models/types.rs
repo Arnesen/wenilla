@@ -4,6 +4,7 @@
 //! ([`BoneScaleAnim`]). No parsing lives here — just the shapes [`m2_batches`](super::m2_batches) and
 //! [`wmo`](super::wmo) both build.
 
+use super::key_anim::SeqLoops;
 use super::mat_anim::{AlphaAnim, RgbAnim};
 use super::tex_anim::UvAnim;
 
@@ -479,6 +480,13 @@ pub struct RenderSubmesh {
     /// translation track baked by [`tex_anim`](super::tex_anim) — the raw `(x, y)` offset over the loop
     /// clock. `None` for the ~98.6% of models with no texture transform, and for all WMO batches.
     pub uv_anim: Option<UvAnim>,
+    /// The batch's UV loop **per file sequence slot**, carried ONLY when the slots disagree — i.e.
+    /// when [`Self::uv_anim`]'s single loop cannot be right for every instance, because which loop
+    /// applies depends on which sequence that instance is playing (decision 1408, bug B98: the BRM
+    /// lava bubbles key their whole flipbook inside the 50 %-weighted variation 1, so slot 0 — the
+    /// only slot the shared-material registry can read — is a dead hold). `None` for every batch
+    /// whose slots agree, which is the shared lane unchanged.
+    pub uv_seq: Option<SeqLoops<[f32; 2]>>,
     /// The batch's **animated RGB tint** (the M2Color colour track, time-varying only — a spell
     /// effect's white-hot flash cooling to red): baked by [`mat_anim`](super::mat_anim). When
     /// `Some`, the static vertex-colour tint is **skipped** for this batch (the two would
@@ -486,6 +494,8 @@ pub struct RenderSubmesh {
     /// key and animated where the lane runs material animation. `None` for constant/keyless tints
     /// (the static vertex bake, decision 0029) — the overwhelming majority.
     pub rgb_anim: Option<RgbAnim>,
+    /// The tint twin of [`Self::uv_seq`], on the same rule and for the same reason.
+    pub rgb_seq: Option<SeqLoops<[f32; 3]>>,
     /// The batch's MOBA section for WMO group batches ([`WmoBatchClass`] — TRANS / INT / EXT, the
     /// per-class lighting law of an interior group). `None` for every M2 batch.
     pub wmo_batch: Option<WmoBatchClass>,
@@ -586,7 +596,9 @@ impl Default for RenderSubmesh {
             welded_billboard: false,
             alpha_anim: None,
             uv_anim: None,
+            uv_seq: None,
             rgb_anim: None,
+            rgb_seq: None,
             wmo_batch: None,
             env_map: false,
         }

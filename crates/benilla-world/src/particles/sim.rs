@@ -203,6 +203,35 @@ fn drive_child(
 /// building are gated by (0689/1289). One `SystemParam` because they are read together, at one
 /// place, and Bevy caps a system at 16 parameters — which `simulate_particles` already sits at, so
 /// the portal query joins this bundle rather than becoming a seventeenth.
+/// The **owner reads** — one bundle for the two questions this sim asks of an emitter's owner
+/// (a joint, a unit root, a placement submesh; never an emitter or child-draw entity, so both
+/// members are provably disjoint from the `&mut GlobalTransform` writes below): *where is it* and
+/// *is its model being drawn*. A `SystemParam` rather than two parameters because
+/// [`simulate_particles`] sits at Bevy's 16-param ceiling, and because the pair is one concept —
+/// the owner's frame — that no caller should be able to half-answer.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct Owners<'w, 's> {
+    transforms:
+        Query<'w, 's, &'static GlobalTransform, (Without<ParticleEmitter>, Without<ChildDraw>)>,
+    visibility: Query<'w, 's, &'static InheritedVisibility>,
+}
+
+impl Owners<'_, '_> {
+    /// The owner's live world position — read every frame, never from a stored anchor: a frozen
+    /// emitter stops refreshing its anchor, so gating on the stored one would latch a moving owner
+    /// out of existence the first time it crossed the wall.
+    fn at(&self, owner: Entity) -> Option<Vec3> {
+        self.transforms.get(owner).ok().map(|gt| gt.translation())
+    }
+
+    /// Is the owner's model NOT being drawn this frame — the entity lane's draw-set term (decision
+    /// 1409). Last propagate's verdict (one frame of lag on a hide that holds while the model is
+    /// culled), and an owner we cannot read is not hidden: it falls through to the drain path.
+    fn hidden(&self, owner: Entity) -> bool {
+        matches!(self.visibility.get(owner), Ok(v) if !v.get())
+    }
+}
+
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SceneGates<'w, 's> {
     view: Res<'w, crate::view::ViewDistance>,
@@ -385,9 +414,7 @@ pub(super) fn simulate_particles(
     interleave: WaterInterleave,
     mut commands: Commands,
     cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
-    // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
-    // both `&mut GlobalTransform` queries below.
-    transforms: Query<&GlobalTransform, (Without<ParticleEmitter>, Without<ChildDraw>)>,
+    owners: Owners,
     // MODEL-particle instance entities ([`super::model`]): the draw-set gate hides them with
     // their frozen emitter.
     mut child_draws: Query<
@@ -570,11 +597,26 @@ pub(super) fn simulate_particles(
             // frozen emitter stops refreshing its anchor, so gating on the stored one would latch a
             // moving owner out of existence the first time it crossed the wall.
             let subject = match emitter.owner {
-                Some(o) => transforms.get(o).ok().map(|gt| gt.translation()),
+                Some(o) => owners.at(o),
                 None => Some(emitter.anchor_pos),
             };
+            // **…and the owner's own draw verdict** (decision 1409). An emitter entity is a world
+            // root — `spawn_emitter` parents it to nothing, because its cloud is anchored, not
+            // carried — so every hide that reaches its model through the scene graph reaches the
+            // emitter not at all. The reference has no such gap: it ticks a model's particles
+            // inside that model's animate step, which runs only for models the frame draws. Ours
+            // ran regardless, which is a culled GameObject's fire still burning over bare ground —
+            // the Orgrimmar bonfires, flame and smoke intact with the wood gone. The world lane's
+            // `EmitterFade` says this in its own vocabulary (terms 4/5); the entity lane has no
+            // fade sphere to say it with, and its owner's propagated verdict is the same answer.
+            //
+            // `InheritedVisibility` is last propagate's — one frame of lag on a verdict that holds
+            // for as long as the model is culled — and an owner we cannot read falls through to the
+            // drain path below, exactly like a vanished one.
+            let owner_hidden = emitter.owner.is_some_and(|o| owners.hidden(o));
             if let Some(at) = subject {
-                if !crate::view::within_farclip(farclip, cam_pos, cam_fwd, at, 0.0) {
+                if owner_hidden || !crate::view::within_farclip(farclip, cam_pos, cam_fwd, at, 0.0)
+                {
                     if !emitter.gated {
                         emitter.gated = true;
                         for slot in &emitter.model_instances {
@@ -629,7 +671,7 @@ pub(super) fn simulate_particles(
         // no anchor exists — a joint's transform is not the instance matrix, so that leg keeps
         // the sign-test fallback (`water_gt = None`).
         let water_model = (*anchor).or(*owner);
-        let water_gt = (*anchor).and_then(|e| transforms.get(e).ok().copied());
+        let water_gt = (*anchor).and_then(|e| owners.transforms.get(e).ok().copied());
         let water_bound = *water_bound;
         *age += dt;
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
@@ -643,7 +685,7 @@ pub(super) fn simulate_particles(
         //    emitter despawns itself. An instant despawn here popped every live particle of a
         //    fireball's trail at the moment of impact.
         if let Some(o) = *owner {
-            match transforms.get(o) {
+            match owners.transforms.get(o) {
                 Ok(gt) => *placement = gt.compute_transform(),
                 Err(_) => {
                     *owner = None;
@@ -694,7 +736,7 @@ pub(super) fn simulate_particles(
         // The live attach rotation `A(t)` (attached models only — see the field doc). A vanished
         // attach entity keeps the last rotation: the pool drains in its final frame.
         if let Some(a) = *attach {
-            if let Ok(gt) = transforms.get(a) {
+            if let Ok(gt) = owners.transforms.get(a) {
                 let (_, rot, _) = gt.to_scale_rotation_translation();
                 *attach_rot = rot;
             }
@@ -713,7 +755,7 @@ pub(super) fn simulate_particles(
         // one while the pool drains. A whole-model owner keeps anchor == owner — identical math.
         match *anchor {
             Some(a) => {
-                if let Ok(gt) = transforms.get(a) {
+                if let Ok(gt) = owners.transforms.get(a) {
                     *anchor_pos = gt.translation();
                 }
             }

@@ -156,46 +156,6 @@ pub fn darkpropscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Capitalize an `Item\ObjectComponents\<sub>` path component for consistent family-key display
-/// regardless of how a given asset's listfile entry happened to be cased (`WEAPON`/`weapon`/
-/// `Weapon` all collapse to `Weapon`).
-fn title_case(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => {
-            first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
-        }
-        None => String::new(),
-    }
-}
-
-/// The top-level content-family bucket for an internal M2 path — `m2lightscan`'s summary
-/// dimension for "how much content is affected, and of what kind". Derived from the path's first
-/// one or two components, case-insensitively. `World\Goober\` (GameObject displays) splits from
-/// plain `World\` (ADT-placed doodads / WMO props) because only the latter is on benilla's
-/// current M2-light spawn path (`crate::terrain_stream::spawn::fx::spawn_lights_for`); everything
-/// not otherwise named folds into `other`.
-fn family_of(name: &str) -> String {
-    let comps: Vec<&str> = name.split('\\').collect();
-    let low = |s: &str| s.to_ascii_lowercase();
-    match comps.first().map(|s| low(s)).as_deref() {
-        Some("creature") => "Creature\\".to_string(),
-        Some("character") => "Character\\".to_string(),
-        Some("spells") => "Spells\\".to_string(),
-        Some("item") if comps.get(1).map(|s| low(s)).as_deref() == Some("objectcomponents") => {
-            match comps.get(2) {
-                Some(sub) => format!("Item\\ObjectComponents\\{}\\", title_case(sub)),
-                None => "Item\\ObjectComponents\\".to_string(),
-            }
-        }
-        Some("world") if comps.get(1).map(|s| low(s)).as_deref() == Some("goober") => {
-            "World\\Goober\\".to_string()
-        }
-        Some("world") => "World\\".to_string(),
-        _ => "other".to_string(),
-    }
-}
-
 /// How many rows of the closing colour tally print (the rest are counted, never silently dropped).
 const TALLY_ROWS: usize = 20;
 
@@ -230,8 +190,8 @@ struct FamilyStats {
 /// diffuse_intensity` (raw colour, intensity, and the product), authored attenuation start/end,
 /// and an `OFF` tag when [`M2Light::visibility_off`] — the one shape (a static `0` visibility
 /// key) that keeps a light dark (§9.4). The closing summary is the real deliverable: totals, a
-/// breakdown by top-level content family ([`family_of`]) — benilla only spawns these lights for
-/// ADT-placed doodads and WMO props today, so this answers how much of the entity path
+/// breakdown by top-level content family ([`super::family_of`]) — benilla only spawns these
+/// lights for ADT-placed doodads and WMO props today, so this answers how much of the entity path
 /// (creatures, held items, GameObjects) is actually missing them — and a cheap diffuse
 /// colour×intensity tally ([`hue_tag`]).
 pub fn m2lightscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
@@ -265,7 +225,7 @@ pub fn m2lightscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         total_point += point_count;
         total_dark += dark_count;
 
-        let fam = families.entry(family_of(&name)).or_default();
+        let fam = families.entry(super::family_of(&name)).or_default();
         fam.models += 1;
         fam.point_lights += point_count;
         fam.dark += dark_count;

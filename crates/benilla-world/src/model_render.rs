@@ -111,6 +111,19 @@ pub struct MatKey {
     /// batch — `CavernsOfTimeSky` and Elwynn share no texture today, but nothing enforces that and
     /// the collision would be a world doodad silently drawn at the far plane.
     sky_depth: bool,
+    /// **This material belongs to one placement, not to the batch** — `None` for the shared
+    /// material every instance of a model reuses, which is every batch but one measured class.
+    ///
+    /// The animated-material registries ([`crate::doodad_anim::UvAnimMaterials`] and its tint twin)
+    /// are keyed by MATERIAL, so a batch whose animated loop depends on **which sequence its
+    /// instance is playing** cannot share one and be right: the BRM lava bubbles key their whole
+    /// flipbook inside a 50 %-weighted variation of animation id 0, and their 15 placements re-roll
+    /// independently every ~3.3 s (decision 0768), so at any instant some are on slot 0 and some on
+    /// slot 1. Keying the material by the placement's anim host gives each its own row and its own
+    /// sequence (decision 1408); the population is 22 batch-channels across 6 models
+    /// (`benilla-extract uvslotscan`), and the clones expire on the same distance evictor as every
+    /// other material ([`scope_model_materials`], decision 0785).
+    instance: Option<Entity>,
 }
 
 /// The per-material static terrain-shade **selector** baked into `sun_scale.x` — NOT an intensity
@@ -215,6 +228,11 @@ pub fn model_material(
     // and the skybox sort rung instead of the ordinary batch-order eps. See [`MatKey::sky_depth`].
     sky_depth: bool,
     light: &Buffer,
+    // The ONE placement this material belongs to, or `None` for the shared batch material every
+    // instance of the model reuses. `Some` only for a batch whose animated UV/tint loop depends on
+    // the sequence its instance is playing (decision 1408): the animated-material registries are
+    // keyed by material, so such a batch cannot share one and be right. See `MatKey::instance`.
+    instance: Option<Entity>,
 ) -> Handle<WowModelMaterial> {
     let key = MatKey {
         light: light.id(),
@@ -239,6 +257,7 @@ pub fn model_material(
         window,
         zfill: false,
         sky_depth,
+        instance,
     };
     if let Some(h) = cache.fetch(&key) {
         return h;
@@ -583,6 +602,9 @@ pub fn zfill_material(
         // A depth-prime twin exists to write depth for a fading model; the sky writes none, so no
         // skybox batch ever has one (`M2BatchMaterials::skybox` builds no twins at all).
         sky_depth: false,
+        // A z-fill twin carries no animated channel at all (no texture, no uv/rgb anim), so it can
+        // never be the per-placement lane — it stays the one shared depth prime per batch.
+        instance: None,
     };
     if let Some(h) = cache.fetch(&key) {
         return h;

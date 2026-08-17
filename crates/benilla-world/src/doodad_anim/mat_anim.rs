@@ -235,11 +235,43 @@ pub fn sample_mat_anim(
 #[derive(bevy::prelude::Component)]
 pub struct AnimMatPart;
 
+/// **Which loop a registered material animates on** — and the whole of decision 1408.
+///
+/// A registry keyed by MATERIAL is shared by every instance of a batch, so it has no sequence to
+/// key on. That is exactly right while every sequence bakes the same loop, and structurally unable
+/// to be right when they don't: the BRM lava bubbles key their whole flipbook inside a 50 %-weighted
+/// variation, and their 15 placements re-roll independently every ~3.3 s (decision 0768), so at any
+/// instant some are on slot 0 and some on slot 1. One shared row cannot serve both.
+///
+/// So a batch whose slots disagree — 22 batch-channels across **6 models**, corpus-wide
+/// (`benilla-extract uvslotscan`) — takes a material of its own **per placement**, keyed by its
+/// anim host in [`crate::model_render::MatKey`], and this entry remembers that host so the sample
+/// rides the sequence the host is actually playing. Everything else keeps the shared material and
+/// the shared clock, untouched.
+///
+/// Per-placement materials rather than a per-instance row in the shared table: the row would have
+/// to be addressed from the shader, and every per-instance channel there is spoken for
+/// (`MeshTag`'s 32 bits are fully allocated; the instance slot is the lazily-allocated,
+/// pressure-reaped palette slot). Against a measured population of six models it buys a new GPU
+/// region and a shader branch to save a handful of draw calls on small atmospheric props, and the
+/// clones are bounded by the same distance evictor every other material has (`art_scope`,
+/// decision 0785). Revisit if the population ever grows.
+pub enum UvLoop {
+    /// Every sequence bakes the same loop: the shared material, on the free-running shared clock.
+    Shared(std::sync::Arc<benilla_formats::UvAnim>),
+    /// The slots disagree: this material belongs to ONE placement, and the loop is whichever slot
+    /// `host` is playing right now.
+    PerSeq {
+        seqs: std::sync::Arc<benilla_formats::SeqLoops<[f32; 2]>>,
+        host: Entity,
+    },
+}
+
 /// One registered UV-scroll material: its sampler, its table slot, and the built seed the delta
 /// rows are measured from (the material's own `sun_scale.zw`, which is never mutated again —
 /// decision 1381).
 pub struct UvAnimEntry {
-    pub anim: std::sync::Arc<benilla_formats::UvAnim>,
+    pub anim: UvLoop,
     pub slot: u16,
     pub seed: [f32; 2],
 }
@@ -249,8 +281,21 @@ impl UvAnimEntry {
     /// adds it back onto `sun_scale.zw` (decision 1381's encoding). Quantized exactly as the
     /// old asset-mutating lane quantized its absolute writes, so the first live frame shows the
     /// same number the old path would have written.
-    pub(crate) fn delta(&self, now: f32) -> [f32; 4] {
-        let uv = self.anim.sample(now);
+    ///
+    /// `playing` is the per-placement lane's live `(sequence slot, clip time)`, resolved by the
+    /// caller from [`Self::host`]; a host that has gone (despawned mid-frame) or a sequence with no
+    /// loop samples the identity, i.e. the batch sits at its built seed — the same degrade a full
+    /// table gives.
+    pub(crate) fn delta(&self, now: f32, gseq_now: f64, playing: Option<(usize, f32)>) -> [f32; 4] {
+        let uv = match &self.anim {
+            UvLoop::Shared(anim) => anim.sample(now),
+            UvLoop::PerSeq { seqs, .. } => playing
+                .and_then(|(seq, band_t)| {
+                    seqs.seq(Some(seq))
+                        .map(|l| l.sample(l.clock(band_t, gseq_now)))
+                })
+                .unwrap_or([0.0, 0.0]),
+        };
         [
             benilla_assets::quantize(uv[0], 4096.0) - self.seed[0],
             benilla_assets::quantize(uv[1], 4096.0) - self.seed[1],
@@ -258,6 +303,37 @@ impl UvAnimEntry {
             0.0,
         ]
     }
+}
+
+impl UvAnimEntry {
+    /// The placement whose sequence this entry rides, or `None` on the shared lane.
+    fn host(&self) -> Option<Entity> {
+        match &self.anim {
+            UvLoop::Shared(_) => None,
+            UvLoop::PerSeq { host, .. } => Some(*host),
+        }
+    }
+}
+
+impl TintAnimEntry {
+    /// [`UvAnimEntry::host`]'s twin.
+    fn host(&self) -> Option<Entity> {
+        match &self.anim {
+            TintLoop::Shared(_) => None,
+            TintLoop::PerSeq { host, .. } => Some(*host),
+        }
+    }
+}
+
+/// The anim hosts a per-placement entry reads its sequence from — [`playing_seq`] behind a query,
+/// so [`tick_anim_materials`] can resolve one per entry without borrowing the world twice.
+pub type SeqHosts<'w, 's> = Query<'w, 's, (&'static AnimationPlayer, &'static ModelAnimations)>;
+
+/// The playing sequence slot + clip time of one anim host, or `None` if the entry is on the shared
+/// lane, the host is gone, or it has no sequence at all.
+fn host_seq(hosts: &SeqHosts, host: Option<Entity>) -> Option<(usize, f32)> {
+    let (player, anims) = hosts.get(host?).ok()?;
+    playing_seq(player, anims)
 }
 
 #[derive(Resource, Default)]
@@ -278,7 +354,7 @@ pub fn register_uv(
     table: &mut crate::mat_anim_table::MatAnimTable,
     materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
     id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
-    anim: &std::sync::Arc<benilla_formats::UvAnim>,
+    anim: UvLoop,
 ) {
     if reg.0.contains_key(&id) {
         return;
@@ -293,14 +369,14 @@ pub fn register_uv(
     };
     let seed = [mat.extension.sun_scale.z, mat.extension.sun_scale.w];
     mat.extension.anim_slots.x = f32::from(slot);
-    reg.0.insert(
-        id,
-        UvAnimEntry {
-            anim: anim.clone(),
-            slot,
-            seed,
-        },
-    );
+    if let UvLoop::PerSeq { host, .. } = &anim {
+        // The breadcrumb for the lane that has no other tell: a per-placement material is invisible
+        // in every count (it is one more material, one more row), so "did the bubbles take the new
+        // lane at all" would otherwise be a question only the eye could answer. One line per
+        // registration, at debug (decision 1408).
+        bevy::log::debug!("mat-anim: per-placement UV lane armed for host {host} (slot {slot})");
+    }
+    reg.0.insert(id, UvAnimEntry { anim, slot, seed });
 }
 
 /// Re-sample the **drawn** animated materials on the shared clock — the UV scroll
@@ -348,6 +424,9 @@ pub(super) fn tick_anim_materials(
         With<AnimMatPart>,
     >,
     twins: Res<crate::model_render::FarSideTwins>,
+    // The per-placement lane's sequence source (decision 1408): an entry registered `PerSeq` asks
+    // its own anim host which slot it is playing, instead of reading the shared clock.
+    hosts: SeqHosts,
     mut drawn: Local<
         bevy::platform::collections::HashSet<AssetId<benilla_assets::materials::WowModelMaterial>>,
     >,
@@ -378,13 +457,17 @@ pub(super) fn tick_anim_materials(
     // below what any face can show — and `MatAnimTable::set` skips same-value writes, so a slow
     // loop uploads nothing most frames. Eviction is unchanged: an entry dies with its material,
     // and its slot zeroes back to identity ([`crate::mat_anim_table`]'s free law).
+    let gseq_now = f64::from(now);
     uv_reg.0.retain(|id, entry| {
         if !materials.contains(*id) {
             table.free(entry.slot);
             return false;
         }
         if drawn.contains(id) {
-            table.set(entry.slot, entry.delta(now));
+            table.set(
+                entry.slot,
+                entry.delta(now, gseq_now, host_seq(&hosts, entry.host())),
+            );
         }
         true
     });
@@ -394,7 +477,10 @@ pub(super) fn tick_anim_materials(
             return false;
         }
         if drawn.contains(id) {
-            table.set(entry.slot, entry.delta(now));
+            table.set(
+                entry.slot,
+                entry.delta(now, gseq_now, host_seq(&hosts, entry.host())),
+            );
         }
         true
     });
@@ -437,17 +523,40 @@ fn matanim_off(time: &Time<bevy::time::Real>) -> bool {
 /// doodad's ambient loop). Spell-effect instances need real per-instance phase instead (one cast
 /// = one 0.9 s pulse), so the effect lane clones its materials and ticks them on the instance
 /// clock (`entities::spell_fx`), never through this registry.
+/// [`UvLoop`]'s RGB twin, on the same rule and for the same reason — `uvslotscan` finds the tint
+/// channel pinned to slot 0 by the same line, and `Spells\\Deterrence_State_Base.m2` tinting
+/// **red→blue in Stand and green→red in Hold**, where the pin renders a *wrong colour* rather than
+/// a frozen one.
+pub enum TintLoop {
+    Shared(std::sync::Arc<benilla_formats::RgbAnim>),
+    PerSeq {
+        seqs: std::sync::Arc<benilla_formats::SeqLoops<[f32; 3]>>,
+        host: Entity,
+    },
+}
+
 /// One registered tint material — [`UvAnimEntry`]'s RGB twin (seed = the built `tint.xyz`).
 pub struct TintAnimEntry {
-    pub anim: std::sync::Arc<benilla_formats::RgbAnim>,
+    pub anim: TintLoop,
     pub slot: u16,
     pub seed: [f32; 3],
 }
 
 impl TintAnimEntry {
-    /// [`UvAnimEntry::delta`]'s RGB twin (1/255 quantization, the display's own step).
-    pub(crate) fn delta(&self, now: f32) -> [f32; 4] {
-        let rgb = benilla_assets::quant255(self.anim.sample(now));
+    /// [`UvAnimEntry::delta`]'s RGB twin (1/255 quantization, the display's own step). The
+    /// per-placement lane's identity is WHITE — the tint is a multiplier, so an unresolvable host
+    /// must leave the batch at its built seed, not black it out.
+    pub(crate) fn delta(&self, now: f32, gseq_now: f64, playing: Option<(usize, f32)>) -> [f32; 4] {
+        let rgb = match &self.anim {
+            TintLoop::Shared(anim) => anim.sample(now),
+            TintLoop::PerSeq { seqs, .. } => playing
+                .and_then(|(seq, band_t)| {
+                    seqs.seq(Some(seq))
+                        .map(|l| l.sample(l.clock(band_t, gseq_now)))
+                })
+                .unwrap_or([1.0, 1.0, 1.0]),
+        };
+        let rgb = benilla_assets::quant255(rgb);
         [
             rgb[0] - self.seed[0],
             rgb[1] - self.seed[1],
@@ -471,7 +580,7 @@ pub fn register_tint(
     table: &mut crate::mat_anim_table::MatAnimTable,
     materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
     id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
-    anim: &std::sync::Arc<benilla_formats::RgbAnim>,
+    anim: TintLoop,
 ) {
     if reg.0.contains_key(&id) {
         return;
@@ -490,14 +599,7 @@ pub fn register_tint(
         mat.extension.tint.z,
     ];
     mat.extension.anim_slots.y = f32::from(slot);
-    reg.0.insert(
-        id,
-        TintAnimEntry {
-            anim: anim.clone(),
-            slot,
-            seed,
-        },
-    );
+    reg.0.insert(id, TintAnimEntry { anim, slot, seed });
 }
 
 #[cfg(test)]
@@ -522,12 +624,12 @@ mod delta_tests {
         let anim = uv_loop();
         let seed = anim.sample(0.0);
         let entry = UvAnimEntry {
-            anim: anim.clone(),
+            anim: UvLoop::Shared(anim.clone()),
             slot: 3,
             seed,
         };
         for t in [0.0_f32, 0.35, 1.0, 1.7] {
-            let d = entry.delta(t);
+            let d = entry.delta(t, f64::from(t), None);
             let s = anim.sample(t);
             let old = [
                 benilla_assets::quantize(s[0], 4096.0),
@@ -548,6 +650,48 @@ mod delta_tests {
         }
     }
 
+    /// **B98** (decision 1408): the per-placement lane samples the slot the placement's own host is
+    /// playing — not slot 0, and not a shared clock.
+    ///
+    /// The BRM lava bubble's shape, exactly: slot 0 bakes to nothing (a dead hold) and slot 1
+    /// carries the flipbook. Reading slot 0, as the shared registry must, is the frozen sprite the
+    /// report named; reading the host's live slot is the fix. The unresolved case — a host
+    /// despawned mid-frame — must land on the UV identity, i.e. the built seed, never a jump.
+    #[test]
+    fn the_per_placement_lane_reads_its_hosts_sequence() {
+        let seqs = std::sync::Arc::new(
+            benilla_formats::SeqLoops::new(vec![
+                None, // slot 0: the dead hold the shared lane is pinned to
+                Some(benilla_formats::UvAnim {
+                    period: 4.0,
+                    step: true,
+                    wrap: true,
+                    gseq: false,
+                    keys: vec![(0.0, [0.0, 0.0]), (2.0, [0.0, 0.605])],
+                }),
+            ])
+            .expect("slot 1 animates"),
+        );
+        let entry = UvAnimEntry {
+            anim: UvLoop::PerSeq {
+                seqs,
+                host: Entity::from_raw_u32(7).expect("a valid test entity"),
+            },
+            slot: 5,
+            seed: [0.0, 0.0],
+        };
+        // On slot 1, past its step key: the whole V flip shows.
+        let d = entry.delta(0.0, 0.0, Some((1, 3.0)));
+        assert!(
+            (d[1] - 0.605).abs() < 1e-3,
+            "the flipbook's V offset: {d:?}"
+        );
+        // On slot 0 there is no loop at all — the identity, i.e. the built seed.
+        assert_eq!(entry.delta(0.0, 0.0, Some((0, 3.0))), [0.0; 4]);
+        // …and an unresolvable host degrades to the same identity, never to a shared-clock sample.
+        assert_eq!(entry.delta(99.0, 99.0, None), [0.0; 4]);
+    }
+
     /// The tint twin, same law at the display's 1/255 step.
     #[test]
     fn the_tint_delta_reproduces_the_old_absolute_write() {
@@ -563,11 +707,11 @@ mod delta_tests {
             [s[0], s[1], s[2]]
         };
         let entry = TintAnimEntry {
-            anim: anim.clone(),
+            anim: TintLoop::Shared(anim.clone()),
             slot: 4,
             seed,
         };
-        let d = entry.delta(0.4);
+        let d = entry.delta(0.4, 0.4, None);
         let old = benilla_assets::quant255(anim.sample(0.4));
         for i in 0..3 {
             assert_eq!(seed[i] + d[i], old[i], "channel {i}");

@@ -717,6 +717,43 @@ mod tests {
         area_down_ray(tris, &bounds, &grids, nav, eye, terrain_z, EXTERIOR)
     }
 
+    /// **A body planted UNDER the floor it stands on is invisible to the position cast, and the
+    /// under-floor fallback is what finds it** (decision 1409). Orgrimmar's bonfires, braziers,
+    /// meat racks and shop signs are authored 0.45–1.16 yd below the group floor they sit in — a
+    /// ray down from the origin passes beneath that floor and reports open ground, which the
+    /// exterior-scene election reads as "outdoors" and hides. `room_at`'s second pass re-casts from
+    /// `ROOM_UNDER_FLOOR_TOLERANCE` higher; this pins both halves of why that works: the cast from
+    /// the origin really does miss, the lifted one really does find the same floor, and the lift is
+    /// far enough to cover the measured spread and no further.
+    #[test]
+    fn an_under_floor_origin_is_found_only_by_the_lifted_cast() {
+        let floor = [quad(0.0, 20.0)];
+        let nav = [nav(0, [-20.0, -20.0, 0.0], [20.0, 20.0, 0.0], 0, 0)];
+        let lift = super::super::interior::POSITION_PROBE_LIFT;
+        let tol = super::super::interior::ROOM_UNDER_FLOOR_TOLERANCE;
+        // The worst measured burial (Orgrimmar bonfire 177026, 1.16 yd under group 134's floor).
+        for buried in [0.45_f32, 1.16] {
+            let feet = -buried;
+            assert_eq!(
+                area_ray(&floor, &nav, [0.0, 0.0, feet + lift], None),
+                None,
+                "the position cast must miss a floor above the origin ({buried} yd)"
+            );
+            assert_eq!(
+                area_ray(&floor, &nav, [0.0, 0.0, feet + lift + tol], None),
+                Some(0),
+                "the under-floor fallback must find it ({buried} yd)"
+            );
+        }
+        // …and the lift is a tolerance, not a licence: a floor further above than it stays unclaimed,
+        // which is what keeps the storey above out of reach.
+        assert_eq!(
+            area_ray(&floor, &nav, [0.0, 0.0, -(tol + 1.0) + lift + tol], None),
+            None,
+            "a floor beyond the tolerance must stay unclaimed"
+        );
+    }
+
     /// **The column index never changes a down-ray verdict.** A dungeon-shaped face set (a big
     /// stack of small floor quads at varying heights, spread over several groups) answered with
     /// the per-group column index must equal the answer from the plain linear scan, column for

@@ -119,7 +119,9 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         welded_billboard: false,
         alpha_anim: None,
         uv_anim: None,
+        uv_seq: None,
         rgb_anim: None,
+        rgb_seq: None,
         wmo_batch: None,
         env_map: false,
     };

@@ -568,13 +568,22 @@ pub fn parse_m2_render_submeshes(
         // The batch's UV-animation loop (decision 0130 phase 3): batch combo → texAnimLookup →
         // translation track, on the same clocks. Carried on the submesh; the renderer applies it.
         let uv_anim = tex_anim::bake_uv_anim(model, batch.texture_transform_combo_index, seq0_slot);
+        // …and the per-sequence set, carried ONLY when the slots disagree — the shared-material
+        // registry cannot key on a sequence, so a batch whose loop depends on which one is playing
+        // needs a per-instance consumer instead (decision 1408). `uniform()` asks that once here
+        // rather than leaving it assumed; every batch whose slots agree keeps `uv_anim` alone and
+        // the lane it has always taken.
+        let uv_seq = tex_anim::bake_uv_seqs(model, batch.texture_transform_combo_index, &seq_slots)
+            .filter(|set| set.uniform().is_none());
         // The batch's animated RGB tint (the M2Color colour track's runtime half): only a
         // time-varying track bakes — a `Some` here *replaces* the static vertex tint below (a
         // spell effect's white-hot flash cooling to red would otherwise freeze on its first key).
-        let rgb_anim = model
-            .color_rgb_tracks
-            .get(batch.color_index as usize)
-            .and_then(|t| mat_anim::bake_rgb_anim(t, &model.global_sequences, seq0_slot));
+        let rgb_track = model.color_rgb_tracks.get(batch.color_index as usize);
+        let rgb_anim =
+            rgb_track.and_then(|t| mat_anim::bake_rgb_anim(t, &model.global_sequences, seq0_slot));
+        let rgb_seq = rgb_track
+            .and_then(|t| mat_anim::bake_rgb_seqs(t, &model.global_sequences, &seq_slots))
+            .filter(|set| set.uniform().is_none());
         // M2 billboard bones: a batch's vertices ride billboard bones (glow cards, chains) that the
         // real client re-orients to the camera each frame — **each bone independently, about its own
         // pivot**. One batch often packs several such cards: a candelabra's candle glows share a single
@@ -706,7 +715,9 @@ pub fn parse_m2_render_submeshes(
             }
             sub.alpha_anim = alpha_anim.clone(); // every billboard-split group shares the batch's loops
             sub.uv_anim = uv_anim.clone();
+            sub.uv_seq = uv_seq.clone();
             sub.rgb_anim = rgb_anim.clone();
+            sub.rgb_seq = rgb_seq.clone();
             out.push(sub);
         }
     }

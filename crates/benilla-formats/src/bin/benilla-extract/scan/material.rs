@@ -3,12 +3,14 @@
 //!
 //! Blend modes (`blendscan`), per-sequence batch visibility through the alpha combine
 //! (`alphascan`), sampler address modes and the UVs that need them (`uvwrapscan`, `texmodescan`),
-//! and generated-texcoord environment stages (`envmapscan`).
+//! generated-texcoord environment stages (`envmapscan`), and the batches whose animated
+//! texture-transform / tint loop is not the same in every sequence slot, which the bake routes to
+//! a per-placement material (`uvslotscan`).
 
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use benilla_formats::Chain;
+use benilla_formats::{Chain, KeyAnim, SeqLoops};
 
 /// Sweep every `.m2` (under `prefix`, if given) and list the models whose MATERIAL table authors
 /// blend mode 5 (Mod) / 6 (Mod2x) — the multiply-blend census (decision 0528). One line per
@@ -394,5 +396,492 @@ pub fn envmapscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         hits - degenerate,
         sheets.len(),
     );
+    Ok(())
+}
+
+/// The two per-batch channels the bake resolves **per file sequence slot** — the pair
+/// `models::m2_batches` hands the runtime as `uv_seq` / `rgb_seq`. Both are `C3Vector` tracks, so
+/// one classifier serves both; only how many components survive the bake differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    /// The texture transform's **translation** track (`tex_anim::bake_uv_seqs`), read off
+    /// `RenderSubmesh::uv_seq` and its shared-lane twin `uv_anim`.
+    Uv,
+    /// The M2Color **RGB** tint track (`mat_anim::bake_rgb_seqs`), read off `rgb_seq` / `rgb_anim`.
+    Rgb,
+}
+
+impl Channel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uv => "UV ",
+            Self::Rgb => "RGB",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Uv => "UV (texture-transform translation)",
+            Self::Rgb => "RGB (M2Color tint)",
+        }
+    }
+
+    /// The field name the report quotes, so a reader can grep the struct the numbers came from.
+    fn field(self) -> &'static str {
+        match self {
+            Self::Uv => "uv_seq",
+            Self::Rgb => "rgb_seq",
+        }
+    }
+
+    /// Axis names for the value-range cells — one per component the bake keeps. The UV pair stays
+    /// `x`/`y`: the bake carries the track's raw components and how the reference maps them onto
+    /// U/V is still under RE (`tex_anim`'s module doc).
+    fn axes(self) -> &'static [&'static str] {
+        match self {
+            Self::Uv => &["x", "y"],
+            Self::Rgb => &["r", "g", "b"],
+        }
+    }
+}
+
+/// How far apart two baked loops may be and still be the **same authored function**. Tight on
+/// purpose: this is the noise floor of a `u32` millisecond key rebased through an `f32` divide, not
+/// an authoring tolerance — a disagreement anyone could see is orders of magnitude larger.
+const KEY_EPS: f32 = 1e-4;
+
+/// Why one batch's slots disagree — the sub-classification of every batch the bake routed to the
+/// per-placement lane, i.e. of every set whose [`SeqLoops::uniform`] came back `None`.
+///
+/// The question these four answer is whether that verdict is **earned**. `uniform()` compares
+/// `KeyAnim` by `PartialEq` — exact float equality on the clock flags, the period and every key —
+/// so two slots holding the same authored loop can still be split by a single flag or by
+/// sub-epsilon noise in a rebased timestamp. `Dead0` and `RealDiffers` are real divergence, where
+/// one material per placement is the only right answer; `WrapOnly` and `KeysEpsilon` are batches a
+/// coarser comparison would have left on the shared lane, and their count IS the over-application.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Why {
+    /// Slot 0 bakes nothing while a later slot bakes a loop — the B98 shape, the founding case, and
+    /// the only class a slot-0-pinned bake could not render at all.
+    Dead0,
+    /// Every slot bakes the same loop except [`KeyAnim::wrap`]: the sequences carrying it disagree
+    /// on their own loop flag, so one band clamps at its tail where another wraps. Visible only at
+    /// the very end of a one-shot band — and never at all on a placed doodad, which loops.
+    WrapOnly,
+    /// Every slot agrees to within [`KEY_EPS`] on every number and on every flag — the slots differ
+    /// only by float noise in the rebased key times, and exact `PartialEq` is the whole reason they
+    /// are here.
+    KeysEpsilon,
+    /// Genuinely different loops: a different key count, a different interpolation or clock law,
+    /// numbers apart by more than noise — or slot 0 alive against a later slot that holds still,
+    /// DEAD-0's mirror.
+    RealDiffers,
+}
+
+impl Why {
+    const ALL: [Self; 4] = [
+        Self::Dead0,
+        Self::WrapOnly,
+        Self::KeysEpsilon,
+        Self::RealDiffers,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dead0 => "DEAD-0",
+            Self::WrapOnly => "WRAP-ONLY",
+            Self::KeysEpsilon => "KEYS-EPSILON",
+            Self::RealDiffers => "REAL-DIFFERS",
+        }
+    }
+
+    /// The one-line reading of the bucket, printed beside its counts.
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::Dead0 => {
+                "slot 0 bakes nothing while a later slot animates — frozen for ever on the \
+                 shared lane, and the population the per-placement lane was built for"
+            }
+            Self::WrapOnly => {
+                "the slots bake the same loop and disagree only on the WRAP flag — one band \
+                 clamps at its tail where another wraps"
+            }
+            Self::KeysEpsilon => {
+                "the slots agree on every number to within 1e-4 — sub-epsilon noise in the \
+                 rebased keys, split by exact float equality"
+            }
+            Self::RealDiffers => {
+                "genuinely different loops (or slot 0 alive against a dead later slot): no single \
+                 shared loop can serve every sequence"
+            }
+        }
+    }
+}
+
+/// One batch-channel's read of the bake.
+struct Verdict {
+    why: Why,
+    /// The largest numeric disagreement between slot 0 and any other slot. `0.0` means the slots
+    /// are bit-identical — which, for a set the bake kept, means only a *flag* differs.
+    delta: f32,
+    /// The report line's detail cell.
+    detail: String,
+}
+
+/// The largest absolute disagreement between two baked loops over everything a consumer reads: the
+/// period, and every key's time and value. `None` when they are not the same **shape** at all — a
+/// different key count or a different interpolation/clock law is a different function, not noise.
+fn loop_delta<V: AsRef<[f32]>>(a: &KeyAnim<V>, b: &KeyAnim<V>) -> Option<f32> {
+    if a.step != b.step || a.gseq != b.gseq || a.keys.len() != b.keys.len() {
+        return None;
+    }
+    let mut d = (a.period - b.period).abs();
+    for ((ta, va), (tb, vb)) in a.keys.iter().zip(&b.keys) {
+        d = d.max((ta - tb).abs());
+        for (x, y) in va.as_ref().iter().zip(vb.as_ref()) {
+            d = d.max((x - y).abs());
+        }
+    }
+    Some(d)
+}
+
+/// `[.L]` — one character per **file** sequence slot: `L` where the slot bakes a loop, `.` where
+/// its key window moves nothing. Slot 0 is leftmost, so a leading `.` reads as the B98 shape at a
+/// glance. Long tables (a creature's fifty-odd sequences) are truncated to a readable head.
+fn slot_cell<V>(slots: &[Option<KeyAnim<V>>]) -> String {
+    const HEAD: usize = 28;
+    let bits: String = slots
+        .iter()
+        .map(|s| if s.is_some() { 'L' } else { '.' })
+        .collect();
+    let live = slots.iter().filter(|s| s.is_some()).count();
+    if bits.len() <= HEAD {
+        format!("[{bits}]")
+    } else {
+        format!("[{}…] {live}/{} live", &bits[..HEAD], slots.len())
+    }
+}
+
+/// `[Wc.]` — the per-slot clock law, the other half of what `PartialEq` compares: `W` wrap, `c`
+/// clamp, `.` dead. The whole content of a WRAP-ONLY row.
+fn wrap_cell<V>(slots: &[Option<KeyAnim<V>>]) -> String {
+    slots
+        .iter()
+        .map(|s| match s {
+            Some(l) if l.wrap => 'W',
+            Some(_) => 'c',
+            None => '.',
+        })
+        .collect::<String>()
+}
+
+/// `1.500s wrap 28k x[+0.000..+0.938] y[…]` — one baked loop as its consumer sees it: the clock,
+/// the size, and the range it sweeps on every component the bake keeps.
+fn loop_cell<V: AsRef<[f32]>>(l: &KeyAnim<V>, ch: Channel) -> String {
+    let range = ch
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(c, axis)| {
+            let (lo, hi) = l
+                .keys
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), (_, v)| {
+                    let x = v.as_ref()[c];
+                    (lo.min(x), hi.max(x))
+                });
+            format!("{axis}[{lo:+.3}..{hi:+.3}]")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{:>6.3}s {} {:>3}k {range}",
+        l.period,
+        if l.wrap { "wrap " } else { "clamp" },
+        l.keys.len(),
+    )
+}
+
+/// Read one batch-channel's per-slot set exactly as the runtime does — [`SeqLoops::slots`], the
+/// same values [`SeqLoops::uniform`] compared — and say why they disagree.
+fn classify<V: AsRef<[f32]> + PartialEq>(set: &SeqLoops<V>, ch: Channel) -> Verdict {
+    let slots = set.slots();
+    let cell = slot_cell(slots);
+    // A set exists only when SOME slot bakes, so a dead slot 0 is by construction a dead slot 0
+    // beside a live later one — no second test needed.
+    let Some(base) = slots.first().and_then(Option::as_ref) else {
+        let (s, live) = slots
+            .iter()
+            .enumerate()
+            .find_map(|(s, l)| Some((s, l.as_ref()?)))
+            .expect("a set exists only when some slot bakes a loop");
+        return Verdict {
+            why: Why::Dead0,
+            delta: 0.0,
+            detail: format!("{cell} slot 0 dead, slot {s} {}", loop_cell(live, ch)),
+        };
+    };
+    let (mut delta, mut wrap) = (0.0f32, false);
+    for (s, slot) in slots.iter().enumerate().skip(1) {
+        let Some(l) = slot.as_ref() else {
+            return Verdict {
+                why: Why::RealDiffers,
+                delta,
+                detail: format!("{cell} slot 0 {} vs slot {s} dead", loop_cell(base, ch),),
+            };
+        };
+        // Name WHAT diverges, not merely that something did: a value-range cell hides a timing
+        // difference (same extremes, different key times) behind identical-looking brackets, and
+        // that is exactly the ambiguity this scan exists to remove.
+        let reason = match loop_delta(base, l) {
+            Some(d) if d <= KEY_EPS => {
+                delta = delta.max(d);
+                wrap |= l.wrap != base.wrap;
+                continue;
+            }
+            Some(d) => format!("keys apart by {d:.1e}"),
+            None => "a different key count or clock law".to_string(),
+        };
+        return Verdict {
+            why: Why::RealDiffers,
+            delta,
+            detail: format!(
+                "{cell} slot 0 {} vs slot {s} {} — {reason}",
+                loop_cell(base, ch),
+                loop_cell(l, ch),
+            ),
+        };
+    }
+    let why = if wrap {
+        Why::WrapOnly
+    } else {
+        Why::KeysEpsilon
+    };
+    Verdict {
+        why,
+        delta,
+        detail: format!(
+            "{cell} {} clock {} delta {delta:.1e}",
+            loop_cell(base, ch),
+            wrap_cell(slots),
+        ),
+    }
+}
+
+/// Per-channel corpus counters. Model counts are per bucket and count a model once if **any** of
+/// its batches lands there, so they overlap rather than partition.
+#[derive(Default)]
+struct Tally {
+    /// The set is `None`: every slot bakes the same loop, so the batch keeps the shared lane.
+    shared_b: u32,
+    /// …and of those, the ones that actually animate there (`uv_anim`/`rgb_anim` with `period > 0`).
+    shared_live_b: u32,
+    shared_live_m: u32,
+    /// The set is `Some` — batches and models routed to the per-placement lane, by [`Why`].
+    per_b: [u32; 4],
+    per_m: [u32; 4],
+    /// Models with at least one per-placement batch on this channel, whatever the reason.
+    per_m_any: u32,
+    /// WRAP-ONLY batches whose slots are **bit-identical** apart from the flag; the rest carry
+    /// sub-epsilon key noise on top of it.
+    wrap_exact: u32,
+}
+
+/// One model's per-placement batches in one (channel, bucket) — the row the family census and the
+/// worst-hit tail are both built from.
+struct Hit {
+    name: String,
+    ch: Channel,
+    why: Why,
+    batches: u32,
+    /// The model's **file** sequence slot count, straight off the set the bake built.
+    slots: usize,
+}
+
+/// How many rows of the worst-hit tail print (the rest are counted, never silently dropped).
+const TAIL_ROWS: usize = 25;
+
+/// Sweep every `.m2` (optionally under a path prefix) and census the batches the bake routes to a
+/// **per-placement material** because their UV / tint loop is not the same in every file sequence
+/// slot — see the `Uvslotscan` command doc for the why.
+///
+/// It reads the bake's own verdict (`RenderSubmesh::uv_seq` / `rgb_seq`, `Some` exactly when
+/// [`SeqLoops::uniform`] refused the shared lane) rather than re-deriving it: this scan used to
+/// carry a transcribed sampler because the fix it was sizing did not exist yet, and once it did the
+/// twin drifted from it — the very failure `idleslotscan`'s rule names ("beside the parse, so the
+/// census asks the renderer's own question instead of a hand-copied twin that can drift from it").
+/// Every number below is therefore what the runtime sees, and the four PER-PLACEMENT buckets say
+/// how much of it `uniform()`'s exact float equality is *earning*.
+pub fn uvslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut batches) = (0u32, 0u64);
+    let mut tally: [Tally; 2] = Default::default();
+    let mut hits: Vec<Hit> = Vec::new();
+
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        scanned += 1;
+        batches += subs.len() as u64;
+
+        let mut lines: Vec<String> = Vec::new();
+        // This model's own contribution, folded into the corpus tally once per channel below:
+        // (shared, shared-and-live) batch counts, per-bucket batch counts, and the file sequence
+        // slot count — which only a batch carrying a set can report, because the set IS the table.
+        let mut shared = [(0u32, 0u32); 2];
+        let mut per = [[0u32; 4]; 2];
+        let mut slots = [0usize; 2];
+        for (bi, sub) in subs.iter().enumerate() {
+            for ch in [Channel::Uv, Channel::Rgb] {
+                let (verdict, live, n) = match ch {
+                    Channel::Uv => (
+                        sub.uv_seq.as_ref().map(|s| classify(s, ch)),
+                        sub.uv_anim.as_ref().is_some_and(|a| a.period > 0.0),
+                        sub.uv_seq.as_ref().map_or(0, |s| s.slots().len()),
+                    ),
+                    Channel::Rgb => (
+                        sub.rgb_seq.as_ref().map(|s| classify(s, ch)),
+                        sub.rgb_anim.as_ref().is_some_and(|a| a.period > 0.0),
+                        sub.rgb_seq.as_ref().map_or(0, |s| s.slots().len()),
+                    ),
+                };
+                let c = ch as usize;
+                let Some(v) = verdict else {
+                    shared[c].0 += 1;
+                    shared[c].1 += u32::from(live);
+                    continue;
+                };
+                per[c][v.why as usize] += 1;
+                slots[c] = n;
+                if v.why == Why::WrapOnly && v.delta == 0.0 {
+                    tally[c].wrap_exact += 1;
+                }
+                lines.push(format!(
+                    "    {} batch {bi:>3}  {:<12}  {}",
+                    ch.label(),
+                    v.why.label(),
+                    v.detail
+                ));
+            }
+        }
+        for ch in [Channel::Uv, Channel::Rgb] {
+            let c = ch as usize;
+            let t = &mut tally[c];
+            t.shared_b += shared[c].0;
+            t.shared_live_b += shared[c].1;
+            t.shared_live_m += u32::from(shared[c].1 > 0);
+            t.per_m_any += u32::from(per[c].iter().any(|&n| n > 0));
+            for w in Why::ALL {
+                let n = per[c][w as usize];
+                if n > 0 {
+                    t.per_b[w as usize] += n;
+                    t.per_m[w as usize] += 1;
+                    hits.push(Hit {
+                        name: name.clone(),
+                        ch,
+                        why: w,
+                        batches: n,
+                        slots: slots[c],
+                    });
+                }
+            }
+        }
+        if !lines.is_empty() {
+            println!(
+                "{name}  ({} file sequence slots)",
+                slots.iter().copied().max().unwrap_or(0)
+            );
+            for l in &lines {
+                println!("{l}");
+            }
+        }
+    }
+
+    println!();
+    println!("=== summary ===  {scanned} model(s) parsed, {batches} render batch(es)");
+    for ch in [Channel::Uv, Channel::Rgb] {
+        let t = &tally[ch as usize];
+        let per_total: u32 = t.per_b.iter().sum();
+        println!();
+        println!(
+            "=== {} ===  {} batch-channel(s)",
+            ch.title(),
+            u64::from(t.shared_b) + u64::from(per_total)
+        );
+        println!(
+            "  SHARED         {:>7} batch(es)  — `{}` is None: every slot bakes the same loop, so \
+             the batch keeps the per-material lane it has always had",
+            t.shared_b,
+            ch.field()
+        );
+        println!(
+            "    of those     {:>7} batch(es) / {:>4} model(s) carry a LIVE loop there \
+             (period > 0); the rest animate nothing at all",
+            t.shared_live_b, t.shared_live_m
+        );
+        println!(
+            "  PER-PLACEMENT  {:>7} batch(es) / {:>4} model(s)  — `{}` is Some: `uniform()` \
+             refused the shared lane, so the world streamer builds this batch a material per \
+             placement",
+            per_total,
+            t.per_m_any,
+            ch.field()
+        );
+        for w in Why::ALL {
+            println!(
+                "    {:<13} {:>5} batch(es) / {:>4} model(s)  — {}",
+                w.label(),
+                t.per_b[w as usize],
+                t.per_m[w as usize],
+                w.blurb()
+            );
+        }
+        if t.per_b[Why::WrapOnly as usize] > 0 {
+            println!(
+                "      ({} of the WRAP-ONLY batches are bit-identical apart from the flag; the \
+                 rest carry sub-epsilon key noise on top of it)",
+                t.wrap_exact
+            );
+        }
+        // Where each bucket's population LIVES, and which models carry most of it. `World\` is a
+        // placed doodad or WMO prop — the only lane the per-placement material reaches — so a
+        // bucket that is mostly `Creature\`/`Spells\` costs nothing today whatever it says.
+        for w in Why::ALL {
+            let rows: Vec<&Hit> = hits
+                .iter()
+                .filter(|h| h.ch == ch && h.why == w)
+                .collect::<Vec<_>>();
+            if rows.is_empty() {
+                continue;
+            }
+            println!();
+            println!("  --- {} ---  {} model(s)", w.label(), rows.len());
+            let mut fams: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+            for h in &rows {
+                let e = fams.entry(super::family_of(&h.name)).or_default();
+                e.0 += 1;
+                e.1 += h.batches;
+            }
+            for (fam, (m, b)) in &fams {
+                println!("    {fam:<28} {m:>4} model(s)  {b:>5} batch(es)");
+            }
+            let mut tail = rows;
+            tail.sort_by(|a, b| b.batches.cmp(&a.batches).then_with(|| a.name.cmp(&b.name)));
+            for h in tail.iter().take(TAIL_ROWS) {
+                println!(
+                    "      {:>4} batch(es)  {:>3} slots  {}",
+                    h.batches, h.slots, h.name
+                );
+            }
+            if let Some(rest) = tail.len().checked_sub(TAIL_ROWS).filter(|n| *n > 0) {
+                println!("      … and {rest} more (top {TAIL_ROWS} shown)");
+            }
+        }
+    }
     Ok(())
 }

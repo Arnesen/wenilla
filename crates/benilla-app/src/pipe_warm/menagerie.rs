@@ -159,6 +159,10 @@ pub(super) fn spawn_menagerie(
                         false,
                         false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
+                        // The pipeline menagerie warms the SHARED batch material; the
+                        // per-placement lane (1408) builds an identical pipeline, so a clone
+                        // needs no row of its own here.
+                        None,
                     ));
                 }
             }
@@ -198,6 +202,10 @@ pub(super) fn spawn_menagerie(
                         false,
                         false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
+                        // The pipeline menagerie warms the SHARED batch material; the
+                        // per-placement lane (1408) builds an identical pipeline, so a clone
+                        // needs no row of its own here.
+                        None,
                     ));
                 }
             }
@@ -248,6 +256,7 @@ pub(super) fn spawn_menagerie(
                     false,
                     true, // the sky lane
                     light,
+                    None, // the shared lane — see the note above
                 ));
             }
         }
@@ -289,6 +298,7 @@ pub(super) fn spawn_menagerie(
                 false,
                 false, // warms the WORLD lane; the sky lane warms with its own model
                 light,
+                None, // the shared lane — see the note above
             );
             if let Some(m) = materials.get(&plain) {
                 let mut m = m.clone();
@@ -337,6 +347,7 @@ pub(super) fn spawn_menagerie(
                         false,
                         false, // warms the WORLD lane; the sky lane warms with its own model
                         light,
+                        None, // the shared lane — see the note above
                     );
                     if let Some(m) = materials.get(&h) {
                         let mut m = m.clone();
@@ -735,7 +746,9 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         welded_billboard: false,
         alpha_anim: None,
         uv_anim: None,
+        uv_seq: None,
         rgb_anim: None,
+        rgb_seq: None,
         wmo_batch: None,
     }
 }

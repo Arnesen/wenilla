@@ -17,7 +17,7 @@
 
 use benilla_m2::{M2ScalarTrack, M2Vec3Track};
 
-use super::key_anim::{bake_track, KeyAnim, SeqSlot};
+use super::key_anim::{bake_track, KeyAnim, SeqLoops, SeqSlot};
 
 /// One baked scalar loop, seconds — see [`KeyAnim`]. The alpha channels' instantiation.
 pub type ScalarAnim = KeyAnim<f32>;
@@ -157,6 +157,24 @@ pub(super) fn bake_rgb_anim(
     seq: Option<SeqSlot>,
 ) -> Option<RgbAnim> {
     bake_track(track, gseq_durations, seq, |v| v, |_| true, |_| true)
+}
+
+/// The per-sequence form of [`bake_rgb_anim`] — same shape, same reason as
+/// [`super::tex_anim::bake_uv_seqs`]. The tint channel is pinned to slot 0 by the same line and
+/// breaks the same way: `uvslotscan` finds `Spells\\Deterrence_State_Base.m2` tinting
+/// **red→blue in Stand and green→red in Hold**, so the slot-0 pin renders a *wrong colour* there,
+/// not merely a frozen one (decision 1408).
+pub(super) fn bake_rgb_seqs(
+    track: &M2Vec3Track,
+    gseq_durations: &[u32],
+    slots: &[SeqSlot],
+) -> Option<SeqLoops<[f32; 3]>> {
+    SeqLoops::new(
+        slots
+            .iter()
+            .map(|&slot| bake_track(track, gseq_durations, Some(slot), |v| v, |_| true, |_| true))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

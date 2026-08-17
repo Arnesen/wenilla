@@ -34,6 +34,7 @@ pub use anim_summary::*;
 pub use bounds::*;
 pub use collision::*;
 pub(crate) use key_anim::{bake_track, SeqSlot};
+pub use key_anim::{KeyAnim, SeqLoops};
 pub use m2_batches::*;
 pub use mat_anim::{AlphaAnim, AlphaSeq, RgbAnim, ScalarAnim};
 pub use records::*;
@@ -102,7 +103,9 @@ fn remap_submesh(
             welded_billboard: false,      // set by the M2 path from the separability gate (0839)
             alpha_anim: None, // set by the M2 path from the batch's colour/weight tracks
             uv_anim: None,    // set by the M2 path from the batch's texture transform
+            uv_seq: None,     // …and its per-sequence set, when the slots disagree (1408)
             rgb_anim: None,   // set by the M2 path from the batch's colour RGB track
+            rgb_seq: None,    // …ditto (1408)
             wmo_batch: None,  // set by the WMO path from the MOGP batch-section counts
             env_map: false,   // set by the M2 path from texture_unit_lookup[texCoordSet] > 2
         },

@@ -664,7 +664,9 @@ impl AssetLoader for WmoModelLoader {
                     billboard: None,            // WMO geometry isn't billboarded
                     alpha_anim: None,           // WMO batches carry no M2 colour/weight tracks
                     uv_anim: None,              // …nor texture transforms
-                    rgb_anim: None,             // …nor M2Color tints
+                    uv_seq: None,               // …so no per-sequence set either (1408)
+                    rgb_anim: None,
+                    rgb_seq: None,            // …nor M2Color tints
                     wmo_batch: sub.wmo_batch, // the MOBA section — an interior group's lighting law
                     ground_quad: None,        // the fx decal lane is M2-only
                     geometry: std::sync::Arc::new(sub),
