@@ -187,7 +187,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "only Claw can autocast"
     );
     assert_eq!(
-        textures(&quads, "benilla:autocast-shine"),
+        textures(&quads, "benilla:autocast-shine:1.2"),
         1,
         "the shine marker on Claw alone — enabled, not merely allowed"
     );
@@ -210,7 +210,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
     s.resolve();
     let gone = s.extract();
     assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
-    assert_eq!(textures(&gone, "benilla:autocast-shine"), 0);
+    assert_eq!(textures(&gone, "benilla:autocast-shine:1.2"), 0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

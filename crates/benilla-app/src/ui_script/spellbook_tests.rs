@@ -488,6 +488,59 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
     assert!(!s
         .eval::<bool>("return SpellButton3Shine:IsVisible()")
         .unwrap());
+    // The corner brackets' RECT, through the live widget. Asserted on the resolved rect rather
+    // than the XML, so an anchor bug between the two is still caught — and CENTERED with no
+    // offset, which is what makes them concentric with the shine below (1393).
+    let br: Vec<f32> = [
+        "GetWidth()",
+        "GetHeight()",
+        "GetLeft() + SpellButton1AutoCastable:GetWidth() / 2 - (SpellButton1:GetLeft() + SpellButton1:GetWidth() / 2)",
+        "GetBottom() + SpellButton1AutoCastable:GetHeight() / 2 - (SpellButton1:GetBottom() + SpellButton1:GetHeight() / 2)",
+    ]
+    .iter()
+    .map(|e| {
+        s.eval::<f32>(&format!("return SpellButton1AutoCastable:{e}"))
+            .unwrap()
+    })
+    .collect();
+    assert!(
+        (br[0] - 71.53).abs() < 0.01 && (br[1] - 71.53).abs() < 0.01,
+        "brackets are {}x{}, 1393 draws them at 71.53 so the art reaches this button's corners",
+        br[0],
+        br[1]
+    );
+    assert!(
+        br[2].abs() < 0.01 && br[3].abs() < 0.01,
+        "brackets sit ({}, {}) off the button's centre; the ref centres them exactly",
+        br[2],
+        br[3]
+    );
+
+    // The marker's RECT: 1391 gave it the ref's own 36x36 at CENTER (1,1); 1393 squares it on the
+    // button instead, so the glow and the brackets share a centre. Checked here rather than
+    // trusted to the XML, because the whole spell-book thread turns on where this viewport sits.
+    let geom: Vec<f32> = ["GetWidth", "GetHeight"]
+        .iter()
+        .map(|m| {
+            s.eval::<f32>(&format!("return SpellButton1Shine:{m}()"))
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        (geom[0] - 37.0).abs() < 0.01 && (geom[1] - 37.0).abs() < 0.01,
+        "shine marker is {geom:?}, expected 37x37 (1393 squares it on the button)"
+    );
+    let dx = s
+        .eval::<f32>("return SpellButton1Shine:GetLeft() - SpellButton1:GetLeft()")
+        .unwrap();
+    let dy = s
+        .eval::<f32>("return SpellButton1Shine:GetBottom() - SpellButton1:GetBottom()")
+        .unwrap();
+    assert!(
+        dx.abs() < 0.01 && dy.abs() < 0.01,
+        "shine marker sits at ({dx}, {dy}) inside the button; 1393 squares it on the button so it \
+         is concentric with the brackets — the ref's +1,+1 is what read as a top/right bias"
+    );
 
     // ── The clicks ────────────────────────────────────────────────────────────────────────────
     // Left: a pet cast, on the pet queue and NOT the player's.

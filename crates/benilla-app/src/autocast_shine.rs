@@ -38,14 +38,25 @@
 //! MODEL UNITS → FrameXML units is the widget's own projection, not a calibration (wow-re
 //! `system/ui/scratch/modelframe-animation-clock.md`, decision 1321's fold-back): the ortho leg
 //! collapses to **1280 × modelScale × layoutScale** FrameXML units per model unit, independent of
-//! aspect and resolution; `scale="1.2"` on the ref's `<Model>` is SetModelScale, so the 0.02 path
-//! is **30.72 units** across a 30-unit button — 1.024×, overhanging its top and right by 2.4% —
-//! and the model ORIGIN is the frame rect's BOTTOM-LEFT, which is why a square authored 0..0.02
-//! lands across the whole button instead of in one quadrant.
+//! aspect and resolution; `scale=` on the ref's `<Model>` is SetModelScale, and the model ORIGIN
+//! is the frame rect's BOTTOM-LEFT, which is why a square authored 0..0.02 lands across the whole
+//! rect instead of in one quadrant.
 //!
-//! **The stars on that path do NOT take the same projection** ([`STAR`], decision 1386): their
-//! half-extent is added after the transform, in 1280-unit space with no `modelScale`, so the
-//! square is scaled by 1.2 and the stars standing on it are not.
+//! **The `<Model>`'s rect and scale are per-TEMPLATE, and the reference does not repeat itself**
+//! (decision 1391) — which is why they ride the [`ShineSite`] and not a constant:
+//!
+//! - **pet button** — `setAllPoints` on 30×30 at `scale="1.2"`: the path is **30.72 units**,
+//!   1.024× the button, overhanging its top and right by 2.4% and clipped there.
+//! - **spell book button** — its own `<Size>36×36</Size>` at `CENTER (1,1)` on a 37×37 button, at
+//!   `scale="1.22"`: the path is **31.232 units** inside a 36-unit rect that itself sits 1.5 units
+//!   in from the button's bottom-left.
+//!
+//! **The stars on that path do NOT take the same projection** ([`STAR`], decisions 1386/1390):
+//! their half-extent is an EYE-SPACE length added after the transform, so it misses `modelScale`
+//! — the square is scaled by 1.2 and the stars standing on it are not — and, unlike the square,
+//! it keeps the ortho leg's aspect term: `2 · half · √(W² + H²)` **window px**, free of UI scale
+//! and frame scale. 12.80 px at 1024×768; 14.69 at 1280×720. 1386 froze the 4:3 case into a
+//! constant, which is why our 16:9 stars were 22 % small until 1390.
 //!
 //! **And the widget is its own scissor** ([`site_quads`], decision 1387): a `<Model>` installs its
 //! frame rect as the VIEWPORT for the duration of its draw and restores it after, so the model
@@ -55,8 +66,9 @@
 //!
 //! **We draw the authored population, not a sample of it** (decision 1386). `rate × life` is
 //! 300 live particles per emitter, 1200 for the model, and that number IS the look: the bone
-//! lays one down every 0.205 units of rim while a newborn star is 12.8 units across, so ~62 of
-//! them pile onto any point of the band and ADD saturates it into one continuous flaming rim —
+//! lays one down every 0.205 units of rim while a newborn star is 12.8 units across at 4:3 (more
+//! on a widescreen — [`STAR`]), so ~62 of them pile onto any point of the band and ADD saturates
+//! it into one continuous flaming rim —
 //! unevenly by channel (the ramp is gold, so R and G clip where B does not, which is why it
 //! reads gold and not white), and what travels is the brightness envelope, not any one star.
 //! 1383 shipped a 23-sample stand-in for that population, chosen to keep the *coverage*
@@ -80,28 +92,69 @@ use bevy::prelude::*;
 
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads};
 
-/// The script layer's registration token: a `Texture` region with this path converts to **no
-/// quads** — the conversion records a [`ShineSite`] at its rect/z instead, and [`emit_shine`]
-/// draws there. Ours, not the install's — the string never reaches the asset resolver.
+/// The script layer's registration token: a `Texture` region whose path starts with this converts
+/// to **no quads** — the conversion records a [`ShineSite`] at its rect/z instead, and
+/// [`emit_shine`] draws there. Ours, not the install's — the string never reaches the resolver.
+///
+/// An optional `:<f32>` suffix carries the `<Model>`'s **`scale=`** ([`token_model_scale`]), which
+/// is `SetModelScale` and is not the same on every button that wears this shine (1391).
 pub(crate) const SHINE_TOKEN: &str = "benilla:autocast-shine";
+
+/// Read a token's model scale, or `None` if `path` is not a shine token at all — the single
+/// definition of what the token's grammar is, shared by the conversion (which records the site)
+/// and the shipped-XML sweep (which must exempt exactly this and nothing that merely resembles
+/// it, so a typo still fails the archive check).
+pub(crate) fn token_model_scale(path: &str) -> Option<f32> {
+    match path.strip_prefix(SHINE_TOKEN)? {
+        "" => Some(1.2),
+        rest => rest.strip_prefix(':')?.parse().ok(),
+    }
+}
 
 /// The spark art — the M2's own emitter texture, resolved once per site at conversion time
 /// through the same resolver every UI texture uses.
 pub(crate) const STAR_TEXTURE: &str = "Interface\\Buttons\\GlowStar";
 
-/// The rim square's side in FrameXML units: 0.02 model units × 1280 × the ref Model's 1.2.
-const SIZE: f32 = 0.02 * 1280.0 * 1.2;
-/// The size ramp's FULL widths in FrameXML units — **and NOT projected like [`SIZE`]**
-/// (decision 1386, wow-re `modelframe-particle-density.md`, correcting 1321's C2).
+/// FrameXML units per model unit — `768 · 5/3`, **aspect- and resolution-independent** (wow-re
+/// `modelframe-clip-and-scale.md` C2, confirmed exactly as 1321 recorded it): 1 model unit is
+/// *not* 1 layout unit, because `0x76d1a0` always folds in `G48 · 5/3` (`76d1c6 0x41ae70(1.0)` =
+/// G48 · `76d1cb fmul [0x80655c]` = f32(5/3)), and that `G48` cancels the `768·√(a²+1)` in the
+/// FrameXML-unit definition. The star's half-extent ([`STAR`]) escapes that fold, which is the
+/// whole reason the two constants no longer live in the same space.
+const PER_MODEL_UNIT: f32 = 1280.0;
+
+/// The rim square's side in FrameXML units at a given `SetModelScale`: the M2's authored
+/// 0.02-unit bone square through [`PER_MODEL_UNIT`]. **30.72 at the pet bar's `scale="1.2"`,
+/// 31.23 at the spell book's `scale="1.22"`** — the ref writes a different number on each
+/// template and 1391 stopped averaging them into one constant.
+fn side(model_scale: f32) -> f32 {
+    0.02 * PER_MODEL_UNIT * model_scale
+}
+/// The size ramp's authored **half-extents, in MODEL units** (`file+0x104`) — deliberately not
+/// pre-projected like [`side`], because they do not take [`side`]'s projection (decision 1390;
+/// wow-re `modelframe-clip-and-scale.md` C3, which corrects the FrameXML-unit constant 1386 wrote
+/// here and confirms everything else in that record).
 ///
-/// A particle quad is not built in model space and transformed with the model: `0x7b2a50` adds a
-/// bare `±half` from the `±1.0` corner table to the ALREADY-TRANSFORMED position, and file flag
-/// `+0x04` bit `0x200` gates off the one multiply by the emitter scale (`0x7b2bab fmul
-/// [edi+0x264]`, which holds a live and correct 1.2 that is never read). So the authored
-/// half-extent lands in POST-transform units — `768·√(a²+1)` = 1280 FrameXML units at 4:3 — and
-/// the ref Model's `scale="1.2"` reaches the bone square but **not** the stars on it. Widths are
-/// `{0.005, 0.0015, 0.001} × 2 × 1280` = 12.8 → 3.84 → 2.56.
-const STAR: [f32; 3] = [0.010 * 1280.0, 0.003 * 1280.0, 0.002 * 1280.0];
+/// A particle quad is not built in model space and transformed with the model: `0x7b3d20`
+/// installs an **identity view** for the whole of the emitter's vertex generation (`7b3e41` save
+/// / `7b3e46` install / restored at the tail), so the `±half` that `0x7b2a50` adds from the
+/// `±1.0` corner table to the already-transformed position is an **eye-space length**; and file
+/// flag `+0x04` bit `0x200` gates off the one multiply by the emitter scale (`0x7b2ba6 je`, taken
+/// because `0x7b2ba3 test ah,0x2` finds the bit clear — the two *ungated* readers of
+/// `[emitter+0x264]` are the bounding sphere). So `SetModelScale(1.2)` reaches the bone square
+/// but **not** the stars standing on it.
+///
+/// The consequence, and the reason this is a model-unit constant now: an eye-space length is
+/// projected by the ortho leg, which maps the frame's *diagonal-normalized* layout rect to NDC
+/// ±1 — so a star's size is **aspect-dependent where the path's is not**.
+///
+/// > full width = `2 · half · 768·√(a²+1)` FrameXML units = **`2 · half · √(W² + H²)` window px**
+///
+/// The pixel form is the one [`site_quads`] uses: no UI scale, no frame scale, just the screen
+/// diagonal. That is 12.80 px at 1024×768 — the number 1386 froze into a constant — but **14.69
+/// px at 1280×720**, 22 % larger against a button 4 % *smaller*. The reference's shine really is
+/// fatter on a widescreen; the 1280 that 1321 folded back is the 4:3 case of a law, not the law.
+const STAR: [f32; 3] = [0.005, 0.0015, 0.001];
 /// The in-plane billboard spin, radians per second of age (`file+0x198`, `angle = spin · age`,
 /// closed form at `0x7b2ddc`) — 0.1 rad = 5.73° over a particle's whole life. The per-particle
 /// sign flip that `0x7b2dea` would apply is gated by runtime bit `0x8000` ← file `+0x04` bit
@@ -151,16 +204,16 @@ fn ramp_color(age: f32) -> [f32; 4] {
 /// Where an emitter sits at lap fraction `f` (wrapped into 0..1), as a FrameXML-unit offset from
 /// the button's BOTTOM-LEFT (the model's own origin — module doc). The bones walk the square
 /// clockwise on screen from that corner, one edge per quarter-lap.
-fn point(f: f32) -> (f32, f32) {
+fn point(f: f32, side: f32) -> (f32, f32) {
     let f = f - f.floor();
     let edge = f * 4.0;
     let leg = edge.floor();
     let t = edge - leg;
     match leg as u32 {
-        0 => (0.0, t * SIZE),         // bottom-left → top-left
-        1 => (t * SIZE, SIZE),        // top-left → top-right
-        2 => (SIZE, SIZE - t * SIZE), // top-right → bottom-right
-        _ => (SIZE - t * SIZE, 0.0),  // bottom-right → bottom-left
+        0 => (0.0, t * side),         // bottom-left → top-left
+        1 => (t * side, side),        // top-left → top-right
+        2 => (side, side - t * side), // top-right → bottom-right
+        _ => (side - t * side, 0.0),  // bottom-right → bottom-left
     }
 }
 
@@ -185,12 +238,13 @@ fn live_per_emitter() -> usize {
     *N
 }
 
-/// A multiplier on the authored star width — the second axis of the same open question
-/// (`WOW_SHINE_SIZE=<f>`, default 1.0). The band's saturated THICKNESS is set by the quad width
-/// and its brightness by width × count, so the two trade off and neither can be read off a
-/// capture alone; this exists to bracket them against the director's reference shots while
-/// wow-re settles which projection a particle quad actually takes (claim C2 of the dispatch —
-/// whether the authored 0.005 is a half-extent, and whether `SetModelScale` multiplies it).
+/// A multiplier on the authored star width (`WOW_SHINE_SIZE=<f>`, default 1.0) — an A/B
+/// instrument, not a pending question: the projection it used to bracket is settled (1390).
+///
+/// The band's saturated THICKNESS is set by the quad width and its brightness by width × count,
+/// so the two trade off and neither can be read off a capture alone — which is exactly why this
+/// stays. `WOW_SHINE_SIZE=0.817` reproduces the pre-1390 4:3 sizing on a 16:9 window, so a
+/// reference shot captured at 4:3 can be compared against ours without rebuilding.
 /// **Never a tuning knob to leave dialled**: the shipped value is the one the bytes say.
 fn size_scale() -> f32 {
     static S: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
@@ -203,15 +257,16 @@ fn size_scale() -> f32 {
 }
 
 /// The live population, computed once: one entry per particle, oldest last, carrying everything
-/// its FIXED age fixes — its age, its width, and its colour+alpha. Only the position moves per
+/// its FIXED age fixes — its age, its **model-unit half-extent** ([`STAR`]; the site's screen
+/// diagonal turns it into pixels at emit), and its colour+alpha. Only the position moves per
 /// frame, which is what keeps a 1200-quad emitter cheap.
 ///
 /// The ages are the steady state of a `rate`/s emitter: one particle born every `1/rate` seconds,
 /// none older than `life`. **Our one departure from the reference's own timeline**: it spawns in
 /// per-frame batches (≈5 coincident particles per frame at 60 fps, at whatever position the bone
 /// held that frame), where this spreads the same population evenly along the path. At the
-/// authored 15.4-unit star width against a 0.2-unit spawn pitch the two are the same picture;
-/// unlike a sample count, it costs nothing to revisit, because the population is the file's.
+/// authored star width against a 0.2-unit spawn pitch the two are the same picture; unlike a
+/// sample count, it costs nothing to revisit, because the population is the file's.
 static PARTICLES: std::sync::LazyLock<Vec<(f32, f32, [f32; 4])>> = std::sync::LazyLock::new(|| {
     let size_scale = size_scale();
     (0..live_per_emitter())
@@ -239,8 +294,16 @@ pub(crate) struct ShineSite {
     /// The token's effective UI alpha (parent chain folded), multiplied into every spark.
     pub(crate) alpha: f32,
     /// FrameXML-units → window-pixels factor at the conversion that recorded this site (the
-    /// extract's `s`); a resize re-extracts and re-records.
+    /// extract's `s`); a resize re-extracts and re-records. Scales the bone PATH ([`side`]).
     pub(crate) scale: f32,
+    /// The `<Model>`'s `SetModelScale`, read off the token ([`token_model_scale`]) — the ref
+    /// writes `1.2` on the pet button and `1.22` on the spell book's, so it belongs to the SITE
+    /// and not to a module constant (1391). Scales the bone path only; never the stars.
+    pub(crate) model_scale: f32,
+    /// The window's diagonal in the same pixels, `√(W² + H²)` — what scales the STARS, and
+    /// nothing else does (decision 1390; [`STAR`]'s law is in screen px, free of UI scale and
+    /// frame scale). Recorded beside `scale` so a resize re-answers both at once.
+    pub(crate) diag: f32,
     /// `Interface\Buttons\GlowStar`, resolved at record time.
     pub(crate) texture: Handle<Image>,
 }
@@ -310,6 +373,7 @@ fn site_quads(site: &ShineSite, ms: u32, out: &mut Vec<UiQuad>) {
     }
     let lap = ms as f32 / PERIOD_MS as f32;
     let s = site.scale;
+    let side = side(site.model_scale);
     // The model origin: the button rect's bottom-left, in y-down px.
     let (ox, oy) = (site.rect.min.x, site.rect.max.y);
     for e in 0..EMITTERS {
@@ -323,9 +387,11 @@ fn site_quads(site: &ShineSite, ms: u32, out: &mut Vec<UiQuad>) {
             // The particle's fixed place in the loop: its emitter's quarter-lap offset, less how
             // far the bone has moved on since this star was born (it is baked into the model
             // frame at birth and never rides the bone — wow-re §7, flags bit 0x10 clear).
-            let (x, y) = point(lap + corner - age / PERIOD);
+            let (x, y) = point(lap + corner - age / PERIOD, side);
             let (cx, cy) = (ox + x * s, oy - y * s);
-            let half = w * s * 0.5;
+            // The path took `s`; the star takes the screen diagonal instead ([`STAR`]) — the two
+            // are different projections of the same model, not a shared one.
+            let half = w * site.diag;
             out.push(UiQuad {
                 rect: Rect::new(cx - half, cy - half, cx + half, cy + half),
                 z_key: site.z,
@@ -360,6 +426,40 @@ impl Plugin for AutocastShinePlugin {
 mod tests {
     use super::*;
 
+    /// The pet button's rim square — the geometry every golden below was taken at
+    /// (`scale="1.2"`, the ref's own value on that template).
+    fn s12() -> f32 {
+        side(1.2)
+    }
+
+    /// The token's grammar (1391): it carries the `<Model>`'s `scale=`, because the reference
+    /// writes a different one on each template that wears this shine — and it still refuses
+    /// anything that merely looks like the token, which is what keeps the shipped-XML archive
+    /// sweep honest about a typo.
+    #[test]
+    fn the_token_carries_the_models_scale_and_nothing_else_parses_as_one() {
+        assert_eq!(token_model_scale("benilla:autocast-shine:1.2"), Some(1.2));
+        assert_eq!(token_model_scale("benilla:autocast-shine:1.22"), Some(1.22));
+        assert_eq!(
+            token_model_scale(SHINE_TOKEN),
+            Some(1.2),
+            "bare = the pet bar's"
+        );
+        for bad in [
+            "benilla:autocast-shin",
+            "benilla:autocast-shine2",
+            "benilla:autocast-shine:",
+            "benilla:autocast-shine:x",
+            "benilla:autocast-shine1.22",
+            "Interface\\Buttons\\GlowStar",
+        ] {
+            assert_eq!(token_model_scale(bad), None, "{bad} must not parse");
+        }
+        // The two rim squares the shipped templates actually ask for.
+        assert!((side(1.2) - 30.72).abs() < 1e-4, "pet button");
+        assert!((side(1.22) - 31.232).abs() < 1e-4, "spell book");
+    }
+
     /// The population golden (1386): the emitter keeps `rate × life` particles alive, aged one
     /// spawn interval apart, none past its life — the file's own numbers, so a constant edit
     /// cannot quietly re-open the sampling era.
@@ -376,11 +476,12 @@ mod tests {
         }
         assert!(PARTICLES.iter().all(|p| p.0 < LIFE));
         // Density is what the look rests on: the bone lays a particle every 0.20 units of rim
-        // while a newborn star is 15.3 units wide, so ~75 stars pile onto any point of the
-        // band. Additive, that saturates — the reference's thick continuous rim, and exactly
-        // what 1383's 23 samples (7.7 units apart, one star deep) could not produce.
-        let pitch = 4.0 * SIZE / PERIOD / RATE;
-        let depth = ramp(STAR, 0.0) / pitch;
+        // while a newborn star is 12.8 units wide at 4:3, so ~60 stars pile onto any point of
+        // the band. Additive, that saturates — the reference's thick continuous rim, and exactly
+        // what 1383's 23 samples (7.7 units apart, one star deep) could not produce. Both terms
+        // are in FrameXML units here, so the star takes the 4:3 case of its own law (1390).
+        let pitch = 4.0 * s12() / PERIOD / RATE;
+        let depth = 2.0 * ramp(STAR, 0.0) * 1280.0 / pitch;
         assert!(
             depth > 50.0,
             "only {depth:.0} stars deep — that will not saturate"
@@ -399,6 +500,8 @@ mod tests {
             clip: None,
             alpha: 1.0,
             scale: 1.0,
+            model_scale: 1.2,
+            diag: 1280.0, // 1024×768: s = 1 and the diagonal is 1280 — the law's 4:3 case
             texture: Handle::default(),
         };
         let at = |ms: u32| {
@@ -423,12 +526,12 @@ mod tests {
         near(at(0), (0.0, 0.0), "clock 0: the bottom-left origin");
         near(
             at(250),
-            (0.0, SIZE / 2.0),
+            (0.0, s12() / 2.0),
             "quarter edge in: the LEFT edge's midpoint (LINEAR)",
         );
-        near(at(500), (0.0, SIZE), "clock 500 ms: top-left");
-        near(at(1000), (SIZE, SIZE), "clock 1000 ms: top-right");
-        near(at(1500), (SIZE, 0.0), "clock 1500 ms: bottom-right");
+        near(at(500), (0.0, s12()), "clock 500 ms: top-left");
+        near(at(1000), (s12(), s12()), "clock 1000 ms: top-right");
+        near(at(1500), (s12(), 0.0), "clock 1500 ms: bottom-right");
         near(at(2000), (0.0, 0.0), "clock 2000 ms wraps onto clock 0");
         // The newborn quad wears the ramp's birth values (the inset included — it is 0.5 % of
         // the way to the mid key already), the additive blend the emitter authors, and the
@@ -436,11 +539,9 @@ mod tests {
         let mut out = Vec::new();
         site_quads(&site, 0, &mut out);
         let head = &out[0];
-        assert!((head.rect.max.x - head.rect.min.x - ramp(STAR, 0.0)).abs() < 0.01);
-        assert!(
-            head.rect.max.x - head.rect.min.x < STAR[0],
-            "the inset bites"
-        );
+        let width = head.rect.max.x - head.rect.min.x;
+        assert!((width - 2.0 * ramp(STAR, 0.0) * site.diag).abs() < 0.01);
+        assert!(width < 2.0 * STAR[0] * site.diag, "the inset bites");
         assert_eq!(head.color, ramp_color(0.0));
         assert!(head.additive);
         assert_eq!(head.z_key, 42);
@@ -463,6 +564,8 @@ mod tests {
             clip: None,
             alpha: 1.0,
             scale: 1.0,
+            model_scale: 1.2,
+            diag: 1280.0, // 1024×768: s = 1 and the diagonal is 1280 — the law's 4:3 case
             texture: Handle::default(),
         };
         let mut out = Vec::new();
@@ -486,7 +589,7 @@ mod tests {
             .map(|q| site.rect.min.x - q.rect.min.x)
             .fold(f32::MIN, f32::max);
         assert!(
-            (worst - ramp(STAR, 0.0) / 2.0).abs() < 0.01,
+            (worst - ramp(STAR, 0.0) * site.diag).abs() < 0.01,
             "the newborn star should hang exactly half its width past the left rim, not {worst}"
         );
 
@@ -511,20 +614,30 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// The two laws decision 1386 took off the bytes, pinned where they can't drift back: the
-    /// star's projection is the POST-transform one (1280, no `modelScale`) while the bone square
-    /// keeps the model's 1.2, and every particle spins the same way at `spin · age`.
+    /// The two projections and the spin, pinned where they can't drift back into one another
+    /// (1386, corrected by 1390): the bone square is 1280/model-unit × the Model's 1.2 at every
+    /// aspect, the star is an eye-space length that takes the screen diagonal and neither scale,
+    /// and every particle spins the same way at `spin · age`.
     #[test]
     fn the_star_skips_the_models_scale_and_every_spin_turns_one_way() {
-        assert!((STAR[0] - 12.8).abs() < 1e-4, "2 × 0.005 × 1280 — no 1.2");
+        // The bone square: 1280 per model unit and the Model's 1.2, at EVERY aspect (C2).
         assert!(
-            (SIZE - 30.72).abs() < 1e-4,
+            (s12() - 30.72).abs() < 1e-4,
             "the bone square DOES take the 1.2"
         );
+        // The star: `2 · half · √(W² + H²)` window px, no 1.2 and no UI scale — so unlike the
+        // square it MOVES with the window's shape (C3). 1024×768 is the case 1386 mistook for
+        // the whole law; 1280×720 is 22 % wider on a button 4 % narrower.
+        let width = |w: f32, h: f32| 2.0 * STAR[0] * (w * w + h * h).sqrt();
+        assert!((width(1024.0, 768.0) - 12.80).abs() < 0.01, "4:3");
+        assert!((width(1280.0, 720.0) - 14.69).abs() < 0.01, "16:9");
         assert!(
-            (SIZE / STAR[0] - 2.4).abs() < 1e-5,
-            "the square is 2.4 star-widths across; 1321's 2.0 was the 1.2 leaking into the star"
+            width(1280.0, 720.0) > 1.14 * width(1024.0, 768.0),
+            "the aspect term is what 1386 froze out; it must be live"
         );
+        // The square is 2.4 star-widths across at 4:3 — 1321's 2.0 was the 1.2 leaking into the
+        // star. It is only 2.1 at 16:9, and that drift IS the law, not a rounding.
+        assert!((s12() / width(1024.0, 768.0) - 2.4).abs() < 1e-3);
 
         let site = ShineSite {
             rect: Rect::new(0.0, 0.0, 30.0, 30.0),
@@ -532,6 +645,8 @@ mod tests {
             clip: None,
             alpha: 1.0,
             scale: 1.0,
+            model_scale: 1.2,
+            diag: 1280.0, // 1024×768: s = 1 and the diagonal is 1280 — the law's 4:3 case
             texture: Handle::default(),
         };
         let mut out = Vec::new();
@@ -555,11 +670,11 @@ mod tests {
     /// bone 1 at BR, bone 2 at TR and bone 3 at TL.
     #[test]
     fn the_bones_walk_one_clockwise_cycle_each_lagging_the_last() {
-        assert_eq!(point(0.0), (0.0, 0.0), "bottom-left at 0 s");
-        assert_eq!(point(0.25), (0.0, SIZE), "top-left at 0.5 s");
-        assert_eq!(point(0.5), (SIZE, SIZE), "top-right at 1.0 s");
-        assert_eq!(point(0.75), (SIZE, 0.0), "bottom-right at 1.5 s");
-        assert_eq!(point(1.0), (0.0, 0.0), "home at 2.0 s");
+        assert_eq!(point(0.0, s12()), (0.0, 0.0), "bottom-left at 0 s");
+        assert_eq!(point(0.25, s12()), (0.0, s12()), "top-left at 0.5 s");
+        assert_eq!(point(0.5, s12()), (s12(), s12()), "top-right at 1.0 s");
+        assert_eq!(point(0.75, s12()), (s12(), 0.0), "bottom-right at 1.5 s");
+        assert_eq!(point(1.0, s12()), (0.0, 0.0), "home at 2.0 s");
 
         // Where each emitter's newborn particle sits at clock 0, straight off the producer.
         let site = ShineSite {
@@ -568,6 +683,8 @@ mod tests {
             clip: None,
             alpha: 1.0,
             scale: 1.0,
+            model_scale: 1.2,
+            diag: 1280.0, // 1024×768: s = 1 and the diagonal is 1280 — the law's 4:3 case
             texture: Handle::default(),
         };
         let mut out = Vec::new();
@@ -588,11 +705,11 @@ mod tests {
         near(born(0), (0.0, 0.0), "bone 0 opens at BL");
         near(
             born(1),
-            (SIZE, 0.0),
+            (s12(), 0.0),
             "bone 1 opens at BR — a quarter lap BEHIND bone 0",
         );
-        near(born(2), (SIZE, SIZE), "bone 2 opens at TR");
-        near(born(3), (0.0, SIZE), "bone 3 opens at TL");
+        near(born(2), (s12(), s12()), "bone 2 opens at TR");
+        near(born(3), (0.0, s12()), "bone 3 opens at TL");
     }
 
     /// Decision 1321's clock law, on the native accumulator: at a exact 60 fps the floor of

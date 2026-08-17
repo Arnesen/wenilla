@@ -559,7 +559,9 @@ pub(super) fn drive_script(
                 portrait_unit: None,
                 path,
                 ..
-            } => path.as_deref() != Some(crate::autocast_shine::SHINE_TOKEN),
+            } => !path
+                .as_deref()
+                .is_some_and(|p| crate::autocast_shine::token_model_scale(p).is_some()),
             _ => false,
         };
         if !changed
@@ -581,6 +583,7 @@ pub(super) fn drive_script(
             convert_entry(
                 extracted[i].clone(),
                 s,
+                w,
                 h,
                 &mut assets,
                 &mut images,
@@ -685,6 +688,7 @@ pub(super) fn drive_script(
         convert_entry(
             eq,
             s,
+            w,
             h,
             &mut assets,
             &mut images,
@@ -805,6 +809,10 @@ pub(super) fn drive_script(
 fn convert_entry(
     eq: benilla_ui::script::ExtractedQuad,
     s: f32,
+    // The window, logical px. `h` flips y-up WoW space into the y-down quad pass; `w` is here for
+    // the one producer whose law is in SCREEN pixels rather than FrameXML units — the autocast
+    // shine's particle size, which the reference projects by the screen diagonal (decision 1390).
+    w: f32,
     h: f32,
     assets: &mut Option<ResMut<WorldAssets>>,
     images: &mut Assets<Image>,
@@ -871,7 +879,10 @@ fn convert_entry(
             // `autocast_shine::emit_shine` (UiQuadAppend) animates the sparks there with zero
             // per-frame script-layout traffic. A side-channel arm, so deliberately NOT
             // splice-simple (the `simple` predicate above excludes the token by path).
-            if path.as_deref() == Some(crate::autocast_shine::SHINE_TOKEN) {
+            if let Some(model_scale) = path
+                .as_deref()
+                .and_then(crate::autocast_shine::token_model_scale)
+            {
                 // A no-assets context (the extract test harness; a capture booted without the
                 // archive) records the site with the default handle — the site's GEOMETRY is
                 // the registration, and the live app always has the resolver.
@@ -885,6 +896,8 @@ fn convert_entry(
                     clip,
                     alpha: eq.alpha,
                     scale: s,
+                    model_scale,
+                    diag: (w * w + h * h).sqrt(),
                     texture: star,
                 });
                 return;

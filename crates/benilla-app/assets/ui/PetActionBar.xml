@@ -437,7 +437,10 @@
                         <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                     </Anchors>
                 </Texture>
-                <Texture name="$parentShine" file="benilla:autocast-shine" hidden="true">
+                <!-- The ref's $parentAutoCast <Model> here IS setAllPoints on the 30x30 button,
+                     at scale="1.2" — the suffix carries that scale the way the ref's own XML
+                     does (its sibling in SpellBookFrame.xml writes a different one). -->
+                <Texture name="$parentShine" file="benilla:autocast-shine:1.2" hidden="true">
                     <Anchors>
                         <Anchor point="TOPLEFT"/>
                         <Anchor point="BOTTOMRIGHT"/>

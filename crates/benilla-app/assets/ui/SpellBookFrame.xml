@@ -637,15 +637,43 @@
                 </Texture>
             </Layer>
             <Layer level="OVERLAY">
-                <!-- ref SpellButtonTemplate's $parentAutoCastable: the static ring that says a pet
-                     spell CAN autocast, 58x58 over a 37x37 button. Its animated sibling (the
-                     $parentAutoCast <Model>) is the native shine lane's marker below (decision
-                     1383 — PetActionBar.xml's sparkle header has the story). -->
+                <!-- The corner brackets that say a pet spell CAN autocast. The art fills only the
+                     middle 33/64 = 0.5156 of UI-AutoCastableOverlay.blp, so where the brackets land
+                     is set entirely by how big the texture is drawn:
+
+                       pet button   ref 58 -> 58 x 0.5156 = 29.9 on a 30 button. Dead in the corners.
+                       spell book   ref 60 -> 60 x 0.5156 = 30.9 on a 37 button. THREE UNITS INSIDE
+                                    each edge, floating — the ref barely grew the overlay (58->60)
+                                    while the button grew 30->37.
+
+                     DEVIATION 2 of 3 in this widget (decision 1393, extending 1392). 71.53 is the
+                     pet button's own ratio carried over — 37 x 58/30 — so the bracket square lands
+                     on this button's corners exactly as it does on that one. Write 60 to go back to
+                     the reference. -->
                 <Texture name="$parentAutoCastable" file="Interface\Buttons\UI-AutoCastableOverlay" hidden="true">
-                    <Size><AbsDimension x="58" y="58"/></Size>
-                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                    <Size><AbsDimension x="71.53" y="71.53"/></Size>
+                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
                 </Texture>
-                <Texture name="$parentShine" file="benilla:autocast-shine" setAllPoints="true" hidden="true"/>
+                <!-- The animated sibling: the ref's $parentAutoCast <Model>, which on this
+                     template carries its own 36x36 CENTER (1,1) rect at scale="1.22".
+
+                     DEVIATION 3 of 3 (decision 1393, extending 1392), and both halves are the same
+                     idea — borrow the pet button's proportions so this button reads like that one:
+
+                       * rect 36 CENTER (1,1) -> 37 CENTER (0,0). The ref's +1,+1 puts the glow a
+                         unit up-and-right of the brackets, which sit dead centre; measured on the
+                         director's capture, the glow's centre really was ~1 unit right of the
+                         button's. Concentric now, so top/right stop reading loose.
+                       * scale 1.22 -> 1.48. 0.02 x 1280 x 1.48 = 37.888 = 1.024 x 37 — the same
+                         1.024 rim/viewport ratio the ref writes on the pet button, which is what
+                         puts the rim ON the viewport edge so the widget's own scissor halves every
+                         star (1387). At the ref's 0.87x the rim floats clear and nothing clips it.
+
+                     To go back to the reference exactly: 36x36, CENTER (1,1), and 1.22. -->
+                <Texture name="$parentShine" file="benilla:autocast-shine:1.48" hidden="true">
+                    <Size><AbsDimension x="37" y="37"/></Size>
+                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
             </Layer>
             <Layer level="BORDER">
                 <Texture name="$parentIconTexture" setAllPoints="true" hidden="true"/>

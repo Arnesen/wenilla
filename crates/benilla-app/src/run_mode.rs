@@ -307,7 +307,7 @@ mod tests {
             "asset_churn.rs",
             "dev.rs",
             "hover_log.rs",
-            "perf.rs",
+            "perf/",
             "preflight.rs",
             "probe_shield.rs",
             "lib.rs",
