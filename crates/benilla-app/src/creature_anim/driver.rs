@@ -420,6 +420,13 @@ pub(super) fn drive_animations(
     // The missing-clip resolver's DBC source (decision 0082): `None` for the brief window before
     // `AnimationData.dbc` loads, in which every lookup below degrades to identity.
     let catalog = anim_data.as_deref().map(|d| &d.0);
+    // `WOW_ANIM_COST=1` — the memo-sizing counter (1370 item 9's bracket): counts the frame's
+    // RESTING rows, the shape an input-memo fast path would skip. Sizing only — no skip is
+    // taken here (an `AnimParked` filter is law-barred: 0448's off-screen-events law means a
+    // parked unit's driver must keep arming clips; the memo is the only safe shape, built when
+    // this number says it pays).
+    let anim_cost = anim_cost_enabled();
+    let (mut cost_rows, mut cost_resting) = (0u32, 0u32);
     for (
         entity,
         anims,
@@ -553,6 +560,32 @@ pub(super) fn drive_animations(
         // same-frame land+relaunch is a new arc there ([`crate::player::Player::advance_airborne_arc`]).
         let prev_vertical = std::mem::replace(&mut drv.last_vertical_speed, mv.vertical_speed);
         let launched = mv.vertical_speed > JUMP_ARC_MIN_UP && prev_vertical <= JUMP_ARC_MIN_UP;
+        // The resting predicate, counted (never acted on — see the counter's note above): mode
+        // Gait with nothing in flight, nothing pending, grounded and motionless. A strict lower
+        // bound on what an input-memo would skip.
+        if anim_cost {
+            cost_rows += 1;
+            if drv.mode == Mode::Gait
+                && drv.overlay.is_none()
+                && drv.overlay_fade.is_none()
+                && drv.wound.is_none()
+                && drv.sheath_swap.is_none()
+                && !first
+                && !mount_edge
+                && cast_hold.is_none()
+                && !moving
+                && !falling
+                && !was_falling
+                && !launched
+                && !pending.contains_key(&entity)
+                && !pending_wound.contains_key(&entity)
+                && !pending_defense.contains_key(&entity)
+                && !pending_slow.contains(&entity)
+                && !pending_sheath.contains_key(&entity)
+            {
+                cost_resting += 1;
+            }
+        }
         if falling && (!was_falling || launched) {
             drv.jump_arc = mv.vertical_speed > JUMP_ARC_MIN_UP;
         }
@@ -1400,4 +1433,18 @@ pub(super) fn drive_animations(
             commands.entity(entity).remove::<super::NockLatch>();
         }
     }
+    if anim_cost && cost_rows > 0 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static FRAME: AtomicU32 = AtomicU32::new(0);
+        // Once a second at 60 fps, not per frame — the counter is a sizing read, not a trace.
+        if FRAME.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {
+            eprintln!("[anim-cost] rows={cost_rows} resting={cost_resting}");
+        }
+    }
+}
+
+/// `WOW_ANIM_COST=1` — arms the memo-sizing counter above. Read once, the meter posture.
+fn anim_cost_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_ANIM_COST").as_deref() == Ok("1"))
 }

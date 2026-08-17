@@ -373,6 +373,10 @@ pub struct WidgetArena {
     regions: Arena<Region>,
     names: HashMap<String, FrameHandle>,
     next_insertion: u32,
+    /// Monotonic count of Minimap-kind frames ever created — an O(1) "a new Minimap widget
+    /// exists" signal, so the per-frame state feed (`set_minimap_inside`'s caller) re-pushes
+    /// exactly when one appears instead of walking every frame to find out.
+    minimap_created: u64,
 }
 
 impl Default for WidgetArena {
@@ -389,7 +393,13 @@ impl WidgetArena {
             regions: Arena::new(),
             names: HashMap::new(),
             next_insertion: 0,
+            minimap_created: 0,
         }
+    }
+
+    /// Monotonic count of Minimap widgets ever created (see the field note).
+    pub fn minimap_created(&self) -> u64 {
+        self.minimap_created
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -585,6 +595,9 @@ impl WidgetArena {
             next_decl: 0,
         };
 
+        if matches!(kind, FrameKind::Minimap) {
+            self.minimap_created += 1;
+        }
         let (index, generation) = self.frames.insert(frame);
         let handle = FrameHandle { index, generation };
 

@@ -13,6 +13,10 @@ use benilla_ui::widget::FrameHandle;
 use crate::ui_pass::{UiQuad, UvRect};
 use crate::ui_text::{layout_text_quads, layout_text_quads_links, UiFontAtlas};
 
+/// `WOW_TEXT_PROBE=1` — launch-time knob, read once (the check ran per Text quad per frame).
+static TEXT_PROBE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("WOW_TEXT_PROBE").as_deref() == Ok("1"));
+
 /// The `QuadContent::Text` payload minus the text itself — the region's resolved style, passed
 /// verbatim from the destructure at the [`super::drive_script`] call site.
 pub(super) struct TextStyle {
@@ -183,7 +187,7 @@ pub(super) fn emit(
     }
     // The probe prints the DISPLAY string (post-ellipsis, post-editbox-window) — what this pass
     // actually draws, which is what a truncation report needs to show.
-    let probe = std::env::var("WOW_TEXT_PROBE").as_deref() == Ok("1");
+    let probe = *TEXT_PROBE;
     if probe {
         // For the focused edit box, also the two numbers that must agree: where the engine puts the
         // caret (`caret=`, advance-table-derived) and how wide the text this pass actually draws is

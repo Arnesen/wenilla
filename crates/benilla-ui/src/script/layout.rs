@@ -1061,20 +1061,24 @@ impl UiScript {
     /// alone left those rects zero-width and their anchored neighbours overlapping.
     pub fn fontstrings_needing_measure(&mut self) -> Vec<MeasureRequest> {
         let mut model = self.model_mut();
-        let mut out = Vec::new();
-        let handles: Vec<RegionHandle> = model
+        // ANY FontString with text — not only the auto-sized ones. A region with both axes
+        // declared needs no measure for its *layout*, but `GetStringWidth` still has to answer
+        // with the string's natural width, and only a measure can supply it (decision 0997: a
+        // kit that reads that number and then SETS a width on the string would otherwise stop
+        // receiving measures the instant it did so, and start reading its own box back). The
+        // key cache is what keeps this from costing a re-measure per frame — and the staleness
+        // check runs allocation-free ([`stale_measure_key`]) so the whole-roster sweep stays
+        // cheap: the request build (text/font clones, the id mint) is paid only by rows that
+        // actually need a measure, which on a quiet frame is none.
+        let needy: Vec<RegionHandle> = model
             .region_data
             .iter()
-            // ANY FontString with text — not only the auto-sized ones. A region with both axes
-            // declared needs no measure for its *layout*, but `GetStringWidth` still has to answer
-            // with the string's natural width, and only a measure can supply it (decision 0997: a
-            // kit that reads that number and then SETS a width on the string would otherwise stop
-            // receiving measures the instant it did so, and start reading its own box back). The
-            // key cache below is what keeps this from costing a re-measure per frame.
             .filter(|(_, d)| d.text.as_deref().is_some_and(|t| !t.is_empty()))
             .map(|(&rh, _)| rh)
+            .filter(|&rh| stale_measure_key(&model, rh).is_some())
             .collect();
-        for rh in handles {
+        let mut out = Vec::with_capacity(needy.len());
+        for rh in needy {
             if let Some(req) = measure_request_for(&mut model, rh) {
                 out.push(req);
             }
@@ -1149,17 +1153,7 @@ impl UiScript {
 /// agree byte for byte on the cache key, or a same-tick measure and the batch pass would each think
 /// the other's answer was stale and re-measure forever.
 pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option<MeasureRequest> {
-    let region = model.arena.region(rh)?;
-    if !matches!(region.kind, crate::widget::RegionKind::FontString) {
-        return None;
-    }
-    // The owner's effective_scale: the host measures at the drawn raster size
-    // ([`MeasureRequest::scale`]), and the key carries it so a SetScale re-measures.
-    let scale = model
-        .arena
-        .frame(region.owner)
-        .map(|f| f.effective_scale)
-        .unwrap_or(1.0);
+    let (key, scale) = stale_measure_key(model, rh)?;
     let d = model.region_data.get(&rh)?;
     let text = d.text.clone().filter(|t| !t.is_empty())?;
     let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
@@ -1167,12 +1161,6 @@ pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option
     let height = d.font_height;
     let text_height = d.text_height;
     let outline = d.outline;
-    // The shared key recipe ([`RegionData::measure_key`]) — the metric reads (region.rs) check the
-    // stored measure against the same hash.
-    let key = d.measure_key(scale);
-    if d.measured.map(|m| m.key) == Some(key) {
-        return None;
-    }
     let id = model.region_id(rh);
     Some(MeasureRequest {
         id,
@@ -1185,4 +1173,34 @@ pub(super) fn measure_request_for(model: &mut Model, rh: RegionHandle) -> Option
         text,
         key,
     })
+}
+
+/// The staleness half of [`measure_request_for`], allocation-free: `Some((key, scale))` iff `rh`
+/// is a FontString holding text whose stored measure no longer matches its current key. This is
+/// the ONE place the "does this region need a measure?" question is answered — the per-frame
+/// sweep ([`super::UiScript::fontstrings_needing_measure`]) asks it for every FontString, so it
+/// must not clone; the request build above pays the clones only after this says stale.
+fn stale_measure_key(model: &Model, rh: RegionHandle) -> Option<(u64, f32)> {
+    let region = model.arena.region(rh)?;
+    if !matches!(region.kind, crate::widget::RegionKind::FontString) {
+        return None;
+    }
+    // The owner's effective_scale: the host measures at the drawn raster size
+    // ([`MeasureRequest::scale`]), and the key carries it so a SetScale re-measures.
+    let scale = model
+        .arena
+        .frame(region.owner)
+        .map(|f| f.effective_scale)
+        .unwrap_or(1.0);
+    let d = model.region_data.get(&rh)?;
+    if d.text.as_deref().is_none_or(|t| t.is_empty()) {
+        return None;
+    }
+    // The shared key recipe ([`RegionData::measure_key`]) — the metric reads (region.rs) check the
+    // stored measure against the same hash.
+    let key = d.measure_key(scale);
+    if d.measured.map(|m| m.key) == Some(key) {
+        return None;
+    }
+    Some((key, scale))
 }

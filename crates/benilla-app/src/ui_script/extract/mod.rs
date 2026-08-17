@@ -36,6 +36,14 @@ fn gate_log_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("WOW_UI_GATE").as_deref() == Ok("1"))
 }
 
+/// `WOW_UI_DIFF=1` — the base-lane rebuild-trigger probe (`ui_pass`' twin). Read once; it also
+/// pins the conversion to the FULL path (the probe's job is naming the first differing quad of a
+/// whole-list diff, which the per-entry splice below deliberately never computes).
+fn ui_diff_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_UI_DIFF").is_some())
+}
+
 /// One line naming why the extract gate did not skip this frame — the input that differed, and for
 /// the render list the first entry that moved. A settled UI is what makes the paint pass free; when
 /// it is never settled, this says what is moving.
@@ -107,6 +115,17 @@ pub(super) struct GateInputs {
     /// The `UiFontAtlas::generation` the held quads' glyph UVs came from — see the gate's own
     /// note below. Moves only when the glyph sheet resets (decisions 1339, 1342).
     generation: Option<u64>,
+    /// Per-entry prefix ends into the conversion's output: entry `i`'s quads occupy
+    /// `spans[i-1]..spans[i]` of `UiQuads::quads` (0 for `i = 0`). Recorded by the full
+    /// conversion, kept current by the splice — this is what lets a one-entry change (the resting
+    /// blink) re-convert one entry instead of the whole interface.
+    spans: Vec<u32>,
+}
+
+/// Entry `i`'s quad range under `spans` (the [`GateInputs::spans`] encoding).
+fn span_bounds(spans: &[u32], i: usize) -> (usize, usize) {
+    let a = if i == 0 { 0 } else { spans[i - 1] as usize };
+    (a, spans[i] as usize)
 }
 
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
@@ -445,6 +464,7 @@ pub(super) fn drive_script(
                 quads: quads.quads.len(),
                 solves,
                 skipped: true,
+                spliced: 0,
             };
         }
         if printing {
@@ -472,6 +492,170 @@ pub(super) fn drive_script(
             booths.images.0 == prev.portraits,
         );
     }
+    // ── The per-entry splice: 1361's shape one layer up ──────────────────────────────────────
+    // The gate above is all-or-nothing, so ONE animating entry (the resting blink, a sweeping
+    // cooldown) used to re-convert the whole interface every frame. When the only input that
+    // moved is the extracted list itself, the lists are index-aligned (same length — the
+    // traversal is stable when nothing was created/destroyed/restacked), few entries differ,
+    // and every differing entry converts to nothing but quads (no link spans, no minimap slot,
+    // no booth panes), the changed entries re-convert alone — through the same [`convert_entry`]
+    // body, which is what makes the spliced output equal the full path's by construction — and
+    // stitch into last frame's `UiQuads` at the ranges `prev.spans` remembers. Everything else
+    // (the side channels, the panes map, the engine's link spans) keeps last frame's values,
+    // which the unchanged entries prove are this frame's too: the settled path's own argument,
+    // applied per entry.
+    'splice: {
+        if capture.is_some()
+            || ui_diff_enabled()
+            || prev.dims != Some(dims)
+            || prev.generation != generation
+            || text_ui != prev.text_ui
+            || booths.images.0 != prev.portraits
+            || prev.extracted.len() != extracted.len()
+            || prev.spans.len() != extracted.len()
+            // spans describe `quads.quads` — if any future writer replaces the base lane out
+            // from under this pass, degrade to the full conversion instead of mis-stitching.
+            || prev.spans.last().copied().unwrap_or(0) as usize != quads.quads.len()
+        {
+            break 'splice;
+        }
+        // The changed entry set, bounded: a real UI transition (a window opening) moves many
+        // entries, and the full conversion is the right tool there anyway.
+        const SPLICE_MAX: usize = 8;
+        let mut changed: Vec<usize> = Vec::with_capacity(SPLICE_MAX);
+        for (i, (now, was)) in extracted.iter().zip(&prev.extracted).enumerate() {
+            if now != was {
+                if changed.len() == SPLICE_MAX {
+                    break 'splice;
+                }
+                changed.push(i);
+            }
+        }
+        // The all-equal case belongs to the settled gate above; reaching here empty means a
+        // comparison razor slipped — take the full path rather than risk skipping a change.
+        if changed.is_empty() {
+            break 'splice;
+        }
+        // Only entries whose conversion writes quads alone are spliceable — old AND new: an
+        // entry morphing into a side-channel kind must reach the full path's plumbing.
+        let simple = |eq: &benilla_ui::script::ExtractedQuad| {
+            matches!(
+                &eq.content,
+                QuadContent::Frame
+                    | QuadContent::Cooldown { .. }
+                    | QuadContent::Backdrop { .. }
+                    | QuadContent::Texture {
+                        portrait_unit: None,
+                        ..
+                    }
+            )
+        };
+        if !changed
+            .iter()
+            .all(|&i| simple(&extracted[i]) && simple(&prev.extracted[i]))
+        {
+            break 'splice;
+        }
+        // Re-convert just the changed entries. The scratch side channels are a tripwire:
+        // `simple` makes them unreachable today, and if an arm ever grows a new side effect
+        // the full path is the only safe answer.
+        let mut scratch: Vec<UiQuad> = Vec::new();
+        let mut scratch_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(changed.len());
+        let mut scratch_links = Vec::new();
+        let mut scratch_slot = None;
+        for &i in &changed {
+            let at = scratch.len();
+            convert_entry(
+                extracted[i].clone(),
+                s,
+                h,
+                &mut assets,
+                &mut images,
+                &mut font_atlas,
+                &mut booths,
+                text_ui.as_ref(),
+                false,
+                &mut scratch,
+                &mut scratch_links,
+                &mut scratch_slot,
+            );
+            scratch_ranges.push(at..scratch.len());
+        }
+        if !scratch_links.is_empty() || scratch_slot.is_some() {
+            break 'splice;
+        }
+        let counts_stable = changed.iter().zip(&scratch_ranges).all(|(&i, r)| {
+            let (a, b) = span_bounds(&prev.spans, i);
+            b - a == r.len()
+        });
+        let mut dirtied = false;
+        if counts_stable {
+            // The blink's shape — same quad count, new bytes: write the spans in place.
+            for (&i, r) in changed.iter().zip(&scratch_ranges) {
+                let (a, b) = span_bounds(&prev.spans, i);
+                if quads.quads[a..b] != scratch[r.clone()] {
+                    quads.quads[a..b].clone_from_slice(&scratch[r.clone()]);
+                    dirtied = true;
+                }
+            }
+        } else {
+            // An entry's quad count moved: stitch a fresh list from the kept spans plus the
+            // re-converted ones, and re-derive the span table.
+            let mut new_out: Vec<UiQuad> = Vec::with_capacity(quads.quads.len() + scratch.len());
+            let mut new_spans: Vec<u32> = Vec::with_capacity(prev.spans.len());
+            let mut ci = 0;
+            for i in 0..extracted.len() {
+                if ci < changed.len() && changed[ci] == i {
+                    new_out.extend_from_slice(&scratch[scratch_ranges[ci].clone()]);
+                    ci += 1;
+                } else {
+                    let (a, b) = span_bounds(&prev.spans, i);
+                    new_out.extend_from_slice(&quads.quads[a..b]);
+                }
+                new_spans.push(new_out.len() as u32);
+            }
+            prev.spans = new_spans;
+            quads.quads = new_out;
+            dirtied = true;
+        }
+        if dirtied {
+            quads.dirty = true;
+        }
+        for &i in &changed {
+            prev.extracted[i] = extracted[i].clone();
+        }
+        drop(extract_span);
+        let us_spl = lap();
+        if cost_on {
+            let solves = script.layout_solves() - solves_before.unwrap_or(0);
+            *ui_cost = super::UiFrameCost {
+                measured: ui_cost.measured,
+                measured_texts: std::mem::take(&mut ui_cost.measured_texts),
+                tick: us_tick,
+                resolve: us_resolve,
+                measure: us_measure,
+                extract: us_exm,
+                convert: us_spl,
+                diff: 0,
+                quads: quads.quads.len(),
+                solves,
+                skipped: false,
+                spliced: changed.len(),
+            };
+        }
+        if printing {
+            let solves = script.layout_solves() - solves_before.unwrap_or(0);
+            eprintln!(
+                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                 exm={us_exm} exa={us_spl} diff=0 eq={n_extracted} quads={} \
+                 solves={solves} changed={} skip=0 spliced={}",
+                quads.quads.len(),
+                u8::from(dirtied),
+                changed.len()
+            );
+        }
+        return;
+    }
     prev.dims = Some(dims);
     prev.generation = generation;
     prev.text_ui = text_ui.clone();
@@ -482,272 +666,25 @@ pub(super) fn drive_script(
     // is still this frame's truth — clearing it above the gate would make every quiet frame put the
     // body panes' cameras to sleep and freeze their animation.
     booths.panes.0.clear();
+    let mut spans: Vec<u32> = Vec::with_capacity(prev.extracted.len());
     for eq in extracted {
-        let Some(r) = eq.rect else { continue };
-        // WoW UI space is y-up from the bottom-left in 768-virtual units; the quad pass is
-        // y-down window px from the top-left — scale ×s, then flip through the window height.
-        let rect = Rect::new(r.left * s, h - r.top * s, r.right * s, h - r.bottom * s);
-        // The ScrollFrame clip (decision 0112), through the same conversion as `rect` —
-        // `UiQuad::clip` is the CPU-clip stand-in `ui_pass` already applies uniformly to
-        // every quad (texture, backdrop, and glyph alike), so this is the entire app-side plumb.
-        let clip = eq
-            .clip
-            .map(|c| Rect::new(c.left * s, h - c.top * s, c.right * s, h - c.bottom * s));
-        match eq.content {
-            // Frames draw nothing themselves in v1 (regions carry the visuals).
-            QuadContent::Frame => continue,
-            // The `<Minimap>` widget's content hole: parked for the minimap renderer (an
-            // UiQuadAppend producer), which fills it at this exact z — the widget slot itself
-            // emits nothing here (decision 0203 phase 1).
-            QuadContent::Minimap { zoom, inside_zoom } => {
-                minimap_slot = Some(crate::minimap::MinimapSlot {
-                    rect,
-                    z: eq.z,
-                    zoom,
-                    inside_zoom,
-                    alpha: eq.alpha,
-                });
-                continue;
-            }
-            // The Cooldown widget's pie wipe + finish flash (decision 0137 phase 4) — the
-            // byte-pinned look of `UI-Cooldown-Indicator.m2`, rebuilt natively (see
-            // [`cooldown_quads`]).
-            QuadContent::Cooldown { fraction, flash } => {
-                cooldown_quads(
-                    rect,
-                    eq.z,
-                    eq.alpha,
-                    fraction,
-                    flash,
-                    clip,
-                    &mut assets,
-                    &mut images,
-                    &mut out,
-                );
-                continue;
-            }
-            QuadContent::Texture {
-                path,
-                color,
-                additive,
-                tex_coords,
-                circular,
-                portrait_unit,
-                rotation,
-                desaturated,
-            } => {
-                // A live unit portrait (`SetPortraitTexture(region, unit)`): sample this token's
-                // source ([`crate::portrait::PortraitImages`]) — the off-screen model bake, or the
-                // ref's 2D TemporaryPortrait stand-in while the model streams in. Absent entry (no
-                // booth yet) draws nothing rather than the run-splitter's white default.
-                if let Some(token) = &portrait_unit {
-                    use crate::portrait::PortraitSource;
-                    // A **square** binding is a booth pane (`BenillaSetBoothTexture`, decision
-                    // 0208 §5), not a round unit portrait: publish the rect's aspect so the booth
-                    // can bake at the shape it will be stretched into, and know it is on screen at
-                    // all (decision 1069). Recorded before the readiness `continue` below — a pane
-                    // whose bake hasn't landed yet is still a pane being drawn. The region's rect
-                    // is the whole answer because no pane crops its bake; a pane that grew
-                    // `<TexCoords>` would have to fold that UV window in here too.
-                    if !circular && rect.height() > 0.0 {
-                        booths
-                            .panes
-                            .0
-                            .insert(token.clone(), rect.width() / rect.height());
-                    }
-                    // The bake is a render target and carries PREMULTIPLIED colour; the 2D stand-in
-                    // is an ordinary straight-alpha BLP. The quad pass has to be told which, or it
-                    // premultiplies the bake a second time and erases every effect the pane draws
-                    // over empty space (see [`crate::ui_pass::UiQuad::premultiplied`]).
-                    let (handle, premultiplied) = match booths.images.0.get(token) {
-                        Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
-                        Some(PortraitSource::File(p)) => (
-                            assets
-                                .as_mut()
-                                .and_then(|a| a.sprite_texture(p, &mut images)),
-                            false,
-                        ),
-                        None => (None, false),
-                    };
-                    let Some(handle) = handle else {
-                        continue;
-                    };
-                    out.push(UiQuad {
-                        rect,
-                        z_key: eq.z,
-                        texture: Some(handle),
-                        // A portrait binding honours `<TexCoords>`/`SetTexCoord` like any other
-                        // texture region — the bake is just the sampled image. The ref crops one
-                        // this way: the character micro button samples the same portrait slot as
-                        // the unit frame through a narrow (0.2..0.8, 0.0666..0.9) window, and
-                        // swaps that window when the button is pushed. This branch used to pin
-                        // UvRect::FULL, which silently squashed the whole square bake into
-                        // whatever rect the region had.
-                        uv: match tex_coords {
-                            Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
-                            Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
-                            None => UvRect::FULL,
-                        },
-                        color: [1.0, 1.0, 1.0, eq.alpha],
-                        // The binding's mask flag: `SetPortraitTexture` regions cut the inscribed
-                        // circle (the ref stamps the same shape into its 64² bake's alpha — and
-                        // rounds the square stand-in art the same way); `BenillaSetBoothTexture`
-                        // (the paper-doll model pane, decision 0208 §5) samples the bake square.
-                        circular,
-                        premultiplied,
-                        clip,
-                        ..default()
-                    });
-                    continue;
-                }
-                // An unset texture region (no file, no color — e.g. a cleared icon) draws nothing;
-                // defaulting it to white would paint phantom quads.
-                if path.is_none() && color.is_none() {
-                    continue;
-                }
-                // A portrait region samples the circular-masked variant so the square icon/model
-                // doesn't poke past the frame ring's thin band (SetPortraitToTexture, decision 0084).
-                //
-                // A path the archives don't have draws **nothing** — never a white slab. This arm
-                // used to fall through to `color.unwrap_or(WHITE)` with a `None` texture, which
-                // `ui_pass` renders as the shared 1×1 white image tinted white: an opaque white
-                // rectangle at the region's rect, which is how B221's macro icons reached the
-                // director's screen. wow-re settles what the reference does: `TextureCreate` does
-                // build an 8×8 placeholder, but `CSimpleTexture::SetTexture` (`0x770200`) checks the
-                // status severity and at ≥2 releases it and returns **without touching the widget's
-                // texture** — the widget keeps what it had, and Lua gets `nil`. Nothing goes white.
-                // We can't keep the *previous* art (a path is re-resolved per frame at extract, not
-                // latched at `SetTexture`), so the faithful-enough result is an empty cell; what
-                // matters is that it is never a phantom quad. The `Backdrop` and live-portrait arms
-                // already guard exactly this way.
-                //
-                // `assets` missing ENTIRELY is a data-less run (the headless UI tests), not a bad
-                // path — those keep the old behaviour rather than blanking every textured quad.
-                let handle = match (path.as_deref(), assets.as_mut()) {
-                    (Some(p), Some(a)) => {
-                        let resolved = if circular {
-                            a.portrait_texture(p, &mut images)
-                        } else {
-                            a.sprite_texture(p, &mut images)
-                        };
-                        if resolved.is_none() {
-                            continue;
-                        }
-                        resolved
-                    }
-                    _ => None,
-                };
-                // A pathless Texture region is a solid color; a textured one tints by it.
-                let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
-                color[3] *= eq.alpha;
-                // `<TexCoords>`/`SetTexCoord` slices the sampled sub-rect. The 4-edge form
-                // `[left,right,top,bottom]` maps to raw UV corners (`left→u0, right→u1, top→v0,
-                // bottom→v1`) — carried through [`UvRect`] rather than a normalized `Rect` so a
-                // mirrored slice (`left>right`, e.g. PlayerFrameTexture) keeps its flip to the
-                // vertex buffer. The 8-arg affine form is already per-corner in the `push_quad`
-                // winding (the route-line quads). Absent = the full texture.
-                let uv = match tex_coords {
-                    Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
-                    Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
-                    None => UvRect::FULL,
-                };
-                out.push(UiQuad {
-                    rect,
-                    z_key: eq.z,
-                    texture: handle,
-                    uv,
-                    color,
-                    additive,
-                    clip,
-                    // The engine's SetRotation is counterclockwise-positive; the quad pass spins
-                    // clockwise-on-screen (`UiQuad::rotation`) — negate to convert.
-                    rotation: -rotation,
-                    desaturated,
-                    ..default()
-                });
-            }
-            QuadContent::Backdrop {
-                path,
-                color,
-                uvs,
-                tile,
-            } => {
-                // A frame Backdrop piece (bg or one of the 8 border pieces). Repeat-sampled when
-                // `tile` (edges tile past UV 1; a tiled bg wraps) — its own GPU image + cache
-                // (`sprite_texture_tiled`) since clamp/repeat bake into the `Image`. The four UVs are
-                // explicit per-corner (the rotated TOP/BOTTOM edges), so they go straight to `UvRect`.
-                let handle = assets.as_mut().and_then(|a| {
-                    if tile {
-                        a.sprite_texture_tiled(&path, &mut images)
-                    } else {
-                        a.sprite_texture(&path, &mut images)
-                    }
-                });
-                // No texture (missing BLP) ⇒ draw nothing rather than a phantom solid quad.
-                let Some(handle) = handle else { continue };
-                let mut color = color;
-                color[3] *= eq.alpha;
-                out.push(UiQuad {
-                    rect,
-                    z_key: eq.z,
-                    texture: Some(handle),
-                    uv: UvRect::from_corners(uvs),
-                    color,
-                    clip,
-                    ..default()
-                });
-            }
-            QuadContent::Text {
-                text,
-                color,
-                justify_h,
-                justify_v,
-                font,
-                font_height,
-                text_height,
-                shadow,
-                outline,
-                alpha_gradient,
-            } => {
-                // No atlas (no client data / Friz Quadrata unreadable — see `ui_text`'s startup
-                // system) means text simply doesn't render, same graceful-absence posture as a
-                // missing `WorldAssets`. The rasterization itself (editbox window, ellipsis,
-                // shadow, links, caret) lives in `text::emit`.
-                let (Some(atlas), Some(text)) = (font_atlas.as_deref_mut(), text) else {
-                    continue;
-                };
-                text::emit(
-                    atlas,
-                    &text,
-                    text::TextStyle {
-                        color,
-                        justify_h,
-                        justify_v,
-                        font,
-                        font_height,
-                        text_height,
-                        shadow,
-                        outline,
-                        alpha_gradient,
-                    },
-                    text::TextHost {
-                        z: eq.z,
-                        alpha: eq.alpha,
-                        target: eq.target,
-                        rect,
-                        clip,
-                        ebox: text_ui.as_ref(),
-                        screen_h: h,
-                        scale: s,
-                        font_scale: eq.scale,
-                        caret_pinned: capture.is_some(),
-                    },
-                    &mut out,
-                    &mut link_spans,
-                );
-            }
-        }
+        convert_entry(
+            eq,
+            s,
+            h,
+            &mut assets,
+            &mut images,
+            &mut font_atlas,
+            &mut booths,
+            text_ui.as_ref(),
+            capture.is_some(),
+            &mut out,
+            &mut link_spans,
+            &mut minimap_slot,
+        );
+        spans.push(out.len() as u32);
     }
+    prev.spans = spans;
     // The payload held on the cursor draws last (a 32×32 icon at the mouse, over the whole UI) —
     // but ONLY in capture mode (decision 0216 §5): a normal run shows it as the hardware cursor
     // instead (`crate::cursor`), which can't appear in a screenshot's pixels, so the quad is the
@@ -789,7 +726,7 @@ pub(super) fn drive_script(
     if changed {
         // `WOW_UI_DIFF=1` — the base-lane half of the rebuild-trigger probe (`ui_pass`' twin):
         // names the first Lua-UI quad that differs from last frame's extraction.
-        if std::env::var_os("WOW_UI_DIFF").is_some() {
+        if ui_diff_enabled() {
             match quads.quads.iter().zip(&out).position(|(a, b)| a != b) {
                 Some(i) => {
                     let (b, a) = (&quads.quads[i], &out[i]);
@@ -827,6 +764,7 @@ pub(super) fn drive_script(
             quads: n_quads,
             solves,
             skipped: false,
+            spliced: 0,
         };
         if printing {
             eprintln!(
@@ -834,6 +772,286 @@ pub(super) fn drive_script(
                  exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
                  solves={solves} changed={} skip=0",
                 u8::from(changed)
+            );
+        }
+    }
+}
+
+/// One extracted entry converted to its screen quads, pushed onto `out` — with the side channels
+/// some arms carry: chat link spans (Text), the minimap widget slot (Minimap), the booth pane
+/// aspects (portrait-bound Texture). The ONE conversion body: the full pass and the per-entry
+/// splice both call this, which is what makes the splice's output equal the full path's by
+/// construction. An arm is splice-eligible only if it writes nothing but `out` — keep
+/// [`splice_simple`] in agreement when an arm's side effects change.
+#[allow(clippy::too_many_arguments)] // the conversion's whole environment, threaded explicitly
+fn convert_entry(
+    eq: benilla_ui::script::ExtractedQuad,
+    s: f32,
+    h: f32,
+    assets: &mut Option<ResMut<WorldAssets>>,
+    images: &mut Assets<Image>,
+    font_atlas: &mut Option<ResMut<UiFontAtlas>>,
+    booths: &mut crate::portrait::BoothBridge,
+    text_ui: Option<&benilla_ui::script::EditBoxTextUi>,
+    caret_pinned: bool,
+    out: &mut Vec<UiQuad>,
+    link_spans: &mut Vec<(
+        benilla_ui::widget::FrameHandle,
+        benilla_ui::layout::Rect,
+        String,
+        String,
+    )>,
+    minimap_slot: &mut Option<crate::minimap::MinimapSlot>,
+) {
+    let Some(r) = eq.rect else { return };
+    // WoW UI space is y-up from the bottom-left in 768-virtual units; the quad pass is
+    // y-down window px from the top-left — scale ×s, then flip through the window height.
+    let rect = Rect::new(r.left * s, h - r.top * s, r.right * s, h - r.bottom * s);
+    // The ScrollFrame clip (decision 0112), through the same conversion as `rect` —
+    // `UiQuad::clip` is the CPU-clip stand-in `ui_pass` already applies uniformly to
+    // every quad (texture, backdrop, and glyph alike), so this is the entire app-side plumb.
+    let clip = eq
+        .clip
+        .map(|c| Rect::new(c.left * s, h - c.top * s, c.right * s, h - c.bottom * s));
+    match eq.content {
+        // Frames draw nothing themselves in v1 (regions carry the visuals).
+        QuadContent::Frame => {}
+        // The `<Minimap>` widget's content hole: parked for the minimap renderer (an
+        // UiQuadAppend producer), which fills it at this exact z — the widget slot itself
+        // emits nothing here (decision 0203 phase 1).
+        QuadContent::Minimap { zoom, inside_zoom } => {
+            *minimap_slot = Some(crate::minimap::MinimapSlot {
+                rect,
+                z: eq.z,
+                zoom,
+                inside_zoom,
+                alpha: eq.alpha,
+            });
+        }
+        // The Cooldown widget's pie wipe + finish flash (decision 0137 phase 4) — the
+        // byte-pinned look of `UI-Cooldown-Indicator.m2`, rebuilt natively (see
+        // [`cooldown_quads`]).
+        QuadContent::Cooldown { fraction, flash } => {
+            cooldown_quads(
+                rect, eq.z, eq.alpha, fraction, flash, clip, assets, images, out,
+            );
+        }
+        QuadContent::Texture {
+            path,
+            color,
+            additive,
+            tex_coords,
+            circular,
+            portrait_unit,
+            rotation,
+            desaturated,
+        } => {
+            // A live unit portrait (`SetPortraitTexture(region, unit)`): sample this token's
+            // source ([`crate::portrait::PortraitImages`]) — the off-screen model bake, or the
+            // ref's 2D TemporaryPortrait stand-in while the model streams in. Absent entry (no
+            // booth yet) draws nothing rather than the run-splitter's white default.
+            if let Some(token) = &portrait_unit {
+                use crate::portrait::PortraitSource;
+                // A **square** binding is a booth pane (`BenillaSetBoothTexture`, decision
+                // 0208 §5), not a round unit portrait: publish the rect's aspect so the booth
+                // can bake at the shape it will be stretched into, and know it is on screen at
+                // all (decision 1069). Recorded before the readiness `continue` below — a pane
+                // whose bake hasn't landed yet is still a pane being drawn. The region's rect
+                // is the whole answer because no pane crops its bake; a pane that grew
+                // `<TexCoords>` would have to fold that UV window in here too.
+                if !circular && rect.height() > 0.0 {
+                    booths
+                        .panes
+                        .0
+                        .insert(token.clone(), rect.width() / rect.height());
+                }
+                // The bake is a render target and carries PREMULTIPLIED colour; the 2D stand-in
+                // is an ordinary straight-alpha BLP. The quad pass has to be told which, or it
+                // premultiplies the bake a second time and erases every effect the pane draws
+                // over empty space (see [`crate::ui_pass::UiQuad::premultiplied`]).
+                let (handle, premultiplied) = match booths.images.0.get(token) {
+                    Some(PortraitSource::Live(h)) => (Some(h.clone()), true),
+                    Some(PortraitSource::File(p)) => (
+                        assets.as_mut().and_then(|a| a.sprite_texture(p, images)),
+                        false,
+                    ),
+                    None => (None, false),
+                };
+                let Some(handle) = handle else {
+                    return;
+                };
+                out.push(UiQuad {
+                    rect,
+                    z_key: eq.z,
+                    texture: Some(handle),
+                    // A portrait binding honours `<TexCoords>`/`SetTexCoord` like any other
+                    // texture region — the bake is just the sampled image. The ref crops one
+                    // this way: the character micro button samples the same portrait slot as
+                    // the unit frame through a narrow (0.2..0.8, 0.0666..0.9) window, and
+                    // swaps that window when the button is pushed. This branch used to pin
+                    // UvRect::FULL, which silently squashed the whole square bake into
+                    // whatever rect the region had.
+                    uv: match tex_coords {
+                        Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
+                        Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
+                        None => UvRect::FULL,
+                    },
+                    color: [1.0, 1.0, 1.0, eq.alpha],
+                    // The binding's mask flag: `SetPortraitTexture` regions cut the inscribed
+                    // circle (the ref stamps the same shape into its 64² bake's alpha — and
+                    // rounds the square stand-in art the same way); `BenillaSetBoothTexture`
+                    // (the paper-doll model pane, decision 0208 §5) samples the bake square.
+                    circular,
+                    premultiplied,
+                    clip,
+                    ..default()
+                });
+                return;
+            }
+            // An unset texture region (no file, no color — e.g. a cleared icon) draws nothing;
+            // defaulting it to white would paint phantom quads.
+            if path.is_none() && color.is_none() {
+                return;
+            }
+            // A portrait region samples the circular-masked variant so the square icon/model
+            // doesn't poke past the frame ring's thin band (SetPortraitToTexture, decision 0084).
+            //
+            // A path the archives don't have draws **nothing** — never a white slab. This arm
+            // used to fall through to `color.unwrap_or(WHITE)` with a `None` texture, which
+            // `ui_pass` renders as the shared 1×1 white image tinted white: an opaque white
+            // rectangle at the region's rect, which is how B221's macro icons reached the
+            // director's screen. wow-re settles what the reference does: `TextureCreate` does
+            // build an 8×8 placeholder, but `CSimpleTexture::SetTexture` (`0x770200`) checks the
+            // status severity and at ≥2 releases it and returns **without touching the widget's
+            // texture** — the widget keeps what it had, and Lua gets `nil`. Nothing goes white.
+            // We can't keep the *previous* art (a path is re-resolved per frame at extract, not
+            // latched at `SetTexture`), so the faithful-enough result is an empty cell; what
+            // matters is that it is never a phantom quad. The `Backdrop` and live-portrait arms
+            // already guard exactly this way.
+            //
+            // `assets` missing ENTIRELY is a data-less run (the headless UI tests), not a bad
+            // path — those keep the old behaviour rather than blanking every textured quad.
+            let handle = match (path.as_deref(), assets.as_mut()) {
+                (Some(p), Some(a)) => {
+                    let resolved = if circular {
+                        a.portrait_texture(p, images)
+                    } else {
+                        a.sprite_texture(p, images)
+                    };
+                    if resolved.is_none() {
+                        return;
+                    }
+                    resolved
+                }
+                _ => None,
+            };
+            // A pathless Texture region is a solid color; a textured one tints by it.
+            let mut color = color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            color[3] *= eq.alpha;
+            // `<TexCoords>`/`SetTexCoord` slices the sampled sub-rect. The 4-edge form
+            // `[left,right,top,bottom]` maps to raw UV corners (`left→u0, right→u1, top→v0,
+            // bottom→v1`) — carried through [`UvRect`] rather than a normalized `Rect` so a
+            // mirrored slice (`left>right`, e.g. PlayerFrameTexture) keeps its flip to the
+            // vertex buffer. The 8-arg affine form is already per-corner in the `push_quad`
+            // winding (the route-line quads). Absent = the full texture.
+            let uv = match tex_coords {
+                Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
+                Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
+                None => UvRect::FULL,
+            };
+            out.push(UiQuad {
+                rect,
+                z_key: eq.z,
+                texture: handle,
+                uv,
+                color,
+                additive,
+                clip,
+                // The engine's SetRotation is counterclockwise-positive; the quad pass spins
+                // clockwise-on-screen (`UiQuad::rotation`) — negate to convert.
+                rotation: -rotation,
+                desaturated,
+                ..default()
+            });
+        }
+        QuadContent::Backdrop {
+            path,
+            color,
+            uvs,
+            tile,
+        } => {
+            // A frame Backdrop piece (bg or one of the 8 border pieces). Repeat-sampled when
+            // `tile` (edges tile past UV 1; a tiled bg wraps) — its own GPU image + cache
+            // (`sprite_texture_tiled`) since clamp/repeat bake into the `Image`. The four UVs are
+            // explicit per-corner (the rotated TOP/BOTTOM edges), so they go straight to `UvRect`.
+            let handle = assets.as_mut().and_then(|a| {
+                if tile {
+                    a.sprite_texture_tiled(&path, images)
+                } else {
+                    a.sprite_texture(&path, images)
+                }
+            });
+            // No texture (missing BLP) ⇒ draw nothing rather than a phantom solid quad.
+            let Some(handle) = handle else { return };
+            let mut color = color;
+            color[3] *= eq.alpha;
+            out.push(UiQuad {
+                rect,
+                z_key: eq.z,
+                texture: Some(handle),
+                uv: UvRect::from_corners(uvs),
+                color,
+                clip,
+                ..default()
+            });
+        }
+        QuadContent::Text {
+            text,
+            color,
+            justify_h,
+            justify_v,
+            font,
+            font_height,
+            text_height,
+            shadow,
+            outline,
+            alpha_gradient,
+        } => {
+            // No atlas (no client data / Friz Quadrata unreadable — see `ui_text`'s startup
+            // system) means text simply doesn't render, same graceful-absence posture as a
+            // missing `WorldAssets`. The rasterization itself (editbox window, ellipsis,
+            // shadow, links, caret) lives in `text::emit`.
+            let (Some(atlas), Some(text)) = (font_atlas.as_deref_mut(), text) else {
+                return;
+            };
+            text::emit(
+                atlas,
+                &text,
+                text::TextStyle {
+                    color,
+                    justify_h,
+                    justify_v,
+                    font,
+                    font_height,
+                    text_height,
+                    shadow,
+                    outline,
+                    alpha_gradient,
+                },
+                text::TextHost {
+                    z: eq.z,
+                    alpha: eq.alpha,
+                    target: eq.target,
+                    rect,
+                    clip,
+                    ebox: text_ui,
+                    screen_h: h,
+                    scale: s,
+                    font_scale: eq.scale,
+                    caret_pinned,
+                },
+                out,
+                link_spans,
             );
         }
     }
@@ -1093,10 +1311,8 @@ mod extract_gate_tests {
     use crate::portrait::PortraitImages;
 
     fn app_with_marker() -> App {
-        let script = UiScript::new().unwrap();
-        script
-            .run(
-                r#"
+        app_from_script(
+            r#"
             local plain = CreateFrame("Frame", "Plain")
             plain:SetPoint("TOPLEFT", 0, 0)
             plain:SetSize(50, 50)
@@ -1104,8 +1320,15 @@ mod extract_gate_tests {
             marker:SetTexture(1, 0, 0)
             marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
         "#,
-            )
-            .unwrap();
+        )
+    }
+
+    /// The same headless app around an arbitrary boot script. The splice tests boot a SECOND
+    /// app straight into a mutated app's final state: its first frame is by construction the
+    /// full conversion the spliced output must equal.
+    fn app_from_script(lua: &str) -> App {
+        let script = UiScript::new().unwrap();
+        script.run(lua).unwrap();
         let mut app = App::new();
         app.insert_non_send_resource(script);
         app.init_resource::<UiQuads>();
@@ -1220,6 +1443,144 @@ mod extract_gate_tests {
                 .filter(|q| q.texture.as_ref() != Some(&bake))
                 .all(|q| !q.premultiplied),
             "every straight-alpha region stays unflagged — the flag is the booth's alone"
+        );
+    }
+
+    /// The per-entry splice, in-place half: a one-entry paint write must ride the splice
+    /// (`UiFrameCost::spliced == 1` — nonzero is the proof the path FIRED, without which this
+    /// test is vacuous) and produce byte-identically what the full conversion produces —
+    /// checked against a fresh app booted straight into the final state.
+    #[test]
+    fn a_one_entry_paint_write_splices_and_matches_the_full_conversion() {
+        let mut app = app_with_marker();
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("marker:SetTexture(0, 0, 1)")
+            .unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::ui_script::UiFrameCost>()
+                .spliced,
+            1,
+            "the color write is one splice-simple entry"
+        );
+        assert!(
+            app.world().resource::<UiQuads>().dirty,
+            "the spliced write re-marks the quads dirty"
+        );
+        let mut reference = app_from_script(
+            r#"
+            local plain = CreateFrame("Frame", "Plain")
+            plain:SetPoint("TOPLEFT", 0, 0)
+            plain:SetSize(50, 50)
+            marker = plain:CreateTexture(nil, "ARTWORK")
+            marker:SetTexture(0, 0, 1)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+        "#,
+        );
+        reference.update();
+        assert!(
+            app.world().resource::<UiQuads>().quads
+                == reference.world().resource::<UiQuads>().quads,
+            "spliced output equals the full conversion of the same model"
+        );
+    }
+
+    /// The stitch half: a write that CHANGES an entry's quad count (a cleared texture emits
+    /// nothing) re-derives the span table — and a later splice against the re-derived spans
+    /// still matches the full conversion, in both directions (1 → 0 quads, then 0 → 1).
+    #[test]
+    fn a_count_changing_write_stitches_and_keeps_the_spans_true() {
+        let mut app = app_with_marker();
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        let before = app.world().resource::<UiQuads>().quads.len();
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("marker:SetTexture(nil)")
+            .unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::ui_script::UiFrameCost>()
+                .spliced,
+            1,
+            "the clear rides the splice (stitch branch)"
+        );
+        let quads = app.world().resource::<UiQuads>();
+        assert!(quads.dirty, "a vanished quad is a real change");
+        assert_eq!(
+            quads.quads.len(),
+            before - 1,
+            "the cleared marker's quad is gone from the stitched list"
+        );
+        // The follow-up (0 → 1 quads) splices against the RE-DERIVED spans.
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("marker:SetTexture(0, 1, 0)")
+            .unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::ui_script::UiFrameCost>()
+                .spliced,
+            1
+        );
+        let mut reference = app_from_script(
+            r#"
+            local plain = CreateFrame("Frame", "Plain")
+            plain:SetPoint("TOPLEFT", 0, 0)
+            plain:SetSize(50, 50)
+            marker = plain:CreateTexture(nil, "ARTWORK")
+            marker:SetTexture(0, 1, 0)
+            marker:SetAllPoints()  -- templateless Lua region: no implicit anchor (1310)
+        "#,
+        );
+        reference.update();
+        assert!(
+            app.world().resource::<UiQuads>().quads
+                == reference.world().resource::<UiQuads>().quads,
+            "post-stitch splice output equals the full conversion"
+        );
+    }
+
+    /// A raster-environment change (window resize) must pin the conversion to the FULL path —
+    /// the splice's held quads were rasterized under the old seam and every one of them is
+    /// wrong-sized (decision 1342's edge, applied to the splice).
+    #[test]
+    fn a_resize_takes_the_full_path_not_the_splice() {
+        let mut app = app_with_marker();
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        app.update();
+        let win = app
+            .world_mut()
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Window>(win).unwrap().resolution = UVec2::new(800, 600).into();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("marker:SetTexture(0, 0, 1)")
+            .unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<crate::ui_script::UiFrameCost>()
+                .spliced,
+            0,
+            "a moved raster environment forbids splicing"
         );
     }
 }

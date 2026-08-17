@@ -25,7 +25,7 @@ use bevy::render::render_graph::{
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
@@ -271,20 +271,32 @@ fn init_pipelines(
 }
 
 /// The two ¼-res ping-pong targets (the reference downsamples full→¼ in ONE Box4 pass —
-/// wow-re blur-geometry.md; a ½ intermediate would be one downsample too many).
+/// wow-re blur-geometry.md; a ½ intermediate would be one downsample too many), plus the
+/// GPU objects derived from them, so the node does not recreate them per frame.
 #[derive(Component)]
 struct FfxGlowTextures {
     quarter_a: CachedTexture,
     quarter_b: CachedTexture,
+    /// The combine's 16-byte `(gain, death, haze, pad)` uniform — persistent, rewritten each
+    /// frame with a queue write (queue writes land before the graph's submit executes).
+    gain_buf: Buffer,
+    /// The two Gauss bind groups bind only the ¼-res ping-pong views + sampler — all stable
+    /// while the textures hold. The downsample and combine bind groups bind the view target's
+    /// post-process source, which `ViewTarget::post_process_write` flips per call, so those two
+    /// CANNOT be cached (they would sample last frame's texture) and stay per-frame in `run`.
+    gauss_h_bind: BindGroup,
+    gauss_v_bind: BindGroup,
 }
 
 fn prepare_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    views: Query<(Entity, &ExtractedCamera), With<FfxGlow>>,
+    pipeline_cache: Res<PipelineCache>,
+    pipelines: Res<FfxGlowPipelines>,
+    views: Query<(Entity, &ExtractedCamera, Option<&FfxGlowTextures>), With<FfxGlow>>,
 ) {
-    for (entity, camera) in &views {
+    for (entity, camera, existing) in &views {
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
@@ -310,9 +322,38 @@ fn prepare_textures(
         };
         let quarter_a = tex("ffx_glow_quarter_a", vp.x / 4, vp.y / 4);
         let quarter_b = tex("ffx_glow_quarter_b", vp.x / 4, vp.y / 4);
+        // `TextureCache::get` hands the same textures back while the viewport holds, and the
+        // derived objects only depend on them — rebuilding the component anyway would be right
+        // back to per-frame bind-group creation.
+        if existing.is_some_and(|t| {
+            t.quarter_a.texture.id() == quarter_a.texture.id()
+                && t.quarter_b.texture.id() == quarter_b.texture.id()
+        }) {
+            continue;
+        }
+        let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
+        let gauss_h_bind = render_device.create_bind_group(
+            "ffx_glow_gauss_h",
+            &layout_filter,
+            &BindGroupEntries::sequential((&quarter_a.default_view, &pipelines.sampler)),
+        );
+        let gauss_v_bind = render_device.create_bind_group(
+            "ffx_glow_gauss_v",
+            &layout_filter,
+            &BindGroupEntries::sequential((&quarter_b.default_view, &pipelines.sampler)),
+        );
+        let gain_buf = render_device.create_buffer(&BufferDescriptor {
+            label: Some("ffx_glow_gain"),
+            size: 16,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         commands.entity(entity).insert(FfxGlowTextures {
             quarter_a,
             quarter_b,
+            gain_buf,
+            gauss_h_bind,
+            gauss_v_bind,
         });
     }
 }
@@ -352,42 +393,46 @@ impl ViewNode for FfxGlowNode {
             return Ok(()); // pipelines still compiling — draw the frame un-glowed
         };
         let render_device = render_context.render_device().clone();
-        let gain_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("ffx_glow_gain"),
-            contents: bytemuck::cast_slice(&[gain, death, haze, 0.0]),
-            usage: BufferUsages::UNIFORM,
-        });
+        world.resource::<RenderQueue>().write_buffer(
+            &textures.gain_buf,
+            0,
+            bytemuck::cast_slice(&[gain, death, haze, 0.0]),
+        );
         let post = view_target.post_process_write();
         let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
         let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
 
+        // The downsample binds `post.source`, which `post_process_write` flips per call — this
+        // bind group cannot be cached (it would sample last frame's texture); the two Gauss ones
+        // bind only the stable ¼-res ping-pong and ride prepared on [`FfxGlowTextures`].
+        let down_bind = render_device.create_bind_group(
+            "ffx_glow_down_quarter",
+            &layout_filter,
+            &BindGroupEntries::sequential((post.source, &pipelines.sampler)),
+        );
+
         // The filter passes (byte-pinned chain): source→¼ (one Box4), ¼a→¼b (H), ¼b→¼a (V).
-        let filter_passes: [(&str, &RenderPipeline, &TextureView, &TextureView); 3] = [
+        let filter_passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 3] = [
             (
                 "ffx_glow_down_quarter",
                 downsample,
-                post.source,
+                &down_bind,
                 &textures.quarter_a.default_view,
             ),
             (
                 "ffx_glow_gauss_h",
                 gauss_h,
-                &textures.quarter_a.default_view,
+                &textures.gauss_h_bind,
                 &textures.quarter_b.default_view,
             ),
             (
                 "ffx_glow_gauss_v",
                 gauss_v,
-                &textures.quarter_b.default_view,
+                &textures.gauss_v_bind,
                 &textures.quarter_a.default_view,
             ),
         ];
-        for (label, pipeline, src, dst) in filter_passes {
-            let bind = render_device.create_bind_group(
-                label,
-                &layout_filter,
-                &BindGroupEntries::sequential((src, &pipelines.sampler)),
-            );
+        for (label, pipeline, bind, dst) in filter_passes {
             let mut pass =
                 render_context
                     .command_encoder()
@@ -404,11 +449,12 @@ impl ViewNode for FfxGlowNode {
                         occlusion_query_set: None,
                     });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
         }
 
         // Combine: screen + w·blur² (gamma-space byte math in the shader) → the post destination.
+        // Also binds the flipping `post.source` — per-frame for the downsample's reason.
         let bind = render_device.create_bind_group(
             "ffx_glow_combine",
             &layout_combine,
@@ -416,7 +462,7 @@ impl ViewNode for FfxGlowNode {
                 post.source,
                 &pipelines.sampler,
                 &textures.quarter_a.default_view,
-                gain_buf.as_entire_binding(),
+                textures.gain_buf.as_entire_binding(),
             )),
         );
         let mut pass = render_context

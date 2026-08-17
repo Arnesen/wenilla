@@ -710,6 +710,14 @@ fn ui_mesh_frozen() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_FREEZE_UI_MESH").is_some())
 }
 
+/// `WOW_UI_DIFF` presence — launch-time knob, read once (the rebuild path re-ran getenv per frame).
+static UI_DIFF: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("WOW_UI_DIFF").is_some());
+
+/// `WOW_UI_PROBE=1` — launch-time knob, read once (the per-run check re-ran getenv ~90×/frame).
+static UI_PROBE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("WOW_UI_PROBE").as_deref() == Ok("1"));
+
 fn rebuild_ui_mesh(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
@@ -746,7 +754,7 @@ fn rebuild_ui_mesh(
     // says the BASE lane's dirty flag did it), once a second. The instrument behind the
     // Stormwind mesh-churn hunt: a widget re-emitting a moving/jittering quad every frame drags
     // every batch through a full rebuild and the GPU allocator through ~90 frees+reallocs.
-    if std::env::var_os("WOW_UI_DIFF").is_some() {
+    if *UI_DIFF {
         if q.dirty {
             eprintln!("[ui-diff] BASE lane dirty");
         } else {
@@ -806,7 +814,7 @@ fn rebuild_ui_mesh(
     // Geometry probe (`WOW_UI_PROBE=1`): dump each textured quad's screen rect once — the
     // capture-harness companion for diagnosing extracted-vs-rendered geometry by data instead of
     // by eyeballing PNGs.
-    if std::env::var("WOW_UI_PROBE").as_deref() == Ok("1") {
+    if *UI_PROBE {
         // Fire on every rebuild (rebuilds are change-driven and rare); read the LAST block.
         {
             info!(
@@ -923,7 +931,7 @@ fn rebuild_ui_mesh(
             ),
             None => (Vec4::new(0.0, 0.0, -1.0, -1.0), None),
         };
-        if std::env::var("WOW_UI_PROBE").as_deref() == Ok("1") && run.mask.is_some() {
+        if *UI_PROBE && run.mask.is_some() {
             info!(
                 "ui probe: masked run {i}: mask_rect={mask_rect:?} scale={scale} tex={:?}",
                 run.mask.as_ref().map(|m| m.texture.id())

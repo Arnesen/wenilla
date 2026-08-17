@@ -16,6 +16,8 @@
 //! caught (mlua's `Function::call` is a protected call) and returned to the caller, which records
 //! them in [`super::Model::errors`] — never a panic, never a print.
 
+use std::borrow::Cow;
+
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::{Model, ScriptValue, REG_SCRIPTS};
@@ -203,6 +205,22 @@ fn fire(
     invoke_with_globals(lua, wrapper, &func, event_name, extra)
 }
 
+/// The legacy `argN` global names, pre-spelled through the arities that occur in practice so the
+/// per-arg save/set/restore below allocates nothing.
+const ARG_NAMES: [&str; 16] = [
+    "arg1", "arg2", "arg3", "arg4", "arg5", "arg6", "arg7", "arg8", "arg9", "arg10", "arg11",
+    "arg12", "arg13", "arg14", "arg15", "arg16",
+];
+
+/// The global name for arg `i` — **1-based**, matching the globals themselves (`arg1..`). Past
+/// [`ARG_NAMES`] it falls back to allocating.
+fn arg_name(i: usize) -> Cow<'static, str> {
+    match ARG_NAMES.get(i - 1) {
+        Some(&name) => Cow::Borrowed(name),
+        None => Cow::Owned(format!("arg{i}")),
+    }
+}
+
 /// The RF-0025 calling convention itself — the single home for it, shared by [`fire`] (registry
 /// handlers: events, OnUpdate, OnShow/OnHide) and the loader's bottom-up `OnLoad` (which holds the
 /// compiled `Function` directly). Sets the legacy `this`/`event`/`arg1..argN` globals and passes the
@@ -222,7 +240,7 @@ pub(crate) fn invoke_with_globals(
     let n = extra.len();
     let mut saved_args: Vec<Value> = Vec::with_capacity(n);
     for i in 1..=n {
-        saved_args.push(g.get::<Value>(format!("arg{i}"))?);
+        saved_args.push(g.get::<Value>(arg_name(i).as_ref())?);
     }
 
     g.set("this", wrapper.clone())?;
@@ -230,7 +248,7 @@ pub(crate) fn invoke_with_globals(
         g.set("event", lua.create_string(ev)?)?;
     }
     for (i, v) in extra.iter().enumerate() {
-        g.set(format!("arg{}", i + 1), v.clone())?;
+        g.set(arg_name(i + 1).as_ref(), v.clone())?;
     }
 
     let mut modern: Vec<Value> = Vec::with_capacity(2 + n);
@@ -246,7 +264,7 @@ pub(crate) fn invoke_with_globals(
     g.set("this", saved_this)?;
     g.set("event", saved_event)?;
     for (i, v) in saved_args.into_iter().enumerate() {
-        g.set(format!("arg{}", i + 1), v)?;
+        g.set(arg_name(i + 1).as_ref(), v)?;
     }
 
     outcome

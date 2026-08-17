@@ -126,8 +126,8 @@ pub(crate) fn project_decal(
         }
         for i in trimesh.bvh().intersect_aabb(&gather) {
             let tri = trimesh.triangle(i);
-            let poly = clip_to_frame([tri.a, tri.b, tri.c], frame);
-            if poly.len() < 3 {
+            let (poly, n) = clip_to_frame([tri.a, tri.b, tri.c], frame);
+            if n < 3 {
                 continue;
             }
             let vert = |p: Vec3| {
@@ -141,7 +141,7 @@ pub(crate) fn project_decal(
             };
             // Fan-triangulate the clipped convex polygon, unrolled (the stream's tri-list
             // topology: identity indices, no shared vertices).
-            for k in 1..poly.len() - 1 {
+            for k in 1..n - 1 {
                 out.push(vert(poly[0]));
                 out.push(vert(poly[k]));
                 out.push(vert(poly[k + 1]));
@@ -155,8 +155,9 @@ pub(crate) fn project_decal(
 /// horizontal rectangle (clipping in the rotated frame is exactly the texture frame, so UVs stay
 /// in `[0,1]` and the texture can never wrap ghost copies in at the corners) and the vertical
 /// slab. Interpolates full 3D positions along clipped edges, so the result stays on the source
-/// triangle's plane. Returns fewer than 3 vertices when the triangle lies outside the box.
-fn clip_to_frame(tri: [Vec3; 3], frame: &DecalFrame) -> Vec<Vec3> {
+/// triangle's plane. Returns the polygon buffer and its vertex count — fewer than 3 when the
+/// triangle lies outside the box.
+fn clip_to_frame(tri: [Vec3; 3], frame: &DecalFrame) -> ([Vec3; 9], usize) {
     let rx = |p: Vec3| frame.in_frame(p).0;
     let rz = |p: Vec3| frame.in_frame(p).1;
     // Signed inside-distances for the six half-planes of the box.
@@ -168,26 +169,34 @@ fn clip_to_frame(tri: [Vec3; 3], frame: &DecalFrame) -> Vec<Vec3> {
         &|p: Vec3| (frame.center.y + frame.max_y) - p.y,
         &|p: Vec3| p.y - (frame.center.y + frame.min_y),
     ];
-    let mut poly: Vec<Vec3> = tri.to_vec();
+    // Stack ping-pong (this runs per gathered triangle per frame): a convex clip grows the
+    // polygon by at most one vertex per plane, so 3 + 6 = 9 bounds both buffers.
+    let mut poly = [Vec3::ZERO; 9];
+    let mut next = [Vec3::ZERO; 9];
+    poly[..3].copy_from_slice(&tri);
+    let mut len = 3;
     for dist in planes {
-        let mut out = Vec::with_capacity(poly.len() + 1);
-        for i in 0..poly.len() {
-            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let mut out = 0;
+        for i in 0..len {
+            let (a, b) = (poly[i], poly[(i + 1) % len]);
             let (da, db) = (dist(a), dist(b));
             if da >= 0.0 {
-                out.push(a);
+                next[out] = a;
+                out += 1;
             }
             // The edge crosses the plane → emit the intersection point.
             if (da >= 0.0) != (db >= 0.0) {
-                out.push(a + (b - a) * (da / (da - db)));
+                next[out] = a + (b - a) * (da / (da - db));
+                out += 1;
             }
         }
-        poly = out;
-        if poly.len() < 3 {
-            return poly;
+        std::mem::swap(&mut poly, &mut next);
+        len = out;
+        if len < 3 {
+            return (poly, len);
         }
     }
-    poly
+    (poly, len)
 }
 
 /// **Project a decal onto the world's receiving surfaces** — the face for every lane that draws
@@ -233,5 +242,72 @@ impl WorldDecal<'_, '_> {
     /// like one — it had been spelling the marker into its own query filter.
     pub fn receives(&self, entity: Entity) -> bool {
         self.surfaces.contains(entity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An axis-aligned 2×2×2 box around the origin (`(sin, cos) = (0, 1)`), so in-frame
+    /// coordinates ARE world `(x, z)` and the expected polygons can be written by hand.
+    fn frame() -> DecalFrame {
+        DecalFrame {
+            center: Vec3::ZERO,
+            sin: 0.0,
+            cos: 1.0,
+            min_x: -1.0,
+            max_x: 1.0,
+            min_z: -1.0,
+            max_z: 1.0,
+            min_y: -1.0,
+            max_y: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_triangle_inside_the_box_passes_through_unchanged() {
+        let tri = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.5),
+        ];
+        let (poly, n) = clip_to_frame(tri, &frame());
+        assert_eq!(n, 3);
+        // Same vertices, same order — the caller's fan (`poly[0], poly[k], poly[k+1]`) rides it.
+        assert_eq!(&poly[..3], &tri);
+    }
+
+    #[test]
+    fn a_half_clipped_triangle_emits_the_hand_computed_polygon() {
+        // Crosses only the `max_x` plane; every value below is exact in f32, so `==` is honest.
+        let tri = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.5),
+        ];
+        let (poly, n) = clip_to_frame(tri, &frame());
+        assert_eq!(n, 4);
+        // The emit order: each surviving vertex first, then its edge's crossing point.
+        assert_eq!(
+            &poly[..4],
+            &[
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.25),
+                Vec3::new(0.0, 0.0, 0.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_triangle_outside_the_box_clips_to_nothing() {
+        let tri = [
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 1.0),
+        ];
+        let (_, n) = clip_to_frame(tri, &frame());
+        assert!(n < 3, "the caller drops it before fanning");
     }
 }

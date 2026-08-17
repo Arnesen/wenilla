@@ -691,9 +691,11 @@ fn emit_minimap(
 /// persisting across the transition. Runs before the script tick, so a `SetZoom` fired from a button
 /// handler this frame routes to the right index. `CurrentWmoInterior` is the same containment test the
 /// interior audio/zone tracker uses.
-/// The state push is unconditional (a Minimap widget created *after* a transition — the cluster XML
-/// loads late — would otherwise never be told, and the arena scan is nothing next to a frame). On the
-/// actual inside↔outside *edge* we also fire `MINIMAP_UPDATE_ZOOM`: the active zoom index just switched
+/// The state is pushed on the inside↔outside *edge* and whenever the VM's Minimap-creation count
+/// moved (the cluster XML loads late, and an addon can build one whenever it likes — the counter
+/// is what keeps "a widget created after the last transition is still told" true without walking
+/// the ~3k-frame arena every frame; the memo resets with a fresh VM, whose rebuilt widgets bump
+/// the fresh counter). On the edge we also fire `MINIMAP_UPDATE_ZOOM`: the active zoom index just switched
 /// to the other (independent) level, so the cluster must re-sync the +/- buttons' enabled state to it
 /// — the client's own signal for "the effective zoom changed" (FrameXML `Minimap_OnEvent`). Without it
 /// the buttons keep the level you left (e.g. `ZoomIn` greyed from an outdoor max-zoom, still greyed
@@ -702,13 +704,18 @@ fn feed_minimap_inside(
     script: Option<bevy::ecs::system::NonSendMut<benilla_ui::script::UiScript>>,
     world: benilla_world::world_point::WorldPoint,
     mut was_inside: Local<crate::ui_script::VmMemo<Option<bool>>>,
+    mut pushed_at: Local<crate::ui_script::VmMemo<u64>>,
 ) {
     let Some(mut script) = script else { return };
-    let was_inside = was_inside.get(&script);
     let inside = world.interior().is_some();
-    script.set_minimap_inside(inside);
-    if *was_inside != Some(inside) {
-        *was_inside = Some(inside);
+    let edge = *was_inside.get(&script) != Some(inside);
+    let created = script.minimap_widgets_created();
+    if edge || *pushed_at.get(&script) != created {
+        script.set_minimap_inside(inside);
+        *pushed_at.get(&script) = created;
+    }
+    if edge {
+        *was_inside.get(&script) = Some(inside);
         script.fire_event("MINIMAP_UPDATE_ZOOM", vec![]);
     }
 }

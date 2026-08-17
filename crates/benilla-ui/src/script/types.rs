@@ -582,7 +582,10 @@ impl RegionData {
     pub(crate) fn measure_key(&self, scale: f32) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.text.clone().unwrap_or_default().hash(&mut hasher);
+        // By reference: `String` hashes exactly as `str` does, and this runs for every
+        // FontString on every frame's staleness sweep — a clone here was ~1.5k heap allocs a
+        // frame at a city pin, all discarded at the key compare.
+        self.text.as_deref().unwrap_or("").hash(&mut hasher);
         self.font_path.hash(&mut hasher);
         self.font_height.map(f32::to_bits).hash(&mut hasher);
         self.text_height.map(f32::to_bits).hash(&mut hasher);

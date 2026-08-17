@@ -133,15 +133,18 @@ pub(super) fn setup_player(
     if std::env::var_os("WOW_NO_INDIRECT").is_some() {
         world_cam.insert(bevy::render::view::NoIndirectDrawing);
     }
-    // `WOW_NO_CLUSTERS=1` — turn off Bevy's clustered-forward light assignment on the world
-    // camera. An EXPERIMENT knob (the 1370 bracket): every world shader takes its point-light
-    // term off OUR storage buffer (`lighting::global_light` — bevy's clusterable buffer is
-    // fragment-only in the view layout and nothing of ours imports `apply_pbr_lighting`), so
-    // the whole assign/extract/prepare cluster lane is suspected dead work proportional to the
-    // resident `PointLight` population (794 at the SW pin). `ClusterConfig::None` short-circuits
+    // Bevy's clustered-forward light assignment is OFF on the world camera by default (the
+    // 1370 bracket surfaced the lane; the 3-round SW split then measured the skip at −0.28
+    // cpu_ms): every world shader takes its point-light term off OUR storage buffer
+    // (`lighting::global_light` — bevy's clusterable buffer is fragment-only in the view
+    // layout and nothing of ours imports `apply_pbr_lighting`; the WDL far ring is unlit), so
+    // the whole assign/extract/prepare cluster lane is dead work proportional to the resident
+    // `PointLight` population (794 at the SW pin). `ClusterConfig::None` short-circuits
     // `assign_objects_to_clusters` per view and starves the light extract/prepare downstream;
-    // the `Clusters` component stays, so the view bind group still builds.
-    if std::env::var_os("WOW_NO_CLUSTERS").is_some() {
+    // the `Clusters` component stays, so the view bind group still builds. Scoped to THIS
+    // camera: the booth/pane cameras keep bevy's default.
+    // `WOW_CLUSTERS=1` restores bevy's upstream default (the A/B lever back).
+    if std::env::var_os("WOW_CLUSTERS").is_none() {
         world_cam.insert(bevy::light::cluster::ClusterConfig::None);
     }
 }

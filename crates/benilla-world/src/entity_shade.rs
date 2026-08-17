@@ -233,12 +233,16 @@ pub(crate) fn update_ground_shade(
     // A card is a world ROOT (the facing system owns its transform), so the descendant walk below
     // cannot reach one — it carries its owner instead. Disjoint from `parts` by the filter above.
     mut cards: Query<(&crate::billboard::BillboardCard, &mut MeshTag)>,
-    // Reused across frames: every entity in a shaded root's tree → that root's shade byte, so the
-    // card pass is one lookup per card instead of a walk per card.
-    mut tree_shade: Local<bevy::platform::collections::HashMap<Entity, u8>>,
+    // Reused across frames: each shaded ROOT → its shade byte this frame (a few hundred entries).
+    // The card pass walks `ChildOf` up to the nearest such root — this map used to record every
+    // descendant too (~10-20k inserts/frame) so that walk could be a single lookup.
+    mut root_shade: Local<bevy::ecs::entity::EntityHashMap<u8>>,
+    // The card pass's up-walk: a card can follow a deep JOINT (`following_joint` — the swinging
+    // lamp's glow), and a joint is not a shade root.
+    child_of: Query<&ChildOf>,
     mut self_log: Local<f32>,
 ) {
-    tree_shade.clear();
+    root_shade.clear();
     let Some(streamer) = streamer else {
         return;
     };
@@ -248,10 +252,7 @@ pub(crate) fn update_ground_shade(
         // `WOW_INTERIOR_LOG=1`: a periodic SELF-node dump (every 3 s) — the probe run's definitive
         // "what state is the parked character actually in" line, attributable unlike the
         // change-triggered `[node]` lines below (wandering NPCs fire those constantly).
-        if is_self.is_some()
-            && time.elapsed_secs() - *self_log > 3.0
-            && std::env::var_os("WOW_INTERIOR_LOG").is_some()
-        {
+        if is_self.is_some() && time.elapsed_secs() - *self_log > 3.0 && interior_log_enabled() {
             let p = gt.translation();
             eprintln!(
                 "[self-node] at wow ({:.1}, {:.1}, {:.1})  t {:.2} -> {:.2} (I {:.2})  indoor {} \
@@ -296,9 +297,7 @@ pub(crate) fn update_ground_shade(
         // `WOW_INTERIOR_LOG=1`: one line whenever a node's intensity target moves — the live
         // instrument for "which stage is this character actually in?" — MCSH-shadowed 0.5 ⇒ t 1;
         // exterior lit and day/night both ⇒ t 0.75 / committed 1.0 while the gain cap stands (0821).
-        if (target - shade.logged_target).abs() > f32::EPSILON
-            && std::env::var_os("WOW_INTERIOR_LOG").is_some()
-        {
+        if (target - shade.logged_target).abs() > f32::EPSILON && interior_log_enabled() {
             eprintln!(
                 "[node] root {root:?} at ({:.1}, {:.1}, {:.1}) -> target t {target:.2} \
                  (I {:.2}, indoor {}) from t {:.2}",
@@ -328,12 +327,11 @@ pub(crate) fn update_ground_shade(
         let byte = (shade.t * 255.0).round().clamp(0.0, 255.0) as u8;
         // Push to every part below the root (body submeshes are direct children; held items/helm ride
         // joint entities deeper down — same full-tree walk as the self-fade). Change-gated per part on
-        // the byte, so a settled entity writes nothing and never re-triggers render extraction.
-        tree_shade.insert(root, byte);
+        // the byte, so a settled entity writes nothing and never re-triggers render extraction. The
+        // walk itself is unconditional: it is the MeshTag re-assert over the classifier's exterior
+        // reclaim (1358), not a change-only push.
+        root_shade.insert(root, byte);
         for part in children.iter_descendants(root) {
-            // Recorded whether or not it is a drawable part: a card can follow a JOINT
-            // (`following_joint` — the swinging lamp's glow), and a joint carries no `MeshTag`.
-            tree_shade.insert(part, byte);
             let Ok((mut tag, lit)) = parts.get_mut(part) else {
                 continue;
             };
@@ -349,12 +347,12 @@ pub(crate) fn update_ground_shade(
     // the reference shades every batch of an object through one node (0778) — but it is a world root,
     // so the walk above skips it and it kept the lit rung while its owner dimmed. 0811 scoped this to
     // GameObjects because 0809 had pinned units flat; 0814 put units back on the chase, so it is once
-    // again every carried card — a torch's flame card dims with the hand that holds it.
+    // again every carried card — a torch's flame card dims with the hand that holds it. The owner (an
+    // anchor or a deep joint) resolves to the NEAREST shaded root above it: with nested roots (a
+    // mounted unit — rider and mount each carry a node) that is the mount's, matching the
+    // one-node-per-object structure above; the old whole-tree map made this pick last-writer-wins.
     for (card, mut tag) in &mut cards {
-        let Some(byte) = card
-            .follows()
-            .and_then(|owner| tree_shade.get(&owner).copied())
-        else {
+        let Some(byte) = card_root_shade(&root_shade, &child_of, card.follows()) else {
             continue; // a fixed terrain doodad's card — its shade rides the material selector
         };
         if shade_of(tag.0) != byte {
@@ -363,11 +361,105 @@ pub(crate) fn update_ground_shade(
     }
 }
 
+/// The shade byte a card inherits: the NEAREST shaded root at or above `follows` (the owner itself
+/// first, then the `ChildOf` chain). `None` — no owner, or no shaded root over it — skips the card,
+/// exactly as the old whole-tree map's miss did.
+fn card_root_shade(
+    root_shade: &bevy::ecs::entity::EntityHashMap<u8>,
+    child_of: &Query<&ChildOf>,
+    follows: Option<Entity>,
+) -> Option<u8> {
+    let mut node = follows?;
+    loop {
+        if let Some(&byte) = root_shade.get(&node) {
+            return Some(byte);
+        }
+        node = child_of.get(node).ok()?.parent();
+    }
+}
+
+/// `WOW_INTERIOR_LOG=1` — the interior/shade instrument lines. Resolved once: the raw env read ran
+/// per root per frame.
+fn interior_log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_INTERIOR_LOG").is_some())
+}
+
 /// One linear ramp step toward a target, never past it (the binary's clamp-no-overshoot chase).
 fn ramp_toward(v: f32, target: f32, step: f32) -> f32 {
     if v < target {
         (v + step).min(target)
     } else {
         (v - step).max(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::entity::EntityHashMap;
+    use bevy::ecs::system::SystemState;
+
+    /// Run the card resolve against a world's live `ChildOf` topology.
+    fn resolve(world: &mut World, map: &EntityHashMap<u8>, follows: Option<Entity>) -> Option<u8> {
+        let mut state: SystemState<Query<&ChildOf>> = SystemState::new(world);
+        card_root_shade(map, &state.get(world), follows)
+    }
+
+    /// A card's owner can sit arbitrarily deep in its root's tree (a held torch's flame card
+    /// follows a hand JOINT under an item entity under the unit) — the up-walk finds the root's
+    /// byte; the root itself, as an owner, is the walk's zero-hop case.
+    #[test]
+    fn a_card_takes_its_roots_byte_from_any_depth() {
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let a = world.spawn(ChildOf(root)).id();
+        let b = world.spawn(ChildOf(a)).id();
+        let c = world.spawn(ChildOf(b)).id();
+        let mut map = EntityHashMap::default();
+        map.insert(root, 7);
+        assert_eq!(resolve(&mut world, &map, Some(c)), Some(7), "3 deep");
+        assert_eq!(
+            resolve(&mut world, &map, Some(root)),
+            Some(7),
+            "the root itself"
+        );
+    }
+
+    /// No owner (a fixed terrain doodad's card), and an owner whose ancestor chain holds no shaded
+    /// root (a card of something this system doesn't shade) — both skip, like the old map miss.
+    #[test]
+    fn an_unshaded_card_is_skipped() {
+        let mut world = World::new();
+        let stray_root = world.spawn_empty().id();
+        let stray = world.spawn(ChildOf(stray_root)).id();
+        let mut map = EntityHashMap::default();
+        map.insert(world.spawn_empty().id(), 9);
+        assert_eq!(resolve(&mut world, &map, None), None, "follows nothing");
+        assert_eq!(
+            resolve(&mut world, &map, Some(stray)),
+            None,
+            "no shaded ancestor"
+        );
+    }
+
+    /// Nested shade roots — a mounted unit: rider root and mount root each carry a node, the mount
+    /// a descendant of the rider. A card under the MOUNT takes the mount's byte (the nearest root),
+    /// pinned here because the old whole-tree map answered this by insert order.
+    #[test]
+    fn a_nested_root_wins_by_nearness() {
+        let mut world = World::new();
+        let rider = world.spawn_empty().id();
+        let mount = world.spawn(ChildOf(rider)).id();
+        let mount_joint = world.spawn(ChildOf(mount)).id();
+        let mut map = EntityHashMap::default();
+        map.insert(rider, 3);
+        map.insert(mount, 9);
+        assert_eq!(
+            resolve(&mut world, &map, Some(mount_joint)),
+            Some(9),
+            "the MOUNT's byte"
+        );
+        assert_eq!(resolve(&mut world, &map, Some(mount)), Some(9));
     }
 }

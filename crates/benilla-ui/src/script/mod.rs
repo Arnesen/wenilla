@@ -690,13 +690,22 @@ impl UiScript {
     /// Push the player's WMO-containment state onto every Minimap widget (the client's `0xceaa60`).
     /// It selects which of the two persisted zoom indices `GetZoom`/`SetZoom` act on, so the zoom
     /// buttons drive the indoor level while indoors and the outdoor level while outside. The app
-    /// owns the containment test, so it owns this push — call it before the script tick.
+    /// owns the containment test, so it owns this push — call it before the script tick. The
+    /// caller pushes on the inside↔outside edge and whenever [`Self::minimap_widgets_created`]
+    /// moved (a widget born after the last transition still gets told, without paying the arena
+    /// walk every frame).
     pub fn set_minimap_inside(&mut self, inside: bool) {
         for (_, frame) in self.model_mut().arena.iter_frames_mut() {
             if let KindState::Minimap(m) = &mut frame.kind_state {
                 m.inside = inside;
             }
         }
+    }
+
+    /// Monotonic count of Minimap widgets ever created in this VM — the O(1) signal that a new
+    /// one exists and needs the containment state pushed.
+    pub fn minimap_widgets_created(&self) -> u64 {
+        self.model_ref().arena.minimap_created()
     }
 
     /// Seed every Minimap widget's two zoom indices from the persisted levels — the client's

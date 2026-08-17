@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use benilla_assets::materials::WowModelMaterial;
 use benilla_world::billboard::BillboardCard;
-use benilla_world::interact::WorldObject;
+use benilla_world::interact::{CreaturePickPart, GoPickPart, WorldObject};
 use benilla_world::interior::part_interior_lit;
 use benilla_world::model_fade::{FadeSet, JoinedFade, PartFade};
 use benilla_world::model_render::{ModelKind, ModelPart};
@@ -100,6 +100,22 @@ pub(super) fn part_materials<'a>(
             bake_blend: part.material_interior_bake_blend.as_ref(),
             zfill: part.zfill.as_ref(),
         },
+    }
+}
+
+/// Stamp a pickable part (or card) with the pick population its kind belongs to: the mouseover
+/// pickers filter by these markers instead of kind-comparing every `WorldObject` row per frame.
+/// One site for both the mesh-part and the billboard-card spawn, so the two can't drift.
+fn insert_pick_marker(child: &mut bevy::ecs::system::EntityCommands<'_>, kind: ModelKind) {
+    match kind {
+        ModelKind::GameObject => {
+            child.insert(GoPickPart);
+        }
+        ModelKind::Creature => {
+            child.insert(CreaturePickPart);
+        }
+        // Doodad/WMO parts (terrain_stream's spawns) are never dressed here and take no marker.
+        ModelKind::Doodad | ModelKind::Wmo => {}
     }
 }
 
@@ -212,6 +228,7 @@ pub(super) fn spawn_part(
             card: None,
         },
     ));
+    insert_pick_marker(&mut child, dress.kind);
     // Every part gets a tag: the instance slot plus the live alpha field. Unconditional because the
     // slot is a per-instance identity every part needs (the tint) rather than a skinning detail —
     // and because the two conditional writers that used to seed it (the interior classifier, the
@@ -341,6 +358,7 @@ fn spawn_billboard_part(
         benilla_world::interact::PickMesh(part.geometry.clone()),
         card_follow,
     ));
+    insert_pick_marker(&mut card, dress.kind);
     // A card takes its MODEL's indoor law through the same constructor as the sibling meshes it was
     // split out of (decision 0778), and carries the unit's INSTANCE slot like every sibling part
     // even though it is never skinned by it — it is a batch of the unit's own model, so a tinted
@@ -599,6 +617,85 @@ mod tests {
             benilla_world::mesh_tag::alpha_of(found[0].0) <= 1.0 / 63.0,
             "…at the encoder's ≈0 floor",
         );
+    }
+
+    /// The dress path stamps every pickable spawn — the mesh part and the billboard CARD (never
+    /// the bare mirror anchor) — with exactly its kind's pick-population marker, so the mouseover
+    /// pickers' marker-filtered sets equal the old kind-filtered ones by construction. Asserted
+    /// differentially: the marker set must equal the `WorldObject`-kind set, and the other kind's
+    /// marker must land on nothing.
+    #[test]
+    fn a_spawned_part_carries_its_kinds_pick_marker() {
+        for kind in [ModelKind::Creature, ModelKind::GameObject] {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+                .init_asset::<Mesh>();
+            let unit = app.world_mut().spawn(Transform::default()).id();
+            let mut billboard = part(None, false);
+            billboard.billboard = Some(benilla_assets::BillboardInfo {
+                pivot: Vec3::ZERO,
+                bone: 1,
+                kind: benilla_formats::BillboardKind::Spherical,
+                scale_anim: None,
+                seq_translations: Vec::new(),
+            });
+            let object = WorldObject {
+                kind,
+                label: String::new(),
+                id: 0,
+                detail: String::new(),
+            };
+            let empty: CharSkinMaterials = (None, None, None, (None, None));
+            let dress = PartDress {
+                unit,
+                kind,
+                char_mats: &empty,
+                object: &object,
+                inst_slot: 0,
+                rigged: false,
+                anchors: std::collections::HashMap::new(),
+                bake_center: Vec3::ZERO,
+                idle_aabb: None,
+                now: 0.0,
+                fade: JoinedFade::Steady,
+            };
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            {
+                let world = app.world();
+                let mut commands = Commands::new(&mut queue, world);
+                spawn_part(&mut commands, &part(None, false), 0, &dress);
+                spawn_part(&mut commands, &billboard, 1, &dress);
+            }
+            queue.apply(app.world_mut());
+            let world = app.world_mut();
+            let by_kind: std::collections::HashSet<Entity> = world
+                .query::<(Entity, &WorldObject)>()
+                .iter(world)
+                .filter(|(_, o)| o.kind == kind)
+                .map(|(e, _)| e)
+                .collect();
+            let (creature, go) = (
+                world
+                    .query_filtered::<Entity, With<CreaturePickPart>>()
+                    .iter(world)
+                    .collect::<std::collections::HashSet<_>>(),
+                world
+                    .query_filtered::<Entity, With<GoPickPart>>()
+                    .iter(world)
+                    .collect::<std::collections::HashSet<_>>(),
+            );
+            let (marked, other) = match kind {
+                ModelKind::Creature => (creature, go),
+                _ => (go, creature),
+            };
+            assert_eq!(
+                by_kind.len(),
+                2,
+                "the mesh part and the card, not the anchor"
+            );
+            assert_eq!(marked, by_kind, "marker set == kind set ({kind:?})");
+            assert!(other.is_empty(), "never the other kind's marker ({kind:?})");
+        }
     }
 
     /// A batch with no character slot — and a slot whose row the appearance didn't resolve (a bald

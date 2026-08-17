@@ -101,6 +101,10 @@ pub(crate) struct UiFrameCost {
     pub(crate) quads: usize,
     pub(crate) solves: u64,
     pub(crate) skipped: bool,
+    /// How many entries the per-entry splice re-converted this frame — `0` on a settled or
+    /// full-conversion frame. Nonzero is the proof the splice path fired (the equivalence tests
+    /// and the live `[ui-cost] spliced=` field both read it).
+    pub(crate) spliced: usize,
 }
 
 /// Does anything want [`UiFrameCost`] filled in this run? Measuring the split costs a clock read

@@ -129,8 +129,22 @@ fn publish_cover(
 /// Render world, after `PipelineCache::process_pipeline_queue_system` has merged this frame's new
 /// pipelines and started (= on macOS: finished) their builds. `seen` is how many cache entries the
 /// previous frame had — everything past it is new this frame.
-fn watch_pipelines(cache: Res<PipelineCache>, watch: Res<PipeWatch>, mut seen: Local<usize>) {
+fn watch_pipelines(
+    cache: Res<PipelineCache>,
+    watch: Res<PipeWatch>,
+    mut seen: Local<usize>,
+    mut settled_seen: Local<usize>,
+) {
     let covered = watch.0.covered.load(Ordering::Relaxed);
+    // O(1) early-out for the steady state: nothing new since last look AND everything had already
+    // settled then, so the walk below could only re-derive last frame's counts. `size_hint().0`
+    // because the opaque `impl Iterator` hides the backing slice's `.len()`; for a slice iterator
+    // the lower bound is exact. The settled conjunct is load-bearing: Queued/Creating pipelines
+    // settle on later frames without `total` moving.
+    let total = cache.pipelines().size_hint().0;
+    if total == *seen && *settled_seen == total {
+        return;
+    }
     let mut total = 0usize;
     let mut settled = 0usize;
     for (id, pipe) in cache.pipelines().enumerate() {
@@ -164,6 +178,7 @@ fn watch_pipelines(cache: Res<PipelineCache>, watch: Res<PipeWatch>, mut seen: L
         }
     }
     *seen = total;
+    *settled_seen = settled;
     watch.0.created.store(total, Ordering::Relaxed);
     watch.0.settled.store(settled, Ordering::Relaxed);
 }

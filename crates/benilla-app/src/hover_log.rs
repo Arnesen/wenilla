@@ -85,7 +85,7 @@ impl Plugin for HoverLogPlugin {
                     out,
                     "frame_ms,cpu_ms,tick_us,resolve_us,measure_us,extract_us,convert_us,\
                      diff_us,quads,solves,skipped,measured,measured_texts,tip_owner,tip_lines,\
-                     tip_first_line"
+                     tip_first_line,spliced"
                 );
                 info!("hover log: recording every frame to {path}");
                 app.insert_resource(Recorder {
@@ -155,7 +155,7 @@ fn record(
         .unwrap_or_else(|| (String::new(), 0, String::new()));
     let _ = writeln!(
         rec.out,
-        "{frame_ms:.3},{cpu_ms:.3},{},{},{},{},{},{},{},{},{},{},{},{},{lines},{}",
+        "{frame_ms:.3},{cpu_ms:.3},{},{},{},{},{},{},{},{},{},{},{},{},{lines},{},{}",
         c.tick,
         c.resolve,
         c.measure,
@@ -169,6 +169,7 @@ fn record(
         cell(&c.measured_texts.join(" ⏎ ")),
         cell(&owner),
         cell(&first),
+        c.spliced,
     );
     rec.rows.push(Row {
         frame_ms,
@@ -326,6 +327,8 @@ fn parse_row(line: &str) -> Option<Row> {
             quads: num(8)? as usize,
             solves: num(9)? as u64,
             skipped: num(10)? != 0.0,
+            // Appended column (absent in pre-splice recordings — those read back as 0).
+            spliced: fields.get(16).and_then(|f| f.parse().ok()).unwrap_or(0),
         },
         tip: if owner.is_empty() {
             None

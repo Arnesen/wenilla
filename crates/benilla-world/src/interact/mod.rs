@@ -50,6 +50,20 @@ pub struct WorldObject {
     pub detail: String,
 }
 
+/// Marker on every pickable **GameObject** part — the GO mouseover pick's population
+/// (`target/hover.rs`). Inserted beside the part's `WorldObject { kind: GameObject }` at the
+/// attach spawn sites, so building the pick set is an archetype-filtered query over the handful
+/// of GO parts on screen instead of a kind-compare over every streamed `WorldObject` row (the
+/// doodad/WMO population dwarfs it).
+#[derive(Component, Clone, Copy)]
+pub struct GoPickPart;
+
+/// The creature twin of [`GoPickPart`]: every pickable unit/player part — the model-less fallback
+/// cube included — the unit pick's skinless-fallback population. Doodad/WMO parts carry neither
+/// marker.
+#[derive(Component, Clone, Copy)]
+pub struct CreaturePickPart;
+
 /// A left *select* gesture in the world. Emitted by [`crate::player::control`] on the button's
 /// **release**, when the press satisfied the reference's click predicate — under 200 ms whatever the
 /// mouse did, or under 800 ms having turned the camera less than 2.25° of yaw / 2.0° of pitch

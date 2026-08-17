@@ -204,21 +204,35 @@ impl Plugin for WorldFoundation {
             // read, whose defaults ARE the player behaviour. The debug panel is only its editor
             // and may not be installed at all.
             .init_resource::<crate::dev_state::DebugState>();
-        // `WOW_NO_PHYS_PREPROP=1` — skip avian's own copy of Bevy's transform propagation in
-        // FixedPostUpdate. An EXPERIMENT knob (the 1370 bracket): `PhysicsTransformPlugin`
-        // re-registers `mark_dirty_trees`/`propagate_parent_transforms`/`sync_simple_transforms`
-        // to run before each physics step — a second whole-world transform sweep on top of
-        // PostUpdate's own. Our world is static geometry plus kinematic movers that write
-        // `Position` directly, so the pre-step copy is suspected dead work; the gate is a
-        // runtime `run_if` on this resource, so inserting it IS the whole mechanism. Known
-        // semantic edge while on: a collider whose `Transform` moves during Update reaches
-        // physics with last frame's `GlobalTransform` (one-frame lag) — a measurement lever,
-        // never a setting.
-        if std::env::var_os("WOW_NO_PHYS_PREPROP").is_some() {
+        // Avian's pre-step copy of Bevy's transform propagation is OFF by default (the 1370
+        // bracket surfaced the lane; the 3-round SW split then measured the skip at −0.40
+        // cpu_ms, negative in every round): `PhysicsTransformPlugin` re-registers
+        // `mark_dirty_trees`/`propagate_parent_transforms`/`sync_simple_transforms` to run
+        // before each physics step — a second whole-world transform sweep on top of
+        // PostUpdate's own. Our world is static geometry plus kinematic movers
+        // (`transport::tick_transports`) that mirror `Position`/`Rotation` directly — built
+        // that way precisely because the sync's own timing already lagged — so the pre-step
+        // sweep buys nothing. The one Transform-moved collider class left is an opening door
+        // (a GameObject's model-local hull riding its pose): it reaches physics one frame late
+        // via PostUpdate's own propagation — transient, bounded, imperceptible.
+        // `WOW_PHYS_PREPROP=1` restores avian's upstream default (the A/B lever back).
+        if std::env::var_os("WOW_PHYS_PREPROP").is_none() {
             app.insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
                 propagate_before_physics: false,
                 ..Default::default()
             });
+        }
+        // `WOW_PHYS_HZ=<hz>` — run the fixed loop at a different rate. An EXPERIMENT lever
+        // (1370 item 10): avian's per-tick stack is the fixed loop's ONLY occupant (nothing
+        // first-party lives in any fixed schedule — zero-hit grep, re-verified at flip time),
+        // so 8 vs the default 64 prices the whole-avian bracket in one leg. A measurement
+        // lever, never a setting: at 8 Hz the spatial trees ingest streamed colliders up to
+        // 125 ms late, which the player's shape-cast controller would feel at a tile seam.
+        if let Some(hz) = std::env::var("WOW_PHYS_HZ")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            app.insert_resource(bevy::time::Time::<bevy::time::Fixed>::from_hz(hz));
         }
         // Direct draws on EVERY camera — the default, not a knob (1374/1376). Bevy's indirect
         // lane is a per-draw indirect encode loop on Metal (no MULTI_DRAW_INDIRECT) plus the GPU

@@ -120,6 +120,37 @@ fn flag_prefix(player_flags: u32) -> String {
         .collect()
 }
 
+/// Whether `cached` is exactly the line stack [`drive_nameplates`]'s stale arm would build from
+/// these inputs — compared in place, because the steady frame must not allocate three strings per
+/// shown unit just to learn nothing changed. Equivalent to string equality against the built stack
+/// (the differential test pins it): line 0 is the set [`FLAG_PREFIXES`] tags in slot order glued
+/// onto the name, line 1 the `<{sub}>` decoration when a subname shows.
+fn lines_current(cached: &[String], player_flags: u32, name: &str, sub: Option<&str>) -> bool {
+    let name_line = |line: &str| {
+        let mut rest = line;
+        for (bit, tag) in FLAG_PREFIXES {
+            if player_flags & bit != 0 {
+                match rest.strip_prefix(tag) {
+                    Some(r) => rest = r,
+                    None => return false,
+                }
+            }
+        }
+        rest == name
+    };
+    match (cached, sub) {
+        ([l0], None) => name_line(l0),
+        ([l0, l1], Some(sub)) => {
+            name_line(l0)
+                && l1
+                    .strip_prefix('<')
+                    .and_then(|r| r.strip_suffix('>'))
+                    .is_some_and(|r| r == sub)
+        }
+        _ => false,
+    }
+}
+
 /// The name's world scale for a unit whose overhead anchor sits `d` world units above its feet.
 /// Shared with the raid-target marker ([`crate::raid_marks`]) — §6 of the same geometry law.
 pub(crate) fn height_scale(d: f32) -> f32 {
@@ -469,31 +500,31 @@ pub(crate) fn drive_nameplates(
         if !show {
             continue;
         }
-        let Some(name) = names.resolve(guid.0, &net_commands).map(str::to_owned) else {
+        // Ask-once resolve, then re-read by reference (`peek`, resolve's read-only twin): holding
+        // resolve's `&mut`-tied return across the subname read below is a borrow conflict, and the
+        // `str::to_owned` that used to break it was a per-unit-per-frame allocation made just to
+        // compare against the cache (the steady arm below no longer builds anything).
+        if names.resolve(guid.0, &net_commands).is_none() {
+            continue;
+        }
+        let Some(name) = names.peek(guid.0) else {
             continue;
         };
         // The player flag decorations (a1–a3): glued straight onto the name line, no space.
-        let name = if net.kind == EntityKind::Player {
-            let prefix = flag_prefix(store.map_or(0, |s| s.0.player_flags()));
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}{name}")
-            }
+        let flags = if net.kind == EntityKind::Player {
+            store.map_or(0, |s| s.0.player_flags())
         } else {
-            name
+            0
         };
-        let mut lines = vec![name];
-        if net.kind == EntityKind::Unit {
-            if let Some(sub) = benilla_protocol::guid::entry(guid.0)
+        let sub = if net.kind == EntityKind::Unit {
+            benilla_protocol::guid::entry(guid.0)
                 .and_then(|e| names.creature_subname(e))
                 // vmangos ships "" (present-but-empty) for most templates — an empty wire
                 // subname is NO subname, never an empty `<>` line.
                 .filter(|s| !s.trim().is_empty())
-            {
-                lines.push(format!("<{sub}>"));
-            }
-        }
+        } else {
+            None
+        };
         // The color: the ring's byte-verified rank + the shared palette selector.
         let rank = ring_reaction(
             factions.as_deref(),
@@ -521,33 +552,29 @@ pub(crate) fn drive_nameplates(
             ))
         };
 
-        // (Re)build the plate entity when its content changed. The seat below is only the
-        // spawn-frame placement — [`place_nameplates`] re-seats every plate each frame from the
-        // propagated (same-frame) pose.
-        let anchor = overhead_anchor(
-            entity,
-            tf,
-            &anchor_q.0,
-            &anchor_q.1,
-            &anchor_q.2,
-            &anchor_q.3,
-            &anchor_q.4,
-        );
-        let scale = height_scale(anchor.y - tf.translation.y);
-        let place = Transform {
-            translation: anchor,
-            rotation: facing,
-            scale: Vec3::splat(scale),
-        };
         seen.insert(entity);
         match plates.live.get(&entity) {
-            Some((_, l, c)) if *l == lines && *c == color => {}
+            // The steady frame — very nearly all of them — compares the cached stack in place
+            // ([`lines_current`]): the line stack used to be BUILT here (three allocations per
+            // shown unit per frame) only to equality-compare against the cache and be dropped.
+            Some((_, l, c)) if *c == color && lines_current(l, flags, name, sub) => {}
             stale => {
                 if let Some((old, _, _)) = stale {
                     let old = *old;
                     if let Ok(mut e) = commands.get_entity(old) {
                         e.despawn();
                     }
+                }
+                // Building the stack allocates, and only this arm does it. [`lines_current`]'s
+                // differential test pins the compare above to exactly this shape.
+                let prefix = flag_prefix(flags);
+                let mut lines = vec![if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}{name}")
+                }];
+                if let Some(sub) = sub {
+                    lines.push(format!("<{sub}>"));
                 }
                 debug!("nameplates: rebuild {entity} -> {lines:?} ({color:?})");
                 let mesh = plates
@@ -556,6 +583,25 @@ pub(crate) fn drive_nameplates(
                     .or_insert_with(|| meshes.add(build_name_mesh(atlas, &lines)))
                     .clone();
                 let material = plates.materials[&color].clone();
+                // The spawn-frame seat only — [`place_nameplates`] re-seats every plate each
+                // frame from the propagated (same-frame) pose. Kept (not `Transform::default()`):
+                // the PostUpdate placement can miss a plate whose unit despawned later this same
+                // Update, and a plate must never render a frame at the origin.
+                let anchor = overhead_anchor(
+                    entity,
+                    tf,
+                    &anchor_q.0,
+                    &anchor_q.1,
+                    &anchor_q.2,
+                    &anchor_q.3,
+                    &anchor_q.4,
+                );
+                let scale = height_scale(anchor.y - tf.translation.y);
+                let place = Transform {
+                    translation: anchor,
+                    rotation: facing,
+                    scale: Vec3::splat(scale),
+                };
                 let plate = commands
                     .spawn((Mesh3d(mesh), MeshMaterial3d(material), place, NamePlate))
                     .id();
@@ -653,8 +699,19 @@ fn place_nameplates(
             rotation: facing,
             scale: Vec3::splat(scale),
         };
-        *ptf = place;
-        *pglobal = GlobalTransform::from(place);
+        // The no-op write gate (decision 1362 — the camera's pattern, at the plate): a parked
+        // unit's seat is bit-stable, but writing it anyway marked every plate's transform changed
+        // every frame. Bit equality, not an epsilon: a real sub-epsilon drift must still land.
+        // The global rides the same branch — a root entity's global IS its transform, so the two
+        // are stale together. The mounted rock-damp seat never settles; the gate just misses there.
+        {
+            let t = ptf.bypass_change_detection();
+            if *t != place {
+                *t = place;
+                ptf.set_changed();
+                *pglobal = GlobalTransform::from(place);
+            }
+        }
     }
     // Dismounted or despawned units drop their damping state (a re-mount starts fresh).
     rock.retain(|e, _| anchor_q.4.contains(*e));
@@ -833,6 +890,95 @@ mod tests {
     }
 
     const RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);
+
+    /// The steady arm's in-place compare answers exactly "is the cached stack what the stale arm
+    /// would build from these inputs" — pinned differentially against that build itself (every
+    /// pair of cases, both directions), so the two shapes cannot drift apart. This is also the
+    /// keep-vs-rebuild verdict: `true` keeps the plate entity across frames, `false` rebuilds it —
+    /// e.g. a name that merely LOOKS pre-tagged (`<AFK>Bob`, unflagged) still compares equal to a
+    /// flagged `Bob`, exactly as the built strings do.
+    #[test]
+    fn lines_current_matches_the_built_stack() {
+        let build = |flags: u32, name: &str, sub: Option<&str>| {
+            let mut lines = vec![format!("{}{name}", flag_prefix(flags))];
+            if let Some(sub) = sub {
+                lines.push(format!("<{sub}>"));
+            }
+            lines
+        };
+        let cases: &[(u32, &str, Option<&str>)] = &[
+            (0, "Mankrik", None),
+            (0, "Young Wolf", Some("Beast")),
+            (0, "Young Wolf", None),
+            (0x2, "Bob", None),
+            (0x2 | 0x8, "Bob", None),
+            (0, "<AFK>Bob", None),
+        ];
+        for &(flags, name, sub) in cases {
+            let cached = build(flags, name, sub);
+            for &(f2, n2, s2) in cases {
+                assert_eq!(
+                    lines_current(&cached, f2, n2, s2),
+                    build(f2, n2, s2) == cached,
+                    "cache of ({flags:#x}, {name:?}, {sub:?}) vs ({f2:#x}, {n2:?}, {s2:?})"
+                );
+            }
+        }
+    }
+
+    /// The placement write gate (decision 1362's pattern at the plate): a static world's second
+    /// placement leaves the plate's `Transform`/`GlobalTransform` change ticks untouched, and a
+    /// moved unit still lands its write — bit equality, so any real movement passes.
+    #[test]
+    fn a_parked_plates_seat_takes_no_write() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(NameAnchorTrace(false));
+        world.spawn((Transform::default(), WorldCamera));
+        let unit = world.spawn(Transform::from_xyz(3.0, -1.0, 5.0)).id();
+        let plate = world
+            .spawn((Transform::default(), GlobalTransform::default(), NamePlate))
+            .id();
+        let mut plates = Nameplates::default();
+        plates
+            .live
+            .insert(unit, (plate, vec!["Bob".to_string()], NamePaint::Flash));
+        world.insert_resource(plates);
+
+        // First seat: the anchor fallback (no model) is the unit's own translation.
+        world.run_system_once(place_nameplates).unwrap();
+        assert_eq!(
+            world.get::<Transform>(plate).unwrap().translation,
+            Vec3::new(3.0, -1.0, 5.0),
+        );
+
+        // A parked frame: bit-identical seat, so neither transform's tick may move.
+        world.clear_trackers();
+        world.run_system_once(place_nameplates).unwrap();
+        let e = world.entity(plate);
+        assert!(
+            !e.get_ref::<Transform>().unwrap().is_changed(),
+            "an unchanged seat must not re-mark the plate's transform"
+        );
+        assert!(
+            !e.get_ref::<GlobalTransform>().unwrap().is_changed(),
+            "…nor its global"
+        );
+
+        // A real move still lands, and marks.
+        world.get_mut::<Transform>(unit).unwrap().translation.x += 2.0;
+        world.clear_trackers();
+        world.run_system_once(place_nameplates).unwrap();
+        let e = world.entity(plate);
+        assert_eq!(
+            e.get::<Transform>().unwrap().translation,
+            Vec3::new(5.0, -1.0, 5.0)
+        );
+        assert!(e.get_ref::<Transform>().unwrap().is_changed());
+        assert!(e.get_ref::<GlobalTransform>().unwrap().is_changed());
+    }
 
     /// A populated cache, as a re-bake finds it: one live plate, its mesh, its material.
     fn primed(generation: Option<u64>, unit: Entity, plate: Entity) -> Nameplates {
