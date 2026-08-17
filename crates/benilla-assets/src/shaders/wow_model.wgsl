@@ -103,6 +103,11 @@ struct ModelParams {
     // midpoint pair — ambient AND diffuse = (Direct + Ambient)/2, ambient +16/255 — the warm pane
     // seen from inside a building (derivation 0x6d37e0, byte-verified).
     sidn: vec4<f32>,
+    // The shared mat-anim TABLE slots (decision 1381): x = the UV-scroll slot, y = the animated-
+    // tint slot — 0 (the pinned-zero identity row) for every static material, so the folds below
+    // add the row unconditionally, branch-free. The rows are DELTAS from the built seeds
+    // (sun_scale.zw / tint.xyz), which stay exactly as built; zw free.
+    anim_slots: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> m: ModelParams;
 
@@ -182,6 +187,12 @@ struct WowLight {
     // back as `origin − camera`, so a skinned vertex is never expressed as an absolute world
     // coordinate in f32 — which is what the ~1 mm/frame character shimmer was.
     rig_origin: array<vec4<f32>, 2048>,
+    // The mat-anim delta table (decision 1381; mat_anim_table.rs mirrors the size): row 0 is the
+    // pinned-zero identity every static material's anim_slots = 0 reads; a live row is the drawn
+    // batch's sampled UV-scroll delta (xy, added to sun_scale.zw) or tint delta (xyz, added to
+    // tint.rgb). Zero region = every batch at its built seed — the studio buffers and
+    // deterministic captures ride that exactly like the tint table's zero-identity.
+    matanim: array<vec4<f32>, 512>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
@@ -569,7 +580,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
         vo.uv = in.uv;
     } else {
-        vo.uv = in.uv + m.sun_scale.zw;
+        vo.uv = in.uv + m.sun_scale.zw + wow_light.matanim[u32(m.anim_slots.x)].xy;
     }
 #endif
 #ifdef VERTEX_UVS_B
@@ -891,7 +902,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // authored values. (The old fog_params.z linear-space A/B is dead — settled by the lane.)
     // `m.tint` is the animated M2Color RGB (identity 1 for static batches) — the same per-batch
     // tint the vertex colours carry for constant tracks, so it folds at the same point.
-    let albedo = base.rgb * m.tint.rgb;
+    let albedo = base.rgb * (m.tint.rgb + wow_light.matanim[u32(m.anim_slots.y)].xyz);
     // Unlit fullbright (model_flags.w): M2 UNLIT (0x01) glass/glow cards, or WMO UNLIT on an
     // exterior-group batch (`tex × white` — the inn's always-lit outside panes). Wins over the lit
     // path; faithfully receives NO emission terms (lighting is off, so GL_EMISSION is dead there).

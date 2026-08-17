@@ -235,13 +235,73 @@ pub fn sample_mat_anim(
 #[derive(bevy::prelude::Component)]
 pub struct AnimMatPart;
 
+/// One registered UV-scroll material: its sampler, its table slot, and the built seed the delta
+/// rows are measured from (the material's own `sun_scale.zw`, which is never mutated again —
+/// decision 1381).
+pub struct UvAnimEntry {
+    pub anim: std::sync::Arc<benilla_formats::UvAnim>,
+    pub slot: u16,
+    pub seed: [f32; 2],
+}
+
+impl UvAnimEntry {
+    /// The slot's delta row for `now`: the quantized sample minus the built seed — the shader
+    /// adds it back onto `sun_scale.zw` (decision 1381's encoding). Quantized exactly as the
+    /// old asset-mutating lane quantized its absolute writes, so the first live frame shows the
+    /// same number the old path would have written.
+    pub(crate) fn delta(&self, now: f32) -> [f32; 4] {
+        let uv = self.anim.sample(now);
+        [
+            benilla_assets::quantize(uv[0], 4096.0) - self.seed[0],
+            benilla_assets::quantize(uv[1], 4096.0) - self.seed[1],
+            0.0,
+            0.0,
+        ]
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct UvAnimMaterials(
     pub  std::collections::HashMap<
         bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
-        std::sync::Arc<benilla_formats::UvAnim>,
+        UvAnimEntry,
     >,
 );
+
+/// Register material `id` for the per-frame UV scroll: allocate its table slot, remember the
+/// built seed, and bake the slot index into the material's `anim_slots.x` — the ONE material
+/// write this lane ever makes (spawn-frame, where the asset is Modified anyway). A full table
+/// (never seen below ~500 resident animated materials) skips registration: the batch stays
+/// frozen at its built seed — a degraded look, never a wrong pixel.
+pub fn register_uv(
+    reg: &mut UvAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    anim: &std::sync::Arc<benilla_formats::UvAnim>,
+) {
+    if reg.0.contains_key(&id) {
+        return;
+    }
+    let Some(slot) = table.alloc() else {
+        bevy::log::warn_once!("mat-anim table full — a UV-scroll batch stays at its seed");
+        return;
+    };
+    let Some(mat) = materials.get_mut(id) else {
+        table.free(slot);
+        return;
+    };
+    let seed = [mat.extension.sun_scale.z, mat.extension.sun_scale.w];
+    mat.extension.anim_slots.x = f32::from(slot);
+    reg.0.insert(
+        id,
+        UvAnimEntry {
+            anim: anim.clone(),
+            slot,
+            seed,
+        },
+    );
+}
 
 /// Re-sample the **drawn** animated materials on the shared clock — the UV scroll
 /// ([`UvAnimMaterials`]) and the RGB tint ([`TintAnimMaterials`]) together, because they share the
@@ -278,7 +338,8 @@ pub(super) fn tick_anim_materials(
     real: Res<Time<bevy::time::Real>>,
     mut uv_reg: ResMut<UvAnimMaterials>,
     mut tint_reg: ResMut<TintAnimMaterials>,
-    mut materials: ResMut<Assets<benilla_assets::materials::WowModelMaterial>>,
+    materials: Res<Assets<benilla_assets::materials::WowModelMaterial>>,
+    mut table: ResMut<crate::mat_anim_table::MatAnimTable>,
     parts: Query<
         (
             &MeshMaterial3d<benilla_assets::materials::WowModelMaterial>,
@@ -309,52 +370,32 @@ pub(super) fn tick_anim_materials(
         }
     }
     let now = time.elapsed_secs();
-    // `contains` on the skip path, never `get_mut`: the entry must survive while its material does
-    // (that is the eviction predicate — an entry dies with its material, not with its visibility),
-    // and an immutable probe is what keeps a skipped material *un*-Modified.
-    uv_reg.0.retain(|id, anim| {
-        if !drawn.contains(id) {
-            return materials.contains(*id);
-        }
-        let uv = anim.sample(now);
-        // The write gate (`write_gated`'s reasoning, 1375): a `get_mut` deref alone marks the
-        // asset Modified — a uniform re-upload, a bind-group rebuild on the non-bindless Metal
-        // path, and the whole-population `AssetChanged` walks — so an unchanged value must be
-        // decided on the immutable view and never deref. Quantized because the input drifts
-        // continuously: 1/4096 of a texture repeat is below what any face can show.
-        let (zq, wq) = (
-            benilla_assets::quantize(uv[0], 4096.0),
-            benilla_assets::quantize(uv[1], 4096.0),
-        );
-        match materials.get(*id) {
-            None => return false, // material unloaded with its cache — drop the entry
-            Some(m) if m.extension.sun_scale.z == zq && m.extension.sun_scale.w == wq => {
-                return true;
-            }
-            Some(_) => {}
-        }
-        let Some(mat) = materials.get_mut(*id) else {
+    // The samples land in the shared table as DELTAS from each entry's built seed (decision
+    // 1381) — the material asset is never touched, so there is no per-frame `Modified`, no
+    // bind-group rebuild, no `AssetChanged` walk, and no far-twin re-insert (the twin's clone
+    // carries the same slot and seed, so it scrolls in phase off the same row). Quantized
+    // because the input drifts continuously: 1/4096 of a texture repeat (1/255 for tint) is
+    // below what any face can show — and `MatAnimTable::set` skips same-value writes, so a slow
+    // loop uploads nothing most frames. Eviction is unchanged: an entry dies with its material,
+    // and its slot zeroes back to identity ([`crate::mat_anim_table`]'s free law).
+    uv_reg.0.retain(|id, entry| {
+        if !materials.contains(*id) {
+            table.free(entry.slot);
             return false;
-        };
-        mat.extension.sun_scale.z = zq;
-        mat.extension.sun_scale.w = wq;
+        }
+        if drawn.contains(id) {
+            table.set(entry.slot, entry.delta(now));
+        }
         true
     });
-    tint_reg.0.retain(|id, anim| {
-        if !drawn.contains(id) {
-            return materials.contains(*id);
-        }
-        let rgb = benilla_assets::quant255(anim.sample(now));
-        let tint = bevy::math::Vec4::new(rgb[0], rgb[1], rgb[2], 1.0);
-        match materials.get(*id) {
-            None => return false,
-            Some(m) if m.extension.tint == tint => return true,
-            Some(_) => {}
-        }
-        let Some(mat) = materials.get_mut(*id) else {
+    tint_reg.0.retain(|id, entry| {
+        if !materials.contains(*id) {
+            table.free(entry.slot);
             return false;
-        };
-        mat.extension.tint = tint;
+        }
+        if drawn.contains(id) {
+            table.set(entry.slot, entry.delta(now));
+        }
         true
     });
 }
@@ -396,10 +437,140 @@ fn matanim_off(time: &Time<bevy::time::Real>) -> bool {
 /// doodad's ambient loop). Spell-effect instances need real per-instance phase instead (one cast
 /// = one 0.9 s pulse), so the effect lane clones its materials and ticks them on the instance
 /// clock (`entities::spell_fx`), never through this registry.
+/// One registered tint material — [`UvAnimEntry`]'s RGB twin (seed = the built `tint.xyz`).
+pub struct TintAnimEntry {
+    pub anim: std::sync::Arc<benilla_formats::RgbAnim>,
+    pub slot: u16,
+    pub seed: [f32; 3],
+}
+
+impl TintAnimEntry {
+    /// [`UvAnimEntry::delta`]'s RGB twin (1/255 quantization, the display's own step).
+    pub(crate) fn delta(&self, now: f32) -> [f32; 4] {
+        let rgb = benilla_assets::quant255(self.anim.sample(now));
+        [
+            rgb[0] - self.seed[0],
+            rgb[1] - self.seed[1],
+            rgb[2] - self.seed[2],
+            0.0,
+        ]
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct TintAnimMaterials(
     pub  std::collections::HashMap<
         bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
-        std::sync::Arc<benilla_formats::RgbAnim>,
+        TintAnimEntry,
     >,
 );
+
+/// [`register_uv`]'s tint twin: slot into `anim_slots.y`, seed from the built `tint.xyz`.
+pub fn register_tint(
+    reg: &mut TintAnimMaterials,
+    table: &mut crate::mat_anim_table::MatAnimTable,
+    materials: &mut bevy::asset::Assets<benilla_assets::materials::WowModelMaterial>,
+    id: bevy::asset::AssetId<benilla_assets::materials::WowModelMaterial>,
+    anim: &std::sync::Arc<benilla_formats::RgbAnim>,
+) {
+    if reg.0.contains_key(&id) {
+        return;
+    }
+    let Some(slot) = table.alloc() else {
+        bevy::log::warn_once!("mat-anim table full — a tint batch stays at its seed");
+        return;
+    };
+    let Some(mat) = materials.get_mut(id) else {
+        table.free(slot);
+        return;
+    };
+    let seed = [
+        mat.extension.tint.x,
+        mat.extension.tint.y,
+        mat.extension.tint.z,
+    ];
+    mat.extension.anim_slots.y = f32::from(slot);
+    reg.0.insert(
+        id,
+        TintAnimEntry {
+            anim: anim.clone(),
+            slot,
+            seed,
+        },
+    );
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    fn uv_loop() -> std::sync::Arc<benilla_formats::UvAnim> {
+        std::sync::Arc::new(benilla_formats::UvAnim {
+            period: 2.0,
+            step: false,
+            wrap: true,
+            gseq: false,
+            keys: vec![(0.0, [0.1, 0.2]), (1.0, [0.5, 0.6]), (2.0, [0.1, 0.2])],
+        })
+    }
+
+    /// The delta law (decision 1381): a row is the quantized live sample minus the BUILT seed,
+    /// so the shader's `seed + row` shows exactly the number the old asset-mutating lane wrote.
+    /// At t = 0 that is the quantized seed — the same value the old tick's first frame produced.
+    #[test]
+    fn the_delta_reproduces_the_old_absolute_write() {
+        let anim = uv_loop();
+        let seed = anim.sample(0.0);
+        let entry = UvAnimEntry {
+            anim: anim.clone(),
+            slot: 3,
+            seed,
+        };
+        for t in [0.0_f32, 0.35, 1.0, 1.7] {
+            let d = entry.delta(t);
+            let s = anim.sample(t);
+            let old = [
+                benilla_assets::quantize(s[0], 4096.0),
+                benilla_assets::quantize(s[1], 4096.0),
+            ];
+            assert_eq!(
+                seed[0] + d[0],
+                old[0],
+                "t={t}: shader fold == old write (u)"
+            );
+            assert_eq!(
+                seed[1] + d[1],
+                old[1],
+                "t={t}: shader fold == old write (v)"
+            );
+            assert_eq!(d[2], 0.0);
+            assert_eq!(d[3], 0.0);
+        }
+    }
+
+    /// The tint twin, same law at the display's 1/255 step.
+    #[test]
+    fn the_tint_delta_reproduces_the_old_absolute_write() {
+        let anim = std::sync::Arc::new(benilla_formats::RgbAnim {
+            period: 1.0,
+            step: false,
+            wrap: true,
+            gseq: false,
+            keys: vec![(0.0, [1.0, 0.5, 0.25]), (1.0, [1.0, 0.5, 0.25])],
+        });
+        let seed = {
+            let s = benilla_assets::quant255(anim.sample(0.0));
+            [s[0], s[1], s[2]]
+        };
+        let entry = TintAnimEntry {
+            anim: anim.clone(),
+            slot: 4,
+            seed,
+        };
+        let d = entry.delta(0.4);
+        let old = benilla_assets::quant255(anim.sample(0.4));
+        for i in 0..3 {
+            assert_eq!(seed[i] + d[i], old[i], "channel {i}");
+        }
+    }
+}

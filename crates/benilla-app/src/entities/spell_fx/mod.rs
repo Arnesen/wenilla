@@ -138,6 +138,10 @@ fn fx_part_material(
     };
     let t0 = anim.sample(0.0);
     mat.extension.tint = Vec4::new(t0[0], t0[1], t0[2], 1.0);
+    // The clone must leave the shared mat-anim table (decision 1381): its tint is ticked per
+    // INSTANCE right here (the whole point of the clone), and a carried world slot would add the
+    // shared delta on top — a double animation the old asset-mutating lane could never produce.
+    mat.extension.anim_slots = Vec4::ZERO;
     let handle = wow_materials.add(mat);
     tint_reg.0.insert(handle.id(), (anim.clone(), now));
     handle

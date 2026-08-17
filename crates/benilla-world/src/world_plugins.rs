@@ -96,6 +96,10 @@ impl PluginGroup for WorldPlugins {
             // The per-instance body tint (decision 0812), on the same slot index as that palette:
             // the aura state kit's CharProc-1 colour, in its own region of the shared light buffer.
             .add(crate::instance_tint::plugin)
+            // The mat-anim delta table (decision 1381), one region over: the per-frame samples of
+            // every UV/tint-animated batch material, so animating a waterfall never mutates its
+            // material asset again.
+            .add(crate::mat_anim_table::plugin)
             // The M2 render lane's three own plugins (decision 1163, stage zero). All three used to
             // be registered by `EntitiesPlugin` — the entity streamer — which is why booting the
             // engine without the game left the model-`Visibility` authority reading a

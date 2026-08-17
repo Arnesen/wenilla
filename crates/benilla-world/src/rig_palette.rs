@@ -81,16 +81,16 @@ pub(crate) fn rig_origin_region_offset() -> u64 {
 }
 
 /// Bytes the origin table adds (32 KB at 2048 slots).
-fn rig_origin_region_bytes() -> u64 {
+pub(crate) fn rig_origin_region_bytes() -> u64 {
     MAX_RIG_SLOTS as u64 * 16
 }
 
 /// Byte offset of the palette rows themselves — after the slot table, the per-instance tint table
-/// that shares this slot index ([`crate::instance_tint`], decision 0812), and the origin table.
-/// The rows stay last because `wow_model.wgsl` declares them as the struct's one runtime-sized
-/// array.
+/// that shares this slot index ([`crate::instance_tint`], decision 0812), the origin table, and
+/// the mat-anim delta table ([`crate::mat_anim_table`], decision 1381). The rows stay last
+/// because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
 pub(crate) fn palette_region_offset() -> u64 {
-    rig_origin_region_offset() + rig_origin_region_bytes()
+    crate::mat_anim_table::region_offset() + crate::mat_anim_table::region_bytes()
 }
 
 /// Total bytes the slot-indexed regions add to every `wow_light`-layout buffer
@@ -100,6 +100,7 @@ pub(crate) fn palette_regions_bytes() -> u64 {
     (MAX_RIG_SLOTS * 4) as u64
         + crate::instance_tint::region_bytes()
         + rig_origin_region_bytes()
+        + crate::mat_anim_table::region_bytes()
         + MAX_PALETTE_BONES as u64 * BONE_BYTES
 }
 
@@ -1096,15 +1097,21 @@ mod tests {
             "the rig-origin table follows the tint table"
         );
         assert_eq!(
-            palette_region_offset() - rig_origin_region_offset(),
+            crate::mat_anim_table::region_offset() - rig_origin_region_offset(),
             rig_origin_region_bytes(),
-            "the palette rows follow the origin table"
+            "the mat-anim table follows the origin table (decision 1381)"
+        );
+        assert_eq!(
+            palette_region_offset() - crate::mat_anim_table::region_offset(),
+            crate::mat_anim_table::region_bytes(),
+            "the palette rows follow the mat-anim table"
         );
         assert_eq!(
             palette_regions_bytes(),
             (MAX_RIG_SLOTS * 4) as u64
                 + crate::instance_tint::region_bytes()
                 + rig_origin_region_bytes()
+                + crate::mat_anim_table::region_bytes()
                 + (MAX_PALETTE_BONES as u64) * BONE_BYTES
         );
         // One `vec4` per addressable slot — the shader declares `array<vec4<f32>, 2048>`.

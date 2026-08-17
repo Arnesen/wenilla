@@ -40,7 +40,8 @@ mod mat_anim;
 pub(crate) use lazy::{LazyRig, SkinnedTwin};
 use mat_anim::tick_anim_materials;
 pub use mat_anim::{
-    playing_seq, sample_mat_anim, AnimMatPart, MatAnim, TintAnimMaterials, UvAnimMaterials,
+    playing_seq, register_tint, register_uv, sample_mat_anim, AnimMatPart, MatAnim,
+    TintAnimMaterials, UvAnimMaterials,
 };
 
 /// The client's single global `rand()` stream — the MSVC LCG at `0x7400e5`, returning `[0, 32767]`

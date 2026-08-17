@@ -188,6 +188,7 @@ pub(super) fn spawn_wmo_gameobject_props(
     mut mats: benilla_world::model_render::M2BatchMaterials,
     mut uv_reg: ResMut<benilla_world::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<benilla_world::doodad_anim::TintAnimMaterials>,
+    mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     mut probes: ResMut<PropProbes>,
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
@@ -278,6 +279,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 Some((m, now)),
                 &mut uv_reg,
                 &mut tint_reg,
+                &mut anim_table,
                 card_owner,
             );
             commands.entity(entity).add_children(&ents);

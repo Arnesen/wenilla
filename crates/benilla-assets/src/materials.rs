@@ -199,6 +199,15 @@ pub struct WowModelExt {
     /// (ambient +16/255) — the warm pane seen from inside a building.
     #[uniform(100)]
     pub sidn: Vec4,
+    /// The shared mat-anim TABLE slots (decision 1381): `x` = the UV-scroll slot + 1, `y` = the
+    /// animated-tint slot + 1 — `0` = not table-animated, and the shader uses the static lanes
+    /// (`sun_scale.zw` / `tint.xyz`) exactly as before. Baked when the batch registers its
+    /// sampler; the per-frame samples live in the shared light buffer's `matanim` region, so an
+    /// animating material is never mutated again (no per-frame `Modified`, no bind-group
+    /// rebuild, no whole-population `AssetChanged` walks — B131's chain, severed at the root).
+    /// `zw` free.
+    #[uniform(100)]
+    pub anim_slots: Vec4,
     /// **The shared global light** (`lighting::global_light`): one storage buffer every material reads,
     /// updated once/frame in place — replaces the per-material light/fog/SH uniforms (ambient/diffuse/
     /// sun/spec + fog + the 7 Model2.bls SH-probe coeffs) the old `apply_wow_lighting` re-pushed every

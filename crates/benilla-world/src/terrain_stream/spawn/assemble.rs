@@ -107,6 +107,9 @@ pub fn spawn_model_entities(
     // `rgb_anim` loop registers its material here so `tick_anim_materials` re-samples the
     // shared tint each frame.
     tint_reg: &mut crate::doodad_anim::TintAnimMaterials,
+    // The shared delta table both registries slot into (decision 1381) — registration allocates
+    // here and bakes the slot into the material.
+    anim_table: &mut crate::mat_anim_table::MatAnimTable,
     // `Some(anchor)` for a prop spawned ON a streamed entity (the WMO-gameobject path): a boneless
     // model's billboard cards FOLLOW this anchor (`BillboardCard::following` — the entity-path law,
     // decision 0153) instead of baking a world pivot, so they track the moving owner and
@@ -267,17 +270,14 @@ pub fn spawn_model_entities(
         // forever value) — registering it would buy a per-frame re-write of the same number
         // (1375), so only a real loop enters the registry.
         if let Some(anim) = sub.uv_anim.as_ref().filter(|a| a.period > 0.0) {
-            uv_reg.0.entry(cutout.id()).or_insert_with(|| anim.clone());
-            uv_reg.0.entry(blend.id()).or_insert_with(|| anim.clone());
+            crate::doodad_anim::register_uv(uv_reg, anim_table, materials, cutout.id(), anim);
+            crate::doodad_anim::register_uv(uv_reg, anim_table, materials, blend.id(), anim);
         }
         // …and for the per-frame tint re-sample (the animated M2Color RGB, same shared clock —
         // the same invisible seq-band phase divergence as the UV scroll, recorded there).
         if let Some(anim) = sub.rgb_anim.as_ref().filter(|a| a.period > 0.0) {
-            tint_reg
-                .0
-                .entry(cutout.id())
-                .or_insert_with(|| anim.clone());
-            tint_reg.0.entry(blend.id()).or_insert_with(|| anim.clone());
+            crate::doodad_anim::register_tint(tint_reg, anim_table, materials, cutout.id(), anim);
+            crate::doodad_anim::register_tint(tint_reg, anim_table, materials, blend.id(), anim);
         }
         // `MeshTag` is the per-instance lighting/fade scalar: an interior prop carries its SH-probe
         // slot index here (the shader evaluates the folded probe instead of the sky base);

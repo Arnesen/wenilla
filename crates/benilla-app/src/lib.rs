@@ -257,6 +257,15 @@ pub fn run(build: BuildId) -> AppExit {
             s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
         });
     }
+    // `WOW_ST_POSTUPDATE=1` — 1366's named open probe: PostUpdate on the single-threaded
+    // executor, an EXPERIMENT lever only. The expectation is a REGRESSION (propagation and
+    // visibility are real parallel bands there, not flag-serialized non-Send work); the lever
+    // exists so the expectation gets measured instead of assumed.
+    if std::env::var_os("WOW_ST_POSTUPDATE").is_some() {
+        app.edit_schedule(PostUpdate, |s| {
+            s.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+        });
+    }
     // …and one startup line says which build produced this log. Registered HERE, beside the stamp
     // it prints, rather than in `preflight` where it sat until decision 1179: **which build is
     // this** is the first thing a bug report from someone else's machine has to establish, and a

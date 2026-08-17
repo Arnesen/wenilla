@@ -455,6 +455,9 @@ pub fn model_material(
                     if window { 1.0 } else { 0.0 },
                 )
             },
+            // Static until a sampler registers this material (decision 1381) — then the
+            // table slot is baked in exactly once.
+            anim_slots: Vec4::ZERO,
             light_buf: light.clone(),
         },
     });
@@ -612,6 +615,7 @@ pub fn zfill_material(
             sun_scale: Vec4::new(ShadeSel::Lit.selector(), 0.0, 0.0, 0.0),
             tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
             sidn: Vec4::ZERO,
+            anim_slots: Vec4::ZERO,
             light_buf: light.clone(),
         },
     });
@@ -804,10 +808,11 @@ pub(crate) fn classify_water_side(
     mut removed: RemovedComponents<MeshMaterial3d<WowModelMaterial>>,
     mut eye_was_submerged: Local<Option<bool>>,
 ) {
-    // A texanim/tint ticker mutates the NEAR asset in place every drawn frame
-    // (`doodad_anim::tick_anim_materials`); mirror the edit into the live twin, or a far-side
-    // waterfall batch freezes its scroll the moment it classifies far. Our own twin writes touch
-    // only far ids (never `to_far` keys), so this can't feed back.
+    // Mirror any near-asset edit into the live twin. Since decision 1381 the texanim/tint lane
+    // animates through the shared table (the twin's clone carries the same slot and seed, so it
+    // scrolls in phase with no mirror needed), which leaves this listener idle in the steady
+    // state — it now catches only genuine one-off near edits (a debug repaint, a future lane).
+    // Our own twin writes touch only far ids (never `to_far` keys), so this can't feed back.
     let edited: Vec<AssetId<WowModelMaterial>> = near_edits
         .read()
         .filter_map(|ev| match ev {

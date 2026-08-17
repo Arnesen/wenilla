@@ -586,6 +586,7 @@ impl WorldAssets {
                 sun_scale: Vec4::new(1.0, 0.0, 0.0, 0.0),
                 tint: Vec4::ONE, // clutter never carries an animated M2Color tint (w: not a WMO batch)
                 sidn: Vec4::ZERO, // clutter is never SIDN/WINDOW glass (WMO-only)
+                anim_slots: Vec4::ZERO,
                 // The shared global light (light/fog/SH come from here, updated in place each frame).
                 light_buf: self.shared_light.clone(),
             },

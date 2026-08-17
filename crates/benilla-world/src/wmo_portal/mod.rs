@@ -355,11 +355,15 @@ fn compute_wmo_pvs(
         };
         let groups = model.group_nav.len();
         // A WMO with no portal graph (single-group props, doors) is never culled — keep all groups on.
+        // Written through the change gate below like the flood's own answer: this branch used to
+        // deref-mut every portal-less prop every frame, which marked the whole population changed
+        // and would defeat any future `Changed<WmoPortalInstance>` run condition (the 1364 item-2
+        // precondition) before it was born.
         if model.portal_refs.is_empty() || model.portal_infos.is_empty() {
-            if inst.visible.len() != groups {
-                inst.visible = vec![true; groups];
-            } else {
-                inst.visible.iter_mut().for_each(|v| *v = true);
+            let held = inst.bypass_change_detection();
+            if held.visible.len() != groups || held.visible.iter().any(|v| !*v) {
+                held.visible = vec![true; groups];
+                inst.set_changed();
             }
             continue;
         }
@@ -379,7 +383,9 @@ fn compute_wmo_pvs(
         let mut log = dump_text
             .is_some()
             .then(|| TraceLog::new(model, eye_local, terrain_local));
-        inst.visible = compute_pvs_traced(
+        // Compare-then-write (1362's shape): a parked camera's flood answers the same set every
+        // frame, and writing it anyway re-marked every instance changed — see the branch above.
+        let fresh = compute_pvs_traced(
             model,
             eye_local,
             terrain_local,
@@ -387,6 +393,10 @@ fn compute_wmo_pvs(
             &world_from_local,
             &mut (&mut tap, &mut log),
         );
+        if inst.bypass_change_detection().visible != fresh {
+            inst.bypass_change_detection().visible = fresh;
+            inst.set_changed();
+        }
         if let (Some(text), Some(log)) = (&mut dump_text, &log) {
             text.push_str(&log.text);
             text.push_str(&format!("visible: {:?}\n\n", inst.visible));

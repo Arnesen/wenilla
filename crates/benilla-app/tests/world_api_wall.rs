@@ -209,6 +209,14 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// count. The items were always crossing; the measurement improved. That is the only kind of raise
 /// that is not a retreat — a raise for a NEW leak is the failure this number exists to catch.
 ///
+/// And 156 → 157: `mat_anim_table::MatAnimTable`, a PUBLISH by 1164's test (decision 1381). The
+/// mat-anim delta table replaced per-frame material mutation, and registration must happen where
+/// materials are BUILT — which for WMO GameObject props (transport interiors) is a game-side
+/// spawner (`entities::wmo_props`) that already threads the two registries this table serves
+/// (`UvAnimMaterials`/`TintAnimMaterials`, published members of the same family). The resource
+/// that allocates the slots is the smallest honest addition beside them; hiding it would mean
+/// a game-side material registering without a slot and silently freezing at its seed.
+///
 /// And 155 → 156: `doodad_anim::DoodadAnimHost`, a PUBLISH by 1164's test (decision 1365). The
 /// doodad joint collapse put placed doodads on the collapsed-rig lane (`RigPose`), which made
 /// them visible to the game's animation-LOD gate — whose park marker the engine's own doodad
@@ -229,7 +237,7 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// input, which is game-side; a one-field resource is the smallest honest expression of that. The
 /// alternative was ordering a game system against an engine system, which crosses this same line
 /// *and* publishes a schedule point to do it.
-const CEILING: usize = 156;
+const CEILING: usize = 157;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

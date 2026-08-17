@@ -86,6 +86,7 @@ pub(super) fn spawn_loaded_placements(
     time: Res<Time>,
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
+    mut anim_table: ResMut<crate::mat_anim_table::MatAnimTable>,
     // Nested to stay inside Bevy's 16-element system-param tuple limit: the prop-probe table +
     // the stream-trace counters + the live/settling state the landing cap reads + the
     // model-forms cache (decision 0834).
@@ -181,6 +182,7 @@ pub(super) fn spawn_loaded_placements(
                         Some((m, now)),
                         &mut uv_reg,
                         &mut tint_reg,
+                        &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
                     );
                     // ADT doodads are exterior scene: from inside a WMO they draw only through a
@@ -295,6 +297,7 @@ pub(super) fn spawn_loaded_placements(
                         None, // WMO group geometry is not an M2 — its doodad props animate below
                         &mut uv_reg,
                         &mut tint_reg,
+                        &mut anim_table,
                         None, // world-static placement: cards bake their world pivot
                     );
                     // A world WMO placement is exterior scene too (`0x6856c0`, fed by the same
@@ -586,6 +589,7 @@ pub(super) fn spawn_loaded_placements(
                 Some((m, now)),
                 &mut uv_reg,
                 &mut tint_reg,
+                &mut anim_table,
                 None, // world-static placement: cards bake their world pivot
             );
             // The slot frees itself when the prop despawns (streaming out) — the component hook
