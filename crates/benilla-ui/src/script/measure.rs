@@ -86,11 +86,14 @@ pub(super) fn ensure_measured(lua: &Lua, rh: RegionHandle) {
         key: req.key,
     };
     if let Some(d) = model.region_data.get_mut(&rh) {
-        if d.measured != Some(new) {
-            d.measured = Some(new);
+        let moved = super::types::MeasuredText::layout_moved(d.measured, new);
+        // The KEY always lands — this IS the measure cache, and a stale key re-requests forever.
+        d.measured = Some(new);
+        if moved {
             // Measured extents are the auto-size axes' inputs — the layout gate's read set, the
-            // same touch `set_measured_text` does. Guarded on a real change so a steady poll does
-            // not dirty the layout every frame.
+            // same touch `set_measured_text` does. Guarded on a change the LAYOUT can see: a
+            // re-measure that returns the same box (a same-width countdown tick) must not open
+            // tier 1, or it costs a whole-roster hash to conclude nothing moved (decision 1385).
             model.touch_layout();
         }
     }

@@ -127,8 +127,7 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "no pet, no shelf"
     );
 
-    // A pet appears. The tick is what runs the bar's OnUpdate, i.e. the sparkle trail — it is an
-    // animation, so it exists from the first frame after the repaint, not from the repaint.
+    // A pet appears.
     s.set_pet_actions(true, true, true, hunter_slots());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -178,29 +177,19 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         "Attack + Defensive are lit; Claw is not"
     );
 
-    // Autocast: the static ring on the one slot that allows it, and the sparkle trail running.
+    // Autocast: the static ring on the one slot that allows it, and the shine MARKER on the one
+    // slot where it is running — the native lane's registration (decision 1383): the extract
+    // carries the token, never sparks, and `autocast_shine::emit_shine` draws the trails at it
+    // on the append lane while the script layer stays settled.
     assert_eq!(
         textures(&quads, "Interface\\Buttons\\UI-AutoCastableOverlay"),
         1,
         "only Claw can autocast"
     );
-    // 4 emitters x the DERIVED trail length, on the one autocasting slot — and on that slot only,
-    // which is the lazy pool's own pin: the other nine buttons have no sparks at all, where they
-    // used to carry a full hidden set each.
-    let trail: usize = s.eval("return BENILLA_PET_AUTOCAST_TRAIL").unwrap();
     assert_eq!(
-        trail, 23,
-        "the size ramp's own spacing (see PetActionBar.xml's header) comes out at 23 samples"
-    );
-    assert_eq!(
-        textures(&quads, "Interface\\Buttons\\GlowStar"),
-        4 * trail,
-        "4 emitters x the trail, on the one autocasting slot"
-    );
-    assert!(
-        s.eval::<bool>("return PetActionButton1.sparks == nil")
-            .unwrap(),
-        "a button that never autocasts never pools a spark"
+        textures(&quads, "benilla:autocast-shine"),
+        1,
+        "the shine marker on Claw alone — enabled, not merely allowed"
     );
 
     // Geometry, quoted from the ref: the bar's TOPLEFT is MainMenuBar's BOTTOMLEFT +(36,97),
@@ -214,14 +203,14 @@ fn the_shipped_pet_bar_drives_end_to_end() {
         (72.0, 56.0, 102.0, 86.0)
     );
 
-    // The pet goes: the bar hides again, sparkles and all.
+    // The pet goes: the bar hides again, shine marker and all.
     s.set_pet_actions(false, true, true, Vec::new());
     s.fire_event("PET_BAR_UPDATE", vec![]);
     s.tick(0.05);
     s.resolve();
     let gone = s.extract();
     assert_eq!(textures(&gone, "Interface\\PetActionBar\\UI-PetBar"), 0);
-    assert_eq!(textures(&gone, "Interface\\Buttons\\GlowStar"), 0);
+    assert_eq!(textures(&gone, "benilla:autocast-shine"), 0);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -642,160 +631,9 @@ fn the_keybind_pair_pushes_and_casts_without_the_clicks_forks() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// **B228 — the autocast trail's motion, MEASURED off the shipped handler.**
-///
-/// nazriel reads the shine as "a bit too fast", and the answer turned out to be in the widget's
-/// CLOCK, which no constants read could have reached. `CSimpleModel`'s per-frame OnUpdate advances
-/// its private `CM2Scene` by `__ftol(elapsed * 1000.0)` — **truncated, no fractional carry**, where
-/// the world's driver adds 0.5 first (wow-re `modelframe-animation-clock.md`, §5 cross-checked).
-/// So the reference's 2000 ms band actually takes `2000 * T / floor(T)` ms at frame time T, and is
-/// **never faster than 2.000 s**. An exact 2.000 s emulation — which is what a measurement of our
-/// old wiring confirmed we had — was therefore faster than any real client at any frame rate.
-///
-/// This drives the real `<OnUpdate>` with real seconds at real frame times and reads the head
-/// spark's own SetPoint back. What is pinned: the lap comes out SLOW by exactly the truncation's
-/// amount at 60 and 144 fps; the geometry is the 30.72 px square the widget's ortho projection puts
-/// on a 30 px button (0.02 units × 1280 × the ref Model's `SetModelScale` 1.2), origin at the
-/// button's BOTTOM-LEFT because that is the model's own origin; a corner every quarter lap, LINEAR
-/// between them (`interp == 1` at the bone record's translation M2Track, so the half-edge sample
-/// sits at the half-time); and the four emitters one quarter-lap apart.
-#[test]
-fn the_autocast_trail_laps_the_rim_the_reference_widgets_slow_way() {
-    let mut s = UiScript::new().unwrap();
-    s.set_screen_size(1024.0, 768.0);
-    load_pet_bar(&s);
-    declare_token_strings(&s);
-    s.set_pet_actions(true, true, true, hunter_slots());
-    s.fire_event("PET_BAR_UPDATE", vec![]);
-    s.resolve();
-
-    // Slot 4 is Claw, the one slot in the fixture with autocast RUNNING. `sparks[n]` is the pool
-    // `BenillaPetAutocast_Create` built: emitter-major, so emitter e's HEAD (age 0, the bone's own
-    // position) is index e·TRAIL + 1.
-    let head = |s: &UiScript, emitter: usize| -> (f32, f32) {
-        let expr = |axis: usize| {
-            format!(
-                "local n = {emitter} * BENILLA_PET_AUTOCAST_TRAIL + 1 \
-                 local a, b, c, x, y = PetActionButton4.sparks[n]:GetPoint() \
-                 return ({axis} == 0) and x or y"
-            )
-        };
-        (
-            s.eval::<f32>(&expr(0)).unwrap(),
-            s.eval::<f32>(&expr(1)).unwrap(),
-        )
-    };
-    let near = |got: (f32, f32), want: (f32, f32), what: &str| {
-        assert!(
-            (got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01,
-            "{what}: at {got:?}, expected {want:?}"
-        );
-    };
-
-    // 0.02 units × 1280 px/unit × 1.2 = 30.72 px across, laid from the button's BOTTOMLEFT — so
-    // the walk runs 0..30.72 in both axes, not ±half from the centre.
-    const S: f32 = 30.72;
-    let (bl, tl, tr, br) = ((0.0, 0.0), (0.0, S), (S, S), (S, 0.0));
-
-    // ── The CLOCK, at a real frame time. 60 fps ⇒ dt = 16.667 ms ⇒ only **16** banked per frame,
-    // so the 2000 ms band needs 125 frames = **2.083 s of wall clock**. At 2.000 s (120 frames)
-    // the clock has banked 1920 ms = 0.96 of a lap: the head is still on the last edge, running
-    // right-to-left toward home and 0.04 × 122.88 = 4.92 px short of it. That shortfall IS the
-    // bug — it is how much slower than our old exact-2.000 s clock the reference has always been.
-    let frames = |s: &mut UiScript, n: usize, dt: f32| {
-        for _ in 0..n {
-            s.tick(dt);
-        }
-    };
-    const DT60: f32 = 1.0 / 60.0;
-    frames(&mut s, 120, DT60); // 2.000 s of wall clock
-    near(
-        head(&s, 0),
-        (4.9152, 0.0),
-        "2.000 s at 60 fps: NOT home yet — the reference is slower than the authored band",
-    );
-    frames(&mut s, 5, DT60); // 2.083 s
-    near(
-        head(&s, 0),
-        bl,
-        "2.083 s at 60 fps: one lap, the reference's own 2000*T/floor(T)",
-    );
-
-    // 144 fps truncates harder — 6.944 ms banked as 6 — so the same lap takes 2.315 s there. A
-    // frame-rate-independent clock would land both of these at 2.000 s and fail here.
-    let mut fast = UiScript::new().unwrap();
-    fast.set_screen_size(1024.0, 768.0);
-    load_pet_bar(&fast);
-    declare_token_strings(&fast);
-    fast.set_pet_actions(true, true, true, hunter_slots());
-    fast.fire_event("PET_BAR_UPDATE", vec![]);
-    fast.resolve();
-    frames(&mut fast, 333, 1.0 / 144.0); // 2.313 s of wall clock ⇒ 1998 ms banked
-    let (fx, fy) = head(&fast, 0);
-    assert!(
-        fy == 0.0 && fx > 0.0 && fx < 1.0,
-        "2.313 s at 144 fps: still 2 ms short of the lap, at {fx:?},{fy:?}"
-    );
-
-    // ── The position LAW, driven at exact MILLISECOND clocks so no tick accumulation can blur it.
-    // The mid-edge sample is the `interp == 1` pin: linear means the half-time is the half-edge,
-    // and a spline-eased track would sit short of it.
-    let at = |s: &UiScript, ms: u32| -> (f32, f32) {
-        s.run(&format!(
-            "BenillaPetAutocast_Update(PetActionButton4, {ms})"
-        ))
-        .unwrap();
-        head(s, 0)
-    };
-    near(at(&s, 0), bl, "clock 0");
-    near(
-        at(&s, 250),
-        (0.0, S / 2.0),
-        "quarter edge in: the LEFT edge's midpoint",
-    );
-    near(at(&s, 500), tl, "clock 500 ms");
-    near(at(&s, 1000), tr, "clock 1000 ms");
-    near(at(&s, 1500), br, "clock 1500 ms");
-    near(at(&s, 2000), bl, "clock 2000 ms wraps onto clock 0");
-
-    // ── The trail is CONTINUOUS, which is what deriving the sample count buys (B228). No two
-    // neighbours in a trail sit further apart than the smaller of their two stars is wide, so the
-    // streak has no seam at any age. The 8-even-samples version failed this from mid-life back —
-    // 7.7 px apart with 4.6 px stars — and a row of separated dots is what reads as marching.
-    let worst_gap: f32 = s
-        .eval(
-            "local worst = 0 \
-             for k = 1, BENILLA_PET_AUTOCAST_TRAIL - 1 do \
-                 local a, b = PetActionButton4.sparks[k], PetActionButton4.sparks[k + 1] \
-                 local _, _, _, ax, ay = a:GetPoint() \
-                 local _, _, _, bx, by = b:GetPoint() \
-                 local d = math.sqrt((ax - bx) * (ax - bx) + (ay - by) * (ay - by)) \
-                 local w = math.min(a:GetWidth(), b:GetWidth()) \
-                 if d / w > worst then worst = d / w end \
-             end \
-             return worst",
-        )
-        .unwrap();
-    assert!(
-        worst_gap <= 1.0,
-        "the widest neighbour gap is {worst_gap:.2} star-widths — the streak has a seam"
-    );
-
-    // ── The four emitters are ONE LAP, a quarter apart — the file's four bones at the four
-    // corners, chasing each other (m2bones: pivots at (-0.001,0), (0.019,0), (0.019,0.02),
-    // (-0.001,0.02), same track, one corner of phase between neighbours).
-    s.run("BenillaPetAutocast_Update(PetActionButton4, 0)")
-        .unwrap();
-    for (e, want, name) in [
-        (0, bl, "emitter 0"),
-        (1, tl, "emitter 1"),
-        (2, tr, "emitter 2"),
-        (3, br, "emitter 3"),
-    ] {
-        near(head(&s, e), want, name);
-    }
-    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
-}
+// The autocast trail's MOTION tests (the B228 corner-walk goldens, the 1321 truncating-clock
+// law, the no-seam continuity pin) live with the drawing now: `crate::autocast_shine`'s own
+// test module — the script layer no longer moves a single spark (decision 1383).
 
 /// The pet bar plus the three files its TOOLTIP needs, in the TOC's own order: Fonts.xml (the
 /// colour codes that wrap the binding), GameTooltip.xml (the plate), and UIParent.xml — already a

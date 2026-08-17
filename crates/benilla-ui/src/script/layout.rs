@@ -297,6 +297,95 @@ fn layout_verify_enabled() -> bool {
     *ON.get_or_init(|| cfg!(test) || std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
 }
 
+/// `WOW_LAYOUT_PROF=1`'s **preamble** split — the `[layout-pre]` line, one per LET-THROUGH resolve.
+///
+/// `[layout-prof]` reports the rounds, which 1350 already made proportional to what moved. This
+/// reports everything *before* them: the fixed whole-roster work every let-through solve pays
+/// whatever moved, which 1383 priced at ~1.9 ms/solve at a live roster and named as the next cut
+/// without ever splitting it. A cut needs to know which of the eight walks it is buying back, so
+/// the split is the instrument that has to exist first.
+///
+/// Off (the default) it takes no clock reads at all — [`Self::lap`] returns on the `on` test, so an
+/// unprofiled resolve pays one bool check per phase.
+#[derive(Default)]
+struct PreambleProf {
+    on: bool,
+    last: Option<std::time::Instant>,
+    /// The GameTooltip auto-size pre-pass (`layout_tooltips`) — a whole-frame-roster filter.
+    tooltip: u128,
+    /// `OnSizeChanged`'s "before" snapshot — a whole-`scripts`-map filter.
+    watched: u128,
+    /// The ids rebuild + the per-frame scale/clamp sync into `layout_inputs`.
+    ids: u128,
+    /// The ScrollFrame override map — another whole-frame-roster walk.
+    scroll: u128,
+    /// `region_resolved`'s liveness retain.
+    retain: u128,
+    /// The per-call solve plan rebuild.
+    plan: u128,
+    /// `LayoutScope::begin` — seven per-id `Vec`s cleared/resized.
+    begin: u128,
+    /// The fingerprint + scope walk over every live FRAME (double-hashed: aggregate + per-node).
+    fp_frames: u128,
+    /// The same over every anchored REGION — the biggest roster (10,438 anchored at the SW pin,
+    /// and by far the biggest single phase: 0.45–1.0 ms of the ~1.0–1.4 ms walk).
+    fp_regions: u128,
+}
+
+impl PreambleProf {
+    fn new(on: bool) -> Self {
+        Self {
+            on,
+            last: on.then(std::time::Instant::now),
+            ..Default::default()
+        }
+    }
+
+    /// Microseconds since the previous lap (0 when off).
+    fn lap(&mut self) -> u128 {
+        if !self.on {
+            return 0;
+        }
+        let now = std::time::Instant::now();
+        self.last
+            .replace(now)
+            .map_or(0, |t| now.duration_since(t).as_micros())
+    }
+
+    /// One line per let-through resolve, printed once the gate's verdict is known — `skips=1` is
+    /// the walk that concluded "nothing moved" and returns without solving, which costs the same
+    /// preamble as one that does.
+    fn report(&self, skips: bool, frames: usize, regions: usize) {
+        if !self.on {
+            return;
+        }
+        let total = self.tooltip
+            + self.watched
+            + self.ids
+            + self.scroll
+            + self.retain
+            + self.plan
+            + self.begin
+            + self.fp_frames
+            + self.fp_regions;
+        eprintln!(
+            "[layout-pre] skips={} frames={frames} anchored={regions} total_us={total} \
+             tooltip={} watched={} ids={} scroll={} retain={} plan={} begin={} \
+             fp_frames={} fp_regions={}",
+            u8::from(skips),
+            self.tooltip,
+            self.watched,
+            self.ids,
+            self.scroll,
+            self.retain,
+            self.plan,
+            self.begin,
+            self.fp_frames,
+            self.fp_regions
+        );
+    }
+}
+
 /// `OnSizeChanged`'s "after": turn the entry-vs-now diff of the watched frames into queued
 /// `(id, width, height)` fires ([`Model::pending_size_changed`]).
 ///
@@ -354,10 +443,18 @@ impl UiScript {
             return;
         }
         let epoch_at_entry = model.layout_epoch;
+        // Past tier 1 ⇒ this call pays the whole-roster preamble, whatever the fingerprint goes on
+        // to decide. Counted here rather than at the solve, because the walk IS the cost (1385).
+        // Not gated on `verify`: a verify build re-walks skipped resolves and must say so.
+        model.layout_gate_walks = model.layout_gate_walks.wrapping_add(1);
+        // `WOW_LAYOUT_PROF=1`'s preamble split — see [`PreambleProf`]. Started here, so the clock
+        // covers everything the tier-1 gate above did NOT skip.
+        let mut pre = PreambleProf::new(layout_prof_enabled());
         // The GameTooltip auto-size + right-flush pre-pass (decision 0274): writes tooltip frame
         // sizes + right-column anchor offsets from the measure round-trip's cached extents, so
         // the graph below solves them like any other frame.
         super::tooltip::layout_tooltips(model);
+        pre.tooltip = pre.lap();
         // ── `OnSizeChanged`'s "before" ───────────────────────────────────────────────────────
         // The client fires it from `ApplyRect 0x76b580`, per rect application. Ours is a batch
         // fixpoint, so the faithful *mechanism* — "this frame's resolved size moved" — is the
@@ -374,6 +471,7 @@ impl UiScript {
             .filter(|(_, kinds)| kinds.contains("OnSizeChanged"))
             .map(|(&h, _)| (h, model.resolved.get(&h).copied()))
             .collect();
+        pre.watched = pre.lap();
         let Model {
             arena,
             layout_inputs,
@@ -423,6 +521,7 @@ impl UiScript {
                 input.extent_y = screen.top;
             }
         }
+        pre.ids = pre.lap();
 
         // The ScrollFrame mechanism (decision 0112): a live ScrollFrame with a live scroll child
         // overrides the child's own anchors for this solve — `SetScrollChild` pins the child TOPLEFT
@@ -453,6 +552,7 @@ impl UiScript {
                 Anchor::new(Point::TopLeft, id, Point::TopLeft, 0.0, state.vertical),
             );
         }
+        pre.scroll = pre.lap();
 
         // Alternating frame/region rounds, run to a CHANGE-DRIVEN FIXPOINT: the real client
         // resolves ONE layout graph in which frames and regions anchor each other freely (the
@@ -480,6 +580,7 @@ impl UiScript {
             arena.region(*rh).is_some()
                 && region_data.get(rh).is_some_and(|d| !d.anchors.is_empty())
         });
+        pre.retain = pre.lap();
         // The per-frame solve plan, resolved ONCE per call rather than per round: each live
         // frame's id, a borrow of its (already scale/clamp-synced) layout input, and its
         // ScrollFrame anchor override if it is a scroll child. The round loop below then walks a
@@ -492,6 +593,7 @@ impl UiScript {
                     .map(|input| (h, id, input, scroll_child_anchor.get(&h).copied()))
             })
             .collect();
+        pre.plan = pre.lap();
 
         // ── The change gate ───────────────────────────────────────────────────────────────────
         // Fingerprint exactly what the rounds below read, and skip them outright when nothing has
@@ -507,14 +609,20 @@ impl UiScript {
         //                                     which together distil `frame_to_id`, frame liveness,
         //                                     `effective_scale`, `clamped_to_screen`, and the
         //                                     ScrollFrame child + vertical offset;
-        //   * `id_to_region` × `region_resolved` — the region rects seeded as externals;
         //   * `region_data`                 — each region's anchors, explicit size, and measured
         //                                     text extent;
         //   * `arena.region(rh)`            — liveness and owner (a dead region drops out of the
         //                                     sweep; the owner supplies the fallback edges).
-        // `resolved` / `region_resolved` are the previous pass's OUTPUT carried forward as the
-        // 0294 seed; at convergence seed and output are equal, so re-running against an unchanged
-        // input set is guaranteed to reproduce them — which is precisely what makes the skip safe.
+        //
+        // **INPUTS ONLY — the 0294 seeds are deliberately NOT hashed** (decision 1385). They are
+        // the previous pass's OUTPUT, and 0294's own property ("every rect is recomputed purely
+        // from (inputs, externals), never from its own prior value") makes a converged pass's
+        // rects a pure function of the inputs: the seeds change how many ROUNDS convergence
+        // takes, never what it converges to. Hashing them therefore added no verdict the input
+        // half does not already give — and it cost two extra whole-roster walks per mutated
+        // frame, because a solve necessarily outgrows the seeds it hashed, so neither that pass
+        // nor the settling pass behind it could close tier 1. (`resolved`, the FRAME rects, was
+        // never in the read set at all — the seed half was asymmetric as well as redundant.)
         //
         // ── …and, in the same walk, the SCOPE (decision 1350) ─────────────────────────────────
         // Each node's own inputs are hashed a second time on their own, into
@@ -526,6 +634,7 @@ impl UiScript {
         // Sized past `next_id` because the region walk below MINTS ids (see there) — every id it
         // can mint is one more than the anchored regions it walks.
         scope.begin(*next_id as usize + region_data.len() + 1);
+        pre.begin = pre.lap();
         let mut fp = InputFingerprint::default();
         fp.rect(*screen);
         fp.feed(plan.len() as u64);
@@ -560,6 +669,7 @@ impl UiScript {
                 }
             }
         }
+        pre.fp_frames = pre.lap();
         let mut fed_regions = 0u64;
         // The round loop's region roster, built in this same walk (decision 1350) — see
         // [`RegionNode`]. Only LIVE, anchored regions: an anchor-less one is invisible to the
@@ -656,13 +766,9 @@ impl UiScript {
         // The count of FED entries (not the map's len — see the vacuous-entry skip above), so an
         // entry leaving the anchored set is a change even if a sibling enters the same frame.
         fp.feed(fed_regions);
-        for (&id, rh) in id_to_region.iter() {
-            if let Some(r) = region_resolved.get(rh) {
-                fp.feed(u64::from(id));
-                fp.rect(*r);
-            }
-        }
+        pre.fp_regions = pre.lap();
         let gate_skips = *layout_fingerprint == Some(fp);
+        pre.report(gate_skips, plan.len(), regions.len());
         // The tier-1/tier-2 cross-check (only reachable under verify when tier 1 judged quiet):
         // the epoch said nothing layout-visible was written, so the fingerprint must agree — a
         // divergence is a mutation path missing its `Model::touch_layout()`, named here at the
@@ -674,12 +780,11 @@ impl UiScript {
                  fingerprint moved — a layout write path is missing its touch_layout()"
             );
         }
-        // Tier 1 closes ONLY on a settled frame (the fingerprint verdict `gate_skips`): the fp is
-        // hashed over the SEEDS (last pass's outputs), so the first resolve after a real change
-        // stores a fingerprint the very next, mutation-free resolve would not reproduce — the
-        // seeds grew under it. That next resolve pays one fingerprint (exactly today's price),
-        // proves the input set has settled, and closes the epoch here; every later quiet frame
-        // skips at the u64 compare.
+        // Nothing in the read set moved since the last CONVERGED resolve, so the rects it left are
+        // still this frame's answer: close tier 1 and skip. (A converged solve closes it too — see
+        // the convergence arm below. This arm is the one that absorbs an epoch bump whose write
+        // changed no input: an id mint, an anchor-less region's creation, a re-`SetPoint` the
+        // setters' own compare let through.)
         if gate_skips {
             *layout_epoch_resolved = Some(epoch_at_entry);
             if !verify {
@@ -1026,13 +1131,21 @@ impl UiScript {
                 // settled, and seeding the next pass's "unchanged ⇒ unmoved" argument from it
                 // would be seeding it from a lie.
                 scope.commit(scope_nodes, *screen);
-                // Tier 1 closes only on a `gate_skips` frame: a real solve (`!gate_skips`) hashed
-                // `fp` over now-outgrown seeds — see the gate above. The re-store here is for the
-                // VERIFY path, whose full re-run of a settled frame passed through the state
-                // clears; production returned at the gate. Either mode leaves the same state.
-                if gate_skips {
-                    *layout_epoch_resolved = Some(epoch_at_entry);
-                }
+                // **A CONVERGED SOLVE CLOSES TIER 1** (decision 1385) — unconditionally, not only
+                // on the `gate_skips` re-run. The fingerprint above is hashed over INPUTS alone,
+                // and the rounds just drove those inputs to their fixpoint, so the fp stored on
+                // the line above is exactly the one the next mutation-free resolve recomputes:
+                // there is nothing left for a settling pass to discover. Closing here is what
+                // makes a per-frame layout write cost ONE whole-roster walk instead of three
+                // (solve, settle, skip) — the castbar's spark, and every addon that animates a
+                // region, used to pay all three every frame.
+                //
+                // `epoch_at_entry` (not the live epoch) keeps it conservative: anything that
+                // touched the layout WHILE this pass ran — the tooltip pre-pass, a lazily minted
+                // region — leaves the epoch ahead of the stored value, so tier 1 re-opens next
+                // call exactly as it should. The cycle-bail path below never reaches here, so a
+                // graph left mid-flight still re-resolves.
+                *layout_epoch_resolved = Some(epoch_at_entry);
                 queue_size_changes(&watched, resolved, frame_to_id, pending_size_changed);
                 return;
             }

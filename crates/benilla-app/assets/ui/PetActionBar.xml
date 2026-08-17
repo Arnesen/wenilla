@@ -92,241 +92,20 @@
 
         -- ── The autocast sparkle ──────────────────────────────────────────────────────────────
         --
-        -- The reference's "autocast is on" mark is a <Model> playing
-        -- Interface\Buttons\UI-AutoCastButton.mdx, and what that model actually is came out of the
-        -- shipped .m2 with `benilla-extract m2bones`/`m2part`:
-        --
-        --   4 bones, pivoting at the corners of a 0.02 x 0.02 unit square, each keyed with the
-        --   SAME 5-key 2.000 s translation loop walking the square edge by edge (0.5 s per edge) —
-        --   the four phase-shifted by one corner each, so they chase one another round it. The
-        --   tracks are `interp == 1`, LINEAR (read at the bone record's M2Track word, not assumed):
-        --   constant speed along each edge, no easing into the corners, which is what the walk
-        --   below reproduces.
-        --   4 particle emitters, one per bone: 300/s, life 1.000 s, Add blend, unlit, texture
-        --   Interface\Buttons\GlowStar.blp, size half-extent 0.005 -> 0.0015 -> 0.001 over life,
-        --   colour (0.976,0.875,0.192,1) -> (0.996,0.945,0.745,1) -> (1,1,1,0). Its spline is one
-        --   cubic Bezier segment whose 4 control points are ALL AT THE ORIGIN — checked, all four,
-        --   because the two INTERIOR handles are what would bend the path and reading only the
-        --   endpoints proves nothing — so a particle never travels: it is born where the bone is
-        --   and shrinks away there. The effect is therefore four comet trails running round the
-        --   button's rim, not a rotating ring.
-        --
-        -- MODEL UNITS -> PIXELS is the widget's own projection, not a calibration
-        -- (wow-re `system/ui/scratch/modelframe-animation-clock.md`, §1317's fold-back). There is
-        -- no fixed px/unit: the ortho leg gives
-        --
-        --     px per model unit = (5/3) * modelScale * layoutScale * screenHeightPx
-        --
-        -- which in FrameXML units collapses to **1280 * modelScale * layoutScale**, independent of
-        -- aspect and resolution. `scale="1.2"` on the ref's <Model> is SetModelScale, NOT
-        -- Frame:SetScale (`0x76cb36`, stored at `+0x3a0`), so 1 model unit = 1536 FrameXML units
-        -- and the 0.02 path is **30.72** across — 1.024x a 30-unit button, overhanging its top and
-        -- right by 2.4%. The model ORIGIN is the frame rect's BOTTOM-LEFT, not its centre, which is
-        -- why a square authored 0..0.02 lands across the whole button instead of in one quadrant.
-        --
-        -- This corrects the 1200 px/unit figure this header carried until then, which was the right
-        -- formula evaluated at a 720 px screen **with the 1.2 left out** — two errors that nearly
-        -- cancelled (28.8 vs 30.72) and made the wrong number look like it cross-checked. BagFrame's
-        -- Cooldown calibration is the same coincidence and is flagged there.
-        --
-        -- OUR ONE DEPARTURE is the particle COUNT: 300 live per emitter is 12 000 quads across a
-        -- full bar. We draw a SAMPLE of the same trail — each sample sits where the bone was `age`
-        -- ago and reads the same position/size/colour ramps at that age — so the trail's shape,
-        -- speed and colour are the file's; only its density is ours.
-        --
-        -- **How many samples is DERIVED, not chosen** (B228). It was 8, evenly spaced in age, on
-        -- the claim that the trail "reads identically at a fraction" of 300. Nobody had checked
-        -- that claim, and the arithmetic says it is false. The rim is 4 x 30.72 = 122.9 px round
-        -- and the lap is 2.0 s, so the bone travels 61.4 px/s and a particle's 1.0 s life spans
-        -- 61.4 px of rim — two whole edges. Eight even samples therefore sit 7.7 px apart, while
-        -- the stars behind the head are 4.6 px and then 3.1 px across: the back half of every trail
-        -- was a row of SEPARATED DOTS where the file draws one continuous streak. Marching dots are
-        -- legible motion in a way a smooth streak is not, so it read as speed on a loop that runs
-        -- at the authored rate (nazriel, B228).
-        --
-        -- So the samples are spaced by the file's own SIZE ramp rather than evenly: each step
-        -- advances one star-width / OVERLAP of arc. That spends samples in the tail where the
-        -- stars are small and saves them at the head where a 15 px star covers everything —
-        -- continuous everywhere, and cheaper than a uniform spacing fine enough for the tail.
-        BENILLA_PET_AUTOCAST_PX_PER_UNIT = 1280                              -- the ortho leg's
-        BENILLA_PET_AUTOCAST_SCALE   = 1.2                                   -- the ref Model's
-        BENILLA_PET_AUTOCAST_PERIOD  = 2.0                                   -- seq0 loop, seconds
-        BENILLA_PET_AUTOCAST_LIFE    = 1.0                                   -- particle lifespan
-        BENILLA_PET_AUTOCAST_EMITTERS = 4
-        -- Star-widths of cover on every point of the trail. 1 would put neighbours exactly edge to
-        -- edge, and a GlowStar fades out toward its own edge, so the seam would show; 2 (centres
-        -- half a width apart) is the cheapest value with no seam.
-        BENILLA_PET_AUTOCAST_OVERLAP = 2
-        -- 0.02 units square, in pixels.
-        BENILLA_PET_AUTOCAST_SIZE = 0.02 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE
-        -- Half-extent -> full width, in pixels: {0.005, 0.0015, 0.001} * 2 * K * scale.
-        -- The MID key is 0.0015, not the 0.002 this table carried until B228: `m2part` printed the
-        -- ramp at 3 decimals and rounded it up, and the transcription took the printout at its
-        -- word. (Fixed at the instrument too — that column prints 4 decimals now.) 33% of the
-        -- mid-life star, so the trail was reading thicker than the file authors it.
-        BENILLA_PET_AUTOCAST_STAR = {
-            0.010 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
-            0.003 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
-            0.002 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
-        }
-        -- The over-life colour ramp's three keys (the file's), as {r, g, b, a}.
-        BENILLA_PET_AUTOCAST_COLOR = {
-            {0.976, 0.875, 0.192, 1.0},
-            {0.996, 0.945, 0.745, 1.0},
-            {1.000, 1.000, 1.000, 0.0},
-        }
-
-        -- ── The widget's CLOCK, truncation and all ────────────────────────────────────────────
-        --
-        -- The reference does NOT play this loop at wall-clock rate, and that is the whole of what
-        -- was left of B228. `CSimpleModel` overrides `CSimpleFrame`'s per-frame OnUpdate slot
-        -- (vtable `0x81c608` idx14 -> `0x76d7f0`) and advances its private `CM2Scene` clock by
-        -- `__ftol(elapsed * 1000.0)` — **truncated, with no fractional carry**. The WORLD's driver
-        -- does the same conversion with a `+0.5` first (`0x48366b`); the widget path omits it
-        -- (`0x76d846`). So the widget throws away `frac(elapsed * 1000)` every single frame, and a
-        -- 2000 ms band takes `2000 * T / floor(T)` ms at frame time T ms:
-        --
-        --     30 fps -> 2020 ms   ·   60 fps -> 2083 ms   ·   75 fps -> 2051   ·   144 fps -> 2315
-        --
-        -- It is **never faster than 2.000 s**. Our old exact-2.000 s clock was therefore faster
-        -- than any real 1.12 client at any frame rate — the floor of the range rather than a point
-        -- in it — which is exactly nazriel's "a bit too fast". (wow-re
-        -- `system/ui/scratch/modelframe-animation-clock.md`, §5 cross-checked.)
-        --
-        -- So the clock is an integer MILLISECOND counter here too, advanced the reference's way.
-        -- This is the mechanism, not a tuned constant: it tracks the player's own frame rate the
-        -- way theirs did. Two knowing limits. The reference's `elapsed` is an **f32**, so
-        -- `f32(0.01) * 1000 = 9.99999978` truncates to 9 — a whole millisecond lost at a nominally
-        -- clean frame rate, and the exact hazard the world path's `+0.5` cancels; we do not model
-        -- f32 rounding, so we lose marginally less than it does. And above 1000 fps the reference
-        -- freezes outright (every frame truncates to 0 ms) — reproduced rather than guarded,
-        -- because a guard would be inventing behaviour, but no 2006 client ever reached it and a
-        -- frozen sparkle at four-figure frame rates is this line's fault, not a new bug.
-        BENILLA_PET_AUTOCAST_PERIOD_MS = 2000
-
-        function BenillaPetAutocast_Advance(frame, elapsed)
-            local ms = (frame.clock or 0) + math.floor(elapsed * 1000)
-            frame.clock = math.mod(ms, BENILLA_PET_AUTOCAST_PERIOD_MS)
-            return frame.clock
-        end
-
-        -- Where an emitter sits at lap fraction `f` (0..1), as an offset from the button's
-        -- BOTTOMLEFT in pixels — the model's own origin (see the header), so this is the authored
-        -- square placed exactly where the widget places it: 0..30.72 across a 30 px button, its
-        -- corner on the button's corner, overhanging the top and right by 0.72 px. The bone tracks
-        -- walk it clockwise on screen from that bottom-left corner, one edge per quarter-lap.
-        function BenillaPetAutocast_Point(f)
-            local s = BENILLA_PET_AUTOCAST_SIZE
-            f = f - math.floor(f)                       -- wrap into 0..1
-            local edge = f * 4
-            local leg = math.floor(edge)
-            local t = edge - leg                        -- 0..1 along this edge
-            if leg == 0 then return 0, t * s            -- bottom-left -> top-left
-            elseif leg == 1 then return t * s, s        -- top-left -> top-right
-            elseif leg == 2 then return s, s - t * s    -- top-right -> bottom-right
-            else return s - t * s, 0                    -- bottom-right -> bottom-left
-            end
-        end
-
-        -- Sample a 3-key over-life ramp (the M2's own {k0, k1 at mid, k2} shape, linear between).
-        function BenillaPetAutocast_Ramp(keys, age)
-            local a, b, t
-            if age <= 0.5 then a, b, t = keys[1], keys[2], age * 2
-            else a, b, t = keys[2], keys[3], (age - 0.5) * 2 end
-            if type(a) == "number" then return a + (b - a) * t end
-            local out = {}
-            for i = 1, table.getn(a) do out[i] = a[i] + (b[i] - a[i]) * t end
-            return out
-        end
-
-        -- The trail's sample AGES, walked once off the size ramp above (the header has the why).
-        -- Each step advances by one local star-width / OVERLAP of rim, converted to seconds at the
-        -- bone's own rim speed — so the spacing tightens as the stars shrink and the streak stays
-        -- unbroken end to end. The count falls out of the file's numbers; nothing here picks it.
-        function BenillaPetAutocast_TrailAges()
-            local speed = 4 * BENILLA_PET_AUTOCAST_SIZE / BENILLA_PET_AUTOCAST_PERIOD  -- px/s of rim
-            local ages, age = {}, 0
-            while age < BENILLA_PET_AUTOCAST_LIFE do
-                table.insert(ages, age)
-                local w = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, age / BENILLA_PET_AUTOCAST_LIFE)
-                -- The step is only positive while the ramp is. This runs at FILE LOAD, so a future
-                -- edit that put a zero in the size table would hang the whole UI before a frame
-                -- ever drew — the failure mode decision 1306 exists for. Bail instead.
-                if w <= 0 then break end
-                age = age + w / BENILLA_PET_AUTOCAST_OVERLAP / speed
-            end
-            return ages
-        end
-        BENILLA_PET_AUTOCAST_AGES  = BenillaPetAutocast_TrailAges()
-        BENILLA_PET_AUTOCAST_TRAIL = table.getn(BENILLA_PET_AUTOCAST_AGES)
-
-        -- Build one button's sparkle pool: EMITTERS x TRAIL textures, hidden until autocast is on.
-        --
-        -- Everything about a sample EXCEPT where it is right now is fixed by its age — size,
-        -- colour and alpha are reads of the over-life ramps at an age that never changes for a
-        -- given slot — so all of it is set HERE, once. The per-frame pass moves the texture and
-        -- touches nothing else, which is why tripling the sample count still costs less per frame
-        -- than the eight-sample version did (it re-derived all five values for every spark, every
-        -- frame). Each spark also carries its fixed place in the loop: its emitter's quarter-lap
-        -- offset, less how far the bone has moved on since this star was born.
-        --
-        -- Built LAZILY, on the first frame the button actually autocasts. Most never do, and a
-        -- pool that is only ever hidden is pure cost — 22 buttons' worth of it across the bar and
-        -- the spell book.
-        function BenillaPetAutocast_Create(button)
-            button.sparks = {}
-            for e = 0, BENILLA_PET_AUTOCAST_EMITTERS - 1 do
-                for k = 1, BENILLA_PET_AUTOCAST_TRAIL do
-                    local age = BENILLA_PET_AUTOCAST_AGES[k]
-                    local life = age / BENILLA_PET_AUTOCAST_LIFE
-                    local size = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, life)
-                    local c = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_COLOR, life)
-                    local spark = button:CreateTexture(nil, "OVERLAY")
-                    spark:SetTexture("Interface\\Buttons\\GlowStar")
-                    spark:SetBlendMode("ADD")
-                    spark:SetWidth(size)
-                    spark:SetHeight(size)
-                    spark:SetVertexColor(c[1], c[2], c[3])
-                    spark:SetAlpha(c[4])
-                    spark:Hide()
-                    spark.phase = e / BENILLA_PET_AUTOCAST_EMITTERS
-                        - age / BENILLA_PET_AUTOCAST_PERIOD
-                    table.insert(button.sparks, spark)
-                end
-            end
-        end
-
-        -- Advance one button's sparkles to the bar's shared clock. Shared on purpose: the four
-        -- emitters are one model, and every autocasting button plays the same loop in step, which
-        -- is what the reference's per-button Models do too (each starts at sequence time 0 and
-        -- they never drift, the loop being exact).
-        --
-        -- Show and hide are EDGE work, not per-frame work: this runs for all ten buttons every
-        -- frame and all but one or two of them are dark, so the old unconditional Hide loop was
-        -- spending most of the bar's frame budget re-hiding what was already hidden.
-        function BenillaPetAutocast_Update(button, clockMs)
-            if not button.autocasting then
-                if button.sparksLit then
-                    for i = 1, table.getn(button.sparks) do button.sparks[i]:Hide() end
-                    button.sparksLit = nil
-                end
-                return
-            end
-            if not button.sparks then BenillaPetAutocast_Create(button) end
-            local sparks = button.sparks
-            local lap = clockMs / BENILLA_PET_AUTOCAST_PERIOD_MS
-            for i = 1, table.getn(sparks) do
-                local spark = sparks[i]
-                -- SetPoint on the SAME point replaces it, so no ClearAllPoints is needed. The
-                -- anchor is the button's BOTTOMLEFT because that is the model's own origin.
-                local x, y = BenillaPetAutocast_Point(lap + spark.phase)
-                spark:SetPoint("CENTER", button, "BOTTOMLEFT", x, y)
-            end
-            if not button.sparksLit then
-                for i = 1, table.getn(sparks) do sparks[i]:Show() end
-                button.sparksLit = 1
-            end
-        end
+        -- NATIVE since decision 1383 (B282). The reference's "autocast is on" mark is a <Model>
+        -- playing Interface\Buttons\UI-AutoCastButton.mdx — a widget OUTSIDE the FrameXML layout
+        -- tree — and our old emulation here (a per-button pool of ~92 OVERLAY textures SetPoint'ed
+        -- every frame from OnUpdate) made the most expensive possible use of the script layer:
+        -- every frame it dirtied the layout epoch and forced two whole-roster anchor solves,
+        -- +4.25 ms/frame for ONE autocasting button at a default roster, scaling with the whole
+        -- UI (B282, nazriel's ~11 ms under addons). What a button carries now is ONE hidden
+        -- marker texture, $parentShine, whose path is the `benilla:autocast-shine` token: the
+        -- extract's conversion records its rect/layer as a shine site and draws nothing, and
+        -- `autocast_shine::emit_shine` (benilla-app) animates the four comet trails there on the
+        -- UI quad append lane — zero per-frame script traffic, the reference's own architecture
+        -- on our substrate. The M2 derivation (bones, emitters, ramps, the 30.72-unit projection,
+        -- decision 1321's truncating millisecond clock) moved whole into that module's header;
+        -- this file's only job is showing the marker exactly while autocast is enabled.
 
         -- ── The buttons ───────────────────────────────────────────────────────────────────────
 
@@ -347,8 +126,7 @@
             button.icon = getglobal(button:GetName() .. "Icon")
             button.cooldown = getglobal(button:GetName() .. "Cooldown")
             button.autocastable = getglobal(button:GetName() .. "AutoCastable")
-            -- No sparkle pool here: BenillaPetAutocast_Update builds it on the first frame this
-            -- button actually autocasts, and most buttons never do.
+            button.shine = getglobal(button:GetName() .. "Shine")
         end
 
         -- Ref PetActionButton_OnClick. The CheckButton widget toggles itself BEFORE OnClick fires,
@@ -502,7 +280,9 @@
 
                 if isActive then button:SetChecked(1) else button:SetChecked(0) end
                 if autoCastAllowed then button.autocastable:Show() else button.autocastable:Hide() end
-                button.autocasting = autoCastEnabled
+                -- The shine marker (decision 1383, header above): showing it IS the whole
+                -- enable — the native producer draws the trails wherever a shown marker sits.
+                if autoCastEnabled then button.shine:Show() else button.shine:Hide() end
 
                 -- An unnamed slot hides — UNLESS the drop grid is up, which is the whole point of
                 -- the grid: while a pet action rides the cursor every slot shows, so you can see
@@ -538,7 +318,6 @@
             frame:RegisterEvent("PET_BAR_SHOWGRID")
             frame:RegisterEvent("PET_BAR_HIDEGRID")
             frame.showgrid = 0
-            frame.clock = 0
             PetActionBar_OnEvent()
         end
 
@@ -562,15 +341,6 @@
                 frame:Show()
             else
                 frame:Hide()
-            end
-        end
-
-        -- The shared sparkle clock. One OnUpdate for the whole bar rather than ten: the four
-        -- emitters are one looping model, so every autocasting button is in step by construction.
-        function BenillaPetActionBar_OnUpdate(frame, elapsed)
-            local clockMs = BenillaPetAutocast_Advance(frame, elapsed)
-            for i = 1, NUM_PET_ACTION_SLOTS do
-                BenillaPetAutocast_Update(getglobal("PetActionButton" .. i), clockMs)
             end
         end
 
@@ -649,9 +419,10 @@
 
     <!--
         One pet button (ref PetActionButtonTemplate: 30x30, inherits ActionButtonTemplate's art
-        set, plus the AutoCastable ring on OVERLAY at 58x58 CENTER). The sparkle textures are
-        created in OnLoad rather than declared: there are 32 of them per button, and they are the
-        one thing here whose count is ours rather than the reference's.
+        set, plus the AutoCastable ring on OVERLAY at 58x58 CENTER). The Shine texture is the
+        ref's $parentAutoCast <Model> re-expressed as the native lane's marker (decision 1383,
+        the sparkle header above): its token path draws nothing itself — a shown marker is where
+        `autocast_shine` plays the trails, at exactly this OVERLAY layer's paint order.
     -->
     <CheckButton name="BenillaPetActionButtonTemplate" virtual="true">
         <Size><AbsDimension x="30" y="30"/></Size>
@@ -664,6 +435,12 @@
                     <Size><AbsDimension x="58" y="58"/></Size>
                     <Anchors>
                         <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentShine" file="benilla:autocast-shine" hidden="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"/>
+                        <Anchor point="BOTTOMRIGHT"/>
                     </Anchors>
                 </Texture>
             </Layer>
@@ -771,7 +548,6 @@
         <Scripts>
             <OnLoad>PetActionBar_OnLoad()</OnLoad>
             <OnEvent>PetActionBar_OnEvent()</OnEvent>
-            <OnUpdate>BenillaPetActionBar_OnUpdate(self, arg1)</OnUpdate>
             <OnShow>UIParent_ManageFramePositions()</OnShow>
             <OnHide>UIParent_ManageFramePositions()</OnHide>
         </Scripts>

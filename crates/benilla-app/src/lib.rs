@@ -37,6 +37,7 @@ mod area_trigger;
 #[cfg(feature = "dev")]
 mod asset_churn;
 mod aura_visual;
+mod autocast_shine;
 mod bindings;
 mod blob_shadow;
 mod bowstring;
@@ -506,6 +507,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The HUD minimap (decision 0203 phase 1): fills the `<Minimap>` widget's extracted hole with
     // the streamed tile window + mask + player arrow, and feeds the zone text.
     .add_plugins(minimap::MinimapPlugin)
+    // The pet-bar / spellbook autocast shine, drawn on the append lane from the conversion's
+    // parked sites — zero per-frame script-layout traffic (decision 1383, B282).
+    .add_plugins(autocast_shine::AutocastShinePlugin)
     // The shared AreaTable catalog + the ZONE_CHANGED event family / zone-text host globals
     // behind GetZoneText & co. (the zone-entry splash arc, decision 0287).
     .add_plugins(area::AreaPlugin)

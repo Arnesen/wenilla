@@ -119,7 +119,11 @@ fn every_shipped_texture_path_resolves_in_the_client_archives() {
             let archive_path = ["file", "bgfile", "edgefile"]
                 .contains(&key.to_ascii_lowercase().as_str())
                 && !value.is_empty();
-            if archive_path {
+            // The autocast-shine token (decision 1383) is a REGISTRATION, not an archive path:
+            // conversion intercepts it before the resolver and it draws nothing, so it is
+            // exempt — by EXACT match against the shipped constant, so a typo'd token in XML
+            // still fails this sweep as the white quad it would actually be.
+            if archive_path && value != crate::autocast_shine::SHINE_TOKEN {
                 out.push((file.to_string(), el.tag.clone(), value.clone()));
             }
         }

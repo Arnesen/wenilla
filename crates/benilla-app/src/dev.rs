@@ -178,6 +178,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_PARTICLE_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::ParticleCensusPlugin);
             }
+            // The under-floor census: `WOW_GROUND_CENSUS=<secs>[,<every>]` prints one line per
+            // streamed unit near the body — the server's Z for it, the Z we drew it at, the drop
+            // between them, and the floor over its head. The instrument B197 was missing: it says
+            // whether a unit below a floor was put there by the server or pulled there by us (see
+            // `capture::GroundCensusPlugin`).
+            if std::env::var("WOW_GROUND_CENSUS").is_ok() {
+                app.add_plugins(crate::capture::GroundCensusPlugin);
+            }
             // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
             // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
             if std::env::var("WOW_ENTITY_CENSUS").is_ok() {

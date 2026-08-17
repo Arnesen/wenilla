@@ -41,7 +41,7 @@ use motion::{
     mark_swimming_creatures, sample_splines,
 };
 pub(crate) use motion::{
-    jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
+    jump_seed, CreatureSwimming, FacingStep, GroundClamped, RemoteMotion, Spline, SplineStopped,
 };
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.

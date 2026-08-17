@@ -112,7 +112,7 @@ pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::ProbeRigPlugin;
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
-    fx_draw_census_plugin, EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin,
+    fx_draw_census_plugin, EntityCensusPlugin, GroundCensusPlugin, LiveFpsPlugin, NodeProbePlugin,
     ParticleCensusPlugin, ProbeChatPlugin, ProbeClock, ProbeExitPlugin, ProbeFocusPlugin,
     ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };

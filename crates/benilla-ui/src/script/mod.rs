@@ -906,7 +906,9 @@ impl UiScript {
                     natural_w,
                     key,
                 };
-                changed |= d.measured != Some(new);
+                // The KEY always lands (or the region re-requests its own measure forever); the
+                // EPOCH moves only if the laid-out extent did — see `MeasuredText::layout_moved`.
+                changed |= MeasuredText::layout_moved(d.measured, new);
                 d.measured = Some(new);
             }
         }
@@ -1080,6 +1082,14 @@ impl UiScript {
     /// means the fingerprint judged the frame quiet).
     pub fn layout_solves(&self) -> u64 {
         self.model_ref().layout_solves
+    }
+
+    /// How many resolves got past **tier 1** and paid the whole-roster preamble
+    /// ([`Model::layout_gate_walks`], decision 1385) — the gate's true cost counter, ≥
+    /// [`Self::layout_solves`] because a walk that concludes "nothing moved" pays the same
+    /// preamble and never reaches the solve counter.
+    pub fn layout_gate_walks(&self) -> u64 {
+        self.model_ref().layout_gate_walks
     }
 
     /// Total fixpoint ROUNDS across every solve ([`Model::layout_rounds`]) — a solve costs

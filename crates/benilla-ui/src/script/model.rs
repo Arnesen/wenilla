@@ -89,11 +89,16 @@ pub(crate) struct Model {
     /// that MOVED rather than the whole graph (decision 1350; see `script::layout::LayoutScope`).
     /// Tiers 1 and 2 above decide *whether* to solve; this decides *what*.
     pub(crate) layout_scope: super::layout::LayoutScope,
-    /// The [`Self::layout_epoch`] value the last SETTLED resolve closed on — one whose
-    /// fingerprint matched, proving the input set (seeds included) has stopped moving. `None`
-    /// forces the next resolve through tier 1: the initial state, a cycle-bailed pass, and every
-    /// real solve (whose stored fingerprint answers for now-outgrown seeds — layout.rs, "Tier 1
-    /// closes ONLY on a settled frame").
+    /// The [`Self::layout_epoch`] value the last CONVERGED resolve closed on. `None` forces the
+    /// next resolve through tier 1: the initial state, a cycle-bailed pass, and
+    /// [`super::UiScript::force_full_layout_resolve`].
+    ///
+    /// **Every converged resolve closes tier 1** (decision 1385) — a real solve as much as a
+    /// skipping one. It could not, while the fingerprint was hashed over the 0294 seeds as well
+    /// as the inputs: a solve outgrew the value it had just stored, so a mutated frame paid three
+    /// whole-roster walks (solve, settle, skip) instead of one. Hashing inputs alone makes the
+    /// stored fingerprint exactly the one the next mutation-free resolve recomputes, so a
+    /// per-frame layout write — the castbar's spark, any addon that animates a region — costs one.
     pub(crate) layout_epoch_resolved: Option<u64>,
     /// How many times the change gate has LET A RESOLVE THROUGH. `UiScript::resolve` is called
     /// unconditionally every frame, so the gap between call count and this is the gate's whole
@@ -101,6 +106,25 @@ pub(crate) struct Model {
     /// merely producing the same rects. Counts the gate's decision, so it reads the same with the
     /// `WOW_LAYOUT_VERIFY` self-check on (which re-runs skipped resolves) as with it off.
     pub(crate) layout_solves: u64,
+    /// How many times a resolve got **past tier 1** — the count of whole-roster preamble WALKS
+    /// (decision 1385). This, not [`Self::layout_solves`], is the honest cost counter for the
+    /// gate: a walk that ends in `gate_skips` still rebuilt the ids/plan, re-synced every frame's
+    /// scale and re-hashed all ~10k anchored regions to conclude "nothing moved" — ~1.0 ms at the
+    /// Stormwind pin — and `layout_solves` cannot see it, because it counts only the walks that
+    /// went on to solve.
+    ///
+    /// The castbar pin is why it exists: one moving spark cost **three** walks per frame and only
+    /// two of them were solves, so the counter the tests asserted on under-reported the bug by a
+    /// third. `resolve_bench::a_region_moving_every_frame_costs_one_gate_walk_on_the_shipped_ui`
+    /// is the guard that reads it.
+    ///
+    /// **Unlike [`Self::layout_solves`], this is NOT verify-independent.** Under
+    /// `layout_verify_enabled` a tier-1-clean resolve falls through and walks anyway, so a verify
+    /// build counts walks production never pays — which is the honest reading (the walk happened)
+    /// but makes the number useless as an assertion there. Assert on it only from a crate that
+    /// consumes `benilla-ui` as a dependency, where `cfg!(test)` is false and the count is
+    /// production's; inside this crate's own tests, assert on `layout_solves`.
+    pub(crate) layout_gate_walks: u64,
     /// The SCOPE of the last solve that ran: `(frames solved, regions swept)` — decision 1350's
     /// own meter, and the number its gate asserts on. `layout_solves` says how often the gate let
     /// a solve through and `layout_rounds` how deep each went; this says how WIDE, which is the
@@ -1100,6 +1124,7 @@ impl Model {
             layout_last_scope: (0, 0),
             layout_epoch_resolved: None,
             layout_solves: 0,
+            layout_gate_walks: 0,
             layout_rounds: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),

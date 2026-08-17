@@ -40,7 +40,7 @@ pub(super) use spline::{
     create_spline, ground_clamp_creatures, mark_swimming_creatures, monster_move_spline,
     sample_splines, trace_create_spline, trace_move_snap,
 };
-pub(crate) use spline::{CreatureSwimming, Spline, SplineStopped};
+pub(crate) use spline::{CreatureSwimming, GroundClamped, Spline, SplineStopped};
 
 /// A full [`Transform`] for a freshly-spawned entity from a raw-WoW pose. WoW orientation (yaw about
 /// +Z) maps straight to a Bevy +Y yaw under `wow_to_bevy` — no 180° offset (unlike doodad/WMO

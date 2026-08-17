@@ -422,14 +422,24 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 /// keeps its own Z, and so does a **swimming** creature ([`CreatureSwimming`]): its wire Z *is* its
 /// swim depth — vmangos paths a water creature in 3D through the volume with a plain non-FLYING
 /// spline (verified `MoveSplineInit`/`WaypointMovementGenerator.cpp`: only `CanFly()` sets the flag),
-/// so ground-clamping it dragged murlocs to the lakebed. A probe **miss** — the unit is genuinely
-/// airborne (ground out of reach) or the tile's collider hasn't streamed in yet — leaves the current
-/// Z untouched (no pop). Runs right after [`sample_splines`] so a walker's freshly-sampled XY+Z is
-/// what we re-ground; an idle unit (no spline) is re-grounded in place each frame, which also catches
-/// it once its terrain collider loads.
+/// so ground-clamping it dragged murlocs to the lakebed. Runs right after [`sample_splines`] so a
+/// walker's freshly-sampled XY+Z is what we re-ground.
+///
+/// **The probe measures from the unit's SEAT, never from the clamp's own last answer** (decision
+/// 1384). The seat is the Z whoever owns this unit's position last wrote — the create block, an
+/// `SMSG_UPDATE_OBJECT` move, its spline, a transport deck composing its rider — and it is what the
+/// server means by "where this unit is". Feeding the previous *output* back in as the next input is
+/// what made a single wrong answer permanent: a unit created inside a building at world entry, in
+/// the window before that building's own floor collider had attached, found the terrain under the
+/// building instead, dropped onto it, and from down there the floor was above the probe's reach
+/// forever after. Deriving from the seat makes every frame's answer a pure function of (the
+/// server's pose, the colliders) — so the moment the floor lands, the unit is back on it, with no
+/// movement needed to shake it loose. A probe **miss** — genuinely airborne, or the ground here
+/// hasn't streamed in — puts the unit at its seat, which is exactly where an unclamped unit belongs.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(in crate::net) fn ground_clamp_creatures(
     world: benilla_world::collision::WorldCollision,
+    epoch: Res<benilla_world::collision::ColliderEpoch>,
     mut commands: Commands,
     mut q: Query<(
         Entity,
@@ -441,9 +451,14 @@ pub(in crate::net) fn ground_clamp_creatures(
     )>,
 ) {
     let cost = clamp_cost_enabled();
+    let legacy = clamp_seat_disabled();
     let t0 = cost.then(std::time::Instant::now);
     let (mut visited, mut skipped, mut held, mut cast, mut hit_n, mut moved) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    // What re-armed each cast (1384): the unit's own seat moved, or the world's colliders changed
+    // under a unit that didn't. The second must be ~0 in a settled scene — a nonzero steady-state
+    // `armed` means the collider set is churning and the gate is holding nothing.
+    let (mut reseat, mut armed) = (0u32, 0u32);
 
     for (entity, net, spline, mut t, mut clamped, swimming) in &mut q {
         visited += 1;
@@ -459,44 +474,74 @@ pub(in crate::net) fn ground_clamp_creatures(
             skipped += 1;
             continue; // in-liquid: the wire Z is the creature's swim depth
         }
-        // The cast gate (decision 1357): a unit standing exactly where its last cast stood, with
-        // a Y nothing has touched since that cast wrote it, cannot get a different answer — the
-        // ray's inputs are its position and the walking colliders, and a *moving* floor (a lift,
-        // a transport deck) reaches its rider through the wire's own position writes, which break
-        // the bit-equality below and re-arm the cast. A MISS never caches (`hit` gates it), so a
-        // unit standing on a tile whose collider hasn't streamed in keeps asking until it lands —
-        // the original re-ground-in-place behaviour, kept exactly where it is load-bearing.
         let xz = [t.translation.x, t.translation.z];
+        // **Re-seat on any write that wasn't ours.** The Y standing here differs from the one this
+        // unit's last clamp left behind exactly when somebody who owns this unit's position moved
+        // it — the wire, its spline, a transport deck — and *that* Y is the authority the probe
+        // measures from. With no memo at all (a unit's first frame), the pose it spawned at is the
+        // seat, which is the create block's own Z.
+        let seat_y = match clamped.as_deref() {
+            _ if legacy => t.translation.y, // the pre-1384 leg: measure from our own last answer
+            Some(c) if c.y_written == t.translation.y => c.seat_y,
+            _ => t.translation.y,
+        };
+        // The cast gate (decision 1357): a unit whose seat and XZ are bit-identical to the cast
+        // that produced its cached hit, in a world whose collider set has not changed since, cannot
+        // get a different answer — those three ARE the ray's inputs. A moving floor (a lift, a
+        // transport deck) reaches its rider through the wire's own position writes, which move the
+        // seat and re-arm the cast; a building whose floor collider attaches a few frames after the
+        // unit was created moves the epoch and re-arms it (decision 1384 — before the epoch was in
+        // the gate, that unit's wrong answer was cached for the session). A MISS never caches, so a
+        // unit standing on a tile whose collider hasn't streamed in keeps asking until it lands.
         if let Some(c) = clamped.as_deref() {
-            if c.hit && c.xz == xz && c.y_written == t.translation.y {
+            let same_question = if legacy {
+                c.y_written == t.translation.y
+            } else {
+                c.seat_y == seat_y && c.epoch == epoch.get()
+            };
+            if c.hit && c.xz == xz && same_question {
                 held += 1;
                 continue;
             }
+            if cost && !legacy {
+                if c.xz == xz && c.seat_y == seat_y {
+                    armed += 1; // the world changed under a unit that didn't move
+                } else {
+                    reseat += 1; // the unit moved, or was moved
+                }
+            }
         }
-        let origin = t.translation + Vec3::Y * GROUND_CLAMP_UP;
+        let origin = Vec3::new(t.translation.x, seat_y + GROUND_CLAMP_UP, t.translation.z);
         let reach = GROUND_CLAMP_UP + GROUND_CLAMP_DOWN;
         cast += 1;
         // The one-sided down-ray (decision 0970): a creature grounds like the player grounds — a
         // face whose winding points away is no floor, or an idle NPC would stand mid-air on the
         // very shell face the player mover now falls through.
         let hit = world.ray_body(origin, Dir3::NEG_Y, reach);
-        if let Some(hit) = &hit {
-            hit_n += 1;
-            let y = origin.y - hit.distance; // the down-ray's hit point Y = feet on the surface
-                                             // Exact bit equality is deliberate, not a sloppy float compare: the question is
-                                             // "would the write change anything" — Bevy's change detection fires on the
-                                             // DerefMut regardless of value, so writing an equal Y every frame marked every
-                                             // standing creature's transform subtree dirty. An epsilon would answer a
-                                             // different question: a real sub-epsilon ground shift must still land.
-            if y != t.translation.y {
-                moved += 1;
-                t.translation.y = y;
+        // The down-ray's hit point Y = feet on the surface; no surface in reach = the seat, i.e.
+        // where the server put it.
+        let y = match &hit {
+            Some(h) => {
+                hit_n += 1;
+                origin.y - h.distance
             }
+            None => seat_y,
+        };
+        // Exact bit equality is deliberate, not a sloppy float compare: the question is "would the
+        // write change anything" — Bevy's change detection fires on the DerefMut regardless of
+        // value, so writing an equal Y every frame marked every standing creature's transform
+        // subtree dirty. An epsilon would answer a different question: a real sub-epsilon ground
+        // shift must still land.
+        if y != t.translation.y {
+            moved += 1;
+            t.translation.y = y;
         }
         let state = GroundClamped {
             xz,
+            seat_y,
             y_written: t.translation.y,
             hit: hit.is_some(),
+            epoch: epoch.get(),
         };
         match clamped.as_deref_mut() {
             Some(c) => *c = state,
@@ -523,7 +568,7 @@ pub(in crate::net) fn ground_clamp_creatures(
         // Per 0734's law (~10.5 ns per row visit), the walk itself is never the cost here: at ~800
         // units it is ~8 µs. Only `ms` justifies the slice — quote it, not the counts.
         eprintln!(
-            "[clamp-cost] visited={visited} skipped={skipped} held={held} cast={cast} hit={hit_n} moved={moved} ms={:.3}",
+            "[clamp-cost] visited={visited} skipped={skipped} held={held} cast={cast} reseat={reseat} armed={armed} hit={hit_n} moved={moved} ms={:.3}",
             t0.elapsed().as_secs_f32() * 1000.0
         );
     }
@@ -533,6 +578,18 @@ pub(in crate::net) fn ground_clamp_creatures(
 fn clamp_cost_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_CLAMP_COST").is_some())
+}
+
+/// The A/B switch behind decision 1384: `WOW_CLAMP_SEAT=off` restores the pre-1384 clamp, which
+/// measured from its own previous answer and cached a hit without dating it against the collider
+/// set. That is the leg where a unit created inside a building before the building's floor collider
+/// attached stays under the floor for the session (B197) — kept as the lever that reproduces the bug
+/// on the fixed binary, so the fix's evidence never depends on two different builds.
+fn clamp_seat_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("WOW_CLAMP_SEAT").is_ok_and(|v| matches!(v.as_str(), "off" | "0"))
+    })
 }
 
 /// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
@@ -567,19 +624,27 @@ const CREATURE_SWIM_EXIT_BAND: f32 = 1.0 / 36.0;
 #[derive(Component)]
 pub(crate) struct CreatureSwimming;
 
-/// The last ground clamp this unit took (decision 1357) — [`ground_clamp_creatures`]' cast gate.
-/// All three fields compare by bit: the gate's question is "are the ray's inputs identical to the
-/// cast that produced this", never "close enough".
-#[derive(Component)]
-pub(in crate::net) struct GroundClamped {
+/// The last ground clamp this unit took (decisions 1357 + 1384) — [`ground_clamp_creatures`]' seat
+/// and its cast gate. Every field compares by bit: the gate's question is "are the ray's inputs
+/// identical to the cast that produced this", never "close enough".
+#[derive(Component, Clone, Copy)]
+pub(crate) struct GroundClamped {
     /// Where the last cast stood.
     xz: [f32; 2],
-    /// The Y standing after that cast (written or left) — an external write (the wire moving the
-    /// unit, a lift carrying it) breaks equality and re-arms the cast.
+    /// **The authoritative Y the answer was derived from** — the pose whoever owns this unit's
+    /// position last wrote, never the clamp's own output. This is what makes the clamp a pure
+    /// function of (server pose, colliders) instead of a ratchet that can only ever fall (1384).
+    pub(crate) seat_y: f32,
+    /// The Y standing after that cast (written or left). It differs from [`Self::seat_y`] by
+    /// exactly the clamp's own correction, so an *external* write is detectable as "the Y here is
+    /// not the one I left", which re-seats.
     y_written: f32,
     /// Only a HIT caches: a miss keeps casting, so a tile whose collider streams in late still
     /// catches its standing units.
     hit: bool,
+    /// The collider-set stamp the answer was computed against — a cached answer outlives neither
+    /// the unit's own pose nor the world it described.
+    epoch: u64,
 }
 
 /// Maintain [`CreatureSwimming`] on `Unit` creatures from the water over their feet (module docs on
@@ -623,6 +688,158 @@ pub(in crate::net) fn mark_swimming_creatures(
                 commands.entity(e).remove::<CreatureSwimming>();
             }
         }
+    }
+}
+
+/// B197's mechanism, in a world small enough to assert on: a unit created inside a building whose
+/// floor collider has not attached yet, and what happens to it when the floor lands.
+///
+/// The real thing is a race between two async collider builds during a loading screen; here it is
+/// two `spawn`s and a `bump`, which is the same three facts — the terrain is under the unit, the
+/// floor is not there yet, and it arrives later. Both halves of decision 1384 are load-bearing in
+/// the second assertion: the seat is what lets the probe reach back up to the floor at all, and the
+/// epoch is what makes anything re-ask after the world changed under a unit standing still.
+#[cfg(test)]
+mod under_floor {
+    use avian3d::prelude::*;
+    use benilla_protocol::EntityKind;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    use super::{ground_clamp_creatures, GroundClamped};
+    use crate::net::NetEntity;
+    use benilla_world::collision::ColliderEpoch;
+
+    /// Auberdine's geometry, to the yard: terrain at 6.98, the building's floor 2.08 above it, and
+    /// the server's Z for the NPCs inside 0.08 above *that* (the small float every wire Z carries).
+    const TERRAIN_Y: f32 = 6.98;
+    const FLOOR_Y: f32 = 9.06;
+    const WIRE_Y: f32 = 9.14;
+
+    /// A 10×10 up-wound quad at `y` — a floor the one-sided down-ray will stand on.
+    fn floor_at(app: &mut App, y: f32) -> Entity {
+        let verts = vec![
+            Vec3::new(-5.0, y, -5.0),
+            Vec3::new(5.0, y, -5.0),
+            Vec3::new(5.0, y, 5.0),
+            Vec3::new(-5.0, y, 5.0),
+        ];
+        app.world_mut()
+            .spawn((
+                RigidBody::Static,
+                Collider::trimesh(verts, vec![[0u32, 2, 1], [0, 3, 2]]),
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    /// A world with the terrain in and the building's floor still building, plus one idle NPC
+    /// standing at the Z the server sent for it.
+    fn half_arrived_world() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>().init_resource::<ColliderEpoch>();
+        // `update()` never runs plugin `finish()`, where avian seats its diagnostics resources —
+        // and the second `update()` below (the one that lands the late floor) does step physics.
+        app.finish();
+        app.cleanup();
+        floor_at(&mut app, TERRAIN_Y);
+        let npc = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                Transform::from_xyz(0.0, WIRE_Y, 0.0),
+            ))
+            .id();
+        app.update(); // seats Position/Rotation and the collider trees
+        (app, npc)
+    }
+
+    fn clamp(app: &mut App) {
+        app.world_mut()
+            .run_system_once(ground_clamp_creatures)
+            .expect("run the clamp");
+    }
+
+    fn y_of(app: &App, e: Entity) -> f32 {
+        app.world().get::<Transform>(e).unwrap().translation.y
+    }
+
+    #[test]
+    fn a_unit_sunk_by_a_late_floor_stands_back_up_when_it_lands() {
+        let (mut app, npc) = half_arrived_world();
+
+        // The window B197 lives in: the only surface under this NPC is the terrain the building
+        // sits on, so that is what the clamp finds. This drop is CORRECT given what exists.
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            TERRAIN_Y,
+            "with only terrain built, the clamp grounds onto terrain"
+        );
+        assert_eq!(
+            app.world().get::<GroundClamped>(npc).unwrap().seat_y,
+            WIRE_Y,
+            "the seat is the server's Z, not the answer the clamp just wrote"
+        );
+
+        // Nothing moves the NPC. The building's floor collider attaches, and stamps the world.
+        floor_at(&mut app, FLOOR_Y);
+        app.world_mut().resource_mut::<ColliderEpoch>().bump();
+        app.update();
+
+        // The fix: it comes back up on its own. Before 1384 it stayed on the terrain for the rest
+        // of the session — the cached hit was never re-asked, and even re-asked it would have
+        // measured from down there.
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            FLOOR_Y,
+            "the floor arrived under an NPC that never moved; it belongs on it"
+        );
+    }
+
+    #[test]
+    fn a_settled_unit_is_not_re_cast_while_the_world_holds_still() {
+        // 1357's saving, still intact: the gate holds an answer whose three inputs are unchanged.
+        let (mut app, npc) = half_arrived_world();
+        clamp(&mut app);
+        let before = *app.world().get::<GroundClamped>(npc).unwrap();
+        clamp(&mut app);
+        let after = *app.world().get::<GroundClamped>(npc).unwrap();
+        assert_eq!(
+            (before.seat_y, before.y_written, before.epoch),
+            (after.seat_y, after.y_written, after.epoch),
+            "a held unit's memo is untouched — nothing re-asked the ground"
+        );
+    }
+
+    #[test]
+    fn a_unit_with_no_ground_in_reach_sits_where_the_server_put_it() {
+        // The miss branch: an airborne/unstreamed unit is left at its seat, never at whatever the
+        // clamp last wrote. `GROUND_CLAMP_UP + GROUND_CLAMP_DOWN` below the seat is empty air here.
+        let (mut app, npc) = half_arrived_world();
+        app.world_mut()
+            .get_mut::<Transform>(npc)
+            .unwrap()
+            .translation
+            .y = TERRAIN_Y + 40.0;
+        clamp(&mut app);
+        assert_eq!(
+            y_of(&app, npc),
+            TERRAIN_Y + 40.0,
+            "no surface in reach ⇒ the wire's Z stands"
+        );
     }
 }
 

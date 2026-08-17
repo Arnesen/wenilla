@@ -207,7 +207,12 @@ impl Plugin for WorldFoundation {
             // The dev state (decision 0026): the always-present config layer eight subsystems
             // read, whose defaults ARE the player behaviour. The debug panel is only its editor
             // and may not be installed at all.
-            .init_resource::<crate::dev_state::DebugState>();
+            .init_resource::<crate::dev_state::DebugState>()
+            // The collider-set stamp every cached collision answer is dated against
+            // (`collision::ColliderEpoch`). Tracked in `First` so a removal is stamped before any
+            // consumer runs; the attach half is stamped by the streamer's own attach loop.
+            .init_resource::<crate::collision::ColliderEpoch>()
+            .add_systems(First, crate::collision::track_collider_removals);
         // Avian's pre-step copy of Bevy's transform propagation is OFF by default (the 1370
         // bracket surfaced the lane; the 3-round SW split then measured the skip at −0.40
         // cpu_ms, negative in every round): `PhysicsTransformPlugin` re-registers

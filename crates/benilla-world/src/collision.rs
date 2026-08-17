@@ -16,6 +16,9 @@ use avian3d::character_controller::move_and_slide::{
 };
 use avian3d::prelude::*;
 use bevy::ecs::component::Component;
+use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::ResMut;
 use bevy::math::{Dir3, Quat, Vec3};
 
 mod one_sided;
@@ -44,6 +47,53 @@ pub(crate) fn walk_layers() -> CollisionLayers {
 /// the player movement query (which omits `Camera`) never hits it.
 pub(crate) fn camera_layers() -> CollisionLayers {
     CollisionLayers::new(CollisionLayer::Camera, LayerMask::ALL)
+}
+
+/// **How many times the world's collider set has changed** — bumped when [`crate::terrain_stream`]
+/// attaches a batch of built colliders, and when any collider is removed (a tile or placement
+/// streaming out, an entity despawning).
+///
+/// It exists because a cached collision *answer* is only as good as the world it was computed
+/// against. The one consumer today is the creature ground clamp's cast gate (decision 1357), which
+/// holds a hit while the unit's own inputs are unchanged: the unit's position and the colliders
+/// under it. It could see the first half change and not the second, so a unit that took its answer
+/// from a half-arrived world — the terrain under a building, before the building's own floor
+/// collider had attached — held that answer forever and stood under the floor for the rest of the
+/// session. A stamp on the collider set closes that: an answer computed at one stamp is re-asked at
+/// the next.
+///
+/// A `u64` counter, not a dirty flag: the gate compares its own recorded stamp, so it never has to
+/// coordinate with other readers about who clears it.
+#[derive(Resource, Default)]
+pub struct ColliderEpoch(u64);
+
+impl ColliderEpoch {
+    /// The current stamp — recorded alongside a cached collision answer, compared to decide whether
+    /// that answer still describes this world.
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+
+    /// **The collider set changed** — call this from any lane that inserts a collider outside the
+    /// streamer's own attach queue (the GameObject hull lane is the one such lane today, decision
+    /// 0761). A lane that forgets leaves a cached answer dated against a world that no longer
+    /// exists; the cost of an over-eager bump is one re-cast.
+    pub fn bump(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+}
+
+/// Bump [`ColliderEpoch`] for the *removal* half (the attach half is published by the streamer's
+/// own attach loop, which already counts what it did). Despawning an entity emits removal events
+/// for its components, so this covers tile/placement stream-out and object destroys alike; reading
+/// the queue is O(removals), which is zero on almost every frame.
+pub(crate) fn track_collider_removals(
+    mut removed: RemovedComponents<Collider>,
+    mut epoch: ResMut<ColliderEpoch>,
+) {
+    if removed.read().count() > 0 {
+        epoch.bump();
+    }
 }
 
 /// Marks a static trimesh collider whose triangles **receive ground decals** (the selection ring).

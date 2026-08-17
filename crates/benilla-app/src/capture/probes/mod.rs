@@ -29,6 +29,11 @@ pub(crate) use live_fps::LiveFpsPlugin;
 mod particle_census;
 pub(crate) use particle_census::ParticleCensusPlugin;
 
+/// The under-floor census — per-unit "where the server put it vs where we drew it", the instrument
+/// that turns a screenshot of an NPC below a floor into a number (B197, decision 1384).
+mod ground_census;
+pub(crate) use ground_census::GroundCensusPlugin;
+
 /// The two exclusive-`World` reflection dumps: the bevy_ui node inventory and the archetype
 /// census — "what is resident right now, and what is it made of".
 mod world_census;

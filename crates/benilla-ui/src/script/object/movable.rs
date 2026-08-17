@@ -428,8 +428,10 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
     } else {
         0.0
     };
+    let (w0, h0) = (input.width, input.height);
     input.width = (input.width + dw).max(1.0);
     input.height = (input.height + dh).max(1.0);
+    let mut moved = input.width.to_bits() != w0.to_bits() || input.height.to_bits() != h0.to_bits();
     // The planted edge: a frame anchored by its LEFT that is gripped on the LEFT has to move too,
     // or the resize would push the right edge instead. Only the gripped axis shifts.
     if !input.anchors.is_empty() && (sz.left || sz.bottom) {
@@ -441,8 +443,16 @@ pub(crate) fn advance_size(model: &mut Model, pos: (f32, f32)) {
                 a.y_off += dy;
             }
         }
+        moved |= (sz.left && dx != 0.0) || (sz.bottom && dy != 0.0);
     }
-    model.touch_layout();
+    // The zero-delta return above is on the RAW cursor delta, which is not the same question: a
+    // single-axis grip dragged purely across its axis gives `dw == dh == 0`, and so does a grip
+    // held past `.max(1.0)` saturation. Both used to bump the epoch and then hash all ~10k
+    // anchored regions to conclude nothing had moved — the castbar's bug class in miniature, for
+    // every frame of such a drag (decision 1385).
+    if moved {
+        model.touch_layout();
+    }
     model.sizing = Some(FrameSizing { sample: pos, ..sz });
 }
 

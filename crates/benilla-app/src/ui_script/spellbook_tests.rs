@@ -480,12 +480,13 @@ fn the_pet_tab_switches_books_and_renders_the_pets_spells() {
             .unwrap(),
         "a passive is not autocastable"
     );
-    // …and the sparkle follows the SECOND (is it on).
+    // …and the shine marker follows the SECOND (is it on) — the native lane (decision 1383)
+    // draws the sparkle wherever a shown marker sits, so shown-ness IS the enable.
     assert!(s
-        .eval::<bool>("return SpellButton1.autocasting == 1")
+        .eval::<bool>("return SpellButton1Shine:IsVisible()")
         .unwrap());
-    assert!(s
-        .eval::<bool>("return SpellButton3.autocasting == nil")
+    assert!(!s
+        .eval::<bool>("return SpellButton3Shine:IsVisible()")
         .unwrap());
 
     // ── The clicks ────────────────────────────────────────────────────────────────────────────

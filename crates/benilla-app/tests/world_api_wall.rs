@@ -209,6 +209,16 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// count. The items were always crossing; the measurement improved. That is the only kind of raise
 /// that is not a retreat — a raise for a NEW leak is the failure this number exists to catch.
 ///
+/// And 157 → 158: `collision::ColliderEpoch`, a PUBLISH by 1164's test (decision 1384). It is the
+/// stamp on the world's collider set — "the geometry you last asked has changed" — and the whole
+/// point of it is that a *cached* collision answer must not outlive the world it described. The
+/// engine owns the fact (the streamer's attach queue is what changes the set), the game owns two of
+/// the three parties: the creature ground clamp reads it, and the GameObject hull lane
+/// (`entities::attach`) is the one collider insert outside the streamer's queue, so it must be able
+/// to stamp. Keeping it engine-private would mean either a game-side collider that no cache can see
+/// arrive — which is B197's bug with a different collider class — or an engine system reaching into
+/// game components to invalidate them, which crosses this line the other way and worse.
+///
 /// And 156 → 157: `mat_anim_table::MatAnimTable`, a PUBLISH by 1164's test (decision 1381). The
 /// mat-anim delta table replaced per-frame material mutation, and registration must happen where
 /// materials are BUILT — which for WMO GameObject props (transport interiors) is a game-side
@@ -237,7 +247,7 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// input, which is game-side; a one-field resource is the smallest honest expression of that. The
 /// alternative was ordering a game system against an engine system, which crosses this same line
 /// *and* publishes a schedule point to do it.
-const CEILING: usize = 157;
+const CEILING: usize = 158;
 
 /// How far under [`CEILING`] the real count may sit before this test asks for the ceiling to be
 /// lowered. Slack, not tolerance: it keeps a single closure from failing the gate, while making it

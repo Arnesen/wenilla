@@ -565,6 +565,30 @@ pub(crate) struct MeasuredText {
     pub(crate) key: u64,
 }
 
+impl MeasuredText {
+    /// Did the part of this measurement the **layout** reads move? (decision 1385)
+    ///
+    /// Only `w`/`h` are layout inputs — they are the auto-size axes, and the only fields
+    /// `InputFingerprint` feeds (`script::layout`'s region walk hashes `m.w`/`m.h`, nothing else).
+    /// `key` is the measure CACHE's business and `natural_w` is `GetStringWidth`'s; neither can
+    /// move a rect.
+    ///
+    /// The distinction is load-bearing, not tidiness. A measure request is only ever *issued* when
+    /// the stored key mismatches, and `MeasuredText`'s derived `PartialEq` includes `key` — so
+    /// `d.measured != Some(new)` is **structurally always true** at both write sites, and touching
+    /// the epoch on it meant every answered measure opened tier 1. A FontString whose text changes
+    /// to something the same size does that on a cadence: a buff countdown ticking `"58s" → "57s"`,
+    /// a colour-code swap, any same-width digit. Tier 1 then went dirty and tier 2 hashed all
+    /// ~10k anchored regions to conclude nothing had moved — ~1 ms, `solves=0`, per tick, times
+    /// the number of unsynchronised timers on screen. The same shape 0740's own doc records the
+    /// bag-hover loop paying, and a sibling of the castbar's (1385).
+    pub(crate) fn layout_moved(before: Option<Self>, after: Self) -> bool {
+        before.is_none_or(|b| {
+            b.w.to_bits() != after.w.to_bits() || b.h.to_bits() != after.h.to_bits()
+        })
+    }
+}
+
 impl RegionData {
     /// The measure-cache key for the region's CURRENT text/font/wrap/outline — the one recipe both
     /// sides of the measure round-trip share. [`super::UiScript::fontstrings_needing_measure`]

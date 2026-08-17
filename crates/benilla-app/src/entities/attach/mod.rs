@@ -271,6 +271,9 @@ pub(super) fn attach_entity_visuals(
     ),
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
     mut palettes: ResMut<benilla_world::rig_palette::RigPalettes>,
+    // The collider-set stamp (1384): the GameObject hull insert below is the one collider lane
+    // outside the streamer's attach queue, so it dates the world itself.
+    mut collider_epoch: ResMut<benilla_world::collision::ColliderEpoch>,
     time: Res<Time>,
 ) {
     let (sections, world_assets, mut images, mut skin_composites, asset_server, mut mats) =
@@ -865,6 +868,11 @@ pub(super) fn attach_entity_visuals(
                         RigidBody::Static
                     };
                     commands.entity(entity).insert((body, col));
+                    // This lane bypasses the streamer's attach queue entirely (0761), so it stamps
+                    // the collider set itself — otherwise a creature standing where a GameObject
+                    // hull lands frames later keeps the answer it took before there was one
+                    // (decision 1384).
+                    collider_epoch.bump();
                 }
             }
         } else {

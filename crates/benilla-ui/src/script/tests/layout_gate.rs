@@ -328,13 +328,91 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
-/// Tier 1 of the gate (decision 0740): the mutation epoch. The epoch closes only on a SETTLED
-/// resolve (one whose fingerprint matched — the first resolve after a change hashes outgrown
-/// seeds, so it may not close), and from then on a quiet frame skips at a `u64` compare without
-/// computing the fingerprint at all.
+/// Tier 1 of the gate (decision 0740): the mutation epoch. **Any CONVERGED resolve closes it**
+/// (decision 1385) — the fingerprint is hashed over inputs alone, so a solve cannot outgrow the
+/// value it stores — and from then on a quiet frame skips at a `u64` compare without computing
+/// the fingerprint at all.
 fn tier_one_closed(s: &UiScript) -> bool {
     let m = s.lua().app_data_ref::<Model>().expect("model app_data");
     m.layout_epoch_resolved == Some(m.layout_epoch)
+}
+
+/// **The castbar law** (decision 1385, ledger B283): a region that MOVES every frame — the classic
+/// OnUpdate animation idiom, our own `CastingBarSpark:SetPoint`, and every addon that slides a
+/// texture — must cost exactly **one** let-through resolve per frame.
+///
+/// It used to cost three. The fingerprint was hashed over the 0294 SEEDS as well as the inputs, so
+/// a solve necessarily outgrew the fingerprint it had just stored: neither that pass nor the
+/// settling pass behind it could close tier 1, and the frame paid solve + settle + skip — three
+/// whole-roster walks at ~1.0–1.4 ms each. Measured live at the Stormwind pin: **+4.2 ms of CPU
+/// per frame for one 32×32 spark**, on a default UI with no addons loaded.
+///
+/// This is the regression guard for that whole bug class. `solves` is the honest counter — a
+/// wasted walk that concludes "nothing moved" still costs the full preamble — so the assertion is
+/// on the count, never on a duration (0735: milliseconds are not evidence of a scope regression).
+#[test]
+fn a_region_moving_every_frame_costs_exactly_one_solve_per_frame() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    setup(&s);
+    s.run(
+        r#"
+        spark = parent:CreateTexture(nil, "OVERLAY")
+        spark:SetWidth(32); spark:SetHeight(32)
+        spark:SetPoint("CENTER", parent, "LEFT", 0, 2)
+        "#,
+    )
+    .expect("spark");
+    s.resolve();
+    assert!(tier_one_closed(&s), "the setup must settle in one resolve");
+
+    // Ten frames of the castbar's own inner loop: one region re-pointed to a NEW offset, then the
+    // host's per-frame resolve. Nothing else in the model moves.
+    //
+    // The offsets start at 1.7, not 0 — a `frame * 1.7` sequence opens with a re-write of the
+    // seed value, which the setters' bit-exact compare absorbs (no epoch bump, no solve at all).
+    // That is the *right* answer and `an_idempotent_setter_call_leaves_tier_one_closed` pins it;
+    // here it would have measured the guard instead of the gate.
+    for frame in 0..10 {
+        let before = solves(&s);
+        s.run(&format!(
+            r#"spark:SetPoint("CENTER", parent, "LEFT", {}, 2)"#,
+            f64::from(frame + 1) * 1.7
+        ))
+        .expect("spark move");
+        s.resolve();
+        assert_eq!(
+            solves(&s) - before,
+            1,
+            "frame {frame}: a single moving region must cost ONE solve, not the \
+             solve+settle+skip trio the seeds-in-the-fingerprint law used to force"
+        );
+        assert!(
+            tier_one_closed(&s),
+            "frame {frame}: the converged solve must close tier 1, so a second getter in the \
+             same tick skips at the u64 compare instead of re-walking the whole roster"
+        );
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The other half of the same law: once it has settled, an untouched frame costs NOTHING — no
+/// solve, and (tier 1) not even the fingerprint walk that would decide so.
+#[test]
+fn a_quiet_frame_after_a_move_costs_no_solve_at_all() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    setup(&s);
+    s.resolve();
+    s.run(r#"parent:SetPoint("TOPLEFT", nil, "TOPLEFT", 33, -44)"#)
+        .expect("move");
+    s.resolve();
+    let settled = solves(&s);
+    for _ in 0..5 {
+        s.resolve();
+        assert_eq!(solves(&s), settled, "a quiet frame must not solve");
+        assert!(tier_one_closed(&s), "and must not reopen tier 1");
+    }
 }
 
 #[test]
@@ -343,11 +421,13 @@ fn a_settled_resolve_closes_tier_one_and_a_real_write_reopens_it() {
     s.set_screen_size(800.0, 600.0);
     setup(&s);
 
-    s.resolve(); // the change-driven solve (fingerprint hashed over pre-solve seeds)
-    s.resolve(); // the settling pass — fingerprint matches, tier 1 closes
+    // ONE resolve closes the epoch (decision 1385): the fingerprint is hashed over inputs alone,
+    // and the rounds just drove those inputs to their fixpoint, so there is nothing left for a
+    // settling pass to discover. This used to need two.
+    s.resolve();
     assert!(
         tier_one_closed(&s),
-        "a settled resolve must close the epoch"
+        "a converged resolve must close the epoch by itself"
     );
 
     s.run("parent:SetWidth(150)").expect("resize");
@@ -356,8 +436,7 @@ fn a_settled_resolve_closes_tier_one_and_a_real_write_reopens_it() {
         "a real layout write must reopen tier 1"
     );
     s.resolve();
-    s.resolve();
-    assert!(tier_one_closed(&s), "and settling closes it again");
+    assert!(tier_one_closed(&s), "and one resolve closes it again");
 }
 
 #[test]

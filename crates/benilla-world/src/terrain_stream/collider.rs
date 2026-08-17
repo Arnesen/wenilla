@@ -155,6 +155,14 @@ pub(super) fn finish_colliders(
         activity.colliders_attached += attached;
         activity.collider_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
+    // The world a cached collision answer was computed against just changed — see
+    // [`crate::collision::ColliderEpoch`]. This is the attach half; removals are stamped by
+    // `track_collider_removals`.
+    if attached > 0 {
+        if let Some(mut epoch) = world.get_resource_mut::<crate::collision::ColliderEpoch>() {
+            epoch.bump();
+        }
+    }
 }
 
 /// `WOW_NO_DOODAD_BODIES=1` — spawn NO doodad/prop hulls at all (decision 1367's premise
