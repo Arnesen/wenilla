@@ -184,6 +184,15 @@ pub(crate) fn advance_track(
 
 /// Fire the event keyframes `clip` crossed on `(prev, cur]`. A loop wrap (`cur < prev`) fires the
 /// tail `(prev, duration]` of the last cycle then the head `[0, cur]` of the new one.
+///
+/// **Every fired key is traced under `aev`** (`WOW_MOVE_TRACE`, `WOW_MOVE_TRACE_TAGS=aev`). This is
+/// the *asking* half of the sound instrument, and it was the half we did not have: the play log
+/// (`RUST_LOG=benilla_app::sound=debug`) says what sounded, but a report of the shape "this
+/// creature vocalises far too often" needs to separate *the tag fired too often* from *the tag
+/// fired as authored and the gate above it is missing*. Those are different bugs with different
+/// fixes — decision 1399 had to answer exactly that question for a pet owl and could only do it by
+/// reading the M2 by hand. One line per key, on the same clock as the mover and wire traces, so a
+/// vocal can be read against the clip that asked for it.
 pub(crate) fn scan_events(
     clip: &AnimClip,
     entity: Entity,
@@ -194,9 +203,24 @@ pub(crate) fn scan_events(
     if clip.events.is_empty() || cur == prev {
         return;
     }
+    let traced = benilla_assets::trace::enabled_for("aev");
     let mut fire = |lo: f32, hi: f32| {
         for e in clip.events.iter() {
             if e.time > lo && e.time <= hi {
+                if traced {
+                    benilla_assets::trace::line(
+                        "aev",
+                        &format!(
+                            "{} unit={entity} anim={} key={:.3}s data={} clip={:.3}s{}",
+                            String::from_utf8_lossy(&e.ident),
+                            clip.anim_id,
+                            e.time,
+                            e.data,
+                            clip.duration,
+                            if clip.looping { " loop" } else { "" },
+                        ),
+                    );
+                }
                 out.write(AnimSoundEvent {
                     entity,
                     ident: e.ident,

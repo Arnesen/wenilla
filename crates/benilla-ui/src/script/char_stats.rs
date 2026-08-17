@@ -11,22 +11,40 @@
 //! sheet calls with `"pet"` (ref `PetPaperDollFrame.lua:73-81`), through these very bindings. So
 //! `UnitStat`/`UnitResistance`/`UnitArmor`/… route on the token — `"player"` and `"pet"` each read
 //! their own pushed snapshot, and **every other token (and a snapshot the app has not pushed yet)
-//! serves the absent shape**: zeros, `percent` 1.0. That last part *is* faithful — the 1.12 fields
-//! behind these (`UNIT_FIELD_STAT*`, `POSSTAT`/`NEGSTAT`, the damage/AP block) are
-//! PRIVATE/OWNER_ONLY, so no third unit ever streams them. A pet's descriptor carries the UNIT
-//! half and no PLAYER block at all, which is why its buff decompositions read `0` and the ref's
-//! own pet sheet shows plain white numbers.
+//! serves the absent shape**: zeros, `percent` 1.0. A pet's descriptor carries the UNIT half and no
+//! PLAYER block at all, which is why its buff decompositions read `0` and the ref's own pet sheet
+//! shows plain white numbers.
 //!
 //! (Until 1057 the router was a hard `token == "player"` test documented as "the faithful
 //! player-only gate". It was neither: it was "no consumer yet". The reference passes `"pet"` into
 //! the same bindings, and the gate was simply never exercised.)
 //!
-//! Return shapes are the ref Lua's own inverse math (ref-PaperDollFrame): the descriptor carries
-//! the *effective* value plus the split positive/negative buff deltas; `base = effective − pos −
-//! neg`. The negative deltas arrive **negative-or-zero** (vmangos `Player.h:1505`
-//! `ApplyStatBuffMod` routes a debuff's already-negative amount into `NEGSTAT`;
-//! `StatSystem.cpp:335-336` writes the AP mods' negative half the same way), matching the ref's
-//! `negBuff < 0` tests.
+//! **The absent shape for a third unit is the right ANSWER for `UnitStat` and a known GAP for the
+//! resistance pair — and the reason it used to be filed as blanket-faithful was wrong.** The
+//! binary does not gate slots 1/2 on SELF at all: `UnitStat`'s are NULL + typemask bit 3 only, and
+//! it returns whatever the client's copy of `UNIT_FIELD_STAT0+i` holds (VERIFIED wow-re
+//! `ui/scratch/pet-paperdoll-stat-api.md` §4). What makes our zeros agree there is the *server's*
+//! visibility, not a client gate: `UNIT_FIELD_STAT*` is PRIVATE + OWNER_ONLY, and the only
+//! owner-visible units a 1.12 unit token can name are the two we already serve — so a stranger's
+//! copy is zero on the reference too. `UNIT_FIELD_RESISTANCES` carries a third flag,
+//! **`SPECIAL_INFO`**, which vmangos grants to the caster of `SPELL_AURA_EMPATHY` — its own comment
+//! reads `// Beast Lore` (`Player.cpp:2603-2610`, `Object.cpp:1065-1067`). So with Beast Lore up on
+//! a beast, the reference's `UnitResistance("target", i)` / `UnitArmor("target")` return that
+//! creature's real numbers through their non-SELF leg, and ours return zeros. That is a real,
+//! reachable divergence, unfed rather than decided: the app pushes snapshots for two tokens only.
+//! `unit_combat_stats` already works over any store, so the missing piece is a third push.
+//!
+//! **Return shapes differ BY FAMILY, and the reference Lua's own asymmetry is the tell**
+//! (decision 1397 — reading one and assuming the other is how 0208 got the stat row wrong).
+//! `UnitStat` serves the **raw** `UNIT_FIELD_STAT` twice — once as-is, once clamped at zero — and
+//! leaves the subtraction to `PaperDollFrame_SetStats`, which writes `(stat - posBuff - negBuff)`
+//! itself. `UnitResistance`/`UnitArmor` serve a **decomposed** first return, because the engine
+//! helper `0x5efcd0` does that subtraction for them; their callers use it directly.
+//!
+//! The negative deltas are **negative-or-zero** where the wire can carry them at all, matching the
+//! ref's `negBuff < 0` tests — but see 1397 for how little of that survives a given server: these
+//! four arrays are stored float and narrowed to int by `Object::BuildValuesUpdate`, and that cast
+//! saturates a negative to `0` on an arm64 host while wrapping it correctly on x86.
 
 use mlua::{Lua, Value};
 

@@ -75,6 +75,14 @@ pub(crate) struct SoundKits {
     rng: Rng,
 }
 
+impl SoundKits {
+    /// One 32-bit draw off the kit player's own generator — the input to [`bark_chance_pass`].
+    /// Shared with the per-shot volume/pitch variation draws, like the client's single stream.
+    pub(super) fn roll(&mut self) -> u32 {
+        self.rng.next()
+    }
+}
+
 /// One playing channel the pump owns — the client's ~0x90-byte channel struct, benilla-shaped.
 pub(crate) struct ActiveChannel {
     pub(crate) kit: u32,
@@ -121,6 +129,39 @@ pub(super) mod voice_category {
     /// outright while the unit's voice slot is live.
     pub(in crate::sound) const HOSTILE: u8 = 0;
 }
+
+/// The **class-bark chance roll** (wow-re `sound/scratch/creature-vocal-gates.md`, §5): the
+/// reference draws `r = MulHi32(101, rand32) ∈ [0, 100]` and admits the bark iff
+/// `threshold >= r` — inclusive, so `P = (threshold + 1) / 101`.
+///
+/// The client's generator is its own shared lagged generator (`0x882664`/`0x882668` over the
+/// `.rdata` table `0x802700`), **not** the MSVCRT LCG the animation variation walk uses, and it is
+/// reseeded from the millisecond tick at `0x402802`. The note's own guidance follows from that:
+/// **reproduce the probability, never the sequence.** So this takes any 32-bit draw — ours is the
+/// kit player's own xorshift ([`SoundKits::roll`]) — and only the arithmetic is faithful.
+pub(super) fn bark_chance_pass(threshold: u32, roll: u32) -> bool {
+    ((101u64 * u64::from(roll)) >> 32) as u32 <= threshold
+}
+
+/// The class-5 (`$FDX` stand) chance threshold: `0x8626d4[5] = 40` in the creature table and
+/// `0x86424c[5] = 40` in the player twin — identical, so which twin dispatches cannot change the
+/// answer. **P = 41/101 ≈ 40.6 %.**
+///
+/// The rest of the creature table is `{70, 100, 60, 100, 100, 40, 100, …}` (player twin
+/// `{35, 100, 30, 100, 100, 40, 100, …}`), and only classes 0, 2 and 5 are ever rolled — every
+/// other class carries 100, i.e. `P = 1`, which is why `$WNG`/`$WGG` (classes 7 and 10) and the
+/// ALERT bark (class 8) are faithfully unconditional. Classes 0 (exertion) and 2 (injury) are
+/// **not** encoded here on purpose: their live trigger route is still unpinned (`$CAH`'s exertion
+/// leg, `super::combat`'s own INTERIM), and a threshold is only safe to apply once you know the
+/// call actually reaches this gate.
+pub(super) const STAND_CHANCE: u32 = 40;
+
+/// The class-5 cooldown: **10 000 ms on ONE global timestamp** (`0x623290`,
+/// `GetTickCount − [0xc4e0e4] − 0x2710`). Not per unit and not per class — a single window shared
+/// by every creature in the world, so one crocodile's croak silences every other creature's stand
+/// vocal for ten seconds. Stamped on an *allowed* attempt and **before** the column-is-zero bail,
+/// so a silent or distance-culled `$FDX` burns the window for everyone too.
+pub(super) const STAND_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A kit to play, by id or by `PlaySoundByName` name.
 pub(crate) enum KitRef<'a> {
@@ -746,6 +787,31 @@ mod tests {
             }
             assert!(seen.iter().all(|&s| s), "cycle {cycle} covered all 5");
         }
+    }
+
+    /// The class-bark chance arithmetic (`r = MulHi32(101, rand32)`, admit iff `threshold >= r`).
+    /// Two properties matter and both are byte-derived: the compare is **inclusive**, so
+    /// `threshold = 100` is a tautology — which is the whole reason `$WNG`, `$WGG` and the ALERT
+    /// bark are faithfully ungated — and `threshold = 40` admits 41 of the 101 buckets.
+    #[test]
+    fn the_bark_chance_is_inclusive_and_100_is_a_tautology() {
+        // 100 never refuses, at either end of the draw space.
+        for roll in [0, 1, u32::MAX / 2, u32::MAX - 1, u32::MAX] {
+            assert!(bark_chance_pass(100, roll), "threshold 100 refused {roll}");
+        }
+        // 40 admits exactly buckets 0..=40 of 101 — measured over the bucket boundaries, not
+        // sampled, so this pins the arithmetic rather than a distribution.
+        let bucket = |r: u32| ((101u64 * u64::from(r)) >> 32) as u32;
+        assert_eq!(bucket(0), 0);
+        assert_eq!(bucket(u32::MAX), 100);
+        let admitted = (0..=100)
+            .filter(|&b| {
+                // the first draw landing in bucket b
+                let r = ((u64::from(b) << 32) / 101) as u32 + 1;
+                bucket(r) == b && bark_chance_pass(STAND_CHANCE, r)
+            })
+            .count();
+        assert_eq!(admitted, 41, "P = 41/101 for the class-5 stand vocal");
     }
 
     /// **The two per-unit handles are disjoint** (decision 1399): the one-shot bark occupies
