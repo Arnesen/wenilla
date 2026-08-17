@@ -65,7 +65,7 @@ use crate::net::{Embodied, Guid, NetEntity, SelfGuid};
 use crate::ui_chat::{default_color, ChatEventKind};
 use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
 use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
-use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
+use crate::vplates::{device_snap, gx_px, plate_basis, text_px, VPlateSet, VPlates};
 use benilla_assets::{AssetSet, WorldAssets};
 use benilla_world::view::WorldCamera;
 
@@ -204,6 +204,22 @@ fn sanitize(text: &str) -> String {
     out
 }
 
+/// The frame's bottom-left origin for a projected seat: BOTTOM-CENTER on the seat, then both
+/// coordinates snapped onto the **device** pixel grid ([`device_snap`], the plate's law).
+///
+/// Split out so the snap law is nameable and pinned. It shipped as a plain logical `round()`,
+/// which is 1 device pixel only at scale 1: on the 2× display we play on it stepped the bubble
+/// two physical pixels per axis over a continuously-sliding world, and at a fractional scale
+/// (1.25/1.5) it never landed on a texel boundary at all — so it paid the stepping without even
+/// buying the crispness it exists for. Same bug, same fix as the plate (0188's snap → the plate's
+/// device grid); the bubble was the site that never got it (1398).
+fn seat_origin(seat: Vec2, w: f32, scale: f32) -> Vec2 {
+    Vec2::new(
+        device_snap(seat.x - w * 0.5, scale),
+        device_snap(seat.y, scale),
+    )
+}
+
 /// The border-unit in logical px for this viewport: 16/1024 of the screen width, carried
 /// through the damped size basis (so it shrinks in step with plate/text sizes past the knee).
 fn border_px(viewport: Vec2, basis: f32) -> f32 {
@@ -314,6 +330,8 @@ fn drive_bubbles(
         Query<(), With<crate::entities::mount::MountChild>>,
     ),
     time: Res<Time>,
+    // The device scale, for the seat's pixel snap ([`device_snap`]).
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     active.0.clear();
     let now = time.elapsed_secs();
@@ -372,6 +390,7 @@ fn drive_bubbles(
     // ── Tick + draw ─────────────────────────────────────────────────────────────────────────
     let cam = camera.single().ok();
     let art = art.as_deref();
+    let scale = window.single().map_or(1.0, Window::scale_factor);
     let trace = std::env::var("WOW_BUBBLE_TRACE").as_deref() == Ok("1");
     let mut dead = Vec::new();
     for (guid, b) in bubbles.0.iter_mut() {
@@ -428,7 +447,20 @@ fn drive_bubbles(
         let Some(viewport) = cam.logical_viewport_size() else {
             continue;
         };
-        draw_bubble(atlas, &mut quads, art, b, seat, viewport, trace);
+        draw_bubble(
+            atlas,
+            &mut quads,
+            art,
+            b,
+            seat,
+            viewport,
+            scale,
+            trace,
+            entity,
+            anchor,
+            tf.translation,
+            cam_pose,
+        );
     }
     for g in dead {
         bubbles.0.remove(&g);
@@ -437,6 +469,7 @@ fn drive_bubbles(
 
 /// Append one bubble's draw list: the Backdrop pieces (bg fill inset by the border-unit +
 /// the 8-piece edge), the tail square, and the wrapped, centered, chatType-colored text.
+#[allow(clippy::too_many_arguments)] // the draw inputs + the jitter trace's decomposition
 fn draw_bubble(
     atlas: &mut UiFontAtlas,
     quads: &mut UiQuads,
@@ -444,7 +477,13 @@ fn draw_bubble(
     b: &Bubble,
     seat: Vec2,
     viewport: Vec2,
+    scale: f32,
     trace: bool,
+    // The `bub` jitter-decomposition trace's inputs — see the tail of this function.
+    entity: Entity,
+    anchor: Vec3,
+    unit_pos: Vec3,
+    cam_pose: &Transform,
 ) {
     let basis = plate_basis(viewport);
     let border = border_px(viewport, basis);
@@ -475,12 +514,17 @@ fn draw_bubble(
     let (text_w, text_h) = (box_w.ceil(), box_h.ceil());
 
     // The auto-fit body: the frame hugs the text layout ± the flat margin; BOTTOM-center on
-    // the seat, growing upward. Snapped to whole logical px (the plate divergence — a
-    // fractional corner bilinear-smears the border art).
+    // the seat, growing upward. Snapped onto the **device** pixel grid (the plate divergence —
+    // a fractional corner bilinear-smears the border art), which is [`device_snap`], the plate's
+    // own law, not the plain logical `round()` this shipped with: the quad lane is logical px, so
+    // rounding there quantized the bubble to `scale_factor` PHYSICAL pixels — two pixels of
+    // stepping per axis on the 2× display we play on, against a world sliding continuously
+    // underneath, and no texel alignment at all at a fractional scale. It is the same bug the
+    // plate was carrying and the same fix; the bubble is simply the site that never got it (1398).
     let w = text_w + 2.0 * margin;
     let h = text_h + 2.0 * margin;
-    let left = (seat.x - w * 0.5).round();
-    let bottom = seat.y.round();
+    let origin = seat_origin(seat, w, scale);
+    let (left, bottom) = (origin.x, origin.y);
     let frame = Rect::new(left, bottom - h, left + w, bottom);
     let alpha = b.alpha;
 
@@ -556,6 +600,50 @@ fn draw_bubble(
         eprintln!(
             "bubble-trace: viewport={viewport:?} frame=({:.1},{:.1})..({:.1},{:.1}) border={border:.1} alpha={alpha:.2} text={:?}",
             frame.min.x, frame.min.y, frame.max.x, frame.max.y, b.text
+        );
+    }
+    // **The jitter decomposition** (`WOW_MOVE_TRACE` tag `bub`, one line per bubble per frame) —
+    // the plate's `vpl` line ([`crate::vplates`]) for the bubble: the world anchor the pose
+    // returned, the camera pose that projected it, the raw projected seat, and the snapped frame
+    // origin. "The bubble is jittery when running" is then attributed to one of three from
+    // numbers rather than from the eye — a bobbing anchor (the animated head attachment re-read
+    // every frame), a noisy camera, or the pixel snap — which is what settles whether the snap fix
+    // was the whole of it. `pos=` is the unit's OWN `Transform` this frame, beside the `anchor=`
+    // the pose returned: the two are read on **different clocks** (the anchor computes through a
+    // `GlobalTransform` that Bevy propagates in `PostUpdate`, so it is last frame's; `pos` is this
+    // frame's), and their horizontal difference is therefore a direct reading of that lag in yards
+    // — the term 1341 cleared for the plate by measuring a unit that was STANDING STILL, where it
+    // is identically zero. It rides the shared tag-filtered trace and NOT the `WOW_BUBBLE_TRACE`
+    // eprintln beside it, whose unbuffered writes would distort the frame pacing the question is
+    // about (the 0880 lesson, the same reason `vpl` lives there).
+    if benilla_assets::trace::enabled_for("bub") {
+        let (cp, cf) = (cam_pose.translation, cam_pose.forward());
+        benilla_assets::trace::line(
+            "bub",
+            &format!(
+                "e={} vp=({:.0},{:.0}) anchor=[{:.4},{:.4},{:.4}] cam=[{:.4},{:.4},{:.4}] \
+                 fwd=[{:.4},{:.4},{:.4}] pos=[{:.4},{:.4},{:.4}] scr=({:.3},{:.3}) \
+                 frame=({:.2},{:.2}) scale={scale:.2}",
+                entity.index(),
+                viewport.x,
+                viewport.y,
+                anchor.x,
+                anchor.y,
+                anchor.z,
+                cp.x,
+                cp.y,
+                cp.z,
+                cf.x,
+                cf.y,
+                cf.z,
+                unit_pos.x,
+                unit_pos.y,
+                unit_pos.z,
+                seat.x,
+                seat.y,
+                frame.min.x,
+                frame.max.y,
+            ),
         );
     }
     quads.overlays.append(&mut text_quads);
@@ -675,6 +763,63 @@ mod tests {
             bubble_cvar(K::Party, &no_say),
             Some(true),
             "party has its own switch"
+        );
+    }
+
+    /// The seat snaps on the DEVICE grid, not the logical one — the plate's law
+    /// ([`device_snap`]), which the bubble shipped without. At the 2× display we play on, a
+    /// logical `round()` moved the bubble two physical pixels per axis against a world that
+    /// slides continuously; this moves it one, the smallest step that still lands the border
+    /// blit on a texel boundary. Pinned so `scale` can't be "simplified" back out into `round()`.
+    #[test]
+    fn the_bubble_seat_snaps_on_the_device_grid() {
+        // 2×: the grid is every half logical pixel, and every snapped edge is a whole physical px.
+        for (seat_y, want) in [(10.0, 10.0), (10.2, 10.0), (10.3, 10.5), (10.6, 10.5)] {
+            let o = seat_origin(Vec2::new(100.0, seat_y), 40.0, 2.0);
+            assert_eq!(o.y, want, "seat y {seat_y} at 2×");
+            assert_eq!(
+                (o.y * 2.0).fract(),
+                0.0,
+                "{} is a whole physical pixel",
+                o.y
+            );
+        }
+        // The x half is the same law applied to the CENTERED left edge (seat − w/2), so an odd
+        // width still lands the left edge — the one the border blit starts from — on the grid.
+        let o = seat_origin(Vec2::new(100.4, 0.0), 41.0, 2.0);
+        assert_eq!(o.x, 80.0);
+        assert_eq!(((100.4_f32 - 20.5) * 2.0).round() / 2.0, o.x);
+        // 1×: identical to the logical round() it replaces — the fix costs nothing at scale 1.
+        assert_eq!(seat_origin(Vec2::new(0.0, 10.4), 0.0, 1.0).y, 10.0);
+        assert_eq!(seat_origin(Vec2::new(0.0, 10.6), 0.0, 1.0).y, 11.0);
+        // 1.5× (the Windows norm), where a logical round() was never texel-aligned at all.
+        for v in [10.4, 10.9, 11.2] {
+            let o = seat_origin(Vec2::new(0.0, v), 0.0, 1.5);
+            assert_eq!(
+                (o.y * 1.5).fract(),
+                0.0,
+                "{v} at 1.5× is a whole physical px"
+            );
+        }
+    }
+
+    /// The snap must not be a *quantizer with a large step*: over a continuous glide, the extra
+    /// displacement it adds to any one frame is bounded by half a device pixel. This is the
+    /// property the jitter report is about — at 2× the old logical round() allowed a whole
+    /// logical pixel (two physical) of extra step, which is what read as judder.
+    #[test]
+    fn the_snap_adds_at_most_half_a_device_pixel_of_step() {
+        let scale = 2.0;
+        let mut worst: f32 = 0.0;
+        // A continuous glide across ~40 px at a fractional per-frame speed, like a run.
+        for i in 0..400 {
+            let seat = 137.317 + 0.1013 * i as f32;
+            let snapped = seat_origin(Vec2::new(0.0, seat), 0.0, scale).y;
+            worst = worst.max((snapped - seat).abs());
+        }
+        assert!(
+            worst <= 0.5 / scale + f32::EPSILON,
+            "snap displacement {worst} exceeds half a device pixel"
         );
     }
 

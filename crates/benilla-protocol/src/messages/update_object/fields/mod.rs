@@ -384,18 +384,27 @@ pub const PLAYER_EXPLORED_ZONES_SLOTS: u16 = 64;
 // `UNIT_END`(188) + vmangos's own symbolic offset, in **decimal** (never the hex `//` comments, stale
 // from the CONTAINER block on) — chain-verified against the already-tested COINAGE(1176) and
 // BUYBACK_PRICE_1(1226) anchors (see the tests).
-const FIELD_PLAYER_POSSTAT0: u16 = 1177; // UNIT_END+0x3DD ×5; FLOAT despite the header's "Type: INT"
-                                         // tag (VERIFIED vmangos `Player.h:1505,1511`
-                                         // `ApplyStatBuffMod`/`GetPosStat` route through
-                                         // `ApplyModSignedFloatValue`/`GetFloatValue`).
-const FIELD_PLAYER_NEGSTAT0: u16 = 1182; // ×5, FLOAT, same header-tag mismatch; **negative-or-zero**
-                                         // (VERIFIED `Player.h:1505`: a stat *debuff* routes its
-                                         // already-negative `val` into this array through the same
-                                         // signed accumulator).
-const FIELD_PLAYER_RESISTANCEBUFFMODSPOSITIVE: u16 = 1187; // ×7, FLOAT (`Player.h:1513-1514`)
-const FIELD_PLAYER_RESISTANCEBUFFMODSNEGATIVE: u16 = 1194; // ×7, FLOAT; negative-or-zero (VERIFIED
-                                                           // `SpellAuras.cpp:4496-4499`: `change` is the signed
-                                                           // resistance delta, routed here unchanged).
+// **These four families are INT on the wire, and the server's own storage type is not the wire
+// type** (decision 1397). The header's "Type: INT" tag is right and the earlier "FLOAT" reading
+// here was wrong: it was taken from vmangos's *internal* accessors (`Player.h:1505,1511-1514`
+// really do route through `ApplyModSignedFloatValue`/`GetFloatValue`), which is one layer below
+// the question. `Object::BuildValuesUpdate` (`Objects/Object.cpp`) carries an explicit special
+// case — comment *"there are some float values which may be negative or can't get negative due to
+// other checks"* — that sends exactly `NEGSTAT0..4`, `POSSTAT0..4`,
+// `RESISTANCEBUFFMODSPOSITIVE+0..6` and `…NEGATIVE+0..6` as `*data << uint32(m_floatValues[index])`,
+// the same float→int narrowing it already applies to `UNIT_FIELD_BASEATTACKTIME`. Live-confirmed on
+// a level-60 warrior in preraid-BiS gear: fields 1177..1181 arrive as `105, 76, 68, 4, 4` (the
+// gear's own +105 str / +76 agi / …), and 1215 `MOD_DAMAGE_DONE_PCT` in the same packet arrives as
+// `0x3F800000` — genuine f32 — so the two encodings sit side by side in one block.
+//
+// Read **signed**: the server's cast of a negative float to `uint32` is UB, and the two
+// architectures disagree. On x86 it wraps to the two's-complement word; on aarch64 `fcvtzu`
+// saturates and a stat *debuff* arrives as a flat `0` (measured on this deploy's arm64 container:
+// a −5 agility debuff moved `UNIT_FIELD_STAT1` but sent `NEGSTAT1 = 0`). `i32` is right for both.
+const FIELD_PLAYER_POSSTAT0: u16 = 1177; // UNIT_END+0x3DD ×5, INT
+const FIELD_PLAYER_NEGSTAT0: u16 = 1182; // ×5, INT; negative-or-zero where the wire can carry it
+const FIELD_PLAYER_RESISTANCEBUFFMODSPOSITIVE: u16 = 1187; // ×7, INT
+const FIELD_PLAYER_RESISTANCEBUFFMODSNEGATIVE: u16 = 1194; // ×7, INT; negative-or-zero
 const FIELD_PLAYER_MOD_DAMAGE_DONE_POS: u16 = 1201; // ×7 schools ([0]=physical), INT (VERIFIED
                                                     // `StatSystem.cpp:87` `SetStatInt32Value` for the magic
                                                     // schools, `SpellAuras.cpp:5208-5210`

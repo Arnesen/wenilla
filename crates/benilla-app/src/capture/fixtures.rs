@@ -808,10 +808,13 @@ pub(super) fn seed_ui_fixture(
                 (722, 24 | 60 << 16),
                 (724, 45),
                 (725, 55 | 60 << 16),
-                // Stat buffs (floats): +10 stamina, −5 spirit; +10 fire resistance.
-                (1179, 10.0f32.to_bits()),   // POSSTAT2
-                (1186, (-5.0f32).to_bits()), // NEGSTAT4
-                (1189, 10.0f32.to_bits()),   // RESISTANCEBUFFMODSPOSITIVE[2] (fire)
+                // Stat buffs (INT on the wire — decision 1397): +10 stamina, −5 spirit; +10 fire
+                // resistance. The −5 is the two's-complement word an x86-hosted server sends; an
+                // arm64 host saturates that same debuff to a flat 0, so the RED leg of the sheet is
+                // exercisable here and not on this deploy.
+                (1179, 10),             // POSSTAT2
+                (1186, (-5i32) as u32), // NEGSTAT4
+                (1189, 10),             // RESISTANCEBUFFMODSPOSITIVE[2] (fire)
                 // Equipment guids (INV_SLOT_HEAD base 486 + 2·slot): chest 4, main hand 15,
                 // ranged 17; the first backpack slot (PACK_SLOT_1 base 532) holds the arrows.
                 (494, G_CHEST as u32),

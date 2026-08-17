@@ -103,6 +103,23 @@ pub(crate) struct ActiveChannel {
     /// `set_volume`). Written via [`set_source_kit_gain`].
     gain: f32,
     category: SoundCategory,
+    /// The **voice category latched on this channel**, when this play is a unit's one-shot
+    /// creature bark — the reference's `[unit+0xb24]` beside the `[unit+0xb20]` handle
+    /// ([`unit_voice_playing`]). `None` for every other play, which is what keeps a unit's body
+    /// loop, greeting line and footsteps out of the voice slot.
+    voice: Option<u8>,
+}
+
+/// The **voice categories** of the reference's per-unit one-shot bark dispatch `0x623a40` (its
+/// 5-way jump table at `0x623afc`; wow-re `object-layer/scratch/smsg-ai-reaction.md`). Only the
+/// one the note pins byte-exactly is named here — the rest of the table, and the priority
+/// ordering that decides which category may interrupt which, are an open wow-re question and are
+/// deliberately NOT guessed at: today only [`voice_category::HOSTILE`] is routed through the slot.
+pub(super) mod voice_category {
+    /// `0x623a40(0)` — the HOSTILE aggro bark, `CreatureSoundData` col 10. Byte-verified as the
+    /// **lowest** priority in the table: it never interrupts a playing bark, and it is dropped
+    /// outright while the unit's voice slot is live.
+    pub(in crate::sound) const HOSTILE: u8 = 0;
 }
 
 /// A kit to play, by id or by `PlaySoundByName` name.
@@ -127,7 +144,7 @@ pub(crate) fn play_kit(
     category: SoundCategory,
 ) -> Result<()> {
     play_kit_ext(
-        kits, assets, out, config, listener, kit_ref, pos, category, None, None, false,
+        kits, assets, out, config, listener, kit_ref, pos, category, None, None, false, None,
     )
 }
 
@@ -139,7 +156,9 @@ pub(crate) fn play_kit(
 /// and **`force_loop`** — loop regardless of the kit's own 0x200 flag, for the drivers whose
 /// *column* is the loop authority (the creature body-loop: every CreatureSoundData col-23 kit is
 /// authored `*Loop*` yet half omit 0x200 — INTERIM, the client's loop-start `0x461d80` flag
-/// handling is unpinned; decision record with the drone build).
+/// handling is unpinned; decision record with the drone build), and a **voice category** — the
+/// category latched on the unit's one-shot bark slot ([`ActiveChannel::voice`]); `Some` only for
+/// the barks the reference stores in `[unit+0xb20]`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn play_kit_ext(
     kits: &mut SoundKits,
@@ -153,6 +172,7 @@ pub(super) fn play_kit_ext(
     variant: Option<usize>,
     source: Option<Entity>,
     force_loop: bool,
+    voice: Option<u8>,
 ) -> Result<()> {
     // The cover's audio hold ([`SoundConfig::world_hold`]): while the loading screen is up, no
     // new sound starts — checked before anything allocates, so the per-frame retry drivers (the
@@ -280,15 +300,66 @@ pub(super) fn play_kit_ext(
         v,
         gain: 1.0,
         category,
+        voice,
     });
     Ok(())
+}
+
+/// Does `unit` hold a **live one-shot voice channel** — the reference's `[unit+0xb20]` handle,
+/// nonzero-gated (wow-re `object-layer/scratch/smsg-ai-reaction.md`)? The slot's liveness IS the
+/// gate: the HOSTILE aggro bark is the lowest category in `0x623a40`'s table, so it never
+/// interrupts what is sounding and is simply dropped while this is true.
+///
+/// Scoped to channels that actually latched a category, which is the whole point — the reference
+/// keeps this handle separate from the combat drone (`0x623800` carries its own latch) and from
+/// the greeting line (`[unit+0xb1c]`), so a humming elemental or a talking quest-giver must not
+/// mute its own barks.
+pub(super) fn unit_voice_playing(out: &SoundOutput, unit: Entity) -> bool {
+    out.channels
+        .iter()
+        .any(|c| occupies_voice_slot(c.source, c.voice, unit))
+}
+
+/// Does one channel, described by its `(source, voice)` identity, occupy `unit`'s **voice** slot
+/// (`[unit+0xb20]`) — as opposed to its greeting latch ([`occupies_greeting_latch`],
+/// `[unit+0xb1c]`)? The two are disjoint by construction, which is the whole point of separating
+/// them: a bark and a greeting line are different handles in the reference and must not mute each
+/// other.
+pub(super) fn occupies_voice_slot(source: Option<Entity>, voice: Option<u8>, unit: Entity) -> bool {
+    source == Some(unit) && voice.is_some()
+}
+
+/// The complement — the greeting latch's own test (see [`source_playing`] for what else currently
+/// lands in it).
+pub(super) fn occupies_greeting_latch(
+    source: Option<Entity>,
+    voice: Option<u8>,
+    unit: Entity,
+) -> bool {
+    source == Some(unit) && voice.is_none()
 }
 
 /// Is a channel tagged with `source` still live? The NPC-greeting per-unit latch (`[unit+0xb1c]`
 /// nonzero-gate, `0x60c28c`/`0x60c40a`): a unit with a greeting line still sounding refuses a new
 /// one. Release is automatic — the pump reaps the channel when the sound stops.
+///
+/// **Voice-latched channels are excluded**, because in the reference they are a *different
+/// handle*: the greeting owns `[unit+0xb1c]`, the one-shot bark owns `[unit+0xb20]`
+/// ([`unit_voice_playing`]). Conflating them would let a unit's aggro roar mute its own greeting
+/// line, which the client never does.
+///
+/// Everything else tagged with `source` is still counted, and that is a **known pre-existing
+/// conflation, not a claim of fidelity**: the body loop (`0x623800`'s own latch), the water
+/// splash and the spell hold all ride the same one `source` tag, so any of them currently masks
+/// a greeting the reference would let through. It bites real data — 6 of the 4 509 displays that
+/// carry an `NPCSounds` greeting also resolve a `CreatureSoundData` row with a nonzero
+/// `loop_sound` (1303, 10006, 10045, 10699, 11912, 12769; counted at the DBCs this session). The
+/// honest fix is a per-latch marker rather than one shared tag, which is wider than this change
+/// and is raised as such in decision 1399 — deliberately not slipped in here.
 pub(super) fn source_playing(out: &SoundOutput, source: Entity) -> bool {
-    out.channels.iter().any(|c| c.source == Some(source))
+    out.channels
+        .iter()
+        .any(|c| occupies_greeting_latch(c.source, c.voice, source))
 }
 
 /// Is a channel tagged with `source` playing kit `kit_id`? The kit-scoped latch — the creature
@@ -379,6 +450,7 @@ pub(crate) fn play_file(
         v: 1.0,
         gain: 1.0,
         category,
+        voice: None,
     });
     Ok(())
 }
@@ -674,5 +746,31 @@ mod tests {
             }
             assert!(seen.iter().all(|&s| s), "cycle {cycle} covered all 5");
         }
+    }
+
+    /// **The two per-unit handles are disjoint** (decision 1399): the one-shot bark occupies
+    /// `[unit+0xb20]`, the greeting line `[unit+0xb1c]`, and neither may answer the other's
+    /// question. This is the regression guard for the way the voice slot was added — tagging the
+    /// bark's channel with its unit made it visible to the greeting latch, which would have let a
+    /// creature's aggro roar silence its own hello.
+    #[test]
+    fn the_voice_slot_and_the_greeting_latch_are_disjoint() {
+        let bear = Entity::from_raw_u32(1).expect("valid entity id");
+        let other = Entity::from_raw_u32(2).expect("valid entity id");
+        let bark = (Some(bear), Some(voice_category::HOSTILE));
+        let greet = (Some(bear), None);
+
+        assert!(occupies_voice_slot(bark.0, bark.1, bear));
+        assert!(!occupies_greeting_latch(bark.0, bark.1, bear));
+        assert!(occupies_greeting_latch(greet.0, greet.1, bear));
+        assert!(!occupies_voice_slot(greet.0, greet.1, bear));
+
+        // Neither slot is world-global: a bark on one unit says nothing about another.
+        assert!(!occupies_voice_slot(bark.0, bark.1, other));
+        assert!(!occupies_greeting_latch(greet.0, greet.1, other));
+
+        // An untagged channel (every ordinary one-shot) is in neither slot.
+        assert!(!occupies_voice_slot(None, None, bear));
+        assert!(!occupies_greeting_latch(None, None, bear));
     }
 }

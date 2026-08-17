@@ -165,22 +165,30 @@ fn damage_and_attack_time_fields_read_their_slots() {
     assert_eq!(f.unit_max_ranged_damage(), Some(47.0));
 }
 
+/// The four stat/resistance buff-split arrays are **INT** on the wire (decision 1397), not the
+/// f32 the server keeps internally — `BuildValuesUpdate` narrows them on the way out. The words
+/// below are the ones a real 5875 server sends; the `-4` case is the x86 host's two's-complement
+/// word (an arm64 host saturates the same debuff to a flat `0` — both decode correctly as `i32`).
 #[test]
-fn player_stat_buff_arrays_read_floats_with_signed_negatives() {
+fn player_stat_buff_arrays_read_signed_ints() {
     let f = ObjectFields::from_pairs(&[
-        (1177, 10.0f32.to_bits()),    // POSSTAT0
-        (1182, (-4.0f32).to_bits()),  // NEGSTAT0 (stored negative — ApplyStatBuffMod)
-        (1187, 30.0f32.to_bits()),    // RESISTANCEBUFFMODSPOSITIVE[0]
-        (1196, (-20.0f32).to_bits()), // RESISTANCEBUFFMODSNEGATIVE[2]
+        (1177, 10),              // POSSTAT0
+        (1182, (-4i32) as u32),  // NEGSTAT0
+        (1187, 30),              // RESISTANCEBUFFMODSPOSITIVE[0]
+        (1196, (-20i32) as u32), // RESISTANCEBUFFMODSNEGATIVE[2]
     ]);
-    assert_eq!(f.player_posstat(0), Some(10.0));
-    assert_eq!(f.player_negstat(0), Some(-4.0));
+    assert_eq!(f.player_posstat(0), Some(10));
+    assert_eq!(f.player_negstat(0), Some(-4));
     assert_eq!(f.player_posstat(5), None, "out of range");
     assert_eq!(f.player_negstat(5), None, "out of range");
-    assert_eq!(f.player_resistance_buff_pos(0), Some(30.0));
-    assert_eq!(f.player_resistance_buff_neg(2), Some(-20.0));
+    assert_eq!(f.player_resistance_buff_pos(0), Some(30));
+    assert_eq!(f.player_resistance_buff_neg(2), Some(-20));
     assert_eq!(f.player_resistance_buff_pos(7), None, "out of range");
     assert_eq!(f.player_resistance_buff_neg(7), None, "out of range");
+    // The regression this decode is: a `105` POSSTAT read as f32 rounds to 0, which is what made
+    // every gear-boosted stat on the character sheet render plain white (B165/B251).
+    let live = ObjectFields::from_pairs(&[(1177, 105)]);
+    assert_eq!(live.player_posstat(0), Some(105));
 }
 
 #[test]

@@ -489,9 +489,25 @@ impl Model {
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
 
-    // UnitStat("player", i /*1..=5*/) → (stat, effectiveStat, posBuff, negBuff): effective is the
-    // UNIT_FIELD_STAT value, pos/neg the POSSTAT/NEGSTAT deltas (neg ≤ 0), and stat (base) their
-    // inverse — the ref computes base = effective − pos − neg and branches on negBuff < 0.
+    // UnitStat("player", i /*1..=5*/) → (stat, effectiveStat, posBuff, negBuff).
+    //
+    // **The first two returns are the same field, UNDECOMPOSED** — `UNIT_FIELD_STAT0+i` raw
+    // (`fild`, `0x518689`), then that same value clamped at zero (`0x5186a3`–`0x5186b7`:
+    // `setl cl; dec ecx; and ecx,eax`). Slots 3/4 are `PLAYER_FIELD_POSSTAT0+i` (`0x518712`) and
+    // `NEGSTAT0+i` (`0x518772`), each behind a SELF gate. VERIFIED, wow-re
+    // `ui/scratch/pet-paperdoll-stat-api.md` §4.
+    //
+    // This served `effective − pos − neg` as the first return until decision 1397. Subtracting is
+    // the ref Lua's *own* job — `PaperDollFrame_SetStats` writes the tooltip's base as
+    // `(stat - posBuff - negBuff)` — so a pre-subtracted `stat` deducts the buff twice. It was
+    // invisible only because pos/neg were stuck at 0 by the field-decode bug 1397 fixes; the two
+    // are one repair.
+    //
+    // **Note the contrast with the two resistance bindings below**, whose first return really *is*
+    // the decomposed base (`0x5efcd0`: `*arg2 = raw - pos - neg`). The reference reads the two
+    // families differently, and the ref Lua's own asymmetry — `SetStats` subtracts, `SetResistances`
+    // and `PaperDollFormatStat` do not — is the tell.
+    //
     // Out-of-range i (the ref never passes one) serves the absent zeros.
     g.set(
         "UnitStat",
@@ -503,10 +519,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 if idx >= 5 {
                     return (0, 0, 0, 0);
                 }
-                let (eff, pos, neg) = (s.stats[idx], s.stat_pos[idx], s.stat_neg[idx]);
+                let (raw, pos, neg) = (s.stats[idx], s.stat_pos[idx], s.stat_neg[idx]);
                 (
-                    i64::from(eff - pos - neg),
-                    i64::from(eff),
+                    i64::from(raw),
+                    i64::from(raw.max(0)),
                     i64::from(pos),
                     i64::from(neg),
                 )
@@ -515,7 +531,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // UnitResistance("player", school /*0..=6*/) → (base, resistance, positive, negative) — the
-    // same inverse math per school ([0] = armor).
+    // decomposition helper `0x5efcd0` per school ([0] = armor): `base = raw − pos − neg`, computed
+    // BEFORE the clamp, and `resistance = max(raw, 0)`. A school cursed below zero therefore reads
+    // a *displayed* 0 with the real (negative) total still folded out of `base`.
     g.set(
         "UnitResistance",
         lua.create_function(|lua, (token, school): (Option<String>, i64)| {
@@ -523,14 +541,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let Some(idx) = usize::try_from(school).ok().filter(|&v| v < 7) else {
                     return (0, 0, 0, 0);
                 };
-                let (eff, pos, neg) = (
+                let (raw, pos, neg) = (
                     s.resistances[idx],
                     s.resistance_pos[idx],
                     s.resistance_neg[idx],
                 );
                 (
-                    i64::from(eff - pos - neg),
-                    i64::from(eff),
+                    i64::from(raw - pos - neg),
+                    i64::from(raw.max(0)),
                     i64::from(pos),
                     i64::from(neg),
                 )
@@ -538,17 +556,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // UnitArmor("player") → (base, effectiveArmor, armor, posBuff, negBuff) — school 0 of the
-    // resistance block; the ref reads effectiveArmor and armor equivalently (both the total).
+    // UnitArmor("player") → (base, effectiveArmor, armor, posBuff, negBuff) — school 0 through the
+    // same `0x5efcd0`, whose 3rd and 4th out-params are both the clamped total (the ref reads
+    // effectiveArmor and armor equivalently, and both are zeroed together when raw < 0).
     g.set(
         "UnitArmor",
         lua.create_function(|lua, token: Option<String>| {
             Ok(with_unit_stats(lua, &token, |s| {
-                let (eff, pos, neg) = (s.resistances[0], s.resistance_pos[0], s.resistance_neg[0]);
+                let (raw, pos, neg) = (s.resistances[0], s.resistance_pos[0], s.resistance_neg[0]);
                 (
-                    i64::from(eff - pos - neg),
-                    i64::from(eff),
-                    i64::from(eff),
+                    i64::from(raw - pos - neg),
+                    i64::from(raw.max(0)),
+                    i64::from(raw.max(0)),
                     i64::from(pos),
                     i64::from(neg),
                 )
@@ -1002,21 +1021,34 @@ mod tests {
     }
 
     #[test]
-    fn unit_stat_serves_effective_and_the_derived_base() {
+    fn unit_stat_serves_the_raw_field_twice_and_the_buff_split() {
         let mut s = UiScript::new().unwrap();
         s.set_player_combat_stats(Some(stats()));
-        // Str: effective 25, pos 4, neg 0 → base 21.
+        // Str: the raw field 25 in BOTH of the first two slots, then the +4/0 split. The ref Lua
+        // does the subtraction itself (`stat - posBuff - negBuff` = 21 for the tooltip's base) —
+        // this binding must not pre-subtract, or the buff is deducted twice.
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
                 .unwrap(),
-            (21, 25, 4, 0)
+            (25, 25, 4, 0)
         );
-        // Agi: effective 20, pos 0, neg −2 → base 22 (the ref tests negBuff < 0).
+        // Agi: raw 20 with a −2 debuff (the ref tests negBuff < 0 to pick red over green).
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 2)"#)
                 .unwrap(),
-            (22, 20, 0, -2)
+            (20, 20, 0, -2)
         );
+        // Only the SECOND return is clamped: a stat driven below zero keeps its sign in slot 1.
+        s.set_player_combat_stats(Some(UnitCombatStats {
+            stats: [-3, 20, 22, 10, 11],
+            ..stats()
+        }));
+        assert_eq!(
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
+                .unwrap(),
+            (-3, 0, 4, 0)
+        );
+        s.set_player_combat_stats(Some(stats()));
         // A non-player token serves the absent zeros (no other unit streams these fields).
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("target", 1)"#)
@@ -1052,11 +1084,12 @@ mod tests {
                 .unwrap(),
             (0, 20, 25, -5)
         );
-        // A cursed school can read negative (arcane: −5 total, all from the debuff).
+        // A school cursed below zero (arcane: −5 total, all from the debuff): the DISPLAYED total
+        // is clamped to 0 (`0x5efcd0`'s tail), while `base` keeps the pre-clamp decomposition.
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitResistance("player", 6)"#)
                 .unwrap(),
-            (0, -5, 0, -5)
+            (0, 0, 0, -5)
         );
         // UnitArmor is school 0 with the five-return shape (effectiveArmor = armor = the total).
         assert_eq!(
@@ -1189,7 +1222,7 @@ mod tests {
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
                 .unwrap(),
-            (21, 25, 4, 0)
+            (25, 25, 4, 0)
         );
         // Resistances: fire (school 2) — 15 for the pet, 20 (+25/−5) for the player.
         assert_eq!(
@@ -1257,7 +1290,7 @@ mod tests {
         assert_eq!(
             s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1)"#)
                 .unwrap(),
-            (21, 25, 4, 0)
+            (25, 25, 4, 0)
         );
     }
 

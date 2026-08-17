@@ -297,27 +297,30 @@ impl ObjectFields {
     pub fn player_crit_percentage(&self) -> Option<f32> {
         self.get_f32(FIELD_PLAYER_CRIT_PERCENTAGE)
     }
-    /// `PLAYER_FIELD_POSSTAT0 + i` — stat `i`'s **positive** buff delta (float despite the header's
-    /// "Type: INT" tag; see the field's doc comment). `i >= 5` reads `None`.
-    pub fn player_posstat(&self, i: u8) -> Option<f32> {
-        (i < 5).then(|| self.get_f32(FIELD_PLAYER_POSSTAT0 + u16::from(i)))?
+    /// `PLAYER_FIELD_POSSTAT0 + i` — stat `i`'s **positive** buff delta: the sum of every gear,
+    /// enchant and aura contribution the server split out of `UNIT_FIELD_STAT0 + i`. **INT on the
+    /// wire**, whatever the server keeps internally — see the field's doc comment. `i >= 5` reads
+    /// `None`.
+    pub fn player_posstat(&self, i: u8) -> Option<i32> {
+        (i < 5).then(|| self.get_i32(FIELD_PLAYER_POSSTAT0 + u16::from(i)))?
     }
-    /// `PLAYER_FIELD_NEGSTAT0 + i` — stat `i`'s **negative** buff delta; negative-or-zero (see the
-    /// field's doc comment for the verified sign). `i >= 5` reads `None`.
-    pub fn player_negstat(&self, i: u8) -> Option<f32> {
-        (i < 5).then(|| self.get_f32(FIELD_PLAYER_NEGSTAT0 + u16::from(i)))?
+    /// `PLAYER_FIELD_NEGSTAT0 + i` — stat `i`'s **negative** buff delta; negative-or-zero, read
+    /// signed because only one of the two server host architectures can carry the sign at all (the
+    /// field's doc comment). `i >= 5` reads `None`.
+    pub fn player_negstat(&self, i: u8) -> Option<i32> {
+        (i < 5).then(|| self.get_i32(FIELD_PLAYER_NEGSTAT0 + u16::from(i)))?
     }
     /// `PLAYER_FIELD_RESISTANCEBUFFMODSPOSITIVE + school` — the positive resistance buff for
-    /// `school` (0..6). `school >= 7` reads `None`.
-    pub fn player_resistance_buff_pos(&self, school: u8) -> Option<f32> {
+    /// `school` (0..6), INT on the wire. `school >= 7` reads `None`.
+    pub fn player_resistance_buff_pos(&self, school: u8) -> Option<i32> {
         (school < 7)
-            .then(|| self.get_f32(FIELD_PLAYER_RESISTANCEBUFFMODSPOSITIVE + u16::from(school)))?
+            .then(|| self.get_i32(FIELD_PLAYER_RESISTANCEBUFFMODSPOSITIVE + u16::from(school)))?
     }
     /// `PLAYER_FIELD_RESISTANCEBUFFMODSNEGATIVE + school` — negative-or-zero (see the field's doc
     /// comment). `school >= 7` reads `None`.
-    pub fn player_resistance_buff_neg(&self, school: u8) -> Option<f32> {
+    pub fn player_resistance_buff_neg(&self, school: u8) -> Option<i32> {
         (school < 7)
-            .then(|| self.get_f32(FIELD_PLAYER_RESISTANCEBUFFMODSNEGATIVE + u16::from(school)))?
+            .then(|| self.get_i32(FIELD_PLAYER_RESISTANCEBUFFMODSNEGATIVE + u16::from(school)))?
     }
     /// `PLAYER_FIELD_MOD_DAMAGE_DONE_POS + school` — positive damage-done bonus (`[0]` = physical).
     /// `school >= 7` reads `None`.

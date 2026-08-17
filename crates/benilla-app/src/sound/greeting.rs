@@ -209,6 +209,7 @@ fn play_line(
         variant,
         Some(npc),
         false,
+        None,
     ) {
         warn!("npc vocal (kit {kit_id}): {e:#}");
     }

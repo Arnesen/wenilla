@@ -147,6 +147,24 @@ pub(crate) struct OverheadFallback(pub(crate) f32);
 /// A pure position read: it computes through `RigPose::posed_point` — the composed pose × the
 /// rig root's frame — and never touches an anchor entity, so the overhead bone spawns nothing
 /// (decision 1355).
+///
+/// **The rig root's frame is taken from `tf`, not from its propagated `GlobalTransform`, whenever
+/// the rig root IS the unit** — which is the normal case (a mounted rider's root is the seat
+/// anchor, a conform-tilted model's is its conform node; those two still read the propagated
+/// frame and keep the lag below). Bevy propagates `GlobalTransform` in `PostUpdate`, so an
+/// `Update` reader like the V-plate or the chat bubble gets **last frame's** world frame while the
+/// unit's own `Transform` beside it — and the camera it projects through, and the model being
+/// drawn — are this frame's. Running, that seam is one frame of travel: measured on a Westfall run
+/// (1398), "head above feet" — a body constant — wobbled up to **11.7 px** per frame and 15.1 px
+/// across the leg, and collapsed to 0.02 px the moment the anchor was paired with the position it
+/// was actually computed from. That is the chat bubble sliding against the head the director
+/// reported as jitter, and 1341 cleared the same term for the plate by measuring a unit that was
+/// STANDING STILL, where it is identically zero.
+///
+/// Reading `tf` is exact here because a unit is a world-root entity — nothing in the world lane
+/// parents a `NetEntity` (the `ChildOf` sites are the portrait booth, the pipe-warm menagerie and
+/// the UI glue), so its global IS its local. A `PostUpdate` caller ([`crate::nameplates`], which
+/// moved there for this very lag) is unaffected: after propagation the two are the same value.
 pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
     entity: Entity,
     tf: &Transform,
@@ -168,7 +186,13 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
             };
             let &(bone, offset) = a.points.get(&slot)?;
             let pose = poses.get(entity).ok()?;
-            let root = globals.get(pose.joints_root).ok()?;
+            let own;
+            let root = if pose.joints_root == entity {
+                own = GlobalTransform::from(*tf);
+                &own
+            } else {
+                globals.get(pose.joints_root).ok()?
+            };
             pose.posed_point(root, bone, offset)
         })
         .unwrap_or_else(|| {

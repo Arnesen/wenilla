@@ -308,6 +308,7 @@ fn start_loop(
         None,
         Some(emitter),
         true,
+        None,
     ) {
         warn!("liquid loop kit {kit_id}: {e:#}");
         return;

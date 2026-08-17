@@ -251,7 +251,12 @@ fn con_color(pl_level: u32, unit_level: u32) -> [f32; 4] {
 /// stepping at 2×: measured over a Goldshire walk at 1440×810 (the `vpl` trace), the extra
 /// displacement the snap adds to a plate's glide fell from a median 0.33 / max 0.99 logical px per
 /// frame to 0.21 / 0.49. What is left is the ±½ device pixel every crisp UI pays.
-fn device_snap(v: f32, scale: f32) -> f32 {
+///
+/// **Shared with the chat bubble** ([`crate::chat_bubble`]), like [`plate_basis`]/[`gx_px`]: it is
+/// the same outside-UIParent overlay family sliding over the same world, so it is the same snap
+/// law. The bubble shipped on a plain logical `round()` — this function's own bug, at the one site
+/// that never got the fix — which is 1398's finding.
+pub(crate) fn device_snap(v: f32, scale: f32) -> f32 {
     (v * scale).round() / scale
 }
 

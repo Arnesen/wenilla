@@ -74,6 +74,7 @@ fn route_spell_kit_sounds(
                         None,
                         Some(entity),
                         false,
+                        None,
                     )
                 } else {
                     play_kit(

@@ -52,6 +52,7 @@ fn route_missile_sounds(
                     None,
                     Some(entity), // tag the loop to the missile — the pump follows it in flight
                     true,         // the missile loop is looping by construction, not by the flag
+                    None,
                 ) {
                     warn!("missile flight sound {kit_sound}: {e:#}");
                 }

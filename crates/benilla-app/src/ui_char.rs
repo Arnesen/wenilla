@@ -430,23 +430,25 @@ fn base_swing(streamed: Option<u32>) -> u32 {
 
 pub(crate) fn unit_combat_stats(store: &ObjectStore) -> UnitCombatStats {
     let f = &store.0;
-    let round = |v: Option<f32>| v.unwrap_or(0.0).round() as i32;
 
     let mut stats = [0i32; 5];
     let mut stat_pos = [0i32; 5];
     let mut stat_neg = [0i32; 5];
     for i in 0..5u8 {
         stats[usize::from(i)] = f.unit_stat(i).unwrap_or(0) as i32;
-        stat_pos[usize::from(i)] = round(f.player_posstat(i));
-        stat_neg[usize::from(i)] = round(f.player_negstat(i));
+        // The four buff-split arrays are INT on the wire (decision 1397) — they used to be read as
+        // f32 and rounded, which turned every real value into `0` and is why B165/B251's stats
+        // never went green.
+        stat_pos[usize::from(i)] = f.player_posstat(i).unwrap_or(0);
+        stat_neg[usize::from(i)] = f.player_negstat(i).unwrap_or(0);
     }
     let mut resistances = [0i32; 7];
     let mut resistance_pos = [0i32; 7];
     let mut resistance_neg = [0i32; 7];
     for i in 0..7u8 {
         resistances[usize::from(i)] = f.unit_resistance(i).unwrap_or(0);
-        resistance_pos[usize::from(i)] = round(f.player_resistance_buff_pos(i));
-        resistance_neg[usize::from(i)] = round(f.player_resistance_buff_neg(i));
+        resistance_pos[usize::from(i)] = f.player_resistance_buff_pos(i).unwrap_or(0);
+        resistance_neg[usize::from(i)] = f.player_resistance_buff_neg(i).unwrap_or(0);
     }
 
     let (ap_pos, ap_neg) = f.unit_attack_power_mods();
