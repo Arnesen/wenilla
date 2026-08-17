@@ -186,6 +186,14 @@ impl Plugin for DevProbesPlugin {
             if std::env::var("WOW_GROUND_CENSUS").is_ok() {
                 app.add_plugins(crate::capture::GroundCensusPlugin);
             }
+            // The unit-visual census: `WOW_UNIT_VISUALS=<secs>[,<every>]` prints one line per
+            // streamed entity near the body — whether it got a debug cube, real geometry, or
+            // nothing at all. The instrument B13 was missing: a black slab in a screenshot cannot
+            // say whether the display named no model (our gap) or named one that draws nothing
+            // (an invisible trigger creature — see `capture::UnitVisualsPlugin`, decision 1403).
+            if std::env::var("WOW_UNIT_VISUALS").is_ok() {
+                app.add_plugins(crate::capture::UnitVisualsPlugin);
+            }
             // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
             // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
             if std::env::var("WOW_ENTITY_CENSUS").is_ok() {

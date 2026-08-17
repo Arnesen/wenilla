@@ -57,7 +57,7 @@ use bevy::ecs::entity::EntityHashSet;
 use bevy::prelude::*;
 
 use benilla_ui::layout::Rect as GxRect;
-use benilla_ui::script::{pieces, Backdrop, Insets};
+use benilla_ui::script::{inset_atlas_bleed, pieces, Backdrop, Insets};
 use benilla_ui::script::{JustifyH, JustifyV, Outline};
 
 use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
@@ -204,6 +204,15 @@ fn sanitize(text: &str) -> String {
     out
 }
 
+/// The bleed inset for one border piece, `Vec2::ZERO` texels meaning "art size unknown, leave the
+/// UVs alone" (a bare test app with no patch chain).
+fn pieces_inset(uvs: [[f32; 2]; 4], texels: Vec2) -> [[f32; 2]; 4] {
+    if texels.x <= 0.0 || texels.y <= 0.0 {
+        return uvs;
+    }
+    inset_atlas_bleed(uvs, texels.x, texels.y)
+}
+
 /// The frame's bottom-left origin for a projected seat: BOTTOM-CENTER on the seat, then both
 /// coordinates snapped onto the **device** pixel grid ([`device_snap`], the plate's law).
 ///
@@ -245,6 +254,18 @@ impl BubbleQueue {
         text: &str,
     ) {
         if sender_guid == 0 || !bubble_cvar(kind, cfg).unwrap_or(false) {
+            if benilla_assets::trace::enabled_for("bub") {
+                let why = match (sender_guid, bubble_cvar(kind, cfg)) {
+                    (0, _) => "senderless".to_string(),
+                    (_, None) => format!("{kind:?}-never-bubbles"),
+                    (_, Some(false)) => format!("{kind:?}-cvar-off"),
+                    _ => unreachable!("the guard above admits nothing else"),
+                };
+                benilla_assets::trace::line(
+                    "bub",
+                    &format!("refuse guid={sender_guid:#x} push:{why}"),
+                );
+            }
             return;
         }
         self.0.push((sender_guid, kind, text.to_string()));
@@ -282,6 +303,10 @@ struct BubbleArt {
     bg: Handle<Image>,
     edge: Handle<Image>,
     tail: Handle<Image>,
+    /// The edge atlas's size in texels, for the half-texel bleed inset
+    /// ([`benilla_ui::script::backdrop::inset_atlas_bleed`] — 1402). Stamped at load because the
+    /// draw has no `Assets<Image>` and this never changes.
+    edge_texels: Vec2,
 }
 
 fn load_bubble_art(
@@ -299,7 +324,16 @@ fn load_bubble_art(
         warn!("chat_bubble: bubble art missing from the patch chain — bubbles will not draw");
         return;
     };
-    commands.insert_resource(BubbleArt { bg, edge, tail });
+    let edge_texels = images.get(&edge).map_or(Vec2::ZERO, |i| {
+        let s = i.texture_descriptor.size;
+        Vec2::new(s.width as f32, s.height as f32)
+    });
+    commands.insert_resource(BubbleArt {
+        bg,
+        edge,
+        tail,
+        edge_texels,
+    });
 }
 
 /// Spawn, tick, and draw, every frame: drain the queue through the spawn gate (`0x608ac0`),
@@ -342,13 +376,25 @@ fn drive_bubbles(
     let find = |guid: u64| units.iter().find(|(_, g, _)| g.0 == guid);
 
     // ── The spawn/replace gate (`0x608ac0`) ─────────────────────────────────────────────────
+    // Every arm below reports its REFUSAL under the `bub` tag. A bubble that never appears used to
+    // be a silent five-way question — no text, no unit, a plate in the way, no local player, out of
+    // range — with nothing in any log to separate them, and the draw trace beside it says nothing
+    // because the draw never runs. One line per refusal is the difference between reading the
+    // answer and bisecting for it.
+    let refuse = |why: &str, guid: u64| {
+        if benilla_assets::trace::enabled_for("bub") {
+            benilla_assets::trace::line("bub", &format!("refuse guid={guid:#x} {why}"));
+        }
+    };
     for (guid, kind, raw) in queue.0.drain(..) {
         let text = sanitize(&raw);
         let words = word_count(&text);
         if words == 0 {
+            refuse("empty-text", guid);
             continue; // empty text → duration 0 → no bubble
         }
         let Some((entity, _, tf)) = find(guid) else {
+            refuse("sender-not-a-live-unit", guid);
             continue; // sender not resolvable to a live unit → NO bubble
         };
         // An active V-plate blocks bubble creation (`0x608adc` — the mutual exclusion,
@@ -356,12 +402,16 @@ fn drive_bubbles(
         // OFF (0599's other half), so friendly/party bubbles have room; a plated hostile
         // yelling shows no bubble, exactly like the reference with plates toggled on.
         if vplates.0.contains(&entity) {
+            refuse("v-plate-on-speaker", guid);
             continue;
         }
         let Some(self_tf) = self_tf else {
+            refuse("no-local-player", guid);
             continue; // the local player must resolve
         };
-        if (tf.translation - self_tf.translation).length_squared() > MAX_DIST_SQ {
+        let d2 = (tf.translation - self_tf.translation).length_squared();
+        if d2 > MAX_DIST_SQ {
+            refuse(&format!("out-of-range dist={:.1}yd", d2.sqrt()), guid);
             continue; // 20 yd at spawn
         }
         let is_self = self_guid.0 == Some(guid);
@@ -441,10 +491,17 @@ fn drive_bubbles(
         );
         let seat_world = Vec3::new(tf.translation.x, anchor.y + LIFT, tf.translation.z);
         let cam_tf = GlobalTransform::from(*cam_pose);
+        // The SEVENTH silent cause, and the one that cost the most to find: a seat behind the
+        // camera fails to project and the bubble draws nothing — alive, ticking, invisible, and
+        // (before this) invisible to the trace too, because every `bub` line is written by the
+        // draw. A probe whose camera had been restored pitched into the ground therefore read as
+        // "bubbles are broken" for six runs (1402). Reported like the spawn gate's refusals.
         let Ok(seat) = cam.world_to_viewport(&cam_tf, seat_world) else {
+            refuse("not-on-screen (behind the camera)", *guid);
             continue;
         };
         let Some(viewport) = cam.logical_viewport_size() else {
+            refuse("no-viewport", *guid);
             continue;
         };
         draw_bubble(
@@ -555,6 +612,15 @@ fn draw_bubble(
             p.corners[2][0],
             -p.corners[2][1],
         );
+        // The border pieces share one 256×32 atlas; without the half-texel inset, bilinear at each
+        // piece's own edge blends in the neighbour's first column — and the column beside the TOP
+        // slice is WHITE at alpha 0, which is the pale line that ran through the bubble (1402). The
+        // bg is its own texture and keeps its UVs.
+        let uvs = if p.is_bg {
+            p.uvs
+        } else {
+            pieces_inset(p.uvs, art.edge_texels)
+        };
         quads.overlays.push(UiQuad {
             rect,
             z_key: if p.is_bg { Z_BG } else { Z_EDGE },
@@ -563,7 +629,7 @@ fn draw_bubble(
             } else {
                 art.edge.clone()
             }),
-            uv: UvRect::from_corners(p.uvs),
+            uv: UvRect::from_corners(uvs),
             color: [1.0, 1.0, 1.0, alpha],
             ..default()
         });

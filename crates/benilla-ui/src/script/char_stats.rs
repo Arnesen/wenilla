@@ -48,7 +48,7 @@
 
 use mlua::{Lua, Value};
 
-use super::Model;
+use super::{binding_abi, Model};
 
 /// The 1.12 weapon-subclass → `SkillLine.dbc` id table, transcribed from vmangos
 /// `ItemPrototype::GetProficiencySkill`'s `item_weapon_skills` (`Objects/Item.cpp:700-707`;
@@ -503,6 +503,30 @@ impl Model {
     }
 }
 
+/// The four reference `.data` literals the two indexed stat bindings raise with — read out of the
+/// shipped 5875 image, verbatim, and NOT paraphrased (the house rule `GetInventorySlotInfo` sets:
+/// an addon may compare or key on the message text).
+///
+/// **Each binding has TWO raises with different strings, and the string pool interleaves them so
+/// that "the nearest `Usage:`" picks the WRONG binding's.** The layout is
+/// `Usage: UnitResistance…` (`0x8510fc`) · `Invalid resistance index…` (`0x85112c`) ·
+/// `Usage: UnitStat…` (`0x851158`) · `Invalid stat index…` (`0x85117c`) — so the `Usage:` two
+/// padding bytes after `UnitResistance`'s index message belongs to `UnitStat`. Each literal is
+/// fixed by the `push <VA>` that names it (`0x5187d6`/`0x5187ed` for `UnitStat`,
+/// `0x5185cb`/`0x5185e2` for `UnitResistance`), never by proximity. This is the same trap
+/// `GetInventorySlotInfo`'s transcription records, one degree worse.
+///
+/// The **index** arm is these two — no `Usage:` prefix, and the offending index is *not*
+/// interpolated (`luaL_error` is called cdecl with exactly two dwords at all four sites: the `L`
+/// and the message, no varargs, so the literal is never a format string).
+const STAT_INDEX_ERROR: &str = "Invalid stat index in UnitStat";
+const RESISTANCE_INDEX_ERROR: &str = "Invalid resistance index in UnitResistance";
+/// The **argument-type** arm — a separate, earlier raise, reached only by a value that is neither
+/// numeric nor a numeric string (the guards are coercion-aware: `UnitStat("player", "3")` serves
+/// stat 3). [`binding_abi`] owns that contract.
+const STAT_USAGE: &str = "Usage: UnitStat(\"unit\", statIndex)";
+const RESISTANCE_USAGE: &str = "Usage: UnitResistance(\"unit\", resistanceIndex)";
+
 /// Register the paper-doll stat/slot globals (decision 0208 §3).
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -526,17 +550,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // families differently, and the ref Lua's own asymmetry — `SetStats` subtracts, `SetResistances`
     // and `PaperDollFormatStat` do not — is the tell.
     //
-    // Out-of-range i (the ref never passes one) serves the absent zeros.
+    // **An out-of-range index RAISES; it does not answer zeros** (see [`STAT_INDEX_ERROR`]).
     g.set(
         "UnitStat",
-        lua.create_function(|lua, (token, i): (Option<String>, i64)| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                let Some(idx) = i.checked_sub(1).and_then(|v| usize::try_from(v).ok()) else {
-                    return (0, 0, 0, 0);
-                };
-                if idx >= 5 {
-                    return (0, 0, 0, 0);
-                }
+        lua.create_function(|lua, (token, i): (Value, Value)| {
+            let token = binding_abi::string_arg(lua, token, STAT_USAGE)?;
+            let idx = binding_abi::number_arg(lua, i, STAT_USAGE)? - 1;
+            if !(0..5).contains(&idx) {
+                return Err(mlua::Error::RuntimeError(STAT_INDEX_ERROR.into()));
+            }
+            let idx = idx as usize;
+            Ok(with_unit_stats(lua, &Some(token), |s| {
                 let (raw, pos, neg) = (s.stats[idx], s.stat_pos[idx], s.stat_neg[idx]);
                 (
                     i64::from(raw),
@@ -552,13 +576,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // decomposition helper `0x5efcd0` per school ([0] = armor): `base = raw − pos − neg`, computed
     // BEFORE the clamp, and `resistance = max(raw, 0)`. A school cursed below zero therefore reads
     // a *displayed* 0 with the real (negative) total still folded out of `base`.
+    // Out-of-range raises too, with its own string ([`RESISTANCE_INDEX_ERROR`]).
     g.set(
         "UnitResistance",
-        lua.create_function(|lua, (token, school): (Option<String>, i64)| {
-            Ok(with_unit_stats(lua, &token, |s| {
-                let Some(idx) = usize::try_from(school).ok().filter(|&v| v < 7) else {
-                    return (0, 0, 0, 0);
-                };
+        lua.create_function(|lua, (token, school): (Value, Value)| {
+            let token = binding_abi::string_arg(lua, token, RESISTANCE_USAGE)?;
+            let school = binding_abi::number_arg(lua, school, RESISTANCE_USAGE)?;
+            if !(0..7).contains(&school) {
+                return Err(mlua::Error::RuntimeError(RESISTANCE_INDEX_ERROR.into()));
+            }
+            let idx = school as usize;
+            Ok(with_unit_stats(lua, &Some(token), |s| {
                 let (raw, pos, neg) = (
                     s.resistances[idx],
                     s.resistance_pos[idx],
@@ -958,7 +986,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{weapon_subclass_skill, SKILL_UNARMED};
+    use super::{
+        weapon_subclass_skill, RESISTANCE_INDEX_ERROR, SKILL_UNARMED, STAT_INDEX_ERROR, STAT_USAGE,
+    };
     use crate::script::{InvSlotView, UiScript, UnitCombatStats};
 
     /// A filled snapshot exercising every field the bindings read.
@@ -1073,17 +1103,60 @@ mod tests {
                 .unwrap(),
             (0, 0, 0, 0)
         );
-        // Out-of-range index: zeros, no error.
+    }
+
+    /// The index arm **raises**, and the truncation that decides which side of the range an
+    /// argument lands on happens FIRST. Both ends converge on one raise (`0x51865a js` and
+    /// `0x518663 jge` → `0x5187d6`), and `_ftol` chops toward zero rather than flooring, so `1.9`
+    /// is a valid `1` while `0.5` and any negative are not.
+    #[test]
+    fn an_out_of_range_stat_index_raises_the_references_own_string() {
+        let mut s = UiScript::new().unwrap();
+        s.set_player_combat_stats(Some(stats()));
+        for arg in ["6", "0", "-3", "0.5", "-0.5"] {
+            let err = s
+                .eval::<(i64, i64, i64, i64)>(&format!(r#"return UnitStat("player", {arg})"#))
+                .unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(STAT_INDEX_ERROR),
+                "UnitStat(\"player\", {arg}) must raise {STAT_INDEX_ERROR:?}, got {msg:?}"
+            );
+            // The index arm carries no `Usage:` prefix, and the pool's interleaving makes the
+            // WRONG binding's usage line the nearest one — so assert we took neither.
+            assert!(!msg.contains("Usage:"), "no Usage: prefix on the index arm");
+        }
+        // Truncation toward zero, ahead of the range test: 1.9 → 1 → stat 0, the valid answer.
         assert_eq!(
-            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 6)"#)
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 1.9)"#)
                 .unwrap(),
-            (0, 0, 0, 0)
+            (25, 25, 4, 0)
         );
+        // The guard is coercion-aware — a numeric STRING is a number here.
         assert_eq!(
-            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", 0)"#)
+            s.eval::<(i64, i64, i64, i64)>(r#"return UnitStat("player", "2")"#)
                 .unwrap(),
-            (0, 0, 0, 0)
+            (20, 20, 0, -2)
         );
+        // Neither numeric nor a numeric string takes the OTHER raise, with the other string.
+        for arg in ["nil", "{}", "true", r#""abc""#] {
+            let msg = format!(
+                "{}",
+                s.eval::<(i64, i64, i64, i64)>(&format!(r#"return UnitStat("player", {arg})"#))
+                    .unwrap_err()
+            );
+            assert!(
+                msg.contains(STAT_USAGE) && !msg.contains(STAT_INDEX_ERROR),
+                "UnitStat(\"player\", {arg}) must take the Usage arm, got {msg:?}"
+            );
+        }
+        // A missing unit token fails the same way (`0x6f3510` reports NULL past the top as
+        // neither number nor string).
+        assert!(format!(
+            "{}",
+            s.eval::<i64>(r#"return UnitStat(nil, 1)"#).unwrap_err()
+        )
+        .contains(STAT_USAGE));
     }
 
     #[test]
@@ -1115,17 +1188,31 @@ mod tests {
                 .unwrap(),
             (130, 150, 150, 30, -10)
         );
-        // Out of range / non-player: zeros.
-        assert_eq!(
-            s.eval::<(i64, i64, i64, i64)>(r#"return UnitResistance("player", 7)"#)
-                .unwrap(),
-            (0, 0, 0, 0)
-        );
+        // A non-player token: zeros. (UnitArmor takes no index and so has no index raise.)
         assert_eq!(
             s.eval::<(i64, i64, i64, i64, i64)>(r#"return UnitArmor("target")"#)
                 .unwrap(),
             (0, 0, 0, 0, 0)
         );
+        // Out of range RAISES, with UnitResistance's own string — not UnitStat's, which is the
+        // literal sitting two padding bytes away in the reference's string pool.
+        for arg in ["7", "-1"] {
+            let msg = format!(
+                "{}",
+                s.eval::<(i64, i64, i64, i64)>(&format!(
+                    r#"return UnitResistance("player", {arg})"#
+                ))
+                .unwrap_err()
+            );
+            assert!(
+                msg.contains(RESISTANCE_INDEX_ERROR) && !msg.contains("UnitStat"),
+                "UnitResistance(\"player\", {arg}) must raise {RESISTANCE_INDEX_ERROR:?}, got {msg:?}"
+            );
+        }
+        // School 0 is in range and is armor — the low end is inclusive, unlike UnitStat's.
+        assert!(s
+            .eval::<(i64, i64, i64, i64)>(r#"return UnitResistance("player", 0)"#)
+            .is_ok());
     }
 
     #[test]

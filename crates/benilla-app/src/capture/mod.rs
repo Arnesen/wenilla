@@ -114,7 +114,7 @@ pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, EntityCensusPlugin, GroundCensusPlugin, LiveFpsPlugin, NodeProbePlugin,
     ParticleCensusPlugin, ProbeChatPlugin, ProbeClock, ProbeExitPlugin, ProbeFocusPlugin,
-    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
+    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin, UnitVisualsPlugin,
 };
 use scenarios::GlueScreen;
 use scenarios::{Scenario, SubjectKind, UiFixture, GLUE_SCENARIOS, GROUND_EYE, SCENARIOS};

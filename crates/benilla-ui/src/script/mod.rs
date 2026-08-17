@@ -131,7 +131,7 @@ pub use action::{ActionSlot, ActionState};
 pub use addon::AddOnInfo;
 pub use addon_message::{AddonDistribution, AddonSend};
 pub use aura::{AuraState, TrackingState};
-pub use backdrop::{pieces, Backdrop, BackdropPiece, Insets};
+pub use backdrop::{inset_atlas_bleed, pieces, Backdrop, BackdropPiece, Insets};
 pub use bank::BankState;
 pub use char_stats::{
     weapon_subclass_skill, InvSlotView, InventorySlots, UnitCombatStats, INVENTORY_SLOT_COUNT,

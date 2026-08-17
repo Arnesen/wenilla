@@ -96,6 +96,52 @@ pub struct BackdropPiece {
 
 const SLICE: f32 = 0.125;
 
+/// Pull a piece's UV rect half a texel inward on every axis whose range is **bounded** — i.e. does
+/// not tile — so bilinear magnification cannot reach across an atlas slice boundary.
+///
+/// The 8 border pieces live side by side in ONE texture, each occupying a [`SLICE`] of `u`, and the
+/// sampler is Linear+Repeat. A quad whose `u` ends exactly on a slice boundary samples, at its own
+/// edge, precisely the seam between two texels — so bilinear returns a 50/50 blend of this slice's
+/// last column and the **neighbouring piece's first**. Half a texel of inset moves that edge sample
+/// onto the texel's centre instead, which is the whole fix.
+///
+/// It is invisible at the reference's own 1024×768, where the 32-texel slice draws into a 16 px
+/// border and the bleed is subpixel. We draw the same slice into ~40 device px at 1440p — a 1.25×
+/// **magnification**, which gives the boundary texel a visible band of its own. In this atlas
+/// (`ChatBubble-Backdrop`, 256×32) the column next to the TOP slice is `(255,251,255)` at alpha 0,
+/// so what leaked in was **white**: the pale horizontal line the director reported through the
+/// speech bubble (1402), with a fainter twin under it from the BOTTOM slice's own boundary.
+///
+/// The bounded-axis test is what keeps this from breaking the tiling it sits next to: `u` always
+/// spans one slice and is always inset, while an edge strip's `v` runs `[0, run]` and only gets the
+/// inset when `run ≤ 1`. A strip that genuinely repeats keeps its exact period — insetting a tiling
+/// axis would make every period land a fraction short and walk the art along the run.
+#[must_use]
+pub fn inset_atlas_bleed(uvs: [[f32; 2]; 4], tex_w: f32, tex_h: f32) -> [[f32; 2]; 4] {
+    let mut out = uvs;
+    for (axis, tex) in [(0usize, tex_w), (1usize, tex_h)] {
+        if tex < 2.0 {
+            continue; // a 1-texel axis has no interior to inset toward
+        }
+        let (lo, hi) = uvs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| {
+            (lo.min(c[axis]), hi.max(c[axis]))
+        });
+        // A tiling axis is left exactly alone (see above); `1.0` is one whole period, which is
+        // bounded and does get the inset — that is the corner pieces, whose `v` is `[0,1]`.
+        if hi - lo > 1.0 + f32::EPSILON {
+            continue;
+        }
+        let half = 0.5 / tex;
+        if hi - lo <= 2.0 * half {
+            continue; // degenerate: the inset would invert the range
+        }
+        for c in &mut out {
+            c[axis] += if c[axis] <= lo { half } else { -half };
+        }
+    }
+    out
+}
+
 /// Axis-aligned corners `[TL, TR, BR, BL]` (y-up) for a piece spanning `x∈[x0,x1]`, `y∈[y0,y1]`
 /// (`y1` = top). The bg overrides its own corners to reproduce the BR-inset bug.
 fn aa_corners(x0: f32, x1: f32, y_bottom: f32, y_top: f32) -> [[f32; 2]; 4] {
@@ -235,6 +281,61 @@ pub fn pieces(frame: Rect, bd: &Backdrop) -> Vec<BackdropPiece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bleed inset moves each BOUNDED axis's edge sample onto a texel CENTRE, and leaves a
+    /// tiling axis bit-exact. Pinned against the real `ChatBubble-Backdrop` geometry (256×32, eight
+    /// 32-texel slices) because that is the atlas whose white alpha-0 column put a line through the
+    /// speech bubble (1402).
+    #[test]
+    fn the_bleed_inset_lands_on_texel_centres_and_spares_tiling() {
+        const W: f32 = 256.0;
+        const H: f32 = 32.0;
+        let half_u = 0.5 / W;
+
+        // A CORNER: u = one slice, v = [0,1]. Both axes are bounded, so both inset.
+        let corner = [[0.5, 0.0], [0.625, 0.0], [0.625, 1.0], [0.5, 1.0]];
+        let got = inset_atlas_bleed(corner, W, H);
+        // In texel coordinates the edges now sit on 128.5 / 159.5 — the centres of the first and
+        // last texels of the slice, which is exactly what stops bilinear reaching texel 127.
+        let us: Vec<f32> = got.iter().map(|c| c[0] * W).collect();
+        assert!((us[0] - 128.5).abs() < 1e-3, "left u at {} texels", us[0]);
+        assert!((us[1] - 159.5).abs() < 1e-3, "right u at {} texels", us[1]);
+        let vs: Vec<f32> = got.iter().map(|c| c[1] * H).collect();
+        assert!((vs[0] - 0.5).abs() < 1e-3, "top v at {} texels", vs[0]);
+        assert!((vs[2] - 31.5).abs() < 1e-3, "bottom v at {} texels", vs[2]);
+
+        // A TILING edge strip: u = one slice (bounded → inset), v = [0, 8] (tiling → untouched).
+        // Touching v would make every period land a fraction short and walk the art along the run.
+        let strip = [[0.25, 8.0], [0.25, 0.0], [0.375, 0.0], [0.375, 8.0]];
+        let got = inset_atlas_bleed(strip, W, H);
+        for (g, s) in got.iter().zip(strip.iter()) {
+            assert_eq!(g[1], s[1], "the tiling axis must be bit-exact");
+        }
+        assert!((got[0][0] - (0.25 + half_u)).abs() < 1e-6);
+        assert!((got[2][0] - (0.375 - half_u)).abs() < 1e-6);
+
+        // The inset NEVER crosses a slice boundary — the property the whole thing exists for.
+        for i in 0u8..8 {
+            let (u0, u1) = (f32::from(i) * SLICE, f32::from(i + 1) * SLICE);
+            let piece = [[u0, 0.0], [u1, 0.0], [u1, 1.0], [u0, 1.0]];
+            for c in inset_atlas_bleed(piece, W, H) {
+                assert!(
+                    c[0] > u0 && c[0] < u1,
+                    "slice {i}: u {} escaped ({u0},{u1})",
+                    c[0]
+                );
+            }
+        }
+
+        // Degenerate inputs are identities, not panics or inversions.
+        assert_eq!(inset_atlas_bleed(corner, 0.0, 0.0), corner);
+        let sliver = [[0.0, 0.0], [0.001, 0.0], [0.001, 1.0], [0.0, 1.0]];
+        assert_eq!(
+            inset_atlas_bleed(sliver, W, H)[0][0],
+            0.0,
+            "too thin to inset"
+        );
+    }
 
     fn tooltip_backdrop(edge_size: f32, inset: f32) -> Backdrop {
         Backdrop {

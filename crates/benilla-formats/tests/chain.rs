@@ -83,6 +83,50 @@ fn culls_constant_zero_alpha_m2_batches() {
 }
 
 #[test]
+fn trigger_creature_models_carry_no_render_geometry() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+
+    // How an invisible **trigger creature** hides in the real client (decision 1403, bug B13): its
+    // model draws nothing. No unit flag, no DBC column — a swept census of all 411 shipped
+    // `CreatureModelData` paths found exactly these three, by two different routes:
+    //
+    //   InvisibleStalker        — `nVertices == 0`: no geometry authored at all (80 bones,
+    //                             135 animations, and not one vertex).
+    //   InvisibleStalkerNoName  — one 4-vertex batch whose transparency track is a constant
+    //                             `0.000`, so the verified zero-alpha cull takes it.
+    //   Creature_SpellPortal    — `nVertices == 0`, like the stalker.
+    //
+    // Between them they back 8 `CreatureDisplayInfo` rows and 154 vmangos creature templates — the
+    // Scarab Wall's "Anachronos Quest Trigger Invisible" and Yojamba Isle's "Zandalarian Event
+    // Generator" among them. If any of these ever comes back non-empty, the attach path stops
+    // being able to tell "this model draws nothing" from "we have no model" and the debug cube
+    // returns as a black slab over all 154.
+    for path in [
+        "creature/invisiblestalker/invisiblestalker.m2",
+        "creature/invisiblestalker/invisiblestalkernoname.m2",
+        "creature/spells/creature_spellportal.m2",
+    ] {
+        let mesh = benilla_formats::load_m2_mesh(&mut chain, path)
+            .unwrap_or_else(|e| panic!("mesh {path}: {e:#}"));
+        assert!(
+            mesh.is_empty(),
+            "{path} is a trigger creature's model and must build no render geometry, got {} batches",
+            mesh.len()
+        );
+    }
+
+    // Control — an ordinary creature on the same path keeps its geometry, so "empty" is a property
+    // of these three models and not of the creature lane.
+    let chicken = benilla_formats::load_m2_mesh(&mut chain, "creature/chicken/chicken.m2")
+        .expect("mesh chicken");
+    assert!(
+        !chicken.is_empty(),
+        "an ordinary creature model keeps its batches"
+    );
+}
+
+#[test]
 fn suppresses_white1_invisible_trap_placeholder() {
     let data = benilla_formats::wow_data_or_skip!();
     let mut chain = open_chain(&data).expect("open vanilla patch chain");

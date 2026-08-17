@@ -201,6 +201,18 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
         })
 }
 
+/// The child mesh spawned by the fallback-cube arm of [`attach::attach_entity_visuals`] — "this
+/// entity's display named no model we could load".
+///
+/// A marker, so the condition is **countable** rather than eyeballed: `WOW_UNIT_VISUALS`
+/// ([`crate::capture::probes::UnitVisualsPlugin`]) reports how many streamed entities are standing
+/// as cubes, and on which displays. Before decision 1403 a cube also stood for every invisible
+/// trigger creature, which is what B13 saw as a black slab — an unlit `StandardMaterial` catches no
+/// light in our scene, so the "red" NPC box renders pure black. The census is how that stays
+/// visible if the gate ever regresses.
+#[derive(Component)]
+pub(crate) struct FallbackCube;
+
 /// Shared fallback cube mesh + per-kind materials, used when an entity has no usable model. (No
 /// GameObject color: GameObjects render their model or nothing — a model-less GameObject is an
 /// effect/trigger that's invisible in the real client.)

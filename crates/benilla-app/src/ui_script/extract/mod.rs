@@ -1049,6 +1049,18 @@ fn convert_entry(
             });
             // No texture (missing BLP) ⇒ draw nothing rather than a phantom solid quad.
             let Some(handle) = handle else { return };
+            // The 8 border pieces share one atlas, so bilinear at a piece's own edge blends in the
+            // NEIGHBOURING piece's first column unless the UVs are pulled half a texel inward
+            // (1402). `tile` is exactly the border-piece predicate here — every one of the 8 sets
+            // it, and a stretched bg (the only `tile: false` piece) is a whole texture, not a
+            // slice of one, so it is left alone.
+            let uvs = match images.get(&handle) {
+                Some(img) if tile => {
+                    let sz = img.texture_descriptor.size;
+                    benilla_ui::script::inset_atlas_bleed(uvs, sz.width as f32, sz.height as f32)
+                }
+                _ => uvs,
+            };
             let mut color = color;
             color[3] *= eq.alpha;
             out.push(UiQuad {

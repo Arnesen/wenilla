@@ -34,6 +34,12 @@ pub(crate) use particle_census::ParticleCensusPlugin;
 mod ground_census;
 pub(crate) use ground_census::GroundCensusPlugin;
 
+/// The unit-visual census — per-entity "what visual did this display actually get", which is what
+/// separates a debug cube (a gap of ours) from a model that legitimately draws nothing (B13,
+/// decision 1403).
+mod visual_census;
+pub(crate) use visual_census::UnitVisualsPlugin;
+
 /// The two exclusive-`World` reflection dumps: the bevy_ui node inventory and the archetype
 /// census — "what is resident right now, and what is it made of".
 mod world_census;

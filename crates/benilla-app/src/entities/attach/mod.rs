@@ -301,7 +301,7 @@ pub(super) fn attach_entity_visuals(
         let worn = resolve_worn_equip(net, equipment, dm);
         let equip = worn.bodyslots;
         // A model still loading (`parts == None`) waits — leave it un-attached and retry next frame
-        // rather than flash a cube we'd swap out. A built-but-empty model falls through to a cube.
+        // rather than flash a cube we'd swap out. A built-but-empty model draws nothing.
         let model = match dm {
             Some(d) => match &d.parts {
                 None => continue,
@@ -310,13 +310,20 @@ pub(super) fn attach_entity_visuals(
             },
             None => None,
         };
+        // **Did the display name a model file at all?** An empty `parts` list means two opposite
+        // things, and the cube below may only answer one of them (decision 1403): a display that
+        // resolved to a model which built zero batches has been *answered* — the model draws
+        // nothing — while a display that resolved to no model at all is a gap of ours.
+        let named_a_model = dm.is_some_and(DisplayModel::names_a_model);
 
         // Invisible interaction-zone GameObjects (the forge, fishing-bobber zone, aura generators, …)
-        // carry a *transparent* placeholder M2: the real client's mesh gate is **type-independent** —
-        // it draws any loaded model and the per-batch zero-alpha cull skips the transparent geometry
+        // carry a *transparent* placeholder M2, and invisible **trigger creatures** an empty or
+        // constant-zero-alpha one: the real client's mesh gate is **type-independent** — it draws
+        // any loaded model and the per-batch zero-alpha cull skips the transparent geometry
         // (decision 0024, superseding 0023's wrong marker-type gate; verified wow-re go-render-gate).
-        // Our M2 alpha cull already reduces those models to zero submeshes, so `model` is `None` here
-        // and they render nothing — no GameObject-type special-case needed.
+        // Our M2 alpha cull already reduces those models to zero submeshes, so `model` is `None`
+        // here and they render nothing — neither kind needs a special case, and `named_a_model`
+        // above is what keeps the unit arm's debug cube off them (1403).
         if let Some(parts) = model {
             // ── Mounts (decision 0441): a mounted unit is TWO skeletons. The mount is a child
             // entity carrying a plain creature `NetEntity` — this very system builds it like any
@@ -876,11 +883,23 @@ pub(super) fn attach_entity_visuals(
                 }
             }
         } else {
-            // Cube fallback: other players (cyan, slim block) and NPCs (red, person-box) without a usable
-            // model. A model-less GameObject renders *nothing* — it's an effect-only/invisible/trigger
-            // object (all particle-only in the real client), so a floating cube would be noise. The cube
-            // origin is centered, so a child offset lifts it onto the ground.
+            // Cube fallback: other players (cyan, slim block) and NPCs (red, person-box) whose display
+            // named **no model to load** — the debug signal for a gap of ours. The cube origin is
+            // centered, so a child offset lifts it onto the ground.
+            //
+            // A display that DID name a model renders exactly what that model built — including
+            // nothing (decision 1403, bug B13). The reference's mesh gate is type-independent: it
+            // draws any loaded model and the per-batch zero-alpha cull skips what is transparent
+            // (decision 0024, verified wow-re `go-render-gate`), so a model with no surviving batch
+            // submits no geometry and the unit is invisible. That is the whole of how a **trigger
+            // creature** hides — `Creature\InvisibleStalker\InvisibleStalker.m2` ships with
+            // `nVertices == 0`, and its `NoName` sibling's one batch carries a constant-zero
+            // transparency track — no unit flag is consumed anywhere. Cubing them put a black slab
+            // over 154 vmangos templates on 8 displays (the Scarab Wall's Anachronos trigger,
+            // Yojamba's Zandalarian Event Generator). It was only ever the *unit* arm that got this
+            // wrong; the GameObject arm below has drawn nothing since 0024.
             let fallback = match net.kind {
+                _ if named_a_model => None,
                 EntityKind::Player => {
                     Some((assets.player_mat.clone(), assets.player_mesh.clone(), 1.0))
                 }
@@ -918,6 +937,9 @@ pub(super) fn attach_entity_visuals(
                         // its shape, which it must SAY (decision 0929): the picker requires pick
                         // geometry rather than inferring a box from its absence.
                         benilla_world::interact::PickBox,
+                        // What makes "we are standing a cube here" a number a probe can read
+                        // (`WOW_UNIT_VISUALS`) rather than something only an eye finds — 1403.
+                        super::FallbackCube,
                     ));
                 });
             }

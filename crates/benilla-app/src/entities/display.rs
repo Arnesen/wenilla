@@ -256,6 +256,18 @@ impl DisplayModel {
             .as_ref()
             .is_some_and(|p| p.iter().any(|part| part.welded_billboard))
     }
+
+    /// Does this display name a model FILE at all? The line between **"the model's own answer is
+    /// draw nothing"** and **"we could not resolve one"** — which are the same empty `parts` list
+    /// and must never be treated alike (decision 1403).
+    ///
+    /// `true` once a display resolved through its catalog to a path we handed the asset server;
+    /// `false` only for [`empty_display`] — a display id absent from `CreatureDisplayInfo` /
+    /// `GameObjectDisplayInfo`, a zero-scale row, or a GameObject display naming no path. That
+    /// second set is *our* gap, and the debug cube is how a session sees it.
+    pub(super) fn names_a_model(&self) -> bool {
+        !matches!(self.handle, ModelHandle::None)
+    }
 }
 
 /// Resolve a creature display id to a [`DisplayModel`]: load its M2 (no skins — the slots are filled at
@@ -624,4 +636,49 @@ fn model_dir(model_path: &str) -> &str {
         .rsplit_once(['\\', '/'])
         .map(|(dir, _)| dir)
         .unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line the attach path's debug cube hangs on (decision 1403, bug B13). Both sides of it
+    /// carry the SAME empty `parts` list once built, so the handle is the only thing that can tell
+    /// them apart: `empty_display` is a display that named no model — our gap, worth a cube —
+    /// while a display holding a real handle has been answered by its model, even when the answer
+    /// is "draw nothing" (the invisible trigger creatures).
+    #[test]
+    fn only_a_display_with_no_model_file_earns_the_cube() {
+        assert!(
+            !empty_display().names_a_model(),
+            "a display that resolved to no model must stay cube-eligible"
+        );
+        assert!(
+            !DisplayModel {
+                handle: ModelHandle::None,
+                parts: Some(Vec::new()),
+                ..empty_shell()
+            }
+            .names_a_model(),
+            "the handle decides, not the parts"
+        );
+        assert!(
+            DisplayModel {
+                handle: ModelHandle::M2(Handle::default()),
+                // Built, and it drew nothing — `InvisibleStalker.m2`'s zero batches. Not a cube.
+                parts: Some(Vec::new()),
+                ..empty_shell()
+            }
+            .names_a_model(),
+            "a display that named an M2 is answered by that model, empty parts included"
+        );
+        assert!(
+            DisplayModel {
+                handle: ModelHandle::Wmo(Handle::default()),
+                ..empty_shell()
+            }
+            .names_a_model(),
+            "a WMO display names a model too"
+        );
+    }
 }
